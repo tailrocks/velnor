@@ -6,6 +6,7 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use std::{
+    collections::BTreeMap,
     path::Path,
     process::{Command, ExitStatus},
 };
@@ -83,27 +84,30 @@ where
         self.run_docker(&container.start_args())?;
 
         let mut results = Vec::new();
+        let mut state = JobExecutionState::default();
         let mut step_error = None;
         for step in steps {
             let result = (|| {
-                let plan = ScriptStepPlan::prepare(step, temp_host)?;
+                let plan = ScriptStepPlan::prepare_with_path(step, temp_host, &state.path)?;
+                let env = state.step_env(&plan.env);
                 let exec_args = container.exec_script_args(
                     &plan.script_container_path,
                     plan.shell,
                     &plan.working_directory_container,
-                    &plan.env,
+                    &env,
                 );
                 let step_result = self.runner.run("docker", &exec_args)?;
-                let state = plan.collect_state()?;
+                let command_state = plan.collect_state()?;
                 Ok(StepExecutionResult {
                     exit_code: step_result.code,
-                    state,
+                    state: command_state,
                 })
             })();
 
             match result {
                 Ok(result) => {
                     let failed = result.exit_code != 0;
+                    state.apply(&result.state);
                     results.push(result);
                     if failed {
                         break;
@@ -146,6 +150,33 @@ where
             );
         }
         Ok(result)
+    }
+}
+
+#[derive(Debug, Default)]
+struct JobExecutionState {
+    env: BTreeMap<String, String>,
+    path: Vec<String>,
+}
+
+impl JobExecutionState {
+    fn step_env(&self, command_file_env: &[(String, String)]) -> Vec<(String, String)> {
+        let mut env: Vec<_> = self
+            .env
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        env.extend(command_file_env.iter().cloned());
+        env
+    }
+
+    fn apply(&mut self, step_state: &StepCommandState) {
+        for (name, value) in &step_state.env {
+            self.env.insert(name.clone(), value.clone());
+        }
+        for path in step_state.path.iter().rev() {
+            self.path.insert(0, path.clone());
+        }
     }
 }
 
@@ -321,5 +352,22 @@ mod tests {
         assert_eq!(calls[5].1[0], "network");
 
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn job_state_flows_env_and_path_to_later_steps() {
+        let mut state = JobExecutionState::default();
+        state.apply(&StepCommandState {
+            env: [("NAME".to_string(), "value".to_string())].into(),
+            path: vec!["/opt/tool".to_string()],
+            ..Default::default()
+        });
+
+        let env = state.step_env(&[("GITHUB_OUTPUT".into(), "/__t/out".into())]);
+
+        assert!(env.contains(&("NAME".into(), "value".into())));
+        assert!(env.contains(&("GITHUB_OUTPUT".into(), "/__t/out".into())));
+        assert!(!env.iter().any(|(name, _)| name == "PATH"));
+        assert_eq!(state.path, vec!["/opt/tool"]);
     }
 }

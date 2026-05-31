@@ -137,10 +137,19 @@ pub struct ScriptStepPlan {
 
 impl ScriptStepPlan {
     pub fn prepare(step: &ScriptStep, temp_host: &Path) -> Result<Self> {
+        Self::prepare_with_path(step, temp_host, &[])
+    }
+
+    pub fn prepare_with_path(
+        step: &ScriptStep,
+        temp_host: &Path,
+        path_prepend: &[String],
+    ) -> Result<Self> {
         fs::create_dir_all(temp_host).with_context(|| format!("create {}", temp_host.display()))?;
         let script_name = format!("{}.sh", step.id);
         let script_host_path = temp_host.join(&script_name);
-        fs::write(&script_host_path, fix_script(&step.script))
+        let script = script_with_path_prelude(&step.script, path_prepend);
+        fs::write(&script_host_path, script)
             .with_context(|| format!("write {}", script_host_path.display()))?;
 
         let command_files = CommandFileSet::new(&step.id, temp_host);
@@ -259,6 +268,24 @@ fn fix_script(script: &str) -> String {
     fixed
 }
 
+fn script_with_path_prelude(script: &str, path_prepend: &[String]) -> String {
+    let fixed = fix_script(script);
+    if path_prepend.is_empty() {
+        return fixed;
+    }
+
+    let joined = path_prepend
+        .iter()
+        .map(|path| shell_single_quote(path))
+        .collect::<Vec<_>>()
+        .join(":");
+    format!("export PATH={joined}:\"$PATH\"\n{fixed}")
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,6 +350,29 @@ mod tests {
         assert_eq!(state.path, vec!["/opt/tool"]);
         assert_eq!(state.state["cleanup"], "yes");
         assert_eq!(state.summary, "summary text");
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn path_prelude_keeps_existing_shell_path() {
+        let temp = temp_step_dir();
+        let step = ScriptStep {
+            id: "step1".into(),
+            script: "tool --version".into(),
+            shell: Shell::Bash,
+            working_directory_container: "/__w/repo".into(),
+        };
+        let plan = ScriptStepPlan::prepare_with_path(
+            &step,
+            &temp,
+            &["/opt/bin".to_string(), "/path/with'quote".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&plan.script_host_path).unwrap(),
+            "export PATH='/opt/bin':'/path/with'\\''quote':\"$PATH\"\ntool --version\n"
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 

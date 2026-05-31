@@ -305,7 +305,7 @@ The next useful implementation steps are:
 
 1. Live-test `velnor-runner run --once --complete-noop` and `velnor-runner run --once --execute-scripts` against disposable workflows and adjust reporter route details if GitHub rejects them.
 2. Start renew-job loop before real job execution.
-3. Carry step output/env/path state across script steps.
+3. Resolve step outputs and job/message environment into later script steps.
 4. Add a native `actions/checkout` equivalent or implement JavaScript action execution.
 
 This gets Velnor from "polls one message" to "can complete a simple real GitHub job".
