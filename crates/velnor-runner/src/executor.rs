@@ -47,6 +47,15 @@ pub struct StepExecutionResult {
     pub state: StepCommandState,
 }
 
+#[derive(Debug, Clone)]
+pub enum ExecutableStep {
+    Script(ScriptStep),
+    JavaScript {
+        step_id: String,
+        invocation: JavaScriptActionInvocation,
+    },
+}
+
 pub struct DockerScriptExecutor<R> {
     runner: R,
 }
@@ -84,25 +93,72 @@ where
         self.run_docker(&container.create_network_args())?;
         self.run_docker(&container.start_args())?;
 
+        let ordered = steps
+            .iter()
+            .cloned()
+            .map(ExecutableStep::Script)
+            .collect::<Vec<_>>();
+        let result =
+            self.execute_ordered_steps_in_started_container(container, &ordered, temp_host);
+
+        let cleanup_result = self.cleanup(container);
+        if let Err(error) = cleanup_result {
+            return Err(error.context("cleanup failed after script step"));
+        }
+        result
+    }
+
+    pub fn execute_ordered_steps(
+        &mut self,
+        container: &JobContainerSpec,
+        steps: &[ExecutableStep],
+        temp_host: &Path,
+    ) -> Result<Vec<StepExecutionResult>> {
+        self.run_docker(&container.create_network_args())?;
+        self.run_docker(&container.start_args())?;
+
+        let result = self.execute_ordered_steps_in_started_container(container, steps, temp_host);
+
+        let cleanup_result = self.cleanup(container);
+        if let Err(error) = cleanup_result {
+            return Err(error.context("cleanup failed after ordered job steps"));
+        }
+        result
+    }
+
+    fn execute_ordered_steps_in_started_container(
+        &mut self,
+        container: &JobContainerSpec,
+        steps: &[ExecutableStep],
+        temp_host: &Path,
+    ) -> Result<Vec<StepExecutionResult>> {
         let mut results = Vec::new();
         let mut state = JobExecutionState::default();
         let mut step_error = None;
         for step in steps {
-            let result = (|| {
-                let plan = ScriptStepPlan::prepare_with_path(step, temp_host, &state.path)?;
-                let env = state.step_env(&plan.env);
-                let exec_args = container.exec_script_args(
-                    &plan.script_container_path,
-                    plan.shell,
-                    &plan.working_directory_container,
-                    &env,
-                );
-                let step_result = self.runner.run("docker", &exec_args)?;
-                let command_state = plan.collect_state()?;
-                Ok(StepExecutionResult {
-                    exit_code: step_result.code,
-                    state: command_state,
-                })
+            let result = (|| match step {
+                ExecutableStep::Script(step) => {
+                    let plan = ScriptStepPlan::prepare_with_path(step, temp_host, &state.path)?;
+                    let env = state.step_env(&plan.env);
+                    let exec_args = container.exec_script_args(
+                        &plan.script_container_path,
+                        plan.shell,
+                        &plan.working_directory_container,
+                        &env,
+                    );
+                    let step_result = self.runner.run("docker", &exec_args)?;
+                    let command_state = plan.collect_state()?;
+                    Ok(StepExecutionResult {
+                        exit_code: step_result.code,
+                        state: command_state,
+                    })
+                }
+                ExecutableStep::JavaScript {
+                    step_id,
+                    invocation,
+                } => self.execute_javascript_action_in_started_container(
+                    container, step_id, invocation, temp_host, &state,
+                ),
             })();
 
             match result {
@@ -119,11 +175,6 @@ where
                     break;
                 }
             }
-        }
-
-        let cleanup_result = self.cleanup(container);
-        if let Err(error) = cleanup_result {
-            return Err(error.context("cleanup failed after script step"));
         }
         if let Some(error) = step_error {
             return Err(error);
@@ -142,28 +193,13 @@ where
         self.run_docker(&container.start_args())?;
 
         let result = (|| {
-            let command_files = ScriptStepPlan::prepare(
-                &ScriptStep {
-                    id: step_id.to_string(),
-                    script: String::new(),
-                    shell: crate::container::Shell::Sh,
-                    working_directory_container: "/__w".to_string(),
-                },
+            self.execute_javascript_action_in_started_container(
+                container,
+                step_id,
+                action,
                 temp_host,
-            )?;
-            let mut env = action.env.clone();
-            env.extend(command_files.env.iter().cloned());
-            let exec_args = container.exec_process_args(
-                "/__w",
-                &env,
-                &["node".to_string(), action.main_container_path.clone()],
-            );
-            let step_result = self.runner.run("docker", &exec_args)?;
-            let state = command_files.collect_state()?;
-            Ok(StepExecutionResult {
-                exit_code: step_result.code,
-                state,
-            })
+                &JobExecutionState::default(),
+            )
         })();
 
         let cleanup_result = self.cleanup(container);
@@ -171,6 +207,38 @@ where
             return Err(error.context("cleanup failed after JavaScript action"));
         }
         result
+    }
+
+    fn execute_javascript_action_in_started_container(
+        &mut self,
+        container: &JobContainerSpec,
+        step_id: &str,
+        action: &JavaScriptActionInvocation,
+        temp_host: &Path,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        let command_files = ScriptStepPlan::prepare(
+            &ScriptStep {
+                id: step_id.to_string(),
+                script: String::new(),
+                shell: crate::container::Shell::Sh,
+                working_directory_container: "/__w".to_string(),
+            },
+            temp_host,
+        )?;
+        let mut env = state.step_env(&command_files.env);
+        env.extend(action.env.clone());
+        let exec_args = container.exec_process_args(
+            "/__w",
+            &env,
+            &["node".to_string(), action.main_container_path.clone()],
+        );
+        let step_result = self.runner.run("docker", &exec_args)?;
+        let state = command_files.collect_state()?;
+        Ok(StepExecutionResult {
+            exit_code: step_result.code,
+            state,
+        })
     }
 
     fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
@@ -447,6 +515,57 @@ mod tests {
             "node".into(),
             "/__a/_actions/acme_action/v1/dist/index.js".into()
         ]));
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn executes_ordered_script_and_javascript_steps_in_one_container() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "step1".into(),
+                script: "echo NAME=value >> $GITHUB_ENV".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+            }),
+            ExecutableStep::JavaScript {
+                step_id: "action1".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    main_container_path: "/__a/_actions/acme_action/v1/dist/index.js".into(),
+                    action_container_path: "/__a/_actions/acme_action/v1".into(),
+                    env: vec![("INPUT_NAME".into(), "value".into())],
+                },
+            },
+            ExecutableStep::Script(ScriptStep {
+                id: "step2".into(),
+                script: "echo done".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        let calls = &executor.runner().calls;
+        assert_eq!(calls.len(), 7);
+        assert_eq!(calls[0].1[0], "network");
+        assert_eq!(calls[1].1[0], "run");
+        assert_eq!(calls[2].1[0], "exec");
+        assert_eq!(calls[3].1[0], "exec");
+        assert_eq!(calls[4].1[0], "exec");
+        assert_eq!(calls[5].1[0], "rm");
+        assert_eq!(calls[6].1[0], "network");
+        assert!(calls[3].1.contains(&"INPUT_NAME=value".into()));
+        assert!(calls[3]
+            .1
+            .contains(&"GITHUB_OUTPUT=/__t/action1_output".into()));
 
         fs::remove_dir_all(temp).unwrap();
     }

@@ -190,7 +190,7 @@ Implement action support in the order that unlocks target workflows fastest:
    - download action repo/ref: implemented for repository action probe path
    - parse `action.yml`: metadata parser and repository action planner are implemented as groundwork
    - map `with:` to `INPUT_*`: implemented for JavaScript action invocation
-   - run Node entrypoint inside job container: executor shape is implemented; ordered job execution still needs wiring
+   - run Node entrypoint inside job container: implemented for ordered script/JavaScript execution
    - provide `GITHUB_*`, `RUNNER_*`, `ACTIONS_*` runtime env
 5. Composite action handler:
    - local `.github/actions/*`
@@ -308,7 +308,7 @@ The next useful implementation steps are:
 1. Live-test `velnor-runner run --once --complete-noop` and `velnor-runner run --once --execute-scripts` against disposable workflows and adjust reporter route details if GitHub rejects them.
 2. Start renew-job loop before real job execution.
 3. Resolve step outputs and job/message environment into later script steps.
-4. Wire ordered job execution for native checkout, JavaScript actions, and script steps in original step order.
+4. Provide full GitHub/runner/action runtime environment for JavaScript actions, then test `setup-*`, cache, and Docker actions from target workflows.
 
 This gets Velnor from "polls one message" to "can complete a simple real GitHub job".
 

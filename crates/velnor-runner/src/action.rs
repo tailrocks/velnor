@@ -81,6 +81,7 @@ impl ActionMetadata {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryActionPlan {
+    pub step_id: String,
     pub repository: String,
     pub git_ref: String,
     pub source_path: Option<String>,
@@ -123,6 +124,7 @@ pub fn repository_action_plans(
             reference.path.as_deref(),
         )?;
         plans.push(RepositoryActionPlan {
+            step_id: step_id(step, plans.len()),
             repository: repository.clone(),
             git_ref,
             source_path: reference.path.clone(),
@@ -132,6 +134,16 @@ pub fn repository_action_plans(
         });
     }
     Ok(plans)
+}
+
+fn step_id(step: &ActionStep, index: usize) -> String {
+    step.id
+        .as_deref()
+        .or(step.context_name.as_deref())
+        .or(step.name.as_deref())
+        .map(sanitize_segment)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("action{}", index + 1))
 }
 
 pub fn download_repository_actions<R>(
@@ -384,6 +396,7 @@ runs:
         let plans = repository_action_plans(&steps, Path::new("/tmp/actions")).unwrap();
 
         assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].step_id, "setup");
         assert_eq!(plans[0].repository, "actions/setup-python");
         assert_eq!(plans[0].git_ref, "v5");
         assert_eq!(
@@ -415,6 +428,7 @@ runs:
         )
         .unwrap();
         let plan = RepositoryActionPlan {
+            step_id: "setup".into(),
             repository: "actions/setup-node".into(),
             git_ref: "v4".into(),
             source_path: None,
@@ -440,6 +454,7 @@ runs:
     fn builds_javascript_action_invocation() {
         let actions_host = Path::new("/tmp/actions");
         let plan = RepositoryActionPlan {
+            step_id: "setup".into(),
             repository: "actions/setup-node".into(),
             git_ref: "v4".into(),
             source_path: None,

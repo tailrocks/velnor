@@ -3,13 +3,13 @@ use serde_json::json;
 use std::{fs, path::PathBuf};
 
 use crate::{
-    action::{download_repository_actions, repository_action_plans},
-    checkout::{checkout_plans, execute_checkouts, has_unsupported_enabled_action},
+    action::{download_repository_actions, repository_action_plans, ResolvedAction},
+    checkout::{checkout_plans, execute_checkouts},
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     container::JobContainerSpec,
-    executor::{DockerScriptExecutor, ProcessCommandRunner},
-    job_message::{AgentJobRequestMessage, PIPELINE_AGENT_JOB_REQUEST},
+    executor::{DockerScriptExecutor, ExecutableStep, ProcessCommandRunner},
+    job_message::{ActionReferenceType, AgentJobRequestMessage, PIPELINE_AGENT_JOB_REQUEST},
     protocol::{
         DistributedTaskClient, GitHubAuthResult, GitHubScope, OAuthClient, OAuthJwtCredentials,
         RegistrationClient, RunnerEvent, RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool,
@@ -340,34 +340,26 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 let Some(script_steps) = script_steps else {
                     bail!("cannot execute scripts because step mapping failed");
                 };
-                if has_unsupported_enabled_action(&job.steps) {
-                    probe_repository_actions(&dir, args.work_dir.clone(), &job)?;
-                    println!(
-                        "Job has enabled unsupported action steps; not executing or acknowledging."
-                    );
-                } else {
-                    let result = execute_script_job(
-                        &dir,
-                        args.work_dir.clone(),
-                        &args.docker_image,
-                        &job,
-                        &script_steps,
-                    )?;
-                    complete_job(
-                        &client,
-                        pool_id,
-                        session_id,
-                        message.message_id,
-                        &stored.settings.agent_name,
-                        &job,
-                        result,
-                        "Velnor executed supported run steps in Docker.".to_string(),
-                    )
-                    .await?;
-                    println!(
-                        "Script job completed with result {result:?} and message acknowledged."
-                    );
-                }
+                let result = execute_script_job(
+                    &dir,
+                    args.work_dir.clone(),
+                    &args.docker_image,
+                    &job,
+                    &script_steps,
+                )?;
+                complete_job(
+                    &client,
+                    pool_id,
+                    session_id,
+                    message.message_id,
+                    &stored.settings.agent_name,
+                    &job,
+                    result,
+                    "Velnor executed supported run and JavaScript action steps in Docker."
+                        .to_string(),
+                )
+                .await?;
+                println!("Job completed with result {result:?} and message acknowledged.");
             } else if args.complete_noop {
                 complete_job(
                     &client,
@@ -401,27 +393,6 @@ pub async fn run(args: RunArgs) -> Result<()> {
     Ok(())
 }
 
-fn probe_repository_actions(
-    config_dir: &std::path::Path,
-    work_dir: Option<PathBuf>,
-    job: &AgentJobRequestMessage,
-) -> Result<()> {
-    let actions = job_work_dir(config_dir, work_dir, job).join("actions");
-    fs::create_dir_all(&actions).with_context(|| format!("create {}", actions.display()))?;
-    let plans = repository_action_plans(&job.steps, &actions)?;
-    if plans.is_empty() {
-        return Ok(());
-    }
-
-    let mut command_runner = ProcessCommandRunner;
-    let resolved_actions = download_repository_actions(&mut command_runner, &plans)?;
-    println!(
-        "Downloaded and resolved {} repository action(s). JavaScript execution is not wired yet.",
-        resolved_actions.len()
-    );
-    Ok(())
-}
-
 fn execute_script_job(
     config_dir: &std::path::Path,
     work_dir: Option<PathBuf>,
@@ -441,14 +412,18 @@ fn execute_script_job(
     let checkout_plans = checkout_plans(job, &workspace)?;
     execute_checkouts(&mut command_runner, &checkout_plans)?;
     let repository_action_plans = repository_action_plans(&job.steps, &actions)?;
-    if !repository_action_plans.is_empty() {
+    let resolved_actions = if repository_action_plans.is_empty() {
+        Vec::new()
+    } else {
         let resolved_actions =
             download_repository_actions(&mut command_runner, &repository_action_plans)?;
         println!(
-            "Downloaded and resolved {} repository action(s). JavaScript execution is not wired yet.",
+            "Downloaded and resolved {} repository action(s).",
             resolved_actions.len()
         );
-    }
+        resolved_actions
+    };
+    let ordered_steps = ordered_executable_steps(job, script_steps, &resolved_actions, &actions)?;
 
     let container = JobContainerSpec {
         name: format!("velnor-job-{}", sanitize_path_segment(&job.job_id)),
@@ -461,7 +436,7 @@ fn execute_script_job(
         mount_docker_socket: true,
     };
     let mut executor = DockerScriptExecutor::new(command_runner);
-    let results = executor.execute_steps(&container, script_steps, &temp)?;
+    let results = executor.execute_ordered_steps(&container, &ordered_steps, &temp)?;
     let failed = results.iter().any(|result| result.exit_code != 0);
 
     Ok(if failed {
@@ -469,6 +444,56 @@ fn execute_script_job(
     } else {
         TaskResult::Succeeded
     })
+}
+
+fn ordered_executable_steps(
+    job: &AgentJobRequestMessage,
+    script_steps: &[crate::script_step::ScriptStep],
+    resolved_actions: &[ResolvedAction],
+    actions_host: &std::path::Path,
+) -> Result<Vec<ExecutableStep>> {
+    let mut ordered = Vec::new();
+    let mut script_iter = script_steps.iter();
+    for step in job.steps.iter().filter(|step| step.enabled) {
+        match step.reference_type() {
+            Some(ActionReferenceType::Script) => {
+                let script = script_iter
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("script step mapping count mismatch"))?;
+                ordered.push(ExecutableStep::Script(script.clone()));
+            }
+            Some(ActionReferenceType::Repository) => {
+                let Some(reference) = step.reference.as_ref() else {
+                    continue;
+                };
+                let Some(repository) = reference.name.as_deref() else {
+                    continue;
+                };
+                if repository.eq_ignore_ascii_case("actions/checkout") {
+                    continue;
+                }
+                let git_ref = reference.git_ref.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("repository action '{repository}' missing ref")
+                })?;
+                let action = resolved_actions
+                    .iter()
+                    .find(|action| {
+                        action.plan.repository == repository && action.plan.git_ref == git_ref
+                    })
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "repository action '{repository}@{git_ref}' was not resolved"
+                        )
+                    })?;
+                ordered.push(ExecutableStep::JavaScript {
+                    step_id: action.plan.step_id.clone(),
+                    invocation: action.javascript_invocation(actions_host)?,
+                });
+            }
+            _ => bail!("unsupported enabled step in job"),
+        }
+    }
+    Ok(ordered)
 }
 
 fn job_work_dir(

@@ -91,7 +91,7 @@ Deliverables:
 - action resolver/downloader for `owner/repo@ref`: repository action download into `_actions` and metadata discovery are implemented
 - action metadata parser for `action.yml`: JavaScript, composite, and Docker `runs.using` shapes are modeled
 - repository action planner for enabled non-checkout `uses:` steps
-- Node action handler: JavaScript action invocation and Docker `node <main>` executor shape are implemented, but ordered job execution is not wired yet
+- Node action handler: JavaScript action invocation and Docker `node <main>` executor shape are implemented and wired into the ordered Docker execution path
 - `INPUT_*` environment variables: planned action inputs are converted to `INPUT_*` for JavaScript invocation
 - runtime env:
   - `GITHUB_*`
@@ -102,6 +102,7 @@ Deliverables:
   - `ACTIONS_RESULTS_URL`
 - secret masking
 - basic workflow command parsing
+- ordered job execution for script steps and JavaScript actions in original message order is wired; host-side checkout still runs before the Docker container starts
 
 Exit criteria:
 
