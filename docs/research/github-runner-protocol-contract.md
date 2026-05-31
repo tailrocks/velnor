@@ -184,6 +184,22 @@ api version: 5.1-preview.1
 route: <server_url>/_apis/distributedtask/pools/{poolId}/sessions/{sessionId}
 ```
 
+## Runner Removal
+
+Remote unregister mirrors registration:
+
+```text
+POST https://api.github.com/repos/OWNER/REPO/actions/runners/remove-token
+Authorization: basic base64("github:<PAT>")
+
+POST https://api.github.com/actions/runner-registration
+Authorization: RemoteAuth <runner-remove-token>
+
+DELETE <server_url>/_apis/distributedtask/pools/{poolId}/agents/{agentId}?api-version=6.0-preview.2
+```
+
+Velnor uses local config to know `poolId`, `agentId`, and GitHub scope URL, then removes the local config file.
+
 Job lock:
 
 ```text

@@ -33,11 +33,12 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         None
     } else {
         let registration_client = RegistrationClient::new()?;
-        let runner_token = runner_registration_token(
+        let runner_token = runner_token(
             &registration_client,
             &scope,
             args.token.as_ref(),
             args.pat.as_ref(),
+            RunnerTokenKind::Registration,
         )
         .await?;
         let auth = registration_client
@@ -127,26 +128,38 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
     Ok(())
 }
 
-async fn runner_registration_token(
+#[derive(Debug, Clone, Copy)]
+enum RunnerTokenKind {
+    Registration,
+    Remove,
+}
+
+async fn runner_token(
     client: &RegistrationClient,
     scope: &GitHubScope,
     explicit_token: Option<&String>,
     pat: Option<&String>,
+    kind: RunnerTokenKind,
 ) -> Result<String> {
     if let Some(token) = explicit_token {
         return Ok(token.clone());
     }
 
     if let Some(pat) = pat {
-        let token = client.create_runner_registration_token(scope, pat).await?;
+        let token = match kind {
+            RunnerTokenKind::Registration => {
+                client.create_runner_registration_token(scope, pat).await?
+            }
+            RunnerTokenKind::Remove => client.create_runner_remove_token(scope, pat).await?,
+        };
         println!(
-            "Fetched short-lived runner registration token; expires at {}.",
-            token.expires_at
+            "Fetched short-lived runner {:?} token; expires at {}.",
+            kind, token.expires_at
         );
         return Ok(token.token);
     }
 
-    bail!("configure needs --token or --pat unless --dry-run is used")
+    bail!("runner token required: pass --token or --pat")
 }
 
 struct RegistrationResult {
@@ -336,12 +349,45 @@ fn credential_str(credentials: &StoredCredentials, key: &str) -> Result<String> 
 
 pub async fn remove(args: RemoveArgs) -> Result<()> {
     let dir = config::config_dir(args.config_dir)?;
+    let stored = config::load(&dir).ok();
+
+    if !args.local_only && (args.token.is_some() || args.pat.is_some()) {
+        let stored = stored
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("local runner config is required for remote remove"))?;
+        let scope = GitHubScope::parse(&stored.settings.github_url)?;
+        let pool_id = stored
+            .settings
+            .pool_id
+            .ok_or_else(|| anyhow::anyhow!("local runner config missing pool_id"))?;
+        let agent_id = stored
+            .settings
+            .agent_id
+            .ok_or_else(|| anyhow::anyhow!("local runner config missing agent_id"))?;
+        let registration_client = RegistrationClient::new()?;
+        let remove_token = runner_token(
+            &registration_client,
+            &scope,
+            args.token.as_ref(),
+            args.pat.as_ref(),
+            RunnerTokenKind::Remove,
+        )
+        .await?;
+        let auth = registration_client
+            .exchange_tenant_credential(&scope, &remove_token, RunnerEvent::Remove)
+            .await?;
+        let client = DistributedTaskClient::new(&auth.server_url, &auth.token)?;
+        client.delete_agent(pool_id, agent_id).await?;
+        println!("Removed remote runner agent {agent_id} from pool {pool_id}.");
+    } else if !args.local_only {
+        println!("Remote remove skipped; pass --pat or --token to unregister from GitHub.");
+    }
+
     if config::remove(&dir)? {
         println!("Removed local runner config from {}", dir.display());
     } else {
         println!("No local runner config at {}", dir.display());
     }
-    println!("Remote unregister is not implemented yet.");
     Ok(())
 }
 

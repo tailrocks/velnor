@@ -78,6 +78,18 @@ pub struct RunArgs {
 
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
+    /// GitHub runner remove token. If omitted, pass --pat to request one.
+    #[arg(long, env = "VELNOR_RUNNER_REMOVE_TOKEN")]
+    pub token: Option<String>,
+
+    /// GitHub personal access token used to request a short-lived runner remove token.
+    #[arg(long, env = "GITHUB_TOKEN")]
+    pub pat: Option<String>,
+
+    /// Only remove local configuration, even if --token or --pat is provided.
+    #[arg(long)]
+    pub local_only: bool,
+
     /// Store configuration under this directory.
     #[arg(long)]
     pub config_dir: Option<PathBuf>,

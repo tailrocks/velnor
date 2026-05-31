@@ -438,6 +438,25 @@ impl DistributedTaskClient {
         self.send_agent("PUT", url, agent, "replace agent").await
     }
 
+    pub async fn delete_agent(&self, pool_id: i64, agent_id: i64) -> Result<()> {
+        let mut url = self
+            .base_url
+            .join(&format!("pools/{pool_id}/agents/{agent_id}"))?;
+        url.query_pairs_mut()
+            .append_pair("api-version", "6.0-preview.2");
+
+        let response = self
+            .http
+            .delete(url)
+            .bearer_auth(&self.bearer_token)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .send()
+            .await
+            .context("send delete agent request")?;
+
+        parse_empty_response(response, "delete agent").await
+    }
+
     pub async fn create_session(
         &self,
         pool_id: i64,
