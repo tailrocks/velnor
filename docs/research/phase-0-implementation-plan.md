@@ -225,7 +225,7 @@ GitHub UI compatibility needs reporting early. Minimal order:
 5. finish job with success/failure/cancelled
 6. include job outputs and step results in completion payload
 7. mask secrets in logs before upload
-8. support annotations from workflow commands. Current code parses state-changing stdout workflow commands (`set-output`, `set-env`, `add-path`, `save-state`), but annotation/reporting commands still need GitHub UI integration.
+8. support annotations from workflow commands. Current code parses state-changing stdout workflow commands (`set-output`, `set-env`, `add-path`, `save-state`) plus `add-mask` mask registration, but annotation/reporting commands still need GitHub UI integration.
 
 Until reporting exists, Docker step execution can be locally correct but GitHub will not look correct.
 

@@ -33,6 +33,11 @@ pub fn parse_workflow_commands(output: &str) -> StepCommandState {
                     state.state.insert(name.clone(), command.value);
                 }
             }
+            "add-mask" => {
+                if !command.value.is_empty() {
+                    state.masks.push(command.value);
+                }
+            }
             _ => {}
         }
     }
@@ -85,6 +90,7 @@ mod tests {
              ::set-env name=MODE::release\n\
              ::add-path::/opt/tool\n\
              ::save-state name=cleanup::yes\n\
+             ::add-mask::top-secret\n\
              ::warning::ignored\n",
         );
 
@@ -92,6 +98,7 @@ mod tests {
         assert_eq!(state.env["MODE"], "release");
         assert_eq!(state.path, vec!["/opt/tool"]);
         assert_eq!(state.state["cleanup"], "yes");
+        assert_eq!(state.masks, vec!["top-secret"]);
     }
 
     #[test]

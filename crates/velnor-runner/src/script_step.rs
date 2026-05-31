@@ -324,6 +324,7 @@ impl CommandFileSet {
                 .collect(),
             state: commands_to_map(parse_command_file(&self.state.host)?),
             summary: fs::read_to_string(&self.summary.host)?,
+            masks: Vec::new(),
         })
     }
 }
@@ -351,6 +352,7 @@ pub struct StepCommandState {
     pub path: Vec<String>,
     pub state: BTreeMap<String, String>,
     pub summary: String,
+    pub masks: Vec<String>,
 }
 
 impl StepCommandState {
@@ -359,6 +361,7 @@ impl StepCommandState {
         self.env.extend(other.env);
         self.path.extend(other.path);
         self.state.extend(other.state);
+        self.masks.extend(other.masks);
         if !other.summary.is_empty() {
             self.summary.push_str(&other.summary);
         }

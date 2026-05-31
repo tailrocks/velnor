@@ -477,6 +477,7 @@ struct JobExecutionState {
     action_states: BTreeMap<String, BTreeMap<String, String>>,
     outcomes: BTreeMap<String, StepOutcome>,
     path: Vec<String>,
+    masks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -526,6 +527,7 @@ impl JobExecutionState {
             action_states: BTreeMap::new(),
             outcomes: BTreeMap::new(),
             path: Vec::new(),
+            masks: Vec::new(),
         }
     }
 
@@ -563,6 +565,7 @@ impl JobExecutionState {
         for path in result.state.path.iter().rev() {
             self.path.insert(0, path.clone());
         }
+        self.masks.extend(result.state.masks.iter().cloned());
     }
 
     fn action_state_env(&self, step_id: &str) -> Vec<(String, String)> {
@@ -1372,6 +1375,7 @@ mod tests {
                     outputs: [("answer".to_string(), "42".to_string())].into(),
                     env: [("NAME".to_string(), "value".to_string())].into(),
                     path: vec!["/opt/tool".to_string()],
+                    masks: vec!["secret".to_string()],
                     ..Default::default()
                 },
             },
@@ -1383,6 +1387,7 @@ mod tests {
         assert!(env.contains(&("GITHUB_OUTPUT".into(), "/__t/out".into())));
         assert!(!env.iter().any(|(name, _)| name == "PATH"));
         assert_eq!(state.path, vec!["/opt/tool"]);
+        assert_eq!(state.masks, vec!["secret"]);
         assert_eq!(
             state.resolve_expressions("value=${{ steps.producer.outputs.answer }}"),
             "value=42"
