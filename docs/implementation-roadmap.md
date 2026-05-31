@@ -64,6 +64,7 @@ Deliverables:
 
 Current code progress:
 
+- runner can parse the outer `AgentJobRequestMessage` subset from GitHub job messages: plan/timeline ids, request/job ids, variables, endpoints, repositories, containers, and action steps
 - command-file parser supports `NAME=value` and heredoc `NAME<<EOF` syntax
 - Docker job container command builder covers network/container start, `docker exec`, and cleanup command shapes
 - script-step plan writes the script under runner temp, exposes per-step command-file env vars, and collects output/env/path/state/summary files after execution

@@ -4,6 +4,7 @@ use serde_json::json;
 use crate::{
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
+    job_message::{AgentJobRequestMessage, PIPELINE_AGENT_JOB_REQUEST},
     protocol::{
         DistributedTaskClient, GitHubAuthResult, GitHubScope, OAuthClient, OAuthJwtCredentials,
         RegistrationClient, RunnerEvent, RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool,
@@ -297,6 +298,25 @@ pub async fn run(args: RunArgs) -> Result<()> {
             "Received message {} type {}.",
             message.message_id, message.message_type
         );
+        if message
+            .message_type
+            .eq_ignore_ascii_case(PIPELINE_AGENT_JOB_REQUEST)
+        {
+            let job = AgentJobRequestMessage::parse_json(&message.body)?;
+            println!(
+                "Parsed job request {} for job '{}' ({} step(s), {} endpoint(s)).",
+                job.request_id,
+                job.job_display_name,
+                job.steps.len(),
+                job.resources.endpoints.len()
+            );
+            if let Some(system_connection) = job.system_connection() {
+                println!(
+                    "System connection URL: {}",
+                    system_connection.url.as_deref().unwrap_or("unknown")
+                );
+            }
+        }
         println!("Message is not acknowledged yet because job execution is not implemented.");
     } else {
         println!("No message received.");

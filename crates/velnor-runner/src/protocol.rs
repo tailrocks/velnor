@@ -916,14 +916,6 @@ pub struct TaskAgentMessage {
     pub iv_base64: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentJobRequestMessage {
-    pub request_id: i64,
-    pub job_id: String,
-    pub job_display_name: String,
-    pub message_type: Option<String>,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskResult {
