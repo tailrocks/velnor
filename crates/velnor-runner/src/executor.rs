@@ -7,10 +7,13 @@ use crate::{
     workflow_command::parse_workflow_commands,
 };
 use anyhow::{bail, Context, Result};
+use globset::{Glob, GlobSetBuilder};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
-    path::Path,
+    fs,
+    path::{Path, PathBuf},
     process::{Command, ExitStatus},
 };
 
@@ -199,7 +202,11 @@ where
         temp_host: &Path,
     ) -> Result<Vec<StepExecutionResult>> {
         let mut results = Vec::new();
-        let mut state = JobExecutionState::new_with_context(base_env, context_data);
+        let mut state = JobExecutionState::new_with_workspace(
+            base_env,
+            context_data,
+            &container.workspace_host,
+        );
         let mut step_error = None;
         let mut post_actions = Vec::new();
         for step in steps {
@@ -409,6 +416,7 @@ where
 struct JobExecutionState {
     env: BTreeMap<String, String>,
     context_data: BTreeMap<String, Value>,
+    workspace_host: Option<PathBuf>,
     outputs: BTreeMap<String, BTreeMap<String, String>>,
     action_states: BTreeMap<String, BTreeMap<String, String>>,
     outcomes: BTreeMap<String, StepOutcome>,
@@ -438,9 +446,26 @@ impl JobExecutionState {
     }
 
     fn new_with_context(base_env: &[(String, String)], context_data: &[(String, Value)]) -> Self {
+        Self::new_internal(base_env, context_data, None)
+    }
+
+    fn new_with_workspace(
+        base_env: &[(String, String)],
+        context_data: &[(String, Value)],
+        workspace_host: &Path,
+    ) -> Self {
+        Self::new_internal(base_env, context_data, Some(workspace_host.to_path_buf()))
+    }
+
+    fn new_internal(
+        base_env: &[(String, String)],
+        context_data: &[(String, Value)],
+        workspace_host: Option<PathBuf>,
+    ) -> Self {
         Self {
             env: base_env.iter().cloned().collect(),
             context_data: context_data.iter().cloned().collect(),
+            workspace_host,
             outputs: BTreeMap::new(),
             action_states: BTreeMap::new(),
             outcomes: BTreeMap::new(),
@@ -554,6 +579,12 @@ impl JobExecutionState {
             return self
                 .resolve_context_data_value(context)
                 .and_then(|value| serde_json::to_string(value).ok());
+        }
+        if let Some(patterns) = parse_hash_files(expression) {
+            return self
+                .workspace_host
+                .as_deref()
+                .map(|workspace| hash_files(workspace, &patterns));
         }
         self.resolve_context_expression(expression)
     }
@@ -700,6 +731,107 @@ fn parse_to_json(expression: &str) -> Option<&str> {
         .strip_prefix("toJSON(")?
         .strip_suffix(')')
         .map(str::trim)
+}
+
+fn parse_hash_files(expression: &str) -> Option<Vec<String>> {
+    let inner = expression
+        .trim()
+        .strip_prefix("hashFiles(")?
+        .strip_suffix(')')?;
+    let mut patterns = Vec::new();
+    let mut rest = inner.trim();
+    while !rest.is_empty() {
+        rest = rest.trim_start();
+        if rest.starts_with(',') {
+            rest = rest[1..].trim_start();
+            continue;
+        }
+        let quote = rest.chars().next()?;
+        if quote != '\'' && quote != '"' {
+            return None;
+        }
+        let value_start = quote.len_utf8();
+        let value_end = rest[value_start..].find(quote)? + value_start;
+        patterns.push(rest[value_start..value_end].to_string());
+        rest = rest[value_end + quote.len_utf8()..].trim_start();
+        if rest.starts_with(',') {
+            rest = rest[1..].trim_start();
+        } else if !rest.is_empty() {
+            return None;
+        }
+    }
+    Some(patterns)
+}
+
+fn hash_files(workspace: &Path, patterns: &[String]) -> String {
+    let Ok(globs) = build_globs(patterns) else {
+        return String::new();
+    };
+    let mut matches = Vec::new();
+    collect_hash_file_matches(workspace, workspace, &globs, &mut matches);
+    matches.sort();
+    matches.dedup();
+    if matches.is_empty() {
+        return String::new();
+    }
+
+    let mut aggregate = Sha256::new();
+    for path in matches {
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        aggregate.update(Sha256::digest(bytes));
+    }
+    hex_digest(aggregate.finalize().as_slice())
+}
+
+fn build_globs(patterns: &[String]) -> Result<globset::GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        builder.add(Glob::new(pattern)?);
+    }
+    builder.build().context("build hashFiles glob set")
+}
+
+fn collect_hash_file_matches(
+    workspace: &Path,
+    dir: &Path,
+    globs: &globset::GlobSet,
+    matches: &mut Vec<PathBuf>,
+) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            collect_hash_file_matches(workspace, &path, globs, matches);
+            continue;
+        }
+        if !file_type.is_file() {
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(workspace) else {
+            continue;
+        };
+        if globs.is_match(normalize_path(relative)) {
+            matches.push(path);
+        }
+    }
+}
+
+fn normalize_path(path: &Path) -> String {
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn split_top_level<'a>(expression: &'a str, operator: &str) -> Option<(&'a str, &'a str)> {
@@ -1251,6 +1383,46 @@ mod tests {
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
             "export PATH='/opt/tool':\"$PATH\"\necho answer=42\n"
         );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn resolves_hash_files_in_action_env() {
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(workspace.join("nested")).unwrap();
+        fs::write(workspace.join("Cargo.lock"), "root-lock\n").unwrap();
+        fs::write(workspace.join("nested/Cargo.lock"), "nested-lock\n").unwrap();
+        fs::write(workspace.join("ignored.txt"), "ignored\n").unwrap();
+        let mut expected_hash = Sha256::new();
+        expected_hash.update(Sha256::digest(b"root-lock\n"));
+        expected_hash.update(Sha256::digest(b"nested-lock\n"));
+        let expected = hex_digest(expected_hash.finalize().as_slice());
+        let steps = vec![ExecutableStep::JavaScript {
+            step_id: "cache".into(),
+            invocation: JavaScriptActionInvocation {
+                node: "node20".into(),
+                main_container_path: "/__a/_actions/cache/dist/restore.js".into(),
+                post_container_path: None,
+                action_container_path: "/__a/_actions/cache".into(),
+                env: vec![(
+                    "INPUT_KEY".into(),
+                    "cargo-${{ hashFiles('**/Cargo.lock') }}".into(),
+                )],
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert!(!expected.is_empty());
+        assert!(executor.runner().calls[2]
+            .1
+            .contains(&format!("INPUT_KEY=cargo-{expected}")));
         fs::remove_dir_all(temp).unwrap();
     }
 
