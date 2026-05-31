@@ -242,8 +242,12 @@ where
         temp_host: &Path,
     ) -> Result<JobExecutionSummary> {
         let mut results = Vec::new();
+        let mut base_env = base_env.to_vec();
+        if let Some(event_path) = prepare_github_event_path(temp_host, context_data)? {
+            base_env.push(("GITHUB_EVENT_PATH".to_string(), event_path));
+        }
         let mut state = JobExecutionState::new_with_workspace(
-            base_env,
+            &base_env,
             context_data,
             &container.workspace_host,
         );
@@ -721,6 +725,7 @@ impl JobExecutionState {
             "github.action_ref" => "GITHUB_ACTION_REF",
             "github.action_repository" => "GITHUB_ACTION_REPOSITORY",
             "github.event_name" => "GITHUB_EVENT_NAME",
+            "github.event_path" => "GITHUB_EVENT_PATH",
             "github.ref" => "GITHUB_REF",
             "github.repository" => "GITHUB_REPOSITORY",
             "github.run_id" => "GITHUB_RUN_ID",
@@ -848,6 +853,32 @@ fn evaluate_job_outputs(
             (!value.is_empty()).then(|| (name.clone(), value))
         })
         .collect()
+}
+
+fn prepare_github_event_path(
+    temp_host: &Path,
+    context_data: &[(String, Value)],
+) -> Result<Option<String>> {
+    let Some(payload) = github_event_payload(context_data) else {
+        return Ok(None);
+    };
+    let event_dir = temp_host.join("_github_workflow");
+    fs::create_dir_all(&event_dir).with_context(|| format!("create {}", event_dir.display()))?;
+    let event_path = event_dir.join("event.json");
+    fs::write(&event_path, payload).with_context(|| format!("write {}", event_path.display()))?;
+    Ok(Some("/__t/_github_workflow/event.json".to_string()))
+}
+
+fn github_event_payload(context_data: &[(String, Value)]) -> Option<String> {
+    let github = context_data
+        .iter()
+        .find_map(|(name, value)| (name == "github").then_some(value))?;
+    let event = github.get("event")?;
+    match event {
+        Value::String(value) => Some(value.clone()),
+        Value::Null => None,
+        value => serde_json::to_string(value).ok(),
+    }
 }
 
 fn job_output_expression(value: &Value) -> Option<&str> {
@@ -1369,6 +1400,10 @@ mod tests {
                 "GITHUB_ACTION_REPOSITORY".into(),
                 "actions/setup-node".into(),
             ),
+            (
+                "GITHUB_EVENT_PATH".into(),
+                "/__t/_github_workflow/event.json".into(),
+            ),
             ("GITHUB_REF".into(), "refs/heads/main".into()),
             ("GITHUB_SHA".into(), "abc123".into()),
             ("GITHUB_TOKEN".into(), "ghs_token".into()),
@@ -1391,6 +1426,7 @@ mod tests {
                     "ACTION_REPOSITORY".into(),
                     "${{ github.action_repository }}".into(),
                 ),
+                ("EVENT_PATH".into(), "${{ github.event_path }}".into()),
                 ("DOCS_SITE_URL".into(), "${{ env.DOCS_SITE_URL }}".into()),
                 ("WORKSPACE".into(), "${{ github.workspace }}".into()),
                 ("OS".into(), "${{ runner.os }}".into()),
@@ -1401,6 +1437,10 @@ mod tests {
                 ("ACTION_PATH".into(), "/__a/actions_setup-node/v4".into()),
                 ("ACTION_REF".into(), "v4".into()),
                 ("ACTION_REPOSITORY".into(), "actions/setup-node".into()),
+                (
+                    "EVENT_PATH".into(),
+                    "/__t/_github_workflow/event.json".into()
+                ),
                 ("DOCS_SITE_URL".into(), "https://docs.example".into()),
                 ("WORKSPACE".into(), "/__w".into()),
                 ("OS".into(), "Linux".into()),
@@ -1536,6 +1576,43 @@ mod tests {
         let exec_args = &executor.runner().calls[2].1;
         assert!(exec_args.contains(&"MODE=release".into()));
         assert!(exec_args.contains(&"TOKEN=ghs_token".into()));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn writes_github_event_payload_and_injects_event_path() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Script(ScriptStep {
+            id: "event-step".into(),
+            script: "cat \"$GITHUB_EVENT_PATH\"".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+        })];
+        let context = vec![(
+            "github".to_string(),
+            serde_json::json!({
+                "event": {
+                    "pull_request": { "number": 42 },
+                    "workflow_run": { "head_sha": "abc123" }
+                }
+            }),
+        )];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps_with_context(&container(&temp), &steps, &[], &context, &temp)
+            .unwrap();
+
+        let exec_args = &executor.runner().calls[2].1;
+        assert!(exec_args.contains(&"GITHUB_EVENT_PATH=/__t/_github_workflow/event.json".into()));
+        assert_eq!(
+            fs::read_to_string(temp.join("_github_workflow/event.json")).unwrap(),
+            r#"{"pull_request":{"number":42},"workflow_run":{"head_sha":"abc123"}}"#
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 
