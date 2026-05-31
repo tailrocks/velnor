@@ -15,10 +15,23 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         ("RUNNER_TOOL_CACHE".to_string(), "/__tool".to_string()),
     ];
 
+    let repository = job.variable("github.repository");
+    push_var(&mut env, "GITHUB_REPOSITORY", repository);
+    push_var_or_derived(
+        &mut env,
+        "GITHUB_REPOSITORY_OWNER",
+        job.variable("github.repository_owner"),
+        repository.and_then(repository_owner),
+    );
     push_var(
         &mut env,
-        "GITHUB_REPOSITORY",
-        job.variable("github.repository"),
+        "GITHUB_REPOSITORY_ID",
+        job.variable("github.repository_id"),
+    );
+    push_var(
+        &mut env,
+        "GITHUB_REPOSITORY_OWNER_ID",
+        job.variable("github.repository_owner_id"),
     );
     push_var(&mut env, "GITHUB_REF", job.variable("github.ref"));
     push_var_or_derived(
@@ -27,9 +40,33 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         job.variable("github.ref_name"),
         job.variable("github.ref").map(ref_name),
     );
+    push_var(&mut env, "GITHUB_REF_TYPE", job.variable("github.ref_type"));
+    push_var(
+        &mut env,
+        "GITHUB_REF_PROTECTED",
+        job.variable("github.ref_protected"),
+    );
+    push_var(&mut env, "GITHUB_BASE_REF", job.variable("github.base_ref"));
+    push_var(&mut env, "GITHUB_HEAD_REF", job.variable("github.head_ref"));
     push_var(&mut env, "GITHUB_SHA", job.variable("github.sha"));
     push_var(&mut env, "GITHUB_ACTOR", job.variable("github.actor"));
+    push_var(&mut env, "GITHUB_ACTOR_ID", job.variable("github.actor_id"));
+    push_var(
+        &mut env,
+        "GITHUB_TRIGGERING_ACTOR",
+        job.variable("github.triggering_actor"),
+    );
     push_var(&mut env, "GITHUB_WORKFLOW", job.variable("github.workflow"));
+    push_var(
+        &mut env,
+        "GITHUB_WORKFLOW_REF",
+        job.variable("github.workflow_ref"),
+    );
+    push_var(
+        &mut env,
+        "GITHUB_WORKFLOW_SHA",
+        job.variable("github.workflow_sha"),
+    );
     push_var(
         &mut env,
         "GITHUB_EVENT_NAME",
@@ -40,6 +77,34 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         &mut env,
         "GITHUB_RUN_NUMBER",
         job.variable("github.run_number"),
+    );
+    push_var(
+        &mut env,
+        "GITHUB_RUN_ATTEMPT",
+        job.variable("github.run_attempt"),
+    );
+    push_var(
+        &mut env,
+        "GITHUB_RETENTION_DAYS",
+        job.variable("github.retention_days"),
+    );
+    push_var_or_default(
+        &mut env,
+        "GITHUB_SERVER_URL",
+        job.variable("github.server_url"),
+        "https://github.com",
+    );
+    push_var_or_default(
+        &mut env,
+        "GITHUB_API_URL",
+        job.variable("github.api_url"),
+        "https://api.github.com",
+    );
+    push_var_or_default(
+        &mut env,
+        "GITHUB_GRAPHQL_URL",
+        job.variable("github.graphql_url"),
+        "https://api.github.com/graphql",
     );
     push_var(
         &mut env,
@@ -188,6 +253,15 @@ fn push_var(env: &mut Vec<(String, String)>, name: &str, value: Option<&str>) {
     }
 }
 
+fn push_var_or_default(
+    env: &mut Vec<(String, String)>,
+    name: &str,
+    value: Option<&str>,
+    default: &str,
+) {
+    env.push((name.to_string(), value.unwrap_or(default).to_string()));
+}
+
 fn set_env(env: &mut Vec<(String, String)>, name: &str, value: &str) {
     if let Some((_, current)) = env
         .iter_mut()
@@ -219,6 +293,13 @@ fn ref_name(git_ref: &str) -> String {
         .or_else(|| git_ref.strip_prefix("refs/pull/"))
         .unwrap_or(git_ref)
         .to_string()
+}
+
+fn repository_owner(repository: &str) -> Option<String> {
+    repository
+        .split_once('/')
+        .map(|(owner, _)| owner.to_string())
+        .filter(|owner| !owner.is_empty())
 }
 
 fn push_endpoint_data(
@@ -283,9 +364,19 @@ mod tests {
             "requestId": 1,
             "variables": {
                 "github.repository": { "value": "acme/repo" },
+                "github.repository_id": { "value": "123" },
+                "github.repository_owner_id": { "value": "456" },
                 "github.ref": { "value": "refs/heads/main" },
+                "github.ref_type": { "value": "branch" },
+                "github.ref_protected": { "value": "true" },
                 "github.sha": { "value": "abc123" },
+                "github.actor_id": { "value": "789" },
+                "github.triggering_actor": { "value": "octocat" },
                 "github.workflow": { "value": "CI" },
+                "github.workflow_ref": { "value": "acme/repo/.github/workflows/ci.yml@refs/heads/main" },
+                "github.workflow_sha": { "value": "def456" },
+                "github.run_attempt": { "value": "2" },
+                "github.retention_days": { "value": "90" },
                 "system.github.token": { "value": "ghs_token", "isSecret": true },
                 "actions_uses_cache_service_v2": { "value": "true" },
                 "actions_set_orchestration_id_env_for_actions": { "value": "true" },
@@ -326,8 +417,24 @@ mod tests {
 
         assert!(env.contains(&("GITHUB_JOB".into(), "check".into())));
         assert!(env.contains(&("GITHUB_REPOSITORY".into(), "acme/repo".into())));
+        assert!(env.contains(&("GITHUB_REPOSITORY_OWNER".into(), "acme".into())));
+        assert!(env.contains(&("GITHUB_REPOSITORY_ID".into(), "123".into())));
+        assert!(env.contains(&("GITHUB_REPOSITORY_OWNER_ID".into(), "456".into())));
         assert!(env.contains(&("GITHUB_REF_NAME".into(), "main".into())));
+        assert!(env.contains(&("GITHUB_REF_TYPE".into(), "branch".into())));
+        assert!(env.contains(&("GITHUB_REF_PROTECTED".into(), "true".into())));
         assert!(env.contains(&("GITHUB_WORKFLOW".into(), "CI".into())));
+        assert!(env.contains(&("GITHUB_WORKFLOW_SHA".into(), "def456".into())));
+        assert!(env.contains(&("GITHUB_ACTOR_ID".into(), "789".into())));
+        assert!(env.contains(&("GITHUB_TRIGGERING_ACTOR".into(), "octocat".into())));
+        assert!(env.contains(&("GITHUB_RUN_ATTEMPT".into(), "2".into())));
+        assert!(env.contains(&("GITHUB_RETENTION_DAYS".into(), "90".into())));
+        assert!(env.contains(&("GITHUB_SERVER_URL".into(), "https://github.com".into())));
+        assert!(env.contains(&("GITHUB_API_URL".into(), "https://api.github.com".into())));
+        assert!(env.contains(&(
+            "GITHUB_GRAPHQL_URL".into(),
+            "https://api.github.com/graphql".into()
+        )));
         assert!(env.contains(&("GITHUB_TOKEN".into(), "ghs_token".into())));
         assert!(env.contains(&("CARGO_TERM_COLOR".into(), "always".into())));
         assert!(env.contains(&("CARGO_INCREMENTAL".into(), "1".into())));
