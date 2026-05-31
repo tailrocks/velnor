@@ -117,12 +117,16 @@ Goal: support local composite actions used by target repos.
 
 Deliverables:
 
-- parse `runs.using: composite`
-- composite inputs
-- nested `run` and `uses` steps
+- parse `runs.using: composite`: metadata parsing exists
+- local composite action discovery after checkout: implemented for `./.github/actions/...`
+- composite inputs: basic `${{ inputs.* }}` interpolation into `run` and `env` exists
+- nested `run` steps: local composite `run` steps are expanded into ordered script steps
+- nested `uses` steps
 - composite outputs
 - composite step conditions
 - post-step state if needed
+
+Current limit: `jackin`'s `aggregate-needs` shape is covered by the run-only subset. `check-deployed-docs` still needs nested `uses` inside composite actions.
 
 Exit criteria:
 

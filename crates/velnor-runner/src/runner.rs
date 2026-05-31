@@ -3,7 +3,11 @@ use serde_json::json;
 use std::{fs, path::PathBuf};
 
 use crate::{
-    action::{download_repository_actions, repository_action_plans, ResolvedAction},
+    action::{
+        composite_script_steps, download_repository_actions, is_local_action_step,
+        local_action_plans, repository_action_plans, resolve_local_action, ActionMetadata,
+        LocalActionPlan, ResolvedAction,
+    },
     checkout::{checkout_plans, execute_checkouts},
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
@@ -412,6 +416,11 @@ fn execute_script_job(
     let mut command_runner = ProcessCommandRunner;
     let checkout_plans = checkout_plans(job, &workspace)?;
     execute_checkouts(&mut command_runner, &checkout_plans)?;
+    let local_action_plans = local_action_plans(&job.steps, &workspace)?;
+    let local_actions = local_action_plans
+        .iter()
+        .map(|plan| Ok((plan.clone(), resolve_local_action(plan)?)))
+        .collect::<Result<Vec<_>>>()?;
     let repository_action_plans = repository_action_plans(&job.steps, &actions)?;
     let resolved_actions = if repository_action_plans.is_empty() {
         Vec::new()
@@ -424,7 +433,13 @@ fn execute_script_job(
         );
         resolved_actions
     };
-    let ordered_steps = ordered_executable_steps(job, script_steps, &resolved_actions, &actions)?;
+    let ordered_steps = ordered_executable_steps(
+        job,
+        script_steps,
+        &resolved_actions,
+        &local_actions,
+        &actions,
+    )?;
 
     let container = JobContainerSpec {
         name: format!("velnor-job-{}", sanitize_path_segment(&job.job_id)),
@@ -452,10 +467,12 @@ fn ordered_executable_steps(
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
     resolved_actions: &[ResolvedAction],
+    local_actions: &[(LocalActionPlan, ActionMetadata)],
     actions_host: &std::path::Path,
 ) -> Result<Vec<ExecutableStep>> {
     let mut ordered = Vec::new();
     let mut script_iter = script_steps.iter();
+    let mut local_iter = local_actions.iter();
     for step in job.steps.iter().filter(|step| step.enabled) {
         match step.reference_type() {
             Some(ActionReferenceType::Script) => {
@@ -465,6 +482,17 @@ fn ordered_executable_steps(
                 ordered.push(ExecutableStep::Script(script.clone()));
             }
             Some(ActionReferenceType::Repository) => {
+                if is_local_action_step(step) {
+                    let (plan, metadata) = local_iter
+                        .next()
+                        .ok_or_else(|| anyhow::anyhow!("local action mapping count mismatch"))?;
+                    ordered.extend(
+                        composite_script_steps(plan, metadata, "/__w")?
+                            .into_iter()
+                            .map(ExecutableStep::Script),
+                    );
+                    continue;
+                }
                 let Some(reference) = step.reference.as_ref() else {
                     continue;
                 };
@@ -708,4 +736,72 @@ fn default_agent_name() -> String {
         .ok()
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "velnor-runner".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::action::{parse_action_metadata, LocalActionPlan};
+    use std::path::Path;
+
+    #[test]
+    fn ordered_steps_expand_local_composite_action() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "steps": [
+                {
+                    "id": "run",
+                    "reference": { "type": "Script" },
+                    "inputs": { "script": "echo before" }
+                },
+                {
+                    "id": "aggregate",
+                    "reference": {
+                        "type": "Repository",
+                        "name": "./.github/actions/aggregate-needs"
+                    },
+                    "inputs": { "workflow-label": "CI" }
+                }
+            ]
+        }))
+        .unwrap();
+        let script_steps = crate::script_step::github_script_steps(&job.steps, "/__w").unwrap();
+        let local_plan = LocalActionPlan {
+            step_id: "aggregate".into(),
+            action_dir: Path::new("/tmp/workspace").join(".github/actions/aggregate-needs"),
+            inputs: [("workflow-label".to_string(), "CI".to_string())].into(),
+        };
+        let metadata = parse_action_metadata(
+            r#"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: echo "${{ inputs.workflow-label }}"
+"#,
+        )
+        .unwrap();
+
+        let ordered = ordered_executable_steps(
+            &job,
+            &script_steps,
+            &[],
+            &[(local_plan, metadata)],
+            Path::new("/tmp/actions"),
+        )
+        .unwrap();
+
+        assert_eq!(ordered.len(), 2);
+        assert!(matches!(ordered[0], ExecutableStep::Script(_)));
+        let ExecutableStep::Script(step) = &ordered[1] else {
+            panic!("local composite should expand to script step")
+        };
+        assert_eq!(step.id, "aggregate-1");
+        assert!(step.script.contains("echo \"CI\""));
+    }
 }

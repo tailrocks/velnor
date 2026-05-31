@@ -79,7 +79,7 @@ fn github_script_step(
     })
 }
 
-fn github_shell(shell: &str) -> Result<Shell> {
+pub(crate) fn github_shell(shell: &str) -> Result<Shell> {
     let shell = shell.split_whitespace().next().unwrap_or(shell);
     if shell.eq_ignore_ascii_case("bash") {
         Ok(Shell::Bash)

@@ -4,6 +4,7 @@ use crate::{
     checkout::fetch_git_ref,
     executor::CommandRunner,
     job_message::{ActionReferenceType, ActionStep},
+    script_step::ScriptStep,
 };
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -45,6 +46,28 @@ pub struct ActionRuns {
     pub post: Option<String>,
     #[serde(default)]
     pub image: Option<String>,
+    #[serde(default)]
+    pub steps: Vec<CompositeActionStep>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CompositeActionStep {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub shell: Option<String>,
+    #[serde(default)]
+    pub run: Option<String>,
+    #[serde(default)]
+    pub uses: Option<String>,
+    #[serde(default)]
+    pub with: BTreeMap<String, String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default, rename = "working-directory", alias = "workingDirectory")]
+    pub working_directory: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +113,13 @@ pub struct RepositoryActionPlan {
     pub inputs: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalActionPlan {
+    pub step_id: String,
+    pub action_dir: PathBuf,
+    pub inputs: BTreeMap<String, String>,
+}
+
 pub fn parse_action_metadata(contents: &str) -> Result<ActionMetadata> {
     serde_yaml::from_str(contents).context("parse action metadata")
 }
@@ -109,6 +139,9 @@ pub fn repository_action_plans(
         let Some(repository) = reference.name.as_ref() else {
             continue;
         };
+        if is_local_action_reference(reference.name.as_deref(), reference.path.as_deref()) {
+            continue;
+        }
         if repository.eq_ignore_ascii_case("actions/checkout") {
             continue;
         }
@@ -130,6 +163,40 @@ pub fn repository_action_plans(
             source_path: reference.path.clone(),
             repository_dir,
             action_dir,
+            inputs: string_inputs(step)?,
+        });
+    }
+    Ok(plans)
+}
+
+pub fn is_local_action_step(step: &ActionStep) -> bool {
+    step.reference
+        .as_ref()
+        .and_then(|reference| {
+            local_action_path(reference.name.as_deref(), reference.path.as_deref())
+        })
+        .is_some()
+}
+
+pub fn local_action_plans(
+    steps: &[ActionStep],
+    workspace_host: &Path,
+) -> Result<Vec<LocalActionPlan>> {
+    let mut plans = Vec::new();
+    for step in steps {
+        if !step.enabled || step.reference_type() != Some(ActionReferenceType::Repository) {
+            continue;
+        }
+        let Some(reference) = step.reference.as_ref() else {
+            continue;
+        };
+        let Some(path) = local_action_path(reference.name.as_deref(), reference.path.as_deref())
+        else {
+            continue;
+        };
+        plans.push(LocalActionPlan {
+            step_id: step_id(step, plans.len()),
+            action_dir: local_action_dir(workspace_host, path)?,
             inputs: string_inputs(step)?,
         });
     }
@@ -190,6 +257,14 @@ pub fn resolve_action(plan: &RepositoryActionPlan) -> Result<ResolvedAction> {
     })
 }
 
+pub fn resolve_local_action(plan: &LocalActionPlan) -> Result<ActionMetadata> {
+    let metadata_path = action_metadata_path(&plan.action_dir)?;
+    parse_action_metadata(
+        &fs::read_to_string(&metadata_path)
+            .with_context(|| format!("read {}", metadata_path.display()))?,
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaScriptActionInvocation {
     pub node: String,
@@ -229,6 +304,65 @@ impl ResolvedAction {
     }
 }
 
+pub fn composite_script_steps(
+    plan: &LocalActionPlan,
+    metadata: &ActionMetadata,
+    workspace_container: &str,
+) -> Result<Vec<ScriptStep>> {
+    if metadata.runtime()? != ActionRuntime::Composite {
+        bail!("local action '{}' is not a composite action", plan.step_id)
+    }
+
+    let action_path = workspace_container_path(workspace_container, &plan.action_dir)?;
+    let mut steps = Vec::new();
+    for (index, step) in metadata.runs.steps.iter().enumerate() {
+        if step.uses.is_some() {
+            bail!("nested uses steps in composite actions are not implemented yet")
+        }
+        let Some(script) = step.run.as_deref() else {
+            continue;
+        };
+        let shell = step
+            .shell
+            .as_deref()
+            .map(crate::script_step::github_shell)
+            .transpose()?
+            .unwrap_or(crate::container::Shell::Bash);
+        let mut rendered = render_composite_value(script, plan, &action_path, workspace_container);
+        if !step.env.is_empty() {
+            let exports = step
+                .env
+                .iter()
+                .map(|(name, value)| {
+                    Ok(format!(
+                        "export {}={}\n",
+                        shell_identifier(name)?,
+                        shell_single_quote(&render_composite_value(
+                            value,
+                            plan,
+                            &action_path,
+                            workspace_container
+                        ))
+                    ))
+                })
+                .collect::<Result<String>>()?;
+            rendered = format!("{exports}{rendered}");
+        }
+        let working_directory_container = step
+            .working_directory
+            .as_deref()
+            .map(|path| workspace_path(workspace_container, path))
+            .unwrap_or_else(|| workspace_container.to_string());
+        steps.push(ScriptStep {
+            id: format!("{}-{}", plan.step_id, index + 1),
+            script: rendered,
+            shell,
+            working_directory_container,
+        });
+    }
+    Ok(steps)
+}
+
 fn action_metadata_path(action_dir: &Path) -> Result<PathBuf> {
     for file_name in ["action.yml", "action.yaml"] {
         let path = action_dir.join(file_name);
@@ -237,6 +371,41 @@ fn action_metadata_path(action_dir: &Path) -> Result<PathBuf> {
         }
     }
     bail!("action metadata not found in {}", action_dir.display())
+}
+
+fn is_local_action_reference(name: Option<&str>, path: Option<&str>) -> bool {
+    local_action_path(name, path).is_some()
+}
+
+fn local_action_path<'a>(name: Option<&'a str>, path: Option<&'a str>) -> Option<&'a str> {
+    path.filter(|value| value.starts_with('.'))
+        .or_else(|| name.filter(|value| value.starts_with('.')))
+}
+
+fn local_action_dir(workspace_host: &Path, source_path: &str) -> Result<PathBuf> {
+    if source_path.starts_with('/') || source_path.contains("..") {
+        bail!("unsupported local action path '{source_path}'")
+    }
+    Ok(workspace_host.join(source_path.trim_start_matches("./")))
+}
+
+fn workspace_container_path(workspace_container: &str, host_path: &Path) -> Result<String> {
+    let relative = host_path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    if let Some(index) = relative.find(".github/actions/") {
+        return Ok(format!(
+            "{}/{}",
+            workspace_container.trim_end_matches('/'),
+            &relative[index..]
+        ));
+    }
+    bail!(
+        "local action path {} is outside workspace action directory",
+        host_path.display()
+    )
 }
 
 fn container_path(actions_host: &Path, host_path: &Path) -> Result<String> {
@@ -315,6 +484,52 @@ fn string_inputs(step: &ActionStep) -> Result<BTreeMap<String, String>> {
     Ok(result)
 }
 
+fn render_composite_value(
+    value: &str,
+    plan: &LocalActionPlan,
+    action_path: &str,
+    workspace_container: &str,
+) -> String {
+    let mut rendered = value
+        .replace("${{ github.action_path }}", action_path)
+        .replace("${{ github.workspace }}", workspace_container);
+    for (name, value) in &plan.inputs {
+        rendered = rendered.replace(&format!("${{{{ inputs.{name} }}}}"), value);
+    }
+    rendered
+}
+
+fn workspace_path(workspace_container: &str, path: &str) -> String {
+    if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!(
+            "{}/{}",
+            workspace_container.trim_end_matches('/'),
+            path.trim_start_matches("./")
+        )
+    }
+}
+
+fn shell_identifier(name: &str) -> Result<&str> {
+    if name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        && name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+    {
+        Ok(name)
+    } else {
+        bail!("unsupported composite env name '{name}'")
+    }
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 fn sanitize_segment(value: &str) -> String {
     value
         .chars()
@@ -380,6 +595,7 @@ runs:
     fn builds_repository_action_plan() {
         let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
             { "reference": { "type": "Repository", "name": "actions/checkout", "ref": "v4" } },
+            { "reference": { "type": "Repository", "name": "./.github/actions/aggregate-needs" } },
             {
                 "id": "setup",
                 "reference": {
@@ -415,6 +631,95 @@ runs:
                 .join("v5")
                 .join("sub/action")
         );
+    }
+
+    #[test]
+    fn builds_local_action_plan() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "aggregate",
+                "reference": {
+                    "type": "Repository",
+                    "name": "./.github/actions/aggregate-needs"
+                },
+                "inputs": { "workflow-label": "CI" }
+            },
+            {
+                "id": "setup",
+                "reference": {
+                    "type": "Repository",
+                    "name": "actions/setup-python",
+                    "ref": "v6"
+                }
+            }
+        ]))
+        .unwrap();
+
+        let plans = local_action_plans(&steps, Path::new("/tmp/workspace")).unwrap();
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].step_id, "aggregate");
+        assert_eq!(
+            plans[0].action_dir,
+            Path::new("/tmp/workspace").join(".github/actions/aggregate-needs")
+        );
+        assert_eq!(plans[0].inputs["workflow-label"], "CI");
+    }
+
+    #[test]
+    fn expands_composite_run_steps() {
+        let plan = LocalActionPlan {
+            step_id: "aggregate".into(),
+            action_dir: Path::new("/tmp/workspace").join(".github/actions/aggregate-needs"),
+            inputs: [("workflow-label".to_string(), "CI".to_string())].into(),
+        };
+        let metadata = parse_action_metadata(
+            r#"
+runs:
+  using: composite
+  steps:
+    - name: Aggregate
+      shell: bash
+      env:
+        WORKFLOW_LABEL: ${{ inputs.workflow-label }}
+      run: |
+        echo "::error::${{ inputs.workflow-label }} failed"
+        test -d "${{ github.action_path }}"
+"#,
+        )
+        .unwrap();
+
+        let steps = composite_script_steps(&plan, &metadata, "/__w").unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].id, "aggregate-1");
+        assert!(steps[0].script.contains("export WORKFLOW_LABEL='CI'"));
+        assert!(steps[0].script.contains("::error::CI failed"));
+        assert!(steps[0]
+            .script
+            .contains("test -d \"/__w/.github/actions/aggregate-needs\""));
+    }
+
+    #[test]
+    fn rejects_nested_composite_uses_for_now() {
+        let plan = LocalActionPlan {
+            step_id: "docs".into(),
+            action_dir: Path::new("/tmp/workspace").join(".github/actions/docs"),
+            inputs: BTreeMap::new(),
+        };
+        let metadata = parse_action_metadata(
+            r#"
+runs:
+  using: composite
+  steps:
+    - uses: jdx/mise-action@v4
+"#,
+        )
+        .unwrap();
+
+        let error = composite_script_steps(&plan, &metadata, "/__w").unwrap_err();
+
+        assert!(error.to_string().contains("nested uses steps"));
     }
 
     #[test]
