@@ -465,14 +465,19 @@ fn execute_script_job(
     };
     let mut executor = DockerScriptExecutor::new(command_runner);
     let base_env = job_runtime_env(job);
-    let results = executor.execute_ordered_steps_with_context(
+    let summary = executor.execute_ordered_steps_with_job_outputs(
         &container,
         &ordered_steps,
         &base_env,
         &context_data,
+        job.job_outputs.as_ref(),
         &temp,
     )?;
-    let failed = results
+    if !summary.job_outputs.is_empty() {
+        println!("Evaluated {} job output(s).", summary.job_outputs.len());
+    }
+    let failed = summary
+        .step_results
         .iter()
         .any(|result| result.exit_code != 0 && !result.failure_ignored);
 

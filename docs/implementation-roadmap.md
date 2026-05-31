@@ -73,6 +73,7 @@ Current code progress:
 - opt-in `run --execute-scripts` can execute script-only jobs in one Docker job container and finish success/failure; enabled non-script actions are refused instead of being faked
 - env written to `GITHUB_ENV` and paths written to `GITHUB_PATH` are propagated to later script steps
 - step outputs written to `GITHUB_OUTPUT` are tracked by step id and basic `${{ steps.<id>.outputs.<name> }}` expressions are resolved in later scripts and JavaScript action env
+- job outputs from the job message are evaluated at the end of execution from final step output state, matching the runner-side evaluation point used by GitHub
 - stdout workflow commands are parsed for legacy/state-changing commands: `set-output`, `set-env`, `add-path`, and `save-state`
 - basic `${{ github.* }}` and `${{ runner.* }}` context expressions are resolved from runtime env in later scripts and JavaScript action env
 - basic step `if` evaluation is implemented for output comparisons, step outcome checks, `runner.os`, `github.event_name`, `github.ref`, and simple `&&`/`||`

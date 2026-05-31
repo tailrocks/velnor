@@ -58,6 +58,12 @@ pub struct StepExecutionResult {
     pub failure_ignored: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobExecutionSummary {
+    pub step_results: Vec<StepExecutionResult>,
+    pub job_outputs: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum ExecutableStep {
     Script(ScriptStep),
@@ -142,13 +148,16 @@ where
             .cloned()
             .map(ExecutableStep::Script)
             .collect::<Vec<_>>();
-        let result = self.execute_ordered_steps_in_started_container(
-            container,
-            &ordered,
-            &[],
-            &[],
-            temp_host,
-        );
+        let result = self
+            .execute_ordered_steps_in_started_container(
+                container,
+                &ordered,
+                &[],
+                &[],
+                None,
+                temp_host,
+            )
+            .map(|summary| summary.step_results);
 
         let cleanup_result = self.cleanup(container);
         if let Err(error) = cleanup_result {
@@ -175,6 +184,27 @@ where
         context_data: &[(String, Value)],
         temp_host: &Path,
     ) -> Result<Vec<StepExecutionResult>> {
+        Ok(self
+            .execute_ordered_steps_with_job_outputs(
+                container,
+                steps,
+                base_env,
+                context_data,
+                None,
+                temp_host,
+            )?
+            .step_results)
+    }
+
+    pub fn execute_ordered_steps_with_job_outputs(
+        &mut self,
+        container: &JobContainerSpec,
+        steps: &[ExecutableStep],
+        base_env: &[(String, String)],
+        context_data: &[(String, Value)],
+        job_outputs: Option<&Value>,
+        temp_host: &Path,
+    ) -> Result<JobExecutionSummary> {
         self.run_docker(&container.create_network_args())?;
         self.run_docker(&container.start_args())?;
 
@@ -183,6 +213,7 @@ where
             steps,
             base_env,
             context_data,
+            job_outputs,
             temp_host,
         );
 
@@ -199,8 +230,9 @@ where
         steps: &[ExecutableStep],
         base_env: &[(String, String)],
         context_data: &[(String, Value)],
+        job_outputs: Option<&Value>,
         temp_host: &Path,
-    ) -> Result<Vec<StepExecutionResult>> {
+    ) -> Result<JobExecutionSummary> {
         let mut results = Vec::new();
         let mut state = JobExecutionState::new_with_workspace(
             base_env,
@@ -315,7 +347,10 @@ where
         if let Some(error) = step_error {
             return Err(error);
         }
-        Ok(results)
+        Ok(JobExecutionSummary {
+            job_outputs: evaluate_job_outputs(job_outputs, &state),
+            step_results: results,
+        })
     }
 
     pub fn execute_javascript_action(
@@ -627,6 +662,9 @@ impl JobExecutionState {
         if let Some(output) = self.resolve_step_output_expression(expression) {
             return Some(output.to_string());
         }
+        if expression.starts_with("steps.") && expression.contains(".outputs.") {
+            return Some(String::new());
+        }
         if let Some(context) = parse_to_json(expression) {
             return self
                 .resolve_context_data_value(context)
@@ -759,6 +797,39 @@ impl JobExecutionState {
         }
         Some(value)
     }
+}
+
+fn evaluate_job_outputs(
+    job_outputs: Option<&Value>,
+    state: &JobExecutionState,
+) -> BTreeMap<String, String> {
+    let Some(Value::Object(outputs)) = job_outputs else {
+        return BTreeMap::new();
+    };
+    outputs
+        .iter()
+        .filter_map(|(name, value)| {
+            let value = job_output_expression(value)?;
+            let value = state.resolve_expressions(value);
+            (!value.is_empty()).then(|| (name.clone(), value))
+        })
+        .collect()
+}
+
+fn job_output_expression(value: &Value) -> Option<&str> {
+    if let Some(value) = value.as_str() {
+        return Some(value);
+    }
+    value
+        .as_object()
+        .and_then(|object| {
+            object
+                .get("value")
+                .or_else(|| object.get("Value"))
+                .or_else(|| object.get("expression"))
+                .or_else(|| object.get("Expression"))
+        })
+        .and_then(Value::as_str)
 }
 
 fn context_value_string(value: &Value) -> Option<String> {
@@ -1451,6 +1522,47 @@ mod tests {
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
             "echo answer=42\n"
         );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn evaluates_job_outputs_from_final_step_state() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Script(ScriptStep {
+            id: "producer".into(),
+            script: "echo answer=42 >> $GITHUB_OUTPUT".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+        })];
+        let job_outputs = serde_json::json!({
+            "answer": "${{ steps.producer.outputs.answer }}",
+            "fallback": "${{ steps.missing.outputs.value || 'default' }}",
+            "empty": "${{ steps.missing.outputs.value }}"
+        });
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                Some(&job_outputs),
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(summary.step_results.len(), 1);
+        assert_eq!(summary.job_outputs["answer"], "42");
+        assert_eq!(summary.job_outputs["fallback"], "default");
+        assert!(!summary.job_outputs.contains_key("empty"));
         fs::remove_dir_all(temp).unwrap();
     }
 
