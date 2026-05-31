@@ -117,11 +117,23 @@ Classic flow from generated `TaskAgentHttpClientBase`:
 POST create session
 locationId: 134e239e-2df3-4794-a6f6-24f1f19ec8dc
 api version: 5.1-preview.1
+route: <server_url>/_apis/distributedtask/pools/{poolId}/sessions
 
 GET message
 locationId: c3a054f6-7a8a-49c0-944e-3a8e5d7adfd7
 api version: 6.0-preview.1
 query: sessionId, lastMessageId, status, runnerVersion, os, architecture, disableUpdate
+route: <server_url>/_apis/distributedtask/pools/{poolId}/messages
+
+DELETE message
+locationId: c3a054f6-7a8a-49c0-944e-3a8e5d7adfd7
+api version: 5.1-preview.1
+route: <server_url>/_apis/distributedtask/pools/{poolId}/messages/{messageId}?sessionId={sessionId}
+
+DELETE session
+locationId: 134e239e-2df3-4794-a6f6-24f1f19ec8dc
+api version: 5.1-preview.1
+route: <server_url>/_apis/distributedtask/pools/{poolId}/sessions/{sessionId}
 ```
 
 Job lock:
@@ -143,3 +155,9 @@ Implement and test in this order:
 6. Job lock renew/finish.
 
 This avoids building Docker execution before Velnor can receive a real job.
+
+## Current Implementation Gap
+
+The `velnor-runner run --once` path can create a session and poll one message when credentials are `OAuthAccessToken`.
+
+After normal agent add/replace, GitHub usually returns OAuth app credentials (`clientId`, `authorizationUrl`, runner private key). Velnor stores those fields, but still needs the OAuth JWT bearer exchange before session polling works for normal registered runners.

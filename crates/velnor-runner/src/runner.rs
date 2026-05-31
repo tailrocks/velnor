@@ -6,7 +6,7 @@ use crate::{
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     protocol::{
         DistributedTaskClient, GitHubAuthResult, GitHubScope, RegistrationClient, RunnerEvent,
-        RunnerKeyPair, TaskAgent, TaskAgentPool,
+        RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool, TaskAgentSession,
     },
 };
 
@@ -208,18 +208,83 @@ impl TaskAgentExt for TaskAgent {
 pub async fn run(args: RunArgs) -> Result<()> {
     let dir = config::config_dir(args.config_dir)?;
     let stored = config::load(&dir)?;
+    let server_url = stored
+        .settings
+        .server_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("runner is not registered: missing server_url"))?;
+    let pool_id = stored
+        .settings
+        .pool_id
+        .ok_or_else(|| anyhow::anyhow!("runner is not registered: missing pool_id"))?;
+    let agent_id = stored
+        .settings
+        .agent_id
+        .ok_or_else(|| anyhow::anyhow!("runner is not registered: missing agent_id"))?;
+    let token = oauth_access_token(&stored)?;
+    let client = DistributedTaskClient::new(server_url, token)?;
+    let owner_name = format!("{} (PID: {})", default_agent_name(), std::process::id());
+    let session = TaskAgentSession::new(owner_name, agent_id, stored.settings.agent_name.clone());
+    let session = client.create_session(pool_id, &session).await?;
+    let session_id = session
+        .session_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("GitHub returned session without sessionId"))?;
+
     println!(
         "Runner '{}' ready with labels: {}",
         stored.settings.agent_name,
         stored.settings.labels.join(",")
     );
-    println!("Protocol polling is not implemented yet.");
+    println!("Created runner session {session_id}.");
+
+    let message = client
+        .get_message(
+            pool_id,
+            session_id,
+            None,
+            RunnerStatus::Online,
+            stored.settings.disable_update,
+        )
+        .await?;
+
+    if let Some(message) = message {
+        println!(
+            "Received message {} type {}.",
+            message.message_id, message.message_type
+        );
+        println!("Message is not acknowledged yet because job execution is not implemented.");
+    } else {
+        println!("No message received.");
+    }
 
     if args.once {
-        println!("Run-once mode requested.");
+        client.delete_session(pool_id, session_id).await?;
+        println!("Deleted runner session.");
+    } else {
+        println!("Continuous polling is not implemented yet; use --once for current milestone.");
     }
 
     Ok(())
+}
+
+fn oauth_access_token(stored: &StoredRunnerConfig) -> Result<String> {
+    let credentials = stored
+        .credentials
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("runner is not registered: missing credentials"))?;
+
+    match credentials.scheme {
+        CredentialScheme::OAuthAccessToken => credentials
+            .data
+            .get("token")
+            .and_then(|value| value.as_str())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| anyhow::anyhow!("OAuthAccessToken credentials missing token")),
+        CredentialScheme::OAuth => bail!(
+            "OAuth JWT credential exchange is not implemented yet; current runner has OAuth credentials"
+        ),
+    }
 }
 
 pub async fn remove(args: RemoveArgs) -> Result<()> {

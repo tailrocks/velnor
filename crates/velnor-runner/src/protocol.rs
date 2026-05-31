@@ -257,6 +257,112 @@ impl DistributedTaskClient {
         self.send_agent("PUT", url, agent, "replace agent").await
     }
 
+    pub async fn create_session(
+        &self,
+        pool_id: i64,
+        session: &TaskAgentSession,
+    ) -> Result<TaskAgentSession> {
+        let mut url = self.base_url.join(&format!("pools/{pool_id}/sessions"))?;
+        url.query_pairs_mut()
+            .append_pair("api-version", "5.1-preview.1");
+
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&self.bearer_token)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .json(session)
+            .send()
+            .await
+            .context("send create session request")?;
+
+        parse_json_response(response, "create session").await
+    }
+
+    pub async fn delete_session(&self, pool_id: i64, session_id: &str) -> Result<()> {
+        let mut url = self
+            .base_url
+            .join(&format!("pools/{pool_id}/sessions/{session_id}"))?;
+        url.query_pairs_mut()
+            .append_pair("api-version", "5.1-preview.1");
+
+        let response = self
+            .http
+            .delete(url)
+            .bearer_auth(&self.bearer_token)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .send()
+            .await
+            .context("send delete session request")?;
+
+        parse_empty_response(response, "delete session").await
+    }
+
+    pub async fn get_message(
+        &self,
+        pool_id: i64,
+        session_id: &str,
+        last_message_id: Option<i64>,
+        status: RunnerStatus,
+        disable_update: bool,
+    ) -> Result<Option<TaskAgentMessage>> {
+        let mut url = self.base_url.join(&format!("pools/{pool_id}/messages"))?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("api-version", "6.0-preview.1");
+            query.append_pair("sessionId", session_id);
+            if let Some(last_message_id) = last_message_id {
+                query.append_pair("lastMessageId", &last_message_id.to_string());
+            }
+            query.append_pair("status", status.as_query_value());
+            query.append_pair("runnerVersion", RUNNER_VERSION);
+            query.append_pair("os", std::env::consts::OS);
+            query.append_pair("architecture", std::env::consts::ARCH);
+            query.append_pair(
+                "disableUpdate",
+                if disable_update { "true" } else { "false" },
+            );
+        }
+
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(&self.bearer_token)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .send()
+            .await
+            .context("send get message request")?;
+
+        parse_optional_json_response(response, "get message").await
+    }
+
+    pub async fn delete_message(
+        &self,
+        pool_id: i64,
+        message_id: i64,
+        session_id: &str,
+    ) -> Result<()> {
+        let mut url = self
+            .base_url
+            .join(&format!("pools/{pool_id}/messages/{message_id}"))?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("api-version", "5.1-preview.1");
+            query.append_pair("sessionId", session_id);
+        }
+
+        let response = self
+            .http
+            .delete(url)
+            .bearer_auth(&self.bearer_token)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .send()
+            .await
+            .context("send delete message request")?;
+
+        parse_empty_response(response, "delete message").await
+    }
+
     async fn get_json<T>(&self, url: Url, action: &str) -> Result<T>
     where
         T: for<'de> Deserialize<'de>,
@@ -348,6 +454,45 @@ where
         .with_context(|| format!("parse {action} response"))
 }
 
+async fn parse_optional_json_response<T>(
+    response: reqwest::Response,
+    action: &str,
+) -> Result<Option<T>>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    if response.status() == reqwest::StatusCode::NO_CONTENT {
+        return Ok(None);
+    }
+
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .with_context(|| format!("read {action} response"))?;
+
+    if !status.is_success() {
+        bail!("{action} failed: status={status}, body={text}");
+    }
+
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+
+    serde_json::from_str::<T>(&text)
+        .map(Some)
+        .with_context(|| format!("parse {action} response"))
+}
+
+async fn parse_empty_response(response: reqwest::Response, action: &str) -> Result<()> {
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        bail!("{action} failed: status={status}, body={body}");
+    }
+    Ok(())
+}
+
 fn distributed_task_base_url(server_url: &str) -> Result<Url> {
     let mut root =
         Url::parse(server_url).with_context(|| format!("parse server URL '{server_url}'"))?;
@@ -369,6 +514,61 @@ pub struct TaskAgentPool {
     pub is_hosted: bool,
     #[serde(default, rename = "isInternal")]
     pub is_internal: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskAgentSession {
+    #[serde(rename = "sessionId", skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(rename = "ownerName")]
+    pub owner_name: String,
+    #[serde(rename = "agent")]
+    pub agent: TaskAgentReference,
+    #[serde(default, rename = "useFipsEncryption")]
+    pub use_fips_encryption: bool,
+    #[serde(rename = "encryptionKey", skip_serializing_if = "Option::is_none")]
+    pub encryption_key: Option<TaskAgentSessionKey>,
+}
+
+impl TaskAgentSession {
+    pub fn new(
+        owner_name: impl Into<String>,
+        agent_id: i64,
+        agent_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            session_id: None,
+            owner_name: owner_name.into(),
+            agent: TaskAgentReference {
+                id: agent_id,
+                name: agent_name.into(),
+                version: RUNNER_VERSION.to_string(),
+                os_description: std::env::consts::OS.to_string(),
+            },
+            use_fips_encryption: false,
+            encryption_key: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskAgentReference {
+    #[serde(rename = "id")]
+    pub id: i64,
+    #[serde(rename = "name")]
+    pub name: String,
+    #[serde(rename = "version")]
+    pub version: String,
+    #[serde(rename = "osDescription")]
+    pub os_description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskAgentSessionKey {
+    #[serde(rename = "encrypted")]
+    pub encrypted: bool,
+    #[serde(rename = "value")]
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -506,9 +706,13 @@ pub struct EncryptionKey {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskAgentMessage {
+    #[serde(rename = "messageId")]
     pub message_id: i64,
+    #[serde(rename = "messageType")]
     pub message_type: String,
+    #[serde(rename = "body")]
     pub body: String,
+    #[serde(rename = "iv", skip_serializing_if = "Option::is_none")]
     pub iv_base64: Option<String>,
 }
 
@@ -536,6 +740,16 @@ pub enum RunnerStatus {
     Online,
     Busy,
     Offline,
+}
+
+impl RunnerStatus {
+    pub fn as_query_value(self) -> &'static str {
+        match self {
+            Self::Online => "Online",
+            Self::Busy => "Busy",
+            Self::Offline => "Offline",
+        }
+    }
 }
 
 pub trait GitHubRunnerProtocol {
@@ -678,5 +892,17 @@ mod tests {
         assert_eq!(pools[0].id, 1);
         assert_eq!(pools[0].name.as_deref(), Some("Default"));
         assert!(pools[0].is_internal);
+    }
+
+    #[test]
+    fn session_payload_matches_agent_reference_shape() {
+        let session = TaskAgentSession::new("host (PID: 1)", 42, "velnor");
+        let json = serde_json::to_value(session).unwrap();
+
+        assert_eq!(json["ownerName"], "host (PID: 1)");
+        assert_eq!(json["agent"]["id"], 42);
+        assert_eq!(json["agent"]["name"], "velnor");
+        assert_eq!(json["agent"]["version"], RUNNER_VERSION);
+        assert_eq!(json["useFipsEncryption"], false);
     }
 }
