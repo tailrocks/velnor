@@ -974,11 +974,13 @@ impl JobExecutionState {
                 .resolve_condition_value(value)
                 .is_some_and(|value| value.contains(unquote(needle.trim())));
         }
-        if let Some((left, right)) = expression.split_once("!=") {
-            return self.resolve_condition_value(left).as_deref() != Some(unquote(right.trim()));
+        if let Some((left, right)) = split_top_level(expression, "!=") {
+            return self.resolve_condition_comparison_value(left)
+                != self.resolve_condition_comparison_value(right);
         }
-        if let Some((left, right)) = expression.split_once("==") {
-            return self.resolve_condition_value(left).as_deref() == Some(unquote(right.trim()));
+        if let Some((left, right)) = split_top_level(expression, "==") {
+            return self.resolve_condition_comparison_value(left)
+                == self.resolve_condition_comparison_value(right);
         }
         if expression == "true" {
             return true;
@@ -990,6 +992,14 @@ impl JobExecutionState {
             return value == "true" || value == "success";
         }
         true
+    }
+
+    fn resolve_condition_comparison_value(&self, expression: &str) -> Option<String> {
+        let expression = expression.trim();
+        if condition_returns_bool(expression) {
+            return Some(self.evaluate_condition_expr(expression).to_string());
+        }
+        self.resolve_condition_value(expression)
     }
 
     fn resolve_condition_value(&self, expression: &str) -> Option<String> {
@@ -1293,6 +1303,25 @@ fn strip_expression(condition: &str) -> &str {
 fn expression_truthy(value: &str) -> bool {
     let value = value.trim();
     !(value.is_empty() || value == "false" || value == "0" || value == "null")
+}
+
+fn condition_returns_bool(expression: &str) -> bool {
+    let expression = expression.trim();
+    if matches!(
+        expression,
+        "always()" | "success()" | "failure()" | "cancelled()" | "true" | "false"
+    ) {
+        return true;
+    }
+    if expression.starts_with('!') {
+        return true;
+    }
+    let expression = strip_wrapping_parentheses(expression).unwrap_or(expression);
+    split_top_level(expression, "||").is_some()
+        || split_top_level(expression, "&&").is_some()
+        || split_top_level(expression, "!=").is_some()
+        || split_top_level(expression, "==").is_some()
+        || parse_contains(expression).is_some()
 }
 
 fn is_quoted(value: &str) -> bool {
@@ -1842,6 +1871,12 @@ mod tests {
             "needs.changes.outputs.bitcoin-processor == 'true' || (github.event_name == 'workflow_dispatch' && (inputs.packages == '' || contains(inputs.packages, 'bitcoin-processor-app')))"
         )));
         assert!(state.evaluate_condition(Some("needs.changes.outputs.bake-targets != ''")));
+        assert!(
+            !state.evaluate_condition(Some("(github.event_name == 'workflow_dispatch') == false"))
+        );
+        assert!(
+            state.evaluate_condition(Some("(github.event_name == 'workflow_dispatch') == true"))
+        );
     }
 
     #[test]
