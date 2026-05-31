@@ -18,6 +18,7 @@ pub struct ScriptStep {
     pub script: String,
     pub shell: Shell,
     pub working_directory_container: String,
+    pub env: Vec<(String, String)>,
     pub condition: Option<String>,
 }
 
@@ -77,8 +78,27 @@ fn github_script_step(
         script: script.to_string(),
         shell,
         working_directory_container: working_directory,
+        env: step_environment(step)?,
         condition: step.condition.clone(),
     })
+}
+
+pub(crate) fn step_environment(step: &ActionStep) -> Result<Vec<(String, String)>> {
+    let Some(environment) = step.environment.as_ref() else {
+        return Ok(Vec::new());
+    };
+    let object = environment
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("step environment must be an object"))?;
+    object
+        .iter()
+        .map(|(name, value)| {
+            let value = value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("step environment '{name}' must be a string"))?;
+            Ok((name.clone(), value.to_string()))
+        })
+        .collect()
 }
 
 pub(crate) fn github_shell(shell: &str) -> Result<Shell> {
@@ -321,6 +341,7 @@ mod tests {
             script: "echo hello".into(),
             shell: Shell::Bash,
             working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
             condition: None,
         };
 
@@ -344,6 +365,7 @@ mod tests {
             script: "echo test".into(),
             shell: Shell::Sh,
             working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
             condition: None,
         };
         let plan = ScriptStepPlan::prepare(&step, &temp).unwrap();
@@ -377,6 +399,7 @@ mod tests {
             script: "tool --version".into(),
             shell: Shell::Bash,
             working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
             condition: None,
         };
         let plan = ScriptStepPlan::prepare_with_path(
@@ -405,6 +428,10 @@ mod tests {
                     "script": "cargo test",
                     "shell": "bash",
                     "workingDirectory": "./crates"
+                },
+                "environment": {
+                    "CARGO_TERM_COLOR": "always",
+                    "TOKEN": "${{ github.token }}"
                 }
             },
             {
@@ -427,6 +454,13 @@ mod tests {
         assert_eq!(mapped[0].script, "cargo test");
         assert!(matches!(mapped[0].shell, Shell::Bash));
         assert_eq!(mapped[0].working_directory_container, "/__w/repo/crates");
+        assert_eq!(
+            mapped[0].env,
+            vec![
+                ("CARGO_TERM_COLOR".into(), "always".into()),
+                ("TOKEN".into(), "${{ github.token }}".into()),
+            ]
+        );
     }
 
     #[test]

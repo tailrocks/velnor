@@ -173,7 +173,9 @@ where
                 ExecutableStep::Script(step) => {
                     let step = state.resolve_script_step(step);
                     let plan = ScriptStepPlan::prepare_with_path(&step, temp_host, &state.path)?;
-                    let env = state.step_env(&plan.env);
+                    let mut env = state.step_env(&[]);
+                    env.extend(state.resolve_env(&step.env));
+                    env.extend(plan.env.iter().cloned());
                     let exec_args = container.exec_script_args(
                         &plan.script_container_path,
                         plan.shell,
@@ -260,12 +262,14 @@ where
                 script: String::new(),
                 shell: crate::container::Shell::Sh,
                 working_directory_container: "/__w".to_string(),
+                env: Vec::new(),
                 condition: None,
             },
             temp_host,
         )?;
-        let mut env = state.step_env(&command_files.env);
+        let mut env = state.step_env(&[]);
         env.extend(state.resolve_env(&action.env));
+        env.extend(command_files.env.iter().cloned());
         let exec_args = container.exec_process_args(
             "/__w",
             &env,
@@ -378,6 +382,7 @@ impl JobExecutionState {
             shell: step.shell,
             working_directory_container: self
                 .resolve_expressions(&step.working_directory_container),
+            env: self.resolve_env(&step.env),
             condition: step.condition.clone(),
         }
     }
@@ -652,6 +657,7 @@ mod tests {
             script: "echo answer=42 >> $GITHUB_OUTPUT".into(),
             shell: Shell::Sh,
             working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
             condition: None,
         };
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
@@ -704,6 +710,7 @@ mod tests {
             script: "exit 7".into(),
             shell: Shell::Sh,
             working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
             condition: None,
         };
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
@@ -733,6 +740,7 @@ mod tests {
                 script: "echo one".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
                 condition: None,
             },
             ScriptStep {
@@ -740,6 +748,7 @@ mod tests {
                 script: "echo two".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
                 condition: None,
             },
         ];
@@ -845,6 +854,38 @@ mod tests {
     }
 
     #[test]
+    fn injects_resolved_step_environment_into_script_exec() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Script(ScriptStep {
+            id: "env-step".into(),
+            script: "echo env".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: vec![
+                ("MODE".into(), "release".into()),
+                ("TOKEN".into(), "${{ github.token }}".into()),
+            ],
+            condition: None,
+        })];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps(
+                &container(&temp),
+                &steps,
+                &[("GITHUB_TOKEN".into(), "ghs_token".into())],
+                &temp,
+            )
+            .unwrap();
+
+        let exec_args = &executor.runner().calls[2].1;
+        assert!(exec_args.contains(&"MODE=release".into()));
+        assert!(exec_args.contains(&"TOKEN=ghs_token".into()));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn resolves_step_outputs_in_later_script_before_exec() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -854,6 +895,7 @@ mod tests {
                 script: "echo answer=42 >> $GITHUB_OUTPUT".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
                 condition: None,
             }),
             ExecutableStep::Script(ScriptStep {
@@ -861,6 +903,7 @@ mod tests {
                 script: "echo answer=${{ steps.producer.outputs.answer }}".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
                 condition: None,
             }),
         ];
@@ -891,6 +934,7 @@ mod tests {
                 script: "node old-action.js".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
                 condition: None,
             }),
             ExecutableStep::Script(ScriptStep {
@@ -898,6 +942,7 @@ mod tests {
                 script: "echo answer=${{ steps.producer.outputs.answer }}".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
                 condition: None,
             }),
         ];
@@ -927,6 +972,7 @@ mod tests {
                 script: "echo answer=42 >> $GITHUB_OUTPUT".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
                 condition: None,
             }),
             ExecutableStep::Script(ScriptStep {
@@ -934,6 +980,7 @@ mod tests {
                 script: "echo should-not-run".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
                 condition: Some("steps.producer.outputs.answer == 'nope'".into()),
             }),
         ];
@@ -1031,6 +1078,7 @@ mod tests {
                 script: "echo NAME=value >> $GITHUB_ENV".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
                 condition: None,
             }),
             ExecutableStep::JavaScript {
@@ -1039,7 +1087,10 @@ mod tests {
                     node: "node20".into(),
                     main_container_path: "/__a/_actions/acme_action/v1/dist/index.js".into(),
                     action_container_path: "/__a/_actions/acme_action/v1".into(),
-                    env: vec![("INPUT_NAME".into(), "value".into())],
+                    env: vec![
+                        ("INPUT_NAME".into(), "value".into()),
+                        ("TOKEN".into(), "${{ github.token }}".into()),
+                    ],
                 },
                 condition: None,
             },
@@ -1048,6 +1099,7 @@ mod tests {
                 script: "echo done".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
                 condition: None,
             }),
         ];
@@ -1057,7 +1109,10 @@ mod tests {
             .execute_ordered_steps(
                 &container(&temp),
                 &steps,
-                &[("GITHUB_REPOSITORY".into(), "acme/repo".into())],
+                &[
+                    ("GITHUB_REPOSITORY".into(), "acme/repo".into()),
+                    ("GITHUB_TOKEN".into(), "ghs_token".into()),
+                ],
                 &temp,
             )
             .unwrap();
@@ -1074,6 +1129,7 @@ mod tests {
         assert_eq!(calls[6].1[0], "network");
         assert!(calls[3].1.contains(&"INPUT_NAME=value".into()));
         assert!(calls[3].1.contains(&"GITHUB_REPOSITORY=acme/repo".into()));
+        assert!(calls[3].1.contains(&"TOKEN=ghs_token".into()));
         assert!(calls[3]
             .1
             .contains(&"GITHUB_OUTPUT=/__t/action1_output".into()));

@@ -875,6 +875,7 @@ runs:
             repository_dir: Path::new("/tmp/actions").join("_actions/jdx_mise-action/v4"),
             action_dir: Path::new("/tmp/actions").join("_actions/jdx_mise-action/v4"),
             inputs: [("github_token".to_string(), "ghs_token".to_string())].into(),
+            env: Vec::new(),
         };
         let resolved = ResolvedAction {
             plan: nested_plan,

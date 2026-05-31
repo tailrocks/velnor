@@ -4,7 +4,7 @@ use crate::{
     checkout::fetch_git_ref,
     executor::CommandRunner,
     job_message::{ActionReferenceType, ActionStep},
-    script_step::ScriptStep,
+    script_step::{step_environment, ScriptStep},
 };
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -111,6 +111,7 @@ pub struct RepositoryActionPlan {
     pub repository_dir: PathBuf,
     pub action_dir: PathBuf,
     pub inputs: BTreeMap<String, String>,
+    pub env: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,6 +171,7 @@ pub fn repository_action_plans(
             repository_dir,
             action_dir,
             inputs: string_inputs(step)?,
+            env: step_environment(step)?,
         });
     }
     Ok(plans)
@@ -311,6 +313,12 @@ impl ResolvedAction {
         )];
         let inputs = effective_inputs(&self.metadata, &self.plan.inputs);
         env.extend(
+            self.plan
+                .env
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone())),
+        );
+        env.extend(
             inputs
                 .iter()
                 .map(|(name, value)| (input_env_name(name), value.clone())),
@@ -352,7 +360,7 @@ pub fn composite_action_invocations(
     }
 
     let action_path = workspace_container_path(workspace_container, &plan.action_dir)?;
-    let inputs = effective_inputs(metadata, &plan.inputs);
+    let action_inputs = effective_inputs(metadata, &plan.inputs);
     let mut invocations = Vec::new();
     for (index, step) in metadata.runs.steps.iter().enumerate() {
         let step_id = format!("{}-{}", plan.step_id, index + 1);
@@ -364,7 +372,27 @@ pub fn composite_action_invocations(
                 .map(|(name, value)| {
                     (
                         name.clone(),
-                        render_composite_value(value, &inputs, &action_path, workspace_container),
+                        render_composite_value(
+                            value,
+                            &action_inputs,
+                            &action_path,
+                            workspace_container,
+                        ),
+                    )
+                })
+                .collect();
+            let env = step
+                .env
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.clone(),
+                        render_composite_value(
+                            value,
+                            &action_inputs,
+                            &action_path,
+                            workspace_container,
+                        ),
                     )
                 })
                 .collect();
@@ -385,6 +413,7 @@ pub fn composite_action_invocations(
                     repository_dir,
                     action_dir,
                     inputs,
+                    env,
                 },
             ));
             continue;
@@ -399,7 +428,7 @@ pub fn composite_action_invocations(
             .transpose()?
             .unwrap_or(crate::container::Shell::Bash);
         let mut rendered =
-            render_composite_value(script, &inputs, &action_path, workspace_container);
+            render_composite_value(script, &action_inputs, &action_path, workspace_container);
         if !step.env.is_empty() {
             let exports = step
                 .env
@@ -410,7 +439,7 @@ pub fn composite_action_invocations(
                         shell_identifier(name)?,
                         shell_single_quote(&render_composite_value(
                             value,
-                            &inputs,
+                            &action_inputs,
                             &action_path,
                             workspace_container
                         ))
@@ -429,6 +458,7 @@ pub fn composite_action_invocations(
             script: rendered,
             shell,
             working_directory_container,
+            env: Vec::new(),
             condition: None,
         }));
     }
@@ -728,7 +758,8 @@ runs:
                     "ref": "v5",
                     "path": "sub/action"
                 },
-                "inputs": { "python-version": "3.12" }
+                "inputs": { "python-version": "3.12" },
+                "environment": { "PIP_INDEX_URL": "${{ github.server_url }}" }
             }
         ]))
         .unwrap();
@@ -747,6 +778,10 @@ runs:
                 .join("v5")
         );
         assert_eq!(plans[0].inputs["python-version"], "3.12");
+        assert_eq!(
+            plans[0].env,
+            vec![("PIP_INDEX_URL".into(), "${{ github.server_url }}".into())]
+        );
         assert_eq!(
             plans[0].action_dir,
             Path::new("/tmp/actions")
@@ -902,6 +937,7 @@ runs:
             repository_dir: temp.clone(),
             action_dir,
             inputs: BTreeMap::new(),
+            env: Vec::new(),
         };
 
         let resolved = resolve_action(&plan).unwrap();
@@ -928,6 +964,11 @@ runs:
             repository_dir: actions_host.join("_actions/actions_setup-node/v4"),
             action_dir: actions_host.join("_actions/actions_setup-node/v4"),
             inputs: [("node-version".to_string(), "22".to_string())].into(),
+            env: [(
+                "NODE_AUTH_TOKEN".to_string(),
+                "${{ github.token }}".to_string(),
+            )]
+            .into(),
         };
         let metadata =
             parse_action_metadata("runs:\n  using: node20\n  main: dist/index.js\n").unwrap();
@@ -953,6 +994,9 @@ runs:
             "GITHUB_ACTION_PATH".into(),
             "/__a/_actions/actions_setup-node/v4".into()
         )));
+        assert!(invocation
+            .env
+            .contains(&("NODE_AUTH_TOKEN".into(), "${{ github.token }}".into())));
     }
 
     #[test]
@@ -966,6 +1010,7 @@ runs:
             repository_dir: actions_host.join("_actions/actions_cache/v5"),
             action_dir: actions_host.join("_actions/actions_cache/v5"),
             inputs: [("path".to_string(), "~/.cargo".to_string())].into(),
+            env: Vec::new(),
         };
         let metadata = parse_action_metadata(
             r#"
