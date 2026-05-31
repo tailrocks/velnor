@@ -1,12 +1,14 @@
 # Decision: Use Pkl For Workflow Authoring
 
-Status: accepted
+Status: accepted for typed workflow authoring after Phase 0
 
 ## Decision
 
-Velnor will use Pkl as its workflow authoring language.
+Velnor will use Pkl as its typed workflow authoring language, but not in Phase 0.
 
-The engine and runner will be Rust. Pkl will be evaluated into a typed workflow model, then Rust will validate and execute the normalized plan.
+Phase 0 is GitHub runner compatibility: existing repositories keep `.github/workflows/*.yml`, and Velnor registers as a self-hosted GitHub runner replacement.
+
+After that is stable, Pkl will be evaluated into a typed workflow model, then Rust will validate and execute the normalized plan or generate GitHub-compatible YAML.
 
 ## Rationale
 
@@ -111,4 +113,3 @@ Required guardrails:
 The Velnor product language is Pkl.
 
 KCL is kept as a benchmark for strict schema design. Velnor's Pkl package should aim for KCL-level discipline while keeping Pkl's better workflow authoring experience.
-

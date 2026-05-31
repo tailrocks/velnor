@@ -1,6 +1,6 @@
 # Velnor Vision
 
-Velnor is a GitHub Actions-like workflow engine with Pkl workflow definitions and a Rust runtime.
+Velnor is a GitHub Actions-like workflow engine and runner with a Rust runtime. Phase 0 focuses on GitHub self-hosted runner compatibility for existing YAML workflows. Pkl workflow definitions come after that.
 
 ## Product Shape
 
@@ -18,7 +18,7 @@ The goal is not to invent a completely new CI/CD mental model. GitHub Actions al
 - environments and approvals
 - hosted or self-hosted runners
 
-Velnor should keep that model where it works. The main change is replacing YAML plus ad hoc expressions with a Pkl-based typed workflow definition.
+Velnor should keep that model where it works. Phase 0 keeps GitHub YAML exactly as-is and replaces the self-hosted runner implementation. Later phases replace YAML plus ad hoc expressions with Pkl-based typed workflow definitions.
 
 ## Why Not YAML
 
@@ -40,9 +40,9 @@ Velnor should keep the readability of GitHub Actions while adding static validat
 - Containers/processes: execution isolation for arbitrary user commands
 - Typed plugins: reusable building blocks with declared inputs, outputs, permissions, and runtime requirements
 
-Pkl is the accepted workflow authoring language. Rust integration should start with unofficial bindings or the official CLI, then move toward `pkl server` embedding or a Rust-native parser/evaluator if the product needs it.
+Phase 0 is the accepted first implementation target: existing GitHub Actions YAML should run on a Velnor self-hosted runner. Pkl is the accepted future workflow authoring language. Rust integration should start with unofficial bindings or the official CLI, then move toward `pkl server` embedding or a Rust-native parser/evaluator if the product needs it.
 
-See [decision-pkl.md](decision-pkl.md) and [research/pkl-rust.md](research/pkl-rust.md).
+See [phase-0-github-runner-compat.md](phase-0-github-runner-compat.md), [decision-pkl.md](decision-pkl.md), and [research/pkl-rust.md](research/pkl-rust.md).
 
 ## Example: GitHub Actions
 

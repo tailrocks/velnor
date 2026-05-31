@@ -8,7 +8,14 @@ Velnor aims to combine CI/CD orchestration with broader workflow automation.
 
 The user experience should feel close to GitHub Actions: workflows, triggers, jobs, steps, matrices, environments, secrets, artifacts, caches, reusable workflow modules, and runner labels should all feel familiar.
 
-The difference is the implementation model:
+The first implementation target:
+
+- existing `.github/workflows/*.yml` files keep working
+- Velnor registers as a GitHub self-hosted runner replacement
+- jobs run inside Docker-isolated environments
+- the initial scope is the workflows used by `jackin-project/jackin` and `ChainArgos/java-monorepo`
+
+The later typed workflow model:
 
 - workflow definitions are written in Pkl instead of YAML
 - workflow primitives are strongly typed
@@ -19,6 +26,10 @@ The difference is the implementation model:
 ## Direction
 
 See [docs/vision.md](docs/vision.md).
+
+Phase 0 runner compatibility: [docs/phase-0-github-runner-compat.md](docs/phase-0-github-runner-compat.md).
+
+Implementation roadmap: [docs/implementation-roadmap.md](docs/implementation-roadmap.md).
 
 Language decision: [docs/decision-pkl.md](docs/decision-pkl.md).
 
