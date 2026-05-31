@@ -2,7 +2,7 @@
 
 use crate::{
     checkout::fetch_git_ref,
-    executor::CommandRunner,
+    executor::{render_context_expressions, CommandRunner},
     job_message::{ActionReferenceType, ActionStep},
     script_step::{step_environment, ScriptStep},
 };
@@ -190,6 +190,14 @@ pub fn local_action_plans(
     steps: &[ActionStep],
     workspace_host: &Path,
 ) -> Result<Vec<LocalActionPlan>> {
+    local_action_plans_with_context(steps, workspace_host, &[])
+}
+
+pub fn local_action_plans_with_context(
+    steps: &[ActionStep],
+    workspace_host: &Path,
+    context_data: &[(String, serde_json::Value)],
+) -> Result<Vec<LocalActionPlan>> {
     let mut plans = Vec::new();
     for step in steps {
         if !step.enabled || step.reference_type() != Some(ActionReferenceType::Repository) {
@@ -205,7 +213,7 @@ pub fn local_action_plans(
         plans.push(LocalActionPlan {
             step_id: step_id(step, plans.len()),
             action_dir: local_action_dir(workspace_host, path)?,
-            inputs: string_inputs(step)?,
+            inputs: render_inputs(&string_inputs(step)?, context_data),
         });
     }
     Ok(plans)
@@ -620,6 +628,21 @@ fn string_inputs(step: &ActionStep) -> Result<BTreeMap<String, String>> {
     Ok(result)
 }
 
+fn render_inputs(
+    inputs: &BTreeMap<String, String>,
+    context_data: &[(String, serde_json::Value)],
+) -> BTreeMap<String, String> {
+    inputs
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.clone(),
+                render_context_expressions(value, context_data),
+            )
+        })
+        .collect()
+}
+
 fn render_composite_value(
     value: &str,
     inputs: &BTreeMap<String, String>,
@@ -821,6 +844,40 @@ runs:
         assert_eq!(
             plans[0].action_dir,
             Path::new("/tmp/workspace").join(".github/actions/aggregate-needs")
+        );
+        assert_eq!(plans[0].inputs["workflow-label"], "CI");
+    }
+
+    #[test]
+    fn renders_local_action_inputs_from_job_context() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "aggregate",
+                "reference": {
+                    "type": "Repository",
+                    "name": "./.github/actions/aggregate-needs"
+                },
+                "inputs": {
+                    "needs-json": "${{ toJSON(needs) }}",
+                    "workflow-label": "CI"
+                }
+            }
+        ]))
+        .unwrap();
+        let context = vec![(
+            "needs".to_string(),
+            serde_json::json!({
+                "check": { "result": "success" },
+                "build": { "result": "failure" }
+            }),
+        )];
+
+        let plans =
+            local_action_plans_with_context(&steps, Path::new("/tmp/workspace"), &context).unwrap();
+
+        assert_eq!(
+            plans[0].inputs["needs-json"],
+            r#"{"build":{"result":"failure"},"check":{"result":"success"}}"#
         );
         assert_eq!(plans[0].inputs["workflow-label"], "CI");
     }

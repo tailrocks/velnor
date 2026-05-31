@@ -5,7 +5,7 @@ use std::{fs, path::PathBuf};
 use crate::{
     action::{
         composite_action_invocations, composite_repository_action_plans,
-        download_repository_actions, is_local_action_step, local_action_plans,
+        download_repository_actions, is_local_action_step, local_action_plans_with_context,
         repository_action_plans, resolve_local_action, ActionMetadata, CompositeActionInvocation,
         LocalActionPlan, ResolvedAction,
     },
@@ -417,7 +417,13 @@ fn execute_script_job(
     let mut command_runner = ProcessCommandRunner;
     let checkout_plans = checkout_plans(job, &workspace)?;
     execute_checkouts(&mut command_runner, &checkout_plans)?;
-    let local_action_plans = local_action_plans(&job.steps, &workspace)?;
+    let context_data = job
+        .context_data
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    let local_action_plans =
+        local_action_plans_with_context(&job.steps, &workspace, &context_data)?;
     let local_actions = local_action_plans
         .iter()
         .map(|plan| Ok((plan.clone(), resolve_local_action(plan)?)))
@@ -455,11 +461,6 @@ fn execute_script_job(
     };
     let mut executor = DockerScriptExecutor::new(command_runner);
     let base_env = job_runtime_env(job);
-    let context_data = job
-        .context_data
-        .iter()
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect::<Vec<_>>();
     let results = executor.execute_ordered_steps_with_context(
         &container,
         &ordered_steps,

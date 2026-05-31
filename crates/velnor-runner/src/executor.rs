@@ -25,6 +25,10 @@ pub trait CommandRunner {
     fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult>;
 }
 
+pub fn render_context_expressions(value: &str, context_data: &[(String, Value)]) -> String {
+    JobExecutionState::new_with_context(&[], context_data).resolve_expressions(value)
+}
+
 #[derive(Default)]
 pub struct ProcessCommandRunner;
 
