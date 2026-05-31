@@ -522,8 +522,8 @@ fn ordered_executable_steps(
                                 ordered.push(ExecutableStep::JavaScript {
                                     step_id: action.plan.step_id.clone(),
                                     invocation: action.javascript_invocation(actions_host)?,
-                                    condition: None,
-                                    continue_on_error: false,
+                                    condition: action.plan.condition.clone(),
+                                    continue_on_error: action.plan.continue_on_error,
                                 });
                             }
                         }
@@ -892,6 +892,8 @@ runs:
             action_dir: Path::new("/tmp/actions").join("_actions/jdx_mise-action/v4"),
             inputs: [("github_token".to_string(), "ghs_token".to_string())].into(),
             env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
         };
         let resolved = ResolvedAction {
             plan: nested_plan,

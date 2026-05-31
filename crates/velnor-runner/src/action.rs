@@ -66,6 +66,8 @@ pub struct CompositeActionStep {
     pub with: BTreeMap<String, String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[serde(default, rename = "if")]
+    pub condition: Option<String>,
     #[serde(default, rename = "working-directory", alias = "workingDirectory")]
     pub working_directory: Option<String>,
 }
@@ -112,6 +114,8 @@ pub struct RepositoryActionPlan {
     pub action_dir: PathBuf,
     pub inputs: BTreeMap<String, String>,
     pub env: Vec<(String, String)>,
+    pub condition: Option<String>,
+    pub continue_on_error: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +176,8 @@ pub fn repository_action_plans(
             action_dir,
             inputs: string_inputs(step)?,
             env: step_environment(step)?,
+            condition: step.condition.clone(),
+            continue_on_error: crate::script_step::step_continue_on_error(step),
         });
     }
     Ok(plans)
@@ -404,6 +410,9 @@ pub fn composite_action_invocations(
                     )
                 })
                 .collect();
+            let condition = step.condition.as_ref().map(|condition| {
+                render_composite_value(condition, &action_inputs, &action_path, workspace_container)
+            });
             let repository_dir =
                 repository_dir(actions_host, &reference.repository, &reference.git_ref);
             let action_dir = action_dir(
@@ -422,6 +431,8 @@ pub fn composite_action_invocations(
                     action_dir,
                     inputs,
                     env,
+                    condition,
+                    continue_on_error: false,
                 },
             ));
             continue;
@@ -467,7 +478,9 @@ pub fn composite_action_invocations(
             shell,
             working_directory_container,
             env: Vec::new(),
-            condition: None,
+            condition: step.condition.as_ref().map(|condition| {
+                render_composite_value(condition, &action_inputs, &action_path, workspace_container)
+            }),
             continue_on_error: false,
         }));
     }
@@ -655,6 +668,7 @@ fn render_composite_value(
         .replace("${{ github.workspace }}", workspace_container);
     for (name, value) in inputs {
         rendered = rendered.replace(&format!("${{{{ inputs.{name} }}}}"), value);
+        rendered = rendered.replace(&format!("inputs.{name}"), value);
     }
     rendered
 }
@@ -896,6 +910,7 @@ runs:
   using: composite
   steps:
     - name: Aggregate
+      if: ${{ inputs.workflow-label == 'CI' }}
       shell: bash
       env:
         WORKFLOW_LABEL: ${{ inputs.workflow-label }}
@@ -910,6 +925,7 @@ runs:
 
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].id, "aggregate-1");
+        assert_eq!(steps[0].condition.as_deref(), Some("${{ CI == 'CI' }}"));
         assert!(steps[0].script.contains("export WORKFLOW_LABEL='CI'"));
         assert!(steps[0].script.contains("::error::CI failed"));
         assert!(steps[0]
@@ -959,6 +975,7 @@ runs:
   using: composite
   steps:
     - uses: jdx/mise-action/sub/action@v4
+      if: ${{ inputs.github-token != '' }}
       with:
         github_token: ${{ inputs.github-token }}
 "#,
@@ -975,6 +992,10 @@ runs:
         assert_eq!(plans[0].git_ref, "v4");
         assert_eq!(plans[0].source_path.as_deref(), Some("sub/action"));
         assert_eq!(plans[0].inputs["github_token"], "ghs_token");
+        assert_eq!(
+            plans[0].condition.as_deref(),
+            Some("${{ ghs_token != '' }}")
+        );
     }
 
     #[test]
@@ -996,6 +1017,8 @@ runs:
             action_dir,
             inputs: BTreeMap::new(),
             env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
         };
 
         let resolved = resolve_action(&plan).unwrap();
@@ -1027,6 +1050,8 @@ runs:
                 "${{ github.token }}".to_string(),
             )]
             .into(),
+            condition: None,
+            continue_on_error: false,
         };
         let metadata =
             parse_action_metadata("runs:\n  using: node20\n  main: dist/index.js\n").unwrap();
@@ -1069,6 +1094,8 @@ runs:
             action_dir: actions_host.join("_actions/actions_cache/v5"),
             inputs: [("path".to_string(), "~/.cargo".to_string())].into(),
             env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
         };
         let metadata = parse_action_metadata(
             r#"
