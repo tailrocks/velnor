@@ -239,11 +239,11 @@ GitHub already evaluates:
 
 Velnor still needs runtime step expression behavior from the job message:
 
-- step `if`: implemented for output comparisons, step outcome checks, selected GitHub/runner context values, and simple `&&`/`||`
+- step `if`: implemented for output comparisons, step outcome checks, selected GitHub/runner context values, generic job `ContextData` (`matrix.*`, `needs.*`, `inputs.*`, `vars.*`), grouped simple `&&`/`||`, and target-shaped `contains()`
 - `always()`
 - `success()`, `failure()`, `cancelled()`
 - `steps.<id>.outputs.*`: implemented for direct interpolation in later scripts and JavaScript action env
-- env/context expansion in scripts and JavaScript action env: basic `steps.*.outputs.*`, `github.*`, and `runner.*` interpolation is implemented
+- env/context expansion in scripts and JavaScript action env: basic `steps.*.outputs.*`, `github.*`, `runner.*`, `env.*`, generic job `ContextData`, and `toJSON(...)` interpolation is implemented
 
 Implement only the expression subset that appears in the job message for target workflows.
 
@@ -307,7 +307,7 @@ The next useful implementation steps are:
 
 1. Live-test `velnor-runner run --once --complete-noop` and `velnor-runner run --once --execute-scripts` against disposable workflows and adjust reporter route details if GitHub rejects them.
 2. Start renew-job loop before real job execution.
-3. Expand job/message expression support; workflow/job-level `env:` and step-level `env:` are implemented for scripts and JavaScript actions.
+3. Expand remaining job/message expression support; workflow/job-level `env:`, step-level `env:`, generic `ContextData`, `contains()`, and `toJSON()` are implemented for runner-side script/action execution paths.
 4. Provide full GitHub/runner/action runtime environment for JavaScript actions, then test `setup-*`, cache, and Docker actions from target workflows.
 
 This gets Velnor from "polls one message" to "can complete a simple real GitHub job".

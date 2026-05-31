@@ -109,6 +109,7 @@ Deliverables:
   - broader GitHub runner env parity remains incomplete
 - secret masking
 - basic workflow command parsing: state-changing stdout commands are parsed; annotations/log grouping are not yet reported to GitHub UI
+- runner-side expression contexts: `env.*`, selected `github.*`/`runner.*`, `steps.*.outputs.*`, and generic job `ContextData` lookup such as `matrix.*`, `needs.*`, `inputs.*`, and `vars.*` are supported for script/action env and basic step conditions; `contains()` and `toJSON()` cover target-shaped cases
 - ordered job execution for script steps and JavaScript actions in original message order is wired; host-side checkout still runs before the Docker container starts
 
 Exit criteria:

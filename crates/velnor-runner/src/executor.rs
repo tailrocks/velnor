@@ -7,6 +7,7 @@ use crate::{
     workflow_command::parse_workflow_commands,
 };
 use anyhow::{bail, Context, Result};
+use serde_json::Value;
 use std::{
     collections::BTreeMap,
     path::Path,
@@ -117,8 +118,13 @@ where
             .cloned()
             .map(ExecutableStep::Script)
             .collect::<Vec<_>>();
-        let result =
-            self.execute_ordered_steps_in_started_container(container, &ordered, &[], temp_host);
+        let result = self.execute_ordered_steps_in_started_container(
+            container,
+            &ordered,
+            &[],
+            &[],
+            temp_host,
+        );
 
         let cleanup_result = self.cleanup(container);
         if let Err(error) = cleanup_result {
@@ -134,11 +140,27 @@ where
         base_env: &[(String, String)],
         temp_host: &Path,
     ) -> Result<Vec<StepExecutionResult>> {
+        self.execute_ordered_steps_with_context(container, steps, base_env, &[], temp_host)
+    }
+
+    pub fn execute_ordered_steps_with_context(
+        &mut self,
+        container: &JobContainerSpec,
+        steps: &[ExecutableStep],
+        base_env: &[(String, String)],
+        context_data: &[(String, Value)],
+        temp_host: &Path,
+    ) -> Result<Vec<StepExecutionResult>> {
         self.run_docker(&container.create_network_args())?;
         self.run_docker(&container.start_args())?;
 
-        let result =
-            self.execute_ordered_steps_in_started_container(container, steps, base_env, temp_host);
+        let result = self.execute_ordered_steps_in_started_container(
+            container,
+            steps,
+            base_env,
+            context_data,
+            temp_host,
+        );
 
         let cleanup_result = self.cleanup(container);
         if let Err(error) = cleanup_result {
@@ -152,10 +174,11 @@ where
         container: &JobContainerSpec,
         steps: &[ExecutableStep],
         base_env: &[(String, String)],
+        context_data: &[(String, Value)],
         temp_host: &Path,
     ) -> Result<Vec<StepExecutionResult>> {
         let mut results = Vec::new();
-        let mut state = JobExecutionState::new(base_env);
+        let mut state = JobExecutionState::new_with_context(base_env, context_data);
         let mut step_error = None;
         for step in steps {
             let step_id = step.id().to_string();
@@ -311,6 +334,7 @@ where
 #[derive(Debug, Default)]
 struct JobExecutionState {
     env: BTreeMap<String, String>,
+    context_data: BTreeMap<String, Value>,
     outputs: BTreeMap<String, BTreeMap<String, String>>,
     outcomes: BTreeMap<String, StepOutcome>,
     path: Vec<String>,
@@ -335,8 +359,13 @@ impl StepOutcome {
 
 impl JobExecutionState {
     fn new(base_env: &[(String, String)]) -> Self {
+        Self::new_with_context(base_env, &[])
+    }
+
+    fn new_with_context(base_env: &[(String, String)], context_data: &[(String, Value)]) -> Self {
         Self {
             env: base_env.iter().cloned().collect(),
+            context_data: context_data.iter().cloned().collect(),
             outputs: BTreeMap::new(),
             outcomes: BTreeMap::new(),
             path: Vec::new(),
@@ -428,13 +457,17 @@ impl JobExecutionState {
         if let Some(output) = self.resolve_step_output_expression(expression) {
             return Some(output.to_string());
         }
+        if let Some(context) = parse_to_json(expression) {
+            return self
+                .resolve_context_data_value(context)
+                .and_then(|value| serde_json::to_string(value).ok());
+        }
         self.resolve_context_expression(expression)
-            .map(ToOwned::to_owned)
     }
 
-    fn resolve_context_expression(&self, expression: &str) -> Option<&str> {
+    fn resolve_context_expression(&self, expression: &str) -> Option<String> {
         if let Some(name) = expression.trim().strip_prefix("env.") {
-            return self.env.get(name).map(String::as_str);
+            return self.env.get(name).cloned();
         }
 
         let env_name = match expression.trim() {
@@ -451,9 +484,9 @@ impl JobExecutionState {
             "runner.os" => "RUNNER_OS",
             "runner.temp" => "RUNNER_TEMP",
             "runner.tool_cache" => "RUNNER_TOOL_CACHE",
-            _ => return None,
+            _ => return self.resolve_context_data_expression(expression),
         };
-        self.env.get(env_name).map(String::as_str)
+        self.env.get(env_name).cloned()
     }
 
     fn evaluate_condition(&self, condition: Option<&str>) -> bool {
@@ -477,11 +510,19 @@ impl JobExecutionState {
                 .values()
                 .any(|outcome| *outcome == StepOutcome::Failure);
         }
-        if let Some((left, right)) = expression.split_once("&&") {
+        if let Some(inner) = strip_wrapping_parentheses(expression) {
+            return self.evaluate_condition_expr(inner);
+        }
+        if let Some((left, right)) = split_top_level(expression, "||") {
+            return self.evaluate_condition_expr(left) || self.evaluate_condition_expr(right);
+        }
+        if let Some((left, right)) = split_top_level(expression, "&&") {
             return self.evaluate_condition_expr(left) && self.evaluate_condition_expr(right);
         }
-        if let Some((left, right)) = expression.split_once("||") {
-            return self.evaluate_condition_expr(left) || self.evaluate_condition_expr(right);
+        if let Some((value, needle)) = parse_contains(expression) {
+            return self
+                .resolve_condition_value(value)
+                .is_some_and(|value| value.contains(unquote(needle.trim())));
         }
         if let Some((left, right)) = expression.split_once("!=") {
             return self.resolve_condition_value(left).as_deref() != Some(unquote(right.trim()));
@@ -518,14 +559,94 @@ impl JobExecutionState {
         if expression == "runner.os" {
             return self
                 .resolve_context_expression(expression)
-                .map(ToOwned::to_owned)
                 .or_else(|| Some("Linux".to_string()));
         }
         if let Some(value) = self.resolve_context_expression(expression) {
-            return Some(value.to_string());
+            return Some(value);
         }
         Some(unquote(expression).to_string())
     }
+
+    fn resolve_context_data_expression(&self, expression: &str) -> Option<String> {
+        self.resolve_context_data_value(expression)
+            .and_then(context_value_string)
+    }
+
+    fn resolve_context_data_value(&self, expression: &str) -> Option<&Value> {
+        let mut segments = expression.trim().split('.');
+        let root = segments.next()?;
+        let mut value = self.context_data.get(root)?;
+        for segment in segments {
+            value = value.get(segment)?;
+        }
+        Some(value)
+    }
+}
+
+fn context_value_string(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => Some(String::new()),
+        Value::String(value) => Some(value.clone()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn parse_contains(expression: &str) -> Option<(&str, &str)> {
+    let inner = expression
+        .trim()
+        .strip_prefix("contains(")?
+        .strip_suffix(')')?;
+    inner.split_once(',')
+}
+
+fn parse_to_json(expression: &str) -> Option<&str> {
+    expression
+        .trim()
+        .strip_prefix("toJSON(")?
+        .strip_suffix(')')
+        .map(str::trim)
+}
+
+fn split_top_level<'a>(expression: &'a str, operator: &str) -> Option<(&'a str, &'a str)> {
+    let mut depth = 0_i32;
+    for (index, ch) in expression.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        if depth == 0 && expression[index..].starts_with(operator) {
+            return Some((
+                expression[..index].trim(),
+                expression[index + operator.len()..].trim(),
+            ));
+        }
+    }
+    None
+}
+
+fn strip_wrapping_parentheses(expression: &str) -> Option<&str> {
+    let expression = expression.trim();
+    let inner = expression.strip_prefix('(')?.strip_suffix(')')?;
+    let mut depth = 0_i32;
+    for (index, ch) in expression.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 && index != expression.len() - 1 {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+        if depth < 0 {
+            return None;
+        }
+    }
+    (depth == 0).then_some(inner.trim())
 }
 
 fn strip_expression(condition: &str) -> &str {
@@ -858,6 +979,60 @@ mod tests {
                 ("OS".into(), "Linux".into()),
             ]
         );
+    }
+
+    #[test]
+    fn resolves_job_context_data_expressions_and_conditions() {
+        let state = JobExecutionState::new_with_context(
+            &[
+                ("GITHUB_EVENT_NAME".into(), "workflow_dispatch".into()),
+                ("GITHUB_REF".into(), "refs/heads/main".into()),
+            ],
+            &[
+                (
+                    "matrix".into(),
+                    serde_json::json!({
+                        "target": "x86_64-apple-darwin",
+                        "zigbuild": true
+                    }),
+                ),
+                (
+                    "needs".into(),
+                    serde_json::json!({
+                        "changes": {
+                            "outputs": {
+                                "bitcoin-processor": "false",
+                                "bake-targets": "bitcoin-processor-app"
+                            },
+                            "result": "success"
+                        },
+                        "test-bitcoin-processor": {
+                            "result": "failure"
+                        }
+                    }),
+                ),
+                (
+                    "inputs".into(),
+                    serde_json::json!({ "packages": "bitcoin-processor-app" }),
+                ),
+            ],
+        );
+
+        assert_eq!(
+            state.resolve_expressions("target=${{ matrix.target }}"),
+            "target=x86_64-apple-darwin"
+        );
+        assert_eq!(
+            state.resolve_expressions("needs=${{ toJSON(needs.changes.outputs) }}"),
+            r#"needs={"bake-targets":"bitcoin-processor-app","bitcoin-processor":"false"}"#
+        );
+        assert!(state.evaluate_condition(Some("matrix.zigbuild")));
+        assert!(state.evaluate_condition(Some("contains(matrix.target, 'apple')")));
+        assert!(state.evaluate_condition(Some("needs.test-bitcoin-processor.result == 'failure'")));
+        assert!(state.evaluate_condition(Some(
+            "needs.changes.outputs.bitcoin-processor == 'true' || (github.event_name == 'workflow_dispatch' && (inputs.packages == '' || contains(inputs.packages, 'bitcoin-processor-app')))"
+        )));
+        assert!(state.evaluate_condition(Some("needs.changes.outputs.bake-targets != ''")));
     }
 
     #[test]

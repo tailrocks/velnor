@@ -455,7 +455,18 @@ fn execute_script_job(
     };
     let mut executor = DockerScriptExecutor::new(command_runner);
     let base_env = job_runtime_env(job);
-    let results = executor.execute_ordered_steps(&container, &ordered_steps, &base_env, &temp)?;
+    let context_data = job
+        .context_data
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    let results = executor.execute_ordered_steps_with_context(
+        &container,
+        &ordered_steps,
+        &base_env,
+        &context_data,
+        &temp,
+    )?;
     let failed = results.iter().any(|result| result.exit_code != 0);
 
     Ok(if failed {
