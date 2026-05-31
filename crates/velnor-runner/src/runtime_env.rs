@@ -4,6 +4,7 @@ use serde_json::{Map, Value};
 pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
     let mut env = vec![
         ("CI".to_string(), "true".to_string()),
+        ("HOME".to_string(), "/github/home".to_string()),
         ("GITHUB_JOB".to_string(), job.job_name()),
         ("GITHUB_WORKSPACE".to_string(), "/__w".to_string()),
         ("RUNNER_OS".to_string(), "Linux".to_string()),
@@ -415,6 +416,7 @@ mod tests {
 
         let env = job_runtime_env(&job);
 
+        assert!(env.contains(&("HOME".into(), "/github/home".into())));
         assert!(env.contains(&("GITHUB_JOB".into(), "check".into())));
         assert!(env.contains(&("GITHUB_REPOSITORY".into(), "acme/repo".into())));
         assert!(env.contains(&("GITHUB_REPOSITORY_OWNER".into(), "acme".into())));

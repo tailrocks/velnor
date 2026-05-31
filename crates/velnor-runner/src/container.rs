@@ -9,6 +9,7 @@ pub struct JobContainerSpec {
     pub network: String,
     pub workspace_host: PathBuf,
     pub temp_host: PathBuf,
+    pub home_host: PathBuf,
     pub actions_host: PathBuf,
     pub tools_host: PathBuf,
     pub mount_docker_socket: bool,
@@ -38,9 +39,13 @@ impl JobContainerSpec {
             "-v".into(),
             mount(&self.temp_host, "/__t"),
             "-v".into(),
+            mount(&self.home_host, "/github/home"),
+            "-v".into(),
             mount(&self.actions_host, "/__a"),
             "-v".into(),
             mount(&self.tools_host, "/__tool"),
+            "-e".into(),
+            "HOME=/github/home".into(),
             "-e".into(),
             "RUNNER_TEMP=/__t".into(),
             "-e".into(),
@@ -115,9 +120,13 @@ impl JobContainerSpec {
             "-v".into(),
             mount(&self.temp_host, "/__t"),
             "-v".into(),
+            mount(&self.home_host, "/github/home"),
+            "-v".into(),
             mount(&self.actions_host, "/__a"),
             "-v".into(),
             mount(&self.tools_host, "/__tool"),
+            "-e".into(),
+            "HOME=/github/home".into(),
         ];
         if self.mount_docker_socket {
             args.extend([
@@ -172,9 +181,13 @@ impl JobContainerSpec {
             "-v".into(),
             mount(&self.temp_host, "/__t"),
             "-v".into(),
+            mount(&self.home_host, "/github/home"),
+            "-v".into(),
             mount(&self.actions_host, "/__a"),
             "-v".into(),
             mount(&self.tools_host, "/__tool"),
+            "-e".into(),
+            "HOME=/github/home".into(),
         ];
         if self.mount_docker_socket {
             args.extend([
@@ -325,6 +338,7 @@ mod tests {
             network: "velnor-net-1".into(),
             workspace_host: "/tmp/work".into(),
             temp_host: "/tmp/temp".into(),
+            home_host: "/tmp/home".into(),
             actions_host: "/tmp/actions".into(),
             tools_host: "/tmp/tools".into(),
             mount_docker_socket: true,
@@ -343,6 +357,8 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--name", "velnor-job-1"]));
         assert!(args.contains(&"/tmp/work:/__w".into()));
+        assert!(args.contains(&"/tmp/home:/github/home".into()));
+        assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"NODE_OPTIONS=--max-old-space-size=4096".into()));
         assert!(args.windows(2).any(|pair| pair == ["--cpus", "2"]));
         assert!(args.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
@@ -412,6 +428,8 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--network", "velnor-net-1"]));
         assert!(args.contains(&"/tmp/work:/__w".into()));
+        assert!(args.contains(&"/tmp/home:/github/home".into()));
+        assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"GITHUB_OUTPUT=/__t/out".into()));
         assert_eq!(
             &args[args.len() - 3..],
@@ -451,6 +469,8 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--network", "velnor-net-1"]));
         assert!(args.contains(&"/tmp/work:/__w".into()));
+        assert!(args.contains(&"/tmp/home:/github/home".into()));
+        assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"INPUT_NAME=value".into()));
         assert!(args
             .windows(2)

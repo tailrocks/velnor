@@ -1412,6 +1412,7 @@ mod tests {
             network: "net".into(),
             workspace_host: temp.join("work"),
             temp_host: temp.to_path_buf(),
+            home_host: temp.join("home"),
             actions_host: temp.join("actions"),
             tools_host: temp.join("tools"),
             mount_docker_socket: false,

@@ -481,9 +481,10 @@ fn execute_script_job(
     let job_dir = job_work_dir(config_dir, work_dir, job);
     let workspace = job_dir.join("workspace");
     let temp = job_dir.join("temp");
+    let home = job_dir.join("home");
     let actions = job_dir.join("actions");
     let tools = job_dir.join("tools");
-    for path in [&workspace, &temp, &actions, &tools] {
+    for path in [&workspace, &temp, &home, &actions, &tools] {
         fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
     }
     let mut command_runner = ProcessCommandRunner;
@@ -526,6 +527,7 @@ fn execute_script_job(
         network: format!("velnor-net-{}", sanitize_path_segment(&job.job_id)),
         workspace_host: workspace,
         temp_host: temp.clone(),
+        home_host: home,
         actions_host: actions,
         tools_host: tools,
         mount_docker_socket: true,
