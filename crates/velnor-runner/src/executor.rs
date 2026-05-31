@@ -56,12 +56,22 @@ pub struct StepExecutionResult {
     pub state: StepCommandState,
     pub skipped: bool,
     pub failure_ignored: bool,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobExecutionSummary {
     pub step_results: Vec<StepExecutionResult>,
     pub job_outputs: BTreeMap<String, String>,
+    pub step_logs: Vec<StepLog>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepLog {
+    pub step_id: String,
+    pub lines: Vec<String>,
+    pub masks: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +252,7 @@ where
         temp_host: &Path,
     ) -> Result<JobExecutionSummary> {
         let mut results = Vec::new();
+        let mut step_logs = Vec::new();
         let mut base_env = base_env.to_vec();
         if let Some(event_path) = prepare_github_event_path(temp_host, context_data)? {
             base_env.push(("GITHUB_EVENT_PATH".to_string(), event_path));
@@ -261,6 +272,8 @@ where
                     state: StepCommandState::default(),
                     skipped: true,
                     failure_ignored: false,
+                    stdout: String::new(),
+                    stderr: String::new(),
                 };
                 state.apply(&step_id, &result);
                 results.push(result);
@@ -287,6 +300,8 @@ where
                         state: command_state,
                         skipped: false,
                         failure_ignored: false,
+                        stdout: step_result.stdout,
+                        stderr: step_result.stderr,
                     })
                 }
                 ExecutableStep::JavaScript {
@@ -310,6 +325,8 @@ where
                     },
                     skipped: false,
                     failure_ignored: false,
+                    stdout: String::new(),
+                    stderr: String::new(),
                 }),
             })();
 
@@ -326,6 +343,9 @@ where
                     }
                     if failed && step.continue_on_error() {
                         result.failure_ignored = true;
+                    }
+                    if let Some(log) = step_log(&step_id, &result) {
+                        step_logs.push(log);
                     }
                     state.apply(&step_id, &result);
                     results.push(result);
@@ -355,6 +375,9 @@ where
             );
             match result {
                 Ok(result) => {
+                    if let Some(log) = step_log(&format!("{}-post", post_action.step_id), &result) {
+                        step_logs.push(log);
+                    }
                     state.apply(&format!("{}-post", post_action.step_id), &result);
                     results.push(result);
                 }
@@ -371,6 +394,7 @@ where
         Ok(JobExecutionSummary {
             job_outputs: evaluate_job_outputs(job_outputs, &state),
             step_results: results,
+            step_logs,
         })
     }
 
@@ -442,6 +466,8 @@ where
             state,
             skipped: false,
             failure_ignored: false,
+            stdout: step_result.stdout,
+            stderr: step_result.stderr,
         })
     }
 
@@ -886,6 +912,23 @@ fn evaluate_job_outputs(
         .collect()
 }
 
+fn step_log(step_id: &str, result: &StepExecutionResult) -> Option<StepLog> {
+    let lines = step_log_lines(&result.stdout, &result.stderr);
+    (!lines.is_empty()).then(|| StepLog {
+        step_id: step_id.to_string(),
+        lines,
+        masks: result.state.masks.clone(),
+    })
+}
+
+fn step_log_lines(stdout: &str, stderr: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .chain(stderr.lines())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 fn prepare_github_event_path(
     temp_host: &Path,
     context_data: &[(String, Value)],
@@ -1202,7 +1245,8 @@ mod tests {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             self.calls.push((program.to_string(), args.to_vec()));
             let stdout = if program == "docker" && args.first().is_some_and(|arg| arg == "exec") {
-                "::set-output name=answer::42\n::add-path::/opt/tool\n".to_string()
+                "::set-output name=answer::42\n::add-path::/opt/tool\n::add-mask::hidden\nhidden\n"
+                    .to_string()
             } else {
                 String::new()
             };
@@ -1378,6 +1422,8 @@ mod tests {
                     masks: vec!["secret".to_string()],
                     ..Default::default()
                 },
+                stdout: String::new(),
+                stderr: String::new(),
             },
         );
 
@@ -1411,6 +1457,8 @@ mod tests {
                     outputs: [("tags".to_string(), "image:latest".to_string())].into(),
                     ..Default::default()
                 },
+                stdout: String::new(),
+                stderr: String::new(),
             },
         );
 
@@ -1822,13 +1870,24 @@ mod tests {
         ];
         let mut executor = DockerScriptExecutor::new(StdoutCommandRunner::default());
 
-        let results = executor
-            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
             .unwrap();
 
+        let results = &summary.step_results;
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].state.outputs["answer"], "42");
         assert_eq!(results[0].state.path, vec!["/opt/tool"]);
+        assert_eq!(summary.step_logs[0].step_id, "producer");
+        assert!(summary.step_logs[0].lines.contains(&"hidden".to_string()));
+        assert_eq!(summary.step_logs[0].masks, vec!["hidden"]);
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
             "export PATH='/opt/tool':\"$PATH\"\necho answer=42\n"
@@ -1992,6 +2051,8 @@ mod tests {
                 skipped: false,
                 failure_ignored: false,
                 state: StepCommandState::default(),
+                stdout: String::new(),
+                stderr: String::new(),
             },
         );
         state.apply(
@@ -2001,6 +2062,8 @@ mod tests {
                 skipped: true,
                 failure_ignored: false,
                 state: StepCommandState::default(),
+                stdout: String::new(),
+                stderr: String::new(),
             },
         );
 
@@ -2019,6 +2082,8 @@ mod tests {
                 skipped: false,
                 failure_ignored: false,
                 state: StepCommandState::default(),
+                stdout: String::new(),
+                stderr: String::new(),
             },
         );
 

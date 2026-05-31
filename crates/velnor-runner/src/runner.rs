@@ -14,7 +14,7 @@ use crate::{
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     container::JobContainerSpec,
-    executor::{DockerScriptExecutor, ExecutableStep, ProcessCommandRunner},
+    executor::{DockerScriptExecutor, ExecutableStep, ProcessCommandRunner, StepLog},
     job_message::{ActionReferenceType, AgentJobRequestMessage, PIPELINE_AGENT_JOB_REQUEST},
     protocol::{
         DistributedTaskClient, GitHubAuthResult, GitHubScope, JobCompletedEvent, OAuthClient,
@@ -365,6 +365,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     &job,
                     job_result.result,
                     job_result.outputs,
+                    job_result.step_logs,
                     "Velnor executed supported run and JavaScript action steps in Docker."
                         .to_string(),
                 )
@@ -383,6 +384,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     &job,
                     TaskResult::Succeeded,
                     BTreeMap::new(),
+                    Vec::new(),
                     "Velnor no-op completion probe: user steps were not executed.".to_string(),
                 )
                 .await?;
@@ -492,6 +494,7 @@ fn execute_script_job(
     Ok(ScriptJobResult {
         result,
         outputs: summary.job_outputs,
+        step_logs: summary.step_logs,
     })
 }
 
@@ -499,6 +502,7 @@ fn execute_script_job(
 struct ScriptJobResult {
     result: TaskResult,
     outputs: BTreeMap<String, String>,
+    step_logs: Vec<StepLog>,
 }
 
 fn job_context_data(job: &AgentJobRequestMessage) -> Vec<(String, Value)> {
@@ -797,6 +801,7 @@ async fn complete_job(
     job: &AgentJobRequestMessage,
     result: TaskResult,
     job_outputs: BTreeMap<String, String>,
+    step_logs: Vec<StepLog>,
     feed_line: String,
 ) -> Result<()> {
     let scope_identifier = job
@@ -826,6 +831,7 @@ async fn complete_job(
             vec![record.clone()],
         )
         .await?;
+    let job_masks = job_mask_values(job);
     client
         .append_timeline_record_feed(
             scope_identifier,
@@ -835,11 +841,29 @@ async fn complete_job(
             &job.job_id,
             TimelineRecordFeedLines::new(
                 job.job_id.clone(),
-                vec![mask_text(&feed_line, &job_mask_values(job))],
+                vec![mask_text(&feed_line, &job_masks)],
                 Some(1),
             ),
         )
         .await?;
+    for step_log in step_logs {
+        let masks = combined_masks(&job_masks, &step_log.masks);
+        let step_id = step_log.step_id;
+        client
+            .append_timeline_record_feed(
+                scope_identifier,
+                hub_name,
+                &job.plan.plan_id,
+                &job.timeline.id,
+                &step_id,
+                TimelineRecordFeedLines::new(
+                    step_id.clone(),
+                    mask_lines(&step_log.lines, &masks),
+                    Some(1),
+                ),
+            )
+            .await?;
+    }
 
     let finish_time = utc_now_rfc3339()?;
     client
@@ -912,6 +936,18 @@ fn mask_text(value: &str, masks: &[String]) -> String {
         .fold(value.to_string(), |masked, mask| {
             masked.replace(mask, "***")
         })
+}
+
+fn mask_lines(lines: &[String], masks: &[String]) -> Vec<String> {
+    lines.iter().map(|line| mask_text(line, masks)).collect()
+}
+
+fn combined_masks(base: &[String], extra: &[String]) -> Vec<String> {
+    let mut masks = base.to_vec();
+    masks.extend(extra.iter().filter(|mask| !mask.is_empty()).cloned());
+    masks.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    masks.dedup();
+    masks
 }
 
 fn utc_now_rfc3339() -> Result<String> {
