@@ -379,6 +379,7 @@ impl RegistrationClient {
 #[derive(Clone)]
 pub struct DistributedTaskClient {
     http: Client,
+    server_root_url: Url,
     base_url: Url,
     bearer_token: String,
 }
@@ -389,8 +390,10 @@ impl DistributedTaskClient {
             .user_agent(RUNNER_USER_AGENT)
             .build()
             .context("build distributed task HTTP client")?;
+        let server_root_url = server_root_url(server_url)?;
         Ok(Self {
             http,
+            server_root_url,
             base_url: distributed_task_base_url(server_url)?,
             bearer_token: bearer_token.into(),
         })
@@ -602,6 +605,65 @@ impl DistributedTaskClient {
         .await
     }
 
+    pub async fn update_timeline_records(
+        &self,
+        scope_identifier: &str,
+        hub_name: &str,
+        plan_id: &str,
+        timeline_id: &str,
+        records: Vec<TimelineRecord>,
+    ) -> Result<Vec<TimelineRecord>> {
+        let url = timeline_records_url(
+            &self.server_root_url,
+            scope_identifier,
+            hub_name,
+            plan_id,
+            timeline_id,
+        )?;
+        let body = VssJsonCollectionWrapper { value: records };
+        let response = self
+            .http
+            .request(Method::PATCH, url)
+            .bearer_auth(&self.bearer_token)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .json(&body)
+            .send()
+            .await
+            .context("send update timeline records request")?;
+
+        parse_json_response(response, "update timeline records").await
+    }
+
+    pub async fn append_timeline_record_feed(
+        &self,
+        scope_identifier: &str,
+        hub_name: &str,
+        plan_id: &str,
+        timeline_id: &str,
+        record_id: &str,
+        feed: TimelineRecordFeedLines,
+    ) -> Result<()> {
+        let url = timeline_record_feed_url(
+            &self.server_root_url,
+            scope_identifier,
+            hub_name,
+            plan_id,
+            timeline_id,
+            record_id,
+        )?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&self.bearer_token)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .json(&feed)
+            .send()
+            .await
+            .context("send append timeline record feed request")?;
+
+        parse_empty_response(response, "append timeline record feed").await
+    }
+
     async fn patch_agent_request(
         &self,
         pool_id: i64,
@@ -675,6 +737,21 @@ impl DistributedTaskClient {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct VssJsonCollectionWrapper<T> {
+    value: T,
+}
+
+fn server_root_url(server_url: &str) -> Result<Url> {
+    let mut root =
+        Url::parse(server_url).with_context(|| format!("parse server URL '{server_url}'"))?;
+    if !root.path().ends_with('/') {
+        let path = format!("{}/", root.path());
+        root.set_path(&path);
+    }
+    Ok(root)
+}
+
 fn agent_request_url(base_url: &Url, pool_id: i64, request_id: i64) -> Result<Url> {
     let mut url = base_url.join(&format!("pools/{pool_id}/jobrequests/{request_id}"))?;
     {
@@ -682,6 +759,51 @@ fn agent_request_url(base_url: &Url, pool_id: i64, request_id: i64) -> Result<Ur
         query.append_pair("api-version", "5.1-preview.1");
         query.append_pair("lockToken", EMPTY_LOCK_TOKEN);
     }
+    Ok(url)
+}
+
+fn timeline_records_url(
+    server_root_url: &Url,
+    scope_identifier: &str,
+    hub_name: &str,
+    plan_id: &str,
+    timeline_id: &str,
+) -> Result<Url> {
+    let mut url = server_root_url.join(&format!(
+        "{scope_identifier}/_apis/distributedtask/hubs/{hub_name}/plans/{plan_id}/timelines/{timeline_id}/records"
+    ))?;
+    url.query_pairs_mut()
+        .append_pair("api-version", "5.1-preview.1");
+    Ok(url)
+}
+
+fn timeline_record_feed_url(
+    server_root_url: &Url,
+    scope_identifier: &str,
+    hub_name: &str,
+    plan_id: &str,
+    timeline_id: &str,
+    record_id: &str,
+) -> Result<Url> {
+    let mut url = server_root_url.join(&format!(
+        "{scope_identifier}/_apis/distributedtask/hubs/{hub_name}/plans/{plan_id}/timelines/{timeline_id}/records/{record_id}/feed"
+    ))?;
+    url.query_pairs_mut()
+        .append_pair("api-version", "5.1-preview.1");
+    Ok(url)
+}
+
+fn timeline_logs_url(
+    server_root_url: &Url,
+    scope_identifier: &str,
+    hub_name: &str,
+    plan_id: &str,
+) -> Result<Url> {
+    let mut url = server_root_url.join(&format!(
+        "{scope_identifier}/_apis/distributedtask/hubs/{hub_name}/plans/{plan_id}/logs"
+    ))?;
+    url.query_pairs_mut()
+        .append_pair("api-version", "5.1-preview.1");
     Ok(url)
 }
 
@@ -1054,6 +1176,138 @@ impl TaskAgentJobRequest {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineRecord {
+    #[serde(rename = "id")]
+    pub id: String,
+    #[serde(default, rename = "parentId", skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(rename = "type")]
+    pub record_type: TimelineRecordType,
+    #[serde(rename = "name")]
+    pub name: String,
+    #[serde(default, rename = "startTime", skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<String>,
+    #[serde(
+        default,
+        rename = "finishTime",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub finish_time: Option<String>,
+    #[serde(
+        default,
+        rename = "currentOperation",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub current_operation: Option<String>,
+    #[serde(
+        default,
+        rename = "percentComplete",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub percent_complete: Option<i32>,
+    #[serde(default, rename = "state", skip_serializing_if = "Option::is_none")]
+    pub state: Option<TimelineRecordState>,
+    #[serde(default, rename = "result", skip_serializing_if = "Option::is_none")]
+    pub result: Option<TaskResult>,
+    #[serde(
+        default,
+        rename = "workerName",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub worker_name: Option<String>,
+    #[serde(default, rename = "order", skip_serializing_if = "Option::is_none")]
+    pub order: Option<i32>,
+    #[serde(default, rename = "refName", skip_serializing_if = "Option::is_none")]
+    pub ref_name: Option<String>,
+    #[serde(default, rename = "errorCount")]
+    pub error_count: i32,
+    #[serde(default, rename = "warningCount")]
+    pub warning_count: i32,
+    #[serde(default, rename = "noticeCount")]
+    pub notice_count: i32,
+}
+
+impl TimelineRecord {
+    pub fn job_pending(
+        job_id: impl Into<String>,
+        name: impl Into<String>,
+        ref_name: Option<String>,
+        worker_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: job_id.into(),
+            parent_id: None,
+            record_type: TimelineRecordType::Job,
+            name: name.into(),
+            start_time: None,
+            finish_time: None,
+            current_operation: None,
+            percent_complete: Some(0),
+            state: Some(TimelineRecordState::Pending),
+            result: None,
+            worker_name: Some(worker_name.into()),
+            order: None,
+            ref_name,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+        }
+    }
+
+    pub fn in_progress(mut self, start_time: impl Into<String>) -> Self {
+        self.start_time = Some(start_time.into());
+        self.state = Some(TimelineRecordState::InProgress);
+        self
+    }
+
+    pub fn completed(mut self, finish_time: impl Into<String>, result: TaskResult) -> Self {
+        self.finish_time = Some(finish_time.into());
+        self.percent_complete = Some(100);
+        self.state = Some(TimelineRecordState::Completed);
+        self.result = Some(result);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum TimelineRecordType {
+    #[serde(rename = "Job", alias = "job")]
+    Job,
+    #[serde(rename = "Task", alias = "task")]
+    Task,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum TimelineRecordState {
+    #[serde(rename = "pending", alias = "Pending")]
+    Pending,
+    #[serde(rename = "inProgress", alias = "InProgress")]
+    InProgress,
+    #[serde(rename = "completed", alias = "Completed")]
+    Completed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineRecordFeedLines {
+    #[serde(rename = "stepId")]
+    pub step_id: String,
+    #[serde(rename = "value")]
+    pub value: Vec<String>,
+    #[serde(default, rename = "startLine", skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<i64>,
+}
+
+impl TimelineRecordFeedLines {
+    pub fn new(step_id: impl Into<String>, lines: Vec<String>, start_line: Option<i64>) -> Self {
+        Self {
+            step_id: step_id.into(),
+            value: lines,
+            start_line,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum TaskResult {
     #[serde(rename = "succeeded", alias = "Succeeded")]
@@ -1267,6 +1521,38 @@ mod tests {
     }
 
     #[test]
+    fn server_root_preserves_server_path() {
+        let url = server_root_url("https://pipelines.actions.githubusercontent.com/abc").unwrap();
+
+        assert_eq!(
+            url.as_str(),
+            "https://pipelines.actions.githubusercontent.com/abc/"
+        );
+    }
+
+    #[test]
+    fn timeline_routes_match_task_client_shape() {
+        let root = server_root_url("https://pipelines.actions.githubusercontent.com/abc").unwrap();
+        let records = timeline_records_url(&root, "scope", "build", "plan", "timeline").unwrap();
+        let feed = timeline_record_feed_url(&root, "scope", "build", "plan", "timeline", "record")
+            .unwrap();
+        let logs = timeline_logs_url(&root, "scope", "build", "plan").unwrap();
+
+        assert_eq!(
+            records.as_str(),
+            "https://pipelines.actions.githubusercontent.com/abc/scope/_apis/distributedtask/hubs/build/plans/plan/timelines/timeline/records?api-version=5.1-preview.1"
+        );
+        assert_eq!(
+            feed.as_str(),
+            "https://pipelines.actions.githubusercontent.com/abc/scope/_apis/distributedtask/hubs/build/plans/plan/timelines/timeline/records/record/feed?api-version=5.1-preview.1"
+        );
+        assert_eq!(
+            logs.as_str(),
+            "https://pipelines.actions.githubusercontent.com/abc/scope/_apis/distributedtask/hubs/build/plans/plan/logs?api-version=5.1-preview.1"
+        );
+    }
+
+    #[test]
     fn agent_request_bodies_match_runner_update_shape() {
         let renew = serde_json::to_value(TaskAgentJobRequest::renew(99)).unwrap();
         let finish = serde_json::to_value(TaskAgentJobRequest::finish(
@@ -1283,6 +1569,49 @@ mod tests {
                 "requestId": 99,
                 "finishTime": "2026-05-31T12:00:00Z",
                 "result": "succeeded"
+            })
+        );
+    }
+
+    #[test]
+    fn timeline_record_body_matches_job_record_shape() {
+        let record =
+            TimelineRecord::job_pending("job-id", "check", Some("build".to_string()), "velnor-1")
+                .in_progress("2026-05-31T12:00:00Z")
+                .completed("2026-05-31T12:01:00Z", TaskResult::Succeeded);
+        let json = serde_json::to_value(record).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "id": "job-id",
+                "type": "Job",
+                "name": "check",
+                "startTime": "2026-05-31T12:00:00Z",
+                "finishTime": "2026-05-31T12:01:00Z",
+                "percentComplete": 100,
+                "state": "completed",
+                "result": "succeeded",
+                "workerName": "velnor-1",
+                "refName": "build",
+                "errorCount": 0,
+                "warningCount": 0,
+                "noticeCount": 0
+            })
+        );
+    }
+
+    #[test]
+    fn timeline_record_feed_body_matches_runner_shape() {
+        let feed = TimelineRecordFeedLines::new("step-id", vec!["hello".to_string()], Some(1));
+        let json = serde_json::to_value(feed).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "stepId": "step-id",
+                "value": ["hello"],
+                "startLine": 1
             })
         );
     }

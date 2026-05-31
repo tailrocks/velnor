@@ -311,3 +311,5 @@ This gets Velnor from "polls one message" to "can complete a simple real GitHub 
 Current code can parse enough `AgentJobRequestMessage` to identify job id/name, plan, request id, timeline id, variables, endpoints, repositories, containers, and action steps.
 
 Current code also has classic `jobrequests` client methods for lock renewal and finish-job requests. They are not called automatically yet because the GitHub UI also needs timeline/log/step reporting.
+
+Current code models the classic timeline record/feed routes used by the upstream `JobServerQueue`; the no-op job completion path still needs live reporter wiring before Velnor should acknowledge or finish a real job.
