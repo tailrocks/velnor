@@ -716,6 +716,10 @@ impl JobExecutionState {
 
         let env_name = match expression.trim() {
             "github.actor" => "GITHUB_ACTOR",
+            "github.action" => "GITHUB_ACTION",
+            "github.action_path" => "GITHUB_ACTION_PATH",
+            "github.action_ref" => "GITHUB_ACTION_REF",
+            "github.action_repository" => "GITHUB_ACTION_REPOSITORY",
             "github.event_name" => "GITHUB_EVENT_NAME",
             "github.ref" => "GITHUB_REF",
             "github.repository" => "GITHUB_REPOSITORY",
@@ -1355,6 +1359,16 @@ mod tests {
     #[test]
     fn resolves_github_and_runner_context_expressions() {
         let state = JobExecutionState::new(&[
+            ("GITHUB_ACTION".into(), "setup".into()),
+            (
+                "GITHUB_ACTION_PATH".into(),
+                "/__a/actions_setup-node/v4".into(),
+            ),
+            ("GITHUB_ACTION_REF".into(), "v4".into()),
+            (
+                "GITHUB_ACTION_REPOSITORY".into(),
+                "actions/setup-node".into(),
+            ),
             ("GITHUB_REF".into(), "refs/heads/main".into()),
             ("GITHUB_SHA".into(), "abc123".into()),
             ("GITHUB_TOKEN".into(), "ghs_token".into()),
@@ -1370,12 +1384,23 @@ mod tests {
         assert_eq!(
             state.resolve_env(&[
                 ("INPUT_TOKEN".into(), "${{ github.token }}".into()),
+                ("ACTION".into(), "${{ github.action }}".into()),
+                ("ACTION_PATH".into(), "${{ github.action_path }}".into()),
+                ("ACTION_REF".into(), "${{ github.action_ref }}".into()),
+                (
+                    "ACTION_REPOSITORY".into(),
+                    "${{ github.action_repository }}".into(),
+                ),
                 ("DOCS_SITE_URL".into(), "${{ env.DOCS_SITE_URL }}".into()),
                 ("WORKSPACE".into(), "${{ github.workspace }}".into()),
                 ("OS".into(), "${{ runner.os }}".into()),
             ]),
             vec![
                 ("INPUT_TOKEN".into(), "ghs_token".into()),
+                ("ACTION".into(), "setup".into()),
+                ("ACTION_PATH".into(), "/__a/actions_setup-node/v4".into()),
+                ("ACTION_REF".into(), "v4".into()),
+                ("ACTION_REPOSITORY".into(), "actions/setup-node".into()),
                 ("DOCS_SITE_URL".into(), "https://docs.example".into()),
                 ("WORKSPACE".into(), "/__w".into()),
                 ("OS".into(), "Linux".into()),

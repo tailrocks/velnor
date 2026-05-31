@@ -365,10 +365,18 @@ impl ResolvedAction {
             .post
             .as_ref()
             .map(|post| format!("{}/{}", action_container_path, post.trim_start_matches('/')));
-        let mut env = vec![(
-            "GITHUB_ACTION_PATH".to_string(),
-            action_container_path.clone(),
-        )];
+        let mut env = vec![
+            ("GITHUB_ACTION".to_string(), self.plan.step_id.clone()),
+            (
+                "GITHUB_ACTION_PATH".to_string(),
+                action_container_path.clone(),
+            ),
+            (
+                "GITHUB_ACTION_REPOSITORY".to_string(),
+                self.plan.repository.clone(),
+            ),
+            ("GITHUB_ACTION_REF".to_string(), self.plan.git_ref.clone()),
+        ];
         let inputs = effective_inputs(&self.metadata, &self.plan.inputs);
         env.extend(
             self.plan
@@ -1385,6 +1393,16 @@ runs:
             "GITHUB_ACTION_PATH".into(),
             "/__a/_actions/actions_setup-node/v4".into()
         )));
+        assert!(invocation
+            .env
+            .contains(&("GITHUB_ACTION".into(), "setup".into())));
+        assert!(invocation.env.contains(&(
+            "GITHUB_ACTION_REPOSITORY".into(),
+            "actions/setup-node".into()
+        )));
+        assert!(invocation
+            .env
+            .contains(&("GITHUB_ACTION_REF".into(), "v4".into())));
         assert!(invocation
             .env
             .contains(&("NODE_AUTH_TOKEN".into(), "${{ github.token }}".into())));
