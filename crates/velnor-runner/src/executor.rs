@@ -1323,6 +1323,7 @@ mod tests {
             tools_host: temp.join("tools"),
             mount_docker_socket: false,
             env: Vec::new(),
+            options: Vec::new(),
             services: Vec::new(),
         }
     }
@@ -1466,6 +1467,7 @@ mod tests {
             network: "net".into(),
             env: Vec::new(),
             ports: Vec::new(),
+            options: Vec::new(),
         });
         let step = ScriptStep {
             id: "step1".into(),

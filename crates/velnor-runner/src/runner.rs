@@ -14,7 +14,7 @@ use crate::{
     checkout::{checkout_plans, execute_checkouts},
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
-    container::{JobContainerSpec, ServiceContainerSpec},
+    container::{split_container_options, JobContainerSpec, ServiceContainerSpec},
     executor::{DockerScriptExecutor, ExecutableStep, ProcessCommandRunner, StepLog},
     job_message::{ActionReferenceType, AgentJobRequestMessage, PIPELINE_AGENT_JOB_REQUEST},
     protocol::{
@@ -530,6 +530,7 @@ fn execute_script_job(
         tools_host: tools,
         mount_docker_socket: true,
         env: job_container_env(job),
+        options: job_container_options(job),
         services: service_containers(job),
     };
     let mut executor = DockerScriptExecutor::new(command_runner);
@@ -882,6 +883,13 @@ fn job_container_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         .collect()
 }
 
+fn job_container_options(job: &AgentJobRequestMessage) -> Vec<String> {
+    job.job_container
+        .as_ref()
+        .and_then(container_options)
+        .unwrap_or_default()
+}
+
 fn service_containers(job: &AgentJobRequestMessage) -> Vec<ServiceContainerSpec> {
     let network = format!("velnor-net-{}", sanitize_path_segment(&job.job_id));
     job.resources
@@ -904,6 +912,11 @@ fn service_containers(job: &AgentJobRequestMessage) -> Vec<ServiceContainerSpec>
                 network: network.clone(),
                 env: service_env(container),
                 ports: service_ports(container),
+                options: container
+                    .options
+                    .as_deref()
+                    .map(split_container_options)
+                    .unwrap_or_default(),
             })
         })
         .collect()
@@ -949,6 +962,20 @@ fn container_image(value: &Value) -> Option<&str> {
         })
         .and_then(Value::as_str)
         .filter(|image| !image.is_empty())
+}
+
+fn container_options(value: &Value) -> Option<Vec<String>> {
+    value
+        .as_object()
+        .and_then(|object| {
+            object
+                .get("options")
+                .or_else(|| object.get("Options"))
+                .or_else(|| object.get("createOptions"))
+                .or_else(|| object.get("CreateOptions"))
+        })
+        .and_then(Value::as_str)
+        .map(split_container_options)
 }
 
 fn container_env(value: &Value) -> Vec<(String, String)> {
@@ -1458,6 +1485,27 @@ mod tests {
     }
 
     #[test]
+    fn job_container_options_read_create_options() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Container",
+            "requestId": 1,
+            "jobContainer": {
+                "createOptions": "--cpus 2 --memory 4g"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            job_container_options(&job),
+            vec!["--cpus", "2", "--memory", "4g"]
+        );
+    }
+
+    #[test]
     fn service_containers_use_non_job_container_resources() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
@@ -1472,6 +1520,7 @@ mod tests {
                     {
                         "alias": "postgres",
                         "image": "postgres:16",
+                        "options": "--health-cmd \"pg_isready -U postgres\"",
                         "environmentVariables": {
                             "POSTGRES_PASSWORD": "postgres"
                         },
@@ -1491,6 +1540,7 @@ mod tests {
                 network: "velnor-net-job_1".into(),
                 env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
                 ports: vec!["5432:5432".into()],
+                options: vec!["--health-cmd".into(), "pg_isready -U postgres".into()],
             }]
         );
     }
