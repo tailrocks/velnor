@@ -903,9 +903,30 @@ fn service_containers(job: &AgentJobRequestMessage) -> Vec<ServiceContainerSpec>
                 network_alias: alias.to_string(),
                 network: network.clone(),
                 env: Vec::new(),
+                ports: service_ports(container),
             })
         })
         .collect()
+}
+
+fn service_ports(container: &crate::job_message::ContainerResource) -> Vec<String> {
+    let mut ports = container
+        .ports
+        .iter()
+        .filter_map(|(container_port, host_port)| {
+            let container_port = container_port.trim();
+            let host_port = host_port.trim();
+            if container_port.is_empty() {
+                None
+            } else if host_port.is_empty() {
+                Some(container_port.to_string())
+            } else {
+                Some(format!("{host_port}:{container_port}"))
+            }
+        })
+        .collect::<Vec<_>>();
+    ports.sort();
+    ports
 }
 
 fn container_image(value: &Value) -> Option<&str> {
@@ -1436,7 +1457,11 @@ mod tests {
             "resources": {
                 "containers": [
                     { "alias": "__job", "image": "ubuntu:24.04" },
-                    { "alias": "postgres", "image": "postgres:16" }
+                    {
+                        "alias": "postgres",
+                        "image": "postgres:16",
+                        "ports": { "5432": "5432" }
+                    }
                 ]
             }
         }))
@@ -1450,6 +1475,7 @@ mod tests {
                 network_alias: "postgres".into(),
                 network: "velnor-net-job_1".into(),
                 env: Vec::new(),
+                ports: vec!["5432:5432".into()],
             }]
         );
     }

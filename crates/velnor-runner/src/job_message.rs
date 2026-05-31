@@ -162,6 +162,8 @@ pub struct ContainerResource {
     pub image: Option<String>,
     #[serde(default, rename = "Options", alias = "options")]
     pub options: Option<String>,
+    #[serde(default, rename = "Ports", alias = "ports")]
+    pub ports: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

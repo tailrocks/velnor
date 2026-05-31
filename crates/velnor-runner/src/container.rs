@@ -109,6 +109,7 @@ pub struct ServiceContainerSpec {
     pub network_alias: String,
     pub network: String,
     pub env: Vec<(String, String)>,
+    pub ports: Vec<String>,
 }
 
 impl ServiceContainerSpec {
@@ -125,6 +126,9 @@ impl ServiceContainerSpec {
         ];
         for (name, value) in &self.env {
             args.extend(["-e".into(), format!("{name}={value}")]);
+        }
+        for port in &self.ports {
+            args.extend(["-p".into(), port.clone()]);
         }
         args.extend([self.image.clone()]);
         args
@@ -259,6 +263,7 @@ mod tests {
             network_alias: "postgres".into(),
             network: "velnor-net-1".into(),
             env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
+            ports: vec!["5432:5432".into()],
         };
 
         assert_eq!(
@@ -274,6 +279,8 @@ mod tests {
                 "postgres",
                 "-e",
                 "POSTGRES_PASSWORD=postgres",
+                "-p",
+                "5432:5432",
                 "postgres:16"
             ]
         );

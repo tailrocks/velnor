@@ -1465,6 +1465,7 @@ mod tests {
             network_alias: "postgres".into(),
             network: "net".into(),
             env: Vec::new(),
+            ports: Vec::new(),
         });
         let step = ScriptStep {
             id: "step1".into(),
