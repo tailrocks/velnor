@@ -846,9 +846,26 @@ async fn complete_job(
             ),
         )
         .await?;
-    for step_log in step_logs {
+    for (index, step_log) in step_logs.into_iter().enumerate() {
         let masks = combined_masks(&job_masks, &step_log.masks);
-        let step_id = step_log.step_id;
+        let step_id = step_log.step_id.clone();
+        let finish_time = utc_now_rfc3339()?;
+        client
+            .update_timeline_records(
+                scope_identifier,
+                hub_name,
+                &job.plan.plan_id,
+                &job.timeline.id,
+                vec![TimelineRecord::task_completed(
+                    step_id.clone(),
+                    job.job_id.clone(),
+                    step_id.clone(),
+                    (index + 1) as i32,
+                    finish_time,
+                    step_log_result(&step_log),
+                )],
+            )
+            .await?;
         client
             .append_timeline_record_feed(
                 scope_identifier,
@@ -905,6 +922,16 @@ fn sanitize_path_segment(value: &str) -> String {
             }
         })
         .collect()
+}
+
+fn step_log_result(step_log: &StepLog) -> TaskResult {
+    if step_log.skipped {
+        TaskResult::Skipped
+    } else if step_log.exit_code == 0 || step_log.failure_ignored {
+        TaskResult::Succeeded
+    } else {
+        TaskResult::Failed
+    }
 }
 
 fn job_mask_values(job: &AgentJobRequestMessage) -> Vec<String> {

@@ -72,6 +72,9 @@ pub struct StepLog {
     pub step_id: String,
     pub lines: Vec<String>,
     pub masks: Vec<String>,
+    pub exit_code: i32,
+    pub skipped: bool,
+    pub failure_ignored: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -918,6 +921,9 @@ fn step_log(step_id: &str, result: &StepExecutionResult) -> Option<StepLog> {
         step_id: step_id.to_string(),
         lines,
         masks: result.state.masks.clone(),
+        exit_code: result.exit_code,
+        skipped: result.skipped,
+        failure_ignored: result.failure_ignored,
     })
 }
 
@@ -1888,6 +1894,8 @@ mod tests {
         assert_eq!(summary.step_logs[0].step_id, "producer");
         assert!(summary.step_logs[0].lines.contains(&"hidden".to_string()));
         assert_eq!(summary.step_logs[0].masks, vec!["hidden"]);
+        assert_eq!(summary.step_logs[0].exit_code, 0);
+        assert!(!summary.step_logs[0].skipped);
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
             "export PATH='/opt/tool':\"$PATH\"\necho answer=42\n"

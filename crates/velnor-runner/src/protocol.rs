@@ -1347,6 +1347,34 @@ impl TimelineRecord {
         }
     }
 
+    pub fn task_completed(
+        step_id: impl Into<String>,
+        parent_id: impl Into<String>,
+        name: impl Into<String>,
+        order: i32,
+        finish_time: impl Into<String>,
+        result: TaskResult,
+    ) -> Self {
+        Self {
+            id: step_id.into(),
+            parent_id: Some(parent_id.into()),
+            record_type: TimelineRecordType::Task,
+            name: name.into(),
+            start_time: None,
+            finish_time: Some(finish_time.into()),
+            current_operation: None,
+            percent_complete: Some(100),
+            state: Some(TimelineRecordState::Completed),
+            result: Some(result),
+            worker_name: None,
+            order: Some(order),
+            ref_name: None,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+        }
+    }
+
     pub fn in_progress(mut self, start_time: impl Into<String>) -> Self {
         self.start_time = Some(start_time.into());
         self.state = Some(TimelineRecordState::InProgress);
@@ -1691,6 +1719,37 @@ mod tests {
                 "result": "succeeded",
                 "workerName": "velnor-1",
                 "refName": "build",
+                "errorCount": 0,
+                "warningCount": 0,
+                "noticeCount": 0
+            })
+        );
+    }
+
+    #[test]
+    fn timeline_record_body_matches_task_record_shape() {
+        let record = TimelineRecord::task_completed(
+            "step-id",
+            "job-id",
+            "Build",
+            1,
+            "2026-05-31T12:01:00Z",
+            TaskResult::Failed,
+        );
+        let json = serde_json::to_value(record).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "id": "step-id",
+                "parentId": "job-id",
+                "type": "Task",
+                "name": "Build",
+                "finishTime": "2026-05-31T12:01:00Z",
+                "percentComplete": 100,
+                "state": "completed",
+                "result": "failed",
+                "order": 1,
                 "errorCount": 0,
                 "warningCount": 0,
                 "noticeCount": 0
