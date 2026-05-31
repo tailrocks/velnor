@@ -66,6 +66,12 @@ pub enum ExecutableStep {
     },
 }
 
+#[derive(Debug, Clone)]
+struct PostJavaScriptAction {
+    step_id: String,
+    invocation: JavaScriptActionInvocation,
+}
+
 impl ExecutableStep {
     fn id(&self) -> &str {
         match self {
@@ -195,6 +201,7 @@ where
         let mut results = Vec::new();
         let mut state = JobExecutionState::new_with_context(base_env, context_data);
         let mut step_error = None;
+        let mut post_actions = Vec::new();
         for step in steps {
             let step_id = step.id().to_string();
             if !state.evaluate_condition(step.condition()) {
@@ -236,13 +243,27 @@ where
                     invocation,
                     ..
                 } => self.execute_javascript_action_in_started_container(
-                    container, step_id, invocation, temp_host, &state,
+                    container,
+                    step_id,
+                    invocation,
+                    &invocation.main_container_path,
+                    &[],
+                    temp_host,
+                    &state,
                 ),
             })();
 
             match result {
                 Ok(mut result) => {
                     let failed = result.exit_code != 0;
+                    if let ExecutableStep::JavaScript { invocation, .. } = step {
+                        if invocation.post_container_path.is_some() {
+                            post_actions.push(PostJavaScriptAction {
+                                step_id: step_id.clone(),
+                                invocation: invocation.clone(),
+                            });
+                        }
+                    }
                     if failed && step.continue_on_error() {
                         result.failure_ignored = true;
                     }
@@ -255,6 +276,32 @@ where
                 Err(error) => {
                     step_error = Some(error);
                     break;
+                }
+            }
+        }
+        for post_action in post_actions.into_iter().rev() {
+            let result = self.execute_javascript_action_in_started_container(
+                container,
+                &format!("{}-post", post_action.step_id),
+                &post_action.invocation,
+                post_action
+                    .invocation
+                    .post_container_path
+                    .as_deref()
+                    .expect("post action must have post entrypoint"),
+                &state.action_state_env(&post_action.step_id),
+                temp_host,
+                &state,
+            );
+            match result {
+                Ok(result) => {
+                    state.apply(&format!("{}-post", post_action.step_id), &result);
+                    results.push(result);
+                }
+                Err(error) => {
+                    if step_error.is_none() {
+                        step_error = Some(error);
+                    }
                 }
             }
         }
@@ -279,6 +326,8 @@ where
                 container,
                 step_id,
                 action,
+                &action.main_container_path,
+                &[],
                 temp_host,
                 &JobExecutionState::default(),
             )
@@ -296,6 +345,8 @@ where
         container: &JobContainerSpec,
         step_id: &str,
         action: &JavaScriptActionInvocation,
+        entrypoint_container_path: &str,
+        action_state_env: &[(String, String)],
         temp_host: &Path,
         state: &JobExecutionState,
     ) -> Result<StepExecutionResult> {
@@ -313,11 +364,12 @@ where
         )?;
         let mut env = state.step_env(&[]);
         env.extend(state.resolve_env(&action.env));
+        env.extend(action_state_env.iter().cloned());
         env.extend(command_files.env.iter().cloned());
         let exec_args = container.exec_process_args(
             "/__w",
             &env,
-            &["node".to_string(), action.main_container_path.clone()],
+            &["node".to_string(), entrypoint_container_path.to_string()],
         );
         let step_result = self.runner.run("docker", &exec_args)?;
         let mut state = command_files.collect_state()?;
@@ -358,6 +410,7 @@ struct JobExecutionState {
     env: BTreeMap<String, String>,
     context_data: BTreeMap<String, Value>,
     outputs: BTreeMap<String, BTreeMap<String, String>>,
+    action_states: BTreeMap<String, BTreeMap<String, String>>,
     outcomes: BTreeMap<String, StepOutcome>,
     path: Vec<String>,
 }
@@ -389,6 +442,7 @@ impl JobExecutionState {
             env: base_env.iter().cloned().collect(),
             context_data: context_data.iter().cloned().collect(),
             outputs: BTreeMap::new(),
+            action_states: BTreeMap::new(),
             outcomes: BTreeMap::new(),
             path: Vec::new(),
         }
@@ -418,12 +472,28 @@ impl JobExecutionState {
             self.outputs
                 .insert(step_id.to_string(), result.state.outputs.clone());
         }
+        if !result.state.state.is_empty() {
+            self.action_states
+                .insert(step_id.to_string(), result.state.state.clone());
+        }
         for (name, value) in &result.state.env {
             self.env.insert(name.clone(), value.clone());
         }
         for path in result.state.path.iter().rev() {
             self.path.insert(0, path.clone());
         }
+    }
+
+    fn action_state_env(&self, step_id: &str) -> Vec<(String, String)> {
+        self.action_states
+            .get(step_id)
+            .into_iter()
+            .flat_map(|state| {
+                state
+                    .iter()
+                    .map(|(name, value)| (format!("STATE_{name}"), value.clone()))
+            })
+            .collect()
     }
 
     fn resolve_script_step(&self, step: &ScriptStep) -> ScriptStep {
@@ -744,6 +814,12 @@ mod tests {
                     .any(|arg| arg == "GITHUB_OUTPUT=/__t/producer_output")
                 {
                     fs::write(self.temp.join("producer_output"), "answer=42\n")?;
+                }
+                if args
+                    .iter()
+                    .any(|arg| arg == "GITHUB_STATE=/__t/cache_state")
+                {
+                    fs::write(self.temp.join("cache_state"), "primaryKey=linux-cache\n")?;
                 }
             }
             Ok(CommandResult {
@@ -1234,6 +1310,7 @@ mod tests {
                 invocation: JavaScriptActionInvocation {
                     node: "node20".into(),
                     main_container_path: "/__a/_actions/sccache/dist/index.js".into(),
+                    post_container_path: None,
                     action_container_path: "/__a/_actions/sccache".into(),
                     env: Vec::new(),
                 },
@@ -1317,6 +1394,7 @@ mod tests {
         let action = JavaScriptActionInvocation {
             node: "node20".into(),
             main_container_path: "/__a/_actions/acme_action/v1/dist/index.js".into(),
+            post_container_path: None,
             action_container_path: "/__a/_actions/acme_action/v1".into(),
             env: vec![
                 (
@@ -1366,6 +1444,7 @@ mod tests {
                 invocation: JavaScriptActionInvocation {
                     node: "node20".into(),
                     main_container_path: "/__a/_actions/acme_action/v1/dist/index.js".into(),
+                    post_container_path: None,
                     action_container_path: "/__a/_actions/acme_action/v1".into(),
                     env: vec![
                         ("INPUT_NAME".into(), "value".into()),
@@ -1416,6 +1495,71 @@ mod tests {
             .1
             .contains(&"GITHUB_OUTPUT=/__t/action1_output".into()));
 
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn executes_javascript_post_actions_in_reverse_order() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::JavaScript {
+                step_id: "cache".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    main_container_path: "/__a/_actions/cache/dist/restore.js".into(),
+                    post_container_path: Some("/__a/_actions/cache/dist/save.js".into()),
+                    action_container_path: "/__a/_actions/cache".into(),
+                    env: vec![("INPUT_KEY".into(), "linux-cache".into())],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "login".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    main_container_path: "/__a/_actions/docker_login/dist/main.js".into(),
+                    post_container_path: Some("/__a/_actions/docker_login/dist/post.js".into()),
+                    action_container_path: "/__a/_actions/docker_login".into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+        ];
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 4);
+        let exec_calls = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| args.first().is_some_and(|arg| arg == "exec"))
+            .map(|(_, args)| args)
+            .collect::<Vec<_>>();
+        assert!(
+            exec_calls[0].ends_with(&["node".into(), "/__a/_actions/cache/dist/restore.js".into()])
+        );
+        assert!(exec_calls[1].ends_with(&[
+            "node".into(),
+            "/__a/_actions/docker_login/dist/main.js".into()
+        ]));
+        assert!(exec_calls[2].ends_with(&[
+            "node".into(),
+            "/__a/_actions/docker_login/dist/post.js".into()
+        ]));
+        assert!(
+            exec_calls[3].ends_with(&["node".into(), "/__a/_actions/cache/dist/save.js".into()])
+        );
+        assert!(exec_calls[3].contains(&"STATE_primaryKey=linux-cache".into()));
         fs::remove_dir_all(temp).unwrap();
     }
 }

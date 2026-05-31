@@ -96,6 +96,7 @@ Deliverables:
 - action metadata parser for `action.yml`: JavaScript, composite, and Docker `runs.using` shapes are modeled
 - repository action planner for enabled non-checkout `uses:` steps
 - Node action handler: JavaScript action invocation and Docker `node <main>` executor shape are implemented and wired into the ordered Docker execution path
+- JavaScript post hooks: `runs.post` is resolved, executed in reverse order after main steps, and receives `STATE_*` values saved through `GITHUB_STATE`
 - `INPUT_*` environment variables: planned action inputs and metadata defaults are converted to `INPUT_*` for JavaScript invocation
 - step `env:` from GitHub job messages is parsed for script and JavaScript action steps, with basic expression resolution at execution time
 - workflow/job `env:` from GitHub job messages is overlaid into the runtime environment; protected `GITHUB_*`/`RUNNER_*` defaults are not overwritten
@@ -111,7 +112,7 @@ Deliverables:
 - basic workflow command parsing: state-changing stdout commands are parsed; annotations/log grouping are not yet reported to GitHub UI
 - runner-side expression contexts: `env.*`, selected `github.*`/`runner.*`, `steps.*.outputs.*`, and generic job `ContextData` lookup such as `matrix.*`, `needs.*`, `inputs.*`, and `vars.*` are supported for script/action env and basic step conditions; `contains()` and `toJSON()` cover target-shaped cases
 - `continue-on-error`: script and JavaScript action steps can ignore a nonzero exit for job failure while preserving `steps.<id>.outcome == 'failure'`, covering target optional `sccache` setup
-- ordered job execution for script steps and JavaScript actions in original message order is wired; host-side checkout still runs before the Docker container starts
+- ordered job execution for script steps and JavaScript actions in original message order is wired, with JavaScript post hooks executed in reverse order; host-side checkout still runs before the Docker container starts
 
 Exit criteria:
 

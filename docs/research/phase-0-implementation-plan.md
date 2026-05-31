@@ -191,6 +191,7 @@ Implement action support in the order that unlocks target workflows fastest:
    - parse `action.yml`: metadata parser and repository action planner are implemented as groundwork
    - map `with:` to `INPUT_*`: implemented for JavaScript action invocation, including metadata defaults
    - run Node entrypoint inside job container: implemented for ordered script/JavaScript execution
+   - run `runs.post` cleanup/save entrypoints: implemented in reverse order with `GITHUB_STATE` to `STATE_*` propagation
    - provide `GITHUB_*`, `RUNNER_*`, `ACTIONS_*` runtime env: basic job-message extraction and step injection are implemented; full runner parity remains open
 5. Composite action handler:
    - local `.github/actions/*`: implemented for checked-out self repository actions

@@ -326,6 +326,7 @@ pub fn resolve_local_action(plan: &LocalActionPlan) -> Result<ActionMetadata> {
 pub struct JavaScriptActionInvocation {
     pub node: String,
     pub main_container_path: String,
+    pub post_container_path: Option<String>,
     pub action_container_path: String,
     pub env: Vec<(String, String)>,
 }
@@ -341,6 +342,12 @@ impl ResolvedAction {
         let action_container_path = container_path(actions_host, &self.plan.action_dir)?;
         let main_container_path =
             format!("{}/{}", action_container_path, main.trim_start_matches('/'));
+        let post_container_path = self
+            .metadata
+            .runs
+            .post
+            .as_ref()
+            .map(|post| format!("{}/{}", action_container_path, post.trim_start_matches('/')));
         let mut env = vec![(
             "GITHUB_ACTION_PATH".to_string(),
             action_container_path.clone(),
@@ -361,6 +368,7 @@ impl ResolvedAction {
         Ok(JavaScriptActionInvocation {
             node: node.clone(),
             main_container_path,
+            post_container_path,
             action_container_path,
             env,
         })
@@ -1211,8 +1219,10 @@ runs:
             condition: None,
             continue_on_error: false,
         };
-        let metadata =
-            parse_action_metadata("runs:\n  using: node20\n  main: dist/index.js\n").unwrap();
+        let metadata = parse_action_metadata(
+            "runs:\n  using: node20\n  main: dist/index.js\n  post: dist/cleanup.js\n",
+        )
+        .unwrap();
         let runtime = metadata.runtime().unwrap();
         let resolved = ResolvedAction {
             plan,
@@ -1227,6 +1237,10 @@ runs:
         assert_eq!(
             invocation.main_container_path,
             "/__a/_actions/actions_setup-node/v4/dist/index.js"
+        );
+        assert_eq!(
+            invocation.post_container_path.as_deref(),
+            Some("/__a/_actions/actions_setup-node/v4/dist/cleanup.js")
         );
         assert!(invocation
             .env
