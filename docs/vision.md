@@ -1,6 +1,6 @@
 # Velnor Vision
 
-Velnor is a GitHub Actions-like workflow engine with a typed configuration language and a Rust runtime.
+Velnor is a GitHub Actions-like workflow engine with KCL workflow definitions and a Rust runtime.
 
 ## Product Shape
 
@@ -18,7 +18,7 @@ The goal is not to invent a completely new CI/CD mental model. GitHub Actions al
 - environments and approvals
 - hosted or self-hosted runners
 
-Velnor should keep that model where it works. The main change is replacing YAML plus ad hoc expressions with a Pkl-based typed workflow definition.
+Velnor should keep that model where it works. The main change is replacing YAML plus ad hoc expressions with a KCL-based typed workflow definition.
 
 ## Why Not YAML
 
@@ -35,10 +35,14 @@ Velnor should keep the readability of GitHub Actions while adding static validat
 
 ## Proposed Stack
 
-- Pkl: workflow authoring, schema, defaults, validation, reusable modules
+- KCL: workflow authoring, schemas, defaults, validation, constraints, reusable modules
 - Rust: parser integration, planner, scheduler, runner, CLI, server
 - Containers/processes: execution isolation for arbitrary user commands
 - Typed plugins: reusable building blocks with declared inputs, outputs, permissions, and runtime requirements
+
+KCL is preferred over Pkl for now because it is schema-centric, cloud-native, and has Rust support. Pkl remains useful prior art for the authoring feel we want: configuration as code without turning workflow orchestration into an unconstrained general-purpose program.
+
+See [research/kcl.md](research/kcl.md).
 
 ## Example: GitHub Actions
 
@@ -65,35 +69,37 @@ jobs:
       - run: cargo test
 ```
 
-## Example: Velnor Pkl Sketch
+## Example: Velnor KCL Sketch
 
-```pkl
-amends "package://velnor.dev/workflow@1.0.0#/Workflow.pkl"
+```python
+import velnor.workflow as wf
 
-name = "CI"
+workflow = wf.Workflow {
+    name = "CI"
 
-on {
-  pullRequest {}
-  push {
-    branches = List("main")
-  }
-}
-
-jobs {
-  ["test"] = new Job {
-    matrix {
-      ["os"] = List("ubuntu-latest", "macos-latest")
-      ["rust"] = List("stable", "beta")
+    on = {
+        pull_request = {}
+        push = {
+            branches = ["main"]
+        }
     }
 
-    runsOn = matrix["os"]
+    jobs = {
+        test = wf.Job {
+            matrix = {
+                os = ["ubuntu-latest", "macos-latest"]
+                rust = ["stable", "beta"]
+            }
 
-    steps = List(
-      Checkout { version = "v4" },
-      Run { command = "rustup default \(matrix["rust"])" },
-      Run { command = "cargo test" },
-    )
-  }
+            runs_on = "${{ matrix.os }}"
+
+            steps = [
+                wf.Checkout { version = "v4" }
+                wf.Run { command = "rustup default ${{ matrix.rust }}" }
+                wf.Run { command = "cargo test" }
+            ]
+        }
+    }
 }
 ```
 
@@ -170,12 +176,12 @@ Velnor should be flexible because users compose typed workflow primitives and on
 - Do not build a YAML transpiler as the primary product.
 - Do not require JavaScript for custom workflow logic.
 - Do not hide runtime behavior behind untyped string interpolation.
-- Do not make Pkl users learn a completely different CI model from GitHub Actions.
+- Do not make KCL users learn a completely different CI model from GitHub Actions.
 
 ## Open Questions
 
 - Should Velnor support importing existing GitHub Actions directly?
 - Should `Use` support OCI-based actions only, or also GitHub-style repositories?
-- Should Pkl evaluate on the control plane only, or can runners evaluate local modules?
+- Should KCL evaluate on the control plane only, or can runners evaluate local modules?
 - How much of GitHub Actions expression syntax should be preserved?
 - Should the first release target local execution, self-hosted server, or GitHub app integration?

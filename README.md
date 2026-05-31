@@ -10,7 +10,7 @@ The user experience should feel close to GitHub Actions: workflows, triggers, jo
 
 The difference is the implementation model:
 
-- workflow definitions are written in Pkl instead of YAML
+- workflow definitions are written in KCL instead of YAML
 - workflow primitives are strongly typed
 - validation happens before execution
 - the engine and runner are implemented in Rust
@@ -19,3 +19,5 @@ The difference is the implementation model:
 ## Direction
 
 See [docs/vision.md](docs/vision.md).
+
+KCL research: [docs/research/kcl.md](docs/research/kcl.md).
