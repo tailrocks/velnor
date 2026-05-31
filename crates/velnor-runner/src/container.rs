@@ -136,6 +136,63 @@ impl JobContainerSpec {
         args
     }
 
+    pub fn build_docker_action_args(
+        &self,
+        image: &str,
+        dockerfile_host: &Path,
+        context_host: &Path,
+    ) -> Vec<String> {
+        vec![
+            "build".into(),
+            "--tag".into(),
+            image.into(),
+            "--file".into(),
+            dockerfile_host.display().to_string(),
+            context_host.display().to_string(),
+        ]
+    }
+
+    pub fn run_docker_action_args(
+        &self,
+        working_directory: &str,
+        env: &[(String, String)],
+        image: &str,
+        entrypoint: Option<&str>,
+        command_args: &[String],
+    ) -> Vec<String> {
+        let mut args = vec![
+            "run".into(),
+            "--rm".into(),
+            "--network".into(),
+            self.network.clone(),
+            "--workdir".into(),
+            working_directory.into(),
+            "-v".into(),
+            mount(&self.workspace_host, "/__w"),
+            "-v".into(),
+            mount(&self.temp_host, "/__t"),
+            "-v".into(),
+            mount(&self.actions_host, "/__a"),
+            "-v".into(),
+            mount(&self.tools_host, "/__tool"),
+        ];
+        if self.mount_docker_socket {
+            args.extend([
+                "-v".into(),
+                "/var/run/docker.sock:/var/run/docker.sock".into(),
+            ]);
+        }
+        for (name, value) in env {
+            args.extend(["-e".into(), format!("{name}={value}")]);
+        }
+        if let Some(entrypoint) = entrypoint {
+            args.extend(["--entrypoint".into(), entrypoint.into()]);
+        }
+        args.push(image.into());
+        args.extend(command_args.iter().cloned());
+        args
+    }
+
     pub fn remove_container_args(&self) -> Vec<String> {
         vec!["rm".into(), "--force".into(), self.name.clone()]
     }
@@ -360,6 +417,45 @@ mod tests {
             &args[args.len() - 3..],
             ["node:20-bookworm", "node", "/__a/action/dist/index.js"]
         );
+    }
+
+    #[test]
+    fn builds_docker_action_args() {
+        let spec = spec();
+
+        assert_eq!(
+            spec.build_docker_action_args(
+                "velnor-action-owner-repo-v1-root",
+                Path::new("/tmp/actions/action/Dockerfile"),
+                Path::new("/tmp/actions/action"),
+            ),
+            vec![
+                "build",
+                "--tag",
+                "velnor-action-owner-repo-v1-root",
+                "--file",
+                "/tmp/actions/action/Dockerfile",
+                "/tmp/actions/action"
+            ]
+        );
+
+        let args = spec.run_docker_action_args(
+            "/__w",
+            &[("INPUT_NAME".into(), "value".into())],
+            "alpine:3.20",
+            Some("/entrypoint.sh"),
+            &["arg1".into()],
+        );
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--network", "velnor-net-1"]));
+        assert!(args.contains(&"/tmp/work:/__w".into()));
+        assert!(args.contains(&"INPUT_NAME=value".into()));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--entrypoint", "/entrypoint.sh"]));
+        assert_eq!(&args[args.len() - 2..], ["alpine:3.20", "arg1"]);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::{
-    action::JavaScriptActionInvocation,
+    action::{DockerActionInvocation, JavaScriptActionInvocation},
     container::JobContainerSpec,
     script_step::{ScriptStep, ScriptStepPlan, StepCommandState},
     workflow_command::parse_workflow_commands,
@@ -99,6 +99,12 @@ pub enum ExecutableStep {
         condition: Option<String>,
         continue_on_error: bool,
     },
+    Docker {
+        step_id: String,
+        invocation: DockerActionInvocation,
+        condition: Option<String>,
+        continue_on_error: bool,
+    },
     CompositeOutputs {
         step_id: String,
         outputs: BTreeMap<String, String>,
@@ -117,6 +123,7 @@ impl ExecutableStep {
         match self {
             ExecutableStep::Script(step) => &step.id,
             ExecutableStep::JavaScript { step_id, .. } => step_id,
+            ExecutableStep::Docker { step_id, .. } => step_id,
             ExecutableStep::CompositeOutputs { step_id, .. } => step_id,
         }
     }
@@ -125,6 +132,7 @@ impl ExecutableStep {
         match self {
             ExecutableStep::Script(step) => step.condition.as_deref(),
             ExecutableStep::JavaScript { condition, .. } => condition.as_deref(),
+            ExecutableStep::Docker { condition, .. } => condition.as_deref(),
             ExecutableStep::CompositeOutputs { condition, .. } => condition.as_deref(),
         }
     }
@@ -133,6 +141,9 @@ impl ExecutableStep {
         match self {
             ExecutableStep::Script(step) => step.continue_on_error,
             ExecutableStep::JavaScript {
+                continue_on_error, ..
+            } => *continue_on_error,
+            ExecutableStep::Docker {
                 continue_on_error, ..
             } => *continue_on_error,
             ExecutableStep::CompositeOutputs { .. } => false,
@@ -341,6 +352,13 @@ where
                     temp_host,
                     &state,
                 ),
+                ExecutableStep::Docker {
+                    step_id,
+                    invocation,
+                    ..
+                } => self.execute_docker_action_in_started_container(
+                    container, step_id, invocation, temp_host, &state,
+                ),
                 ExecutableStep::CompositeOutputs { outputs, .. } => Ok(StepExecutionResult {
                     exit_code: 0,
                     state: StepCommandState {
@@ -484,6 +502,58 @@ where
         let node_image = node_action_image(&action.node, &container.node_action_image);
         let exec_args =
             container.run_node_action_args("/__w", &env, &node_image, entrypoint_container_path);
+        let step_result = self.runner.run("docker", &exec_args)?;
+        let mut state = command_files.collect_state()?;
+        state.merge(parse_workflow_commands(&step_result.stdout));
+        Ok(StepExecutionResult {
+            exit_code: step_result.code,
+            state,
+            skipped: false,
+            failure_ignored: false,
+            stdout: step_result.stdout,
+            stderr: step_result.stderr,
+        })
+    }
+
+    fn execute_docker_action_in_started_container(
+        &mut self,
+        container: &JobContainerSpec,
+        step_id: &str,
+        action: &DockerActionInvocation,
+        temp_host: &Path,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        if let (Some(context_host), Some(dockerfile_host)) =
+            (&action.build_context_host, &action.dockerfile_host)
+        {
+            self.run_docker(&container.build_docker_action_args(
+                &action.image,
+                dockerfile_host,
+                context_host,
+            ))?;
+        }
+        let command_files = ScriptStepPlan::prepare(
+            &ScriptStep {
+                id: step_id.to_string(),
+                script: String::new(),
+                shell: crate::container::Shell::Sh,
+                working_directory_container: "/__w".to_string(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            },
+            temp_host,
+        )?;
+        let mut env = state.step_env(&[]);
+        env.extend(state.resolve_env(&action.env));
+        env.extend(command_files.env.iter().cloned());
+        let exec_args = container.run_docker_action_args(
+            "/__w",
+            &env,
+            &action.image,
+            action.entrypoint.as_deref(),
+            &action.args,
+        );
         let step_result = self.runner.run("docker", &exec_args)?;
         let mut state = command_files.collect_state()?;
         state.merge(parse_workflow_commands(&step_result.stdout));
@@ -2249,6 +2319,92 @@ mod tests {
             "node".into(),
             "/__a/_actions/acme_action/v1/dist/index.js".into()
         ]));
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn executes_docker_action_with_inputs_and_command_files() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let action = DockerActionInvocation {
+            image: "alpine:3.20".into(),
+            build_context_host: None,
+            dockerfile_host: None,
+            action_container_path: "/__a/_actions/acme_docker/v1".into(),
+            env: vec![
+                (
+                    "GITHUB_ACTION_PATH".into(),
+                    "/__a/_actions/acme_docker/v1".into(),
+                ),
+                ("INPUT_NAME".into(), "value".into()),
+            ],
+            entrypoint: Some("/entrypoint.sh".into()),
+            args: vec!["arg1".into()],
+        };
+        let steps = vec![ExecutableStep::Docker {
+            step_id: "docker1".into(),
+            invocation: action,
+            condition: None,
+            continue_on_error: false,
+        }];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        let calls = &executor.runner().calls;
+        assert_eq!(calls[2].1[0], "run");
+        assert!(calls[2].1.contains(&"INPUT_NAME=value".into()));
+        assert!(calls[2]
+            .1
+            .contains(&"GITHUB_OUTPUT=/__t/docker1_output".into()));
+        assert!(calls[2]
+            .1
+            .windows(2)
+            .any(|pair| pair == ["--entrypoint", "/entrypoint.sh"]));
+        assert!(calls[2].1.ends_with(&["alpine:3.20".into(), "arg1".into()]));
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn builds_local_docker_action_before_running_it() {
+        let temp = temp_dir();
+        let action_dir = temp.join("actions/acme");
+        fs::create_dir_all(&action_dir).unwrap();
+        let action = DockerActionInvocation {
+            image: "velnor-action-acme-docker-v1-root".into(),
+            build_context_host: Some(action_dir.clone()),
+            dockerfile_host: Some(action_dir.join("Dockerfile")),
+            action_container_path: "/__a/_actions/acme_docker/v1".into(),
+            env: Vec::new(),
+            entrypoint: None,
+            args: Vec::new(),
+        };
+        let steps = vec![ExecutableStep::Docker {
+            step_id: "docker1".into(),
+            invocation: action,
+            condition: None,
+            continue_on_error: false,
+        }];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        let calls = &executor.runner().calls;
+        assert_eq!(calls[2].1[0], "build");
+        assert!(calls[2]
+            .1
+            .contains(&"velnor-action-acme-docker-v1-root".into()));
+        assert_eq!(calls[3].1[0], "run");
+        assert!(calls[3]
+            .1
+            .contains(&"velnor-action-acme-docker-v1-root".into()));
 
         fs::remove_dir_all(temp).unwrap();
     }

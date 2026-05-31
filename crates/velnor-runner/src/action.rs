@@ -57,6 +57,10 @@ pub struct ActionRuns {
     #[serde(default)]
     pub image: Option<String>,
     #[serde(default)]
+    pub entrypoint: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
     pub steps: Vec<CompositeActionStep>,
 }
 
@@ -348,6 +352,17 @@ pub struct JavaScriptActionInvocation {
     pub env: Vec<(String, String)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockerActionInvocation {
+    pub image: String,
+    pub build_context_host: Option<PathBuf>,
+    pub dockerfile_host: Option<PathBuf>,
+    pub action_container_path: String,
+    pub env: Vec<(String, String)>,
+    pub entrypoint: Option<String>,
+    pub args: Vec<String>,
+}
+
 impl ResolvedAction {
     pub fn javascript_invocation(&self, actions_host: &Path) -> Result<JavaScriptActionInvocation> {
         let ActionRuntime::JavaScript { node, main } = &self.runtime else {
@@ -396,6 +411,77 @@ impl ResolvedAction {
             post_container_path,
             action_container_path,
             env,
+        })
+    }
+
+    pub fn docker_invocation(&self, actions_host: &Path) -> Result<DockerActionInvocation> {
+        let ActionRuntime::Docker { image } = &self.runtime else {
+            bail!("action '{}' is not a Docker action", self.plan.repository)
+        };
+        let action_container_path = container_path(actions_host, &self.plan.action_dir)?;
+        let inputs = effective_inputs(&self.metadata, &self.plan.inputs);
+        let mut env = vec![
+            ("GITHUB_ACTION".to_string(), self.plan.step_id.clone()),
+            (
+                "GITHUB_ACTION_PATH".to_string(),
+                action_container_path.clone(),
+            ),
+            (
+                "GITHUB_ACTION_REPOSITORY".to_string(),
+                self.plan.repository.clone(),
+            ),
+            ("GITHUB_ACTION_REF".to_string(), self.plan.git_ref.clone()),
+        ];
+        env.extend(
+            self.plan
+                .env
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone())),
+        );
+        env.extend(
+            inputs
+                .iter()
+                .map(|(name, value)| (input_env_name(name), value.clone())),
+        );
+
+        let (image, build_context_host, dockerfile_host) =
+            if let Some(image) = image.strip_prefix("docker://") {
+                (image.to_string(), None, None)
+            } else {
+                let dockerfile_host = self.plan.action_dir.join(image);
+                let tag = docker_action_tag(
+                    &self.plan.repository,
+                    &self.plan.git_ref,
+                    self.plan.source_path.as_deref(),
+                );
+                (
+                    tag,
+                    Some(self.plan.action_dir.clone()),
+                    Some(dockerfile_host),
+                )
+            };
+        let entrypoint = self
+            .metadata
+            .runs
+            .entrypoint
+            .as_ref()
+            .map(|value| render_action_scoped_value(value, &inputs, &action_container_path));
+        let args = self
+            .metadata
+            .runs
+            .args
+            .iter()
+            .map(|value| render_action_scoped_value(value, &inputs, &action_container_path))
+            .collect();
+
+        Ok(DockerActionInvocation {
+            image,
+            build_context_host,
+            dockerfile_host,
+            action_container_path,
+            env,
+            entrypoint,
+            args,
         })
     }
 
@@ -743,6 +829,17 @@ fn input_env_name(name: &str) -> String {
     )
 }
 
+fn docker_action_tag(repository: &str, git_ref: &str, source_path: Option<&str>) -> String {
+    let source = source_path.unwrap_or("root");
+    format!(
+        "velnor-action-{}-{}-{}",
+        sanitize_segment(repository),
+        sanitize_segment(git_ref),
+        sanitize_segment(source)
+    )
+    .to_ascii_lowercase()
+}
+
 fn repository_clone_url(repository: &str) -> String {
     format!("https://github.com/{repository}.git")
 }
@@ -826,6 +923,14 @@ fn render_composite_scoped_value(
         &render_composite_value(value, inputs, action_path, workspace_container),
         step_ids,
     )
+}
+
+fn render_action_scoped_value(
+    value: &str,
+    inputs: &BTreeMap<String, String>,
+    action_path: &str,
+) -> String {
+    render_composite_value(value, inputs, action_path, "/__w")
 }
 
 fn rewrite_step_output_refs(value: &str, step_ids: &BTreeMap<String, String>) -> String {
@@ -939,6 +1044,33 @@ runs:
                 main: "dist/index.js".into()
             }
         );
+    }
+
+    #[test]
+    fn parses_docker_action_metadata() {
+        let metadata = parse_action_metadata(
+            r#"
+inputs:
+  image:
+    default: alpine:3.20
+runs:
+  using: docker
+  image: Dockerfile
+  entrypoint: /entrypoint.sh
+  args:
+    - ${{ inputs.image }}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            metadata.runtime().unwrap(),
+            ActionRuntime::Docker {
+                image: "Dockerfile".into()
+            }
+        );
+        assert_eq!(metadata.runs.entrypoint.as_deref(), Some("/entrypoint.sh"));
+        assert_eq!(metadata.runs.args, vec!["${{ inputs.image }}"]);
     }
 
     #[test]
@@ -1452,5 +1584,70 @@ runs:
         assert!(invocation
             .env
             .contains(&("INPUT_FAIL_ON_CACHE_MISS".into(), "false".into())));
+    }
+
+    #[test]
+    fn builds_docker_action_invocation() {
+        let actions_host = Path::new("/tmp/actions");
+        let plan = RepositoryActionPlan {
+            step_id: "renovate".into(),
+            repository: "renovatebot/github-action".into(),
+            git_ref: "v46.1.14".into(),
+            source_path: None,
+            repository_dir: actions_host.join("_actions/renovatebot_github-action/v46.1.14"),
+            action_dir: actions_host.join("_actions/renovatebot_github-action/v46.1.14"),
+            inputs: [(
+                "renovate-image".to_string(),
+                "ghcr.io/renovatebot/renovate".to_string(),
+            )]
+            .into(),
+            env: [("LOG_LEVEL".to_string(), "debug".to_string())].into(),
+            condition: None,
+            continue_on_error: false,
+        };
+        let metadata = parse_action_metadata(
+            r#"
+inputs:
+  renovate-image:
+    default: ghcr.io/renovatebot/renovate
+runs:
+  using: docker
+  image: docker://alpine:3.20
+  entrypoint: /entrypoint.sh
+  args:
+    - ${{ inputs.renovate-image }}
+    - ${{ github.action_path }}/config.js
+"#,
+        )
+        .unwrap();
+        let runtime = metadata.runtime().unwrap();
+        let resolved = ResolvedAction {
+            plan,
+            metadata_path: actions_host
+                .join("_actions/renovatebot_github-action/v46.1.14/action.yml"),
+            metadata,
+            runtime,
+        };
+
+        let invocation = resolved.docker_invocation(actions_host).unwrap();
+
+        assert_eq!(invocation.image, "alpine:3.20");
+        assert!(invocation.build_context_host.is_none());
+        assert!(invocation.dockerfile_host.is_none());
+        assert_eq!(invocation.entrypoint.as_deref(), Some("/entrypoint.sh"));
+        assert_eq!(
+            invocation.args,
+            vec![
+                "ghcr.io/renovatebot/renovate",
+                "/__a/_actions/renovatebot_github-action/v46.1.14/config.js",
+            ]
+        );
+        assert!(invocation.env.contains(&(
+            "INPUT_RENOVATE_IMAGE".into(),
+            "ghcr.io/renovatebot/renovate".into()
+        )));
+        assert!(invocation
+            .env
+            .contains(&("LOG_LEVEL".into(), "debug".into())));
     }
 }

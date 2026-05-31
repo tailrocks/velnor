@@ -213,6 +213,9 @@ Implement action support in the order that unlocks target workflows fastest:
    - `ACTIONS_CACHE_URL`
    - `ACTIONS_RESULTS_URL`
 7. Docker action behavior:
+   - `runs.using: docker` action planning and execution is implemented for top-level and repository-nested action expansion
+   - `docker://` images run directly; local Dockerfile actions are built before execution
+   - Docker actions run as short-lived containers on the same job network with workspace/temp/actions/tools mounts and command-file env
    - job container can call host Docker
    - buildx action can create/use builders
    - GHA cache backend variables pass through

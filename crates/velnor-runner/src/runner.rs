@@ -772,6 +772,12 @@ fn append_resolved_action_steps(
             condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
             continue_on_error: action.plan.continue_on_error,
         }),
+        ActionRuntime::Docker { .. } => ordered.push(ExecutableStep::Docker {
+            step_id: action.plan.step_id.clone(),
+            invocation: action.docker_invocation(actions_host)?,
+            condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
+            continue_on_error: action.plan.continue_on_error,
+        }),
         ActionRuntime::Composite => {
             let action_condition =
                 combine_conditions(parent_condition, action.plan.condition.as_deref());
@@ -812,12 +818,6 @@ fn append_resolved_action_steps(
                     }
                 }
             }
-        }
-        ActionRuntime::Docker { image } => {
-            bail!(
-                "Docker action '{}' ({image}) is not implemented yet",
-                action.plan.repository
-            )
         }
     }
     Ok(())
@@ -1829,6 +1829,77 @@ runs:
             invocation.main_container_path,
             "/__a/_actions/acme_action/v1/sub/action/sub.js"
         );
+    }
+
+    #[test]
+    fn ordered_steps_expand_repository_docker_action() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Renovate",
+            "requestId": 1,
+            "steps": [{
+                "id": "renovate",
+                "reference": {
+                    "type": "Repository",
+                    "name": "renovatebot/github-action",
+                    "ref": "v46.1.14"
+                },
+                "inputs": { "renovate-image": "ghcr.io/renovatebot/renovate" }
+            }]
+        }))
+        .unwrap();
+        let actions_host = Path::new("/tmp/actions");
+        let plan = RepositoryActionPlan {
+            step_id: "renovate".into(),
+            repository: "renovatebot/github-action".into(),
+            git_ref: "v46.1.14".into(),
+            source_path: None,
+            repository_dir: actions_host.join("_actions/renovatebot_github-action/v46.1.14"),
+            action_dir: actions_host.join("_actions/renovatebot_github-action/v46.1.14"),
+            inputs: [(
+                "renovate-image".to_string(),
+                "ghcr.io/renovatebot/renovate".to_string(),
+            )]
+            .into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+        };
+        let metadata = parse_action_metadata(
+            r#"
+runs:
+  using: docker
+  image: docker://alpine:3.20
+  args:
+    - ${{ inputs.renovate-image }}
+"#,
+        )
+        .unwrap();
+        let resolved = ResolvedAction {
+            plan,
+            metadata_path: actions_host
+                .join("_actions/renovatebot_github-action/v46.1.14/action.yml"),
+            runtime: metadata.runtime().unwrap(),
+            metadata,
+        };
+
+        let ordered = ordered_executable_steps(&job, &[], &[resolved], &[], actions_host).unwrap();
+
+        assert_eq!(ordered.len(), 1);
+        let ExecutableStep::Docker {
+            step_id,
+            invocation,
+            ..
+        } = &ordered[0]
+        else {
+            panic!("repository Docker action should expand to Docker step")
+        };
+        assert_eq!(step_id, "renovate");
+        assert_eq!(invocation.image, "alpine:3.20");
+        assert_eq!(invocation.args, vec!["ghcr.io/renovatebot/renovate"]);
     }
 
     #[test]

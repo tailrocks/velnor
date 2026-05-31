@@ -107,6 +107,7 @@ Deliverables:
 - Node action handler: JavaScript action invocation and Docker `node <main>` executor shape are implemented and wired into the ordered Docker execution path
 - JavaScript actions run in a short-lived Node side container selected from `runs.using` with the same workspace/temp/actions/tools mounts and job network, so job images do not need to provide Node
 - JavaScript post hooks: `runs.post` is resolved, executed in reverse order after main steps, and receives `STATE_*` values saved through `GITHUB_STATE`
+- Docker action handler: `runs.using: docker` actions are planned and run as short-lived Docker containers on the job network; `docker://` images are used directly, and local Dockerfile actions are built before execution
 - `INPUT_*` environment variables: planned action inputs and metadata defaults are converted to `INPUT_*` for JavaScript invocation
 - step `env:` from GitHub job messages is parsed for script and JavaScript action steps, with basic expression resolution at execution time
 - workflow/job `env:` from GitHub job messages is overlaid into the runtime environment; protected `GITHUB_*`/`RUNNER_*` defaults are not overwritten
@@ -148,7 +149,7 @@ Deliverables:
 - composite outputs: metadata `outputs.*.value` is evaluated after expanded inner steps and exposed as `steps.<composite-id>.outputs.*`
 - post-step state if needed
 
-Current limit: `jackin`'s `aggregate-needs` shape is covered by the run-only subset, including `needs-json: ${{ toJSON(needs) }}` input rendering. `check-deployed-docs` can now plan its nested `jdx/mise-action` repository action. Marketplace composites such as `dtolnay/rust-toolchain`, `rui314/setup-mold`, `actions/upload-pages-artifact`, and `extractions/setup-just` can be expanded far enough to run scripts or route nested repository actions, with composite outputs materialized for later steps. Nested local actions, nested Docker actions, and full GitHub expression parity remain open.
+Current limit: `jackin`'s `aggregate-needs` shape is covered by the run-only subset, including `needs-json: ${{ toJSON(needs) }}` input rendering. `check-deployed-docs` can now plan its nested `jdx/mise-action` repository action. Marketplace composites such as `dtolnay/rust-toolchain`, `rui314/setup-mold`, `actions/upload-pages-artifact`, and `extractions/setup-just` can be expanded far enough to run scripts or route nested repository actions, with composite outputs materialized for later steps. Nested local actions and full GitHub expression parity remain open.
 
 Exit criteria:
 
