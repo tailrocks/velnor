@@ -306,6 +306,7 @@ where
             &plan.git_ref,
             &plan.repository_dir,
             None,
+            Some(1),
         )?;
         resolved.push(resolve_action(plan)?);
     }

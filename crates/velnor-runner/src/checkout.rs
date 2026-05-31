@@ -14,6 +14,7 @@ pub struct CheckoutPlan {
     pub version: Option<String>,
     pub destination: PathBuf,
     pub token: Option<String>,
+    pub fetch_depth: Option<u32>,
 }
 
 pub fn checkout_plans(
@@ -26,20 +27,34 @@ pub fn checkout_plans(
             continue;
         }
 
-        let repository = self_repository(&job.resources.repositories)?;
-        ensure_self_checkout(step, repository)?;
-        let clone_url = repository
-            .properties
-            .get("cloneUrl")
-            .or(repository.url.as_ref())
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("self repository missing clone URL"))?;
+        let self_repository = self_repository(&job.resources.repositories)?;
+        let checkout_repository = checkout_repository(step);
+        let clone_url = checkout_clone_url(checkout_repository.as_deref(), self_repository)?;
         let destination = workspace_host.join(checkout_path(step)?);
         plans.push(CheckoutPlan {
             clone_url,
-            version: checkout_ref(step).or_else(|| repository.version.clone()),
+            version: checkout_ref(step).or_else(|| {
+                checkout_repository
+                    .as_deref()
+                    .filter(|repository| {
+                        self_repository
+                            .name
+                            .as_deref()
+                            .is_some_and(|self_name| repository.eq_ignore_ascii_case(self_name))
+                    })
+                    .and_then(|_| self_repository.version.clone())
+                    .or_else(|| {
+                        if checkout_repository.is_none() {
+                            self_repository.version.clone()
+                        } else {
+                            None
+                        }
+                    })
+            }),
             destination,
-            token: system_access_token(job.system_connection()),
+            token: checkout_token(step, job)
+                .or_else(|| system_access_token(job.system_connection())),
+            fetch_depth: checkout_fetch_depth(step)?,
         });
     }
     Ok(plans)
@@ -73,6 +88,7 @@ where
         plan.version.as_deref().unwrap_or("HEAD"),
         &plan.destination,
         plan.token.as_deref(),
+        plan.fetch_depth,
     )
 }
 
@@ -82,6 +98,7 @@ pub fn fetch_git_ref<R>(
     git_ref: &str,
     destination: &Path,
     token: Option<&str>,
+    fetch_depth: Option<u32>,
 ) -> Result<()>
 where
     R: CommandRunner,
@@ -129,10 +146,11 @@ where
         "fetch".to_string(),
         "--no-tags".to_string(),
         "--prune".to_string(),
-        "--depth=1".to_string(),
-        "origin".to_string(),
-        git_ref.to_string(),
     ]);
+    if let Some(depth) = fetch_depth {
+        fetch.push(format!("--depth={depth}"));
+    }
+    fetch.extend(["origin".to_string(), git_ref.to_string()]);
     run_git(runner, &fetch)?;
 
     run_git(
@@ -202,24 +220,120 @@ fn checkout_ref(step: &ActionStep) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn ensure_self_checkout(step: &ActionStep, repository: &RepositoryResource) -> Result<()> {
-    let Some(requested_repository) = step
-        .inputs
+fn checkout_repository(step: &ActionStep) -> Option<String> {
+    step.inputs
         .as_ref()
         .and_then(|inputs| inputs.get("repository"))
         .and_then(|value| value.as_str())
         .filter(|value| !value.is_empty())
-    else {
-        return Ok(());
-    };
-    let Some(self_name) = repository.name.as_deref() else {
-        bail!("checkout repository input is unsupported without self repository name")
-    };
-    if requested_repository.eq_ignore_ascii_case(self_name) {
-        Ok(())
-    } else {
-        bail!("unsupported checkout repository '{requested_repository}'")
+        .map(ToOwned::to_owned)
+}
+
+fn checkout_clone_url(
+    requested_repository: Option<&str>,
+    self_repository: &RepositoryResource,
+) -> Result<String> {
+    match requested_repository {
+        Some(repository) if !is_repository_name(repository) => {
+            bail!("unsupported checkout repository '{repository}'")
+        }
+        Some(repository)
+            if self_repository
+                .name
+                .as_deref()
+                .is_some_and(|self_name| repository.eq_ignore_ascii_case(self_name)) =>
+        {
+            self_clone_url(self_repository)
+        }
+        Some(repository) => Ok(format!("https://github.com/{repository}.git")),
+        None => self_clone_url(self_repository),
     }
+}
+
+fn self_clone_url(repository: &RepositoryResource) -> Result<String> {
+    repository
+        .properties
+        .get("cloneUrl")
+        .or(repository.url.as_ref())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("self repository missing clone URL"))
+}
+
+fn is_repository_name(repository: &str) -> bool {
+    let mut parts = repository.split('/');
+    let Some(owner) = parts.next() else {
+        return false;
+    };
+    let Some(name) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none()
+        && [owner, name].iter().all(|part| {
+            !part.is_empty()
+                && *part != "."
+                && *part != ".."
+                && part
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.')
+        })
+}
+
+fn checkout_fetch_depth(step: &ActionStep) -> Result<Option<u32>> {
+    let Some(value) = step
+        .inputs
+        .as_ref()
+        .and_then(|inputs| inputs.get("fetch-depth"))
+    else {
+        return Ok(Some(1));
+    };
+    let Some(value) = value.as_str().filter(|value| !value.is_empty()) else {
+        return Ok(Some(1));
+    };
+    let depth = value
+        .parse::<u32>()
+        .with_context(|| format!("parse checkout fetch-depth '{value}'"))?;
+    if depth == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(depth))
+    }
+}
+
+fn checkout_token(step: &ActionStep, job: &AgentJobRequestMessage) -> Option<String> {
+    let token = step
+        .inputs
+        .as_ref()
+        .and_then(|inputs| inputs.get("token"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())?;
+    resolve_token_expression(token, job)
+}
+
+fn resolve_token_expression(token: &str, job: &AgentJobRequestMessage) -> Option<String> {
+    let expression = token
+        .trim()
+        .strip_prefix("${{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .map(str::trim);
+    let Some(expression) = expression else {
+        return Some(token.to_string());
+    };
+    if expression.eq_ignore_ascii_case("github.token")
+        || expression.eq_ignore_ascii_case("secrets.GITHUB_TOKEN")
+    {
+        return system_access_token(job.system_connection());
+    }
+    for prefix in ["secrets.", "secret."] {
+        if let Some(name) = expression.strip_prefix(prefix) {
+            return job
+                .variables
+                .get(&format!("secrets.{name}"))
+                .or_else(|| job.variables.get(&format!("secret.{name}")))
+                .or_else(|| job.variables.get(name))
+                .and_then(|value| value.value.clone());
+        }
+    }
+    Some(token.to_string())
 }
 
 fn system_access_token(endpoint: Option<&ServiceEndpoint>) -> Option<String> {
@@ -299,6 +413,7 @@ mod tests {
             version: Some("abc123".into()),
             destination: temp.clone(),
             token: Some("token".into()),
+            fetch_depth: Some(1),
         };
         let mut runner = RecordingRunner::default();
 
@@ -311,6 +426,7 @@ mod tests {
             .iter()
             .any(|(_, args)| args.contains(&"fetch".to_string())
                 && args.contains(&"abc123".to_string())
+                && args.contains(&"--depth=1".to_string())
                 && args
                     .iter()
                     .any(|arg| arg.contains("AUTHORIZATION: bearer token"))));
@@ -324,12 +440,121 @@ mod tests {
     }
 
     #[test]
-    fn rejects_checkout_of_different_repository() {
-        let step: ActionStep = serde_json::from_value(serde_json::json!({
-            "reference": { "type": "Repository", "name": "actions/checkout" },
-            "inputs": { "repository": "other/repo" }
+    fn full_fetch_checkout_omits_depth_arg() {
+        let temp = std::env::temp_dir().join(format!(
+            "velnor-checkout-full-fetch-test-{}",
+            std::process::id()
+        ));
+        let plan = CheckoutPlan {
+            clone_url: "https://github.com/acme/repo.git".into(),
+            version: Some("main".into()),
+            destination: temp.clone(),
+            token: None,
+            fetch_depth: None,
+        };
+        let mut runner = RecordingRunner::default();
+
+        execute_checkout(&mut runner, &plan).unwrap();
+
+        let fetch = runner
+            .calls
+            .iter()
+            .find(|(_, args)| args.contains(&"fetch".to_string()))
+            .unwrap();
+        assert!(!fetch.1.iter().any(|arg| arg.starts_with("--depth=")));
+
+        std::fs::remove_dir_all(temp).ok();
+    }
+
+    #[test]
+    fn plans_external_checkout_with_path_ref_token_and_full_fetch() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Release",
+            "requestId": 1,
+            "variables": {
+                "secrets.HOMEBREW_TAP_TOKEN": {
+                    "value": "tap-token",
+                    "isSecret": true
+                }
+            },
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "jackin-project/jackin",
+                    "version": "abc123",
+                    "properties": { "cloneUrl": "https://github.com/jackin-project/jackin.git" }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" },
+                "inputs": {
+                    "repository": "jackin-project/homebrew-tap",
+                    "ref": "main",
+                    "path": "homebrew-tap",
+                    "token": "${{ secrets.HOMEBREW_TAP_TOKEN }}",
+                    "fetch-depth": "0"
+                }
+            }]
         }))
         .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(
+            plans[0].clone_url,
+            "https://github.com/jackin-project/homebrew-tap.git"
+        );
+        assert_eq!(plans[0].version.as_deref(), Some("main"));
+        assert_eq!(plans[0].destination, Path::new("/tmp/work/homebrew-tap"));
+        assert_eq!(plans[0].token.as_deref(), Some("tap-token"));
+        assert_eq!(plans[0].fetch_depth, None);
+    }
+
+    #[test]
+    fn plans_self_checkout_defaults() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "CI",
+            "requestId": 1,
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "authorization": {
+                        "parameters": { "AccessToken": "ghs-token" }
+                    }
+                }],
+                "repositories": [{
+                    "alias": "self",
+                    "name": "acme/repo",
+                    "version": "abc123",
+                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans[0].clone_url, "https://github.com/acme/repo.git");
+        assert_eq!(plans[0].version.as_deref(), Some("abc123"));
+        assert_eq!(plans[0].destination, Path::new("/tmp/work"));
+        assert_eq!(plans[0].token.as_deref(), Some("ghs-token"));
+        assert_eq!(plans[0].fetch_depth, Some(1));
+    }
+
+    #[test]
+    fn rejects_malformed_checkout_repository() {
         let repository = RepositoryResource {
             alias: Some("self".into()),
             name: Some("acme/repo".into()),
@@ -339,7 +564,7 @@ mod tests {
             properties: Default::default(),
         };
 
-        let error = ensure_self_checkout(&step, &repository).unwrap_err();
+        let error = checkout_clone_url(Some("../bad"), &repository).unwrap_err();
 
         assert!(error
             .to_string()

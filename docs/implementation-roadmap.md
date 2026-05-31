@@ -85,7 +85,7 @@ Current code progress:
 - stdout workflow commands are parsed for legacy/state-changing commands: `set-output`, `set-env`, `add-path`, and `save-state`
 - basic `${{ github.* }}` and `${{ runner.* }}` context expressions are resolved from runtime env in later scripts and JavaScript action env
 - basic step `if` evaluation is implemented for output comparisons, step outcome checks, `runner.os`, `github.event_name`, `github.ref`, status functions, and simple `&&`/`||`
-- native self-repository `actions/checkout` support is wired before Docker execution through host `git init/fetch/checkout`; other repository actions remain unsupported
+- native `actions/checkout` support is wired before Docker execution through host `git init/fetch/checkout`; self and explicit `repository:` checkouts are supported, including target `path`, `ref`, `token`, and `fetch-depth` inputs
 
 Exit criteria:
 
@@ -100,7 +100,7 @@ Goal: support common JavaScript actions.
 
 Deliverables:
 
-- broader `actions/checkout` compatibility: repository input, sparse checkout, submodules, LFS, credentials cleanup
+- broader `actions/checkout` compatibility: `repository`, `path`, `ref`, `token`, and `fetch-depth` inputs are implemented for target shapes; sparse checkout, submodules, LFS, and credentials cleanup remain open
 - action resolver/downloader for `owner/repo@ref`: repository action download into `_actions` and metadata discovery are implemented
 - action metadata parser for `action.yml`: JavaScript, composite, and Docker `runs.using` shapes are modeled
 - repository action planner for enabled non-checkout `uses:` steps
