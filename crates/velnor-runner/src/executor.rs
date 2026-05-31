@@ -162,6 +162,9 @@ where
         temp_host: &Path,
     ) -> Result<Vec<StepExecutionResult>> {
         self.run_docker(&container.create_network_args())?;
+        for service in &container.services {
+            self.run_docker(&service.start_args())?;
+        }
         self.run_docker(&container.start_args())?;
 
         let ordered = steps
@@ -227,6 +230,9 @@ where
         temp_host: &Path,
     ) -> Result<JobExecutionSummary> {
         self.run_docker(&container.create_network_args())?;
+        for service in &container.services {
+            self.run_docker(&service.start_args())?;
+        }
         self.run_docker(&container.start_args())?;
 
         let result = self.execute_ordered_steps_in_started_container(
@@ -409,6 +415,9 @@ where
         temp_host: &Path,
     ) -> Result<StepExecutionResult> {
         self.run_docker(&container.create_network_args())?;
+        for service in &container.services {
+            self.run_docker(&service.start_args())?;
+        }
         self.run_docker(&container.start_args())?;
 
         let result = (|| {
@@ -476,9 +485,18 @@ where
 
     fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
         let container_result = self.run_docker(&container.remove_container_args());
+        let service_results = container
+            .services
+            .iter()
+            .rev()
+            .map(|service| self.run_docker(&service.remove_args()))
+            .collect::<Vec<_>>();
         let network_result = self.run_docker(&container.remove_network_args());
 
         container_result?;
+        for service_result in service_results {
+            service_result?;
+        }
         network_result?;
         Ok(())
     }
@@ -1283,6 +1301,7 @@ mod tests {
             tools_host: temp.join("tools"),
             mount_docker_socket: false,
             env: Vec::new(),
+            services: Vec::new(),
         }
     }
 

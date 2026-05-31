@@ -14,7 +14,7 @@ use crate::{
     checkout::{checkout_plans, execute_checkouts},
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
-    container::JobContainerSpec,
+    container::{JobContainerSpec, ServiceContainerSpec},
     executor::{DockerScriptExecutor, ExecutableStep, ProcessCommandRunner, StepLog},
     job_message::{ActionReferenceType, AgentJobRequestMessage, PIPELINE_AGENT_JOB_REQUEST},
     protocol::{
@@ -530,6 +530,7 @@ fn execute_script_job(
         tools_host: tools,
         mount_docker_socket: true,
         env: job_container_env(job),
+        services: service_containers(job),
     };
     let mut executor = DockerScriptExecutor::new(command_runner);
     let base_env = job_runtime_env(job);
@@ -878,6 +879,32 @@ fn job_container_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         .as_ref()
         .into_iter()
         .flat_map(container_env)
+        .collect()
+}
+
+fn service_containers(job: &AgentJobRequestMessage) -> Vec<ServiceContainerSpec> {
+    let network = format!("velnor-net-{}", sanitize_path_segment(&job.job_id));
+    job.resources
+        .containers
+        .iter()
+        .filter_map(|container| {
+            let alias = container.alias.as_deref()?;
+            if alias == "__job" || alias.eq_ignore_ascii_case("job") {
+                return None;
+            }
+            let image = container.image.as_ref()?.clone();
+            Some(ServiceContainerSpec {
+                name: format!(
+                    "velnor-service-{}-{}",
+                    sanitize_path_segment(&job.job_id),
+                    sanitize_path_segment(alias)
+                ),
+                image,
+                network_alias: alias.to_string(),
+                network: network.clone(),
+                env: Vec::new(),
+            })
+        })
         .collect()
 }
 
@@ -1394,6 +1421,36 @@ mod tests {
         assert_eq!(
             job_container_env(&array_job),
             vec![("RUST_LOG".into(), "debug".into())]
+        );
+    }
+
+    #[test]
+    fn service_containers_use_non_job_container_resources() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job/1",
+            "jobDisplayName": "Services",
+            "requestId": 1,
+            "resources": {
+                "containers": [
+                    { "alias": "__job", "image": "ubuntu:24.04" },
+                    { "alias": "postgres", "image": "postgres:16" }
+                ]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            service_containers(&job),
+            vec![ServiceContainerSpec {
+                name: "velnor-service-job_1-postgres".into(),
+                image: "postgres:16".into(),
+                network_alias: "postgres".into(),
+                network: "velnor-net-job_1".into(),
+                env: Vec::new(),
+            }]
         );
     }
 

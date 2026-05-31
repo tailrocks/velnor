@@ -13,6 +13,7 @@ pub struct JobContainerSpec {
     pub tools_host: PathBuf,
     pub mount_docker_socket: bool,
     pub env: Vec<(String, String)>,
+    pub services: Vec<ServiceContainerSpec>,
 }
 
 impl JobContainerSpec {
@@ -101,6 +102,39 @@ impl JobContainerSpec {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceContainerSpec {
+    pub name: String,
+    pub image: String,
+    pub network_alias: String,
+    pub network: String,
+    pub env: Vec<(String, String)>,
+}
+
+impl ServiceContainerSpec {
+    pub fn start_args(&self) -> Vec<String> {
+        let mut args = vec![
+            "run".into(),
+            "--detach".into(),
+            "--name".into(),
+            self.name.clone(),
+            "--network".into(),
+            self.network.clone(),
+            "--network-alias".into(),
+            self.network_alias.clone(),
+        ];
+        for (name, value) in &self.env {
+            args.extend(["-e".into(), format!("{name}={value}")]);
+        }
+        args.extend([self.image.clone()]);
+        args
+    }
+
+    pub fn remove_args(&self) -> Vec<String> {
+        vec!["rm".into(), "--force".into(), self.name.clone()]
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum Shell {
     Bash,
@@ -141,6 +175,7 @@ mod tests {
             tools_host: "/tmp/tools".into(),
             mount_docker_socket: true,
             env: vec![("NODE_OPTIONS".into(), "--max-old-space-size=4096".into())],
+            services: Vec::new(),
         }
     }
 
@@ -204,6 +239,38 @@ mod tests {
                 "node",
                 "/__a/action/dist/index.js"
             ]
+        );
+    }
+
+    #[test]
+    fn builds_service_container_start_args() {
+        let service = ServiceContainerSpec {
+            name: "velnor-service-postgres".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "velnor-net-1".into(),
+            env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
+        };
+
+        assert_eq!(
+            service.start_args(),
+            vec![
+                "run",
+                "--detach",
+                "--name",
+                "velnor-service-postgres",
+                "--network",
+                "velnor-net-1",
+                "--network-alias",
+                "postgres",
+                "-e",
+                "POSTGRES_PASSWORD=postgres",
+                "postgres:16"
+            ]
+        );
+        assert_eq!(
+            service.remove_args(),
+            vec!["rm", "--force", "velnor-service-postgres"]
         );
     }
 }

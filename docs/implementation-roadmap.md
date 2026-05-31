@@ -51,6 +51,7 @@ Deliverables:
 - per-job workspace/temp/actions/tools directories
 - per-job Docker network
 - long-running job container
+- basic service containers from GitHub container resources start on the same Docker network with their GitHub alias as a network alias
 - explicit GitHub job `container:` images are used when present; otherwise Velnor falls back to the CLI/default Docker image
 - job container environment variables from GitHub's job container payload are passed to `docker run`
 - `docker exec` for each script step

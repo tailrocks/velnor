@@ -125,6 +125,8 @@ Current code can map enabled GitHub `run:` message steps into internal script-st
 
 When GitHub sends an explicit job container image, Velnor uses that image for the long-running Docker job container. If no job image is present, Velnor uses the CLI/default image. Job container environment variables from the job container payload are passed through to `docker run`.
 
+Basic service containers from GitHub container resources are started on the same per-job Docker network before the job container, using the GitHub alias as Docker network alias, and removed during cleanup.
+
 Current code also treats enabled `actions/checkout` for the self repository as a native host-side checkout before starting the Docker job container. It uses the self repository resource clone URL, job version/ref, and system access token if present. Cross-repository checkout, submodules, sparse checkout, LFS, and full credential cleanup remain later compatibility work.
 
 For target workflows, mount the host Docker socket first. This weakens isolation but is the shortest path to `docker/setup-buildx-action`, `docker/bake-action`, `docker/build-push-action`, and direct `docker buildx`.
