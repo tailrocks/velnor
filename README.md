@@ -27,6 +27,22 @@ The later typed workflow model:
 
 See [docs/vision.md](docs/vision.md).
 
+## Current Runner Scaffold
+
+The first Rust crate is `velnor-runner`. It currently provides the local CLI/config shell for Milestone 0:
+
+```sh
+cargo run --bin velnor-runner -- configure \
+  --url https://github.com/OWNER/REPO \
+  --token "$GITHUB_RUNNER_REGISTRATION_TOKEN" \
+  --labels velnor,hetzner-sentry-ci
+
+cargo run --bin velnor-runner -- status
+cargo run --bin velnor-runner -- run
+```
+
+Remote GitHub registration and job polling are the next implementation step.
+
 Phase 0 runner compatibility: [docs/phase-0-github-runner-compat.md](docs/phase-0-github-runner-compat.md).
 
 Implementation roadmap: [docs/implementation-roadmap.md](docs/implementation-roadmap.md).
