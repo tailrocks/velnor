@@ -111,6 +111,52 @@ Velnor must support these before it can replace the two target repos:
 
 ## Candidate Summary
 
+## Popularity And Age
+
+GitHub metadata captured on 2026-05-31. `createdAt` is the GitHub repository creation date, not necessarily the original language birth date.
+
+| Language | Main repo used for comparison | GitHub created | Stars | Notes |
+| --- | --- | ---: | ---: | --- |
+| Nix | https://github.com/NixOS/nix | 2012-02-08 | 16,986 | Oldest GitHub repo in this set; major ecosystem, but heavier UX than Velnor wants |
+| Jsonnet | https://github.com/google/jsonnet | 2014-08-01 | 7,517 | Mature config language; dynamic typing |
+| Dhall | https://github.com/dhall-lang/dhall-haskell | 2016-09-07 | 965 | Strong safety/typing, lower GitHub star count |
+| Starlark | https://github.com/bazelbuild/starlark | 2018-08-16 | 3,009 | Language repo; popularity is bigger through Bazel/Buck usage than repo stars suggest |
+| Nickel | https://github.com/nickel-lang/nickel | 2019-01-08 | 2,926 | Rust-native and config-first, but smaller ecosystem |
+| CUE | https://github.com/cue-lang/cue | 2021-07-02 | 6,124 | Strong schema/config validation; Go-native |
+| KCL | https://github.com/kcl-lang/kcl | 2022-05-05 | 2,363 | Rust-heavy core; CNCF Sandbox; smaller but aligned with Velnor |
+| Pkl | https://github.com/apple/pkl | 2024-01-19 | 11,373 | Newest repo; very strong early popularity and best UX signal |
+
+Popularity ranking by stars:
+
+1. Nix
+2. Pkl
+3. Jsonnet
+4. CUE
+5. Starlark
+6. Nickel
+7. KCL
+8. Dhall
+
+Age ranking by GitHub repository creation:
+
+1. Nix
+2. Jsonnet
+3. Dhall
+4. Starlark
+5. Nickel
+6. CUE
+7. KCL
+8. Pkl
+
+Interpretation:
+
+- Pkl is the newest but already second by stars, which is a strong UX/popularity signal.
+- KCL is less popular by stars, but more aligned with Rust implementation and typed config/policy.
+- CUE is more popular than KCL and very strong technically, but brings a Go-native center of gravity.
+- Jsonnet and Starlark are older and known, but weaker for Velnor's strong typing goal.
+- Nix is by far the most popular/oldest here, but likely too much language/ecosystem weight for GitHub Actions-like CI UX.
+- Dhall is technically safe but not popular enough to justify its ergonomics cost for this product.
+
 | Language | Fit | Strength | Risk |
 | --- | --- | --- | --- |
 | KCL | Strong | Schemas, constraints, Rust-heavy core, CNCF Sandbox | Smaller ecosystem than Jsonnet/Starlark/Nix; cloud-native bias |
@@ -770,4 +816,3 @@ KCL is the best current default for Velnor:
 - abstractions can remove real duplication in both target repos
 
 Pkl is still the best UX challenger. CUE is the best schema/validation challenger.
-
