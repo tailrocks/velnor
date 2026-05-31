@@ -64,13 +64,13 @@ impl JobContainerSpec {
         script_path_in_container: &str,
         shell: Shell,
         working_directory: &str,
+        env: &[(String, String)],
     ) -> Vec<String> {
-        let mut args = vec![
-            "exec".into(),
-            "--workdir".into(),
-            working_directory.into(),
-            self.name.clone(),
-        ];
+        let mut args = vec!["exec".into(), "--workdir".into(), working_directory.into()];
+        for (name, value) in env {
+            args.extend(["-e".into(), format!("{name}={value}")]);
+        }
+        args.push(self.name.clone());
         args.extend(shell.command_args(script_path_in_container));
         args
     }
@@ -140,7 +140,12 @@ mod tests {
 
     #[test]
     fn builds_bash_exec_args() {
-        let args = spec().exec_script_args("/__t/step.sh", Shell::Bash, "/__w/repo");
+        let args = spec().exec_script_args(
+            "/__t/step.sh",
+            Shell::Bash,
+            "/__w/repo",
+            &[("GITHUB_OUTPUT".into(), "/__t/out".into())],
+        );
 
         assert_eq!(
             args,
@@ -148,6 +153,8 @@ mod tests {
                 "exec",
                 "--workdir",
                 "/__w/repo",
+                "-e",
+                "GITHUB_OUTPUT=/__t/out",
                 "velnor-job-1",
                 "bash",
                 "--noprofile",

@@ -4,6 +4,7 @@ mod config;
 mod container;
 mod protocol;
 mod runner;
+mod script_step;
 
 use anyhow::Result;
 use clap::Parser;

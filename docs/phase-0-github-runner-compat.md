@@ -185,10 +185,10 @@ Phase 0 should start with Option A and document the security tradeoff.
 
 Initial code now models this Docker command shape without executing it yet. The next execution step is to connect assigned job steps to:
 
-- command-file setup per step
-- script writing under runner temp
+- command-file setup per step: implemented as step plan
+- script writing under runner temp: implemented as step plan
 - `docker exec` using `bash`/`sh`
-- command-file parsing after each step
+- command-file parsing after each step: implemented as state collector
 
 ## Required Workflow Features
 

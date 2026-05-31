@@ -64,6 +64,7 @@ Current code progress:
 
 - command-file parser supports `NAME=value` and heredoc `NAME<<EOF` syntax
 - Docker job container command builder covers network/container start, `docker exec`, and cleanup command shapes
+- script-step plan writes the script under runner temp, exposes per-step command-file env vars, and collects output/env/path/state/summary files after execution
 
 Exit criteria:
 
