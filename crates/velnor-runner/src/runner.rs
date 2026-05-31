@@ -1036,12 +1036,14 @@ async fn complete_job(
         .ok_or_else(|| anyhow::anyhow!("job plan missing scopeIdentifier"))?;
     let hub_name = job.plan.plan_type.as_deref().unwrap_or("build");
     let start_time = utc_now_rfc3339()?;
+    let (error_count, warning_count, notice_count) = step_issue_counts(&step_logs);
     let record = TimelineRecord::job_pending(
         job.job_id.clone(),
         job.job_display_name.clone(),
         job.job_name.clone(),
         worker_name,
     )
+    .with_issue_counts(error_count, warning_count, notice_count)
     .in_progress(start_time);
 
     client
@@ -1088,6 +1090,11 @@ async fn complete_job(
                     (index + 1) as i32,
                     finish_time,
                     step_log_result(&step_log),
+                )
+                .with_issue_counts(
+                    step_log.error_count,
+                    step_log.warning_count,
+                    step_log.notice_count,
                 )],
             )
             .await?;
@@ -1157,6 +1164,16 @@ fn step_log_result(step_log: &StepLog) -> TaskResult {
     } else {
         TaskResult::Failed
     }
+}
+
+fn step_issue_counts(step_logs: &[StepLog]) -> (i32, i32, i32) {
+    step_logs.iter().fold((0, 0, 0), |counts, step| {
+        (
+            counts.0 + step.error_count,
+            counts.1 + step.warning_count,
+            counts.2 + step.notice_count,
+        )
+    })
 }
 
 fn job_mask_values(job: &AgentJobRequestMessage) -> Vec<String> {

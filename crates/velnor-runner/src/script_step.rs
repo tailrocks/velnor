@@ -325,6 +325,9 @@ impl CommandFileSet {
             state: commands_to_map(parse_command_file(&self.state.host)?),
             summary: fs::read_to_string(&self.summary.host)?,
             masks: Vec::new(),
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
         })
     }
 }
@@ -353,6 +356,9 @@ pub struct StepCommandState {
     pub state: BTreeMap<String, String>,
     pub summary: String,
     pub masks: Vec<String>,
+    pub error_count: i32,
+    pub warning_count: i32,
+    pub notice_count: i32,
 }
 
 impl StepCommandState {
@@ -362,6 +368,9 @@ impl StepCommandState {
         self.path.extend(other.path);
         self.state.extend(other.state);
         self.masks.extend(other.masks);
+        self.error_count += other.error_count;
+        self.warning_count += other.warning_count;
+        self.notice_count += other.notice_count;
         if !other.summary.is_empty() {
             self.summary.push_str(&other.summary);
         }

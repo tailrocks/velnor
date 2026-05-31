@@ -88,6 +88,9 @@ pub struct StepLog {
     pub exit_code: i32,
     pub skipped: bool,
     pub failure_ignored: bool,
+    pub error_count: i32,
+    pub warning_count: i32,
+    pub notice_count: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -1048,6 +1051,9 @@ fn step_log(step_id: &str, result: &StepExecutionResult) -> Option<StepLog> {
         exit_code: result.exit_code,
         skipped: result.skipped,
         failure_ignored: result.failure_ignored,
+        error_count: result.state.error_count,
+        warning_count: result.state.warning_count,
+        notice_count: result.state.notice_count,
     })
 }
 
@@ -1378,7 +1384,7 @@ mod tests {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             self.calls.push((program.to_string(), args.to_vec()));
             let stdout = if program == "docker" && args.first().is_some_and(|arg| arg == "exec") {
-                "::set-output name=answer::42\n::add-path::/opt/tool\n::add-mask::hidden\nhidden\n"
+                "::set-output name=answer::42\n::add-path::/opt/tool\n::add-mask::hidden\n::error::broken\nhidden\n"
                     .to_string()
             } else {
                 String::new()
@@ -2075,9 +2081,13 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].state.outputs["answer"], "42");
         assert_eq!(results[0].state.path, vec!["/opt/tool"]);
+        assert_eq!(results[0].state.error_count, 1);
+        assert_eq!(results[0].state.warning_count, 0);
+        assert_eq!(results[0].state.notice_count, 0);
         assert_eq!(summary.step_logs[0].step_id, "producer");
         assert!(summary.step_logs[0].lines.contains(&"hidden".to_string()));
         assert_eq!(summary.step_logs[0].masks, vec!["hidden"]);
+        assert_eq!(summary.step_logs[0].error_count, 1);
         assert_eq!(summary.step_logs[0].exit_code, 0);
         assert!(!summary.step_logs[0].skipped);
         assert_eq!(

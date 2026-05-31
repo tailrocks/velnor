@@ -1375,6 +1375,18 @@ impl TimelineRecord {
         }
     }
 
+    pub fn with_issue_counts(
+        mut self,
+        error_count: i32,
+        warning_count: i32,
+        notice_count: i32,
+    ) -> Self {
+        self.error_count = error_count;
+        self.warning_count = warning_count;
+        self.notice_count = notice_count;
+        self
+    }
+
     pub fn in_progress(mut self, start_time: impl Into<String>) -> Self {
         self.start_time = Some(start_time.into());
         self.state = Some(TimelineRecordState::InProgress);
@@ -1735,7 +1747,8 @@ mod tests {
             1,
             "2026-05-31T12:01:00Z",
             TaskResult::Failed,
-        );
+        )
+        .with_issue_counts(1, 2, 3);
         let json = serde_json::to_value(record).unwrap();
 
         assert_eq!(
@@ -1750,9 +1763,9 @@ mod tests {
                 "state": "completed",
                 "result": "failed",
                 "order": 1,
-                "errorCount": 0,
-                "warningCount": 0,
-                "noticeCount": 0
+                "errorCount": 1,
+                "warningCount": 2,
+                "noticeCount": 3
             })
         );
     }

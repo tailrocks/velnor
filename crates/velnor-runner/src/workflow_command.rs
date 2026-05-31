@@ -38,6 +38,9 @@ pub fn parse_workflow_commands(output: &str) -> StepCommandState {
                     state.masks.push(command.value);
                 }
             }
+            "error" => state.error_count += 1,
+            "warning" => state.warning_count += 1,
+            "notice" => state.notice_count += 1,
             _ => {}
         }
     }
@@ -91,7 +94,9 @@ mod tests {
              ::add-path::/opt/tool\n\
              ::save-state name=cleanup::yes\n\
              ::add-mask::top-secret\n\
-             ::warning::ignored\n",
+             ::error file=src/main.rs,line=7::broken\n\
+             ::warning::careful\n\
+             ::notice::noted\n",
         );
 
         assert_eq!(state.outputs["answer"], "42");
@@ -99,6 +104,9 @@ mod tests {
         assert_eq!(state.path, vec!["/opt/tool"]);
         assert_eq!(state.state["cleanup"], "yes");
         assert_eq!(state.masks, vec!["top-secret"]);
+        assert_eq!(state.error_count, 1);
+        assert_eq!(state.warning_count, 1);
+        assert_eq!(state.notice_count, 1);
     }
 
     #[test]
