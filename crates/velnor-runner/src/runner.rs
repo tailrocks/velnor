@@ -522,7 +522,7 @@ fn execute_script_job(
 
     let container = JobContainerSpec {
         name: format!("velnor-job-{}", sanitize_path_segment(&job.job_id)),
-        image: docker_image.to_string(),
+        image: job_container_image(job).unwrap_or(docker_image).to_string(),
         network: format!("velnor-net-{}", sanitize_path_segment(&job.job_id)),
         workspace_host: workspace,
         temp_host: temp.clone(),
@@ -852,6 +852,38 @@ fn job_work_dir(
     work_dir
         .unwrap_or_else(|| config_dir.join("_work"))
         .join(sanitize_path_segment(&job.job_id))
+}
+
+fn job_container_image(job: &AgentJobRequestMessage) -> Option<&str> {
+    job.job_container
+        .as_ref()
+        .and_then(container_image)
+        .or_else(|| {
+            job.resources
+                .containers
+                .iter()
+                .find(|container| {
+                    container
+                        .alias
+                        .as_deref()
+                        .is_some_and(|alias| alias == "__job" || alias.eq_ignore_ascii_case("job"))
+                })
+                .and_then(|container| container.image.as_deref())
+        })
+}
+
+fn container_image(value: &Value) -> Option<&str> {
+    value
+        .as_object()
+        .and_then(|object| {
+            object
+                .get("image")
+                .or_else(|| object.get("Image"))
+                .or_else(|| object.get("containerImage"))
+                .or_else(|| object.get("ContainerImage"))
+        })
+        .and_then(Value::as_str)
+        .filter(|image| !image.is_empty())
 }
 
 async fn complete_job(
@@ -1230,6 +1262,54 @@ mod tests {
         assert_eq!(
             mask_text("hint-secret ghs_token visible", &masks),
             "*** *** visible"
+        );
+    }
+
+    #[test]
+    fn job_container_image_prefers_explicit_job_container() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Container",
+            "requestId": 1,
+            "jobContainer": {
+                "image": "ghcr.io/acme/job:latest"
+            },
+            "resources": {
+                "containers": [{
+                    "alias": "__job",
+                    "image": "ubuntu:24.04"
+                }]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(job_container_image(&job), Some("ghcr.io/acme/job:latest"));
+    }
+
+    #[test]
+    fn job_container_image_uses_job_resource_container() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Container",
+            "requestId": 1,
+            "resources": {
+                "containers": [{
+                    "alias": "__job",
+                    "image": "ghcr.io/acme/resource:latest"
+                }]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            job_container_image(&job),
+            Some("ghcr.io/acme/resource:latest")
         );
     }
 

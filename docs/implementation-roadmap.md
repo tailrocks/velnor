@@ -51,6 +51,7 @@ Deliverables:
 - per-job workspace/temp/actions/tools directories
 - per-job Docker network
 - long-running job container
+- explicit GitHub job `container:` images are used when present; otherwise Velnor falls back to the CLI/default Docker image
 - `docker exec` for each script step
 - shell resolution for `bash` and `sh`
 - working directory support
