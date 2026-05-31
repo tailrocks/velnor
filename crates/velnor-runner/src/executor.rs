@@ -4,6 +4,7 @@ use crate::{
     action::JavaScriptActionInvocation,
     container::JobContainerSpec,
     script_step::{ScriptStep, ScriptStepPlan, StepCommandState},
+    workflow_command::parse_workflow_commands,
 };
 use anyhow::{bail, Context, Result};
 use std::{
@@ -180,7 +181,8 @@ where
                         &env,
                     );
                     let step_result = self.runner.run("docker", &exec_args)?;
-                    let command_state = plan.collect_state()?;
+                    let mut command_state = plan.collect_state()?;
+                    command_state.merge(parse_workflow_commands(&step_result.stdout));
                     Ok(StepExecutionResult {
                         exit_code: step_result.code,
                         state: command_state,
@@ -270,7 +272,8 @@ where
             &["node".to_string(), action.main_container_path.clone()],
         );
         let step_result = self.runner.run("docker", &exec_args)?;
-        let state = command_files.collect_state()?;
+        let mut state = command_files.collect_state()?;
+        state.merge(parse_workflow_commands(&step_result.stdout));
         Ok(StepExecutionResult {
             exit_code: step_result.code,
             state,
@@ -598,6 +601,27 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct StdoutCommandRunner {
+        calls: Vec<(String, Vec<String>)>,
+    }
+
+    impl CommandRunner for StdoutCommandRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            let stdout = if program == "docker" && args.first().is_some_and(|arg| arg == "exec") {
+                "::set-output name=answer::42\n::add-path::/opt/tool\n".to_string()
+            } else {
+                String::new()
+            };
+            Ok(CommandResult {
+                code: 0,
+                stdout,
+                stderr: String::new(),
+            })
+        }
+    }
+
     fn temp_dir() -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -853,6 +877,42 @@ mod tests {
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
             "echo answer=42\n"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn workflow_commands_from_stdout_update_later_steps() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "producer".into(),
+                script: "node old-action.js".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                condition: None,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "consumer".into(),
+                script: "echo answer=${{ steps.producer.outputs.answer }}".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                condition: None,
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(StdoutCommandRunner::default());
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].state.outputs["answer"], "42");
+        assert_eq!(results[0].state.path, vec!["/opt/tool"]);
+        assert_eq!(
+            fs::read_to_string(temp.join("consumer.sh")).unwrap(),
+            "export PATH='/opt/tool':\"$PATH\"\necho answer=42\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }

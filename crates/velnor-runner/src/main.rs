@@ -10,6 +10,7 @@ mod protocol;
 mod runner;
 mod runtime_env;
 mod script_step;
+mod workflow_command;
 
 use anyhow::Result;
 use clap::Parser;

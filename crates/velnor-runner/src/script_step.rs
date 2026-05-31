@@ -255,6 +255,18 @@ pub struct StepCommandState {
     pub summary: String,
 }
 
+impl StepCommandState {
+    pub fn merge(&mut self, other: StepCommandState) {
+        self.outputs.extend(other.outputs);
+        self.env.extend(other.env);
+        self.path.extend(other.path);
+        self.state.extend(other.state);
+        if !other.summary.is_empty() {
+            self.summary.push_str(&other.summary);
+        }
+    }
+}
+
 fn commands_to_map(commands: Vec<FileCommand>) -> BTreeMap<String, String> {
     commands
         .into_iter()

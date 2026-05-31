@@ -73,6 +73,7 @@ Current code progress:
 - opt-in `run --execute-scripts` can execute script-only jobs in one Docker job container and finish success/failure; enabled non-script actions are refused instead of being faked
 - env written to `GITHUB_ENV` and paths written to `GITHUB_PATH` are propagated to later script steps
 - step outputs written to `GITHUB_OUTPUT` are tracked by step id and basic `${{ steps.<id>.outputs.<name> }}` expressions are resolved in later scripts and JavaScript action env
+- stdout workflow commands are parsed for legacy/state-changing commands: `set-output`, `set-env`, `add-path`, and `save-state`
 - basic `${{ github.* }}` and `${{ runner.* }}` context expressions are resolved from runtime env in later scripts and JavaScript action env
 - basic step `if` evaluation is implemented for output comparisons, step outcome checks, `runner.os`, `github.event_name`, `github.ref`, and simple `&&`/`||`
 - native self-repository `actions/checkout` support is wired before Docker execution through host `git init/fetch/checkout`; other repository actions remain unsupported
@@ -105,7 +106,7 @@ Deliverables:
   - `ACTIONS_RESULTS_URL`
   - broader GitHub runner env parity remains incomplete
 - secret masking
-- basic workflow command parsing
+- basic workflow command parsing: state-changing stdout commands are parsed; annotations/log grouping are not yet reported to GitHub UI
 - ordered job execution for script steps and JavaScript actions in original message order is wired; host-side checkout still runs before the Docker container starts
 
 Exit criteria:
