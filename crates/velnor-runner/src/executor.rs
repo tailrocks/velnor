@@ -73,6 +73,11 @@ pub enum ExecutableStep {
         condition: Option<String>,
         continue_on_error: bool,
     },
+    CompositeOutputs {
+        step_id: String,
+        outputs: BTreeMap<String, String>,
+        condition: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -86,6 +91,7 @@ impl ExecutableStep {
         match self {
             ExecutableStep::Script(step) => &step.id,
             ExecutableStep::JavaScript { step_id, .. } => step_id,
+            ExecutableStep::CompositeOutputs { step_id, .. } => step_id,
         }
     }
 
@@ -93,6 +99,7 @@ impl ExecutableStep {
         match self {
             ExecutableStep::Script(step) => step.condition.as_deref(),
             ExecutableStep::JavaScript { condition, .. } => condition.as_deref(),
+            ExecutableStep::CompositeOutputs { condition, .. } => condition.as_deref(),
         }
     }
 
@@ -102,6 +109,7 @@ impl ExecutableStep {
             ExecutableStep::JavaScript {
                 continue_on_error, ..
             } => *continue_on_error,
+            ExecutableStep::CompositeOutputs { .. } => false,
         }
     }
 }
@@ -290,6 +298,15 @@ where
                     temp_host,
                     &state,
                 ),
+                ExecutableStep::CompositeOutputs { outputs, .. } => Ok(StepExecutionResult {
+                    exit_code: 0,
+                    state: StepCommandState {
+                        outputs: state.evaluate_named_outputs(outputs),
+                        ..StepCommandState::default()
+                    },
+                    skipped: false,
+                    failure_ignored: false,
+                }),
             })();
 
             match result {
@@ -572,6 +589,19 @@ impl JobExecutionState {
     fn resolve_env(&self, env: &[(String, String)]) -> Vec<(String, String)> {
         env.iter()
             .map(|(name, value)| (name.clone(), self.resolve_expressions(value)))
+            .collect()
+    }
+
+    fn evaluate_named_outputs(
+        &self,
+        outputs: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        outputs
+            .iter()
+            .filter_map(|(name, value)| {
+                let value = self.resolve_expressions(value);
+                (!value.is_empty()).then(|| (name.clone(), value))
+            })
             .collect()
     }
 
@@ -1563,6 +1593,57 @@ mod tests {
         assert_eq!(summary.job_outputs["answer"], "42");
         assert_eq!(summary.job_outputs["fallback"], "default");
         assert!(!summary.job_outputs.contains_key("empty"));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn materializes_composite_outputs_as_outer_step_outputs() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "producer".into(),
+                script: "echo answer=42 >> $GITHUB_OUTPUT".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+            ExecutableStep::CompositeOutputs {
+                step_id: "composite".into(),
+                outputs: [(
+                    "artifact-id".to_string(),
+                    "${{ steps.producer.outputs.answer }}".to_string(),
+                )]
+                .into(),
+                condition: None,
+            },
+            ExecutableStep::Script(ScriptStep {
+                id: "consumer".into(),
+                script: "echo artifact=${{ steps.composite.outputs.artifact-id }}".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[1].state.outputs["artifact-id"], "42");
+        assert_eq!(
+            fs::read_to_string(temp.join("consumer.sh")).unwrap(),
+            "echo artifact=42\n"
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 

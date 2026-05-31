@@ -137,10 +137,10 @@ Deliverables:
 - composite step conditions: `if:` is parsed, rendered with composite inputs, and propagated to expanded `run` and nested repository JavaScript steps
 - repository composite actions: downloaded marketplace composites now expand into ordered script steps; nested repository actions inside those composites are discovered and downloaded recursively
 - composite `continue-on-error`: parsed for nested composite steps and applied to expanded script/repository steps
-- composite outputs
+- composite outputs: metadata `outputs.*.value` is evaluated after expanded inner steps and exposed as `steps.<composite-id>.outputs.*`
 - post-step state if needed
 
-Current limit: `jackin`'s `aggregate-needs` shape is covered by the run-only subset, including `needs-json: ${{ toJSON(needs) }}` input rendering. `check-deployed-docs` can now plan its nested `jdx/mise-action` repository action. Marketplace composites such as `dtolnay/rust-toolchain`, `rui314/setup-mold`, `actions/upload-pages-artifact`, and `extractions/setup-just` can be expanded far enough to run scripts or route nested repository actions. Composite outputs, nested local actions, nested Docker actions, and full GitHub expression parity remain open.
+Current limit: `jackin`'s `aggregate-needs` shape is covered by the run-only subset, including `needs-json: ${{ toJSON(needs) }}` input rendering. `check-deployed-docs` can now plan its nested `jdx/mise-action` repository action. Marketplace composites such as `dtolnay/rust-toolchain`, `rui314/setup-mold`, `actions/upload-pages-artifact`, and `extractions/setup-just` can be expanded far enough to run scripts or route nested repository actions, with composite outputs materialized for later steps. Nested local actions, nested Docker actions, and full GitHub expression parity remain open.
 
 Exit criteria:
 

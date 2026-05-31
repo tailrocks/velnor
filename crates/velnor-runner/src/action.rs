@@ -23,6 +23,8 @@ pub struct ActionMetadata {
     pub runs: ActionRuns,
     #[serde(default)]
     pub inputs: BTreeMap<String, ActionInput>,
+    #[serde(default)]
+    pub outputs: BTreeMap<String, ActionOutput>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -33,6 +35,14 @@ pub struct ActionInput {
     pub default_value: Option<String>,
     #[serde(default)]
     pub required: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActionOutput {
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub value: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -131,6 +141,13 @@ pub struct LocalActionPlan {
 pub enum CompositeActionInvocation {
     Script(ScriptStep),
     Repository(RepositoryActionPlan),
+    Outputs(CompositeActionOutputs),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositeActionOutputs {
+    pub step_id: String,
+    pub outputs: BTreeMap<String, String>,
 }
 
 pub fn parse_action_metadata(contents: &str) -> Result<ActionMetadata> {
@@ -408,6 +425,7 @@ pub fn composite_script_steps(
             .filter_map(|invocation| match invocation {
                 CompositeActionInvocation::Script(step) => Some(step),
                 CompositeActionInvocation::Repository(_) => None,
+                CompositeActionInvocation::Outputs(_) => None,
             })
             .collect(),
     )
@@ -444,8 +462,12 @@ fn composite_action_invocations_with_path(
 ) -> Result<Vec<CompositeActionInvocation>> {
     let action_inputs = effective_inputs(metadata, inputs);
     let mut invocations = Vec::new();
+    let mut step_ids = BTreeMap::new();
     for (index, step) in metadata.runs.steps.iter().enumerate() {
-        let step_id = format!("{}-{}", step_id_prefix, index + 1);
+        let step_id = composite_step_id(step_id_prefix, step.id.as_deref(), index);
+        if let Some(id) = step.id.as_deref() {
+            step_ids.insert(id.to_string(), step_id.clone());
+        }
         if let Some(uses) = step.uses.as_deref() {
             let reference = parse_repository_uses(uses)?;
             let inputs = step
@@ -454,11 +476,12 @@ fn composite_action_invocations_with_path(
                 .map(|(name, value)| {
                     (
                         name.clone(),
-                        render_composite_value(
+                        render_composite_scoped_value(
                             value,
                             &action_inputs,
                             action_path,
                             workspace_container,
+                            &step_ids,
                         ),
                     )
                 })
@@ -469,17 +492,24 @@ fn composite_action_invocations_with_path(
                 .map(|(name, value)| {
                     (
                         name.clone(),
-                        render_composite_value(
+                        render_composite_scoped_value(
                             value,
                             &action_inputs,
                             action_path,
                             workspace_container,
+                            &step_ids,
                         ),
                     )
                 })
                 .collect();
             let condition = step.condition.as_ref().map(|condition| {
-                render_composite_value(condition, &action_inputs, action_path, workspace_container)
+                render_composite_scoped_value(
+                    condition,
+                    &action_inputs,
+                    action_path,
+                    workspace_container,
+                    &step_ids,
+                )
             });
             let repository_dir =
                 repository_dir(actions_host, &reference.repository, &reference.git_ref);
@@ -514,8 +544,13 @@ fn composite_action_invocations_with_path(
             .map(crate::script_step::github_shell)
             .transpose()?
             .unwrap_or(crate::container::Shell::Bash);
-        let mut rendered =
-            render_composite_value(script, &action_inputs, action_path, workspace_container);
+        let mut rendered = render_composite_scoped_value(
+            script,
+            &action_inputs,
+            action_path,
+            workspace_container,
+            &step_ids,
+        );
         if !step.env.is_empty() {
             let exports = step
                 .env
@@ -524,11 +559,12 @@ fn composite_action_invocations_with_path(
                     Ok(format!(
                         "export {}={}\n",
                         shell_identifier(name)?,
-                        shell_single_quote(&render_composite_value(
+                        shell_single_quote(&render_composite_scoped_value(
                             value,
                             &action_inputs,
                             action_path,
-                            workspace_container
+                            workspace_container,
+                            &step_ids,
                         ))
                     ))
                 })
@@ -547,9 +583,39 @@ fn composite_action_invocations_with_path(
             working_directory_container,
             env: Vec::new(),
             condition: step.condition.as_ref().map(|condition| {
-                render_composite_value(condition, &action_inputs, action_path, workspace_container)
+                render_composite_scoped_value(
+                    condition,
+                    &action_inputs,
+                    action_path,
+                    workspace_container,
+                    &step_ids,
+                )
             }),
             continue_on_error: step.continue_on_error.unwrap_or(false),
+        }));
+    }
+    let outputs = metadata
+        .outputs
+        .iter()
+        .filter_map(|(name, output)| {
+            output.value.as_ref().map(|value| {
+                (
+                    name.clone(),
+                    render_composite_scoped_value(
+                        value,
+                        &action_inputs,
+                        action_path,
+                        workspace_container,
+                        &step_ids,
+                    ),
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    if !outputs.is_empty() {
+        invocations.push(CompositeActionInvocation::Outputs(CompositeActionOutputs {
+            step_id: step_id_prefix.to_string(),
+            outputs,
         }));
     }
     Ok(invocations)
@@ -739,6 +805,36 @@ fn render_composite_value(
         rendered = rendered.replace(&format!("inputs.{name}"), value);
     }
     rendered
+}
+
+fn render_composite_scoped_value(
+    value: &str,
+    inputs: &BTreeMap<String, String>,
+    action_path: &str,
+    workspace_container: &str,
+    step_ids: &BTreeMap<String, String>,
+) -> String {
+    rewrite_step_output_refs(
+        &render_composite_value(value, inputs, action_path, workspace_container),
+        step_ids,
+    )
+}
+
+fn rewrite_step_output_refs(value: &str, step_ids: &BTreeMap<String, String>) -> String {
+    let mut rendered = value.to_string();
+    for (source, target) in step_ids {
+        rendered = rendered.replace(
+            &format!("steps.{source}.outputs."),
+            &format!("steps.{target}.outputs."),
+        );
+    }
+    rendered
+}
+
+fn composite_step_id(prefix: &str, id: Option<&str>, index: usize) -> String {
+    id.map(|id| format!("{prefix}-{}", sanitize_segment(id)))
+        .filter(|value| !value.ends_with('-'))
+        .unwrap_or_else(|| format!("{prefix}-{}", index + 1))
 }
 
 fn effective_inputs(
@@ -1028,6 +1124,46 @@ runs:
 
         assert!(steps[0].script.contains("export EXTERNAL_LINKS='true'"));
         assert!(steps[0].script.contains("echo \"true\""));
+    }
+
+    #[test]
+    fn expands_composite_outputs_from_inner_step_outputs() {
+        let plan = LocalActionPlan {
+            step_id: "pages".into(),
+            action_dir: Path::new("/tmp/workspace").join(".github/actions/pages"),
+            inputs: BTreeMap::new(),
+        };
+        let metadata = parse_action_metadata(
+            r#"
+outputs:
+  artifact-id:
+    value: ${{ steps.upload-artifact.outputs.artifact-id }}
+runs:
+  using: composite
+  steps:
+    - id: upload-artifact
+      uses: actions/upload-artifact@v7
+"#,
+        )
+        .unwrap();
+
+        let invocations =
+            composite_action_invocations(&plan, &metadata, "/__w", Path::new("/tmp/actions"))
+                .unwrap();
+
+        assert_eq!(invocations.len(), 2);
+        let CompositeActionInvocation::Repository(plan) = &invocations[0] else {
+            panic!("first composite invocation should be repository action")
+        };
+        assert_eq!(plan.step_id, "pages-upload-artifact");
+        let CompositeActionInvocation::Outputs(outputs) = &invocations[1] else {
+            panic!("second composite invocation should materialize outputs")
+        };
+        assert_eq!(outputs.step_id, "pages");
+        assert_eq!(
+            outputs.outputs["artifact-id"],
+            "${{ steps.pages-upload-artifact.outputs.artifact-id }}"
+        );
     }
 
     #[test]

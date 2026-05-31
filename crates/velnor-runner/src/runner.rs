@@ -590,6 +590,13 @@ fn ordered_executable_steps(
                                     None,
                                 )?;
                             }
+                            CompositeActionInvocation::Outputs(outputs) => {
+                                ordered.push(ExecutableStep::CompositeOutputs {
+                                    step_id: outputs.step_id,
+                                    outputs: outputs.outputs,
+                                    condition: None,
+                                });
+                            }
                         }
                     }
                     continue;
@@ -674,6 +681,13 @@ fn append_resolved_action_steps(
                             actions_host,
                             action_condition.as_deref(),
                         )?;
+                    }
+                    CompositeActionInvocation::Outputs(outputs) => {
+                        ordered.push(ExecutableStep::CompositeOutputs {
+                            step_id: outputs.step_id,
+                            outputs: outputs.outputs,
+                            condition: action_condition.clone(),
+                        });
                     }
                 }
             }
@@ -1150,5 +1164,83 @@ runs:
             Some("${{ (runner.os == 'Linux') && (runner.os != 'Windows') }}")
         );
         assert!(step.script.contains("echo \"stable\""));
+    }
+
+    #[test]
+    fn ordered_steps_materialize_repository_composite_outputs() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Pages",
+            "requestId": 1,
+            "steps": [{
+                "id": "pages",
+                "reference": {
+                    "type": "Repository",
+                    "name": "actions/upload-pages-artifact",
+                    "ref": "v5"
+                },
+                "condition": "runner.os == 'Linux'"
+            }]
+        }))
+        .unwrap();
+        let actions_host = Path::new("/tmp/actions");
+        let plan = RepositoryActionPlan {
+            step_id: "pages".into(),
+            repository: "actions/upload-pages-artifact".into(),
+            git_ref: "v5".into(),
+            source_path: None,
+            repository_dir: actions_host.join("_actions/actions_upload-pages-artifact/v5"),
+            action_dir: actions_host.join("_actions/actions_upload-pages-artifact/v5"),
+            inputs: BTreeMap::new(),
+            env: Vec::new(),
+            condition: Some("runner.os == 'Linux'".into()),
+            continue_on_error: false,
+        };
+        let metadata = parse_action_metadata(
+            r#"
+outputs:
+  artifact-id:
+    value: ${{ steps.upload.outputs.artifact-id }}
+runs:
+  using: composite
+  steps:
+    - id: upload
+      shell: bash
+      run: echo artifact-id=123 >> "$GITHUB_OUTPUT"
+"#,
+        )
+        .unwrap();
+        let resolved = ResolvedAction {
+            plan,
+            metadata_path: actions_host
+                .join("_actions/actions_upload-pages-artifact/v5/action.yml"),
+            runtime: metadata.runtime().unwrap(),
+            metadata,
+        };
+
+        let ordered = ordered_executable_steps(&job, &[], &[resolved], &[], actions_host).unwrap();
+
+        assert_eq!(ordered.len(), 2);
+        let ExecutableStep::Script(step) = &ordered[0] else {
+            panic!("first composite step should be script")
+        };
+        assert_eq!(step.id, "pages-upload");
+        let ExecutableStep::CompositeOutputs {
+            step_id,
+            outputs,
+            condition,
+        } = &ordered[1]
+        else {
+            panic!("second composite step should materialize outputs")
+        };
+        assert_eq!(step_id, "pages");
+        assert_eq!(
+            outputs["artifact-id"],
+            "${{ steps.pages-upload.outputs.artifact-id }}"
+        );
+        assert_eq!(condition.as_deref(), Some("runner.os == 'Linux'"));
     }
 }

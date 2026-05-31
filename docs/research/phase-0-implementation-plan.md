@@ -200,7 +200,7 @@ Implement action support in the order that unlocks target workflows fastest:
    - step `if`: implemented for local composite `run` and nested repository JavaScript steps
    - repository marketplace composites: implemented for downloaded `runs.using: composite` actions, including recursive discovery of nested repository `uses`
    - composite step `continue-on-error`: parsed and propagated into expanded steps
-   - inputs/outputs: input interpolation, defaults, and target `toJSON(needs)` caller input rendering are implemented; composite outputs remain open
+   - inputs/outputs: input interpolation, defaults, target `toJSON(needs)` caller input rendering, and metadata `outputs.*.value` materialization are implemented
 6. Cache/artifact runtime endpoints:
    - `ACTIONS_RUNTIME_URL`
    - `ACTIONS_RUNTIME_TOKEN`
