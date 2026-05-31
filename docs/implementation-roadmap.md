@@ -74,6 +74,7 @@ Current code progress:
 - command-file parser supports `NAME=value` and heredoc `NAME<<EOF` syntax
 - Docker job container command builder covers network/container start, `docker exec`, and cleanup command shapes
 - Docker execution uses a shared `/github/home` mount and `HOME=/github/home` across the job, JavaScript action sidecar, and Docker action containers so setup actions can install tools into a home directory visible to later script steps
+- JavaScript actions run in a configurable sidecar image via `--node-action-image`; the default `ghcr.io/catthehacker/ubuntu:act-latest` carries Node and the Docker CLI, which target Docker actions such as `docker/setup-buildx-action`, `docker/login-action`, `docker/build-push-action`, and `docker/bake-action` need when they talk to the mounted Docker socket
 - script-step plan writes the script under runner temp, exposes per-step command-file env vars, and collects output/env/path/state/summary files after execution
 - Docker script executor runs the planned lifecycle through an abstract command runner: create network, start container, exec script, collect state, cleanup container/network
 - enabled GitHub script steps can be mapped into internal `ScriptStep` plans for `bash` and `sh`, including `script`, `shell`, `workingDirectory`, and job `defaults.run` shell/working-directory

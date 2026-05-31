@@ -35,6 +35,9 @@ pub fn render_context_expressions(value: &str, context_data: &[(String, Value)])
 }
 
 fn node_action_image(runtime: &str, fallback: &str) -> String {
+    if !fallback.trim().is_empty() {
+        return fallback.to_string();
+    }
     match runtime.strip_prefix("node") {
         Some("20") => "node:20-bookworm".to_string(),
         Some("24") => "node:24-bookworm".to_string(),
@@ -1419,25 +1422,20 @@ mod tests {
             env: Vec::new(),
             options: Vec::new(),
             services: Vec::new(),
-            node_action_image: "node:24-bookworm".into(),
+            node_action_image: String::new(),
         }
     }
 
     #[test]
     fn selects_node_action_image_from_runtime() {
         assert_eq!(
-            node_action_image("node20", "node:24-bookworm"),
-            "node:20-bookworm"
+            node_action_image("node24", "ghcr.io/catthehacker/ubuntu:act-latest"),
+            "ghcr.io/catthehacker/ubuntu:act-latest"
         );
-        assert_eq!(
-            node_action_image("node24", "node:20-bookworm"),
-            "node:24-bookworm"
-        );
-        assert_eq!(node_action_image("node16", "node:24-bookworm"), "node:16");
-        assert_eq!(
-            node_action_image("bogus", "node:24-bookworm"),
-            "node:24-bookworm"
-        );
+        assert_eq!(node_action_image("node20", ""), "node:20-bookworm");
+        assert_eq!(node_action_image("node24", ""), "node:24-bookworm");
+        assert_eq!(node_action_image("node16", ""), "node:16");
+        assert_eq!(node_action_image("bogus", ""), "");
     }
 
     #[test]

@@ -200,7 +200,7 @@ Implement action support in the order that unlocks target workflows fastest:
    - download action repo/ref: implemented for repository action probe path
    - parse `action.yml`: metadata parser and repository action planner are implemented as groundwork
    - map `with:` to `INPUT_*`: implemented for JavaScript action invocation, including metadata defaults
-   - run Node entrypoint: implemented for ordered script/JavaScript execution. JavaScript actions run in a short-lived Node side container selected from `runs.using` with the same workspace/temp/actions/tools mounts and job network so arbitrary job images do not need to carry Node.
+   - run Node entrypoint: implemented for ordered script/JavaScript execution. JavaScript actions run in a short-lived side container with the same workspace/temp/home/actions/tools mounts and job network so arbitrary job images do not need to carry Node. The default sidecar image is `ghcr.io/catthehacker/ubuntu:act-latest` instead of a plain `node:*` image because the target Docker JavaScript actions also need the Docker CLI while using the mounted Docker socket; operators can override it with `--node-action-image`.
    - run `runs.post` cleanup/save entrypoints: implemented in reverse order with `GITHUB_STATE` to `STATE_*` propagation and target `runs.post-if` condition handling
    - provide `GITHUB_*`, `RUNNER_*`, `ACTIONS_*` runtime env: basic job-message extraction, target repository owner/ref/workflow/server URL env, `GITHUB_EVENT_PATH` payload writing, per-action repository/ref/path env, and step injection are implemented; full runner parity remains open
 5. Composite action handler:
@@ -220,7 +220,7 @@ Implement action support in the order that unlocks target workflows fastest:
    - `runs.using: docker` action planning and execution is implemented for top-level and repository-nested action expansion
    - `docker://` images run directly; local Dockerfile actions are built before execution
    - Docker actions run as short-lived containers on the same job network with workspace/temp/actions/tools mounts and command-file env
-   - job container can call host Docker
+   - job container and JavaScript action sidecars can call host Docker through the mounted socket; the default JavaScript action sidecar includes the Docker CLI
    - buildx action can create/use builders
    - GHA cache backend variables pass through
 8. Pages actions for jackin:

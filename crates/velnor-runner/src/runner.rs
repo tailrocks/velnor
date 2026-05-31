@@ -404,6 +404,7 @@ async fn handle_message(
             config_dir,
             args.work_dir.clone(),
             &args.docker_image,
+            &args.node_action_image,
             &job,
             &script_steps,
         );
@@ -475,6 +476,7 @@ fn execute_script_job(
     config_dir: &std::path::Path,
     work_dir: Option<PathBuf>,
     docker_image: &str,
+    node_action_image: &str,
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
 ) -> Result<ScriptJobResult> {
@@ -534,7 +536,7 @@ fn execute_script_job(
         env: job_container_env(job),
         options: job_container_options(job),
         services: service_containers(job),
-        node_action_image: "node:24-bookworm".to_string(),
+        node_action_image: node_action_image.to_string(),
     };
     let mut executor = DockerScriptExecutor::new(command_runner);
     let base_env = job_runtime_env(job);
