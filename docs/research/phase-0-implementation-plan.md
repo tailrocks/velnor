@@ -243,7 +243,7 @@ Velnor still needs runtime step expression behavior from the job message:
 - `always()`
 - `success()`, `failure()`, `cancelled()`
 - `steps.<id>.outputs.*`: implemented for direct interpolation in later scripts and JavaScript action env
-- env/context expansion already present in action inputs or script env
+- env/context expansion in scripts and JavaScript action env: basic `steps.*.outputs.*`, `github.*`, and `runner.*` interpolation is implemented
 
 Implement only the expression subset that appears in the job message for target workflows.
 

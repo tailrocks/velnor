@@ -396,8 +396,8 @@ impl JobExecutionState {
                 return rendered;
             };
             let expression = after_start[..end].trim();
-            if let Some(output) = self.resolve_step_output_expression(expression) {
-                rendered.push_str(output);
+            if let Some(value) = self.resolve_expression_value(expression) {
+                rendered.push_str(&value);
             } else {
                 rendered.push_str(&rest[start..start + 3 + end + 2]);
             }
@@ -414,6 +414,34 @@ impl JobExecutionState {
             .get(step_id)
             .and_then(|outputs| outputs.get(expression))
             .map(String::as_str)
+    }
+
+    fn resolve_expression_value(&self, expression: &str) -> Option<String> {
+        if let Some(output) = self.resolve_step_output_expression(expression) {
+            return Some(output.to_string());
+        }
+        self.resolve_context_expression(expression)
+            .map(ToOwned::to_owned)
+    }
+
+    fn resolve_context_expression(&self, expression: &str) -> Option<&str> {
+        let env_name = match expression.trim() {
+            "github.actor" => "GITHUB_ACTOR",
+            "github.event_name" => "GITHUB_EVENT_NAME",
+            "github.ref" => "GITHUB_REF",
+            "github.repository" => "GITHUB_REPOSITORY",
+            "github.run_id" => "GITHUB_RUN_ID",
+            "github.run_number" => "GITHUB_RUN_NUMBER",
+            "github.sha" => "GITHUB_SHA",
+            "github.token" => "GITHUB_TOKEN",
+            "github.workspace" => "GITHUB_WORKSPACE",
+            "runner.arch" => "RUNNER_ARCH",
+            "runner.os" => "RUNNER_OS",
+            "runner.temp" => "RUNNER_TEMP",
+            "runner.tool_cache" => "RUNNER_TOOL_CACHE",
+            _ => return None,
+        };
+        self.env.get(env_name).map(String::as_str)
     }
 
     fn evaluate_condition(&self, condition: Option<&str>) -> bool {
@@ -476,13 +504,13 @@ impl JobExecutionState {
             }
         }
         if expression == "runner.os" {
-            return Some("Linux".to_string());
+            return self
+                .resolve_context_expression(expression)
+                .map(ToOwned::to_owned)
+                .or_else(|| Some("Linux".to_string()));
         }
-        if expression == "github.event_name" {
-            return self.env.get("GITHUB_EVENT_NAME").cloned();
-        }
-        if expression == "github.ref" {
-            return self.env.get("GITHUB_REF").cloned();
+        if let Some(value) = self.resolve_context_expression(expression) {
+            return Some(value.to_string());
         }
         Some(unquote(expression).to_string())
     }
@@ -762,6 +790,34 @@ mod tests {
             state.resolve_env(&[("INPUT_TAGS".into(), "${{ steps.meta.outputs.tags }}".into())]);
 
         assert_eq!(env, vec![("INPUT_TAGS".into(), "image:latest".into())]);
+    }
+
+    #[test]
+    fn resolves_github_and_runner_context_expressions() {
+        let state = JobExecutionState::new(&[
+            ("GITHUB_REF".into(), "refs/heads/main".into()),
+            ("GITHUB_SHA".into(), "abc123".into()),
+            ("GITHUB_TOKEN".into(), "ghs_token".into()),
+            ("GITHUB_WORKSPACE".into(), "/__w".into()),
+            ("RUNNER_OS".into(), "Linux".into()),
+        ]);
+
+        assert_eq!(
+            state.resolve_expressions("${{ github.ref }} ${{ github.sha }}"),
+            "refs/heads/main abc123"
+        );
+        assert_eq!(
+            state.resolve_env(&[
+                ("INPUT_TOKEN".into(), "${{ github.token }}".into()),
+                ("WORKSPACE".into(), "${{ github.workspace }}".into()),
+                ("OS".into(), "${{ runner.os }}".into()),
+            ]),
+            vec![
+                ("INPUT_TOKEN".into(), "ghs_token".into()),
+                ("WORKSPACE".into(), "/__w".into()),
+                ("OS".into(), "Linux".into()),
+            ]
+        );
     }
 
     #[test]
