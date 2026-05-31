@@ -23,7 +23,7 @@ use crate::{
         TimelineRecordFeedLines,
     },
     runtime_env::job_runtime_env,
-    script_step::github_script_steps,
+    script_step::github_script_steps_with_defaults,
 };
 
 pub async fn configure(args: ConfigureArgs) -> Result<()> {
@@ -328,16 +328,17 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 job.steps.len(),
                 job.resources.endpoints.len()
             );
-            let script_steps = match github_script_steps(&job.steps, "/__w") {
-                Ok(script_steps) => {
-                    println!("Mapped {} script run step(s).", script_steps.len());
-                    Some(script_steps)
-                }
-                Err(error) => {
-                    println!("Script step mapping is incomplete: {error}.");
-                    None
-                }
-            };
+            let script_steps =
+                match github_script_steps_with_defaults(&job.steps, "/__w", &job.defaults) {
+                    Ok(script_steps) => {
+                        println!("Mapped {} script run step(s).", script_steps.len());
+                        Some(script_steps)
+                    }
+                    Err(error) => {
+                        println!("Script step mapping is incomplete: {error}.");
+                        None
+                    }
+                };
             if let Some(system_connection) = job.system_connection() {
                 println!(
                     "System connection URL: {}",

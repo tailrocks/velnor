@@ -6,6 +6,7 @@ use crate::{
     job_message::{ActionReferenceType, ActionStep},
 };
 use anyhow::{bail, Context, Result};
+use serde_json::Value;
 use std::{
     collections::BTreeMap,
     fs,
@@ -27,6 +28,15 @@ pub fn github_script_steps(
     steps: &[ActionStep],
     workspace_container: &str,
 ) -> Result<Vec<ScriptStep>> {
+    github_script_steps_with_defaults(steps, workspace_container, &[])
+}
+
+pub fn github_script_steps_with_defaults(
+    steps: &[ActionStep],
+    workspace_container: &str,
+    defaults: &[Value],
+) -> Result<Vec<ScriptStep>> {
+    let defaults = RunDefaults::from_job_defaults(defaults)?;
     let mut script_steps = Vec::new();
     for (index, step) in steps.iter().enumerate() {
         if !step.enabled {
@@ -36,7 +46,12 @@ pub fn github_script_steps(
             continue;
         }
 
-        script_steps.push(github_script_step(step, index, workspace_container)?);
+        script_steps.push(github_script_step(
+            step,
+            index,
+            workspace_container,
+            &defaults,
+        )?);
     }
     Ok(script_steps)
 }
@@ -51,6 +66,7 @@ fn github_script_step(
     step: &ActionStep,
     index: usize,
     workspace_container: &str,
+    defaults: &RunDefaults,
 ) -> Result<ScriptStep> {
     let inputs = step
         .inputs
@@ -64,6 +80,7 @@ fn github_script_step(
     let shell = inputs
         .get("shell")
         .and_then(|value| value.as_str())
+        .or(defaults.shell.as_deref())
         .map(github_shell)
         .transpose()?
         .unwrap_or(Shell::Bash);
@@ -71,6 +88,7 @@ fn github_script_step(
         .get("workingDirectory")
         .or_else(|| inputs.get("working-directory"))
         .and_then(|value| value.as_str())
+        .or(defaults.working_directory.as_deref())
         .map(|path| workspace_path(workspace_container, path))
         .unwrap_or_else(|| workspace_container.to_string());
 
@@ -83,6 +101,56 @@ fn github_script_step(
         condition: step.condition.clone(),
         continue_on_error: step_continue_on_error(step),
     })
+}
+
+#[derive(Debug, Default)]
+struct RunDefaults {
+    shell: Option<String>,
+    working_directory: Option<String>,
+}
+
+impl RunDefaults {
+    fn from_job_defaults(defaults: &[Value]) -> Result<Self> {
+        let mut run_defaults = Self::default();
+        for value in defaults {
+            run_defaults.merge_value(value)?;
+        }
+        Ok(run_defaults)
+    }
+
+    fn merge_value(&mut self, value: &Value) -> Result<()> {
+        let Some(object) = value.as_object() else {
+            return Ok(());
+        };
+        let run = object
+            .get("run")
+            .or_else(|| object.get("Run"))
+            .or_else(|| object.get("RUN"));
+        if let Some(run) = run.and_then(Value::as_object) {
+            if let Some(shell) = string_field(run, &["shell", "Shell"]) {
+                github_shell(shell)?;
+                self.shell = Some(shell.to_string());
+            }
+            if let Some(working_directory) = string_field(
+                run,
+                &[
+                    "workingDirectory",
+                    "working-directory",
+                    "WorkingDirectory",
+                    "Working-Directory",
+                ],
+            ) {
+                self.working_directory = Some(working_directory.to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn string_field<'a>(object: &'a serde_json::Map<String, Value>, names: &[&str]) -> Option<&'a str> {
+    names
+        .iter()
+        .find_map(|name| object.get(*name).and_then(Value::as_str))
 }
 
 pub(crate) fn step_continue_on_error(step: &ActionStep) -> bool {
@@ -476,6 +544,47 @@ mod tests {
             ]
         );
         assert!(mapped[0].continue_on_error);
+    }
+
+    #[test]
+    fn applies_job_run_defaults_to_script_steps() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "ansible",
+                "reference": { "type": "Script" },
+                "inputs": { "script": "ansible-playbook --syntax-check site.yml" }
+            },
+            {
+                "id": "override",
+                "reference": { "type": "Script" },
+                "inputs": {
+                    "script": "cargo test",
+                    "shell": "sh",
+                    "workingDirectory": "./backend-rust"
+                }
+            }
+        ]))
+        .unwrap();
+        let defaults = vec![serde_json::json!({
+            "run": {
+                "shell": "bash",
+                "working-directory": "./ansible-configs"
+            }
+        })];
+
+        let mapped = github_script_steps_with_defaults(&steps, "/__w/repo", &defaults).unwrap();
+
+        assert_eq!(mapped[0].id, "ansible");
+        assert!(matches!(mapped[0].shell, Shell::Bash));
+        assert_eq!(
+            mapped[0].working_directory_container,
+            "/__w/repo/ansible-configs"
+        );
+        assert!(matches!(mapped[1].shell, Shell::Sh));
+        assert_eq!(
+            mapped[1].working_directory_container,
+            "/__w/repo/backend-rust"
+        );
     }
 
     #[test]

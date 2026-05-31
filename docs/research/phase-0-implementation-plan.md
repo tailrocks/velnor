@@ -166,7 +166,7 @@ Observed action/runtime needs:
 - reusable workflows through `workflow_call`
 - job `needs`, outputs, `if`, `always`, `contains`
 - command files: `GITHUB_OUTPUT`, `GITHUB_ENV`, `GITHUB_PATH`
-- defaults for `shell: bash` and working directory
+- defaults for `shell: bash` and working directory: implemented for `defaults.run.shell` and `defaults.run.working-directory`
 
 `jackin-project/jackin` is the second target. It has more hosted-runner labels and platform matrix complexity:
 
