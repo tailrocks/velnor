@@ -532,6 +532,7 @@ fn execute_script_job(
         env: job_container_env(job),
         options: job_container_options(job),
         services: service_containers(job),
+        node_action_image: "node:24-bookworm".to_string(),
     };
     let mut executor = DockerScriptExecutor::new(command_runner);
     let base_env = job_runtime_env(job);

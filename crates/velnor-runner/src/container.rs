@@ -15,6 +15,7 @@ pub struct JobContainerSpec {
     pub env: Vec<(String, String)>,
     pub options: Vec<String>,
     pub services: Vec<ServiceContainerSpec>,
+    pub node_action_image: String,
 }
 
 impl JobContainerSpec {
@@ -92,6 +93,46 @@ impl JobContainerSpec {
         }
         args.push(self.name.clone());
         args.extend(command.iter().cloned());
+        args
+    }
+
+    pub fn run_node_action_args(
+        &self,
+        working_directory: &str,
+        env: &[(String, String)],
+        node_image: &str,
+        entrypoint_container_path: &str,
+    ) -> Vec<String> {
+        let mut args = vec![
+            "run".into(),
+            "--rm".into(),
+            "--network".into(),
+            self.network.clone(),
+            "--workdir".into(),
+            working_directory.into(),
+            "-v".into(),
+            mount(&self.workspace_host, "/__w"),
+            "-v".into(),
+            mount(&self.temp_host, "/__t"),
+            "-v".into(),
+            mount(&self.actions_host, "/__a"),
+            "-v".into(),
+            mount(&self.tools_host, "/__tool"),
+        ];
+        if self.mount_docker_socket {
+            args.extend([
+                "-v".into(),
+                "/var/run/docker.sock:/var/run/docker.sock".into(),
+            ]);
+        }
+        for (name, value) in env {
+            args.extend(["-e".into(), format!("{name}={value}")]);
+        }
+        args.extend([
+            node_image.into(),
+            "node".into(),
+            entrypoint_container_path.into(),
+        ]);
         args
     }
 
@@ -233,6 +274,7 @@ mod tests {
             env: vec![("NODE_OPTIONS".into(), "--max-old-space-size=4096".into())],
             options: vec!["--cpus".into(), "2".into()],
             services: Vec::new(),
+            node_action_image: "node:24-bookworm".into(),
         }
     }
 
@@ -297,6 +339,26 @@ mod tests {
                 "node",
                 "/__a/action/dist/index.js"
             ]
+        );
+    }
+
+    #[test]
+    fn builds_node_action_run_args() {
+        let args = spec().run_node_action_args(
+            "/__w",
+            &[("GITHUB_OUTPUT".into(), "/__t/out".into())],
+            "node:20-bookworm",
+            "/__a/action/dist/index.js",
+        );
+
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--network", "velnor-net-1"]));
+        assert!(args.contains(&"/tmp/work:/__w".into()));
+        assert!(args.contains(&"GITHUB_OUTPUT=/__t/out".into()));
+        assert_eq!(
+            &args[args.len() - 3..],
+            ["node:20-bookworm", "node", "/__a/action/dist/index.js"]
         );
     }
 

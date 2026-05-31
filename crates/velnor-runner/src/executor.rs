@@ -34,6 +34,17 @@ pub fn render_context_expressions(value: &str, context_data: &[(String, Value)])
     JobExecutionState::new_with_context(&[], context_data).resolve_expressions(value)
 }
 
+fn node_action_image(runtime: &str, fallback: &str) -> String {
+    match runtime.strip_prefix("node") {
+        Some("20") => "node:20-bookworm".to_string(),
+        Some("24") => "node:24-bookworm".to_string(),
+        Some(major) if major.chars().all(|ch| ch.is_ascii_digit()) && !major.is_empty() => {
+            format!("node:{major}")
+        }
+        _ => fallback.to_string(),
+    }
+}
+
 #[derive(Default)]
 pub struct ProcessCommandRunner;
 
@@ -470,11 +481,9 @@ where
         env.extend(state.resolve_env(&action.env));
         env.extend(action_state_env.iter().cloned());
         env.extend(command_files.env.iter().cloned());
-        let exec_args = container.exec_process_args(
-            "/__w",
-            &env,
-            &["node".to_string(), entrypoint_container_path.to_string()],
-        );
+        let node_image = node_action_image(&action.node, &container.node_action_image);
+        let exec_args =
+            container.run_node_action_args("/__w", &env, &node_image, entrypoint_container_path);
         let step_result = self.runner.run("docker", &exec_args)?;
         let mut state = command_files.collect_state()?;
         state.merge(parse_workflow_commands(&step_result.stdout));
@@ -1260,7 +1269,10 @@ mod tests {
     impl CommandRunner for OutputWritingRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             self.calls.push((program.to_string(), args.to_vec()));
-            if program == "docker" && args.first().is_some_and(|arg| arg == "exec") {
+            let action_process = program == "docker"
+                && (args.first().is_some_and(|arg| arg == "exec")
+                    || args.iter().any(|arg| arg.starts_with("node:")));
+            if action_process {
                 if args
                     .iter()
                     .any(|arg| arg == "GITHUB_OUTPUT=/__t/producer_output")
@@ -1325,7 +1337,25 @@ mod tests {
             env: Vec::new(),
             options: Vec::new(),
             services: Vec::new(),
+            node_action_image: "node:24-bookworm".into(),
         }
+    }
+
+    #[test]
+    fn selects_node_action_image_from_runtime() {
+        assert_eq!(
+            node_action_image("node20", "node:24-bookworm"),
+            "node:20-bookworm"
+        );
+        assert_eq!(
+            node_action_image("node24", "node:20-bookworm"),
+            "node:24-bookworm"
+        );
+        assert_eq!(node_action_image("node16", "node:24-bookworm"), "node:16");
+        assert_eq!(
+            node_action_image("bogus", "node:24-bookworm"),
+            "node:24-bookworm"
+        );
     }
 
     #[test]
@@ -2122,7 +2152,11 @@ mod tests {
             .runner()
             .calls
             .iter()
-            .filter(|(_, args)| args.first().is_some_and(|arg| arg == "exec"))
+            .filter(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "exec")
+                    || (args.first().is_some_and(|arg| arg == "run")
+                        && args.contains(&"node:20-bookworm".into()))
+            })
             .count();
         assert_eq!(exec_count, 2);
         fs::remove_dir_all(temp).unwrap();
@@ -2205,12 +2239,13 @@ mod tests {
 
         assert_eq!(result.exit_code, 0);
         let calls = &executor.runner().calls;
-        assert_eq!(calls[2].1[0], "exec");
+        assert_eq!(calls[2].1[0], "run");
         assert!(calls[2].1.contains(&"INPUT_NAME=value".into()));
         assert!(calls[2]
             .1
             .contains(&"GITHUB_OUTPUT=/__t/action1_output".into()));
         assert!(calls[2].1.ends_with(&[
+            "node:20-bookworm".into(),
             "node".into(),
             "/__a/_actions/acme_action/v1/dist/index.js".into()
         ]));
@@ -2277,7 +2312,7 @@ mod tests {
         assert_eq!(calls[0].1[0], "network");
         assert_eq!(calls[1].1[0], "run");
         assert_eq!(calls[2].1[0], "exec");
-        assert_eq!(calls[3].1[0], "exec");
+        assert_eq!(calls[3].1[0], "run");
         assert_eq!(calls[4].1[0], "exec");
         assert_eq!(calls[5].1[0], "rm");
         assert_eq!(calls[6].1[0], "network");
@@ -2335,23 +2370,32 @@ mod tests {
             .runner()
             .calls
             .iter()
-            .filter(|(_, args)| args.first().is_some_and(|arg| arg == "exec"))
+            .filter(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:20-bookworm".into())
+            })
             .map(|(_, args)| args)
             .collect::<Vec<_>>();
-        assert!(
-            exec_calls[0].ends_with(&["node".into(), "/__a/_actions/cache/dist/restore.js".into()])
-        );
+        assert!(exec_calls[0].ends_with(&[
+            "node:20-bookworm".into(),
+            "node".into(),
+            "/__a/_actions/cache/dist/restore.js".into()
+        ]));
         assert!(exec_calls[1].ends_with(&[
+            "node:20-bookworm".into(),
             "node".into(),
             "/__a/_actions/docker_login/dist/main.js".into()
         ]));
         assert!(exec_calls[2].ends_with(&[
+            "node:20-bookworm".into(),
             "node".into(),
             "/__a/_actions/docker_login/dist/post.js".into()
         ]));
-        assert!(
-            exec_calls[3].ends_with(&["node".into(), "/__a/_actions/cache/dist/save.js".into()])
-        );
+        assert!(exec_calls[3].ends_with(&[
+            "node:20-bookworm".into(),
+            "node".into(),
+            "/__a/_actions/cache/dist/save.js".into()
+        ]));
         assert!(exec_calls[3].contains(&"STATE_primaryKey=linux-cache".into()));
         fs::remove_dir_all(temp).unwrap();
     }
