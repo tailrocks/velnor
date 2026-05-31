@@ -15,7 +15,10 @@ use rsa::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use url::Url;
 use uuid::Uuid;
 
@@ -605,6 +608,27 @@ impl DistributedTaskClient {
         .await
     }
 
+    pub async fn raise_job_completed_event(
+        &self,
+        scope_identifier: &str,
+        hub_name: &str,
+        plan_id: &str,
+        event: &JobCompletedEvent,
+    ) -> Result<()> {
+        let url = plan_events_url(&self.server_root_url, scope_identifier, hub_name, plan_id)?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&self.bearer_token)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .json(event)
+            .send()
+            .await
+            .context("send job completed event request")?;
+
+        parse_empty_response(response, "raise job completed event").await
+    }
+
     pub async fn update_timeline_records(
         &self,
         scope_identifier: &str,
@@ -771,6 +795,20 @@ fn timeline_records_url(
 ) -> Result<Url> {
     let mut url = server_root_url.join(&format!(
         "{scope_identifier}/_apis/distributedtask/hubs/{hub_name}/plans/{plan_id}/timelines/{timeline_id}/records"
+    ))?;
+    url.query_pairs_mut()
+        .append_pair("api-version", "5.1-preview.1");
+    Ok(url)
+}
+
+fn plan_events_url(
+    server_root_url: &Url,
+    scope_identifier: &str,
+    hub_name: &str,
+    plan_id: &str,
+) -> Result<Url> {
+    let mut url = server_root_url.join(&format!(
+        "{scope_identifier}/_apis/distributedtask/hubs/{hub_name}/plans/{plan_id}/events"
     ))?;
     url.query_pairs_mut()
         .append_pair("api-version", "5.1-preview.1");
@@ -1177,6 +1215,60 @@ impl TaskAgentJobRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobCompletedEvent {
+    #[serde(rename = "name")]
+    pub name: String,
+    #[serde(rename = "jobId")]
+    pub job_id: String,
+    #[serde(rename = "requestId")]
+    pub request_id: i64,
+    #[serde(rename = "result")]
+    pub result: TaskResult,
+    #[serde(
+        default,
+        rename = "outputs",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub outputs: BTreeMap<String, JobOutputValue>,
+}
+
+impl JobCompletedEvent {
+    pub fn new(
+        request_id: i64,
+        job_id: impl Into<String>,
+        result: TaskResult,
+        outputs: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            name: "JobCompleted".to_string(),
+            job_id: job_id.into(),
+            request_id,
+            result,
+            outputs: outputs
+                .into_iter()
+                .map(|(name, value)| {
+                    (
+                        name,
+                        JobOutputValue {
+                            value: Some(value),
+                            is_secret: false,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobOutputValue {
+    #[serde(default, rename = "value", skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, rename = "isSecret")]
+    pub is_secret: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineRecord {
     #[serde(rename = "id")]
     pub id: String,
@@ -1537,6 +1629,7 @@ mod tests {
         let feed = timeline_record_feed_url(&root, "scope", "build", "plan", "timeline", "record")
             .unwrap();
         let logs = timeline_logs_url(&root, "scope", "build", "plan").unwrap();
+        let events = plan_events_url(&root, "scope", "build", "plan").unwrap();
 
         assert_eq!(
             records.as_str(),
@@ -1549,6 +1642,10 @@ mod tests {
         assert_eq!(
             logs.as_str(),
             "https://pipelines.actions.githubusercontent.com/abc/scope/_apis/distributedtask/hubs/build/plans/plan/logs?api-version=5.1-preview.1"
+        );
+        assert_eq!(
+            events.as_str(),
+            "https://pipelines.actions.githubusercontent.com/abc/scope/_apis/distributedtask/hubs/build/plans/plan/events?api-version=5.1-preview.1"
         );
     }
 
@@ -1612,6 +1709,33 @@ mod tests {
                 "stepId": "step-id",
                 "value": ["hello"],
                 "startLine": 1
+            })
+        );
+    }
+
+    #[test]
+    fn job_completed_event_body_matches_runner_shape() {
+        let event = JobCompletedEvent::new(
+            99,
+            "job-id",
+            TaskResult::Succeeded,
+            [("answer".to_string(), "42".to_string())].into(),
+        );
+        let json = serde_json::to_value(event).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "name": "JobCompleted",
+                "jobId": "job-id",
+                "requestId": 99,
+                "result": "succeeded",
+                "outputs": {
+                    "answer": {
+                        "value": "42",
+                        "isSecret": false
+                    }
+                }
             })
         );
     }

@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde_json::json;
-use std::{fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use crate::{
     action::{
@@ -17,9 +17,10 @@ use crate::{
     executor::{DockerScriptExecutor, ExecutableStep, ProcessCommandRunner},
     job_message::{ActionReferenceType, AgentJobRequestMessage, PIPELINE_AGENT_JOB_REQUEST},
     protocol::{
-        DistributedTaskClient, GitHubAuthResult, GitHubScope, OAuthClient, OAuthJwtCredentials,
-        RegistrationClient, RunnerEvent, RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool,
-        TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines,
+        DistributedTaskClient, GitHubAuthResult, GitHubScope, JobCompletedEvent, OAuthClient,
+        OAuthJwtCredentials, RegistrationClient, RunnerEvent, RunnerKeyPair, RunnerStatus,
+        TaskAgent, TaskAgentPool, TaskAgentSession, TaskResult, TimelineRecord,
+        TimelineRecordFeedLines,
     },
     runtime_env::job_runtime_env,
     script_step::github_script_steps,
@@ -347,7 +348,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 let Some(script_steps) = script_steps else {
                     bail!("cannot execute scripts because step mapping failed");
                 };
-                let result = execute_script_job(
+                let job_result = execute_script_job(
                     &dir,
                     args.work_dir.clone(),
                     &args.docker_image,
@@ -361,12 +362,16 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     message.message_id,
                     &stored.settings.agent_name,
                     &job,
-                    result,
+                    job_result.result,
+                    job_result.outputs,
                     "Velnor executed supported run and JavaScript action steps in Docker."
                         .to_string(),
                 )
                 .await?;
-                println!("Job completed with result {result:?} and message acknowledged.");
+                println!(
+                    "Job completed with result {:?} and message acknowledged.",
+                    job_result.result
+                );
             } else if args.complete_noop {
                 complete_job(
                     &client,
@@ -376,6 +381,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     &stored.settings.agent_name,
                     &job,
                     TaskResult::Succeeded,
+                    BTreeMap::new(),
                     "Velnor no-op completion probe: user steps were not executed.".to_string(),
                 )
                 .await?;
@@ -406,7 +412,7 @@ fn execute_script_job(
     docker_image: &str,
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
-) -> Result<TaskResult> {
+) -> Result<ScriptJobResult> {
     let job_dir = job_work_dir(config_dir, work_dir, job);
     let workspace = job_dir.join("workspace");
     let temp = job_dir.join("temp");
@@ -481,11 +487,21 @@ fn execute_script_job(
         .iter()
         .any(|result| result.exit_code != 0 && !result.failure_ignored);
 
-    Ok(if failed {
+    let result = if failed {
         TaskResult::Failed
     } else {
         TaskResult::Succeeded
+    };
+    Ok(ScriptJobResult {
+        result,
+        outputs: summary.job_outputs,
     })
+}
+
+#[derive(Debug, Clone)]
+struct ScriptJobResult {
+    result: TaskResult,
+    outputs: BTreeMap<String, String>,
 }
 
 fn download_repository_actions_recursive<R>(
@@ -715,6 +731,7 @@ async fn complete_job(
     worker_name: &str,
     job: &AgentJobRequestMessage,
     result: TaskResult,
+    job_outputs: BTreeMap<String, String>,
     feed_line: String,
 ) -> Result<()> {
     let scope_identifier = job
@@ -763,6 +780,14 @@ async fn complete_job(
             &job.plan.plan_id,
             &job.timeline.id,
             vec![record.completed(finish_time.clone(), result)],
+        )
+        .await?;
+    client
+        .raise_job_completed_event(
+            scope_identifier,
+            hub_name,
+            &job.plan.plan_id,
+            &JobCompletedEvent::new(job.request_id, job.job_id.clone(), result, job_outputs),
         )
         .await?;
     client
