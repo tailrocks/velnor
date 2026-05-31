@@ -1,10 +1,15 @@
 #![allow(dead_code)]
 
-use crate::job_message::{ActionReferenceType, ActionStep};
+use crate::{
+    checkout::fetch_git_ref,
+    executor::CommandRunner,
+    job_message::{ActionReferenceType, ActionStep},
+};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -79,6 +84,7 @@ pub struct RepositoryActionPlan {
     pub repository: String,
     pub git_ref: String,
     pub source_path: Option<String>,
+    pub repository_dir: PathBuf,
     pub action_dir: PathBuf,
     pub inputs: BTreeMap<String, String>,
 }
@@ -109,6 +115,7 @@ pub fn repository_action_plans(
             .git_ref
             .clone()
             .ok_or_else(|| anyhow::anyhow!("repository action '{repository}' missing ref"))?;
+        let repository_dir = repository_dir(actions_host, repository, &git_ref);
         let action_dir = action_dir(
             actions_host,
             repository,
@@ -119,11 +126,77 @@ pub fn repository_action_plans(
             repository: repository.clone(),
             git_ref,
             source_path: reference.path.clone(),
+            repository_dir,
             action_dir,
             inputs: string_inputs(step)?,
         });
     }
     Ok(plans)
+}
+
+pub fn download_repository_actions<R>(
+    runner: &mut R,
+    plans: &[RepositoryActionPlan],
+) -> Result<Vec<ResolvedAction>>
+where
+    R: CommandRunner,
+{
+    let mut resolved = Vec::new();
+    for plan in plans {
+        fetch_git_ref(
+            runner,
+            &repository_clone_url(&plan.repository),
+            &plan.git_ref,
+            &plan.repository_dir,
+            None,
+        )?;
+        resolved.push(resolve_action(plan)?);
+    }
+    Ok(resolved)
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedAction {
+    pub plan: RepositoryActionPlan,
+    pub metadata_path: PathBuf,
+    pub metadata: ActionMetadata,
+    pub runtime: ActionRuntime,
+}
+
+pub fn resolve_action(plan: &RepositoryActionPlan) -> Result<ResolvedAction> {
+    let metadata_path = action_metadata_path(&plan.action_dir)?;
+    let metadata = parse_action_metadata(
+        &fs::read_to_string(&metadata_path)
+            .with_context(|| format!("read {}", metadata_path.display()))?,
+    )?;
+    let runtime = metadata.runtime()?;
+    Ok(ResolvedAction {
+        plan: plan.clone(),
+        metadata_path,
+        metadata,
+        runtime,
+    })
+}
+
+fn action_metadata_path(action_dir: &Path) -> Result<PathBuf> {
+    for file_name in ["action.yml", "action.yaml"] {
+        let path = action_dir.join(file_name);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+    bail!("action metadata not found in {}", action_dir.display())
+}
+
+fn repository_clone_url(repository: &str) -> String {
+    format!("https://github.com/{repository}.git")
+}
+
+fn repository_dir(actions_host: &Path, repository: &str, git_ref: &str) -> PathBuf {
+    actions_host
+        .join("_actions")
+        .join(sanitize_segment(repository))
+        .join(sanitize_segment(git_ref))
 }
 
 fn action_dir(
@@ -132,10 +205,7 @@ fn action_dir(
     git_ref: &str,
     source_path: Option<&str>,
 ) -> Result<PathBuf> {
-    let mut dir = actions_host
-        .join("_actions")
-        .join(sanitize_segment(repository))
-        .join(sanitize_segment(git_ref));
+    let mut dir = repository_dir(actions_host, repository, git_ref);
     if let Some(source_path) = source_path.filter(|path| !path.is_empty()) {
         if source_path.starts_with('/') || source_path.contains("..") {
             bail!("unsupported repository action path '{source_path}'")
@@ -242,6 +312,13 @@ runs:
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].repository, "actions/setup-python");
         assert_eq!(plans[0].git_ref, "v5");
+        assert_eq!(
+            plans[0].repository_dir,
+            Path::new("/tmp/actions")
+                .join("_actions")
+                .join("actions_setup-python")
+                .join("v5")
+        );
         assert_eq!(plans[0].inputs["python-version"], "3.12");
         assert_eq!(
             plans[0].action_dir,
@@ -251,5 +328,37 @@ runs:
                 .join("v5")
                 .join("sub/action")
         );
+    }
+
+    #[test]
+    fn resolves_action_metadata_from_action_dir() {
+        let temp = std::env::temp_dir().join(format!("velnor-action-test-{}", std::process::id()));
+        let action_dir = temp.join("action");
+        fs::create_dir_all(&action_dir).unwrap();
+        fs::write(
+            action_dir.join("action.yml"),
+            "runs:\n  using: node20\n  main: dist/index.js\n",
+        )
+        .unwrap();
+        let plan = RepositoryActionPlan {
+            repository: "actions/setup-node".into(),
+            git_ref: "v4".into(),
+            source_path: None,
+            repository_dir: temp.clone(),
+            action_dir,
+            inputs: BTreeMap::new(),
+        };
+
+        let resolved = resolve_action(&plan).unwrap();
+
+        assert_eq!(
+            resolved.runtime,
+            ActionRuntime::JavaScript {
+                node: "node20".into(),
+                main: "dist/index.js".into()
+            }
+        );
+        assert_eq!(resolved.metadata_path.file_name().unwrap(), "action.yml");
+        fs::remove_dir_all(temp).ok();
     }
 }

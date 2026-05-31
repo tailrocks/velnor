@@ -67,15 +67,34 @@ fn execute_checkout<R>(runner: &mut R, plan: &CheckoutPlan) -> Result<()>
 where
     R: CommandRunner,
 {
-    std::fs::create_dir_all(&plan.destination)
-        .with_context(|| format!("create {}", plan.destination.display()))?;
+    fetch_git_ref(
+        runner,
+        &plan.clone_url,
+        plan.version.as_deref().unwrap_or("HEAD"),
+        &plan.destination,
+        plan.token.as_deref(),
+    )
+}
 
-    run_git(runner, &["init".to_string(), path_arg(&plan.destination)])?;
+pub fn fetch_git_ref<R>(
+    runner: &mut R,
+    clone_url: &str,
+    git_ref: &str,
+    destination: &Path,
+    token: Option<&str>,
+) -> Result<()>
+where
+    R: CommandRunner,
+{
+    std::fs::create_dir_all(destination)
+        .with_context(|| format!("create {}", destination.display()))?;
+
+    run_git(runner, &["init".to_string(), path_arg(destination)])?;
     run_git(
         runner,
         &[
             "-C".to_string(),
-            path_arg(&plan.destination),
+            path_arg(destination),
             "remote".to_string(),
             "remove".to_string(),
             "origin".to_string(),
@@ -86,21 +105,21 @@ where
         runner,
         &[
             "-C".to_string(),
-            path_arg(&plan.destination),
+            path_arg(destination),
             "remote".to_string(),
             "add".to_string(),
             "origin".to_string(),
-            plan.clone_url.clone(),
+            clone_url.to_string(),
         ],
     )?;
 
     let mut fetch = vec![
         "-C".to_string(),
-        path_arg(&plan.destination),
+        path_arg(destination),
         "-c".to_string(),
         "protocol.version=2".to_string(),
     ];
-    if let Some(token) = &plan.token {
+    if let Some(token) = token {
         fetch.extend([
             "-c".to_string(),
             format!("http.extraheader=AUTHORIZATION: bearer {token}"),
@@ -112,7 +131,7 @@ where
         "--prune".to_string(),
         "--depth=1".to_string(),
         "origin".to_string(),
-        plan.version.clone().unwrap_or_else(|| "HEAD".to_string()),
+        git_ref.to_string(),
     ]);
     run_git(runner, &fetch)?;
 
@@ -120,7 +139,7 @@ where
         runner,
         &[
             "-C".to_string(),
-            path_arg(&plan.destination),
+            path_arg(destination),
             "checkout".to_string(),
             "--force".to_string(),
             "FETCH_HEAD".to_string(),

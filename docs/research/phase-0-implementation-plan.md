@@ -187,7 +187,7 @@ Implement action support in the order that unlocks target workflows fastest:
 2. Command files and env/path propagation: partially implemented for parsing and per-step files.
 3. `actions/checkout`: either native plugin first or JavaScript action support first. Native plugin is faster for Phase 0.
 4. Marketplace JavaScript action handler:
-   - download action repo/ref
+   - download action repo/ref: implemented for repository action probe path
    - parse `action.yml`: metadata parser and repository action planner are implemented as groundwork
    - map `with:` to `INPUT_*`
    - run Node entrypoint inside job container
@@ -308,7 +308,7 @@ The next useful implementation steps are:
 1. Live-test `velnor-runner run --once --complete-noop` and `velnor-runner run --once --execute-scripts` against disposable workflows and adjust reporter route details if GitHub rejects them.
 2. Start renew-job loop before real job execution.
 3. Resolve step outputs and job/message environment into later script steps.
-4. Download repository actions into `_actions`, then run JavaScript action entrypoints for `setup-*`, cache, and Docker actions used by the target repositories.
+4. Run JavaScript action entrypoints for `setup-*`, cache, and Docker actions used by the target repositories.
 
 This gets Velnor from "polls one message" to "can complete a simple real GitHub job".
 

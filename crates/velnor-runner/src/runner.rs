@@ -3,6 +3,7 @@ use serde_json::json;
 use std::{fs, path::PathBuf};
 
 use crate::{
+    action::{download_repository_actions, repository_action_plans},
     checkout::{checkout_plans, execute_checkouts, has_unsupported_enabled_action},
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
@@ -340,6 +341,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     bail!("cannot execute scripts because step mapping failed");
                 };
                 if has_unsupported_enabled_action(&job.steps) {
+                    probe_repository_actions(&dir, args.work_dir.clone(), &job)?;
                     println!(
                         "Job has enabled unsupported action steps; not executing or acknowledging."
                     );
@@ -399,6 +401,27 @@ pub async fn run(args: RunArgs) -> Result<()> {
     Ok(())
 }
 
+fn probe_repository_actions(
+    config_dir: &std::path::Path,
+    work_dir: Option<PathBuf>,
+    job: &AgentJobRequestMessage,
+) -> Result<()> {
+    let actions = job_work_dir(config_dir, work_dir, job).join("actions");
+    fs::create_dir_all(&actions).with_context(|| format!("create {}", actions.display()))?;
+    let plans = repository_action_plans(&job.steps, &actions)?;
+    if plans.is_empty() {
+        return Ok(());
+    }
+
+    let mut command_runner = ProcessCommandRunner;
+    let resolved_actions = download_repository_actions(&mut command_runner, &plans)?;
+    println!(
+        "Downloaded and resolved {} repository action(s). JavaScript execution is not wired yet.",
+        resolved_actions.len()
+    );
+    Ok(())
+}
+
 fn execute_script_job(
     config_dir: &std::path::Path,
     work_dir: Option<PathBuf>,
@@ -406,9 +429,7 @@ fn execute_script_job(
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
 ) -> Result<TaskResult> {
-    let job_dir = work_dir
-        .unwrap_or_else(|| config_dir.join("_work"))
-        .join(sanitize_path_segment(&job.job_id));
+    let job_dir = job_work_dir(config_dir, work_dir, job);
     let workspace = job_dir.join("workspace");
     let temp = job_dir.join("temp");
     let actions = job_dir.join("actions");
@@ -419,6 +440,15 @@ fn execute_script_job(
     let mut command_runner = ProcessCommandRunner;
     let checkout_plans = checkout_plans(job, &workspace)?;
     execute_checkouts(&mut command_runner, &checkout_plans)?;
+    let repository_action_plans = repository_action_plans(&job.steps, &actions)?;
+    if !repository_action_plans.is_empty() {
+        let resolved_actions =
+            download_repository_actions(&mut command_runner, &repository_action_plans)?;
+        println!(
+            "Downloaded and resolved {} repository action(s). JavaScript execution is not wired yet.",
+            resolved_actions.len()
+        );
+    }
 
     let container = JobContainerSpec {
         name: format!("velnor-job-{}", sanitize_path_segment(&job.job_id)),
@@ -439,6 +469,16 @@ fn execute_script_job(
     } else {
         TaskResult::Succeeded
     })
+}
+
+fn job_work_dir(
+    config_dir: &std::path::Path,
+    work_dir: Option<PathBuf>,
+    job: &AgentJobRequestMessage,
+) -> PathBuf {
+    work_dir
+        .unwrap_or_else(|| config_dir.join("_work"))
+        .join(sanitize_path_segment(&job.job_id))
 }
 
 async fn complete_job(
