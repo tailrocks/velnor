@@ -31,6 +31,23 @@ https://github.example.com/OWNER/REPO
 
 ## Tenant Credential
 
+If the user provides a GitHub PAT instead of a runner registration token, the official runner first requests a short-lived runner token:
+
+```text
+POST https://api.github.com/repos/OWNER/REPO/actions/runners/registration-token
+Authorization: basic base64("github:<PAT>")
+Accept: application/vnd.github.v3+json
+```
+
+Response:
+
+```json
+{
+  "token": "...",
+  "expires_at": "2026-05-31T20:00:00Z"
+}
+```
+
 Registration token exchange:
 
 ```text

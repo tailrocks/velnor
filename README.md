@@ -34,7 +34,7 @@ The first Rust crate is `velnor-runner`. It currently provides the local CLI/con
 ```sh
 cargo run --bin velnor-runner -- configure \
   --url https://github.com/OWNER/REPO \
-  --token "$GITHUB_RUNNER_REGISTRATION_TOKEN" \
+  --pat "$GITHUB_TOKEN" \
   --labels velnor,hetzner-sentry-ci \
   --replace
 
@@ -48,7 +48,7 @@ cargo run --bin velnor-runner -- status
 cargo run --bin velnor-runner -- run
 ```
 
-`configure` now validates runner scope URLs, exchanges a GitHub runner registration token for tenant credentials, and can add/replace a runner agent in the selected pool. `run --once` can exchange stored OAuth runner credentials, create a classic runner session, and poll one message.
+`configure` now validates runner scope URLs, can request a short-lived GitHub runner token from `--pat`, exchanges that runner token for tenant credentials, and can add/replace a runner agent in the selected pool. `run --once` can exchange stored OAuth runner credentials, create a classic runner session, and poll one message.
 
 Phase 0 runner compatibility: [docs/phase-0-github-runner-compat.md](docs/phase-0-github-runner-compat.md).
 

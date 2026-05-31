@@ -28,9 +28,13 @@ pub struct ConfigureArgs {
     #[arg(long)]
     pub url: String,
 
-    /// GitHub runner registration token.
+    /// GitHub runner registration token. If omitted, pass --pat to request one.
     #[arg(long, env = "VELNOR_RUNNER_TOKEN")]
-    pub token: String,
+    pub token: Option<String>,
+
+    /// GitHub personal access token used to request a short-lived runner registration token.
+    #[arg(long, env = "GITHUB_TOKEN")]
+    pub pat: Option<String>,
 
     /// Runner display name.
     #[arg(long)]

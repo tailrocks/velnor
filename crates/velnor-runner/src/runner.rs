@@ -32,8 +32,16 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
     let registration = if args.dry_run {
         None
     } else {
-        let auth = RegistrationClient::new()?
-            .exchange_tenant_credential(&scope, &args.token, RunnerEvent::Register)
+        let registration_client = RegistrationClient::new()?;
+        let runner_token = runner_registration_token(
+            &registration_client,
+            &scope,
+            args.token.as_ref(),
+            args.pat.as_ref(),
+        )
+        .await?;
+        let auth = registration_client
+            .exchange_tenant_credential(&scope, &runner_token, RunnerEvent::Register)
             .await?;
         let client = DistributedTaskClient::new(&auth.server_url, &auth.token)?;
         let pools = client.get_agent_pools(args.pool_name.as_deref()).await?;
@@ -117,6 +125,28 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn runner_registration_token(
+    client: &RegistrationClient,
+    scope: &GitHubScope,
+    explicit_token: Option<&String>,
+    pat: Option<&String>,
+) -> Result<String> {
+    if let Some(token) = explicit_token {
+        return Ok(token.clone());
+    }
+
+    if let Some(pat) = pat {
+        let token = client.create_runner_registration_token(scope, pat).await?;
+        println!(
+            "Fetched short-lived runner registration token; expires at {}.",
+            token.expires_at
+        );
+        return Ok(token.token);
+    }
+
+    bail!("configure needs --token or --pat unless --dry-run is used")
 }
 
 struct RegistrationResult {

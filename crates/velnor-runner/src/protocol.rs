@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use reqwest::{
     header::{ACCEPT, AUTHORIZATION, USER_AGENT},
@@ -101,6 +102,14 @@ pub struct TenantCredentialRequest {
 pub enum RunnerEvent {
     Register,
     Remove,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubRunnerToken {
+    #[serde(rename = "token")]
+    pub token: String,
+    #[serde(rename = "expires_at")]
+    pub expires_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -306,6 +315,63 @@ impl RegistrationClient {
             .json::<GitHubAuthResult>()
             .await
             .context("parse tenant credential response")
+    }
+
+    pub async fn create_runner_registration_token(
+        &self,
+        scope: &GitHubScope,
+        pat: &str,
+    ) -> Result<GitHubRunnerToken> {
+        self.create_runner_token(scope.registration_token_url.clone(), pat, "registration")
+            .await
+    }
+
+    pub async fn create_runner_remove_token(
+        &self,
+        scope: &GitHubScope,
+        pat: &str,
+    ) -> Result<GitHubRunnerToken> {
+        self.create_runner_token(scope.remove_token_url.clone(), pat, "remove")
+            .await
+    }
+
+    async fn create_runner_token(
+        &self,
+        url: Url,
+        pat: &str,
+        token_type: &str,
+    ) -> Result<GitHubRunnerToken> {
+        let basic = STANDARD.encode(format!("github:{pat}"));
+        let response = self
+            .http
+            .post(url)
+            .header(AUTHORIZATION, format!("basic {basic}"))
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .header(ACCEPT, "application/vnd.github.v3+json")
+            .send()
+            .await
+            .with_context(|| format!("send {token_type} token request"))?;
+
+        let status = response.status();
+        let request_id = response
+            .headers()
+            .get("x-github-request-id")
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            bail!(
+                "runner {token_type} token request failed: status={status}, request_id={}, body={}",
+                request_id.unwrap_or_else(|| "unknown".to_string()),
+                body
+            );
+        }
+
+        response
+            .json::<GitHubRunnerToken>()
+            .await
+            .with_context(|| format!("parse {token_type} token response"))
     }
 }
 
@@ -978,6 +1044,20 @@ mod tests {
 
         assert_eq!(auth.token_schema, "OAuthAccessToken");
         assert!(auth.use_v2_flow);
+    }
+
+    #[test]
+    fn runner_token_response_parses_expiry() {
+        let token: GitHubRunnerToken = serde_json::from_str(
+            r#"{
+                "token": "abc",
+                "expires_at": "2026-05-31T20:00:00Z"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(token.token, "abc");
+        assert_eq!(token.expires_at, "2026-05-31T20:00:00Z");
     }
 
     #[test]
