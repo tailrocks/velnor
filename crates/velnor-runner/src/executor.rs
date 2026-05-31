@@ -511,8 +511,13 @@ where
         env.extend(action_state_env.iter().cloned());
         env.extend(command_files.env.iter().cloned());
         let node_image = node_action_image(&action.node, &container.node_action_image);
-        let exec_args =
-            container.run_node_action_args("/__w", &env, &node_image, entrypoint_container_path);
+        let exec_args = container.run_node_action_args(
+            "/__w",
+            &env,
+            &state.path,
+            &node_image,
+            entrypoint_container_path,
+        );
         let step_result = self.runner.run("docker", &exec_args)?;
         let mut state = command_files.collect_state()?;
         state.merge(parse_workflow_commands(&step_result.stdout));
@@ -1368,6 +1373,9 @@ mod tests {
                     .any(|arg| arg == "GITHUB_STATE=/__t/cache_state")
                 {
                     fs::write(self.temp.join("cache_state"), "primaryKey=linux-cache\n")?;
+                }
+                if args.iter().any(|arg| arg == "GITHUB_PATH=/__t/pather_path") {
+                    fs::write(self.temp.join("pather_path"), "/github/home/.cargo/bin\n")?;
                 }
             }
             Ok(CommandResult {
@@ -2497,6 +2505,62 @@ mod tests {
             .1
             .contains(&"GITHUB_OUTPUT=/__t/action1_output".into()));
 
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn javascript_actions_receive_prior_github_path_entries() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "pather".into(),
+                script: "echo /github/home/.cargo/bin >> $GITHUB_PATH".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+            ExecutableStep::JavaScript {
+                step_id: "cargo-install".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    main_container_path: "/__a/_actions/cargo-install/dist/index.js".into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/cargo-install".into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+        ];
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        let node_call = executor
+            .runner()
+            .calls
+            .iter()
+            .find(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:20-bookworm".into())
+            })
+            .map(|(_, args)| args)
+            .unwrap();
+        assert!(node_call
+            .last()
+            .is_some_and(|arg| arg.contains("export PATH='/github/home/.cargo/bin':\"$PATH\"")));
+        assert!(node_call.last().is_some_and(
+            |arg| arg.contains("exec node '/__a/_actions/cargo-install/dist/index.js'")
+        ));
         fs::remove_dir_all(temp).unwrap();
     }
 

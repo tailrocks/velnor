@@ -105,6 +105,7 @@ impl JobContainerSpec {
         &self,
         working_directory: &str,
         env: &[(String, String)],
+        path_prepend: &[String],
         node_image: &str,
         entrypoint_container_path: &str,
     ) -> Vec<String> {
@@ -137,11 +138,16 @@ impl JobContainerSpec {
         for (name, value) in env {
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
-        args.extend([
-            node_image.into(),
-            "node".into(),
-            entrypoint_container_path.into(),
-        ]);
+        args.push(node_image.into());
+        if path_prepend.is_empty() {
+            args.extend(["node".into(), entrypoint_container_path.into()]);
+        } else {
+            args.extend([
+                "sh".into(),
+                "-lc".into(),
+                node_action_shell_command(path_prepend, entrypoint_container_path),
+            ]);
+        }
         args
     }
 
@@ -288,6 +294,22 @@ fn mount(host: &Path, container: &str) -> String {
     format!("{}:{container}", host.display())
 }
 
+fn node_action_shell_command(path_prepend: &[String], entrypoint_container_path: &str) -> String {
+    let joined = path_prepend
+        .iter()
+        .map(|path| shell_single_quote(path))
+        .collect::<Vec<_>>()
+        .join(":");
+    format!(
+        "export PATH={joined}:\"$PATH\"\nexec node {}",
+        shell_single_quote(entrypoint_container_path)
+    )
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 pub fn split_container_options(options: &str) -> Vec<String> {
     let mut values = Vec::new();
     let mut current = String::new();
@@ -420,6 +442,7 @@ mod tests {
         let args = spec().run_node_action_args(
             "/__w",
             &[("GITHUB_OUTPUT".into(), "/__t/out".into())],
+            &[],
             "node:20-bookworm",
             "/__a/action/dist/index.js",
         );
@@ -434,6 +457,26 @@ mod tests {
         assert_eq!(
             &args[args.len() - 3..],
             ["node:20-bookworm", "node", "/__a/action/dist/index.js"]
+        );
+    }
+
+    #[test]
+    fn builds_node_action_run_args_with_path_prelude() {
+        let args = spec().run_node_action_args(
+            "/__w",
+            &[("GITHUB_OUTPUT".into(), "/__t/out".into())],
+            &["/github/home/.cargo/bin".into(), "/path/with'quote".into()],
+            "node:20-bookworm",
+            "/__a/action/dist/index.js",
+        );
+
+        assert_eq!(
+            &args[args.len() - 4..args.len() - 1],
+            ["node:20-bookworm", "sh", "-lc"]
+        );
+        assert_eq!(
+            args.last().unwrap(),
+            "export PATH='/github/home/.cargo/bin':'/path/with'\\''quote':\"$PATH\"\nexec node '/__a/action/dist/index.js'"
         );
     }
 
