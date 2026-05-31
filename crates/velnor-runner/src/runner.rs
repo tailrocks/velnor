@@ -902,11 +902,19 @@ fn service_containers(job: &AgentJobRequestMessage) -> Vec<ServiceContainerSpec>
                 image,
                 network_alias: alias.to_string(),
                 network: network.clone(),
-                env: Vec::new(),
+                env: service_env(container),
                 ports: service_ports(container),
             })
         })
         .collect()
+}
+
+fn service_env(container: &crate::job_message::ContainerResource) -> Vec<(String, String)> {
+    container
+        .environment_variables
+        .as_ref()
+        .map(container_env_value)
+        .unwrap_or_default()
 }
 
 fn service_ports(container: &crate::job_message::ContainerResource) -> Vec<String> {
@@ -953,6 +961,10 @@ fn container_env(value: &Value) -> Vec<(String, String)> {
     }) else {
         return Vec::new();
     };
+    container_env_value(environment)
+}
+
+fn container_env_value(environment: &Value) -> Vec<(String, String)> {
     match environment {
         Value::Object(object) => object
             .iter()
@@ -1460,6 +1472,9 @@ mod tests {
                     {
                         "alias": "postgres",
                         "image": "postgres:16",
+                        "environmentVariables": {
+                            "POSTGRES_PASSWORD": "postgres"
+                        },
                         "ports": { "5432": "5432" }
                     }
                 ]
@@ -1474,7 +1489,7 @@ mod tests {
                 image: "postgres:16".into(),
                 network_alias: "postgres".into(),
                 network: "velnor-net-job_1".into(),
-                env: Vec::new(),
+                env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
                 ports: vec!["5432:5432".into()],
             }]
         );
