@@ -72,10 +72,11 @@ Current code progress:
 - enabled GitHub script steps can be mapped into internal `ScriptStep` plans for `bash` and `sh`, including `script`, `shell`, and `workingDirectory` inputs
 - opt-in `run --execute-scripts` can execute script-only jobs in one Docker job container and finish success/failure; enabled non-script actions are refused instead of being faked
 - env written to `GITHUB_ENV` and paths written to `GITHUB_PATH` are propagated to later script steps; step outputs are parsed but not yet expression-resolved into later scripts
+- native self-repository `actions/checkout` support is wired before Docker execution through host `git init/fetch/checkout`; other repository actions remain unsupported
 
 Exit criteria:
 
-- workflow with checkout-free shell steps works.
+- workflow with self checkout plus shell steps works.
 - step output flows to later step.
 - env written to `GITHUB_ENV` flows to later step.
 - non-zero exit code fails step/job.
@@ -86,6 +87,7 @@ Goal: support common JavaScript actions.
 
 Deliverables:
 
+- broader `actions/checkout` compatibility: repository input, sparse checkout, submodules, LFS, credentials cleanup
 - action resolver/downloader for `owner/repo@ref`
 - action metadata parser for `action.yml`
 - Node action handler

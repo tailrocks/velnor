@@ -3,6 +3,7 @@ use serde_json::json;
 use std::{fs, path::PathBuf};
 
 use crate::{
+    checkout::{checkout_plans, execute_checkouts, has_unsupported_enabled_action},
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     container::JobContainerSpec,
@@ -13,7 +14,7 @@ use crate::{
         RegistrationClient, RunnerEvent, RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool,
         TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines,
     },
-    script_step::{github_script_steps, has_enabled_non_script_steps},
+    script_step::github_script_steps,
 };
 
 pub async fn configure(args: ConfigureArgs) -> Result<()> {
@@ -338,8 +339,10 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 let Some(script_steps) = script_steps else {
                     bail!("cannot execute scripts because step mapping failed");
                 };
-                if has_enabled_non_script_steps(&job.steps) {
-                    println!("Job has enabled non-script steps; not executing or acknowledging.");
+                if has_unsupported_enabled_action(&job.steps) {
+                    println!(
+                        "Job has enabled unsupported action steps; not executing or acknowledging."
+                    );
                 } else {
                     let result = execute_script_job(
                         &dir,
@@ -413,6 +416,9 @@ fn execute_script_job(
     for path in [&workspace, &temp, &actions, &tools] {
         fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
     }
+    let mut command_runner = ProcessCommandRunner;
+    let checkout_plans = checkout_plans(job, &workspace)?;
+    execute_checkouts(&mut command_runner, &checkout_plans)?;
 
     let container = JobContainerSpec {
         name: format!("velnor-job-{}", sanitize_path_segment(&job.job_id)),
@@ -424,7 +430,7 @@ fn execute_script_job(
         tools_host: tools,
         mount_docker_socket: true,
     };
-    let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+    let mut executor = DockerScriptExecutor::new(command_runner);
     let results = executor.execute_steps(&container, script_steps, &temp)?;
     let failed = results.iter().any(|result| result.exit_code != 0);
 
