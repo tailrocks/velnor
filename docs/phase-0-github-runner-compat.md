@@ -10,6 +10,8 @@ Phase 0 is a Rust implementation of a GitHub self-hosted runner-compatible agent
 
 Pkl remains the future authoring layer, but it comes after GitHub Actions compatibility.
 
+Detailed implementation notes: `docs/research/phase-0-implementation-plan.md`.
+
 ## Goal
 
 Make this work without changing workflow files:

@@ -2,6 +2,8 @@
 
 This roadmap is ordered for the real first goal: run existing GitHub Actions YAML on a Rust Velnor self-hosted runner replacement.
 
+Detailed Phase 0 implementation research lives in `docs/research/phase-0-implementation-plan.md`.
+
 ## Milestone 0: Protocol Spike
 
 Goal: prove Velnor can appear as a GitHub self-hosted runner.
@@ -30,7 +32,7 @@ Deliverables:
 
 - deserialize enough `AgentJobRequestMessage`
 - renew job request lock
-- report basic timeline/log output
+- report timeline/log output for a no-op job
 - finish job request with success/failure
 - handle cancellation message
 
