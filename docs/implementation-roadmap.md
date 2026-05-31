@@ -71,7 +71,8 @@ Current code progress:
 - Docker script executor runs the planned lifecycle through an abstract command runner: create network, start container, exec script, collect state, cleanup container/network
 - enabled GitHub script steps can be mapped into internal `ScriptStep` plans for `bash` and `sh`, including `script`, `shell`, and `workingDirectory` inputs
 - opt-in `run --execute-scripts` can execute script-only jobs in one Docker job container and finish success/failure; enabled non-script actions are refused instead of being faked
-- env written to `GITHUB_ENV` and paths written to `GITHUB_PATH` are propagated to later script steps; step outputs are parsed but not yet expression-resolved into later scripts
+- env written to `GITHUB_ENV` and paths written to `GITHUB_PATH` are propagated to later script steps
+- step outputs written to `GITHUB_OUTPUT` are tracked by step id and basic `${{ steps.<id>.outputs.<name> }}` expressions are resolved in later scripts and JavaScript action env
 - native self-repository `actions/checkout` support is wired before Docker execution through host `git init/fetch/checkout`; other repository actions remain unsupported
 
 Exit criteria:

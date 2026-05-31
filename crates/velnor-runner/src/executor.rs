@@ -56,6 +56,15 @@ pub enum ExecutableStep {
     },
 }
 
+impl ExecutableStep {
+    fn id(&self) -> &str {
+        match self {
+            ExecutableStep::Script(step) => &step.id,
+            ExecutableStep::JavaScript { step_id, .. } => step_id,
+        }
+    }
+}
+
 pub struct DockerScriptExecutor<R> {
     runner: R,
 }
@@ -139,9 +148,11 @@ where
         let mut state = JobExecutionState::new(base_env);
         let mut step_error = None;
         for step in steps {
+            let step_id = step.id().to_string();
             let result = (|| match step {
                 ExecutableStep::Script(step) => {
-                    let plan = ScriptStepPlan::prepare_with_path(step, temp_host, &state.path)?;
+                    let step = state.resolve_script_step(step);
+                    let plan = ScriptStepPlan::prepare_with_path(&step, temp_host, &state.path)?;
                     let env = state.step_env(&plan.env);
                     let exec_args = container.exec_script_args(
                         &plan.script_container_path,
@@ -167,7 +178,7 @@ where
             match result {
                 Ok(result) => {
                     let failed = result.exit_code != 0;
-                    state.apply(&result.state);
+                    state.apply(&step_id, &result.state);
                     results.push(result);
                     if failed {
                         break;
@@ -230,7 +241,7 @@ where
             temp_host,
         )?;
         let mut env = state.step_env(&command_files.env);
-        env.extend(action.env.clone());
+        env.extend(state.resolve_env(&action.env));
         let exec_args = container.exec_process_args(
             "/__w",
             &env,
@@ -270,6 +281,7 @@ where
 #[derive(Debug, Default)]
 struct JobExecutionState {
     env: BTreeMap<String, String>,
+    outputs: BTreeMap<String, BTreeMap<String, String>>,
     path: Vec<String>,
 }
 
@@ -277,6 +289,7 @@ impl JobExecutionState {
     fn new(base_env: &[(String, String)]) -> Self {
         Self {
             env: base_env.iter().cloned().collect(),
+            outputs: BTreeMap::new(),
             path: Vec::new(),
         }
     }
@@ -291,13 +304,64 @@ impl JobExecutionState {
         env
     }
 
-    fn apply(&mut self, step_state: &StepCommandState) {
+    fn apply(&mut self, step_id: &str, step_state: &StepCommandState) {
+        if !step_state.outputs.is_empty() {
+            self.outputs
+                .insert(step_id.to_string(), step_state.outputs.clone());
+        }
         for (name, value) in &step_state.env {
             self.env.insert(name.clone(), value.clone());
         }
         for path in step_state.path.iter().rev() {
             self.path.insert(0, path.clone());
         }
+    }
+
+    fn resolve_script_step(&self, step: &ScriptStep) -> ScriptStep {
+        ScriptStep {
+            id: step.id.clone(),
+            script: self.resolve_expressions(&step.script),
+            shell: step.shell,
+            working_directory_container: self
+                .resolve_expressions(&step.working_directory_container),
+        }
+    }
+
+    fn resolve_env(&self, env: &[(String, String)]) -> Vec<(String, String)> {
+        env.iter()
+            .map(|(name, value)| (name.clone(), self.resolve_expressions(value)))
+            .collect()
+    }
+
+    fn resolve_expressions(&self, value: &str) -> String {
+        let mut rendered = String::with_capacity(value.len());
+        let mut rest = value;
+        while let Some(start) = rest.find("${{") {
+            rendered.push_str(&rest[..start]);
+            let after_start = &rest[start + 3..];
+            let Some(end) = after_start.find("}}") else {
+                rendered.push_str(&rest[start..]);
+                return rendered;
+            };
+            let expression = after_start[..end].trim();
+            if let Some(output) = self.resolve_step_output_expression(expression) {
+                rendered.push_str(output);
+            } else {
+                rendered.push_str(&rest[start..start + 3 + end + 2]);
+            }
+            rest = &after_start[end + 2..];
+        }
+        rendered.push_str(rest);
+        rendered
+    }
+
+    fn resolve_step_output_expression(&self, expression: &str) -> Option<&str> {
+        let expression = expression.strip_prefix("steps.")?;
+        let (step_id, expression) = expression.split_once(".outputs.")?;
+        self.outputs
+            .get(step_id)
+            .and_then(|outputs| outputs.get(expression))
+            .map(String::as_str)
     }
 }
 
@@ -333,6 +397,30 @@ mod tests {
             };
             Ok(CommandResult {
                 code,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    struct OutputWritingRunner {
+        calls: Vec<(String, Vec<String>)>,
+        temp: PathBuf,
+    }
+
+    impl CommandRunner for OutputWritingRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            if program == "docker" && args.first().is_some_and(|arg| arg == "exec") {
+                if args
+                    .iter()
+                    .any(|arg| arg == "GITHUB_OUTPUT=/__t/producer_output")
+                {
+                    fs::write(self.temp.join("producer_output"), "answer=42\n")?;
+                }
+            }
+            Ok(CommandResult {
+                code: 0,
                 stdout: String::new(),
                 stderr: String::new(),
             })
@@ -478,11 +566,15 @@ mod tests {
     #[test]
     fn job_state_flows_env_and_path_to_later_steps() {
         let mut state = JobExecutionState::default();
-        state.apply(&StepCommandState {
-            env: [("NAME".to_string(), "value".to_string())].into(),
-            path: vec!["/opt/tool".to_string()],
-            ..Default::default()
-        });
+        state.apply(
+            "producer",
+            &StepCommandState {
+                outputs: [("answer".to_string(), "42".to_string())].into(),
+                env: [("NAME".to_string(), "value".to_string())].into(),
+                path: vec!["/opt/tool".to_string()],
+                ..Default::default()
+            },
+        );
 
         let env = state.step_env(&[("GITHUB_OUTPUT".into(), "/__t/out".into())]);
 
@@ -490,6 +582,66 @@ mod tests {
         assert!(env.contains(&("GITHUB_OUTPUT".into(), "/__t/out".into())));
         assert!(!env.iter().any(|(name, _)| name == "PATH"));
         assert_eq!(state.path, vec!["/opt/tool"]);
+        assert_eq!(
+            state.resolve_expressions("value=${{ steps.producer.outputs.answer }}"),
+            "value=42"
+        );
+        assert_eq!(
+            state.resolve_expressions("keep=${{ github.ref }}"),
+            "keep=${{ github.ref }}"
+        );
+    }
+
+    #[test]
+    fn resolves_step_outputs_in_later_action_env() {
+        let mut state = JobExecutionState::default();
+        state.apply(
+            "meta",
+            &StepCommandState {
+                outputs: [("tags".to_string(), "image:latest".to_string())].into(),
+                ..Default::default()
+            },
+        );
+
+        let env =
+            state.resolve_env(&[("INPUT_TAGS".into(), "${{ steps.meta.outputs.tags }}".into())]);
+
+        assert_eq!(env, vec![("INPUT_TAGS".into(), "image:latest".into())]);
+    }
+
+    #[test]
+    fn resolves_step_outputs_in_later_script_before_exec() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "producer".into(),
+                script: "echo answer=42 >> $GITHUB_OUTPUT".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "consumer".into(),
+                script: "echo answer=${{ steps.producer.outputs.answer }}".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            fs::read_to_string(temp.join("consumer.sh")).unwrap(),
+            "echo answer=42\n"
+        );
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
