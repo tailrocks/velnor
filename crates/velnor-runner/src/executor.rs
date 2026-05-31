@@ -15,6 +15,8 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
+    thread,
+    time::Duration,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +166,7 @@ where
         self.run_docker(&container.create_network_args())?;
         for service in &container.services {
             self.run_docker(&service.start_args())?;
+            self.wait_for_service(service)?;
         }
         self.run_docker(&container.start_args())?;
 
@@ -232,6 +235,7 @@ where
         self.run_docker(&container.create_network_args())?;
         for service in &container.services {
             self.run_docker(&service.start_args())?;
+            self.wait_for_service(service)?;
         }
         self.run_docker(&container.start_args())?;
 
@@ -417,6 +421,7 @@ where
         self.run_docker(&container.create_network_args())?;
         for service in &container.services {
             self.run_docker(&service.start_args())?;
+            self.wait_for_service(service)?;
         }
         self.run_docker(&container.start_args())?;
 
@@ -512,6 +517,23 @@ where
             );
         }
         Ok(result)
+    }
+
+    fn wait_for_service(&mut self, service: &crate::container::ServiceContainerSpec) -> Result<()> {
+        for _ in 0..30 {
+            let result = self.run_docker(&service.health_status_args())?;
+            match result.stdout.trim() {
+                "healthy" | "running" | "" => return Ok(()),
+                "exited" | "dead" => {
+                    bail!(
+                        "service container '{}' stopped before becoming ready",
+                        service.name
+                    )
+                }
+                _ => thread::sleep(Duration::from_secs(1)),
+            }
+        }
+        bail!("service container '{}' did not become ready", service.name)
     }
 }
 
@@ -1201,7 +1223,7 @@ fn exit_code(status: ExitStatus) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::container::Shell;
+    use crate::container::{ServiceContainerSpec, Shell};
     use std::{
         fs,
         path::PathBuf,
@@ -1429,6 +1451,40 @@ mod tests {
         assert_eq!(calls[4].1[0], "rm");
         assert_eq!(calls[5].1[0], "network");
 
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn starts_and_waits_for_service_before_job_container() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let mut container = container(&temp);
+        container.services.push(ServiceContainerSpec {
+            name: "svc".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "net".into(),
+            env: Vec::new(),
+        });
+        let step = ScriptStep {
+            id: "step1".into(),
+            script: "echo ok".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+        };
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor.execute_step(&container, &step, &temp).unwrap();
+
+        let calls = &executor.runner().calls;
+        assert_eq!(calls[0].1, vec!["network", "create", "net"]);
+        assert_eq!(calls[1].1[0], "run");
+        assert!(calls[1].1.windows(2).any(|pair| pair == ["--name", "svc"]));
+        assert_eq!(calls[2].1[0], "inspect");
+        assert_eq!(calls[3].1[0], "run");
         fs::remove_dir_all(temp).unwrap();
     }
 

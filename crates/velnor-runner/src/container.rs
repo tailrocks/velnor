@@ -133,6 +133,15 @@ impl ServiceContainerSpec {
     pub fn remove_args(&self) -> Vec<String> {
         vec!["rm".into(), "--force".into(), self.name.clone()]
     }
+
+    pub fn health_status_args(&self) -> Vec<String> {
+        vec![
+            "inspect".into(),
+            "--format={{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}"
+                .into(),
+            self.name.clone(),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -271,6 +280,14 @@ mod tests {
         assert_eq!(
             service.remove_args(),
             vec!["rm", "--force", "velnor-service-postgres"]
+        );
+        assert_eq!(
+            service.health_status_args(),
+            vec![
+                "inspect",
+                "--format={{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
+                "velnor-service-postgres"
+            ]
         );
     }
 }
