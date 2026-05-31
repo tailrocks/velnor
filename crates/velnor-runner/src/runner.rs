@@ -5,9 +5,10 @@ use std::{fs, path::PathBuf};
 use crate::{
     action::{
         composite_action_invocations, composite_repository_action_plans,
-        download_repository_actions, is_local_action_step, local_action_plans_with_context,
-        repository_action_plans, resolve_local_action, ActionMetadata, CompositeActionInvocation,
-        LocalActionPlan, ResolvedAction,
+        composite_repository_action_plans_from_resolved, download_repository_actions,
+        is_local_action_step, local_action_plans_with_context, repository_action_plans,
+        resolve_local_action, ActionMetadata, ActionRuntime, CompositeActionInvocation,
+        LocalActionPlan, RepositoryActionPlan, ResolvedAction,
     },
     checkout::{checkout_plans, execute_checkouts},
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
@@ -21,7 +22,7 @@ use crate::{
         TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines,
     },
     runtime_env::job_runtime_env,
-    script_step::{github_script_steps, step_continue_on_error},
+    script_step::github_script_steps,
 };
 
 pub async fn configure(args: ConfigureArgs) -> Result<()> {
@@ -433,8 +434,11 @@ fn execute_script_job(
     let resolved_actions = if repository_action_plans.is_empty() {
         Vec::new()
     } else {
-        let resolved_actions =
-            download_repository_actions(&mut command_runner, &repository_action_plans)?;
+        let resolved_actions = download_repository_actions_recursive(
+            &mut command_runner,
+            &repository_action_plans,
+            &actions,
+        )?;
         println!(
             "Downloaded and resolved {} repository action(s).",
             resolved_actions.len()
@@ -479,6 +483,44 @@ fn execute_script_job(
     })
 }
 
+fn download_repository_actions_recursive<R>(
+    runner: &mut R,
+    initial_plans: &[RepositoryActionPlan],
+    actions_host: &std::path::Path,
+) -> Result<Vec<ResolvedAction>>
+where
+    R: crate::executor::CommandRunner,
+{
+    let mut resolved = Vec::new();
+    let mut pending = initial_plans.to_vec();
+    while !pending.is_empty() {
+        let next = download_repository_actions(runner, &pending)?;
+        resolved.extend(next);
+
+        let nested = composite_repository_action_plans_from_resolved(&resolved, actions_host)?;
+        let previous_pending = pending;
+        pending = nested
+            .into_iter()
+            .filter(|plan| {
+                !resolved
+                    .iter()
+                    .any(|action| same_action(&action.plan, plan))
+                    && !previous_pending
+                        .iter()
+                        .any(|existing| same_action(existing, plan))
+            })
+            .collect();
+    }
+    Ok(resolved)
+}
+
+fn same_action(left: &RepositoryActionPlan, right: &RepositoryActionPlan) -> bool {
+    left.step_id == right.step_id
+        && left.repository == right.repository
+        && left.git_ref == right.git_ref
+        && left.source_path == right.source_path
+}
+
 fn ordered_executable_steps(
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
@@ -519,12 +561,13 @@ fn ordered_executable_steps(
                                             plan.step_id
                                         )
                                     })?;
-                                ordered.push(ExecutableStep::JavaScript {
-                                    step_id: action.plan.step_id.clone(),
-                                    invocation: action.javascript_invocation(actions_host)?,
-                                    condition: action.plan.condition.clone(),
-                                    continue_on_error: action.plan.continue_on_error,
-                                });
+                                append_resolved_action_steps(
+                                    &mut ordered,
+                                    action,
+                                    resolved_actions,
+                                    actions_host,
+                                    None,
+                                )?;
                             }
                         }
                     }
@@ -552,17 +595,101 @@ fn ordered_executable_steps(
                             "repository action '{repository}@{git_ref}' was not resolved"
                         )
                     })?;
-                ordered.push(ExecutableStep::JavaScript {
-                    step_id: action.plan.step_id.clone(),
-                    invocation: action.javascript_invocation(actions_host)?,
-                    condition: step.condition.clone(),
-                    continue_on_error: step_continue_on_error(step),
-                });
+                append_resolved_action_steps(
+                    &mut ordered,
+                    action,
+                    resolved_actions,
+                    actions_host,
+                    None,
+                )?;
             }
             _ => bail!("unsupported enabled step in job"),
         }
     }
     Ok(ordered)
+}
+
+fn append_resolved_action_steps(
+    ordered: &mut Vec<ExecutableStep>,
+    action: &ResolvedAction,
+    resolved_actions: &[ResolvedAction],
+    actions_host: &std::path::Path,
+    parent_condition: Option<&str>,
+) -> Result<()> {
+    match &action.runtime {
+        ActionRuntime::JavaScript { .. } => ordered.push(ExecutableStep::JavaScript {
+            step_id: action.plan.step_id.clone(),
+            invocation: action.javascript_invocation(actions_host)?,
+            condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
+            continue_on_error: action.plan.continue_on_error,
+        }),
+        ActionRuntime::Composite => {
+            let action_condition =
+                combine_conditions(parent_condition, action.plan.condition.as_deref());
+            for invocation in action.composite_invocations("/__w", actions_host)? {
+                match invocation {
+                    CompositeActionInvocation::Script(mut script) => {
+                        script.condition = combine_conditions(
+                            action_condition.as_deref(),
+                            script.condition.as_deref(),
+                        );
+                        script.continue_on_error |= action.plan.continue_on_error;
+                        ordered.push(ExecutableStep::Script(script));
+                    }
+                    CompositeActionInvocation::Repository(plan) => {
+                        let nested = resolved_actions
+                            .iter()
+                            .find(|resolved| resolved.plan.step_id == plan.step_id)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "nested repository action '{}' was not resolved",
+                                    plan.step_id
+                                )
+                            })?;
+                        append_resolved_action_steps(
+                            ordered,
+                            nested,
+                            resolved_actions,
+                            actions_host,
+                            action_condition.as_deref(),
+                        )?;
+                    }
+                }
+            }
+        }
+        ActionRuntime::Docker { image } => {
+            bail!(
+                "Docker action '{}' ({image}) is not implemented yet",
+                action.plan.repository
+            )
+        }
+    }
+    Ok(())
+}
+
+fn combine_conditions(parent: Option<&str>, child: Option<&str>) -> Option<String> {
+    match (
+        parent.filter(|value| !value.trim().is_empty()),
+        child.filter(|value| !value.trim().is_empty()),
+    ) {
+        (Some(parent), Some(child)) => Some(format!(
+            "${{{{ ({}) && ({}) }}}}",
+            strip_condition_expression(parent),
+            strip_condition_expression(child)
+        )),
+        (Some(parent), None) => Some(parent.to_string()),
+        (None, Some(child)) => Some(child.to_string()),
+        (None, None) => None,
+    }
+}
+
+fn strip_condition_expression(condition: &str) -> &str {
+    condition
+        .trim()
+        .strip_prefix("${{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .map(str::trim)
+        .unwrap_or_else(|| condition.trim())
 }
 
 fn job_work_dir(
@@ -927,5 +1054,71 @@ runs:
         assert!(invocation
             .env
             .contains(&("INPUT_GITHUB_TOKEN".into(), "ghs_token".into())));
+    }
+
+    #[test]
+    fn ordered_steps_expand_repository_composite_action() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Toolchain",
+            "requestId": 1,
+            "steps": [{
+                "id": "rust",
+                "reference": {
+                    "type": "Repository",
+                    "name": "dtolnay/rust-toolchain",
+                    "ref": "stable"
+                },
+                "condition": "runner.os == 'Linux'",
+                "inputs": { "toolchain": "stable" }
+            }]
+        }))
+        .unwrap();
+        let actions_host = Path::new("/tmp/actions");
+        let plan = RepositoryActionPlan {
+            step_id: "rust".into(),
+            repository: "dtolnay/rust-toolchain".into(),
+            git_ref: "stable".into(),
+            source_path: None,
+            repository_dir: actions_host.join("_actions/dtolnay_rust-toolchain/stable"),
+            action_dir: actions_host.join("_actions/dtolnay_rust-toolchain/stable"),
+            inputs: [("toolchain".to_string(), "stable".to_string())].into(),
+            env: Vec::new(),
+            condition: Some("runner.os == 'Linux'".into()),
+            continue_on_error: false,
+        };
+        let metadata = parse_action_metadata(
+            r#"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      if: runner.os != 'Windows'
+      run: echo "${{ inputs.toolchain }}"
+"#,
+        )
+        .unwrap();
+        let resolved = ResolvedAction {
+            plan,
+            metadata_path: actions_host.join("_actions/dtolnay_rust-toolchain/stable/action.yml"),
+            runtime: metadata.runtime().unwrap(),
+            metadata,
+        };
+
+        let ordered = ordered_executable_steps(&job, &[], &[resolved], &[], actions_host).unwrap();
+
+        assert_eq!(ordered.len(), 1);
+        let ExecutableStep::Script(step) = &ordered[0] else {
+            panic!("repository composite should expand to script step")
+        };
+        assert_eq!(step.id, "rust-1");
+        assert_eq!(
+            step.condition.as_deref(),
+            Some("${{ (runner.os == 'Linux') && (runner.os != 'Windows') }}")
+        );
+        assert!(step.script.contains("echo \"stable\""));
     }
 }

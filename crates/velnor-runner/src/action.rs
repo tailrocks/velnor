@@ -70,6 +70,8 @@ pub struct CompositeActionStep {
     pub condition: Option<String>,
     #[serde(default, rename = "working-directory", alias = "workingDirectory")]
     pub working_directory: Option<String>,
+    #[serde(default, rename = "continue-on-error", alias = "continueOnError")]
+    pub continue_on_error: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,6 +242,24 @@ pub fn composite_repository_action_plans(
     Ok(plans)
 }
 
+pub fn composite_repository_action_plans_from_resolved(
+    resolved_actions: &[ResolvedAction],
+    actions_host: &Path,
+) -> Result<Vec<RepositoryActionPlan>> {
+    let mut plans = Vec::new();
+    for action in resolved_actions {
+        if action.runtime != ActionRuntime::Composite {
+            continue;
+        }
+        for invocation in action.composite_invocations("/__w", actions_host)? {
+            if let CompositeActionInvocation::Repository(repository_plan) = invocation {
+                plans.push(repository_plan);
+            }
+        }
+    }
+    Ok(plans)
+}
+
 fn step_id(step: &ActionStep, index: usize) -> String {
     step.id
         .as_deref()
@@ -345,6 +365,28 @@ impl ResolvedAction {
             env,
         })
     }
+
+    pub fn composite_invocations(
+        &self,
+        workspace_container: &str,
+        actions_host: &Path,
+    ) -> Result<Vec<CompositeActionInvocation>> {
+        if self.runtime != ActionRuntime::Composite {
+            bail!(
+                "action '{}' is not a composite action",
+                self.plan.repository
+            )
+        }
+        let action_path = container_path(actions_host, &self.plan.action_dir)?;
+        composite_action_invocations_with_path(
+            &self.plan.step_id,
+            &self.plan.inputs,
+            &self.metadata,
+            workspace_container,
+            actions_host,
+            &action_path,
+        )
+    }
 }
 
 pub fn composite_script_steps(
@@ -374,10 +416,28 @@ pub fn composite_action_invocations(
     }
 
     let action_path = workspace_container_path(workspace_container, &plan.action_dir)?;
-    let action_inputs = effective_inputs(metadata, &plan.inputs);
+    composite_action_invocations_with_path(
+        &plan.step_id,
+        &plan.inputs,
+        metadata,
+        workspace_container,
+        actions_host,
+        &action_path,
+    )
+}
+
+fn composite_action_invocations_with_path(
+    step_id_prefix: &str,
+    inputs: &BTreeMap<String, String>,
+    metadata: &ActionMetadata,
+    workspace_container: &str,
+    actions_host: &Path,
+    action_path: &str,
+) -> Result<Vec<CompositeActionInvocation>> {
+    let action_inputs = effective_inputs(metadata, inputs);
     let mut invocations = Vec::new();
     for (index, step) in metadata.runs.steps.iter().enumerate() {
-        let step_id = format!("{}-{}", plan.step_id, index + 1);
+        let step_id = format!("{}-{}", step_id_prefix, index + 1);
         if let Some(uses) = step.uses.as_deref() {
             let reference = parse_repository_uses(uses)?;
             let inputs = step
@@ -389,7 +449,7 @@ pub fn composite_action_invocations(
                         render_composite_value(
                             value,
                             &action_inputs,
-                            &action_path,
+                            action_path,
                             workspace_container,
                         ),
                     )
@@ -404,14 +464,14 @@ pub fn composite_action_invocations(
                         render_composite_value(
                             value,
                             &action_inputs,
-                            &action_path,
+                            action_path,
                             workspace_container,
                         ),
                     )
                 })
                 .collect();
             let condition = step.condition.as_ref().map(|condition| {
-                render_composite_value(condition, &action_inputs, &action_path, workspace_container)
+                render_composite_value(condition, &action_inputs, action_path, workspace_container)
             });
             let repository_dir =
                 repository_dir(actions_host, &reference.repository, &reference.git_ref);
@@ -432,7 +492,7 @@ pub fn composite_action_invocations(
                     inputs,
                     env,
                     condition,
-                    continue_on_error: false,
+                    continue_on_error: step.continue_on_error.unwrap_or(false),
                 },
             ));
             continue;
@@ -447,7 +507,7 @@ pub fn composite_action_invocations(
             .transpose()?
             .unwrap_or(crate::container::Shell::Bash);
         let mut rendered =
-            render_composite_value(script, &action_inputs, &action_path, workspace_container);
+            render_composite_value(script, &action_inputs, action_path, workspace_container);
         if !step.env.is_empty() {
             let exports = step
                 .env
@@ -459,7 +519,7 @@ pub fn composite_action_invocations(
                         shell_single_quote(&render_composite_value(
                             value,
                             &action_inputs,
-                            &action_path,
+                            action_path,
                             workspace_container
                         ))
                     ))
@@ -479,9 +539,9 @@ pub fn composite_action_invocations(
             working_directory_container,
             env: Vec::new(),
             condition: step.condition.as_ref().map(|condition| {
-                render_composite_value(condition, &action_inputs, &action_path, workspace_container)
+                render_composite_value(condition, &action_inputs, action_path, workspace_container)
             }),
-            continue_on_error: false,
+            continue_on_error: step.continue_on_error.unwrap_or(false),
         }));
     }
     Ok(invocations)
@@ -996,6 +1056,104 @@ runs:
             plans[0].condition.as_deref(),
             Some("${{ ghs_token != '' }}")
         );
+    }
+
+    #[test]
+    fn expands_repository_composite_run_steps() {
+        let actions_host = Path::new("/tmp/actions");
+        let plan = RepositoryActionPlan {
+            step_id: "toolchain".into(),
+            repository: "dtolnay/rust-toolchain".into(),
+            git_ref: "stable".into(),
+            source_path: None,
+            repository_dir: actions_host.join("_actions/dtolnay_rust-toolchain/stable"),
+            action_dir: actions_host.join("_actions/dtolnay_rust-toolchain/stable"),
+            inputs: [("toolchain".to_string(), "stable".to_string())].into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+        };
+        let metadata = parse_action_metadata(
+            r#"
+inputs:
+  toolchain:
+    default: nightly
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      if: runner.os == 'Linux'
+      continue-on-error: true
+      run: echo "${{ github.action_path }} ${{ inputs.toolchain }}"
+"#,
+        )
+        .unwrap();
+        let runtime = metadata.runtime().unwrap();
+        let resolved = ResolvedAction {
+            plan,
+            metadata_path: actions_host.join("_actions/dtolnay_rust-toolchain/stable/action.yml"),
+            metadata,
+            runtime,
+        };
+
+        let invocations = resolved
+            .composite_invocations("/__w", actions_host)
+            .unwrap();
+
+        let CompositeActionInvocation::Script(step) = &invocations[0] else {
+            panic!("repository composite should expand to script")
+        };
+        assert_eq!(step.id, "toolchain-1");
+        assert_eq!(step.condition.as_deref(), Some("runner.os == 'Linux'"));
+        assert!(step.continue_on_error);
+        assert!(step
+            .script
+            .contains("/__a/_actions/dtolnay_rust-toolchain/stable stable"));
+    }
+
+    #[test]
+    fn collects_nested_repository_actions_from_resolved_composites() {
+        let actions_host = Path::new("/tmp/actions");
+        let plan = RepositoryActionPlan {
+            step_id: "pages".into(),
+            repository: "actions/upload-pages-artifact".into(),
+            git_ref: "v4".into(),
+            source_path: None,
+            repository_dir: actions_host.join("_actions/actions_upload-pages-artifact/v4"),
+            action_dir: actions_host.join("_actions/actions_upload-pages-artifact/v4"),
+            inputs: [("path".to_string(), "site".to_string())].into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+        };
+        let metadata = parse_action_metadata(
+            r#"
+runs:
+  using: composite
+  steps:
+    - uses: actions/upload-artifact@v7
+      with:
+        path: ${{ inputs.path }}
+"#,
+        )
+        .unwrap();
+        let runtime = metadata.runtime().unwrap();
+        let resolved = ResolvedAction {
+            plan,
+            metadata_path: actions_host
+                .join("_actions/actions_upload-pages-artifact/v4/action.yml"),
+            metadata,
+            runtime,
+        };
+
+        let plans =
+            composite_repository_action_plans_from_resolved(&[resolved], actions_host).unwrap();
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].step_id, "pages-1");
+        assert_eq!(plans[0].repository, "actions/upload-artifact");
+        assert_eq!(plans[0].git_ref, "v7");
+        assert_eq!(plans[0].inputs["path"], "site");
     }
 
     #[test]
