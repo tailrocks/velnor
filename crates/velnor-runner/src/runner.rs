@@ -529,6 +529,7 @@ fn execute_script_job(
         actions_host: actions,
         tools_host: tools,
         mount_docker_socket: true,
+        env: job_container_env(job),
     };
     let mut executor = DockerScriptExecutor::new(command_runner);
     let base_env = job_runtime_env(job);
@@ -872,6 +873,14 @@ fn job_container_image(job: &AgentJobRequestMessage) -> Option<&str> {
         })
 }
 
+fn job_container_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
+    job.job_container
+        .as_ref()
+        .into_iter()
+        .flat_map(container_env)
+        .collect()
+}
+
 fn container_image(value: &Value) -> Option<&str> {
     value
         .as_object()
@@ -884,6 +893,40 @@ fn container_image(value: &Value) -> Option<&str> {
         })
         .and_then(Value::as_str)
         .filter(|image| !image.is_empty())
+}
+
+fn container_env(value: &Value) -> Vec<(String, String)> {
+    let Some(environment) = value.as_object().and_then(|object| {
+        object
+            .get("environmentVariables")
+            .or_else(|| object.get("EnvironmentVariables"))
+            .or_else(|| object.get("env"))
+            .or_else(|| object.get("Env"))
+    }) else {
+        return Vec::new();
+    };
+    match environment {
+        Value::Object(object) => object
+            .iter()
+            .filter_map(|(name, value)| value.as_str().map(|value| (name.clone(), value.into())))
+            .collect(),
+        Value::Array(values) => values
+            .iter()
+            .filter_map(|value| {
+                let object = value.as_object()?;
+                let name = object
+                    .get("name")
+                    .or_else(|| object.get("Name"))
+                    .and_then(Value::as_str)?;
+                let value = object
+                    .get("value")
+                    .or_else(|| object.get("Value"))
+                    .and_then(Value::as_str)?;
+                Some((name.to_string(), value.to_string()))
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 async fn complete_job(
@@ -1310,6 +1353,47 @@ mod tests {
         assert_eq!(
             job_container_image(&job),
             Some("ghcr.io/acme/resource:latest")
+        );
+    }
+
+    #[test]
+    fn job_container_env_reads_object_and_array_shapes() {
+        let object_job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Container",
+            "requestId": 1,
+            "jobContainer": {
+                "environmentVariables": {
+                    "NODE_OPTIONS": "--max-old-space-size=4096"
+                }
+            }
+        }))
+        .unwrap();
+        let array_job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Container",
+            "requestId": 1,
+            "jobContainer": {
+                "env": [
+                    { "name": "RUST_LOG", "value": "debug" }
+                ]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            job_container_env(&object_job),
+            vec![("NODE_OPTIONS".into(), "--max-old-space-size=4096".into())]
+        );
+        assert_eq!(
+            job_container_env(&array_job),
+            vec![("RUST_LOG".into(), "debug".into())]
         );
     }
 

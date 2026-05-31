@@ -12,6 +12,7 @@ pub struct JobContainerSpec {
     pub actions_host: PathBuf,
     pub tools_host: PathBuf,
     pub mount_docker_socket: bool,
+    pub env: Vec<(String, String)>,
 }
 
 impl JobContainerSpec {
@@ -42,6 +43,9 @@ impl JobContainerSpec {
             "-e".into(),
             "RUNNER_TOOL_CACHE=/__tool".into(),
         ];
+        for (name, value) in &self.env {
+            args.extend(["-e".into(), format!("{name}={value}")]);
+        }
 
         if self.mount_docker_socket {
             args.extend([
@@ -136,6 +140,7 @@ mod tests {
             actions_host: "/tmp/actions".into(),
             tools_host: "/tmp/tools".into(),
             mount_docker_socket: true,
+            env: vec![("NODE_OPTIONS".into(), "--max-old-space-size=4096".into())],
         }
     }
 
@@ -147,6 +152,7 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--name", "velnor-job-1"]));
         assert!(args.contains(&"/tmp/work:/__w".into()));
+        assert!(args.contains(&"NODE_OPTIONS=--max-old-space-size=4096".into()));
         assert!(args.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
         assert_eq!(args.last().map(String::as_str), Some("/dev/null"));
     }

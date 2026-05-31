@@ -1282,6 +1282,7 @@ mod tests {
             actions_host: temp.join("actions"),
             tools_host: temp.join("tools"),
             mount_docker_socket: false,
+            env: Vec::new(),
         }
     }
 
