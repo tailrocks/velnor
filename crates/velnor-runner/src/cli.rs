@@ -44,6 +44,14 @@ pub struct ConfigureArgs {
     #[arg(long)]
     pub replace: bool,
 
+    /// Runner group/pool id. If omitted, Velnor chooses the default self-hosted pool.
+    #[arg(long)]
+    pub pool_id: Option<i64>,
+
+    /// Runner group/pool name. Used when multiple self-hosted pools exist.
+    #[arg(long)]
+    pub pool_name: Option<String>,
+
     /// Validate local config and payloads without calling GitHub.
     #[arg(long)]
     pub dry_run: bool,

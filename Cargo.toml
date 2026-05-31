@@ -9,8 +9,10 @@ repository = "https://github.com/donbeave/velnor"
 
 [workspace.dependencies]
 anyhow = "1.0.98"
+base64 = "0.22.1"
 clap = { version = "4.5.38", features = ["derive", "env"] }
 reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
+rsa = { version = "0.9.8", features = ["pem"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 thiserror = "2.0.12"

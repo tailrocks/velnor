@@ -67,23 +67,47 @@ Velnor stores these as runner credentials and then talks to the distributed task
 
 ## Agent Registration Payload
 
-The next call registers a `TaskAgent` in the selected pool. The minimum payload shape Velnor needs:
+The runner lists self-hosted pools, chooses the default internal pool unless a runner group is requested, then checks existing agents by name:
+
+```text
+GET <server_url>/_apis/distributedtask/pools?api-version=5.1-preview.1
+GET <server_url>/_apis/distributedtask/pools/{poolId}/agents?agentName={name}&api-version=6.0-preview.2
+```
+
+The next call registers or replaces a `TaskAgent` in the selected pool:
+
+```text
+POST <server_url>/_apis/distributedtask/pools/{poolId}/agents?api-version=6.0-preview.2
+PUT  <server_url>/_apis/distributedtask/pools/{poolId}/agents/{agentId}?api-version=6.0-preview.2
+```
+
+The minimum payload shape Velnor needs:
 
 ```json
 {
   "name": "velnor-runner",
   "version": "2.326.0",
+  "osDescription": "linux",
   "maxParallelism": 1,
   "ephemeral": false,
   "disableUpdate": true,
+  "authorization": {
+    "publicKey": {
+      "exponent": "...",
+      "modulus": "..."
+    }
+  },
   "labels": [
-    { "name": "velnor" },
-    { "name": "hetzner-sentry-ci" }
+    { "name": "self-hosted", "type": "System" },
+    { "name": "linux", "type": "System" },
+    { "name": "x86_64", "type": "System" },
+    { "name": "velnor", "type": "User" },
+    { "name": "hetzner-sentry-ci", "type": "User" }
   ]
 }
 ```
 
-OAuth key exchange adds `authorization.publicKey`. If GitHub returns V2 runner authorization, Velnor must store `ServerUrlV2` and use broker flow.
+GitHub returns agent id and OAuth authorization data. Velnor stores `clientId`, `authorizationUrl`, and the generated private key so it can mint OAuth JWT credentials for session/message APIs later. If GitHub returns V2 runner authorization, Velnor must store `ServerUrlV2` and use broker flow.
 
 ## Message Loop Calls
 
@@ -113,7 +137,7 @@ Implement and test in this order:
 
 1. URL derivation and payload serialization.
 2. Tenant credential exchange.
-3. Agent add/replace/remove.
+3. Agent pool lookup and agent add/replace.
 4. Session create/delete.
 5. Message long-poll.
 6. Job lock renew/finish.

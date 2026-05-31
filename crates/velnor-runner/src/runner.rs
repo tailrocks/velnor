@@ -4,7 +4,10 @@ use serde_json::json;
 use crate::{
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
-    protocol::{GitHubScope, RegistrationClient, RunnerEvent, TaskAgent},
+    protocol::{
+        DistributedTaskClient, GitHubAuthResult, GitHubScope, RegistrationClient, RunnerEvent,
+        RunnerKeyPair, TaskAgent, TaskAgentPool,
+    },
 };
 
 pub async fn configure(args: ConfigureArgs) -> Result<()> {
@@ -12,29 +15,76 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
     let scope = GitHubScope::parse(&args.url)?;
     let agent_name = args.name.unwrap_or_else(default_agent_name);
     let labels = normalize_labels(args.labels);
-    let agent = TaskAgent::new(agent_name.clone(), labels.clone(), false);
-    let auth = if args.dry_run {
+    let key_pair = if args.dry_run {
         None
     } else {
-        Some(
-            RegistrationClient::new()?
-                .exchange_tenant_credential(&scope, &args.token, RunnerEvent::Register)
-                .await?,
-        )
+        Some(RunnerKeyPair::generate()?)
     };
-    let credentials = auth.as_ref().map(stored_credentials).transpose()?;
+    let agent = TaskAgent::new(
+        agent_name.clone(),
+        labels.clone(),
+        key_pair
+            .as_ref()
+            .map(|key_pair| key_pair.public_key.clone()),
+        false,
+    );
+    let registration = if args.dry_run {
+        None
+    } else {
+        let auth = RegistrationClient::new()?
+            .exchange_tenant_credential(&scope, &args.token, RunnerEvent::Register)
+            .await?;
+        let client = DistributedTaskClient::new(&auth.server_url, &auth.token)?;
+        let pools = client.get_agent_pools(args.pool_name.as_deref()).await?;
+        let pool = select_pool(&pools, args.pool_id, args.pool_name.as_deref())?;
+        let existing = client.get_agents(pool.id, &agent_name).await?;
+        let registered_agent = if let Some(existing_agent) = existing.first() {
+            if !args.replace {
+                bail!("runner '{}' already exists; pass --replace", agent_name);
+            }
+            client
+                .replace_agent(pool.id, &agent.clone().with_id(existing_agent.id()?))
+                .await?
+        } else {
+            client.add_agent(pool.id, &agent).await?
+        };
+
+        Some(RegistrationResult {
+            auth,
+            pool,
+            agent: registered_agent,
+        })
+    };
+    let credentials = match (&registration, &key_pair) {
+        (Some(registration), Some(key_pair)) => Some(stored_credentials(
+            &registration.auth,
+            &registration.agent,
+            key_pair,
+        )?),
+        _ => None,
+    };
 
     let stored = StoredRunnerConfig {
         settings: RunnerSettings {
             github_url: scope.original_url.clone(),
-            server_url: auth.as_ref().map(|auth| auth.server_url.clone()),
+            server_url: registration
+                .as_ref()
+                .map(|registration| registration.auth.server_url.clone()),
             server_url_v2: None,
-            pool_id: None,
-            pool_name: None,
-            agent_id: None,
+            pool_id: registration
+                .as_ref()
+                .map(|registration| registration.pool.id),
+            pool_name: registration
+                .as_ref()
+                .and_then(|registration| registration.pool.name.clone()),
+            agent_id: registration
+                .as_ref()
+                .and_then(|registration| registration.agent.id),
             agent_name,
             labels,
-            use_v2_flow: auth.as_ref().is_some_and(|auth| auth.use_v2_flow),
+            use_v2_flow: registration
+                .as_ref()
+                .is_some_and(|registration| registration.auth.use_v2_flow),
             ephemeral: false,
             disable_update: true,
         },
@@ -54,21 +104,47 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         agent.name,
         agent.labels.len()
     );
-    if auth.is_some() {
-        println!("Stored tenant credential from GitHub.");
-        println!("Agent add/replace call is the next Milestone 0 step.");
+    if let Some(registration) = registration {
+        println!(
+            "Registered agent id {} in pool {}.",
+            registration.agent.id.unwrap_or_default(),
+            registration.pool.id
+        );
+        println!("Session create/message poll is the next Milestone 0 step.");
     } else {
         println!("Dry run: skipped tenant credential exchange.");
-    }
-
-    if args.replace {
-        println!("Recorded --replace intent; remote replacement is not implemented yet.");
     }
 
     Ok(())
 }
 
-fn stored_credentials(auth: &crate::protocol::GitHubAuthResult) -> Result<StoredCredentials> {
+struct RegistrationResult {
+    auth: GitHubAuthResult,
+    pool: TaskAgentPool,
+    agent: TaskAgent,
+}
+
+fn stored_credentials(
+    auth: &GitHubAuthResult,
+    agent: &TaskAgent,
+    key_pair: &RunnerKeyPair,
+) -> Result<StoredCredentials> {
+    if let Some(authorization) = &agent.authorization {
+        if let (Some(client_id), Some(authorization_url)) =
+            (&authorization.client_id, &authorization.authorization_url)
+        {
+            return Ok(StoredCredentials {
+                scheme: CredentialScheme::OAuth,
+                data: json!({
+                    "clientId": client_id,
+                    "authorizationUrl": authorization_url,
+                    "privateKeyPem": key_pair.private_key_pem,
+                    "requireFipsCryptography": "false",
+                }),
+            });
+        }
+    }
+
     Ok(StoredCredentials {
         scheme: credential_scheme(&auth.token_schema)?,
         data: json!({
@@ -82,6 +158,50 @@ fn credential_scheme(token_schema: &str) -> Result<CredentialScheme> {
         Ok(CredentialScheme::OAuthAccessToken)
     } else {
         bail!("unsupported GitHub runner token schema: {token_schema}")
+    }
+}
+
+fn select_pool(
+    pools: &[TaskAgentPool],
+    pool_id: Option<i64>,
+    pool_name: Option<&str>,
+) -> Result<TaskAgentPool> {
+    if let Some(pool_id) = pool_id {
+        return pools
+            .iter()
+            .find(|pool| pool.id == pool_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("runner pool id {pool_id} not found"));
+    }
+
+    if let Some(pool_name) = pool_name {
+        return pools
+            .iter()
+            .find(|pool| {
+                pool.name
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(pool_name))
+            })
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("runner pool '{pool_name}' not found"));
+    }
+
+    pools
+        .iter()
+        .find(|pool| pool.is_internal && !pool.is_hosted)
+        .or_else(|| pools.iter().find(|pool| !pool.is_hosted))
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no self-hosted runner pool found"))
+}
+
+trait TaskAgentExt {
+    fn id(&self) -> Result<i64>;
+}
+
+impl TaskAgentExt for TaskAgent {
+    fn id(&self) -> Result<i64> {
+        self.id
+            .ok_or_else(|| anyhow::anyhow!("GitHub returned agent without id"))
     }
 }
 
