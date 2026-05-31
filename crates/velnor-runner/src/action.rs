@@ -178,6 +178,45 @@ pub fn resolve_action(plan: &RepositoryActionPlan) -> Result<ResolvedAction> {
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaScriptActionInvocation {
+    pub node: String,
+    pub main_container_path: String,
+    pub action_container_path: String,
+    pub env: Vec<(String, String)>,
+}
+
+impl ResolvedAction {
+    pub fn javascript_invocation(&self, actions_host: &Path) -> Result<JavaScriptActionInvocation> {
+        let ActionRuntime::JavaScript { node, main } = &self.runtime else {
+            bail!(
+                "action '{}' is not a JavaScript action",
+                self.plan.repository
+            )
+        };
+        let action_container_path = container_path(actions_host, &self.plan.action_dir)?;
+        let main_container_path =
+            format!("{}/{}", action_container_path, main.trim_start_matches('/'));
+        let mut env = vec![(
+            "GITHUB_ACTION_PATH".to_string(),
+            action_container_path.clone(),
+        )];
+        env.extend(
+            self.plan
+                .inputs
+                .iter()
+                .map(|(name, value)| (input_env_name(name), value.clone())),
+        );
+
+        Ok(JavaScriptActionInvocation {
+            node: node.clone(),
+            main_container_path,
+            action_container_path,
+            env,
+        })
+    }
+}
+
 fn action_metadata_path(action_dir: &Path) -> Result<PathBuf> {
     for file_name in ["action.yml", "action.yaml"] {
         let path = action_dir.join(file_name);
@@ -186,6 +225,41 @@ fn action_metadata_path(action_dir: &Path) -> Result<PathBuf> {
         }
     }
     bail!("action metadata not found in {}", action_dir.display())
+}
+
+fn container_path(actions_host: &Path, host_path: &Path) -> Result<String> {
+    let relative = host_path.strip_prefix(actions_host).with_context(|| {
+        format!(
+            "action path {} is outside actions directory {}",
+            host_path.display(),
+            actions_host.display()
+        )
+    })?;
+    let relative = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    Ok(if relative.is_empty() {
+        "/__a".to_string()
+    } else {
+        format!("/__a/{relative}")
+    })
+}
+
+fn input_env_name(name: &str) -> String {
+    format!(
+        "INPUT_{}",
+        name.chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() {
+                    ch.to_ascii_uppercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>()
+    )
 }
 
 fn repository_clone_url(repository: &str) -> String {
@@ -360,5 +434,42 @@ runs:
         );
         assert_eq!(resolved.metadata_path.file_name().unwrap(), "action.yml");
         fs::remove_dir_all(temp).ok();
+    }
+
+    #[test]
+    fn builds_javascript_action_invocation() {
+        let actions_host = Path::new("/tmp/actions");
+        let plan = RepositoryActionPlan {
+            repository: "actions/setup-node".into(),
+            git_ref: "v4".into(),
+            source_path: None,
+            repository_dir: actions_host.join("_actions/actions_setup-node/v4"),
+            action_dir: actions_host.join("_actions/actions_setup-node/v4"),
+            inputs: [("node-version".to_string(), "22".to_string())].into(),
+        };
+        let metadata =
+            parse_action_metadata("runs:\n  using: node20\n  main: dist/index.js\n").unwrap();
+        let runtime = metadata.runtime().unwrap();
+        let resolved = ResolvedAction {
+            plan,
+            metadata_path: actions_host.join("_actions/actions_setup-node/v4/action.yml"),
+            metadata,
+            runtime,
+        };
+
+        let invocation = resolved.javascript_invocation(actions_host).unwrap();
+
+        assert_eq!(invocation.node, "node20");
+        assert_eq!(
+            invocation.main_container_path,
+            "/__a/_actions/actions_setup-node/v4/dist/index.js"
+        );
+        assert!(invocation
+            .env
+            .contains(&("INPUT_NODE_VERSION".into(), "22".into())));
+        assert!(invocation.env.contains(&(
+            "GITHUB_ACTION_PATH".into(),
+            "/__a/_actions/actions_setup-node/v4".into()
+        )));
     }
 }

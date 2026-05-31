@@ -66,12 +66,25 @@ impl JobContainerSpec {
         working_directory: &str,
         env: &[(String, String)],
     ) -> Vec<String> {
+        self.exec_process_args(
+            working_directory,
+            env,
+            &shell.command_args(script_path_in_container),
+        )
+    }
+
+    pub fn exec_process_args(
+        &self,
+        working_directory: &str,
+        env: &[(String, String)],
+        command: &[String],
+    ) -> Vec<String> {
         let mut args = vec!["exec".into(), "--workdir".into(), working_directory.into()];
         for (name, value) in env {
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
         args.push(self.name.clone());
-        args.extend(shell.command_args(script_path_in_container));
+        args.extend(command.iter().cloned());
         args
     }
 
@@ -161,6 +174,29 @@ mod tests {
                 "--norc",
                 "-e",
                 "/__t/step.sh"
+            ]
+        );
+    }
+
+    #[test]
+    fn builds_process_exec_args() {
+        let args = spec().exec_process_args(
+            "/__w/repo",
+            &[("INPUT_NAME".into(), "value".into())],
+            &["node".into(), "/__a/action/dist/index.js".into()],
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "exec",
+                "--workdir",
+                "/__w/repo",
+                "-e",
+                "INPUT_NAME=value",
+                "velnor-job-1",
+                "node",
+                "/__a/action/dist/index.js"
             ]
         );
     }

@@ -91,8 +91,8 @@ Deliverables:
 - action resolver/downloader for `owner/repo@ref`: repository action download into `_actions` and metadata discovery are implemented
 - action metadata parser for `action.yml`: JavaScript, composite, and Docker `runs.using` shapes are modeled
 - repository action planner for enabled non-checkout `uses:` steps
-- Node action handler
-- `INPUT_*` environment variables
+- Node action handler: JavaScript action invocation and Docker `node <main>` executor shape are implemented, but ordered job execution is not wired yet
+- `INPUT_*` environment variables: planned action inputs are converted to `INPUT_*` for JavaScript invocation
 - runtime env:
   - `GITHUB_*`
   - `RUNNER_*`

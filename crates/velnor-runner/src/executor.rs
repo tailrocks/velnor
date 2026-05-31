@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use crate::{
+    action::JavaScriptActionInvocation,
     container::JobContainerSpec,
     script_step::{ScriptStep, ScriptStepPlan, StepCommandState},
 };
@@ -128,6 +129,48 @@ where
             return Err(error);
         }
         Ok(results)
+    }
+
+    pub fn execute_javascript_action(
+        &mut self,
+        container: &JobContainerSpec,
+        step_id: &str,
+        action: &JavaScriptActionInvocation,
+        temp_host: &Path,
+    ) -> Result<StepExecutionResult> {
+        self.run_docker(&container.create_network_args())?;
+        self.run_docker(&container.start_args())?;
+
+        let result = (|| {
+            let command_files = ScriptStepPlan::prepare(
+                &ScriptStep {
+                    id: step_id.to_string(),
+                    script: String::new(),
+                    shell: crate::container::Shell::Sh,
+                    working_directory_container: "/__w".to_string(),
+                },
+                temp_host,
+            )?;
+            let mut env = action.env.clone();
+            env.extend(command_files.env.iter().cloned());
+            let exec_args = container.exec_process_args(
+                "/__w",
+                &env,
+                &["node".to_string(), action.main_container_path.clone()],
+            );
+            let step_result = self.runner.run("docker", &exec_args)?;
+            let state = command_files.collect_state()?;
+            Ok(StepExecutionResult {
+                exit_code: step_result.code,
+                state,
+            })
+        })();
+
+        let cleanup_result = self.cleanup(container);
+        if let Err(error) = cleanup_result {
+            return Err(error.context("cleanup failed after JavaScript action"));
+        }
+        result
     }
 
     fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
@@ -369,5 +412,42 @@ mod tests {
         assert!(env.contains(&("GITHUB_OUTPUT".into(), "/__t/out".into())));
         assert!(!env.iter().any(|(name, _)| name == "PATH"));
         assert_eq!(state.path, vec!["/opt/tool"]);
+    }
+
+    #[test]
+    fn executes_javascript_action_with_inputs_and_command_files() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let action = JavaScriptActionInvocation {
+            node: "node20".into(),
+            main_container_path: "/__a/_actions/acme_action/v1/dist/index.js".into(),
+            action_container_path: "/__a/_actions/acme_action/v1".into(),
+            env: vec![
+                (
+                    "GITHUB_ACTION_PATH".into(),
+                    "/__a/_actions/acme_action/v1".into(),
+                ),
+                ("INPUT_NAME".into(), "value".into()),
+            ],
+        };
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        let result = executor
+            .execute_javascript_action(&container(&temp), "action1", &action, &temp)
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let calls = &executor.runner().calls;
+        assert_eq!(calls[2].1[0], "exec");
+        assert!(calls[2].1.contains(&"INPUT_NAME=value".into()));
+        assert!(calls[2]
+            .1
+            .contains(&"GITHUB_OUTPUT=/__t/action1_output".into()));
+        assert!(calls[2].1.ends_with(&[
+            "node".into(),
+            "/__a/_actions/acme_action/v1/dist/index.js".into()
+        ]));
+
+        fs::remove_dir_all(temp).unwrap();
     }
 }
