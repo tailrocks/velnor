@@ -21,7 +21,7 @@ use crate::{
         TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines,
     },
     runtime_env::job_runtime_env,
-    script_step::github_script_steps,
+    script_step::{github_script_steps, step_continue_on_error},
 };
 
 pub async fn configure(args: ConfigureArgs) -> Result<()> {
@@ -468,7 +468,9 @@ fn execute_script_job(
         &context_data,
         &temp,
     )?;
-    let failed = results.iter().any(|result| result.exit_code != 0);
+    let failed = results
+        .iter()
+        .any(|result| result.exit_code != 0 && !result.failure_ignored);
 
     Ok(if failed {
         TaskResult::Failed
@@ -521,6 +523,7 @@ fn ordered_executable_steps(
                                     step_id: action.plan.step_id.clone(),
                                     invocation: action.javascript_invocation(actions_host)?,
                                     condition: None,
+                                    continue_on_error: false,
                                 });
                             }
                         }
@@ -553,6 +556,7 @@ fn ordered_executable_steps(
                     step_id: action.plan.step_id.clone(),
                     invocation: action.javascript_invocation(actions_host)?,
                     condition: step.condition.clone(),
+                    continue_on_error: step_continue_on_error(step),
                 });
             }
             _ => bail!("unsupported enabled step in job"),

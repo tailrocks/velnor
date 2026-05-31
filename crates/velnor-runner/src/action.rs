@@ -468,6 +468,7 @@ pub fn composite_action_invocations(
             working_directory_container,
             env: Vec::new(),
             condition: None,
+            continue_on_error: false,
         }));
     }
     Ok(invocations)

@@ -20,6 +20,7 @@ pub struct ScriptStep {
     pub working_directory_container: String,
     pub env: Vec<(String, String)>,
     pub condition: Option<String>,
+    pub continue_on_error: bool,
 }
 
 pub fn github_script_steps(
@@ -80,7 +81,16 @@ fn github_script_step(
         working_directory_container: working_directory,
         env: step_environment(step)?,
         condition: step.condition.clone(),
+        continue_on_error: step_continue_on_error(step),
     })
+}
+
+pub(crate) fn step_continue_on_error(step: &ActionStep) -> bool {
+    match step.continue_on_error.as_ref() {
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(serde_json::Value::String(value)) => value.eq_ignore_ascii_case("true"),
+        _ => false,
+    }
 }
 
 pub(crate) fn step_environment(step: &ActionStep) -> Result<Vec<(String, String)>> {
@@ -343,6 +353,7 @@ mod tests {
             working_directory_container: "/__w/repo".into(),
             env: Vec::new(),
             condition: None,
+            continue_on_error: false,
         };
 
         let plan = ScriptStepPlan::prepare(&step, &temp).unwrap();
@@ -367,6 +378,7 @@ mod tests {
             working_directory_container: "/__w/repo".into(),
             env: Vec::new(),
             condition: None,
+            continue_on_error: false,
         };
         let plan = ScriptStepPlan::prepare(&step, &temp).unwrap();
 
@@ -401,6 +413,7 @@ mod tests {
             working_directory_container: "/__w/repo".into(),
             env: Vec::new(),
             condition: None,
+            continue_on_error: false,
         };
         let plan = ScriptStepPlan::prepare_with_path(
             &step,
@@ -423,6 +436,7 @@ mod tests {
                 "id": "run-1",
                 "displayName": "Run tests",
                 "enabled": true,
+                "continueOnError": true,
                 "reference": { "type": "Script" },
                 "inputs": {
                     "script": "cargo test",
@@ -461,6 +475,7 @@ mod tests {
                 ("TOKEN".into(), "${{ github.token }}".into()),
             ]
         );
+        assert!(mapped[0].continue_on_error);
     }
 
     #[test]

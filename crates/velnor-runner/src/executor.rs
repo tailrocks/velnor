@@ -52,6 +52,7 @@ pub struct StepExecutionResult {
     pub exit_code: i32,
     pub state: StepCommandState,
     pub skipped: bool,
+    pub failure_ignored: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +62,7 @@ pub enum ExecutableStep {
         step_id: String,
         invocation: JavaScriptActionInvocation,
         condition: Option<String>,
+        continue_on_error: bool,
     },
 }
 
@@ -76,6 +78,15 @@ impl ExecutableStep {
         match self {
             ExecutableStep::Script(step) => step.condition.as_deref(),
             ExecutableStep::JavaScript { condition, .. } => condition.as_deref(),
+        }
+    }
+
+    fn continue_on_error(&self) -> bool {
+        match self {
+            ExecutableStep::Script(step) => step.continue_on_error,
+            ExecutableStep::JavaScript {
+                continue_on_error, ..
+            } => *continue_on_error,
         }
     }
 }
@@ -191,6 +202,7 @@ where
                     exit_code: 0,
                     state: StepCommandState::default(),
                     skipped: true,
+                    failure_ignored: false,
                 };
                 state.apply(&step_id, &result);
                 results.push(result);
@@ -216,6 +228,7 @@ where
                         exit_code: step_result.code,
                         state: command_state,
                         skipped: false,
+                        failure_ignored: false,
                     })
                 }
                 ExecutableStep::JavaScript {
@@ -228,11 +241,14 @@ where
             })();
 
             match result {
-                Ok(result) => {
+                Ok(mut result) => {
                     let failed = result.exit_code != 0;
+                    if failed && step.continue_on_error() {
+                        result.failure_ignored = true;
+                    }
                     state.apply(&step_id, &result);
                     results.push(result);
-                    if failed {
+                    if failed && !step.continue_on_error() {
                         break;
                     }
                 }
@@ -291,6 +307,7 @@ where
                 working_directory_container: "/__w".to_string(),
                 env: Vec::new(),
                 condition: None,
+                continue_on_error: false,
             },
             temp_host,
         )?;
@@ -309,6 +326,7 @@ where
             exit_code: step_result.code,
             state,
             skipped: false,
+            failure_ignored: false,
         })
     }
 
@@ -417,6 +435,7 @@ impl JobExecutionState {
                 .resolve_expressions(&step.working_directory_container),
             env: self.resolve_env(&step.env),
             condition: step.condition.clone(),
+            continue_on_error: step.continue_on_error,
         }
     }
 
@@ -788,6 +807,7 @@ mod tests {
             working_directory_container: "/__w/repo".into(),
             env: Vec::new(),
             condition: None,
+            continue_on_error: false,
         };
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
@@ -841,6 +861,7 @@ mod tests {
             working_directory_container: "/__w/repo".into(),
             env: Vec::new(),
             condition: None,
+            continue_on_error: false,
         };
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
@@ -871,6 +892,7 @@ mod tests {
                 working_directory_container: "/__w/repo".into(),
                 env: Vec::new(),
                 condition: None,
+                continue_on_error: false,
             },
             ScriptStep {
                 id: "step2".into(),
@@ -879,6 +901,7 @@ mod tests {
                 working_directory_container: "/__w/repo".into(),
                 env: Vec::new(),
                 condition: None,
+                continue_on_error: false,
             },
         ];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
@@ -908,6 +931,7 @@ mod tests {
             &StepExecutionResult {
                 exit_code: 0,
                 skipped: false,
+                failure_ignored: false,
                 state: StepCommandState {
                     outputs: [("answer".to_string(), "42".to_string())].into(),
                     env: [("NAME".to_string(), "value".to_string())].into(),
@@ -941,6 +965,7 @@ mod tests {
             &StepExecutionResult {
                 exit_code: 0,
                 skipped: false,
+                failure_ignored: false,
                 state: StepCommandState {
                     outputs: [("tags".to_string(), "image:latest".to_string())].into(),
                     ..Default::default()
@@ -1053,6 +1078,7 @@ mod tests {
                 ("TOKEN".into(), "${{ github.token }}".into()),
             ],
             condition: None,
+            continue_on_error: false,
         })];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
@@ -1083,6 +1109,7 @@ mod tests {
                 working_directory_container: "/__w/repo".into(),
                 env: Vec::new(),
                 condition: None,
+                continue_on_error: false,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "consumer".into(),
@@ -1091,6 +1118,7 @@ mod tests {
                 working_directory_container: "/__w/repo".into(),
                 env: Vec::new(),
                 condition: None,
+                continue_on_error: false,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
@@ -1122,6 +1150,7 @@ mod tests {
                 working_directory_container: "/__w/repo".into(),
                 env: Vec::new(),
                 condition: None,
+                continue_on_error: false,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "consumer".into(),
@@ -1130,6 +1159,7 @@ mod tests {
                 working_directory_container: "/__w/repo".into(),
                 env: Vec::new(),
                 condition: None,
+                continue_on_error: false,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(StdoutCommandRunner::default());
@@ -1160,6 +1190,7 @@ mod tests {
                 working_directory_container: "/__w/repo".into(),
                 env: Vec::new(),
                 condition: None,
+                continue_on_error: false,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "consumer".into(),
@@ -1168,6 +1199,7 @@ mod tests {
                 working_directory_container: "/__w/repo".into(),
                 env: Vec::new(),
                 condition: Some("steps.producer.outputs.answer == 'nope'".into()),
+                continue_on_error: false,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
@@ -1193,6 +1225,65 @@ mod tests {
     }
 
     #[test]
+    fn continue_on_error_keeps_failure_outcome_but_runs_later_steps() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::JavaScript {
+                step_id: "sccache".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    main_container_path: "/__a/_actions/sccache/dist/index.js".into(),
+                    action_container_path: "/__a/_actions/sccache".into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: true,
+            },
+            ExecutableStep::Script(ScriptStep {
+                id: "enable-sccache".into(),
+                script: "echo SCCACHE_GHA_ENABLED=true >> $GITHUB_ENV".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: Some("steps.sccache.outcome == 'success'".into()),
+                continue_on_error: false,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "next".into(),
+                script: "echo next".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+            calls: Vec::new(),
+            codes: vec![0, 0, 7, 0, 0],
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].exit_code, 7);
+        assert!(results[0].failure_ignored);
+        assert!(results[1].skipped);
+        assert_eq!(results[2].exit_code, 0);
+        let exec_count = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| args.first().is_some_and(|arg| arg == "exec"))
+            .count();
+        assert_eq!(exec_count, 2);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn evaluates_step_outcome_conditions() {
         let mut state = JobExecutionState::default();
         state.apply(
@@ -1200,6 +1291,7 @@ mod tests {
             &StepExecutionResult {
                 exit_code: 0,
                 skipped: false,
+                failure_ignored: false,
                 state: StepCommandState::default(),
             },
         );
@@ -1208,6 +1300,7 @@ mod tests {
             &StepExecutionResult {
                 exit_code: 0,
                 skipped: true,
+                failure_ignored: false,
                 state: StepCommandState::default(),
             },
         );
@@ -1266,6 +1359,7 @@ mod tests {
                 working_directory_container: "/__w/repo".into(),
                 env: Vec::new(),
                 condition: None,
+                continue_on_error: false,
             }),
             ExecutableStep::JavaScript {
                 step_id: "action1".into(),
@@ -1279,6 +1373,7 @@ mod tests {
                     ],
                 },
                 condition: None,
+                continue_on_error: false,
             },
             ExecutableStep::Script(ScriptStep {
                 id: "step2".into(),
@@ -1287,6 +1382,7 @@ mod tests {
                 working_directory_container: "/__w/repo".into(),
                 env: Vec::new(),
                 condition: None,
+                continue_on_error: false,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
