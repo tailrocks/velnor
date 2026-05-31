@@ -16,6 +16,7 @@ reqwest = { version = "0.12.23", default-features = false, features = ["json", "
 rsa = { version = "0.9.8", features = ["pem"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
+serde_yaml = "0.9.34"
 thiserror = "2.0.12"
 time = { version = "0.3.41", features = ["formatting"] }
 tokio = { version = "1.45.1", features = ["macros", "rt-multi-thread", "signal", "time"] }

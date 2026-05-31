@@ -89,7 +89,8 @@ Deliverables:
 
 - broader `actions/checkout` compatibility: repository input, sparse checkout, submodules, LFS, credentials cleanup
 - action resolver/downloader for `owner/repo@ref`
-- action metadata parser for `action.yml`
+- action metadata parser for `action.yml`: JavaScript, composite, and Docker `runs.using` shapes are modeled
+- repository action planner for enabled non-checkout `uses:` steps
 - Node action handler
 - `INPUT_*` environment variables
 - runtime env:
