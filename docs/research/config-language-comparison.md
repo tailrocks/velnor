@@ -807,12 +807,13 @@ If these are primitives, user workflow code becomes much smaller than GitHub Act
 
 ## Current Decision Bias
 
-KCL is the best current default for Velnor:
+Pkl is the best current default for Velnor:
 
-- authoring language is config/policy-first
-- schema and constraints are native
-- Rust implementation alignment is strong
-- syntax is approachable enough for GitHub Actions users
+- authoring experience is strongest
+- visibility is strongest among the modern config-language candidates
+- Pkl already has a typed GitHub Actions package in `pkl-pantry`
+- typed action catalogs are direct prior art for Velnor plugins
+- syntax is approachable for GitHub Actions users
 - abstractions can remove real duplication in both target repos
 
-Pkl is still the best UX challenger. CUE is the best schema/validation challenger.
+KCL remains the best Rust/config-policy challenger. CUE remains the best schema/validation challenger.

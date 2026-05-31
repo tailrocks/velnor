@@ -1,6 +1,6 @@
 # Velnor Vision
 
-Velnor is a GitHub Actions-like workflow engine with KCL workflow definitions and a Rust runtime.
+Velnor is a GitHub Actions-like workflow engine with Pkl workflow definitions and a Rust runtime.
 
 ## Product Shape
 
@@ -18,7 +18,7 @@ The goal is not to invent a completely new CI/CD mental model. GitHub Actions al
 - environments and approvals
 - hosted or self-hosted runners
 
-Velnor should keep that model where it works. The main change is replacing YAML plus ad hoc expressions with a KCL-based typed workflow definition.
+Velnor should keep that model where it works. The main change is replacing YAML plus ad hoc expressions with a Pkl-based typed workflow definition.
 
 ## Why Not YAML
 
@@ -35,14 +35,14 @@ Velnor should keep the readability of GitHub Actions while adding static validat
 
 ## Proposed Stack
 
-- KCL: workflow authoring, schemas, defaults, validation, constraints, reusable modules
+- Pkl: workflow authoring, schemas, defaults, validation, constraints, reusable modules
 - Rust: parser integration, planner, scheduler, runner, CLI, server
 - Containers/processes: execution isolation for arbitrary user commands
 - Typed plugins: reusable building blocks with declared inputs, outputs, permissions, and runtime requirements
 
-KCL is preferred over Pkl for now because it is schema-centric, cloud-native, and has Rust support. Pkl remains useful prior art for the authoring feel we want: configuration as code without turning workflow orchestration into an unconstrained general-purpose program.
+Pkl is preferred because it has the strongest authoring experience and visibility among the modern config-language candidates. Rust integration should start by invoking the official Pkl CLI, then move toward `pkl server` embedding when needed.
 
-See [research/kcl.md](research/kcl.md).
+See [research/pkl-rust.md](research/pkl-rust.md).
 
 ## Example: GitHub Actions
 
@@ -69,37 +69,35 @@ jobs:
       - run: cargo test
 ```
 
-## Example: Velnor KCL Sketch
+## Example: Velnor Pkl Sketch
 
-```python
-import velnor.workflow as wf
+```pkl
+amends "package://velnor.dev/workflow@1.0.0#/Workflow.pkl"
 
-workflow = wf.Workflow {
-    name = "CI"
+name = "CI"
 
-    on = {
-        pull_request = {}
-        push = {
-            branches = ["main"]
-        }
+on {
+  pullRequest {}
+  push {
+    branches = List("main")
+  }
+}
+
+jobs {
+  ["test"] = new Job {
+    matrix {
+      ["os"] = List("ubuntu-latest", "macos-latest")
+      ["rust"] = List("stable", "beta")
     }
 
-    jobs = {
-        test = wf.Job {
-            matrix = {
-                os = ["ubuntu-latest", "macos-latest"]
-                rust = ["stable", "beta"]
-            }
+    runsOn = "${{ matrix.os }}"
 
-            runs_on = "${{ matrix.os }}"
-
-            steps = [
-                wf.Checkout { version = "v4" }
-                wf.Run { command = "rustup default ${{ matrix.rust }}" }
-                wf.Run { command = "cargo test" }
-            ]
-        }
-    }
+    steps = List(
+      Checkout { version = "v4" },
+      Run { command = "rustup default ${{ matrix.rust }}" },
+      Run { command = "cargo test" },
+    )
+  }
 }
 ```
 
@@ -176,12 +174,12 @@ Velnor should be flexible because users compose typed workflow primitives and on
 - Do not build a YAML transpiler as the primary product.
 - Do not require JavaScript for custom workflow logic.
 - Do not hide runtime behavior behind untyped string interpolation.
-- Do not make KCL users learn a completely different CI model from GitHub Actions.
+- Do not make Pkl users learn a completely different CI model from GitHub Actions.
 
 ## Open Questions
 
 - Should Velnor support importing existing GitHub Actions directly?
 - Should `Use` support OCI-based actions only, or also GitHub-style repositories?
-- Should KCL evaluate on the control plane only, or can runners evaluate local modules?
+- Should Pkl evaluate on the control plane only, or can runners evaluate local modules?
 - How much of GitHub Actions expression syntax should be preserved?
 - Should the first release target local execution, self-hosted server, or GitHub app integration?
