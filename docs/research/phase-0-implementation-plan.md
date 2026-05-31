@@ -202,7 +202,7 @@ Implement action support in the order that unlocks target workflows fastest:
    - map `with:` to `INPUT_*`: implemented for JavaScript action invocation, including metadata defaults
    - run Node entrypoint: implemented for ordered script/JavaScript execution. JavaScript actions run in a short-lived side container with the same workspace/temp/home/actions/tools mounts and job network so arbitrary job images do not need to carry Node. The default sidecar image is `ghcr.io/catthehacker/ubuntu:act-latest` instead of a plain `node:*` image because the target Docker JavaScript actions also need the Docker CLI while using the mounted Docker socket; operators can override it with `--node-action-image`.
    - run `runs.post` cleanup/save entrypoints: implemented in reverse order with `GITHUB_STATE` to `STATE_*` propagation and target `runs.post-if` condition handling
-   - provide `GITHUB_*`, `RUNNER_*`, `ACTIONS_*` runtime env: basic job-message extraction, target repository owner/ref/workflow/server URL env, GitHub-style `RUNNER_ARCH` values, `GITHUB_EVENT_PATH` payload writing, per-action repository/ref/path env, and step injection are implemented; full runner parity remains open
+   - provide `GITHUB_*`, `RUNNER_*`, `ACTIONS_*` runtime env: basic job-message extraction, `GITHUB_ACTIONS=true`, target repository owner/ref/workflow/server URL env, GitHub-style `RUNNER_ARCH` values, `GITHUB_EVENT_PATH` payload writing, per-action repository/ref/path env, and step injection are implemented; full runner parity remains open
 5. Composite action handler:
    - local `.github/actions/*`: implemented for checked-out self repository actions
    - nested `run`: implemented for shell steps with basic input/action-path/workspace interpolation
