@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
-use std::{collections::BTreeMap, fs, path::PathBuf};
+use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
 
 use crate::{
     action::{
@@ -269,7 +269,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
     }
 
-    let dir = config::config_dir(args.config_dir)?;
+    let dir = config::config_dir(args.config_dir.clone())?;
     let stored = config::load(&dir)?;
     let server_url = stored
         .settings
@@ -301,111 +301,139 @@ pub async fn run(args: RunArgs) -> Result<()> {
     );
     println!("Created runner session {session_id}.");
 
-    let message = client
-        .get_message(
+    let mut last_message_id = None;
+    loop {
+        let message = client
+            .get_message(
+                pool_id,
+                session_id,
+                last_message_id,
+                RunnerStatus::Online,
+                stored.settings.disable_update,
+            )
+            .await?;
+
+        let Some(message) = message else {
+            println!("No message received.");
+            if args.once {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        };
+        last_message_id = Some(message.message_id);
+        handle_message(
+            &client,
             pool_id,
             session_id,
-            None,
-            RunnerStatus::Online,
-            stored.settings.disable_update,
+            &stored.settings.agent_name,
+            &dir,
+            &args,
+            message,
         )
         .await?;
-
-    if let Some(message) = message {
-        println!(
-            "Received message {} type {}.",
-            message.message_id, message.message_type
-        );
-        if message
-            .message_type
-            .eq_ignore_ascii_case(PIPELINE_AGENT_JOB_REQUEST)
-        {
-            let job = AgentJobRequestMessage::parse_json(&message.body)?;
-            println!(
-                "Parsed job request {} for job '{}' ({} step(s), {} endpoint(s)).",
-                job.request_id,
-                job.job_display_name,
-                job.steps.len(),
-                job.resources.endpoints.len()
-            );
-            let script_steps =
-                match github_script_steps_with_defaults(&job.steps, "/__w", &job.defaults) {
-                    Ok(script_steps) => {
-                        println!("Mapped {} script run step(s).", script_steps.len());
-                        Some(script_steps)
-                    }
-                    Err(error) => {
-                        println!("Script step mapping is incomplete: {error}.");
-                        None
-                    }
-                };
-            if let Some(system_connection) = job.system_connection() {
-                println!(
-                    "System connection URL: {}",
-                    system_connection.url.as_deref().unwrap_or("unknown")
-                );
-            }
-            if args.execute_scripts {
-                let Some(script_steps) = script_steps else {
-                    bail!("cannot execute scripts because step mapping failed");
-                };
-                let job_result = execute_script_job(
-                    &dir,
-                    args.work_dir.clone(),
-                    &args.docker_image,
-                    &job,
-                    &script_steps,
-                )?;
-                complete_job(
-                    &client,
-                    pool_id,
-                    session_id,
-                    message.message_id,
-                    &stored.settings.agent_name,
-                    &job,
-                    job_result.result,
-                    job_result.outputs,
-                    job_result.step_logs,
-                    "Velnor executed supported run and JavaScript action steps in Docker."
-                        .to_string(),
-                )
-                .await?;
-                println!(
-                    "Job completed with result {:?} and message acknowledged.",
-                    job_result.result
-                );
-            } else if args.complete_noop {
-                complete_job(
-                    &client,
-                    pool_id,
-                    session_id,
-                    message.message_id,
-                    &stored.settings.agent_name,
-                    &job,
-                    TaskResult::Succeeded,
-                    BTreeMap::new(),
-                    Vec::new(),
-                    "Velnor no-op completion probe: user steps were not executed.".to_string(),
-                )
-                .await?;
-                println!("No-op job completed and message acknowledged.");
-            } else {
-                println!("Job is not acknowledged yet; pass --complete-noop to probe completion.");
-            }
-        } else {
-            println!("Message is not acknowledged because type is not implemented.");
+        if args.once {
+            break;
         }
-    } else {
-        println!("No message received.");
     }
 
-    if args.once {
-        client.delete_session(pool_id, session_id).await?;
-        println!("Deleted runner session.");
-    } else {
-        println!("Continuous polling is not implemented yet; use --once for current milestone.");
+    client.delete_session(pool_id, session_id).await?;
+    println!("Deleted runner session.");
+
+    Ok(())
+}
+
+async fn handle_message(
+    client: &DistributedTaskClient,
+    pool_id: i64,
+    session_id: &str,
+    worker_name: &str,
+    config_dir: &std::path::Path,
+    args: &RunArgs,
+    message: crate::protocol::TaskAgentMessage,
+) -> Result<()> {
+    println!(
+        "Received message {} type {}.",
+        message.message_id, message.message_type
+    );
+    if !message
+        .message_type
+        .eq_ignore_ascii_case(PIPELINE_AGENT_JOB_REQUEST)
+    {
+        println!("Message is not acknowledged because type is not implemented.");
+        return Ok(());
     }
 
+    let job = AgentJobRequestMessage::parse_json(&message.body)?;
+    println!(
+        "Parsed job request {} for job '{}' ({} step(s), {} endpoint(s)).",
+        job.request_id,
+        job.job_display_name,
+        job.steps.len(),
+        job.resources.endpoints.len()
+    );
+    let script_steps = match github_script_steps_with_defaults(&job.steps, "/__w", &job.defaults) {
+        Ok(script_steps) => {
+            println!("Mapped {} script run step(s).", script_steps.len());
+            Some(script_steps)
+        }
+        Err(error) => {
+            println!("Script step mapping is incomplete: {error}.");
+            None
+        }
+    };
+    if let Some(system_connection) = job.system_connection() {
+        println!(
+            "System connection URL: {}",
+            system_connection.url.as_deref().unwrap_or("unknown")
+        );
+    }
+    if args.execute_scripts {
+        let Some(script_steps) = script_steps else {
+            bail!("cannot execute scripts because step mapping failed");
+        };
+        let job_result = execute_script_job(
+            config_dir,
+            args.work_dir.clone(),
+            &args.docker_image,
+            &job,
+            &script_steps,
+        )?;
+        complete_job(
+            client,
+            pool_id,
+            session_id,
+            message.message_id,
+            worker_name,
+            &job,
+            job_result.result,
+            job_result.outputs,
+            job_result.step_logs,
+            "Velnor executed supported run and JavaScript action steps in Docker.".to_string(),
+        )
+        .await?;
+        println!(
+            "Job completed with result {:?} and message acknowledged.",
+            job_result.result
+        );
+    } else if args.complete_noop {
+        complete_job(
+            client,
+            pool_id,
+            session_id,
+            message.message_id,
+            worker_name,
+            &job,
+            TaskResult::Succeeded,
+            BTreeMap::new(),
+            Vec::new(),
+            "Velnor no-op completion probe: user steps were not executed.".to_string(),
+        )
+        .await?;
+        println!("No-op job completed and message acknowledged.");
+    } else {
+        println!("Job is not acknowledged yet; pass --complete-noop to probe completion.");
+    }
     Ok(())
 }
 

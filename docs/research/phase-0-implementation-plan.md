@@ -72,6 +72,8 @@ loop:
 DeleteAgentSessionAsync(poolId, sessionId)
 ```
 
+Current code keeps one GitHub session open and long-polls this classic message route until stopped. `run --once` preserves the probe behavior by exiting after one message/no-message poll.
+
 Current GitHub can also send broker/run-service messages. Velnor already stores whether registration returned V2 settings; it still needs broker support before claiming broad drop-in compatibility.
 
 Minimum message support:

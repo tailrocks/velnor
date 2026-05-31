@@ -15,7 +15,7 @@ Deliverables:
 - repo-level runner registration
 - runner appears online in GitHub UI
 - session create/delete
-- message long-poll loop
+- message long-poll loop: `run --once` exits after one poll/job; default `run` keeps polling the existing GitHub message route in one session
 - log raw message metadata for assigned job
 
 Exit criteria:
