@@ -40,9 +40,9 @@ Velnor should keep the readability of GitHub Actions while adding static validat
 - Containers/processes: execution isolation for arbitrary user commands
 - Typed plugins: reusable building blocks with declared inputs, outputs, permissions, and runtime requirements
 
-Pkl is preferred because it has the strongest authoring experience and visibility among the modern config-language candidates. Rust integration should start by invoking the official Pkl CLI, then move toward `pkl server` embedding when needed.
+Pkl is the accepted workflow authoring language. Rust integration should start with unofficial bindings or the official CLI, then move toward `pkl server` embedding or a Rust-native parser/evaluator if the product needs it.
 
-See [research/pkl-rust.md](research/pkl-rust.md).
+See [decision-pkl.md](decision-pkl.md) and [research/pkl-rust.md](research/pkl-rust.md).
 
 ## Example: GitHub Actions
 

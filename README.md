@@ -20,6 +20,8 @@ The difference is the implementation model:
 
 See [docs/vision.md](docs/vision.md).
 
+Language decision: [docs/decision-pkl.md](docs/decision-pkl.md).
+
 KCL research: [docs/research/kcl.md](docs/research/kcl.md).
 
 Language comparison and target repo workflow analysis: [docs/research/config-language-comparison.md](docs/research/config-language-comparison.md).

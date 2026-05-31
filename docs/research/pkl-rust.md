@@ -333,7 +333,7 @@ velnor run workflow.pkl
 
 ## Recommendation
 
-Use Pkl as the product language.
+Use Pkl as the product language. This is now captured as an accepted decision in [../decision-pkl.md](../decision-pkl.md).
 
 Implement the first prototype with either:
 
