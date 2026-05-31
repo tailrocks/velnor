@@ -1,9 +1,10 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
+use serde_json::json;
 
 use crate::{
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
-    config::{self, RunnerSettings, StoredRunnerConfig},
-    protocol::{GitHubScope, TaskAgent},
+    config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
+    protocol::{GitHubScope, RegistrationClient, RunnerEvent, TaskAgent},
 };
 
 pub async fn configure(args: ConfigureArgs) -> Result<()> {
@@ -12,22 +13,32 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
     let agent_name = args.name.unwrap_or_else(default_agent_name);
     let labels = normalize_labels(args.labels);
     let agent = TaskAgent::new(agent_name.clone(), labels.clone(), false);
+    let auth = if args.dry_run {
+        None
+    } else {
+        Some(
+            RegistrationClient::new()?
+                .exchange_tenant_credential(&scope, &args.token, RunnerEvent::Register)
+                .await?,
+        )
+    };
+    let credentials = auth.as_ref().map(stored_credentials).transpose()?;
 
     let stored = StoredRunnerConfig {
         settings: RunnerSettings {
             github_url: scope.original_url.clone(),
-            server_url: None,
+            server_url: auth.as_ref().map(|auth| auth.server_url.clone()),
             server_url_v2: None,
             pool_id: None,
             pool_name: None,
             agent_id: None,
             agent_name,
             labels,
-            use_v2_flow: false,
+            use_v2_flow: auth.as_ref().is_some_and(|auth| auth.use_v2_flow),
             ephemeral: false,
             disable_update: true,
         },
-        credentials: None,
+        credentials,
     };
 
     config::save(&dir, &stored)?;
@@ -43,13 +54,35 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         agent.name,
         agent.labels.len()
     );
-    println!("Remote GitHub registration call is the next Milestone 0 step.");
+    if auth.is_some() {
+        println!("Stored tenant credential from GitHub.");
+        println!("Agent add/replace call is the next Milestone 0 step.");
+    } else {
+        println!("Dry run: skipped tenant credential exchange.");
+    }
 
     if args.replace {
         println!("Recorded --replace intent; remote replacement is not implemented yet.");
     }
 
     Ok(())
+}
+
+fn stored_credentials(auth: &crate::protocol::GitHubAuthResult) -> Result<StoredCredentials> {
+    Ok(StoredCredentials {
+        scheme: credential_scheme(&auth.token_schema)?,
+        data: json!({
+            "token": auth.token,
+        }),
+    })
+}
+
+fn credential_scheme(token_schema: &str) -> Result<CredentialScheme> {
+    if token_schema.eq_ignore_ascii_case("OAuthAccessToken") {
+        Ok(CredentialScheme::OAuthAccessToken)
+    } else {
+        bail!("unsupported GitHub runner token schema: {token_schema}")
+    }
 }
 
 pub async fn run(args: RunArgs) -> Result<()> {

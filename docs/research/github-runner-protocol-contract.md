@@ -52,7 +52,18 @@ Removal uses the same endpoint with:
 }
 ```
 
-The response provides a server URL and token schema/token data. Velnor stores these as runner credentials and then talks to the distributed task APIs.
+The response provides a server URL, token schema/token data, and sometimes `use_v2_flow`.
+
+```json
+{
+  "url": "https://pipelines.actions.githubusercontent.com/...",
+  "token_schema": "OAuthAccessToken",
+  "token": "...",
+  "use_v2_flow": true
+}
+```
+
+Velnor stores these as runner credentials and then talks to the distributed task APIs.
 
 ## Agent Registration Payload
 

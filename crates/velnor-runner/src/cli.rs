@@ -44,6 +44,10 @@ pub struct ConfigureArgs {
     #[arg(long)]
     pub replace: bool,
 
+    /// Validate local config and payloads without calling GitHub.
+    #[arg(long)]
+    pub dry_run: bool,
+
     /// Store configuration under this directory.
     #[arg(long)]
     pub config_dir: Option<PathBuf>,

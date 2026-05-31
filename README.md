@@ -37,11 +37,17 @@ cargo run --bin velnor-runner -- configure \
   --token "$GITHUB_RUNNER_REGISTRATION_TOKEN" \
   --labels velnor,hetzner-sentry-ci
 
+cargo run --bin velnor-runner -- configure \
+  --url https://github.com/OWNER/REPO \
+  --token fake \
+  --labels velnor \
+  --dry-run
+
 cargo run --bin velnor-runner -- status
 cargo run --bin velnor-runner -- run
 ```
 
-Remote GitHub registration and job polling are the next implementation step.
+`configure` now validates runner scope URLs and can exchange a GitHub runner registration token for tenant credentials. Agent add/replace and job polling are the next implementation steps.
 
 Phase 0 runner compatibility: [docs/phase-0-github-runner-compat.md](docs/phase-0-github-runner-compat.md).
 

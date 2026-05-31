@@ -1,6 +1,10 @@
 #![allow(dead_code)]
 
 use anyhow::{bail, Context, Result};
+use reqwest::{
+    header::{ACCEPT, AUTHORIZATION, USER_AGENT},
+    Client,
+};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -97,6 +101,67 @@ pub struct GitHubAuthResult {
     pub token_schema: String,
     #[serde(rename = "token")]
     pub token: String,
+    #[serde(default, rename = "use_v2_flow")]
+    pub use_v2_flow: bool,
+}
+
+#[derive(Clone)]
+pub struct RegistrationClient {
+    http: Client,
+}
+
+impl RegistrationClient {
+    pub fn new() -> Result<Self> {
+        let http = Client::builder()
+            .user_agent(RUNNER_USER_AGENT)
+            .build()
+            .context("build GitHub registration HTTP client")?;
+        Ok(Self { http })
+    }
+
+    pub async fn exchange_tenant_credential(
+        &self,
+        scope: &GitHubScope,
+        runner_token: &str,
+        runner_event: RunnerEvent,
+    ) -> Result<GitHubAuthResult> {
+        let request = TenantCredentialRequest {
+            url: scope.original_url.clone(),
+            runner_event,
+        };
+
+        let response = self
+            .http
+            .post(scope.tenant_credential_url.clone())
+            .header(AUTHORIZATION, format!("RemoteAuth {runner_token}"))
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .header(ACCEPT, "application/vnd.github.v3+json")
+            .json(&request)
+            .send()
+            .await
+            .context("send tenant credential request")?;
+
+        let status = response.status();
+        let request_id = response
+            .headers()
+            .get("x-github-request-id")
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            bail!(
+                "tenant credential request failed: status={status}, request_id={}, body={}",
+                request_id.unwrap_or_else(|| "unknown".to_string()),
+                body
+            );
+        }
+
+        response
+            .json::<GitHubAuthResult>()
+            .await
+            .context("parse tenant credential response")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -301,5 +366,21 @@ mod tests {
         assert_eq!(json["maxParallelism"], 1);
         assert_eq!(json["labels"][0]["name"], "velnor");
         assert_eq!(json["labels"][1]["name"], "hetzner-sentry-ci");
+    }
+
+    #[test]
+    fn auth_result_accepts_v2_flag() {
+        let auth: GitHubAuthResult = serde_json::from_str(
+            r#"{
+                "url": "https://pipelines.actions.githubusercontent.com/",
+                "token_schema": "OAuthAccessToken",
+                "token": "secret",
+                "use_v2_flow": true
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(auth.token_schema, "OAuthAccessToken");
+        assert!(auth.use_v2_flow);
     }
 }
