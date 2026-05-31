@@ -98,6 +98,7 @@ Deliverables:
 - Node action handler: JavaScript action invocation and Docker `node <main>` executor shape are implemented and wired into the ordered Docker execution path
 - `INPUT_*` environment variables: planned action inputs and metadata defaults are converted to `INPUT_*` for JavaScript invocation
 - step `env:` from GitHub job messages is parsed for script and JavaScript action steps, with basic expression resolution at execution time
+- workflow/job `env:` from GitHub job messages is overlaid into the runtime environment; protected `GITHUB_*`/`RUNNER_*` defaults are not overwritten
 - runtime env:
   - basic `GITHUB_*` variables are extracted from the job message and injected into script and JavaScript steps
   - basic `RUNNER_*` variables are injected for the Docker runner environment
@@ -105,7 +106,7 @@ Deliverables:
   - `ACTIONS_RUNTIME_TOKEN`
   - `ACTIONS_CACHE_URL`
   - `ACTIONS_RESULTS_URL`
-  - broader GitHub runner env parity and workflow/job-level `env:` remain incomplete
+  - broader GitHub runner env parity remains incomplete
 - secret masking
 - basic workflow command parsing: state-changing stdout commands are parsed; annotations/log grouping are not yet reported to GitHub UI
 - ordered job execution for script steps and JavaScript actions in original message order is wired; host-side checkout still runs before the Docker container starts

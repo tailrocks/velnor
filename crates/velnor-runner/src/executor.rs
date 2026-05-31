@@ -433,6 +433,10 @@ impl JobExecutionState {
     }
 
     fn resolve_context_expression(&self, expression: &str) -> Option<&str> {
+        if let Some(name) = expression.trim().strip_prefix("env.") {
+            return self.env.get(name).map(String::as_str);
+        }
+
         let env_name = match expression.trim() {
             "github.actor" => "GITHUB_ACTOR",
             "github.event_name" => "GITHUB_EVENT_NAME",
@@ -832,6 +836,7 @@ mod tests {
             ("GITHUB_SHA".into(), "abc123".into()),
             ("GITHUB_TOKEN".into(), "ghs_token".into()),
             ("GITHUB_WORKSPACE".into(), "/__w".into()),
+            ("DOCS_SITE_URL".into(), "https://docs.example".into()),
             ("RUNNER_OS".into(), "Linux".into()),
         ]);
 
@@ -842,11 +847,13 @@ mod tests {
         assert_eq!(
             state.resolve_env(&[
                 ("INPUT_TOKEN".into(), "${{ github.token }}".into()),
+                ("DOCS_SITE_URL".into(), "${{ env.DOCS_SITE_URL }}".into()),
                 ("WORKSPACE".into(), "${{ github.workspace }}".into()),
                 ("OS".into(), "${{ runner.os }}".into()),
             ]),
             vec![
                 ("INPUT_TOKEN".into(), "ghs_token".into()),
+                ("DOCS_SITE_URL".into(), "https://docs.example".into()),
                 ("WORKSPACE".into(), "/__w".into()),
                 ("OS".into(), "Linux".into()),
             ]

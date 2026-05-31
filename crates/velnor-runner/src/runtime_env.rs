@@ -1,4 +1,5 @@
 use crate::job_message::AgentJobRequestMessage;
+use serde_json::{Map, Value};
 
 pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
     let mut env = vec![
@@ -60,7 +61,87 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         );
     }
 
+    for (name, value) in job_environment_variables(job) {
+        if is_protected_default_env(&name) {
+            continue;
+        }
+        env.push((name, value));
+    }
+
     env
+}
+
+fn job_environment_variables(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
+    job.environment_variables
+        .iter()
+        .flat_map(environment_token_pairs)
+        .collect()
+}
+
+fn environment_token_pairs(value: &Value) -> Vec<(String, String)> {
+    match value {
+        Value::Object(object) => environment_object_pairs(object),
+        Value::Array(values) => values.iter().flat_map(environment_token_pairs).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn environment_object_pairs(object: &Map<String, Value>) -> Vec<(String, String)> {
+    if let (Some(name), Some(value)) = (object.get("name"), object.get("value")) {
+        if let Some(name) = name.as_str() {
+            return vec![(name.to_string(), environment_value(value))];
+        }
+    }
+
+    for pair_key in ["pairs", "mapping", "map"] {
+        if let Some(Value::Array(pairs)) = object.get(pair_key) {
+            return pairs.iter().flat_map(environment_pair_value).collect();
+        }
+    }
+
+    object
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case("type"))
+        .map(|(name, value)| (name.clone(), environment_value(value)))
+        .collect()
+}
+
+fn environment_pair_value(value: &Value) -> Vec<(String, String)> {
+    match value {
+        Value::Object(object) => {
+            if let (Some(key), Some(value)) = (
+                object
+                    .get("key")
+                    .or_else(|| object.get("name"))
+                    .or_else(|| object.get("Key")),
+                object.get("value").or_else(|| object.get("Value")),
+            ) {
+                if let Some(key) = key.as_str() {
+                    return vec![(key.to_string(), environment_value(value))];
+                }
+            }
+            environment_object_pairs(object)
+        }
+        Value::Array(pair) if pair.len() == 2 => pair[0]
+            .as_str()
+            .map(|key| vec![(key.to_string(), environment_value(&pair[1]))])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn environment_value(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(value) => value.clone(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn is_protected_default_env(name: &str) -> bool {
+    name.starts_with("GITHUB_") || name.starts_with("RUNNER_")
 }
 
 fn push_var(env: &mut Vec<(String, String)>, name: &str, value: Option<&str>) {
@@ -123,6 +204,19 @@ mod tests {
                 "github.sha": { "value": "abc123" },
                 "system.github.token": { "value": "ghs_token", "isSecret": true }
             },
+            "environmentVariables": [
+                {
+                    "CARGO_TERM_COLOR": "always",
+                    "CARGO_INCREMENTAL": 0,
+                    "GITHUB_REF": "refs/heads/evil"
+                },
+                {
+                    "pairs": [
+                        { "key": "SCCACHE_DIR", "value": "/var/cache/sccache" },
+                        ["CARGO_INCREMENTAL", "1"]
+                    ]
+                }
+            ],
             "resources": {
                 "endpoints": [{
                     "name": "SystemVssConnection",
@@ -144,6 +238,11 @@ mod tests {
         assert!(env.contains(&("GITHUB_JOB".into(), "check".into())));
         assert!(env.contains(&("GITHUB_REPOSITORY".into(), "acme/repo".into())));
         assert!(env.contains(&("GITHUB_TOKEN".into(), "ghs_token".into())));
+        assert!(env.contains(&("CARGO_TERM_COLOR".into(), "always".into())));
+        assert!(env.contains(&("CARGO_INCREMENTAL".into(), "1".into())));
+        assert!(env.contains(&("SCCACHE_DIR".into(), "/var/cache/sccache".into())));
+        assert!(env.contains(&("GITHUB_REF".into(), "refs/heads/main".into())));
+        assert!(!env.contains(&("GITHUB_REF".into(), "refs/heads/evil".into())));
         assert!(env.contains(&("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into())));
         assert!(env.contains(&(
             "ACTIONS_CACHE_URL".into(),

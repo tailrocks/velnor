@@ -155,9 +155,12 @@ The message contains:
 - steps
 - job container/service container data
 - defaults
+- workflow/job environment variable overlays
 - expression/context data needed at runtime
 
 Velnor needs a Rust representation for the subset used by target jobs.
+
+The upstream `JobExtension` evaluates `message.EnvironmentVariables` before action preparation, writes the result to `context.Global.EnvironmentVariables`, and also updates the `env` expression context. `AgentJobRequestMessage` documents this field as a hierarchy of environment variables to overlay, where the last entry wins.
 
 ## Step Execution
 

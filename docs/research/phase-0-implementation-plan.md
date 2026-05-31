@@ -307,7 +307,7 @@ The next useful implementation steps are:
 
 1. Live-test `velnor-runner run --once --complete-noop` and `velnor-runner run --once --execute-scripts` against disposable workflows and adjust reporter route details if GitHub rejects them.
 2. Start renew-job loop before real job execution.
-3. Resolve broader job/message environment into later steps; step-level `env:` is implemented for scripts and JavaScript actions.
+3. Expand job/message expression support; workflow/job-level `env:` and step-level `env:` are implemented for scripts and JavaScript actions.
 4. Provide full GitHub/runner/action runtime environment for JavaScript actions, then test `setup-*`, cache, and Docker actions from target workflows.
 
 This gets Velnor from "polls one message" to "can complete a simple real GitHub job".
