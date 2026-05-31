@@ -70,6 +70,7 @@ Current code progress:
 - script-step plan writes the script under runner temp, exposes per-step command-file env vars, and collects output/env/path/state/summary files after execution
 - Docker script executor runs the planned lifecycle through an abstract command runner: create network, start container, exec script, collect state, cleanup container/network
 - enabled GitHub script steps can be mapped into internal `ScriptStep` plans for `bash` and `sh`, including `script`, `shell`, and `workingDirectory` inputs
+- opt-in `run --execute-scripts` can execute script-only jobs in one Docker job container and finish success/failure; enabled non-script actions are refused instead of being faked
 
 Exit criteria:
 

@@ -67,29 +67,63 @@ where
         step: &ScriptStep,
         temp_host: &Path,
     ) -> Result<StepExecutionResult> {
+        let mut results = self.execute_steps(container, std::slice::from_ref(step), temp_host)?;
+        results
+            .pop()
+            .ok_or_else(|| anyhow::anyhow!("script step did not produce a result"))
+    }
+
+    pub fn execute_steps(
+        &mut self,
+        container: &JobContainerSpec,
+        steps: &[ScriptStep],
+        temp_host: &Path,
+    ) -> Result<Vec<StepExecutionResult>> {
         self.run_docker(&container.create_network_args())?;
         self.run_docker(&container.start_args())?;
 
-        let plan = ScriptStepPlan::prepare(step, temp_host)?;
-        let exec_args = container.exec_script_args(
-            &plan.script_container_path,
-            plan.shell,
-            &plan.working_directory_container,
-            &plan.env,
-        );
-        let step_result = self.runner.run("docker", &exec_args);
-        let state = plan.collect_state()?;
+        let mut results = Vec::new();
+        let mut step_error = None;
+        for step in steps {
+            let result = (|| {
+                let plan = ScriptStepPlan::prepare(step, temp_host)?;
+                let exec_args = container.exec_script_args(
+                    &plan.script_container_path,
+                    plan.shell,
+                    &plan.working_directory_container,
+                    &plan.env,
+                );
+                let step_result = self.runner.run("docker", &exec_args)?;
+                let state = plan.collect_state()?;
+                Ok(StepExecutionResult {
+                    exit_code: step_result.code,
+                    state,
+                })
+            })();
+
+            match result {
+                Ok(result) => {
+                    let failed = result.exit_code != 0;
+                    results.push(result);
+                    if failed {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    step_error = Some(error);
+                    break;
+                }
+            }
+        }
 
         let cleanup_result = self.cleanup(container);
         if let Err(error) = cleanup_result {
             return Err(error.context("cleanup failed after script step"));
         }
-
-        let step_result = step_result?;
-        Ok(StepExecutionResult {
-            exit_code: step_result.code,
-            state,
-        })
+        if let Some(error) = step_error {
+            return Err(error);
+        }
+        Ok(results)
     }
 
     fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
@@ -248,6 +282,43 @@ mod tests {
         assert_eq!(executor.runner().calls.len(), 5);
         assert_eq!(executor.runner().calls[3].1[0], "rm");
         assert_eq!(executor.runner().calls[4].1[0], "network");
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn executes_multiple_steps_in_one_container() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ScriptStep {
+                id: "step1".into(),
+                script: "echo one".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+            },
+            ScriptStep {
+                id: "step2".into(),
+                script: "echo two".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+            },
+        ];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        let results = executor
+            .execute_steps(&container(&temp), &steps, &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        let calls = &executor.runner().calls;
+        assert_eq!(calls.len(), 6);
+        assert_eq!(calls[0].1[0], "network");
+        assert_eq!(calls[1].1[0], "run");
+        assert_eq!(calls[2].1[0], "exec");
+        assert_eq!(calls[3].1[0], "exec");
+        assert_eq!(calls[4].1[0], "rm");
+        assert_eq!(calls[5].1[0], "network");
 
         fs::remove_dir_all(temp).unwrap();
     }

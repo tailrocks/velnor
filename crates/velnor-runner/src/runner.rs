@@ -1,16 +1,19 @@
 use anyhow::{bail, Context, Result};
 use serde_json::json;
+use std::{fs, path::PathBuf};
 
 use crate::{
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
+    container::JobContainerSpec,
+    executor::{DockerScriptExecutor, ProcessCommandRunner},
     job_message::{AgentJobRequestMessage, PIPELINE_AGENT_JOB_REQUEST},
     protocol::{
         DistributedTaskClient, GitHubAuthResult, GitHubScope, OAuthClient, OAuthJwtCredentials,
         RegistrationClient, RunnerEvent, RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool,
         TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines,
     },
-    script_step::github_script_steps,
+    script_step::{github_script_steps, has_enabled_non_script_steps},
 };
 
 pub async fn configure(args: ConfigureArgs) -> Result<()> {
@@ -252,6 +255,10 @@ impl TaskAgentExt for TaskAgent {
 }
 
 pub async fn run(args: RunArgs) -> Result<()> {
+    if args.complete_noop && args.execute_scripts {
+        bail!("--complete-noop and --execute-scripts are mutually exclusive");
+    }
+
     let dir = config::config_dir(args.config_dir)?;
     let stored = config::load(&dir)?;
     let server_url = stored
@@ -311,24 +318,61 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 job.steps.len(),
                 job.resources.endpoints.len()
             );
-            match github_script_steps(&job.steps, "/__w") {
-                Ok(script_steps) => println!("Mapped {} script run step(s).", script_steps.len()),
-                Err(error) => println!("Script step mapping is incomplete: {error}."),
-            }
+            let script_steps = match github_script_steps(&job.steps, "/__w") {
+                Ok(script_steps) => {
+                    println!("Mapped {} script run step(s).", script_steps.len());
+                    Some(script_steps)
+                }
+                Err(error) => {
+                    println!("Script step mapping is incomplete: {error}.");
+                    None
+                }
+            };
             if let Some(system_connection) = job.system_connection() {
                 println!(
                     "System connection URL: {}",
                     system_connection.url.as_deref().unwrap_or("unknown")
                 );
             }
-            if args.complete_noop {
-                complete_noop_job(
+            if args.execute_scripts {
+                let Some(script_steps) = script_steps else {
+                    bail!("cannot execute scripts because step mapping failed");
+                };
+                if has_enabled_non_script_steps(&job.steps) {
+                    println!("Job has enabled non-script steps; not executing or acknowledging.");
+                } else {
+                    let result = execute_script_job(
+                        &dir,
+                        args.work_dir.clone(),
+                        &args.docker_image,
+                        &job,
+                        &script_steps,
+                    )?;
+                    complete_job(
+                        &client,
+                        pool_id,
+                        session_id,
+                        message.message_id,
+                        &stored.settings.agent_name,
+                        &job,
+                        result,
+                        "Velnor executed supported run steps in Docker.".to_string(),
+                    )
+                    .await?;
+                    println!(
+                        "Script job completed with result {result:?} and message acknowledged."
+                    );
+                }
+            } else if args.complete_noop {
+                complete_job(
                     &client,
                     pool_id,
                     session_id,
                     message.message_id,
                     &stored.settings.agent_name,
                     &job,
+                    TaskResult::Succeeded,
+                    "Velnor no-op completion probe: user steps were not executed.".to_string(),
                 )
                 .await?;
                 println!("No-op job completed and message acknowledged.");
@@ -352,13 +396,54 @@ pub async fn run(args: RunArgs) -> Result<()> {
     Ok(())
 }
 
-async fn complete_noop_job(
+fn execute_script_job(
+    config_dir: &std::path::Path,
+    work_dir: Option<PathBuf>,
+    docker_image: &str,
+    job: &AgentJobRequestMessage,
+    script_steps: &[crate::script_step::ScriptStep],
+) -> Result<TaskResult> {
+    let job_dir = work_dir
+        .unwrap_or_else(|| config_dir.join("_work"))
+        .join(sanitize_path_segment(&job.job_id));
+    let workspace = job_dir.join("workspace");
+    let temp = job_dir.join("temp");
+    let actions = job_dir.join("actions");
+    let tools = job_dir.join("tools");
+    for path in [&workspace, &temp, &actions, &tools] {
+        fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
+    }
+
+    let container = JobContainerSpec {
+        name: format!("velnor-job-{}", sanitize_path_segment(&job.job_id)),
+        image: docker_image.to_string(),
+        network: format!("velnor-net-{}", sanitize_path_segment(&job.job_id)),
+        workspace_host: workspace,
+        temp_host: temp.clone(),
+        actions_host: actions,
+        tools_host: tools,
+        mount_docker_socket: true,
+    };
+    let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+    let results = executor.execute_steps(&container, script_steps, &temp)?;
+    let failed = results.iter().any(|result| result.exit_code != 0);
+
+    Ok(if failed {
+        TaskResult::Failed
+    } else {
+        TaskResult::Succeeded
+    })
+}
+
+async fn complete_job(
     client: &DistributedTaskClient,
     pool_id: i64,
     session_id: &str,
     message_id: i64,
     worker_name: &str,
     job: &AgentJobRequestMessage,
+    result: TaskResult,
+    feed_line: String,
 ) -> Result<()> {
     let scope_identifier = job
         .plan
@@ -394,11 +479,7 @@ async fn complete_noop_job(
             &job.plan.plan_id,
             &job.timeline.id,
             &job.job_id,
-            TimelineRecordFeedLines::new(
-                job.job_id.clone(),
-                vec!["Velnor no-op completion probe: user steps were not executed.".to_string()],
-                Some(1),
-            ),
+            TimelineRecordFeedLines::new(job.job_id.clone(), vec![feed_line], Some(1)),
         )
         .await?;
 
@@ -409,11 +490,11 @@ async fn complete_noop_job(
             hub_name,
             &job.plan.plan_id,
             &job.timeline.id,
-            vec![record.completed(finish_time.clone(), TaskResult::Succeeded)],
+            vec![record.completed(finish_time.clone(), result)],
         )
         .await?;
     client
-        .finish_agent_request(pool_id, job.request_id, finish_time, TaskResult::Succeeded)
+        .finish_agent_request(pool_id, job.request_id, finish_time, result)
         .await?;
     client
         .delete_message(pool_id, message_id, session_id)
@@ -421,6 +502,19 @@ async fn complete_noop_job(
         .context("acknowledge completed job message")?;
 
     Ok(())
+}
+
+fn sanitize_path_segment(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn utc_now_rfc3339() -> Result<String> {

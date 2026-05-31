@@ -38,6 +38,12 @@ pub fn github_script_steps(
     Ok(script_steps)
 }
 
+pub fn has_enabled_non_script_steps(steps: &[ActionStep]) -> bool {
+    steps
+        .iter()
+        .any(|step| step.enabled && step.reference_type() != Some(ActionReferenceType::Script))
+}
+
 fn github_script_step(
     step: &ActionStep,
     index: usize,
@@ -369,5 +375,33 @@ mod tests {
         let error = github_script_steps(&steps, "/__w/repo").unwrap_err();
 
         assert!(error.to_string().contains("unsupported run step shell"));
+    }
+
+    #[test]
+    fn detects_enabled_non_script_steps() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "enabled": false,
+                "reference": { "type": "Repository", "name": "actions/checkout" }
+            },
+            {
+                "enabled": true,
+                "reference": { "type": "Script" },
+                "inputs": { "script": "echo hi" }
+            }
+        ]))
+        .unwrap();
+
+        assert!(!has_enabled_non_script_steps(&steps));
+
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "enabled": true,
+                "reference": { "type": "Repository", "name": "actions/checkout" }
+            }
+        ]))
+        .unwrap();
+
+        assert!(has_enabled_non_script_steps(&steps));
     }
 }

@@ -78,6 +78,18 @@ pub struct RunArgs {
     /// Mark a received job as succeeded without executing user steps.
     #[arg(long)]
     pub complete_noop: bool,
+
+    /// Execute supported run steps in Docker, then finish and acknowledge the job.
+    #[arg(long)]
+    pub execute_scripts: bool,
+
+    /// Docker image for --execute-scripts jobs.
+    #[arg(long, default_value = "ubuntu:24.04")]
+    pub docker_image: String,
+
+    /// Host work directory for Docker job state. Defaults under the runner config directory.
+    #[arg(long)]
+    pub work_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
