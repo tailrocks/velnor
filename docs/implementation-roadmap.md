@@ -77,7 +77,7 @@ Current code progress:
 - evaluated job outputs are sent in a classic `JobCompleted` plan event before the agent request is finished
 - stdout workflow commands are parsed for legacy/state-changing commands: `set-output`, `set-env`, `add-path`, and `save-state`
 - basic `${{ github.* }}` and `${{ runner.* }}` context expressions are resolved from runtime env in later scripts and JavaScript action env
-- basic step `if` evaluation is implemented for output comparisons, step outcome checks, `runner.os`, `github.event_name`, `github.ref`, and simple `&&`/`||`
+- basic step `if` evaluation is implemented for output comparisons, step outcome checks, `runner.os`, `github.event_name`, `github.ref`, status functions, and simple `&&`/`||`
 - native self-repository `actions/checkout` support is wired before Docker execution through host `git init/fetch/checkout`; other repository actions remain unsupported
 
 Exit criteria:

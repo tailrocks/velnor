@@ -781,8 +781,20 @@ impl JobExecutionState {
                 .values()
                 .any(|outcome| *outcome == StepOutcome::Failure);
         }
+        if expression == "failure()" {
+            return self
+                .outcomes
+                .values()
+                .any(|outcome| *outcome == StepOutcome::Failure);
+        }
+        if expression == "cancelled()" {
+            return false;
+        }
         if let Some(inner) = strip_wrapping_parentheses(expression) {
             return self.evaluate_condition_expr(inner);
+        }
+        if let Some(inner) = expression.strip_prefix('!') {
+            return !self.evaluate_condition_expr(inner);
         }
         if let Some((left, right)) = split_top_level(expression, "||") {
             return self.evaluate_condition_expr(left) || self.evaluate_condition_expr(right);
@@ -1982,6 +1994,25 @@ mod tests {
         assert!(state.evaluate_condition(Some("steps.sccache.outcome == 'success'")));
         assert!(state.evaluate_condition(Some("steps.disabled.outcome != 'success'")));
         assert!(state.evaluate_condition(Some("runner.os == 'Linux'")));
+        assert!(state.evaluate_condition(Some("success()")));
+        assert!(!state.evaluate_condition(Some("failure()")));
+        assert!(!state.evaluate_condition(Some("cancelled()")));
+        assert!(state.evaluate_condition(Some("!cancelled()")));
+
+        state.apply(
+            "failed",
+            &StepExecutionResult {
+                exit_code: 1,
+                skipped: false,
+                failure_ignored: false,
+                state: StepCommandState::default(),
+            },
+        );
+
+        assert!(!state.evaluate_condition(Some("success()")));
+        assert!(state.evaluate_condition(Some("failure()")));
+        assert!(state.evaluate_condition(Some("failure() && !cancelled()")));
+        assert!(state.evaluate_condition(Some("always() && failure()")));
     }
 
     #[test]
