@@ -617,7 +617,9 @@ fn ordered_executable_steps(
                 let action = resolved_actions
                     .iter()
                     .find(|action| {
-                        action.plan.repository == repository && action.plan.git_ref == git_ref
+                        action.plan.repository == repository
+                            && action.plan.git_ref == git_ref
+                            && action.plan.source_path.as_deref() == reference.path.as_deref()
                     })
                     .ok_or_else(|| {
                         anyhow::anyhow!(
@@ -1165,6 +1167,81 @@ runs:
             Some("${{ (runner.os == 'Linux') && (runner.os != 'Windows') }}")
         );
         assert!(step.script.contains("echo \"stable\""));
+    }
+
+    #[test]
+    fn ordered_steps_match_repository_action_source_path() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Tool",
+            "requestId": 1,
+            "steps": [{
+                "id": "sub",
+                "reference": {
+                    "type": "Repository",
+                    "name": "acme/action",
+                    "ref": "v1",
+                    "path": "sub/action"
+                }
+            }]
+        }))
+        .unwrap();
+        let actions_host = Path::new("/tmp/actions");
+        let root_plan = RepositoryActionPlan {
+            step_id: "root".into(),
+            repository: "acme/action".into(),
+            git_ref: "v1".into(),
+            source_path: None,
+            repository_dir: actions_host.join("_actions/acme_action/v1"),
+            action_dir: actions_host.join("_actions/acme_action/v1"),
+            inputs: BTreeMap::new(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+        };
+        let sub_plan = RepositoryActionPlan {
+            step_id: "sub".into(),
+            repository: "acme/action".into(),
+            git_ref: "v1".into(),
+            source_path: Some("sub/action".into()),
+            repository_dir: actions_host.join("_actions/acme_action/v1"),
+            action_dir: actions_host.join("_actions/acme_action/v1/sub/action"),
+            inputs: BTreeMap::new(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+        };
+        let root_metadata =
+            parse_action_metadata("runs:\n  using: node20\n  main: root.js\n").unwrap();
+        let sub_metadata =
+            parse_action_metadata("runs:\n  using: node20\n  main: sub.js\n").unwrap();
+        let resolved = vec![
+            ResolvedAction {
+                plan: root_plan,
+                metadata_path: actions_host.join("_actions/acme_action/v1/action.yml"),
+                runtime: root_metadata.runtime().unwrap(),
+                metadata: root_metadata,
+            },
+            ResolvedAction {
+                plan: sub_plan,
+                metadata_path: actions_host.join("_actions/acme_action/v1/sub/action/action.yml"),
+                runtime: sub_metadata.runtime().unwrap(),
+                metadata: sub_metadata,
+            },
+        ];
+
+        let ordered = ordered_executable_steps(&job, &[], &resolved, &[], actions_host).unwrap();
+
+        let ExecutableStep::JavaScript { invocation, .. } = &ordered[0] else {
+            panic!("repository action should expand to JavaScript step")
+        };
+        assert_eq!(
+            invocation.main_container_path,
+            "/__a/_actions/acme_action/v1/sub/action/sub.js"
+        );
     }
 
     #[test]
