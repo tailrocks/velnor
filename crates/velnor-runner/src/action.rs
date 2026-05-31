@@ -427,6 +427,7 @@ pub fn composite_action_invocations(
             script: rendered,
             shell,
             working_directory_container,
+            condition: None,
         }));
     }
     Ok(invocations)

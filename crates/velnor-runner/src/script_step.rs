@@ -18,6 +18,7 @@ pub struct ScriptStep {
     pub script: String,
     pub shell: Shell,
     pub working_directory_container: String,
+    pub condition: Option<String>,
 }
 
 pub fn github_script_steps(
@@ -76,6 +77,7 @@ fn github_script_step(
         script: script.to_string(),
         shell,
         working_directory_container: working_directory,
+        condition: step.condition.clone(),
     })
 }
 
@@ -307,6 +309,7 @@ mod tests {
             script: "echo hello".into(),
             shell: Shell::Bash,
             working_directory_container: "/__w/repo".into(),
+            condition: None,
         };
 
         let plan = ScriptStepPlan::prepare(&step, &temp).unwrap();
@@ -329,6 +332,7 @@ mod tests {
             script: "echo test".into(),
             shell: Shell::Sh,
             working_directory_container: "/__w/repo".into(),
+            condition: None,
         };
         let plan = ScriptStepPlan::prepare(&step, &temp).unwrap();
 
@@ -361,6 +365,7 @@ mod tests {
             script: "tool --version".into(),
             shell: Shell::Bash,
             working_directory_container: "/__w/repo".into(),
+            condition: None,
         };
         let plan = ScriptStepPlan::prepare_with_path(
             &step,

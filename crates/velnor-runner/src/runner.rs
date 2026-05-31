@@ -508,6 +508,7 @@ fn ordered_executable_steps(
                                 ordered.push(ExecutableStep::JavaScript {
                                     step_id: action.plan.step_id.clone(),
                                     invocation: action.javascript_invocation(actions_host)?,
+                                    condition: None,
                                 });
                             }
                         }
@@ -539,6 +540,7 @@ fn ordered_executable_steps(
                 ordered.push(ExecutableStep::JavaScript {
                     step_id: action.plan.step_id.clone(),
                     invocation: action.javascript_invocation(actions_host)?,
+                    condition: step.condition.clone(),
                 });
             }
             _ => bail!("unsupported enabled step in job"),
@@ -897,6 +899,7 @@ runs:
         let ExecutableStep::JavaScript {
             step_id,
             invocation,
+            ..
         } = &ordered[0]
         else {
             panic!("nested repository action should expand to JavaScript step")

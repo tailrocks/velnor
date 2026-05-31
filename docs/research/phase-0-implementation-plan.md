@@ -239,7 +239,7 @@ GitHub already evaluates:
 
 Velnor still needs runtime step expression behavior from the job message:
 
-- step `if`
+- step `if`: implemented for output comparisons, step outcome checks, selected GitHub/runner context values, and simple `&&`/`||`
 - `always()`
 - `success()`, `failure()`, `cancelled()`
 - `steps.<id>.outputs.*`: implemented for direct interpolation in later scripts and JavaScript action env

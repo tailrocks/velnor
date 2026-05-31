@@ -45,6 +45,7 @@ impl CommandRunner for ProcessCommandRunner {
 pub struct StepExecutionResult {
     pub exit_code: i32,
     pub state: StepCommandState,
+    pub skipped: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +54,7 @@ pub enum ExecutableStep {
     JavaScript {
         step_id: String,
         invocation: JavaScriptActionInvocation,
+        condition: Option<String>,
     },
 }
 
@@ -61,6 +63,13 @@ impl ExecutableStep {
         match self {
             ExecutableStep::Script(step) => &step.id,
             ExecutableStep::JavaScript { step_id, .. } => step_id,
+        }
+    }
+
+    fn condition(&self) -> Option<&str> {
+        match self {
+            ExecutableStep::Script(step) => step.condition.as_deref(),
+            ExecutableStep::JavaScript { condition, .. } => condition.as_deref(),
         }
     }
 }
@@ -149,6 +158,16 @@ where
         let mut step_error = None;
         for step in steps {
             let step_id = step.id().to_string();
+            if !state.evaluate_condition(step.condition()) {
+                let result = StepExecutionResult {
+                    exit_code: 0,
+                    state: StepCommandState::default(),
+                    skipped: true,
+                };
+                state.apply(&step_id, &result);
+                results.push(result);
+                continue;
+            }
             let result = (|| match step {
                 ExecutableStep::Script(step) => {
                     let step = state.resolve_script_step(step);
@@ -165,11 +184,13 @@ where
                     Ok(StepExecutionResult {
                         exit_code: step_result.code,
                         state: command_state,
+                        skipped: false,
                     })
                 }
                 ExecutableStep::JavaScript {
                     step_id,
                     invocation,
+                    ..
                 } => self.execute_javascript_action_in_started_container(
                     container, step_id, invocation, temp_host, &state,
                 ),
@@ -178,7 +199,7 @@ where
             match result {
                 Ok(result) => {
                     let failed = result.exit_code != 0;
-                    state.apply(&step_id, &result.state);
+                    state.apply(&step_id, &result);
                     results.push(result);
                     if failed {
                         break;
@@ -237,6 +258,7 @@ where
                 script: String::new(),
                 shell: crate::container::Shell::Sh,
                 working_directory_container: "/__w".to_string(),
+                condition: None,
             },
             temp_host,
         )?;
@@ -252,6 +274,7 @@ where
         Ok(StepExecutionResult {
             exit_code: step_result.code,
             state,
+            skipped: false,
         })
     }
 
@@ -282,7 +305,25 @@ where
 struct JobExecutionState {
     env: BTreeMap<String, String>,
     outputs: BTreeMap<String, BTreeMap<String, String>>,
+    outcomes: BTreeMap<String, StepOutcome>,
     path: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepOutcome {
+    Success,
+    Failure,
+    Skipped,
+}
+
+impl StepOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            StepOutcome::Success => "success",
+            StepOutcome::Failure => "failure",
+            StepOutcome::Skipped => "skipped",
+        }
+    }
 }
 
 impl JobExecutionState {
@@ -290,6 +331,7 @@ impl JobExecutionState {
         Self {
             env: base_env.iter().cloned().collect(),
             outputs: BTreeMap::new(),
+            outcomes: BTreeMap::new(),
             path: Vec::new(),
         }
     }
@@ -304,15 +346,24 @@ impl JobExecutionState {
         env
     }
 
-    fn apply(&mut self, step_id: &str, step_state: &StepCommandState) {
-        if !step_state.outputs.is_empty() {
+    fn apply(&mut self, step_id: &str, result: &StepExecutionResult) {
+        let outcome = if result.skipped {
+            StepOutcome::Skipped
+        } else if result.exit_code == 0 {
+            StepOutcome::Success
+        } else {
+            StepOutcome::Failure
+        };
+        self.outcomes.insert(step_id.to_string(), outcome);
+
+        if !result.state.outputs.is_empty() {
             self.outputs
-                .insert(step_id.to_string(), step_state.outputs.clone());
+                .insert(step_id.to_string(), result.state.outputs.clone());
         }
-        for (name, value) in &step_state.env {
+        for (name, value) in &result.state.env {
             self.env.insert(name.clone(), value.clone());
         }
-        for path in step_state.path.iter().rev() {
+        for path in result.state.path.iter().rev() {
             self.path.insert(0, path.clone());
         }
     }
@@ -324,6 +375,7 @@ impl JobExecutionState {
             shell: step.shell,
             working_directory_container: self
                 .resolve_expressions(&step.working_directory_container),
+            condition: step.condition.clone(),
         }
     }
 
@@ -363,6 +415,97 @@ impl JobExecutionState {
             .and_then(|outputs| outputs.get(expression))
             .map(String::as_str)
     }
+
+    fn evaluate_condition(&self, condition: Option<&str>) -> bool {
+        let Some(condition) = condition
+            .map(str::trim)
+            .filter(|condition| !condition.is_empty())
+        else {
+            return true;
+        };
+        self.evaluate_condition_expr(strip_expression(condition))
+    }
+
+    fn evaluate_condition_expr(&self, expression: &str) -> bool {
+        let expression = expression.trim();
+        if expression == "always()" {
+            return true;
+        }
+        if expression == "success()" {
+            return !self
+                .outcomes
+                .values()
+                .any(|outcome| *outcome == StepOutcome::Failure);
+        }
+        if let Some((left, right)) = expression.split_once("&&") {
+            return self.evaluate_condition_expr(left) && self.evaluate_condition_expr(right);
+        }
+        if let Some((left, right)) = expression.split_once("||") {
+            return self.evaluate_condition_expr(left) || self.evaluate_condition_expr(right);
+        }
+        if let Some((left, right)) = expression.split_once("!=") {
+            return self.resolve_condition_value(left).as_deref() != Some(unquote(right.trim()));
+        }
+        if let Some((left, right)) = expression.split_once("==") {
+            return self.resolve_condition_value(left).as_deref() == Some(unquote(right.trim()));
+        }
+        if expression == "true" {
+            return true;
+        }
+        if expression == "false" {
+            return false;
+        }
+        if let Some(value) = self.resolve_condition_value(expression) {
+            return value == "true" || value == "success";
+        }
+        true
+    }
+
+    fn resolve_condition_value(&self, expression: &str) -> Option<String> {
+        let expression = expression.trim();
+        if let Some(output) = self.resolve_step_output_expression(expression) {
+            return Some(output.to_string());
+        }
+        if let Some(expression) = expression.strip_prefix("steps.") {
+            let (step_id, field) = expression.split_once('.')?;
+            if field == "outcome" || field == "conclusion" {
+                return self
+                    .outcomes
+                    .get(step_id)
+                    .map(|outcome| outcome.as_str().to_string());
+            }
+        }
+        if expression == "runner.os" {
+            return Some("Linux".to_string());
+        }
+        if expression == "github.event_name" {
+            return self.env.get("GITHUB_EVENT_NAME").cloned();
+        }
+        if expression == "github.ref" {
+            return self.env.get("GITHUB_REF").cloned();
+        }
+        Some(unquote(expression).to_string())
+    }
+}
+
+fn strip_expression(condition: &str) -> &str {
+    condition
+        .strip_prefix("${{")
+        .and_then(|value| value.strip_suffix("}}"))
+        .map(str::trim)
+        .unwrap_or(condition)
+}
+
+fn unquote(value: &str) -> &str {
+    value
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+        .or_else(|| {
+            value
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+        })
+        .unwrap_or(value)
 }
 
 fn exit_code(status: ExitStatus) -> Result<i32> {
@@ -457,6 +600,7 @@ mod tests {
             script: "echo answer=42 >> $GITHUB_OUTPUT".into(),
             shell: Shell::Sh,
             working_directory_container: "/__w/repo".into(),
+            condition: None,
         };
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
@@ -508,6 +652,7 @@ mod tests {
             script: "exit 7".into(),
             shell: Shell::Sh,
             working_directory_container: "/__w/repo".into(),
+            condition: None,
         };
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
@@ -536,12 +681,14 @@ mod tests {
                 script: "echo one".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
+                condition: None,
             },
             ScriptStep {
                 id: "step2".into(),
                 script: "echo two".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
+                condition: None,
             },
         ];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
@@ -568,11 +715,15 @@ mod tests {
         let mut state = JobExecutionState::default();
         state.apply(
             "producer",
-            &StepCommandState {
-                outputs: [("answer".to_string(), "42".to_string())].into(),
-                env: [("NAME".to_string(), "value".to_string())].into(),
-                path: vec!["/opt/tool".to_string()],
-                ..Default::default()
+            &StepExecutionResult {
+                exit_code: 0,
+                skipped: false,
+                state: StepCommandState {
+                    outputs: [("answer".to_string(), "42".to_string())].into(),
+                    env: [("NAME".to_string(), "value".to_string())].into(),
+                    path: vec!["/opt/tool".to_string()],
+                    ..Default::default()
+                },
             },
         );
 
@@ -597,9 +748,13 @@ mod tests {
         let mut state = JobExecutionState::default();
         state.apply(
             "meta",
-            &StepCommandState {
-                outputs: [("tags".to_string(), "image:latest".to_string())].into(),
-                ..Default::default()
+            &StepExecutionResult {
+                exit_code: 0,
+                skipped: false,
+                state: StepCommandState {
+                    outputs: [("tags".to_string(), "image:latest".to_string())].into(),
+                    ..Default::default()
+                },
             },
         );
 
@@ -619,12 +774,14 @@ mod tests {
                 script: "echo answer=42 >> $GITHUB_OUTPUT".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
+                condition: None,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "consumer".into(),
                 script: "echo answer=${{ steps.producer.outputs.answer }}".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
+                condition: None,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
@@ -642,6 +799,73 @@ mod tests {
             "echo answer=42\n"
         );
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn skips_steps_when_output_condition_is_false() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "producer".into(),
+                script: "echo answer=42 >> $GITHUB_OUTPUT".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                condition: None,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "consumer".into(),
+                script: "echo should-not-run".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                condition: Some("steps.producer.outputs.answer == 'nope'".into()),
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results[1].skipped);
+        assert!(!temp.join("consumer.sh").exists());
+        let exec_count = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| args.first().is_some_and(|arg| arg == "exec"))
+            .count();
+        assert_eq!(exec_count, 1);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn evaluates_step_outcome_conditions() {
+        let mut state = JobExecutionState::default();
+        state.apply(
+            "sccache",
+            &StepExecutionResult {
+                exit_code: 0,
+                skipped: false,
+                state: StepCommandState::default(),
+            },
+        );
+        state.apply(
+            "disabled",
+            &StepExecutionResult {
+                exit_code: 0,
+                skipped: true,
+                state: StepCommandState::default(),
+            },
+        );
+
+        assert!(state.evaluate_condition(Some("steps.sccache.outcome == 'success'")));
+        assert!(state.evaluate_condition(Some("steps.disabled.outcome != 'success'")));
+        assert!(state.evaluate_condition(Some("runner.os == 'Linux'")));
     }
 
     #[test]
@@ -691,6 +915,7 @@ mod tests {
                 script: "echo NAME=value >> $GITHUB_ENV".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
+                condition: None,
             }),
             ExecutableStep::JavaScript {
                 step_id: "action1".into(),
@@ -700,12 +925,14 @@ mod tests {
                     action_container_path: "/__a/_actions/acme_action/v1".into(),
                     env: vec![("INPUT_NAME".into(), "value".into())],
                 },
+                condition: None,
             },
             ExecutableStep::Script(ScriptStep {
                 id: "step2".into(),
                 script: "echo done".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
+                condition: None,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
