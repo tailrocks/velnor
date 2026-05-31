@@ -301,11 +301,13 @@ Pkl workflow -> Velnor compiler    -> Velnor normalized plan -> Docker executor
 
 The next useful implementation steps are:
 
-1. Implement lock renewal and finish-job request calls.
-2. Add a minimal reporter that can mark a no-op job success/failure in GitHub UI.
+1. Add a minimal reporter that can mark a no-op job success/failure in GitHub UI.
+2. Start renew-job loop before job execution and call finish-job after reporting is ready.
 3. Connect script-step Docker executor to real script steps from the job message.
 4. Add a native `actions/checkout` equivalent or implement JavaScript action execution.
 
 This gets Velnor from "polls one message" to "can complete a simple real GitHub job".
 
 Current code can parse enough `AgentJobRequestMessage` to identify job id/name, plan, request id, timeline id, variables, endpoints, repositories, containers, and action steps.
+
+Current code also has classic `jobrequests` client methods for lock renewal and finish-job requests. They are not called automatically yet because the GitHub UI also needs timeline/log/step reporting.

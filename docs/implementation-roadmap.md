@@ -31,9 +31,9 @@ Goal: receive one job and mark it completed.
 Deliverables:
 
 - deserialize enough `AgentJobRequestMessage`
-- renew job request lock
+- renew job request lock: client method implemented for classic `jobrequests` route
 - report timeline/log output for a no-op job
-- finish job request with success/failure
+- finish job request with success/failure: client method implemented for classic `jobrequests` route
 - handle cancellation message
 
 Exit criteria:

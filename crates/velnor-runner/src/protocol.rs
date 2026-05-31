@@ -4,8 +4,8 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use reqwest::{
-    header::{ACCEPT, AUTHORIZATION, USER_AGENT},
-    Client,
+    header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT},
+    Client, Method,
 };
 use rsa::{
     pkcs8::{EncodePrivateKey, LineEnding},
@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 pub const RUNNER_VERSION: &str = "2.326.0";
 pub const RUNNER_USER_AGENT: &str = "actions-runner/2.326.0 (velnor)";
+pub const EMPTY_LOCK_TOKEN: &str = "00000000-0000-0000-0000-000000000000";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitHubScope {
@@ -563,6 +564,68 @@ impl DistributedTaskClient {
         parse_empty_response(response, "delete message").await
     }
 
+    pub async fn renew_agent_request(
+        &self,
+        pool_id: i64,
+        request_id: i64,
+        orchestration_id: Option<&str>,
+    ) -> Result<TaskAgentJobRequest> {
+        let body = TaskAgentJobRequest::renew(request_id);
+        let mut headers = HeaderMap::new();
+        if let Some(orchestration_id) = orchestration_id.filter(|value| !value.is_empty()) {
+            headers.insert(
+                HeaderName::from_static("x-vss-orchestrationid"),
+                HeaderValue::from_str(orchestration_id).context("invalid orchestration id")?,
+            );
+        }
+
+        self.patch_agent_request(pool_id, request_id, &body, headers, "renew agent request")
+            .await
+    }
+
+    pub async fn finish_agent_request(
+        &self,
+        pool_id: i64,
+        request_id: i64,
+        finish_time_utc: impl Into<String>,
+        result: TaskResult,
+    ) -> Result<TaskAgentJobRequest> {
+        let body = TaskAgentJobRequest::finish(request_id, finish_time_utc, result);
+
+        self.patch_agent_request(
+            pool_id,
+            request_id,
+            &body,
+            HeaderMap::new(),
+            "finish agent request",
+        )
+        .await
+    }
+
+    async fn patch_agent_request(
+        &self,
+        pool_id: i64,
+        request_id: i64,
+        body: &TaskAgentJobRequest,
+        headers: HeaderMap,
+        action: &str,
+    ) -> Result<TaskAgentJobRequest> {
+        let url = agent_request_url(&self.base_url, pool_id, request_id)?;
+
+        let response = self
+            .http
+            .request(Method::PATCH, url)
+            .bearer_auth(&self.bearer_token)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .headers(headers)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("send {action} request"))?;
+
+        parse_json_response(response, action).await
+    }
+
     async fn get_json<T>(&self, url: Url, action: &str) -> Result<T>
     where
         T: for<'de> Deserialize<'de>,
@@ -610,6 +673,16 @@ impl DistributedTaskClient {
 
         parse_json_response(response, action).await
     }
+}
+
+fn agent_request_url(base_url: &Url, pool_id: i64, request_id: i64) -> Result<Url> {
+    let mut url = base_url.join(&format!("pools/{pool_id}/jobrequests/{request_id}"))?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("api-version", "5.1-preview.1");
+        query.append_pair("lockToken", EMPTY_LOCK_TOKEN);
+    }
+    Ok(url)
 }
 
 fn parse_vss_list<T>(value: Value, action: &str) -> Result<Vec<T>>
@@ -916,13 +989,82 @@ pub struct TaskAgentMessage {
     pub iv_base64: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskAgentJobRequest {
+    #[serde(rename = "requestId", alias = "RequestId")]
+    pub request_id: i64,
+    #[serde(
+        default,
+        rename = "lockedUntil",
+        alias = "LockedUntil",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub locked_until: Option<String>,
+    #[serde(
+        default,
+        rename = "finishTime",
+        alias = "FinishTime",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub finish_time: Option<String>,
+    #[serde(
+        default,
+        rename = "result",
+        alias = "Result",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub result: Option<TaskResult>,
+    #[serde(
+        default,
+        rename = "jobId",
+        alias = "JobId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub job_id: Option<String>,
+    #[serde(
+        default,
+        rename = "jobName",
+        alias = "JobName",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub job_name: Option<String>,
+}
+
+impl TaskAgentJobRequest {
+    pub fn renew(request_id: i64) -> Self {
+        Self {
+            request_id,
+            locked_until: None,
+            finish_time: None,
+            result: None,
+            job_id: None,
+            job_name: None,
+        }
+    }
+
+    pub fn finish(request_id: i64, finish_time_utc: impl Into<String>, result: TaskResult) -> Self {
+        Self {
+            request_id,
+            locked_until: None,
+            finish_time: Some(finish_time_utc.into()),
+            result: Some(result),
+            job_id: None,
+            job_name: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum TaskResult {
+    #[serde(rename = "succeeded", alias = "Succeeded")]
     Succeeded,
+    #[serde(rename = "failed", alias = "Failed")]
     Failed,
+    #[serde(rename = "canceled", alias = "Canceled")]
     Canceled,
+    #[serde(rename = "skipped", alias = "Skipped")]
     Skipped,
+    #[serde(rename = "abandoned", alias = "Abandoned")]
     Abandoned,
 }
 
@@ -1110,6 +1252,60 @@ mod tests {
         assert_eq!(json["agent"]["name"], "velnor");
         assert_eq!(json["agent"]["version"], RUNNER_VERSION);
         assert_eq!(json["useFipsEncryption"], false);
+    }
+
+    #[test]
+    fn agent_request_url_matches_classic_runner_route() {
+        let base = distributed_task_base_url("https://pipelines.actions.githubusercontent.com/abc")
+            .unwrap();
+        let url = agent_request_url(&base, 7, 99).unwrap();
+
+        assert_eq!(
+            url.as_str(),
+            "https://pipelines.actions.githubusercontent.com/abc/_apis/distributedtask/pools/7/jobrequests/99?api-version=5.1-preview.1&lockToken=00000000-0000-0000-0000-000000000000"
+        );
+    }
+
+    #[test]
+    fn agent_request_bodies_match_runner_update_shape() {
+        let renew = serde_json::to_value(TaskAgentJobRequest::renew(99)).unwrap();
+        let finish = serde_json::to_value(TaskAgentJobRequest::finish(
+            99,
+            "2026-05-31T12:00:00Z",
+            TaskResult::Succeeded,
+        ))
+        .unwrap();
+
+        assert_eq!(renew, serde_json::json!({ "requestId": 99 }));
+        assert_eq!(
+            finish,
+            serde_json::json!({
+                "requestId": 99,
+                "finishTime": "2026-05-31T12:00:00Z",
+                "result": "succeeded"
+            })
+        );
+    }
+
+    #[test]
+    fn task_agent_job_request_accepts_pascal_response() {
+        let request: TaskAgentJobRequest = serde_json::from_str(
+            r#"{
+                "RequestId": 99,
+                "LockedUntil": "2026-05-31T12:05:00Z",
+                "Result": "Succeeded",
+                "JobName": "check"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(request.request_id, 99);
+        assert_eq!(
+            request.locked_until.as_deref(),
+            Some("2026-05-31T12:05:00Z")
+        );
+        assert!(matches!(request.result, Some(TaskResult::Succeeded)));
+        assert_eq!(request.job_name.as_deref(), Some("check"));
     }
 
     #[test]
