@@ -3,16 +3,19 @@ use anyhow::Result;
 use crate::{
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, RunnerSettings, StoredRunnerConfig},
+    protocol::{GitHubScope, TaskAgent},
 };
 
 pub async fn configure(args: ConfigureArgs) -> Result<()> {
     let dir = config::config_dir(args.config_dir)?;
+    let scope = GitHubScope::parse(&args.url)?;
     let agent_name = args.name.unwrap_or_else(default_agent_name);
     let labels = normalize_labels(args.labels);
+    let agent = TaskAgent::new(agent_name.clone(), labels.clone(), false);
 
     let stored = StoredRunnerConfig {
         settings: RunnerSettings {
-            github_url: args.url,
+            github_url: scope.original_url.clone(),
             server_url: None,
             server_url_v2: None,
             pool_id: None,
@@ -29,7 +32,18 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
 
     config::save(&dir, &stored)?;
     println!("Wrote local runner config to {}", dir.display());
-    println!("GitHub registration API calls are the next Milestone 0 step.");
+    println!("GitHub scope API: {}", scope.api_base_url);
+    println!(
+        "Tenant credential endpoint: {}",
+        scope.tenant_credential_url
+    );
+    println!("Runner token endpoint: {}", scope.registration_token_url);
+    println!(
+        "Prepared TaskAgent payload for '{}' with {} label(s).",
+        agent.name,
+        agent.labels.len()
+    );
+    println!("Remote GitHub registration call is the next Milestone 0 step.");
 
     if args.replace {
         println!("Recorded --replace intent; remote replacement is not implemented yet.");
