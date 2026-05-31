@@ -110,7 +110,7 @@ Deliverables:
   - broader GitHub runner env parity remains incomplete
 - secret masking
 - basic workflow command parsing: state-changing stdout commands are parsed; annotations/log grouping are not yet reported to GitHub UI
-- runner-side expression contexts: `env.*`, selected `github.*`/`runner.*`, `steps.*.outputs.*`, and generic job `ContextData` lookup such as `matrix.*`, `needs.*`, `inputs.*`, and `vars.*` are supported for script/action env and basic step conditions; `contains()`, `toJSON()`, and workspace-backed `hashFiles(...)` cover target-shaped cases
+- runner-side expression contexts: `env.*`, selected `github.*`/`runner.*`, `steps.*.outputs.*`, and generic job `ContextData` lookup such as `matrix.*`, `needs.*`, `inputs.*`, and `vars.*` are supported for script/action env and basic step conditions; `&&`/`||` value expressions, equality checks, unary `!`, `contains()`, `toJSON()`, and workspace-backed `hashFiles(...)` cover target-shaped cases
 - `continue-on-error`: script and JavaScript action steps can ignore a nonzero exit for job failure while preserving `steps.<id>.outcome == 'failure'`, covering target optional `sccache` setup
 - ordered job execution for script steps and JavaScript actions in original message order is wired, with JavaScript post hooks executed in reverse order; host-side checkout still runs before the Docker container starts
 

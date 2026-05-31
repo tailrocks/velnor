@@ -572,6 +572,58 @@ impl JobExecutionState {
     }
 
     fn resolve_expression_value(&self, expression: &str) -> Option<String> {
+        let expression = expression.trim();
+        if let Some(inner) = strip_wrapping_parentheses(expression) {
+            return self.resolve_expression_value(inner);
+        }
+        if let Some((left, right)) = split_top_level(expression, "||") {
+            let left = self.resolve_expression_value(left).unwrap_or_default();
+            if expression_truthy(&left) {
+                return Some(left);
+            }
+            return self.resolve_expression_value(right);
+        }
+        if let Some((left, right)) = split_top_level(expression, "&&") {
+            let left = self.resolve_expression_value(left).unwrap_or_default();
+            if expression_truthy(&left) {
+                return self.resolve_expression_value(right);
+            }
+            return Some("false".to_string());
+        }
+        if let Some(inner) = expression.strip_prefix('!') {
+            let value = self.resolve_expression_value(inner).unwrap_or_default();
+            return Some((!expression_truthy(&value)).to_string());
+        }
+        if let Some((left, right)) = split_top_level(expression, "!=") {
+            return Some(
+                (self.resolve_expression_value(left).unwrap_or_default()
+                    != self.resolve_expression_value(right).unwrap_or_default())
+                .to_string(),
+            );
+        }
+        if let Some((left, right)) = split_top_level(expression, "==") {
+            return Some(
+                (self.resolve_expression_value(left).unwrap_or_default()
+                    == self.resolve_expression_value(right).unwrap_or_default())
+                .to_string(),
+            );
+        }
+        if let Some((value, needle)) = parse_contains(expression) {
+            return Some(
+                self.resolve_expression_value(value)
+                    .is_some_and(|value| value.contains(unquote(needle.trim())))
+                    .to_string(),
+            );
+        }
+        if is_quoted(expression) {
+            return Some(unquote(expression).to_string());
+        }
+        if expression == "true" || expression == "false" {
+            return Some(expression.to_string());
+        }
+        if expression == "null" {
+            return Some(String::new());
+        }
         if let Some(output) = self.resolve_step_output_expression(expression) {
             return Some(output.to_string());
         }
@@ -880,6 +932,16 @@ fn strip_expression(condition: &str) -> &str {
         .and_then(|value| value.strip_suffix("}}"))
         .map(str::trim)
         .unwrap_or(condition)
+}
+
+fn expression_truthy(value: &str) -> bool {
+    let value = value.trim();
+    !(value.is_empty() || value == "false" || value == "0" || value == "null")
+}
+
+fn is_quoted(value: &str) -> bool {
+    (value.starts_with('\'') && value.ends_with('\''))
+        || (value.starts_with('"') && value.ends_with('"'))
 }
 
 fn unquote(value: &str) -> &str {
@@ -1262,6 +1324,30 @@ mod tests {
         assert_eq!(
             state.resolve_expressions("needs=${{ toJSON(needs.changes.outputs) }}"),
             r#"needs={"bake-targets":"bitcoin-processor-app","bitcoin-processor":"false"}"#
+        );
+        assert_eq!(
+            state.resolve_expressions(
+                "tool=${{ matrix.zigbuild && 'rust zig cargo:cargo-zigbuild' || 'rust' }}"
+            ),
+            "tool=rust zig cargo:cargo-zigbuild"
+        );
+        assert_eq!(
+            state.resolve_expressions(
+                "push=${{ (github.event_name == 'push' && needs.changes.outputs.bitcoin-processor == 'true') || (github.event_name == 'workflow_dispatch' && inputs.packages) }}"
+            ),
+            "push=bitcoin-processor-app"
+        );
+        assert_eq!(
+            state.resolve_expressions(
+                "fallback=${{ steps.dispatch.outputs.docs || needs.changes.outputs.bake-targets }}"
+            ),
+            "fallback=bitcoin-processor-app"
+        );
+        assert_eq!(
+            state.resolve_expressions(
+                "enabled=${{ !inputs.publish && github.event_name == 'workflow_dispatch' }}"
+            ),
+            "enabled=true"
         );
         assert!(state.evaluate_condition(Some("matrix.zigbuild")));
         assert!(state.evaluate_condition(Some("contains(matrix.target, 'apple')")));
