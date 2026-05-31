@@ -54,6 +54,8 @@ pub struct ActionRuns {
     pub pre: Option<String>,
     #[serde(default)]
     pub post: Option<String>,
+    #[serde(default, rename = "post-if", alias = "postIf")]
+    pub post_if: Option<String>,
     #[serde(default)]
     pub image: Option<String>,
     #[serde(default)]
@@ -349,6 +351,7 @@ pub struct JavaScriptActionInvocation {
     pub node: String,
     pub main_container_path: String,
     pub post_container_path: Option<String>,
+    pub post_condition: Option<String>,
     pub action_container_path: String,
     pub env: Vec<(String, String)>,
 }
@@ -410,6 +413,7 @@ impl ResolvedAction {
             node: node.clone(),
             main_container_path,
             post_container_path,
+            post_condition: self.metadata.runs.post_if.clone(),
             action_container_path,
             env,
         })
@@ -1030,6 +1034,7 @@ runs:
   using: node20
   main: dist/index.js
   post: dist/cleanup.js
+  post-if: success()
 "#,
         )
         .unwrap();
@@ -1045,6 +1050,7 @@ runs:
                 main: "dist/index.js".into()
             }
         );
+        assert_eq!(metadata.runs.post_if.as_deref(), Some("success()"));
     }
 
     #[test]
@@ -1497,7 +1503,7 @@ runs:
             continue_on_error: false,
         };
         let metadata = parse_action_metadata(
-            "runs:\n  using: node20\n  main: dist/index.js\n  post: dist/cleanup.js\n",
+            "runs:\n  using: node20\n  main: dist/index.js\n  post: dist/cleanup.js\n  post-if: success()\n",
         )
         .unwrap();
         let runtime = metadata.runtime().unwrap();
@@ -1519,6 +1525,7 @@ runs:
             invocation.post_container_path.as_deref(),
             Some("/__a/_actions/actions_setup-node/v4/dist/cleanup.js")
         );
+        assert_eq!(invocation.post_condition.as_deref(), Some("success()"));
         assert!(invocation
             .env
             .contains(&("INPUT_NODE_VERSION".into(), "22".into())));

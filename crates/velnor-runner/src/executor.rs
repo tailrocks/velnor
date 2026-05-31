@@ -116,6 +116,7 @@ pub enum ExecutableStep {
 struct PostJavaScriptAction {
     step_id: String,
     invocation: JavaScriptActionInvocation,
+    condition: Option<String>,
 }
 
 impl ExecutableStep {
@@ -380,6 +381,7 @@ where
                             post_actions.push(PostJavaScriptAction {
                                 step_id: step_id.clone(),
                                 invocation: invocation.clone(),
+                                condition: invocation.post_condition.clone(),
                             });
                         }
                     }
@@ -402,6 +404,9 @@ where
             }
         }
         for post_action in post_actions.into_iter().rev() {
+            if !state.evaluate_condition(post_action.condition.as_deref()) {
+                continue;
+            }
             let result = self.execute_javascript_action_in_started_container(
                 container,
                 &format!("{}-post", post_action.step_id),
@@ -2100,6 +2105,7 @@ mod tests {
                 node: "node20".into(),
                 main_container_path: "/__a/_actions/cache/dist/restore.js".into(),
                 post_container_path: None,
+                post_condition: None,
                 action_container_path: "/__a/_actions/cache".into(),
                 env: vec![(
                     "INPUT_KEY".into(),
@@ -2179,6 +2185,7 @@ mod tests {
                     node: "node20".into(),
                     main_container_path: "/__a/_actions/sccache/dist/index.js".into(),
                     post_container_path: None,
+                    post_condition: None,
                     action_container_path: "/__a/_actions/sccache".into(),
                     env: Vec::new(),
                 },
@@ -2292,6 +2299,7 @@ mod tests {
             node: "node20".into(),
             main_container_path: "/__a/_actions/acme_action/v1/dist/index.js".into(),
             post_container_path: None,
+            post_condition: None,
             action_container_path: "/__a/_actions/acme_action/v1".into(),
             env: vec![
                 (
@@ -2429,6 +2437,7 @@ mod tests {
                     node: "node20".into(),
                     main_container_path: "/__a/_actions/acme_action/v1/dist/index.js".into(),
                     post_container_path: None,
+                    post_condition: None,
                     action_container_path: "/__a/_actions/acme_action/v1".into(),
                     env: vec![
                         ("INPUT_NAME".into(), "value".into()),
@@ -2493,6 +2502,7 @@ mod tests {
                     node: "node20".into(),
                     main_container_path: "/__a/_actions/cache/dist/restore.js".into(),
                     post_container_path: Some("/__a/_actions/cache/dist/save.js".into()),
+                    post_condition: None,
                     action_container_path: "/__a/_actions/cache".into(),
                     env: vec![("INPUT_KEY".into(), "linux-cache".into())],
                 },
@@ -2505,6 +2515,7 @@ mod tests {
                     node: "node20".into(),
                     main_container_path: "/__a/_actions/docker_login/dist/main.js".into(),
                     post_container_path: Some("/__a/_actions/docker_login/dist/post.js".into()),
+                    post_condition: None,
                     action_container_path: "/__a/_actions/docker_login".into(),
                     env: Vec::new(),
                 },
@@ -2553,6 +2564,58 @@ mod tests {
             "/__a/_actions/cache/dist/save.js".into()
         ]));
         assert!(exec_calls[3].contains(&"STATE_primaryKey=linux-cache".into()));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn skips_javascript_post_action_when_post_if_is_false() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::JavaScript {
+                step_id: "cache".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    main_container_path: "/__a/_actions/cache/dist/restore.js".into(),
+                    post_container_path: Some("/__a/_actions/cache/dist/save.js".into()),
+                    post_condition: Some("success()".into()),
+                    action_container_path: "/__a/_actions/cache".into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::Script(ScriptStep {
+                id: "fail".into(),
+                script: "exit 1".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+            calls: Vec::new(),
+            codes: vec![0, 0, 0, 1, 0, 0],
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[1].exit_code, 1);
+        let node_calls = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:20-bookworm".into())
+            })
+            .count();
+        assert_eq!(node_calls, 1);
         fs::remove_dir_all(temp).unwrap();
     }
 }
