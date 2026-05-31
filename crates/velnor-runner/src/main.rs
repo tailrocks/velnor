@@ -8,6 +8,7 @@ mod executor;
 mod job_message;
 mod protocol;
 mod runner;
+mod runtime_env;
 mod script_step;
 
 use anyhow::Result;

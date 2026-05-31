@@ -15,6 +15,7 @@ use crate::{
         RegistrationClient, RunnerEvent, RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool,
         TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines,
     },
+    runtime_env::job_runtime_env,
     script_step::github_script_steps,
 };
 
@@ -436,7 +437,8 @@ fn execute_script_job(
         mount_docker_socket: true,
     };
     let mut executor = DockerScriptExecutor::new(command_runner);
-    let results = executor.execute_ordered_steps(&container, &ordered_steps, &temp)?;
+    let base_env = job_runtime_env(job);
+    let results = executor.execute_ordered_steps(&container, &ordered_steps, &base_env, &temp)?;
     let failed = results.iter().any(|result| result.exit_code != 0);
 
     Ok(if failed {

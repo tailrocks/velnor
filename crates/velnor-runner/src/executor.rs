@@ -99,7 +99,7 @@ where
             .map(ExecutableStep::Script)
             .collect::<Vec<_>>();
         let result =
-            self.execute_ordered_steps_in_started_container(container, &ordered, temp_host);
+            self.execute_ordered_steps_in_started_container(container, &ordered, &[], temp_host);
 
         let cleanup_result = self.cleanup(container);
         if let Err(error) = cleanup_result {
@@ -112,12 +112,14 @@ where
         &mut self,
         container: &JobContainerSpec,
         steps: &[ExecutableStep],
+        base_env: &[(String, String)],
         temp_host: &Path,
     ) -> Result<Vec<StepExecutionResult>> {
         self.run_docker(&container.create_network_args())?;
         self.run_docker(&container.start_args())?;
 
-        let result = self.execute_ordered_steps_in_started_container(container, steps, temp_host);
+        let result =
+            self.execute_ordered_steps_in_started_container(container, steps, base_env, temp_host);
 
         let cleanup_result = self.cleanup(container);
         if let Err(error) = cleanup_result {
@@ -130,10 +132,11 @@ where
         &mut self,
         container: &JobContainerSpec,
         steps: &[ExecutableStep],
+        base_env: &[(String, String)],
         temp_host: &Path,
     ) -> Result<Vec<StepExecutionResult>> {
         let mut results = Vec::new();
-        let mut state = JobExecutionState::default();
+        let mut state = JobExecutionState::new(base_env);
         let mut step_error = None;
         for step in steps {
             let result = (|| match step {
@@ -271,6 +274,13 @@ struct JobExecutionState {
 }
 
 impl JobExecutionState {
+    fn new(base_env: &[(String, String)]) -> Self {
+        Self {
+            env: base_env.iter().cloned().collect(),
+            path: Vec::new(),
+        }
+    }
+
     fn step_env(&self, command_file_env: &[(String, String)]) -> Vec<(String, String)> {
         let mut env: Vec<_> = self
             .env
@@ -549,7 +559,12 @@ mod tests {
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
         let results = executor
-            .execute_ordered_steps(&container(&temp), &steps, &temp)
+            .execute_ordered_steps(
+                &container(&temp),
+                &steps,
+                &[("GITHUB_REPOSITORY".into(), "acme/repo".into())],
+                &temp,
+            )
             .unwrap();
 
         assert_eq!(results.len(), 3);
@@ -563,6 +578,7 @@ mod tests {
         assert_eq!(calls[5].1[0], "rm");
         assert_eq!(calls[6].1[0], "network");
         assert!(calls[3].1.contains(&"INPUT_NAME=value".into()));
+        assert!(calls[3].1.contains(&"GITHUB_REPOSITORY=acme/repo".into()));
         assert!(calls[3]
             .1
             .contains(&"GITHUB_OUTPUT=/__t/action1_output".into()));
