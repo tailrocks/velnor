@@ -120,6 +120,12 @@ pub struct LocalActionPlan {
     pub inputs: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone)]
+pub enum CompositeActionInvocation {
+    Script(ScriptStep),
+    Repository(RepositoryActionPlan),
+}
+
 pub fn parse_action_metadata(contents: &str) -> Result<ActionMetadata> {
     serde_yaml::from_str(contents).context("parse action metadata")
 }
@@ -199,6 +205,21 @@ pub fn local_action_plans(
             action_dir: local_action_dir(workspace_host, path)?,
             inputs: string_inputs(step)?,
         });
+    }
+    Ok(plans)
+}
+
+pub fn composite_repository_action_plans(
+    local_actions: &[(LocalActionPlan, ActionMetadata)],
+    actions_host: &Path,
+) -> Result<Vec<RepositoryActionPlan>> {
+    let mut plans = Vec::new();
+    for (plan, metadata) in local_actions {
+        for invocation in composite_action_invocations(plan, metadata, "/__w", actions_host)? {
+            if let CompositeActionInvocation::Repository(repository_plan) = invocation {
+                plans.push(repository_plan);
+            }
+        }
     }
     Ok(plans)
 }
@@ -309,15 +330,63 @@ pub fn composite_script_steps(
     metadata: &ActionMetadata,
     workspace_container: &str,
 ) -> Result<Vec<ScriptStep>> {
+    Ok(
+        composite_action_invocations(plan, metadata, workspace_container, Path::new("/__a"))?
+            .into_iter()
+            .filter_map(|invocation| match invocation {
+                CompositeActionInvocation::Script(step) => Some(step),
+                CompositeActionInvocation::Repository(_) => None,
+            })
+            .collect(),
+    )
+}
+
+pub fn composite_action_invocations(
+    plan: &LocalActionPlan,
+    metadata: &ActionMetadata,
+    workspace_container: &str,
+    actions_host: &Path,
+) -> Result<Vec<CompositeActionInvocation>> {
     if metadata.runtime()? != ActionRuntime::Composite {
         bail!("local action '{}' is not a composite action", plan.step_id)
     }
 
     let action_path = workspace_container_path(workspace_container, &plan.action_dir)?;
-    let mut steps = Vec::new();
+    let mut invocations = Vec::new();
     for (index, step) in metadata.runs.steps.iter().enumerate() {
-        if step.uses.is_some() {
-            bail!("nested uses steps in composite actions are not implemented yet")
+        let step_id = format!("{}-{}", plan.step_id, index + 1);
+        if let Some(uses) = step.uses.as_deref() {
+            let reference = parse_repository_uses(uses)?;
+            let inputs = step
+                .with
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.clone(),
+                        render_composite_value(value, plan, &action_path, workspace_container),
+                    )
+                })
+                .collect();
+            let repository_dir =
+                repository_dir(actions_host, &reference.repository, &reference.git_ref);
+            let action_dir = action_dir(
+                actions_host,
+                &reference.repository,
+                &reference.git_ref,
+                reference.source_path.as_deref(),
+            )?;
+            invocations.push(CompositeActionInvocation::Repository(
+                RepositoryActionPlan {
+                    step_id,
+                    repository: reference.repository,
+                    git_ref: reference.git_ref,
+                    source_path: reference.source_path,
+                    repository_dir,
+                    action_dir,
+                    inputs,
+                },
+            ));
+            continue;
         }
         let Some(script) = step.run.as_deref() else {
             continue;
@@ -353,14 +422,48 @@ pub fn composite_script_steps(
             .as_deref()
             .map(|path| workspace_path(workspace_container, path))
             .unwrap_or_else(|| workspace_container.to_string());
-        steps.push(ScriptStep {
-            id: format!("{}-{}", plan.step_id, index + 1),
+        invocations.push(CompositeActionInvocation::Script(ScriptStep {
+            id: step_id,
             script: rendered,
             shell,
             working_directory_container,
-        });
+        }));
     }
-    Ok(steps)
+    Ok(invocations)
+}
+
+#[derive(Debug, Clone)]
+struct RepositoryUsesReference {
+    repository: String,
+    source_path: Option<String>,
+    git_ref: String,
+}
+
+fn parse_repository_uses(uses: &str) -> Result<RepositoryUsesReference> {
+    if uses.starts_with('.') {
+        bail!("nested local composite uses '{uses}' are not implemented yet")
+    }
+    if uses.starts_with("docker://") {
+        bail!("nested Docker composite uses '{uses}' are not implemented yet")
+    }
+    let Some((path, git_ref)) = uses.rsplit_once('@') else {
+        bail!("repository action '{uses}' missing ref")
+    };
+    let parts = path.split('/').collect::<Vec<_>>();
+    if parts.len() < 2 || parts[0].is_empty() || parts[1].is_empty() {
+        bail!("unsupported repository action reference '{uses}'")
+    }
+    let repository = format!("{}/{}", parts[0], parts[1]);
+    let source_path = if parts.len() > 2 {
+        Some(parts[2..].join("/"))
+    } else {
+        None
+    };
+    Ok(RepositoryUsesReference {
+        repository,
+        source_path,
+        git_ref: git_ref.to_string(),
+    })
 }
 
 fn action_metadata_path(action_dir: &Path) -> Result<PathBuf> {
@@ -701,25 +804,34 @@ runs:
     }
 
     #[test]
-    fn rejects_nested_composite_uses_for_now() {
+    fn builds_nested_composite_repository_action_plan() {
         let plan = LocalActionPlan {
             step_id: "docs".into(),
             action_dir: Path::new("/tmp/workspace").join(".github/actions/docs"),
-            inputs: BTreeMap::new(),
+            inputs: [("github-token".to_string(), "ghs_token".to_string())].into(),
         };
         let metadata = parse_action_metadata(
             r#"
 runs:
   using: composite
   steps:
-    - uses: jdx/mise-action@v4
+    - uses: jdx/mise-action/sub/action@v4
+      with:
+        github_token: ${{ inputs.github-token }}
 "#,
         )
         .unwrap();
 
-        let error = composite_script_steps(&plan, &metadata, "/__w").unwrap_err();
+        let plans =
+            composite_repository_action_plans(&[(plan, metadata)], Path::new("/tmp/actions"))
+                .unwrap();
 
-        assert!(error.to_string().contains("nested uses steps"));
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].step_id, "docs-1");
+        assert_eq!(plans[0].repository, "jdx/mise-action");
+        assert_eq!(plans[0].git_ref, "v4");
+        assert_eq!(plans[0].source_path.as_deref(), Some("sub/action"));
+        assert_eq!(plans[0].inputs["github_token"], "ghs_token");
     }
 
     #[test]

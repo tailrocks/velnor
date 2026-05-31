@@ -195,7 +195,7 @@ Implement action support in the order that unlocks target workflows fastest:
 5. Composite action handler:
    - local `.github/actions/*`: implemented for checked-out self repository actions
    - nested `run`: implemented for shell steps with basic input/action-path/workspace interpolation
-   - nested `uses`
+   - nested `uses`: implemented for repository JavaScript actions inside local composites
    - inputs/outputs
 6. Cache/artifact runtime endpoints:
    - `ACTIONS_RUNTIME_URL`

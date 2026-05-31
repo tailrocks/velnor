@@ -121,12 +121,12 @@ Deliverables:
 - local composite action discovery after checkout: implemented for `./.github/actions/...`
 - composite inputs: basic `${{ inputs.* }}` interpolation into `run` and `env` exists
 - nested `run` steps: local composite `run` steps are expanded into ordered script steps
-- nested `uses` steps
+- nested `uses` steps: implemented for repository JavaScript actions referenced from local composites
 - composite outputs
 - composite step conditions
 - post-step state if needed
 
-Current limit: `jackin`'s `aggregate-needs` shape is covered by the run-only subset. `check-deployed-docs` still needs nested `uses` inside composite actions.
+Current limit: `jackin`'s `aggregate-needs` shape is covered by the run-only subset. `check-deployed-docs` can now plan its nested `jdx/mise-action` repository action, but composite outputs, conditions, nested local actions, and nested Docker actions remain open.
 
 Exit criteria:
 

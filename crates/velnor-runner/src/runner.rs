@@ -4,8 +4,9 @@ use std::{fs, path::PathBuf};
 
 use crate::{
     action::{
-        composite_script_steps, download_repository_actions, is_local_action_step,
-        local_action_plans, repository_action_plans, resolve_local_action, ActionMetadata,
+        composite_action_invocations, composite_repository_action_plans,
+        download_repository_actions, is_local_action_step, local_action_plans,
+        repository_action_plans, resolve_local_action, ActionMetadata, CompositeActionInvocation,
         LocalActionPlan, ResolvedAction,
     },
     checkout::{checkout_plans, execute_checkouts},
@@ -421,7 +422,8 @@ fn execute_script_job(
         .iter()
         .map(|plan| Ok((plan.clone(), resolve_local_action(plan)?)))
         .collect::<Result<Vec<_>>>()?;
-    let repository_action_plans = repository_action_plans(&job.steps, &actions)?;
+    let mut repository_action_plans = repository_action_plans(&job.steps, &actions)?;
+    repository_action_plans.extend(composite_repository_action_plans(&local_actions, &actions)?);
     let resolved_actions = if repository_action_plans.is_empty() {
         Vec::new()
     } else {
@@ -486,11 +488,30 @@ fn ordered_executable_steps(
                     let (plan, metadata) = local_iter
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("local action mapping count mismatch"))?;
-                    ordered.extend(
-                        composite_script_steps(plan, metadata, "/__w")?
-                            .into_iter()
-                            .map(ExecutableStep::Script),
-                    );
+                    for invocation in
+                        composite_action_invocations(plan, metadata, "/__w", actions_host)?
+                    {
+                        match invocation {
+                            CompositeActionInvocation::Script(script) => {
+                                ordered.push(ExecutableStep::Script(script));
+                            }
+                            CompositeActionInvocation::Repository(plan) => {
+                                let action = resolved_actions
+                                    .iter()
+                                    .find(|action| action.plan.step_id == plan.step_id)
+                                    .ok_or_else(|| {
+                                        anyhow::anyhow!(
+                                            "nested repository action '{}' was not resolved",
+                                            plan.step_id
+                                        )
+                                    })?;
+                                ordered.push(ExecutableStep::JavaScript {
+                                    step_id: action.plan.step_id.clone(),
+                                    invocation: action.javascript_invocation(actions_host)?,
+                                });
+                            }
+                        }
+                    }
                     continue;
                 }
                 let Some(reference) = step.reference.as_ref() else {
@@ -741,7 +762,9 @@ fn default_agent_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::action::{parse_action_metadata, LocalActionPlan};
+    use crate::action::{
+        parse_action_metadata, ActionRuntime, LocalActionPlan, RepositoryActionPlan,
+    };
     use std::path::Path;
 
     #[test]
@@ -803,5 +826,84 @@ runs:
         };
         assert_eq!(step.id, "aggregate-1");
         assert!(step.script.contains("echo \"CI\""));
+    }
+
+    #[test]
+    fn ordered_steps_expand_nested_composite_repository_action() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Docs",
+            "requestId": 1,
+            "steps": [{
+                "id": "docs",
+                "reference": {
+                    "type": "Repository",
+                    "name": "./.github/actions/check-deployed-docs"
+                },
+                "inputs": { "github-token": "ghs_token" }
+            }]
+        }))
+        .unwrap();
+        let local_plan = LocalActionPlan {
+            step_id: "docs".into(),
+            action_dir: Path::new("/tmp/workspace").join(".github/actions/check-deployed-docs"),
+            inputs: [("github-token".to_string(), "ghs_token".to_string())].into(),
+        };
+        let local_metadata = parse_action_metadata(
+            r#"
+runs:
+  using: composite
+  steps:
+    - uses: jdx/mise-action@v4
+      with:
+        github_token: ${{ inputs.github-token }}
+"#,
+        )
+        .unwrap();
+        let nested_metadata =
+            parse_action_metadata("runs:\n  using: node20\n  main: dist/index.js\n").unwrap();
+        let nested_plan = RepositoryActionPlan {
+            step_id: "docs-1".into(),
+            repository: "jdx/mise-action".into(),
+            git_ref: "v4".into(),
+            source_path: None,
+            repository_dir: Path::new("/tmp/actions").join("_actions/jdx_mise-action/v4"),
+            action_dir: Path::new("/tmp/actions").join("_actions/jdx_mise-action/v4"),
+            inputs: [("github_token".to_string(), "ghs_token".to_string())].into(),
+        };
+        let resolved = ResolvedAction {
+            plan: nested_plan,
+            metadata_path: Path::new("/tmp/actions").join("_actions/jdx_mise-action/v4/action.yml"),
+            metadata: nested_metadata,
+            runtime: ActionRuntime::JavaScript {
+                node: "node20".into(),
+                main: "dist/index.js".into(),
+            },
+        };
+
+        let ordered = ordered_executable_steps(
+            &job,
+            &[],
+            &[resolved],
+            &[(local_plan, local_metadata)],
+            Path::new("/tmp/actions"),
+        )
+        .unwrap();
+
+        assert_eq!(ordered.len(), 1);
+        let ExecutableStep::JavaScript {
+            step_id,
+            invocation,
+        } = &ordered[0]
+        else {
+            panic!("nested repository action should expand to JavaScript step")
+        };
+        assert_eq!(step_id, "docs-1");
+        assert!(invocation
+            .env
+            .contains(&("INPUT_GITHUB_TOKEN".into(), "ghs_token".into())));
     }
 }
