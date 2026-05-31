@@ -106,10 +106,7 @@ Deliverables:
   - basic `GITHUB_*` variables are extracted from the job message and injected into script and JavaScript steps
   - target `GITHUB_WORKFLOW` and `GITHUB_REF_NAME` are injected; `GITHUB_REF_NAME` is derived from `GITHUB_REF` when GitHub does not send it directly
   - basic `RUNNER_*` variables are injected for the Docker runner environment
-  - `ACTIONS_RUNTIME_URL`
-  - `ACTIONS_RUNTIME_TOKEN`
-  - `ACTIONS_CACHE_URL`
-  - `ACTIONS_RESULTS_URL`
+  - action runtime values from `SystemVssConnection` are injected: `ACTIONS_RUNTIME_URL`, `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_CACHE_URL`, `ACTIONS_RESULTS_URL`, OIDC request URL/token, cache service v2, and orchestration id when GitHub sends them
   - broader GitHub runner env parity remains incomplete
 - secret masking
 - basic workflow command parsing: state-changing stdout commands are parsed; annotations/log grouping are not yet reported to GitHub UI

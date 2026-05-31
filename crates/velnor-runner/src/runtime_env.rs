@@ -49,7 +49,7 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
 
     if let Some(endpoint) = job.system_connection() {
         if let Some(url) = endpoint.url.as_deref() {
-            env.push(("ACTIONS_RUNTIME_URL".to_string(), url.to_string()));
+            set_env(&mut env, "ACTIONS_RUNTIME_URL", url);
         }
         if let Some(token) = endpoint.authorization.as_ref().and_then(|authorization| {
             authorization
@@ -57,14 +57,45 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
                 .get("AccessToken")
                 .or_else(|| authorization.parameters.get("accessToken"))
         }) {
-            env.push(("ACTIONS_RUNTIME_TOKEN".to_string(), token.clone()));
+            set_env(&mut env, "ACTIONS_RUNTIME_TOKEN", token);
         }
         push_endpoint_data(&mut env, endpoint, "CacheServerUrl", "ACTIONS_CACHE_URL");
         push_endpoint_data(
             &mut env,
             endpoint,
+            "PipelinesServiceUrl",
+            "ACTIONS_RUNTIME_URL",
+        );
+        if push_endpoint_data(
+            &mut env,
+            endpoint,
+            "GenerateIdTokenUrl",
+            "ACTIONS_ID_TOKEN_REQUEST_URL",
+        ) {
+            if let Some(token) = endpoint.authorization.as_ref().and_then(|authorization| {
+                authorization
+                    .parameters
+                    .get("AccessToken")
+                    .or_else(|| authorization.parameters.get("accessToken"))
+            }) {
+                set_env(&mut env, "ACTIONS_ID_TOKEN_REQUEST_TOKEN", token);
+            }
+        }
+        push_endpoint_data(
+            &mut env,
+            endpoint,
             "ResultsServiceUrl",
             "ACTIONS_RESULTS_URL",
+        );
+    }
+    if job.variable_bool("actions_uses_cache_service_v2") == Some(true) {
+        env.push(("ACTIONS_CACHE_SERVICE_V2".to_string(), "true".to_string()));
+    }
+    if job.variable_bool("actions_set_orchestration_id_env_for_actions") == Some(true) {
+        push_var(
+            &mut env,
+            "ACTIONS_ORCHESTRATION_ID",
+            job.variable("system.orchestrationId"),
         );
     }
 
@@ -157,6 +188,17 @@ fn push_var(env: &mut Vec<(String, String)>, name: &str, value: Option<&str>) {
     }
 }
 
+fn set_env(env: &mut Vec<(String, String)>, name: &str, value: &str) {
+    if let Some((_, current)) = env
+        .iter_mut()
+        .find(|(current_name, _)| current_name == name)
+    {
+        *current = value.to_string();
+    } else {
+        env.push((name.to_string(), value.to_string()));
+    }
+}
+
 fn push_var_or_derived(
     env: &mut Vec<(String, String)>,
     name: &str,
@@ -184,18 +226,22 @@ fn push_endpoint_data(
     endpoint: &crate::job_message::ServiceEndpoint,
     key: &str,
     env_name: &str,
-) {
+) -> bool {
     if let Some(value) = endpoint
         .data
         .get(key)
         .or_else(|| endpoint.data.get(env_name))
+        .filter(|value| !value.is_empty())
     {
-        env.push((env_name.to_string(), value.clone()));
+        set_env(env, env_name, value);
+        return true;
     }
+    false
 }
 
 trait JobRuntimeExt {
     fn variable(&self, name: &str) -> Option<&str>;
+    fn variable_bool(&self, name: &str) -> Option<bool>;
     fn job_name(&self) -> String;
 }
 
@@ -204,6 +250,14 @@ impl JobRuntimeExt for AgentJobRequestMessage {
         self.variables
             .get(name)
             .and_then(|value| value.value.as_deref())
+    }
+
+    fn variable_bool(&self, name: &str) -> Option<bool> {
+        self.variable(name).and_then(|value| match value {
+            "true" | "True" | "TRUE" => Some(true),
+            "false" | "False" | "FALSE" => Some(false),
+            _ => None,
+        })
     }
 
     fn job_name(&self) -> String {
@@ -232,7 +286,10 @@ mod tests {
                 "github.ref": { "value": "refs/heads/main" },
                 "github.sha": { "value": "abc123" },
                 "github.workflow": { "value": "CI" },
-                "system.github.token": { "value": "ghs_token", "isSecret": true }
+                "system.github.token": { "value": "ghs_token", "isSecret": true },
+                "actions_uses_cache_service_v2": { "value": "true" },
+                "actions_set_orchestration_id_env_for_actions": { "value": "true" },
+                "system.orchestrationId": { "value": "orch-123" }
             },
             "environmentVariables": [
                 {
@@ -256,6 +313,8 @@ mod tests {
                     },
                     "data": {
                         "CacheServerUrl": "https://cache.actions.example",
+                        "PipelinesServiceUrl": "https://pipelines-v2.actions.example",
+                        "GenerateIdTokenUrl": "https://oidc.actions.example/id-token",
                         "ResultsServiceUrl": "https://results.actions.example"
                     }
                 }]
@@ -277,8 +336,26 @@ mod tests {
         assert!(!env.contains(&("GITHUB_REF".into(), "refs/heads/evil".into())));
         assert!(env.contains(&("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into())));
         assert!(env.contains(&(
+            "ACTIONS_RUNTIME_URL".into(),
+            "https://pipelines-v2.actions.example".into()
+        )));
+        assert!(env.contains(&(
             "ACTIONS_CACHE_URL".into(),
             "https://cache.actions.example".into()
         )));
+        assert!(env.contains(&(
+            "ACTIONS_RESULTS_URL".into(),
+            "https://results.actions.example".into()
+        )));
+        assert!(env.contains(&(
+            "ACTIONS_ID_TOKEN_REQUEST_URL".into(),
+            "https://oidc.actions.example/id-token".into()
+        )));
+        assert!(env.contains(&(
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN".into(),
+            "runtime-token".into()
+        )));
+        assert!(env.contains(&("ACTIONS_CACHE_SERVICE_V2".into(), "true".into())));
+        assert!(env.contains(&("ACTIONS_ORCHESTRATION_ID".into(), "orch-123".into())));
     }
 }
