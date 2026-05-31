@@ -243,10 +243,10 @@ GitHub already evaluates:
 
 Velnor still needs runtime step expression behavior from the job message:
 
-- step `if`: implemented for output comparisons, step outcome checks, selected GitHub/runner context values, generic job `ContextData` (`matrix.*`, `needs.*`, `inputs.*`, `vars.*`), grouped simple `&&`/`||`, target-shaped `contains()`, and status functions `always()`, `success()`, `failure()`, and non-cancelled `cancelled()`
+- step `if`: implemented for output comparisons, step outcome checks, selected GitHub/runner context values, generic job `ContextData` (`matrix.*`, `needs.*`, `inputs.*`, `vars.*`), synthesized `secrets.*` from GitHub secret variables, grouped simple `&&`/`||`, target-shaped `contains()`, and status functions `always()`, `success()`, `failure()`, and non-cancelled `cancelled()`
 - `steps.<id>.outputs.*`: implemented for direct interpolation in later scripts and JavaScript action env
 - job outputs: `JobOutputs` from the GitHub job message are evaluated after step execution from final step outputs and sent through the classic `JobCompleted` plan event; run-service completion payload parity remains open
-- env/context expansion in scripts and JavaScript action env: basic `steps.*.outputs.*`, `github.*` including `github.workflow`, `github.ref_name`, and nested `github.event.*`, `runner.*`, `env.*`, generic job `ContextData`, target-shaped `&&`/`||` value expressions, equality checks, unary `!`, `contains(...)`, `toJSON(...)`, and workspace-backed `hashFiles(...)` interpolation is implemented
+- env/context expansion in scripts and JavaScript action env: basic `steps.*.outputs.*`, `github.*` including `github.workflow`, `github.ref_name`, and nested `github.event.*`, `runner.*`, `env.*`, `secrets.*`, generic job `ContextData`, target-shaped `&&`/`||` value expressions, equality checks, unary `!`, `contains(...)`, `toJSON(...)`, and workspace-backed `hashFiles(...)` interpolation is implemented
 - `continue-on-error`: implemented for script and JavaScript action steps; failed steps keep failure outcome for later `steps.<id>.outcome` checks, but do not fail the job
 
 Implement only the expression subset that appears in the job message for target workflows.

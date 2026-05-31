@@ -1517,6 +1517,10 @@ mod tests {
                     serde_json::json!({ "packages": "bitcoin-processor-app" }),
                 ),
                 (
+                    "secrets".into(),
+                    serde_json::json!({ "DOCKERHUB_TOKEN": "docker_secret" }),
+                ),
+                (
                     "github".into(),
                     serde_json::json!({
                         "event": {
@@ -1570,6 +1574,10 @@ mod tests {
         assert_eq!(
             state.resolve_expressions("head=${{ github.event.workflow_run.head_sha }}"),
             "head=def456"
+        );
+        assert_eq!(
+            state.resolve_expressions("token=${{ secrets.DOCKERHUB_TOKEN }}"),
+            "token=docker_secret"
         );
         assert!(state.evaluate_condition(Some("matrix.zigbuild")));
         assert!(state.evaluate_condition(Some("contains(matrix.target, 'apple')")));

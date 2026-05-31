@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use std::{collections::BTreeMap, fs, path::PathBuf};
 
 use crate::{
@@ -425,11 +425,7 @@ fn execute_script_job(
     let mut command_runner = ProcessCommandRunner;
     let checkout_plans = checkout_plans(job, &workspace)?;
     execute_checkouts(&mut command_runner, &checkout_plans)?;
-    let context_data = job
-        .context_data
-        .iter()
-        .map(|(name, value)| (name.clone(), value.clone()))
-        .collect::<Vec<_>>();
+    let context_data = job_context_data(job);
     let local_action_plans =
         local_action_plans_with_context(&job.steps, &workspace, &context_data)?;
     let local_actions = local_action_plans
@@ -503,6 +499,58 @@ fn execute_script_job(
 struct ScriptJobResult {
     result: TaskResult,
     outputs: BTreeMap<String, String>,
+}
+
+fn job_context_data(job: &AgentJobRequestMessage) -> Vec<(String, Value)> {
+    let mut context_data = job.context_data.clone();
+    let mut synthesized_secrets = Map::new();
+    for (name, variable) in &job.variables {
+        if !variable.is_secret {
+            continue;
+        }
+        let Some(value) = variable.value.as_ref() else {
+            continue;
+        };
+        for secret_name in secret_context_names(name) {
+            synthesized_secrets
+                .entry(secret_name)
+                .or_insert_with(|| Value::String(value.clone()));
+        }
+    }
+
+    if !synthesized_secrets.is_empty() {
+        match context_data.get_mut("secrets") {
+            Some(Value::Object(secrets)) => {
+                for (name, value) in synthesized_secrets {
+                    secrets.entry(name).or_insert(value);
+                }
+            }
+            Some(_) => {}
+            None => {
+                context_data.insert("secrets".to_string(), Value::Object(synthesized_secrets));
+            }
+        }
+    }
+
+    context_data.into_iter().collect()
+}
+
+fn secret_context_names(variable_name: &str) -> Vec<String> {
+    if variable_name.eq_ignore_ascii_case("system.github.token") {
+        return vec!["GITHUB_TOKEN".to_string()];
+    }
+    for prefix in ["secrets.", "secret."] {
+        if let Some(name) = variable_name.strip_prefix(prefix) {
+            if !name.is_empty() {
+                return vec![name.to_string()];
+            }
+        }
+    }
+    if variable_name.contains('.') {
+        Vec::new()
+    } else {
+        vec![variable_name.to_string()]
+    }
 }
 
 fn download_repository_actions_recursive<R>(
@@ -958,6 +1006,42 @@ mod tests {
         parse_action_metadata, ActionRuntime, LocalActionPlan, RepositoryActionPlan,
     };
     use std::path::Path;
+
+    #[test]
+    fn job_context_data_synthesizes_secrets_from_secret_variables() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Secrets",
+            "requestId": 1,
+            "variables": {
+                "system.github.token": { "value": "ghs_token", "isSecret": true },
+                "secrets.DOCKERHUB_TOKEN": { "value": "docker_secret", "isSecret": true },
+                "DOCKERHUB_USERNAME": { "value": "docker_user", "isSecret": true },
+                "PUBLIC_VALUE": { "value": "visible", "isSecret": false }
+            },
+            "contextData": {
+                "secrets": {
+                    "DOCKERHUB_TOKEN": "server_secret"
+                },
+                "matrix": {
+                    "target": "linux"
+                }
+            }
+        }))
+        .unwrap();
+
+        let context_data: BTreeMap<_, _> = job_context_data(&job).into_iter().collect();
+        let secrets = context_data["secrets"].as_object().unwrap();
+
+        assert_eq!(secrets["GITHUB_TOKEN"], "ghs_token");
+        assert_eq!(secrets["DOCKERHUB_TOKEN"], "server_secret");
+        assert_eq!(secrets["DOCKERHUB_USERNAME"], "docker_user");
+        assert!(!secrets.contains_key("PUBLIC_VALUE"));
+        assert_eq!(context_data["matrix"]["target"], "linux");
+    }
 
     #[test]
     fn ordered_steps_expand_local_composite_action() {
