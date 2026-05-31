@@ -32,8 +32,8 @@ Deliverables:
 
 - deserialize enough `AgentJobRequestMessage`
 - renew job request lock: client method implemented for classic `jobrequests` route
-- report timeline/log output for a no-op job: timeline/feed client shapes are implemented; live reporter wiring is still pending
-- finish job request with success/failure: client method implemented for classic `jobrequests` route
+- report timeline/log output for a no-op job: opt-in `run --complete-noop` probe is implemented for classic timeline/feed routes
+- finish job request with success/failure: opt-in `run --complete-noop` probe finishes success
 - handle cancellation message
 
 Exit criteria:

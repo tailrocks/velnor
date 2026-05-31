@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::json;
 
 use crate::{
@@ -8,7 +8,7 @@ use crate::{
     protocol::{
         DistributedTaskClient, GitHubAuthResult, GitHubScope, OAuthClient, OAuthJwtCredentials,
         RegistrationClient, RunnerEvent, RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool,
-        TaskAgentSession,
+        TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines,
     },
 };
 
@@ -316,8 +316,23 @@ pub async fn run(args: RunArgs) -> Result<()> {
                     system_connection.url.as_deref().unwrap_or("unknown")
                 );
             }
+            if args.complete_noop {
+                complete_noop_job(
+                    &client,
+                    pool_id,
+                    session_id,
+                    message.message_id,
+                    &stored.settings.agent_name,
+                    &job,
+                )
+                .await?;
+                println!("No-op job completed and message acknowledged.");
+            } else {
+                println!("Job is not acknowledged yet; pass --complete-noop to probe completion.");
+            }
+        } else {
+            println!("Message is not acknowledged because type is not implemented.");
         }
-        println!("Message is not acknowledged yet because job execution is not implemented.");
     } else {
         println!("No message received.");
     }
@@ -330,6 +345,83 @@ pub async fn run(args: RunArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn complete_noop_job(
+    client: &DistributedTaskClient,
+    pool_id: i64,
+    session_id: &str,
+    message_id: i64,
+    worker_name: &str,
+    job: &AgentJobRequestMessage,
+) -> Result<()> {
+    let scope_identifier = job
+        .plan
+        .scope_identifier
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("job plan missing scopeIdentifier"))?;
+    let hub_name = job.plan.plan_type.as_deref().unwrap_or("build");
+    let start_time = utc_now_rfc3339()?;
+    let record = TimelineRecord::job_pending(
+        job.job_id.clone(),
+        job.job_display_name.clone(),
+        job.job_name.clone(),
+        worker_name,
+    )
+    .in_progress(start_time);
+
+    client
+        .renew_agent_request(pool_id, job.request_id, Some(&job.plan.plan_id))
+        .await?;
+    client
+        .update_timeline_records(
+            scope_identifier,
+            hub_name,
+            &job.plan.plan_id,
+            &job.timeline.id,
+            vec![record.clone()],
+        )
+        .await?;
+    client
+        .append_timeline_record_feed(
+            scope_identifier,
+            hub_name,
+            &job.plan.plan_id,
+            &job.timeline.id,
+            &job.job_id,
+            TimelineRecordFeedLines::new(
+                job.job_id.clone(),
+                vec!["Velnor no-op completion probe: user steps were not executed.".to_string()],
+                Some(1),
+            ),
+        )
+        .await?;
+
+    let finish_time = utc_now_rfc3339()?;
+    client
+        .update_timeline_records(
+            scope_identifier,
+            hub_name,
+            &job.plan.plan_id,
+            &job.timeline.id,
+            vec![record.completed(finish_time.clone(), TaskResult::Succeeded)],
+        )
+        .await?;
+    client
+        .finish_agent_request(pool_id, job.request_id, finish_time, TaskResult::Succeeded)
+        .await?;
+    client
+        .delete_message(pool_id, message_id, session_id)
+        .await
+        .context("acknowledge completed job message")?;
+
+    Ok(())
+}
+
+fn utc_now_rfc3339() -> Result<String> {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .context("format UTC timestamp")
 }
 
 async fn oauth_access_token(stored: &StoredRunnerConfig) -> Result<String> {

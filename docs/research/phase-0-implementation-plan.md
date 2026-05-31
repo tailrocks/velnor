@@ -301,8 +301,8 @@ Pkl workflow -> Velnor compiler    -> Velnor normalized plan -> Docker executor
 
 The next useful implementation steps are:
 
-1. Add a minimal reporter that can mark a no-op job success/failure in GitHub UI.
-2. Start renew-job loop before job execution and call finish-job after reporting is ready.
+1. Live-test `velnor-runner run --once --complete-noop` against a disposable workflow and adjust reporter route details if GitHub rejects them.
+2. Start renew-job loop before real job execution.
 3. Connect script-step Docker executor to real script steps from the job message.
 4. Add a native `actions/checkout` equivalent or implement JavaScript action execution.
 
@@ -310,6 +310,6 @@ This gets Velnor from "polls one message" to "can complete a simple real GitHub 
 
 Current code can parse enough `AgentJobRequestMessage` to identify job id/name, plan, request id, timeline id, variables, endpoints, repositories, containers, and action steps.
 
-Current code also has classic `jobrequests` client methods for lock renewal and finish-job requests. They are not called automatically yet because the GitHub UI also needs timeline/log/step reporting.
+Current code has classic `jobrequests` client methods for lock renewal and finish-job requests. The normal run path does not acknowledge jobs yet, but `velnor-runner run --once --complete-noop` can opt into the completion probe.
 
-Current code models the classic timeline record/feed routes used by the upstream `JobServerQueue`; the no-op job completion path still needs live reporter wiring before Velnor should acknowledge or finish a real job.
+Current code models the classic timeline record/feed routes used by the upstream `JobServerQueue`; the no-op completion path still needs a live disposable GitHub test before it should be treated as proven.

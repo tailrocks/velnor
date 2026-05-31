@@ -74,6 +74,10 @@ pub struct RunArgs {
     /// Exit after one job.
     #[arg(long)]
     pub once: bool,
+
+    /// Mark a received job as succeeded without executing user steps.
+    #[arg(long)]
+    pub complete_noop: bool,
 }
 
 #[derive(Debug, Args)]
