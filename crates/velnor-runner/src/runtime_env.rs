@@ -21,8 +21,15 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         job.variable("github.repository"),
     );
     push_var(&mut env, "GITHUB_REF", job.variable("github.ref"));
+    push_var_or_derived(
+        &mut env,
+        "GITHUB_REF_NAME",
+        job.variable("github.ref_name"),
+        job.variable("github.ref").map(ref_name),
+    );
     push_var(&mut env, "GITHUB_SHA", job.variable("github.sha"));
     push_var(&mut env, "GITHUB_ACTOR", job.variable("github.actor"));
+    push_var(&mut env, "GITHUB_WORKFLOW", job.variable("github.workflow"));
     push_var(
         &mut env,
         "GITHUB_EVENT_NAME",
@@ -150,6 +157,28 @@ fn push_var(env: &mut Vec<(String, String)>, name: &str, value: Option<&str>) {
     }
 }
 
+fn push_var_or_derived(
+    env: &mut Vec<(String, String)>,
+    name: &str,
+    value: Option<&str>,
+    derived: Option<String>,
+) {
+    if let Some(value) = value {
+        env.push((name.to_string(), value.to_string()));
+    } else if let Some(value) = derived {
+        env.push((name.to_string(), value));
+    }
+}
+
+fn ref_name(git_ref: &str) -> String {
+    git_ref
+        .strip_prefix("refs/heads/")
+        .or_else(|| git_ref.strip_prefix("refs/tags/"))
+        .or_else(|| git_ref.strip_prefix("refs/pull/"))
+        .unwrap_or(git_ref)
+        .to_string()
+}
+
 fn push_endpoint_data(
     env: &mut Vec<(String, String)>,
     endpoint: &crate::job_message::ServiceEndpoint,
@@ -202,6 +231,7 @@ mod tests {
                 "github.repository": { "value": "acme/repo" },
                 "github.ref": { "value": "refs/heads/main" },
                 "github.sha": { "value": "abc123" },
+                "github.workflow": { "value": "CI" },
                 "system.github.token": { "value": "ghs_token", "isSecret": true }
             },
             "environmentVariables": [
@@ -237,6 +267,8 @@ mod tests {
 
         assert!(env.contains(&("GITHUB_JOB".into(), "check".into())));
         assert!(env.contains(&("GITHUB_REPOSITORY".into(), "acme/repo".into())));
+        assert!(env.contains(&("GITHUB_REF_NAME".into(), "main".into())));
+        assert!(env.contains(&("GITHUB_WORKFLOW".into(), "CI".into())));
         assert!(env.contains(&("GITHUB_TOKEN".into(), "ghs_token".into())));
         assert!(env.contains(&("CARGO_TERM_COLOR".into(), "always".into())));
         assert!(env.contains(&("CARGO_INCREMENTAL".into(), "1".into())));

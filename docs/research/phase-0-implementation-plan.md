@@ -247,7 +247,7 @@ Velnor still needs runtime step expression behavior from the job message:
 - `always()`
 - `success()`, `failure()`, `cancelled()`
 - `steps.<id>.outputs.*`: implemented for direct interpolation in later scripts and JavaScript action env
-- env/context expansion in scripts and JavaScript action env: basic `steps.*.outputs.*`, `github.*`, `runner.*`, `env.*`, generic job `ContextData`, target-shaped `&&`/`||` value expressions, equality checks, unary `!`, `contains(...)`, `toJSON(...)`, and workspace-backed `hashFiles(...)` interpolation is implemented
+- env/context expansion in scripts and JavaScript action env: basic `steps.*.outputs.*`, `github.*` including `github.workflow`, `github.ref_name`, and nested `github.event.*`, `runner.*`, `env.*`, generic job `ContextData`, target-shaped `&&`/`||` value expressions, equality checks, unary `!`, `contains(...)`, `toJSON(...)`, and workspace-backed `hashFiles(...)` interpolation is implemented
 - `continue-on-error`: implemented for script and JavaScript action steps; failed steps keep failure outcome for later `steps.<id>.outcome` checks, but do not fail the job
 
 Implement only the expression subset that appears in the job message for target workflows.

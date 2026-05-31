@@ -655,6 +655,8 @@ impl JobExecutionState {
             "github.run_number" => "GITHUB_RUN_NUMBER",
             "github.sha" => "GITHUB_SHA",
             "github.token" => "GITHUB_TOKEN",
+            "github.workflow" => "GITHUB_WORKFLOW",
+            "github.ref_name" => "GITHUB_REF_NAME",
             "github.workspace" => "GITHUB_WORKSPACE",
             "runner.arch" => "RUNNER_ARCH",
             "runner.os" => "RUNNER_OS",
@@ -1314,6 +1316,18 @@ mod tests {
                     "inputs".into(),
                     serde_json::json!({ "packages": "bitcoin-processor-app" }),
                 ),
+                (
+                    "github".into(),
+                    serde_json::json!({
+                        "event": {
+                            "pull_request": { "number": 42 },
+                            "workflow_run": {
+                                "head_sha": "def456",
+                                "head_branch": "main"
+                            }
+                        }
+                    }),
+                ),
             ],
         );
 
@@ -1348,6 +1362,14 @@ mod tests {
                 "enabled=${{ !inputs.publish && github.event_name == 'workflow_dispatch' }}"
             ),
             "enabled=true"
+        );
+        assert_eq!(
+            state.resolve_expressions("pr=${{ github.event.pull_request.number }}"),
+            "pr=42"
+        );
+        assert_eq!(
+            state.resolve_expressions("head=${{ github.event.workflow_run.head_sha }}"),
+            "head=def456"
         );
         assert!(state.evaluate_condition(Some("matrix.zigbuild")));
         assert!(state.evaluate_condition(Some("contains(matrix.target, 'apple')")));
