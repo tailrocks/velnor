@@ -3,8 +3,9 @@
 use crate::{
     command_files::{parse_command_file, FileCommand},
     container::Shell,
+    job_message::{ActionReferenceType, ActionStep},
 };
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::{
     collections::BTreeMap,
     fs,
@@ -17,6 +18,105 @@ pub struct ScriptStep {
     pub script: String,
     pub shell: Shell,
     pub working_directory_container: String,
+}
+
+pub fn github_script_steps(
+    steps: &[ActionStep],
+    workspace_container: &str,
+) -> Result<Vec<ScriptStep>> {
+    let mut script_steps = Vec::new();
+    for (index, step) in steps.iter().enumerate() {
+        if !step.enabled {
+            continue;
+        }
+        if step.reference_type() != Some(ActionReferenceType::Script) {
+            continue;
+        }
+
+        script_steps.push(github_script_step(step, index, workspace_container)?);
+    }
+    Ok(script_steps)
+}
+
+fn github_script_step(
+    step: &ActionStep,
+    index: usize,
+    workspace_container: &str,
+) -> Result<ScriptStep> {
+    let inputs = step
+        .inputs
+        .as_ref()
+        .and_then(|value| value.as_object())
+        .ok_or_else(|| anyhow::anyhow!("script step {} missing inputs object", index + 1))?;
+    let script = inputs
+        .get("script")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow::anyhow!("script step {} missing script input", index + 1))?;
+    let shell = inputs
+        .get("shell")
+        .and_then(|value| value.as_str())
+        .map(github_shell)
+        .transpose()?
+        .unwrap_or(Shell::Bash);
+    let working_directory = inputs
+        .get("workingDirectory")
+        .or_else(|| inputs.get("working-directory"))
+        .and_then(|value| value.as_str())
+        .map(|path| workspace_path(workspace_container, path))
+        .unwrap_or_else(|| workspace_container.to_string());
+
+    Ok(ScriptStep {
+        id: step_id(step, index),
+        script: script.to_string(),
+        shell,
+        working_directory_container: working_directory,
+    })
+}
+
+fn github_shell(shell: &str) -> Result<Shell> {
+    let shell = shell.split_whitespace().next().unwrap_or(shell);
+    if shell.eq_ignore_ascii_case("bash") {
+        Ok(Shell::Bash)
+    } else if shell.eq_ignore_ascii_case("sh") {
+        Ok(Shell::Sh)
+    } else {
+        bail!("unsupported run step shell '{shell}'")
+    }
+}
+
+fn workspace_path(workspace_container: &str, path: &str) -> String {
+    if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!(
+            "{}/{}",
+            workspace_container.trim_end_matches('/'),
+            path.trim_start_matches("./")
+        )
+    }
+}
+
+fn step_id(step: &ActionStep, index: usize) -> String {
+    step.id
+        .as_deref()
+        .or(step.context_name.as_deref())
+        .or(step.name.as_deref())
+        .map(sanitize_step_id)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("step{}", index + 1))
+}
+
+fn sanitize_step_id(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -218,5 +318,56 @@ mod tests {
         assert_eq!(state.state["cleanup"], "yes");
         assert_eq!(state.summary, "summary text");
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn maps_github_script_steps_to_internal_steps() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "run-1",
+                "displayName": "Run tests",
+                "enabled": true,
+                "reference": { "type": "Script" },
+                "inputs": {
+                    "script": "cargo test",
+                    "shell": "bash",
+                    "workingDirectory": "./crates"
+                }
+            },
+            {
+                "id": "checkout",
+                "reference": { "type": "Repository", "name": "actions/checkout" }
+            },
+            {
+                "id": "disabled",
+                "enabled": false,
+                "reference": { "type": "Script" },
+                "inputs": { "script": "echo skip" }
+            }
+        ]))
+        .unwrap();
+
+        let mapped = github_script_steps(&steps, "/__w/repo").unwrap();
+
+        assert_eq!(mapped.len(), 1);
+        assert_eq!(mapped[0].id, "run-1");
+        assert_eq!(mapped[0].script, "cargo test");
+        assert!(matches!(mapped[0].shell, Shell::Bash));
+        assert_eq!(mapped[0].working_directory_container, "/__w/repo/crates");
+    }
+
+    #[test]
+    fn rejects_unsupported_github_shell() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "reference": { "type": "Script" },
+                "inputs": { "script": "echo hi", "shell": "pwsh" }
+            }
+        ]))
+        .unwrap();
+
+        let error = github_script_steps(&steps, "/__w/repo").unwrap_err();
+
+        assert!(error.to_string().contains("unsupported run step shell"));
     }
 }

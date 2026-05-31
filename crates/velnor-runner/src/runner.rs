@@ -10,6 +10,7 @@ use crate::{
         RegistrationClient, RunnerEvent, RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool,
         TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines,
     },
+    script_step::github_script_steps,
 };
 
 pub async fn configure(args: ConfigureArgs) -> Result<()> {
@@ -310,6 +311,10 @@ pub async fn run(args: RunArgs) -> Result<()> {
                 job.steps.len(),
                 job.resources.endpoints.len()
             );
+            match github_script_steps(&job.steps, "/__w") {
+                Ok(script_steps) => println!("Mapped {} script run step(s).", script_steps.len()),
+                Err(error) => println!("Script step mapping is incomplete: {error}."),
+            }
             if let Some(system_connection) = job.system_connection() {
                 println!(
                     "System connection URL: {}",

@@ -119,6 +119,8 @@ docker rm --force <job container>
 docker network rm <job network>
 ```
 
+Current code can map enabled GitHub `run:` message steps into internal script-step plans when the runner receives `Reference.Type = Script`. The mapper supports `script`, `shell` values `bash`/`sh`, and relative or absolute `workingDirectory`; unsupported shells are reported as incomplete mapping until broader shell support is added.
+
 For target workflows, mount the host Docker socket first. This weakens isolation but is the shortest path to `docker/setup-buildx-action`, `docker/bake-action`, `docker/build-push-action`, and direct `docker buildx`.
 
 Later isolation options:
