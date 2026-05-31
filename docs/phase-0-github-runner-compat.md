@@ -187,7 +187,7 @@ Initial code now models this Docker command shape without executing it yet. The 
 
 - command-file setup per step: implemented as step plan
 - script writing under runner temp: implemented as step plan
-- `docker exec` using `bash`/`sh`
+- `docker exec` using `bash`/`sh`: implemented behind command runner abstraction
 - command-file parsing after each step: implemented as state collector
 
 ## Required Workflow Features

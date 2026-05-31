@@ -2,6 +2,7 @@ mod cli;
 mod command_files;
 mod config;
 mod container;
+mod executor;
 mod protocol;
 mod runner;
 mod script_step;
