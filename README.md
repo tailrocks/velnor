@@ -27,3 +27,5 @@ Language comparison and target repo workflow analysis: [docs/research/config-lan
 Pkl/Rust integration research: [docs/research/pkl-rust.md](docs/research/pkl-rust.md).
 
 Pkl vs KCL language comparison: [docs/research/pkl-vs-kcl.md](docs/research/pkl-vs-kcl.md).
+
+Side-by-side GitHub Actions vs Pkl vs KCL examples: [docs/research/github-actions-vs-pkl-vs-kcl.md](docs/research/github-actions-vs-pkl-vs-kcl.md).
