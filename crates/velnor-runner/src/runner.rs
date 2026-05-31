@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
 use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
+use tokio::task::JoinHandle;
 
 use crate::{
     action::{
@@ -392,13 +393,22 @@ async fn handle_message(
         let Some(script_steps) = script_steps else {
             bail!("cannot execute scripts because step mapping failed");
         };
+        let renewal = start_lock_renewal(
+            client.clone(),
+            pool_id,
+            job.request_id,
+            job.plan.plan_id.clone(),
+        )
+        .await?;
         let job_result = execute_script_job(
             config_dir,
             args.work_dir.clone(),
             &args.docker_image,
             &job,
             &script_steps,
-        )?;
+        );
+        renewal.abort();
+        let job_result = job_result?;
         complete_job(
             client,
             pool_id,
@@ -435,6 +445,30 @@ async fn handle_message(
         println!("Job is not acknowledged yet; pass --complete-noop to probe completion.");
     }
     Ok(())
+}
+
+async fn start_lock_renewal(
+    client: DistributedTaskClient,
+    pool_id: i64,
+    request_id: i64,
+    plan_id: String,
+) -> Result<JoinHandle<()>> {
+    client
+        .renew_agent_request(pool_id, request_id, Some(&plan_id))
+        .await
+        .context("initial job lock renewal")?;
+
+    Ok(tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            if let Err(error) = client
+                .renew_agent_request(pool_id, request_id, Some(&plan_id))
+                .await
+            {
+                eprintln!("Job lock renewal failed: {error:#}");
+            }
+        }
+    }))
 }
 
 fn execute_script_job(

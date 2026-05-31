@@ -98,7 +98,7 @@ The official runner assumes one active job per runner. Velnor should keep the sa
 8. Finish the job request.
 9. Return runner status online.
 
-Lock renewal matters more than step execution. If Velnor runs a real job without renewal, GitHub can abandon or reassign the job while the container is still running.
+Lock renewal matters more than step execution. If Velnor runs a real job without renewal, GitHub can abandon or reassign the job while the container is still running. Current code performs an initial renewal before Docker execution and keeps a 60-second renewal loop alive while user code runs.
 
 ## Docker Execution Model
 

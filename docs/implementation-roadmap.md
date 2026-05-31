@@ -31,7 +31,7 @@ Goal: receive one job and mark it completed.
 Deliverables:
 
 - deserialize enough `AgentJobRequestMessage`
-- renew job request lock: client method implemented for classic `jobrequests` route
+- renew job request lock: client method implemented for classic `jobrequests` route; script execution starts with an initial renewal and keeps a background renewal loop alive while user code runs
 - report timeline/log output for a no-op job: opt-in `run --complete-noop` probe is implemented for classic timeline/feed routes
 - finish job request with success/failure: opt-in `run --complete-noop` probe finishes success
 - handle cancellation message
