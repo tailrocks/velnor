@@ -183,6 +183,13 @@ Cons:
 
 Phase 0 should start with Option A and document the security tradeoff.
 
+Initial code now models this Docker command shape without executing it yet. The next execution step is to connect assigned job steps to:
+
+- command-file setup per step
+- script writing under runner temp
+- `docker exec` using `bash`/`sh`
+- command-file parsing after each step
+
 ## Required Workflow Features
 
 From the target repositories, Phase 0 must support:

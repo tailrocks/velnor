@@ -60,6 +60,11 @@ Deliverables:
   - `GITHUB_STATE`
   - `GITHUB_STEP_SUMMARY`
 
+Current code progress:
+
+- command-file parser supports `NAME=value` and heredoc `NAME<<EOF` syntax
+- Docker job container command builder covers network/container start, `docker exec`, and cleanup command shapes
+
 Exit criteria:
 
 - workflow with checkout-free shell steps works.
