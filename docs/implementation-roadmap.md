@@ -96,7 +96,7 @@ Deliverables:
 - action metadata parser for `action.yml`: JavaScript, composite, and Docker `runs.using` shapes are modeled
 - repository action planner for enabled non-checkout `uses:` steps
 - Node action handler: JavaScript action invocation and Docker `node <main>` executor shape are implemented and wired into the ordered Docker execution path
-- `INPUT_*` environment variables: planned action inputs are converted to `INPUT_*` for JavaScript invocation
+- `INPUT_*` environment variables: planned action inputs and metadata defaults are converted to `INPUT_*` for JavaScript invocation
 - runtime env:
   - basic `GITHUB_*` variables are extracted from the job message and injected into script and JavaScript steps
   - basic `RUNNER_*` variables are injected for the Docker runner environment
@@ -123,7 +123,7 @@ Deliverables:
 
 - parse `runs.using: composite`: metadata parsing exists
 - local composite action discovery after checkout: implemented for `./.github/actions/...`
-- composite inputs: basic `${{ inputs.* }}` interpolation into `run` and `env` exists
+- composite inputs: basic `${{ inputs.* }}` interpolation into `run`, `env`, and nested `with` exists, including metadata defaults
 - nested `run` steps: local composite `run` steps are expanded into ordered script steps
 - nested `uses` steps: implemented for repository JavaScript actions referenced from local composites
 - composite outputs

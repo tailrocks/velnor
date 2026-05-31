@@ -189,14 +189,14 @@ Implement action support in the order that unlocks target workflows fastest:
 4. Marketplace JavaScript action handler:
    - download action repo/ref: implemented for repository action probe path
    - parse `action.yml`: metadata parser and repository action planner are implemented as groundwork
-   - map `with:` to `INPUT_*`: implemented for JavaScript action invocation
+   - map `with:` to `INPUT_*`: implemented for JavaScript action invocation, including metadata defaults
    - run Node entrypoint inside job container: implemented for ordered script/JavaScript execution
    - provide `GITHUB_*`, `RUNNER_*`, `ACTIONS_*` runtime env: basic job-message extraction and step injection are implemented; full runner parity remains open
 5. Composite action handler:
    - local `.github/actions/*`: implemented for checked-out self repository actions
    - nested `run`: implemented for shell steps with basic input/action-path/workspace interpolation
    - nested `uses`: implemented for repository JavaScript actions inside local composites
-   - inputs/outputs
+   - inputs/outputs: input interpolation and defaults are implemented; composite outputs remain open
 6. Cache/artifact runtime endpoints:
    - `ACTIONS_RUNTIME_URL`
    - `ACTIONS_RUNTIME_TOKEN`

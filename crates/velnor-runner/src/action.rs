@@ -309,9 +309,9 @@ impl ResolvedAction {
             "GITHUB_ACTION_PATH".to_string(),
             action_container_path.clone(),
         )];
+        let inputs = effective_inputs(&self.metadata, &self.plan.inputs);
         env.extend(
-            self.plan
-                .inputs
+            inputs
                 .iter()
                 .map(|(name, value)| (input_env_name(name), value.clone())),
         );
@@ -352,6 +352,7 @@ pub fn composite_action_invocations(
     }
 
     let action_path = workspace_container_path(workspace_container, &plan.action_dir)?;
+    let inputs = effective_inputs(metadata, &plan.inputs);
     let mut invocations = Vec::new();
     for (index, step) in metadata.runs.steps.iter().enumerate() {
         let step_id = format!("{}-{}", plan.step_id, index + 1);
@@ -363,7 +364,7 @@ pub fn composite_action_invocations(
                 .map(|(name, value)| {
                     (
                         name.clone(),
-                        render_composite_value(value, plan, &action_path, workspace_container),
+                        render_composite_value(value, &inputs, &action_path, workspace_container),
                     )
                 })
                 .collect();
@@ -397,7 +398,8 @@ pub fn composite_action_invocations(
             .map(crate::script_step::github_shell)
             .transpose()?
             .unwrap_or(crate::container::Shell::Bash);
-        let mut rendered = render_composite_value(script, plan, &action_path, workspace_container);
+        let mut rendered =
+            render_composite_value(script, &inputs, &action_path, workspace_container);
         if !step.env.is_empty() {
             let exports = step
                 .env
@@ -408,7 +410,7 @@ pub fn composite_action_invocations(
                         shell_identifier(name)?,
                         shell_single_quote(&render_composite_value(
                             value,
-                            plan,
+                            &inputs,
                             &action_path,
                             workspace_container
                         ))
@@ -590,17 +592,35 @@ fn string_inputs(step: &ActionStep) -> Result<BTreeMap<String, String>> {
 
 fn render_composite_value(
     value: &str,
-    plan: &LocalActionPlan,
+    inputs: &BTreeMap<String, String>,
     action_path: &str,
     workspace_container: &str,
 ) -> String {
     let mut rendered = value
         .replace("${{ github.action_path }}", action_path)
         .replace("${{ github.workspace }}", workspace_container);
-    for (name, value) in &plan.inputs {
+    for (name, value) in inputs {
         rendered = rendered.replace(&format!("${{{{ inputs.{name} }}}}"), value);
     }
     rendered
+}
+
+fn effective_inputs(
+    metadata: &ActionMetadata,
+    provided: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut inputs = metadata
+        .inputs
+        .iter()
+        .filter_map(|(name, input)| {
+            input
+                .default_value
+                .as_ref()
+                .map(|value| (name.clone(), value.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    inputs.extend(provided.clone());
+    inputs
 }
 
 fn workspace_path(workspace_container: &str, path: &str) -> String {
@@ -805,6 +825,35 @@ runs:
     }
 
     #[test]
+    fn expands_composite_input_defaults() {
+        let plan = LocalActionPlan {
+            step_id: "docs".into(),
+            action_dir: Path::new("/tmp/workspace").join(".github/actions/check-deployed-docs"),
+            inputs: BTreeMap::new(),
+        };
+        let metadata = parse_action_metadata(
+            r#"
+inputs:
+  external-links:
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        EXTERNAL_LINKS: ${{ inputs.external-links }}
+      run: echo "${{ inputs.external-links }}"
+"#,
+        )
+        .unwrap();
+
+        let steps = composite_script_steps(&plan, &metadata, "/__w").unwrap();
+
+        assert!(steps[0].script.contains("export EXTERNAL_LINKS='true'"));
+        assert!(steps[0].script.contains("echo \"true\""));
+    }
+
+    #[test]
     fn builds_nested_composite_repository_action_plan() {
         let plan = LocalActionPlan {
             step_id: "docs".into(),
@@ -904,5 +953,48 @@ runs:
             "GITHUB_ACTION_PATH".into(),
             "/__a/_actions/actions_setup-node/v4".into()
         )));
+    }
+
+    #[test]
+    fn builds_javascript_action_invocation_with_input_defaults() {
+        let actions_host = Path::new("/tmp/actions");
+        let plan = RepositoryActionPlan {
+            step_id: "cache".into(),
+            repository: "actions/cache".into(),
+            git_ref: "v5".into(),
+            source_path: None,
+            repository_dir: actions_host.join("_actions/actions_cache/v5"),
+            action_dir: actions_host.join("_actions/actions_cache/v5"),
+            inputs: [("path".to_string(), "~/.cargo".to_string())].into(),
+        };
+        let metadata = parse_action_metadata(
+            r#"
+inputs:
+  path:
+    required: true
+  fail-on-cache-miss:
+    default: "false"
+runs:
+  using: node20
+  main: dist/index.js
+"#,
+        )
+        .unwrap();
+        let runtime = metadata.runtime().unwrap();
+        let resolved = ResolvedAction {
+            plan,
+            metadata_path: actions_host.join("_actions/actions_cache/v5/action.yml"),
+            metadata,
+            runtime,
+        };
+
+        let invocation = resolved.javascript_invocation(actions_host).unwrap();
+
+        assert!(invocation
+            .env
+            .contains(&("INPUT_PATH".into(), "~/.cargo".into())));
+        assert!(invocation
+            .env
+            .contains(&("INPUT_FAIL_ON_CACHE_MISS".into(), "false".into())));
     }
 }
