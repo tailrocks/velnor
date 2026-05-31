@@ -833,7 +833,11 @@ async fn complete_job(
             &job.plan.plan_id,
             &job.timeline.id,
             &job.job_id,
-            TimelineRecordFeedLines::new(job.job_id.clone(), vec![feed_line], Some(1)),
+            TimelineRecordFeedLines::new(
+                job.job_id.clone(),
+                vec![mask_text(&feed_line, &job_mask_values(job))],
+                Some(1),
+            ),
         )
         .await?;
 
@@ -877,6 +881,37 @@ fn sanitize_path_segment(value: &str) -> String {
             }
         })
         .collect()
+}
+
+fn job_mask_values(job: &AgentJobRequestMessage) -> Vec<String> {
+    let mut values = Vec::new();
+    values.extend(
+        job.mask
+            .iter()
+            .filter_map(|mask| mask.value.as_deref())
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+    );
+    values.extend(
+        job.variables
+            .values()
+            .filter(|variable| variable.is_secret)
+            .filter_map(|variable| variable.value.as_deref())
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+    );
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values.dedup();
+    values
+}
+
+fn mask_text(value: &str, masks: &[String]) -> String {
+    masks
+        .iter()
+        .filter(|mask| !mask.is_empty())
+        .fold(value.to_string(), |masked, mask| {
+            masked.replace(mask, "***")
+        })
 }
 
 fn utc_now_rfc3339() -> Result<String> {
@@ -1041,6 +1076,36 @@ mod tests {
         assert_eq!(secrets["DOCKERHUB_USERNAME"], "docker_user");
         assert!(!secrets.contains_key("PUBLIC_VALUE"));
         assert_eq!(context_data["matrix"]["target"], "linux");
+    }
+
+    #[test]
+    fn job_mask_values_include_mask_hints_and_secret_variables() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Mask",
+            "requestId": 1,
+            "mask": [
+                { "type": "Variable", "value": "hint-secret" }
+            ],
+            "variables": {
+                "system.github.token": { "value": "ghs_token", "isSecret": true },
+                "PUBLIC_VALUE": { "value": "visible", "isSecret": false }
+            }
+        }))
+        .unwrap();
+
+        let masks = job_mask_values(&job);
+
+        assert!(masks.contains(&"hint-secret".to_string()));
+        assert!(masks.contains(&"ghs_token".to_string()));
+        assert!(!masks.contains(&"visible".to_string()));
+        assert_eq!(
+            mask_text("hint-secret ghs_token visible", &masks),
+            "*** *** visible"
+        );
     }
 
     #[test]

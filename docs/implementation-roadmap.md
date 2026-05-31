@@ -111,7 +111,7 @@ Deliverables:
   - basic `RUNNER_*` variables are injected for the Docker runner environment
   - action runtime values from `SystemVssConnection` are injected: `ACTIONS_RUNTIME_URL`, `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_CACHE_URL`, `ACTIONS_RESULTS_URL`, OIDC request URL/token, cache service v2, and orchestration id when GitHub sends them
   - broader GitHub runner env parity remains incomplete
-- `secrets.*` expressions are resolved from GitHub secret job variables, including `secrets.GITHUB_TOKEN` from `system.github.token`; `::add-mask::` workflow commands are tracked for later masking, but upload-time log masking remains open
+- `secrets.*` expressions are resolved from GitHub secret job variables, including `secrets.GITHUB_TOKEN` from `system.github.token`; GitHub mask hints and secret variables are applied to runner-uploaded feed lines, and `::add-mask::` workflow commands are tracked for later step log masking
 - basic workflow command parsing: state-changing stdout commands are parsed; annotations/log grouping are not yet reported to GitHub UI
 - runner-side expression contexts: `env.*`, selected `github.*`/`runner.*` including `github.workflow` and `github.ref_name`, nested `github.event.*` from `ContextData`, `steps.*.outputs.*`, `secrets.*`, and generic job `ContextData` lookup such as `matrix.*`, `needs.*`, `inputs.*`, and `vars.*` are supported for script/action env and basic step conditions; `&&`/`||` value expressions, equality checks, unary `!`, `contains()`, `toJSON()`, and workspace-backed `hashFiles(...)` cover target-shaped cases
 - `continue-on-error`: script and JavaScript action steps can ignore a nonzero exit for job failure while preserving `steps.<id>.outcome == 'failure'`, covering target optional `sccache` setup
