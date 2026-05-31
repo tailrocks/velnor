@@ -25,3 +25,5 @@ KCL research: [docs/research/kcl.md](docs/research/kcl.md).
 Language comparison and target repo workflow analysis: [docs/research/config-language-comparison.md](docs/research/config-language-comparison.md).
 
 Pkl/Rust integration research: [docs/research/pkl-rust.md](docs/research/pkl-rust.md).
+
+Pkl vs KCL language comparison: [docs/research/pkl-vs-kcl.md](docs/research/pkl-vs-kcl.md).
