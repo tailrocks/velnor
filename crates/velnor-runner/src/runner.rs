@@ -5,8 +5,9 @@ use crate::{
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     protocol::{
-        DistributedTaskClient, GitHubAuthResult, GitHubScope, RegistrationClient, RunnerEvent,
-        RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool, TaskAgentSession,
+        DistributedTaskClient, GitHubAuthResult, GitHubScope, OAuthClient, OAuthJwtCredentials,
+        RegistrationClient, RunnerEvent, RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool,
+        TaskAgentSession,
     },
 };
 
@@ -221,7 +222,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
         .settings
         .agent_id
         .ok_or_else(|| anyhow::anyhow!("runner is not registered: missing agent_id"))?;
-    let token = oauth_access_token(&stored)?;
+    let token = oauth_access_token(&stored).await?;
     let client = DistributedTaskClient::new(server_url, token)?;
     let owner_name = format!("{} (PID: {})", default_agent_name(), std::process::id());
     let session = TaskAgentSession::new(owner_name, agent_id, stored.settings.agent_name.clone());
@@ -268,7 +269,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     Ok(())
 }
 
-fn oauth_access_token(stored: &StoredRunnerConfig) -> Result<String> {
+async fn oauth_access_token(stored: &StoredRunnerConfig) -> Result<String> {
     let credentials = stored
         .credentials
         .as_ref()
@@ -281,10 +282,26 @@ fn oauth_access_token(stored: &StoredRunnerConfig) -> Result<String> {
             .and_then(|value| value.as_str())
             .map(ToOwned::to_owned)
             .ok_or_else(|| anyhow::anyhow!("OAuthAccessToken credentials missing token")),
-        CredentialScheme::OAuth => bail!(
-            "OAuth JWT credential exchange is not implemented yet; current runner has OAuth credentials"
-        ),
+        CredentialScheme::OAuth => {
+            let oauth = OAuthJwtCredentials {
+                client_id: credential_str(credentials, "clientId")?,
+                authorization_url: credential_str(credentials, "authorizationUrl")?,
+                private_key_pem: credential_str(credentials, "privateKeyPem")?,
+            };
+            OAuthClient::new()?
+                .exchange_client_credentials(&oauth)
+                .await
+        }
     }
+}
+
+fn credential_str(credentials: &StoredCredentials, key: &str) -> Result<String> {
+    credentials
+        .data
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("OAuth credentials missing {key}"))
 }
 
 pub async fn remove(args: RemoveArgs) -> Result<()> {

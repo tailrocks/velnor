@@ -109,6 +109,37 @@ The minimum payload shape Velnor needs:
 
 GitHub returns agent id and OAuth authorization data. Velnor stores `clientId`, `authorizationUrl`, and the generated private key so it can mint OAuth JWT credentials for session/message APIs later. If GitHub returns V2 runner authorization, Velnor must store `ServerUrlV2` and use broker flow.
 
+## OAuth Credential Exchange
+
+Normal registered runners do not keep using the temporary registration token. They store OAuth app credentials and sign a JWT client assertion.
+
+Token request:
+
+```text
+POST <authorizationUrl>
+Accept: application/json
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials
+client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer
+client_assertion=<RS256 JWT>
+```
+
+JWT assertion claims:
+
+```json
+{
+  "iss": "<clientId>",
+  "sub": "<clientId>",
+  "aud": "<authorizationUrl>",
+  "jti": "<uuid>",
+  "nbf": 1710000000,
+  "exp": 1710000600
+}
+```
+
+The access token from this exchange is used as the bearer token for distributed task session/message APIs.
+
 ## Message Loop Calls
 
 Classic flow from generated `TaskAgentHttpClientBase`:
@@ -158,6 +189,4 @@ This avoids building Docker execution before Velnor can receive a real job.
 
 ## Current Implementation Gap
 
-The `velnor-runner run --once` path can create a session and poll one message when credentials are `OAuthAccessToken`.
-
-After normal agent add/replace, GitHub usually returns OAuth app credentials (`clientId`, `authorizationUrl`, runner private key). Velnor stores those fields, but still needs the OAuth JWT bearer exchange before session polling works for normal registered runners.
+The `velnor-runner run --once` path can now exchange stored OAuth credentials and call classic session/message APIs. This still needs a live GitHub registration test, and V2 broker/session support remains separate work if GitHub forces `use_v2_flow`.

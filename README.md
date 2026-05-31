@@ -48,7 +48,7 @@ cargo run --bin velnor-runner -- status
 cargo run --bin velnor-runner -- run
 ```
 
-`configure` now validates runner scope URLs, exchanges a GitHub runner registration token for tenant credentials, and can add/replace a runner agent in the selected pool. `run --once` has the classic session/message API shape; OAuth JWT token exchange is the next required step for normal registered runners.
+`configure` now validates runner scope URLs, exchanges a GitHub runner registration token for tenant credentials, and can add/replace a runner agent in the selected pool. `run --once` can exchange stored OAuth runner credentials, create a classic runner session, and poll one message.
 
 Phase 0 runner compatibility: [docs/phase-0-github-runner-compat.md](docs/phase-0-github-runner-compat.md).
 

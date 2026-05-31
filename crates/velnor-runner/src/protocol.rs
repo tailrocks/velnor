@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use anyhow::{bail, Context, Result};
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use reqwest::{
     header::{ACCEPT, AUTHORIZATION, USER_AGENT},
     Client,
@@ -13,7 +14,9 @@ use rsa::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
+use uuid::Uuid;
 
 pub const RUNNER_VERSION: &str = "2.326.0";
 pub const RUNNER_USER_AGENT: &str = "actions-runner/2.326.0 (velnor)";
@@ -110,6 +113,118 @@ pub struct GitHubAuthResult {
     pub token: String,
     #[serde(default, rename = "use_v2_flow")]
     pub use_v2_flow: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct OAuthJwtCredentials {
+    pub client_id: String,
+    pub authorization_url: String,
+    pub private_key_pem: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OAuthJwtClaims {
+    iss: String,
+    sub: String,
+    aud: String,
+    jti: String,
+    nbf: u64,
+    exp: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthTokenResponse {
+    #[serde(rename = "access_token")]
+    pub access_token: Option<String>,
+    #[serde(rename = "token_type")]
+    pub token_type: Option<String>,
+    #[serde(rename = "expires_in")]
+    pub expires_in: Option<i64>,
+    #[serde(rename = "error")]
+    pub error: Option<String>,
+    #[serde(rename = "error_description")]
+    pub error_description: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct OAuthClient {
+    http: Client,
+}
+
+impl OAuthClient {
+    pub fn new() -> Result<Self> {
+        let http = Client::builder()
+            .user_agent(RUNNER_USER_AGENT)
+            .build()
+            .context("build OAuth HTTP client")?;
+        Ok(Self { http })
+    }
+
+    pub async fn exchange_client_credentials(
+        &self,
+        credentials: &OAuthJwtCredentials,
+    ) -> Result<String> {
+        let assertion = build_client_assertion(credentials)?;
+        let params = [
+            ("grant_type", "client_credentials".to_string()),
+            (
+                "client_assertion_type",
+                "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_string(),
+            ),
+            ("client_assertion", assertion),
+        ];
+
+        let response = self
+            .http
+            .post(&credentials.authorization_url)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .header(ACCEPT, "application/json")
+            .form(&params)
+            .send()
+            .await
+            .context("send OAuth token request")?;
+
+        let status = response.status();
+        let text = response.text().await.context("read OAuth token response")?;
+        if !status.is_success() && status != reqwest::StatusCode::BAD_REQUEST {
+            bail!("OAuth token request failed: status={status}, body={text}");
+        }
+
+        let token: OAuthTokenResponse =
+            serde_json::from_str(&text).context("parse OAuth token response")?;
+
+        if let Some(error) = token.error {
+            bail!(
+                "OAuth token request failed: error={error}, description={}",
+                token.error_description.unwrap_or_default()
+            );
+        }
+
+        token
+            .access_token
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("OAuth token response missing access_token"))
+    }
+}
+
+fn build_client_assertion(credentials: &OAuthJwtCredentials) -> Result<String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock before unix epoch")?
+        .as_secs();
+    let claims = OAuthJwtClaims {
+        iss: credentials.client_id.clone(),
+        sub: credentials.client_id.clone(),
+        aud: credentials.authorization_url.clone(),
+        jti: Uuid::new_v4().to_string(),
+        nbf: now,
+        exp: now + 600,
+    };
+    let header = Header::new(Algorithm::RS256);
+    let key = EncodingKey::from_rsa_pem(credentials.private_key_pem.as_bytes())
+        .context("load runner RSA private key")?;
+
+    encode(&header, &claims, &key).context("sign OAuth client assertion")
 }
 
 #[derive(Debug, Clone)]
@@ -904,5 +1019,21 @@ mod tests {
         assert_eq!(json["agent"]["name"], "velnor");
         assert_eq!(json["agent"]["version"], RUNNER_VERSION);
         assert_eq!(json["useFipsEncryption"], false);
+    }
+
+    #[test]
+    fn builds_rs256_oauth_client_assertion() {
+        let key_pair = RunnerKeyPair::generate().unwrap();
+        let credentials = OAuthJwtCredentials {
+            client_id: "client-id".to_string(),
+            authorization_url: "https://vstoken.actions.githubusercontent.com/token".to_string(),
+            private_key_pem: key_pair.private_key_pem,
+        };
+
+        let jwt = build_client_assertion(&credentials).unwrap();
+        let parts: Vec<_> = jwt.split('.').collect();
+
+        assert_eq!(parts.len(), 3);
+        assert!(parts.iter().all(|part| !part.is_empty()));
     }
 }
