@@ -194,14 +194,24 @@ Cons:
 - more complex cache behavior
 - Buildx and privileged mode complexity
 
-Phase 0 should start with Option A and document the security tradeoff.
+Phase 0 uses Option A and documents the security tradeoff. This is intentional
+for the current target repositories because their workflows need `docker`,
+Buildx, Bake, registry auth, and image build/cache behavior from inside the job
+container. Velnor mounts the host Docker socket and, when discoverable, the host
+Docker CLI and Buildx plugin directory into the job container and native action
+containers. Steps can therefore run Docker commands from inside the job
+container while talking to the host Docker daemon.
 
-Initial code now models this Docker command shape without executing it yet. The next execution step is to connect assigned job steps to:
+Velnor now executes assigned jobs through this Docker command shape:
 
-- command-file setup per step: implemented as step plan
-- script writing under runner temp: implemented as step plan
-- `docker exec` using `bash`/`sh`: implemented behind command runner abstraction
-- command-file parsing after each step: implemented as state collector
+- command-file setup per step
+- script writing under runner temp
+- per-job Docker network creation
+- optional GitHub service containers on the same network with aliases
+- long-running job container startup
+- `docker exec` using `bash`/`sh`
+- command-file parsing after each step
+- container and network cleanup
 
 ## Required Workflow Features
 

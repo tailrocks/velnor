@@ -88,6 +88,7 @@ Smoke scripts write sanitized job payloads under `.velnor-job-dumps` by default.
 Set `VELNOR_TARGET_WORKFLOW=<workflow.yml>` on target smoke scripts to dispatch
 that workflow before Velnor waits for one job.
 Set `VELNOR_TARGET_REF=<branch-or-sha>` to dispatch from a specific ref.
+Set `VELNOR_TARGET_INPUTS=key=value,other=value` for workflow dispatch inputs.
 Set `VELNOR_TARGET_MVP_ARM_LABEL=true` only on ARM Linux target smoke hosts.
 
 The remaining Phase 0 proof is live GitHub UI validation on the two target
@@ -138,6 +139,11 @@ If the Docker daemon sees the work directory at a different path than the
 runner process, set `VELNOR_DOCKER_HOST_WORK_DIR` to that daemon-visible path.
 For a remote Docker daemon without a local `/var/run/docker.sock`, set
 `VELNOR_REQUIRE_DOCKER_SOCKET=false` for the fixture smoke run.
+For target jobs, Velnor runs the job in a Docker container and mounts
+`/var/run/docker.sock` plus the host Docker/Buildx client into that container
+when the socket is present. This is the Phase 0 Docker-outside-of-Docker model:
+workflow steps inside the job container can run `docker`/`docker buildx`, and
+service containers share the per-job Docker network with GitHub-style aliases.
 To create a fresh fixture run instead of using the current queued run, set
 `VELNOR_FIXTURE_DISPATCH=true`.
 The smoke script removes the temporary fixture runner on exit by default; set

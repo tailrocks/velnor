@@ -13,6 +13,7 @@ CLEANUP_RUNNER="${VELNOR_TARGET_CLEANUP_RUNNER:-false}"
 DUMP_JOB_MESSAGES="${VELNOR_DUMP_JOB_MESSAGES:-$ROOT/.velnor-job-dumps/target}"
 WORKFLOW="${VELNOR_TARGET_WORKFLOW:-}"
 TARGET_REF="${VELNOR_TARGET_REF:-}"
+TARGET_INPUTS="${VELNOR_TARGET_INPUTS:-}"
 RUN_ID="${VELNOR_TARGET_RUN_ID:-}"
 TARGET_LABEL="${VELNOR_TARGET_LABEL:-target}"
 TARGET_MVP_ARM_LABEL="${VELNOR_TARGET_MVP_ARM_LABEL:-false}"
@@ -79,6 +80,12 @@ if [[ -n "$WORKFLOW" ]]; then
   workflow_run_args=("$WORKFLOW" --repo "$TARGET_REPO")
   if [[ -n "$TARGET_REF" ]]; then
     workflow_run_args+=(--ref "$TARGET_REF")
+  fi
+  if [[ -n "$TARGET_INPUTS" ]]; then
+    IFS=',' read -r -a target_inputs <<<"$TARGET_INPUTS"
+    for input in "${target_inputs[@]}"; do
+      workflow_run_args+=(-f "$input")
+    done
   fi
   gh workflow run "${workflow_run_args[@]}"
   echo "==> Waiting for dispatched run to appear"
