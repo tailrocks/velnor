@@ -1,10 +1,12 @@
-# Deferred Brainstorming: Pkl For Workflow Authoring
+# Archived Brainstorming: Pkl For Workflow Authoring
 
-Status: deferred; no current implementation
+Status: archived brainstorming only; no current implementation
 
 ## Current Decision
 
-Velnor will not implement Pkl support now.
+Velnor will not implement Pkl support now. Pkl, PQL, KCL, and any
+Velnor-native workflow language are not required, not selected, and not part of
+the current implementation plan.
 
 Phase 0 is GitHub runner compatibility: existing repositories keep `.github/workflows/*.yml`, and Velnor registers as a self-hosted GitHub runner replacement.
 
@@ -26,9 +28,9 @@ If typed workflow authoring is revisited after target GitHub Actions compatibili
 
 KCL remains useful comparison material. Neither KCL nor Pkl is part of the current implementation scope.
 
-## Possible Future Binding Roadmap
+## Historical Binding Notes
 
-Do not start this roadmap until Phase 0 live GitHub target runs are proven.
+Do not treat this as a roadmap. These are old research notes only.
 
 ### Future Option 1: Unofficial Rust Bindings
 
@@ -37,7 +39,7 @@ Prototype with existing unofficial Rust bindings:
 - `pklrust`
 - `rpkl`
 
-The initial goal is to evaluate `.pkl` workflow files into Rust structs through serde.
+One old idea was to evaluate `.pkl` workflow files into Rust structs through serde.
 
 Target flow:
 

@@ -1,8 +1,9 @@
 # KCL Research
 
-Status: historical brainstorming. The current implementation scope is GitHub
-Actions runner compatibility with existing YAML unchanged. Do not implement KCL
-or any Velnor-native workflow language before live target repository proof.
+Status: archived brainstorming only. The current implementation scope is GitHub
+Actions runner compatibility with existing YAML unchanged. Do not implement
+Pkl, PQL, KCL, or any Velnor-native workflow language. This document is not a
+roadmap and creates no current requirement.
 
 KCL was researched as a candidate for a future workflow definition language.
 
@@ -193,12 +194,12 @@ schema Step:
 - Syntax is familiar but not identical to GitHub Actions, so migration docs matter.
 - Need clarify whether Velnor stores expression syntax like `${{ matrix.os }}` or replaces it with native KCL references.
 
-## Recommendation
+## Archived Finding
 
 Historical research conclusion only: KCL was a plausible workflow authoring
 candidate during brainstorming. Do not implement it now.
 
-Keep first milestone narrow:
+Old suggested KCL experiment scope was narrow:
 
 - one workflow file
 - `push` and `pull_request`
@@ -209,4 +210,4 @@ Keep first milestone narrow:
 - local runner
 - normalized execution plan
 
-Do not build marketplace/plugin system until the KCL schema and Rust plan format feel correct.
+No KCL schema or Rust plan format is being built now.

@@ -1,18 +1,18 @@
-# Deferred Research: Pkl And Rust Integration
+# Archived Research: Pkl And Rust Integration
 
-This is historical brainstorming. Pkl is not part of the current implementation
-scope. Do not implement Pkl support until the GitHub Actions runner replacement
-works against the two target repositories in live GitHub UI runs.
+This is archived brainstorming. Pkl, PQL, KCL, and any Velnor-native workflow
+language are not part of the current implementation scope. Do not implement Pkl
+support now. This document is not a roadmap and creates no current requirement.
 
 ## Summary
 
 There is no official Apple-maintained Rust binding listed in Pkl's official bindings. Official bindings currently focus on Java, Kotlin, Swift, and Go.
 
-Rust integration is still practical:
+Old Rust integration ideas:
 
-1. MVP: call the `pkl` CLI from Rust and evaluate workflow files to JSON.
-2. Next: use Pkl's official `pkl server` embedding protocol from Rust.
-3. Later: adopt or build a Rust binding around the message-passing API and Pkl binary encoding.
+1. Old simple option: call the `pkl` CLI from Rust and evaluate workflow files to JSON.
+2. Old embedding option: use Pkl's official `pkl server` protocol from Rust.
+3. Old binding option: adopt or build a Rust binding around the message-passing API and Pkl binary encoding.
 
 Primary sources:
 
@@ -32,13 +32,16 @@ Pkl's official docs list Java, Kotlin, Swift, and Go bindings. Rust is not liste
 
 The official language binding specification is still useful for Rust. It says Pkl can be embedded in any host application. Today that embedding model uses a child process running `pkl server` and a message-passing protocol. A future C library is planned.
 
-That means Rust does not need to parse or evaluate Pkl itself. Velnor can treat Pkl as a compiler/evaluator process.
+Old research conclusion: Rust would not need to parse or evaluate Pkl itself.
+Velnor could have treated Pkl as a compiler/evaluator process if this idea were
+ever reopened.
 
-## Recommended MVP Path
+## Archived Prototype Paths
 
-If Pkl is revisited later, use it as a workflow language through typed deserialization from evaluated Pkl.
+If Pkl is ever revisited later, one old idea was to use it as a workflow
+language through typed deserialization from evaluated Pkl.
 
-There are two viable MVP implementation paths:
+Two old prototype paths were:
 
 1. Direct CLI JSON bridge.
 2. `pklrust` with `EvaluatorManager` and typed serde output.
@@ -62,7 +65,7 @@ Advantages:
 - uses official Pkl CLI behavior
 - no dependency on immature Rust crates
 - easy to debug from terminal
-- JSON boundary is stable enough for an MVP
+- JSON boundary looked stable enough for a prototype
 
 Rust sketch:
 
@@ -284,17 +287,17 @@ So Velnor should borrow schema and UX ideas, but compile to Velnor's Rust execut
 
 ## Packaging Options
 
-Velnor can support Pkl in three ways:
+Old Pkl distribution options:
 
 1. Require `pkl` on `PATH`.
 2. Download/manage a pinned Pkl binary in `~/.velnor`.
 3. Vendor platform-specific Pkl binaries with Velnor releases.
 
-Recommendation:
+Archived distribution note:
 
-- MVP: require `pkl` on `PATH`, with clear error message.
-- Early product: add `velnor pkl install` or auto-download pinned Pkl.
-- Production: pin supported Pkl version range and cache binary per platform.
+- Old MVP idea: require `pkl` on `PATH`, with clear error message.
+- Old early product idea: add `velnor pkl install` or auto-download pinned Pkl.
+- Old production idea: pin supported Pkl version range and cache binary per platform.
 
 ## Validation Split
 
@@ -334,16 +337,18 @@ velnor run workflow.pkl
   3. execute steps on runner
 ```
 
-## Recommendation
+## Archived Finding
 
 Pkl is not the active product language. The current implementation scope is
 GitHub Actions runner compatibility with existing YAML unchanged.
 
-Implement the first prototype with either:
+If this research is ever reopened, old prototype options were:
 
 - `pklrust` typed evaluation, if it passes a quick spike against real workflows, or
 - `pkl eval --format json`, if we want the lowest-risk dependency path.
 
-Avoid writing a Pkl evaluator in Rust. Treat the Pkl evaluator as a compiler process, then build Velnor's planner and runner in Rust.
+The old conservative advice was to avoid writing a Pkl evaluator in Rust and
+treat the Pkl evaluator as a compiler process.
 
-Once the schema stabilizes, test `rpkl` and `pklrust` against real Velnor workflows. If either is stable enough, use it as an implementation detail. If not, build a small Rust client for `pkl server`.
+No schema is being built now. No `rpkl`, `pklrust`, `pkl server`, or Pkl CLI
+path is in scope now.

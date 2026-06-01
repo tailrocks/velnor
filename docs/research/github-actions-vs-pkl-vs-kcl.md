@@ -6,10 +6,10 @@ This compares three authoring models for Velnor:
 - Velnor with Pkl
 - Velnor with KCL
 
-Status: historical brainstorming. The current implementation scope is GitHub
+Status: archived brainstorming only. The current implementation scope is GitHub
 Actions runner compatibility with existing YAML unchanged. Do not implement
-Pkl, KCL, or any Velnor-native workflow language before live target repository
-proof.
+Pkl, PQL, KCL, or any Velnor-native workflow language. This document is not a
+roadmap and creates no current requirement.
 
 The examples focus on the workflows used in:
 
@@ -1001,10 +1001,10 @@ Problems:
 - less CI/CD-specific prior art
 - may feel more like policy/IaC than workflow engine UX
 
-## Historical Recommendation
+## Archived Finding
 
-This recommendation is deferred. Do not implement Pkl, KCL, or any Velnor-native
-workflow language now.
+This finding is deferred and non-binding. Do not implement Pkl, PQL, KCL, or any
+Velnor-native workflow language now.
 
 If typed authoring is revisited after live target GitHub Actions compatibility,
 Pkl was the preferred user-facing candidate in this comparison, with KCL's
@@ -1014,13 +1014,13 @@ If this research is reopened later, any typed package should be strict enough
 that AI agents get immediate failures when they invent wrong fields, wrong step
 kinds, wrong output references, or wrong runner labels.
 
-Target authoring model:
+Possible historical authoring sketch, not accepted design:
 
 ```pkl
 amends "package://velnor.dev/workflow@1.0.0#/Workflow.pkl"
 ```
 
-Target runtime model:
+Possible historical runtime sketch, not accepted design:
 
 ```text
 future typed source

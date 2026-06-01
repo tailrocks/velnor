@@ -25,7 +25,8 @@ Velnor should keep that model where it works. Phase 0 keeps GitHub YAML exactly 
 Typed workflow authoring was researched as a future idea, but it is not current
 implementation work. Phase 0 does not replace YAML, parse workflows, introduce
 Pkl/PQL/KCL, or define a Velnor-native workflow language. Existing research
-notes are historical brainstorming only, not an implementation plan.
+notes are historical brainstorming only, not an implementation plan. None of
+those languages are required now, selected now, or planned for Phase 0.
 
 YAML is weak as an authoring language:
 
@@ -73,62 +74,31 @@ jobs:
       - run: cargo test
 ```
 
-## Deferred Example: Typed Workflow Sketch
-
-```pkl
-amends "package://velnor.dev/workflow@1.0.0#/Workflow.pkl"
-
-name = "CI"
-
-on {
-  pullRequest {}
-  push {
-    branches = List("main")
-  }
-}
-
-jobs {
-  ["test"] = new Job {
-    matrix {
-      ["os"] = List("ubuntu-latest", "macos-latest")
-      ["rust"] = List("stable", "beta")
-    }
-
-    runsOn = "${{ matrix.os }}"
-
-    steps = List(
-      Checkout { version = "v4" },
-      Run { command = "rustup default ${{ matrix.rust }}" },
-      Run { command = "cargo test" },
-    )
-  }
-}
-```
-
-The shape remains close to GitHub Actions, but the config is typed and can be evaluated into an execution plan before any runner starts.
-
-## Core Concepts
+## Phase 0 Concepts
 
 ### Workflow
 
-A workflow is the top-level unit. It defines triggers, permissions, defaults, environment variables, jobs, and metadata.
+A workflow is still a GitHub Actions YAML workflow owned by GitHub. Velnor does
+not parse or schedule it in Phase 0.
 
 ### Trigger
 
-Triggers should mirror common GitHub Actions events where possible:
+Triggers are GitHub Actions triggers. GitHub evaluates them before Velnor sees
+a runner job:
 
 - `push`
-- `pullRequest`
+- `pull_request`
 - `schedule`
-- `manual`
-- `workflowCall`
-- `repositoryEvent`
+- `workflow_dispatch`
+- `workflow_call`
+- `repository_dispatch`
 - `tag`
 - `release`
 
 ### Job
 
-A job is a node in the execution DAG. It has:
+A job is the already-expanded unit GitHub sends to a self-hosted runner. Velnor
+executes that job in a Linux Docker container.
 
 - `runsOn`
 - `needs`
@@ -144,7 +114,8 @@ A job is a node in the execution DAG. It has:
 
 ### Step
 
-A step is a command or typed action. Initial step kinds:
+A step is either a shell command or one of the supported GitHub Actions-style
+`uses:` entries required by the target repositories:
 
 - `Run`
 - `Checkout`
@@ -154,16 +125,17 @@ A step is a command or typed action. Initial step kinds:
 - `RestoreCache`
 - `SaveCache`
 
-### Typed Action
+### Rust-Native Action Adapter
 
-A typed action is a reusable building block with explicit schema:
+A Rust-native action adapter is Velnor's internal replacement for a target
+marketplace action. It implements only the behavior needed by the two target
+repositories:
 
 - inputs
 - outputs
 - required permissions
 - supported platforms
 - runtime type
-- version
 
 This keeps the marketplace idea, but avoids making JavaScript the default extension language.
 

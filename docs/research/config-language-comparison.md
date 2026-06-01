@@ -5,10 +5,11 @@ This note compares candidate authoring languages for Velnor and tests them again
 - https://github.com/jackin-project/jackin
 - https://github.com/ChainArgos/java-monorepo
 
-Status: historical brainstorming. The current implementation scope is GitHub
+Status: archived brainstorming only. The current implementation scope is GitHub
 Actions runner compatibility with existing YAML unchanged. Do not implement
-Pkl, KCL, or any Velnor-native workflow language before live target repository
-proof.
+Pkl, PQL, KCL, CUE, Dhall, Jsonnet, Starlark, Nickel, Nix, or any
+Velnor-native workflow language. This document is not a roadmap and creates no
+current requirement.
 
 ## Sources
 
@@ -173,15 +174,17 @@ Interpretation:
 | Nickel | Medium | Rust-native, typed contracts, config-first | Less famous; smaller ecosystem |
 | Nix | Low/Medium | Reproducible build environments | Too much ecosystem/language complexity for a GitHub Actions replacement UX |
 
-## Recommendation
+## Archived Shortlist
 
-Shortlist:
+Old shortlist:
 
 1. KCL
 2. Pkl
 3. CUE
 
-Use Starlark only if Velnor wants a Bazel-like programmable extension language. Use Jsonnet only if "generate workflow JSON" becomes more important than strong typing. Use Dhall only if totality and safety beat ergonomics.
+Old comparison note: Starlark fit a Bazel-like programmable extension language.
+Jsonnet fit generated workflow JSON. Dhall fit totality and safety. None are
+current choices.
 
 ## Complex Workflow Example
 
@@ -810,9 +813,10 @@ Therefore Velnor should make these first-class typed primitives:
 
 If these are primitives, user workflow code becomes much smaller than GitHub Actions YAML while staying understandable.
 
-## Deferred Decision Bias
+## Archived Finding
 
-If typed authoring is revisited later, Pkl is the best researched default:
+If typed authoring is ever reopened later, this old research favored Pkl as a
+candidate to re-evaluate:
 
 - authoring experience is strongest
 - visibility is strongest among the modern config-language candidates
@@ -821,4 +825,5 @@ If typed authoring is revisited later, Pkl is the best researched default:
 - syntax is approachable for GitHub Actions users
 - abstractions can remove real duplication in both target repos
 
-KCL remains the best Rust/config-policy challenger. CUE remains the best schema/validation challenger.
+KCL was the Rust/config-policy challenger in this archived comparison. CUE was
+the schema/validation challenger. None are selected now.
