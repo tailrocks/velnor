@@ -837,22 +837,26 @@ impl JobExecutionState {
         }
         if let Some((left, right)) = split_top_level(expression, "!=") {
             return Some(
-                (self.resolve_expression_value(left).unwrap_or_default()
-                    != self.resolve_expression_value(right).unwrap_or_default())
+                (!github_string_eq(
+                    &self.resolve_expression_value(left).unwrap_or_default(),
+                    &self.resolve_expression_value(right).unwrap_or_default(),
+                ))
                 .to_string(),
             );
         }
         if let Some((left, right)) = split_top_level(expression, "==") {
             return Some(
-                (self.resolve_expression_value(left).unwrap_or_default()
-                    == self.resolve_expression_value(right).unwrap_or_default())
+                github_string_eq(
+                    &self.resolve_expression_value(left).unwrap_or_default(),
+                    &self.resolve_expression_value(right).unwrap_or_default(),
+                )
                 .to_string(),
             );
         }
         if let Some((value, needle)) = parse_contains(expression) {
             return Some(
                 self.resolve_expression_value(value)
-                    .is_some_and(|value| value.contains(unquote(needle.trim())))
+                    .is_some_and(|value| github_contains(&value, unquote(needle.trim())))
                     .to_string(),
             );
         }
@@ -1014,15 +1018,25 @@ impl JobExecutionState {
         if let Some((value, needle)) = parse_contains(expression) {
             return self
                 .resolve_condition_value(value)
-                .is_some_and(|value| value.contains(unquote(needle.trim())));
+                .is_some_and(|value| github_contains(&value, unquote(needle.trim())));
         }
         if let Some((left, right)) = split_top_level(expression, "!=") {
-            return self.resolve_condition_comparison_value(left)
-                != self.resolve_condition_comparison_value(right);
+            let left = self
+                .resolve_condition_comparison_value(left)
+                .unwrap_or_default();
+            let right = self
+                .resolve_condition_comparison_value(right)
+                .unwrap_or_default();
+            return !github_string_eq(&left, &right);
         }
         if let Some((left, right)) = split_top_level(expression, "==") {
-            return self.resolve_condition_comparison_value(left)
-                == self.resolve_condition_comparison_value(right);
+            let left = self
+                .resolve_condition_comparison_value(left)
+                .unwrap_or_default();
+            let right = self
+                .resolve_condition_comparison_value(right)
+                .unwrap_or_default();
+            return github_string_eq(&left, &right);
         }
         if expression == "true" {
             return true;
@@ -1351,6 +1365,16 @@ fn strip_expression(condition: &str) -> &str {
 fn expression_truthy(value: &str) -> bool {
     let value = value.trim();
     !(value.is_empty() || value == "false" || value == "0" || value == "null")
+}
+
+fn github_string_eq(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+fn github_contains(value: &str, needle: &str) -> bool {
+    value
+        .to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
 }
 
 fn condition_returns_bool(expression: &str) -> bool {
@@ -1932,6 +1956,12 @@ mod tests {
         );
         assert_eq!(
             state.resolve_expressions(
+                "selected=${{ contains(inputs.packages, 'BITCOIN-PROCESSOR-APP') }}"
+            ),
+            "selected=true"
+        );
+        assert_eq!(
+            state.resolve_expressions(
                 "fallback=${{ steps.dispatch.outputs.docs || needs.changes.outputs.bake-targets }}"
             ),
             "fallback=bitcoin-processor-app"
@@ -1941,6 +1971,10 @@ mod tests {
                 "enabled=${{ !inputs.publish && github.event_name == 'workflow_dispatch' }}"
             ),
             "enabled=true"
+        );
+        assert_eq!(
+            state.resolve_expressions("event=${{ github.event_name == 'WORKFLOW_DISPATCH' }}"),
+            "event=true"
         );
         assert_eq!(
             state.resolve_expressions("pr=${{ github.event.pull_request.number }}"),
@@ -1960,6 +1994,9 @@ mod tests {
         assert!(state.evaluate_condition(Some(
             "needs.changes.outputs.bitcoin-processor == 'true' || (github.event_name == 'workflow_dispatch' && (inputs.packages == '' || contains(inputs.packages, 'bitcoin-processor-app')))"
         )));
+        assert!(
+            state.evaluate_condition(Some("contains(inputs.packages, 'BITCOIN-PROCESSOR-APP')"))
+        );
         assert!(state.evaluate_condition(Some("needs.changes.outputs.bake-targets != ''")));
         assert!(
             !state.evaluate_condition(Some("(github.event_name == 'workflow_dispatch') == false"))
@@ -2467,6 +2504,8 @@ mod tests {
         assert!(state.evaluate_condition(Some("steps.disabled.outcome != 'success'")));
         assert!(state.evaluate_condition(Some("steps.disabled.conclusion == 'skipped'")));
         assert!(state.evaluate_condition(Some("runner.os == 'Linux'")));
+        assert!(state.evaluate_condition(Some("runner.os == 'linux'")));
+        assert!(state.evaluate_condition(Some("runner.os != 'windows'")));
         assert_eq!(state.resolve_expressions("${{ job.status }}"), "success");
         assert!(state.evaluate_condition(Some("job.status == 'success'")));
         assert!(state.evaluate_condition(Some("success()")));
