@@ -19,6 +19,7 @@ use std::{
     thread,
     time::Duration,
 };
+use tokio::sync::mpsc::UnboundedSender;
 
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
 
@@ -139,6 +140,12 @@ pub enum ExecutableStep {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepStartEvent {
+    pub step_id: String,
+    pub order: i32,
+}
+
 #[derive(Debug, Clone)]
 struct PostJavaScriptAction {
     step_id: String,
@@ -187,10 +194,20 @@ impl ExecutableStep {
             ExecutableStep::CompositeOutputs { .. } => false,
         }
     }
+
+    fn reports_timeline_start(&self) -> bool {
+        !matches!(
+            self,
+            ExecutableStep::CompositeStart { .. }
+                | ExecutableStep::CompositeEnd { .. }
+                | ExecutableStep::CompositeOutputs { .. }
+        )
+    }
 }
 
 pub struct DockerScriptExecutor<R> {
     runner: R,
+    step_start_sender: Option<UnboundedSender<StepStartEvent>>,
 }
 
 impl<R> DockerScriptExecutor<R>
@@ -198,7 +215,15 @@ where
     R: CommandRunner,
 {
     pub fn new(runner: R) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            step_start_sender: None,
+        }
+    }
+
+    pub fn with_step_start_sender(mut self, sender: UnboundedSender<StepStartEvent>) -> Self {
+        self.step_start_sender = Some(sender);
+        self
     }
 
     pub fn into_runner(self) -> R {
@@ -207,6 +232,17 @@ where
 
     pub fn runner(&self) -> &R {
         &self.runner
+    }
+
+    fn emit_step_started(&self, step_id: impl Into<String>, order: &mut i32) {
+        let Some(sender) = &self.step_start_sender else {
+            return;
+        };
+        *order += 1;
+        let _ = sender.send(StepStartEvent {
+            step_id: step_id.into(),
+            order: *order,
+        });
     }
 
     pub fn execute_step(
@@ -355,6 +391,7 @@ where
         );
         let mut step_error = None;
         let mut post_actions = Vec::new();
+        let mut timeline_order = 0;
         for step in steps {
             match step {
                 ExecutableStep::CompositeStart { step_id } => {
@@ -401,6 +438,7 @@ where
                             });
                             post_registered = true;
                         }
+                        self.emit_step_started(format!("{step_id}-pre"), &mut timeline_order);
                         let mut result = self.execute_javascript_action_in_started_container(
                             container,
                             step_id,
@@ -426,6 +464,9 @@ where
                 }
             }
             let step_state = state.with_step_action(&step_id);
+            if step.reports_timeline_start() {
+                self.emit_step_started(step_id.clone(), &mut timeline_order);
+            }
             let result = (|| match step {
                 ExecutableStep::CompositeStart { .. } | ExecutableStep::CompositeEnd { .. } => {
                     unreachable!("composite boundary steps are handled before execution")
@@ -535,6 +576,7 @@ where
             if !state.evaluate_post_condition(post_action.condition.as_deref()) {
                 continue;
             }
+            self.emit_step_started(format!("{}-post", post_action.step_id), &mut timeline_order);
             let result = self.execute_javascript_action_in_started_container(
                 container,
                 &format!("{}-post", post_action.step_id),
@@ -3273,6 +3315,70 @@ mod tests {
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
             "echo artifact=42\n"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn emits_step_started_events_for_real_executable_steps() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "producer".into(),
+                script: "echo answer=42 >> $GITHUB_OUTPUT".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+            ExecutableStep::CompositeOutputs {
+                step_id: "composite".into(),
+                outputs: [(
+                    "artifact-id".to_string(),
+                    "${{ steps.producer.outputs.answer }}".to_string(),
+                )]
+                .into(),
+                condition: None,
+            },
+            ExecutableStep::Script(ScriptStep {
+                id: "consumer".into(),
+                script: "echo artifact=${{ steps.composite.outputs.artifact-id }}".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+        ];
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        })
+        .with_step_start_sender(sender);
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+        let mut events = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            events.push(event);
+        }
+
+        assert_eq!(
+            events,
+            vec![
+                StepStartEvent {
+                    step_id: "producer".into(),
+                    order: 1
+                },
+                StepStartEvent {
+                    step_id: "consumer".into(),
+                    order: 2
+                }
+            ]
         );
         fs::remove_dir_all(temp).unwrap();
     }

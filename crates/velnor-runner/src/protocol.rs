@@ -1828,6 +1828,32 @@ impl TimelineRecord {
         }
     }
 
+    pub fn task_pending(
+        step_id: impl Into<String>,
+        parent_id: impl Into<String>,
+        name: impl Into<String>,
+        order: i32,
+    ) -> Self {
+        Self {
+            id: step_id.into(),
+            parent_id: Some(parent_id.into()),
+            record_type: TimelineRecordType::Task,
+            name: name.into(),
+            start_time: None,
+            finish_time: None,
+            current_operation: None,
+            percent_complete: Some(0),
+            state: Some(TimelineRecordState::Pending),
+            result: None,
+            worker_name: None,
+            order: Some(order),
+            ref_name: None,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+        }
+    }
+
     pub fn with_issue_counts(
         mut self,
         error_count: i32,
@@ -2495,6 +2521,30 @@ mod tests {
                 "errorCount": 1,
                 "warningCount": 2,
                 "noticeCount": 3
+            })
+        );
+    }
+
+    #[test]
+    fn timeline_record_body_matches_in_progress_task_record_shape() {
+        let record = TimelineRecord::task_pending("step-id", "job-id", "Build", 1)
+            .in_progress("2026-05-31T12:00:00Z");
+        let json = serde_json::to_value(record).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "id": "step-id",
+                "parentId": "job-id",
+                "type": "Task",
+                "name": "Build",
+                "startTime": "2026-05-31T12:00:00Z",
+                "percentComplete": 0,
+                "state": "inProgress",
+                "order": 1,
+                "errorCount": 0,
+                "warningCount": 0,
+                "noticeCount": 0
             })
         );
     }

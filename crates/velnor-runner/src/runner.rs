@@ -12,7 +12,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::task::JoinHandle;
+use tokio::{sync::mpsc::UnboundedReceiver, task::JoinHandle};
 
 use crate::{
     action::{
@@ -28,7 +28,9 @@ use crate::{
     },
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
-    executor::{DockerScriptExecutor, ExecutableStep, ProcessCommandRunner, StepLog},
+    executor::{
+        DockerScriptExecutor, ExecutableStep, ProcessCommandRunner, StepLog, StepStartEvent,
+    },
     github_adapter::{
         github_job_container_spec, github_normalized_job_plan, job_container_name,
         system_connection_access_token, GitHubJobContainerPaths,
@@ -646,6 +648,8 @@ async fn handle_job_request(
             job_container_name(&job),
             canceled.clone(),
         );
+        let (step_start_sender, step_start_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let step_timeline = start_step_timeline_publisher(job.clone(), step_start_receiver);
         let config_dir = config_dir.to_path_buf();
         let work_dir = args.work_dir.clone();
         let docker_image = args.docker_image.clone();
@@ -664,12 +668,20 @@ async fn handle_job_request(
                 billing_owner_id,
                 &job_to_execute,
                 &script_steps,
+                Some(step_start_sender),
             )
         })
         .await
         .context("join Docker job execution task")?;
         cancellation.abort();
         renewal.abort();
+        match tokio::time::timeout(Duration::from_secs(5), step_timeline).await {
+            Ok(Err(error)) if !error.is_cancelled() => {
+                eprintln!("Step timeline publisher failed: {error:#}");
+            }
+            Ok(_) => {}
+            Err(_) => eprintln!("Timed out waiting for best-effort step timeline publisher."),
+        }
         let job_result = match job_result {
             Ok(mut job_result) => {
                 if canceled.load(Ordering::SeqCst) {
@@ -962,6 +974,22 @@ fn start_broker_cancellation_poll(
     })
 }
 
+fn start_step_timeline_publisher(
+    job: AgentJobRequestMessage,
+    mut receiver: UnboundedReceiver<StepStartEvent>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(event) = receiver.recv().await {
+            if let Err(error) = publish_timeline_step_started(&job, &event).await {
+                eprintln!(
+                    "Best-effort timeline step start update failed for '{}': {error:#}",
+                    event.step_id
+                );
+            }
+        }
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct JobCancelMessage {
     #[serde(default, rename = "JobId", alias = "jobId")]
@@ -1034,6 +1062,7 @@ fn execute_script_job(
     billing_owner_id: Option<String>,
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
+    step_start_sender: Option<tokio::sync::mpsc::UnboundedSender<StepStartEvent>>,
 ) -> Result<ScriptJobResult> {
     let job_dir = job_work_dir(config_dir, work_dir, job);
     let workspace = job_dir.join("workspace");
@@ -1122,6 +1151,9 @@ fn execute_script_job(
         .cloned()
         .collect::<Vec<_>>();
     let mut executor = DockerScriptExecutor::new(command_runner);
+    if let Some(sender) = step_start_sender {
+        executor = executor.with_step_start_sender(sender);
+    }
     let summary_result = executor.execute_ordered_steps_with_completion(
         &plan.execution.job_container,
         &plan.steps,
@@ -1685,6 +1717,28 @@ async fn publish_timeline_job_started(
     Ok(())
 }
 
+async fn publish_timeline_step_started(
+    job: &AgentJobRequestMessage,
+    event: &StepStartEvent,
+) -> Result<()> {
+    let Some(context) = timeline_publish_context(job)? else {
+        return Ok(());
+    };
+    let start_time = current_time_rfc3339()?;
+    let record = timeline_step_started_record(job, event, &start_time);
+    context
+        .client
+        .update_timeline_records(
+            &context.scope_identifier,
+            &context.hub_name,
+            &job.plan.plan_id,
+            &job.timeline.id,
+            vec![record],
+        )
+        .await?;
+    Ok(())
+}
+
 async fn publish_timeline_logs(job: &AgentJobRequestMessage, step_logs: &[StepLog]) -> Result<()> {
     if step_logs.is_empty() {
         return Ok(());
@@ -1738,6 +1792,20 @@ fn timeline_started_record(
         job.job_display_name.clone(),
         job.job_name.clone(),
         runner_name.to_string(),
+    )
+    .in_progress(start_time.to_string())
+}
+
+fn timeline_step_started_record(
+    job: &AgentJobRequestMessage,
+    event: &StepStartEvent,
+    start_time: &str,
+) -> TimelineRecord {
+    TimelineRecord::task_pending(
+        event.step_id.clone(),
+        job.job_id.clone(),
+        event.step_id.clone(),
+        event.order,
     )
     .in_progress(start_time.to_string())
 }
@@ -2273,6 +2341,47 @@ mod tests {
                 "state": "inProgress",
                 "workerName": "velnor-1",
                 "refName": "check",
+                "errorCount": 0,
+                "warningCount": 0,
+                "noticeCount": 0
+            })
+        );
+    }
+
+    #[test]
+    fn timeline_step_started_record_marks_task_in_progress() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": {
+                "planId": "plan",
+                "planType": "Build",
+                "scopeIdentifier": "scope"
+            },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1
+        }))
+        .unwrap();
+        let event = StepStartEvent {
+            step_id: "step-1".into(),
+            order: 2,
+        };
+
+        let record = timeline_step_started_record(&job, &event, "2026-06-01T00:00:00Z");
+        let json = serde_json::to_value(record).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "id": "step-1",
+                "parentId": "job",
+                "type": "Task",
+                "name": "step-1",
+                "startTime": "2026-06-01T00:00:00Z",
+                "percentComplete": 0,
+                "state": "inProgress",
+                "order": 2,
                 "errorCount": 0,
                 "warningCount": 0,
                 "noticeCount": 0

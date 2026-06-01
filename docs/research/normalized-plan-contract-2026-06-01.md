@@ -279,11 +279,11 @@ The reporter then performs source-specific completion:
 The current runner already sends V2 `completejob` with conclusion, outputs,
 step results, workflow-command annotations, evaluated environment URL, masked
 job telemetry for implemented workflow-command cases, billing owner id, and
-known Docker environment/bootstrap `infrastructureFailureCategory`. A
-best-effort in-progress job timeline record is sent before Docker execution;
-timeline task records and masked feed lines are uploaded before completion.
-Still-open GitHub parity work is richer per-step in-progress UI log/timeline
-behavior and live validation.
+known Docker environment/bootstrap `infrastructureFailureCategory`.
+Best-effort in-progress job and task timeline records are sent as execution
+starts; completed timeline task records and masked feed lines are uploaded
+before completion. Still-open GitHub parity work is richer live log streaming
+during long-running steps and live validation.
 
 ## Pkl Package Shape
 
