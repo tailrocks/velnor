@@ -351,6 +351,8 @@ Current non-goals:
 - no Pkl package
 - no PQL package or schema
 - no KCL package or schema
+- no parser, evaluator, compiler, binding, or runtime integration for any of
+  those languages
 - no workflow renderer/compiler
 - no replacement for GitHub's YAML parser
 - no Velnor-native scheduler before Phase 0 target proof

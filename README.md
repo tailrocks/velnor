@@ -20,13 +20,16 @@ Out of current scope:
 - no Pkl, PQL, KCL, or Velnor-native workflow authoring
 - no Velnor-native workflow language
 - no typed workflow-language implementation work of any kind
+- no config-language parser, compiler, evaluator, binding, package, schema, or
+  runtime integration work
 - no replacement for GitHub's YAML parser or scheduler
 - no macOS support in Velnor at all; Phase 0 runs Linux jobs only
 - no broad GitHub Actions parity beyond the two target repositories
 
 Any Pkl, PQL, KCL, CUE, Jsonnet, Starlark, Nickel, Dhall, or Nix material under
 `docs/research/` is archived brainstorming only. It is not a requirement, not a
-current design target, and not an implementation plan.
+current design target, and not an implementation plan. It must stay separate
+from Phase 0 runner compatibility work.
 
 ## Direction
 

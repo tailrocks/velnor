@@ -26,7 +26,9 @@ Typed workflow authoring was researched as a future idea, but it is not current
 implementation work. Phase 0 does not replace YAML, parse workflows, introduce
 Pkl/PQL/KCL, or define a Velnor-native workflow language. Existing research
 notes are historical brainstorming only, not an implementation plan. None of
-those languages are required now, selected now, or planned for Phase 0.
+those languages are required now, selected now, or planned for Phase 0. Do not
+add parsers, bindings, schemas, packages, evaluators, compilers, or runtime
+integration for them during Phase 0.
 
 YAML is weak as an authoring language:
 
