@@ -178,6 +178,9 @@ that path with `VELNOR_LIVE_EVIDENCE_DIR`; override log excerpt length with
 `VELNOR_LIVE_EVIDENCE_LOG_LINES`; override local store entry count with
 `VELNOR_LIVE_EVIDENCE_LOCAL_ENTRIES`. Both evidence count values must be
 positive integers and are validated before runner registration.
+If a fixture or target smoke script fails after a GitHub run id is known, it
+also writes a best-effort evidence file with phase `failed-before-completion`
+before cleanup.
 Set `VELNOR_TARGET_WORKFLOW=<workflow.yml>` on target smoke scripts to dispatch
 that workflow before Velnor waits for target jobs.
 Workflow values must be file names ending in `.yml` or `.yaml`.

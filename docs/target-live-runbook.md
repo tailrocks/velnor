@@ -364,6 +364,11 @@ Velnor. Set
 Both evidence count values must be positive integers; smoke scripts validate
 them before runner registration.
 
+If a fixture or target smoke script fails after a GitHub run id is known, it
+writes a best-effort evidence file before cleanup with phase
+`failed-before-completion`. Use that file together with any sanitized job
+payload dump before retrying or changing runner code.
+
 Keep sanitized job payloads for failures:
 
 ```sh
