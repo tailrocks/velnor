@@ -30,6 +30,8 @@ Reference upstream:
 - Velnor drift check: `scripts/check_runner_reference.py`
 - source audit: `docs/research/actions-runner-source-audit-2026-06-01.md`
 - latest V2 refresh: `docs/research/latest-runner-v2-refresh-2026-06-01.md`
+- implementation gap audit:
+  `docs/research/phase-0-implementation-gap-audit-2026-06-01.md`
 
 The 2026-06-01 source refresh found no broker/run-service protocol file changes
 between `v2.334.0` and `origin/main`. The relevant diff in `src/Runner.Listener`,
