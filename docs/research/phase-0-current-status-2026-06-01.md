@@ -119,6 +119,9 @@ Evidence captured on 2026-06-01:
 - `scripts/fixture_status.sh` still shows `compat-velnor (app-a)` and
   `compat-velnor (app-b)` queued until a Velnor self-hosted runner with label
   `velnor-target-mvp` is registered.
+- `scripts/fixture_audit.py` passes against `donbeave/velnor-actions-fixture@main`,
+  checking the current `compat.yml`, `docker.yml`, and local composite action
+  metadata expected by the fixture proof.
 
 This fixture is not a replacement for target-repo proof. It is the next live
 bridge: first make the queued Velnor fixture jobs pass, collect evidence, then
@@ -131,8 +134,9 @@ Current local environment finding:
 - `scripts/live_host_doctor.sh` with the default socket requirement fails before
   registration because `/var/run/docker.sock` does not exist on this host.
 - `scripts/fixture_readiness.sh` confirms the same safe stopping point: fixture
-  GitHub-hosted jobs are complete, Velnor fixture jobs are queued, and host
-  readiness fails before any runner registration or workflow dispatch.
+  GitHub-hosted jobs are complete, Velnor fixture jobs are queued, fixture audit
+  passes, and host readiness fails before any runner registration or workflow
+  dispatch.
 - `VELNOR_REQUIRE_DOCKER_SOCKET=false scripts/live_host_doctor.sh` reaches the
   bind-mount visibility preflight, then fails because the remote Docker daemon
   cannot see `/Users/donbeave/Projects/velnor-project/velnor/.velnor-work`.
@@ -165,8 +169,8 @@ Current local environment finding:
 
 1. Run `scripts/target_verify.sh` and `cargo test -q`.
 2. Run `scripts/fixture_readiness.sh` on the live Linux host and intended
-   workdir. It checks fixture status and live host readiness without registering
-   a runner or dispatching workflows.
+   workdir. It checks fixture status, fixture feature surface, and live host
+   readiness without registering a runner or dispatching workflows.
 3. On a host that passes readiness, run `scripts/fixture_smoke.sh`. This
    registers `donbeave/velnor-actions-fixture` with label `velnor-target-mvp`,
    runs the queued fixture jobs through `daemon --once --slots N`, and confirms

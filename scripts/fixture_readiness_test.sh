@@ -20,9 +20,16 @@ printf 'live-host-doctor\n' >>"$VELNOR_FIXTURE_READINESS_TEST_CALLS"
 EOF
 chmod +x "$tmp_dir/live-host-doctor"
 
+cat >"$tmp_dir/fixture-audit" <<'EOF'
+#!/usr/bin/env bash
+printf 'fixture-audit\n' >>"$VELNOR_FIXTURE_READINESS_TEST_CALLS"
+EOF
+chmod +x "$tmp_dir/fixture-audit"
+
 output="$(
   VELNOR_FIXTURE_READINESS_TEST_CALLS="$calls_file" \
   VELNOR_FIXTURE_STATUS_SCRIPT="$tmp_dir/fixture-status" \
+  VELNOR_FIXTURE_AUDIT_SCRIPT="$tmp_dir/fixture-audit" \
   VELNOR_LIVE_HOST_DOCTOR_SCRIPT="$tmp_dir/live-host-doctor" \
   "$SCRIPT"
 )"
@@ -33,7 +40,7 @@ if [[ "$output" != *"does not register runners or dispatch workflows"* ]]; then
   exit 1
 fi
 
-if [[ "$calls" != $'fixture-status\nlive-host-doctor' ]]; then
+if [[ "$calls" != $'fixture-status\nfixture-audit\nlive-host-doctor' ]]; then
   echo "fixture readiness called unexpected scripts: $calls" >&2
   exit 1
 fi
@@ -41,7 +48,9 @@ fi
 : >"$calls_file"
 VELNOR_FIXTURE_READINESS_TEST_CALLS="$calls_file" \
 VELNOR_FIXTURE_READINESS_CHECK_STATUS=false \
+VELNOR_FIXTURE_READINESS_CHECK_AUDIT=false \
 VELNOR_FIXTURE_STATUS_SCRIPT="$tmp_dir/fixture-status" \
+VELNOR_FIXTURE_AUDIT_SCRIPT="$tmp_dir/fixture-audit" \
 VELNOR_LIVE_HOST_DOCTOR_SCRIPT="$tmp_dir/live-host-doctor" \
   "$SCRIPT" >/dev/null
 calls="$(cat "$calls_file")"
@@ -53,6 +62,7 @@ fi
 
 if VELNOR_FIXTURE_READINESS_CHECK_STATUS=maybe \
   VELNOR_FIXTURE_STATUS_SCRIPT="$tmp_dir/fixture-status" \
+  VELNOR_FIXTURE_AUDIT_SCRIPT="$tmp_dir/fixture-audit" \
   VELNOR_LIVE_HOST_DOCTOR_SCRIPT="$tmp_dir/live-host-doctor" \
   "$SCRIPT" >/dev/null 2>&1; then
   echo "fixture readiness should reject invalid boolean controls" >&2

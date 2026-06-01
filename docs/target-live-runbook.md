@@ -56,8 +56,8 @@ scripts/live_host_doctor.sh
 ```
 
 Before attempting the fixture smoke, run the fixture readiness gate. It checks
-the current fixture workflow status and live host readiness, but does not
-register runners or dispatch workflows:
+the current fixture workflow status, fixture feature surface, and live host
+readiness, but does not register runners or dispatch workflows:
 
 ```sh
 scripts/fixture_readiness.sh

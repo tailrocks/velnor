@@ -119,6 +119,12 @@ dispatching a workflow:
 scripts/fixture_readiness.sh
 ```
 
+The fixture repository feature surface can be audited directly with:
+
+```sh
+scripts/fixture_audit.py
+```
+
 The live proof scripts are Linux-only as well; they fail before runner
 registration on non-Linux hosts, and reject `VELNOR_TARGET_MVP_ARM_LABEL=true`
 unless the host is ARM Linux.
