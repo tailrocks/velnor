@@ -1255,7 +1255,12 @@ fn evaluate_job_outputs(
 }
 
 fn step_log(step_id: &str, result: &StepExecutionResult) -> Option<StepLog> {
-    let lines = step_log_lines(&result.stdout, &result.stderr, &result.state.summary);
+    let lines = step_log_lines(
+        &result.stdout,
+        &result.stderr,
+        &result.state.log_lines,
+        &result.state.summary,
+    );
     (!lines.is_empty()).then(|| StepLog {
         step_id: step_id.to_string(),
         lines,
@@ -1269,12 +1274,18 @@ fn step_log(step_id: &str, result: &StepExecutionResult) -> Option<StepLog> {
     })
 }
 
-fn step_log_lines(stdout: &str, stderr: &str, summary: &str) -> Vec<String> {
+fn step_log_lines(
+    stdout: &str,
+    stderr: &str,
+    command_lines: &[String],
+    summary: &str,
+) -> Vec<String> {
     let mut lines = stdout
         .lines()
         .chain(stderr.lines())
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
+    lines.extend(command_lines.iter().cloned());
     if !summary.is_empty() {
         lines.push("Step summary:".to_string());
         lines.extend(summary.lines().map(ToOwned::to_owned));

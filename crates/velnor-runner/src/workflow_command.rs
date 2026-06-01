@@ -50,13 +50,63 @@ pub fn parse_workflow_commands(output: &str) -> StepCommandState {
                     state.masks.push(command.value);
                 }
             }
-            "error" => state.error_count += 1,
-            "warning" => state.warning_count += 1,
-            "notice" => state.notice_count += 1,
+            "error" => {
+                state.error_count += 1;
+                state.log_lines.push(format_annotation("error", &command));
+            }
+            "warning" => {
+                state.warning_count += 1;
+                state.log_lines.push(format_annotation("warning", &command));
+            }
+            "notice" => {
+                state.notice_count += 1;
+                state.log_lines.push(format_annotation("notice", &command));
+            }
+            "debug" => state.log_lines.push(format!("Debug: {}", command.value)),
+            "group" => state.log_lines.push(format!("Group: {}", command.value)),
+            "endgroup" => state.log_lines.push("End group".to_string()),
             _ => {}
         }
     }
     state
+}
+
+fn format_annotation(kind: &str, command: &WorkflowCommand<'_>) -> String {
+    let mut line = format!("{}: {}", title_case(kind), command.value);
+    if let Some(title) = command
+        .properties
+        .get("title")
+        .filter(|value| !value.is_empty())
+    {
+        line.push_str(&format!(" [{title}]"));
+    }
+    let location = annotation_location(&command.properties);
+    if !location.is_empty() {
+        line.push_str(&format!(" ({location})"));
+    }
+    line
+}
+
+fn annotation_location(properties: &BTreeMap<String, String>) -> String {
+    let mut location = Vec::new();
+    if let Some(file) = properties.get("file").filter(|value| !value.is_empty()) {
+        location.push(file.clone());
+    }
+    if let Some(line) = properties.get("line").filter(|value| !value.is_empty()) {
+        location.push(format!("line {line}"));
+    }
+    if let Some(column) = properties.get("col").filter(|value| !value.is_empty()) {
+        location.push(format!("col {column}"));
+    }
+    location.join(":")
+}
+
+fn title_case(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+        None => String::new(),
+    }
 }
 
 fn parse_workflow_command(line: &str) -> Option<WorkflowCommand<'_>> {
@@ -119,6 +169,14 @@ mod tests {
         assert_eq!(state.error_count, 1);
         assert_eq!(state.warning_count, 1);
         assert_eq!(state.notice_count, 1);
+        assert_eq!(
+            state.log_lines,
+            vec![
+                "Error: broken (src/main.rs:line 7)".to_string(),
+                "Warning: careful".to_string(),
+                "Notice: noted".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -143,5 +201,26 @@ mod tests {
         assert_eq!(state.outputs["answer"], "42");
         assert_eq!(state.error_count, 0);
         assert_eq!(state.warning_count, 1);
+    }
+
+    #[test]
+    fn preserves_annotation_titles_and_group_boundaries() {
+        let state = parse_workflow_commands(
+            "::group::Build\n\
+             ::notice title=sccache stats::hit rate 80%25\n\
+             ::debug::resolved key\n\
+             ::endgroup::\n",
+        );
+
+        assert_eq!(
+            state.log_lines,
+            vec![
+                "Group: Build".to_string(),
+                "Notice: hit rate 80% [sccache stats]".to_string(),
+                "Debug: resolved key".to_string(),
+                "End group".to_string(),
+            ]
+        );
+        assert_eq!(state.notice_count, 1);
     }
 }

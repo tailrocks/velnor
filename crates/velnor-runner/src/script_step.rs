@@ -330,6 +330,7 @@ impl CommandFileSet {
             state: commands_to_map(parse_command_file(&self.state.host)?),
             summary: fs::read_to_string(&self.summary.host)?,
             masks: Vec::new(),
+            log_lines: Vec::new(),
             error_count: 0,
             warning_count: 0,
             notice_count: 0,
@@ -361,6 +362,7 @@ pub struct StepCommandState {
     pub state: BTreeMap<String, String>,
     pub summary: String,
     pub masks: Vec<String>,
+    pub log_lines: Vec<String>,
     pub error_count: i32,
     pub warning_count: i32,
     pub notice_count: i32,
@@ -373,6 +375,7 @@ impl StepCommandState {
         self.path.extend(other.path);
         self.state.extend(other.state);
         self.masks.extend(other.masks);
+        self.log_lines.extend(other.log_lines);
         self.error_count += other.error_count;
         self.warning_count += other.warning_count;
         self.notice_count += other.notice_count;
