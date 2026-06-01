@@ -59,6 +59,48 @@ PQL source -> PQL evaluator/type checker
 PQL must lower into the same execution model as GitHub job messages. It should
 not create a second executor or a second action-adapter system.
 
+## Existing Pkl GitHub Actions Package
+
+There is already an official Pkl package for GitHub Actions workflows:
+
+- package: `pkg.pkl-lang.org/pkl-pantry/com.github.actions`
+- latest package version checked: `1.7.0`
+- package URI:
+  `package://pkg.pkl-lang.org/pkl-pantry/com.github.actions@1.7.0`
+- source:
+  <https://github.com/apple/pkl-pantry/tree/com.github.actions@1.7.0/packages/com.github.actions>
+
+Useful package concepts:
+
+- `Workflow`, `Job`, `Step`, `Container`, and `Action` modules model GitHub
+  Actions YAML concepts directly.
+- `AbstractTypedStep` is explicitly for action steps with type-safe inputs.
+- the package includes typed catalog modules for core `actions/*` and
+  `github/*` actions, including current target-relevant examples such as
+  `actions/checkout@v6`, `actions/cache@v5`, `actions/setup-python@v6`,
+  `actions/upload-artifact@v5`, `actions/download-artifact@v6`,
+  `actions/upload-pages-artifact@v4`, and `actions/deploy-pages@v4`.
+- Pkl's published guidance supports generating typed action definitions for
+  other marketplace actions and extending a catalog with those generated
+  definitions.
+
+This package is the best future reference for keeping PQL visually close to
+GitHub Actions. Velnor should not copy it directly as the runtime model,
+because it primarily models GitHub YAML generation. Velnor's future PQL package
+should instead borrow the familiar vocabulary and typed-step catalog pattern,
+then lower into `NormalizedJobPlan` and Velnor's Rust-native action adapters.
+
+Design consequence:
+
+- For GitHub compatibility mode, PQL can render GitHub-compatible YAML using a
+  package shape close to `com.github.actions`.
+- For Velnor-native mode, the same high-level PQL should lower typed helpers
+  such as `Cache`, `PathFilter`, `DockerBake`, `RequiredGate`, and Pages
+  operations into native plan steps.
+- Generated typed marketplace wrappers are useful for migration, but core
+  target families should still become Velnor-owned primitives when the Rust
+  runner owns their behavior.
+
 ## Design Rules
 
 - Keep GitHub Actions vocabulary where it is already good.
