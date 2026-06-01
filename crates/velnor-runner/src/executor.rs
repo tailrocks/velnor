@@ -1867,10 +1867,12 @@ mod tests {
     impl CommandRunner for FailingPostRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             self.calls.push((program.to_string(), args.to_vec()));
-            let code = if args
-                .iter()
-                .any(|arg| arg.contains("/__a/_actions/sccache/dist/show_stats/index.js"))
-            {
+            let code = if args.iter().any(|arg| {
+                arg.contains("/__a/_actions/sccache/dist/show_stats/index.js")
+                    || arg.contains(
+                        "/__a/_actions/mozilla-actions_sccache-action/dist/show_stats/index.js",
+                    )
+            }) {
                 1
             } else {
                 0
@@ -4990,6 +4992,98 @@ mod tests {
         assert!(!results[0].failure_ignored);
         assert_eq!(results[1].exit_code, 1);
         assert!(results[1].failure_ignored);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn target_sccache_action_soft_fails_and_gates_wrapper_step() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::JavaScript {
+                step_id: "sccache".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path:
+                        "/__a/_actions/mozilla-actions_sccache-action/dist/setup/index.js".into(),
+                    post_container_path: Some(
+                        "/__a/_actions/mozilla-actions_sccache-action/dist/show_stats/index.js"
+                            .into(),
+                    ),
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/mozilla-actions_sccache-action".into(),
+                    env: vec![
+                        (
+                            "INPUT_TOKEN".into(),
+                            "${{ github.server_url == 'https://github.com' && github.token || '' }}"
+                                .into(),
+                        ),
+                        ("INPUT_DISABLE_ANNOTATIONS".into(), "false".into()),
+                    ],
+                },
+                condition: None,
+                continue_on_error: true,
+            },
+            ExecutableStep::Script(ScriptStep {
+                id: "enable-sccache".into(),
+                script: "echo RUSTC_WRAPPER=sccache >> \"$GITHUB_ENV\"".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w".into(),
+                env: Vec::new(),
+                condition: Some("steps.sccache.outcome == 'success'".into()),
+                continue_on_error: false,
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(FailingPostRunner { calls: Vec::new() });
+
+        let results = executor
+            .execute_ordered_steps(
+                &container(&temp),
+                &steps,
+                &[
+                    ("GITHUB_TOKEN".into(), "ghs_token".into()),
+                    ("GITHUB_SERVER_URL".into(), "https://github.com".into()),
+                    ("GITHUB_REPOSITORY".into(), "jackin-project/jackin".into()),
+                    ("RUNNER_TEMP".into(), "/__t".into()),
+                ],
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].exit_code, 0);
+        assert!(!results[1].skipped);
+        assert_eq!(results[2].exit_code, 1);
+        assert!(results[2].failure_ignored);
+        let node_calls = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:24-bookworm".into())
+            })
+            .map(|(_, args)| args)
+            .collect::<Vec<_>>();
+        assert_eq!(node_calls.len(), 2);
+        for call in &node_calls {
+            assert!(call.contains(&"INPUT_TOKEN=ghs_token".into()));
+            assert!(call.contains(&"INPUT_DISABLE_ANNOTATIONS=false".into()));
+            assert!(call.contains(&"GITHUB_REPOSITORY=jackin-project/jackin".into()));
+            assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
+        }
+        assert!(node_calls[0].ends_with(&[
+            "node:24-bookworm".into(),
+            "node".into(),
+            "/__a/_actions/mozilla-actions_sccache-action/dist/setup/index.js".into()
+        ]));
+        assert!(node_calls[1].ends_with(&[
+            "node:24-bookworm".into(),
+            "node".into(),
+            "/__a/_actions/mozilla-actions_sccache-action/dist/show_stats/index.js".into()
+        ]));
         fs::remove_dir_all(temp).unwrap();
     }
 
