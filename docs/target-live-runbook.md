@@ -163,7 +163,9 @@ scripts/java_target_smoke.sh
 It runs the live host doctor, registers `ChainArgos/java-monorepo` with the
 target label preset, validates stored V2/label config, and consumes one queued
 job with `--once`. Set `VELNOR_TARGET_CLEANUP_RUNNER=true` to remove the
-registered runner on exit.
+registered runner on exit. Sanitized job payloads are written to
+`.velnor-job-dumps/java-target` by default; set `VELNOR_DUMP_JOB_MESSAGES=` to
+disable dumps or point it at another directory.
 
 Start Velnor:
 

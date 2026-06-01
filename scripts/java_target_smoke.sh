@@ -10,6 +10,7 @@ DOCKER_HOST_WORK_DIR="${VELNOR_DOCKER_HOST_WORK_DIR:-}"
 REQUIRE_DOCKER_SOCKET="${VELNOR_REQUIRE_DOCKER_SOCKET:-true}"
 IDLE_TIMEOUT_SECONDS="${VELNOR_IDLE_TIMEOUT_SECONDS:-900}"
 CLEANUP_RUNNER="${VELNOR_TARGET_CLEANUP_RUNNER:-false}"
+DUMP_JOB_MESSAGES="${VELNOR_DUMP_JOB_MESSAGES:-$ROOT/.velnor-job-dumps/java-target}"
 REGISTERED_RUNNER=false
 
 cleanup_runner() {
@@ -29,6 +30,9 @@ fi
 cd "$ROOT"
 
 run_args=(--work-dir "$WORK_DIR")
+if [[ -n "$DUMP_JOB_MESSAGES" ]]; then
+  run_args+=(--dump-job-message "$DUMP_JOB_MESSAGES")
+fi
 if [[ -n "$DOCKER_HOST_WORK_DIR" ]]; then
   run_args+=(--docker-host-work-dir "$DOCKER_HOST_WORK_DIR")
 fi

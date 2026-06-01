@@ -78,6 +78,8 @@ The first real target smoke wrapper is:
 scripts/java_target_smoke.sh
 ```
 
+Smoke scripts write sanitized job payloads under `.velnor-job-dumps` by default.
+
 The remaining Phase 0 proof is live GitHub UI validation on the two target
 repositories from a Linux host whose Docker daemon can see Velnor's bind-mounted
 work directory.

@@ -15,6 +15,7 @@ DISPATCH="${VELNOR_FIXTURE_DISPATCH:-false}"
 RUN_ID="${VELNOR_FIXTURE_RUN_ID:-26762850861}"
 JOB_COUNT="${VELNOR_FIXTURE_JOB_COUNT:-2}"
 CLEANUP_RUNNER="${VELNOR_FIXTURE_CLEANUP_RUNNER:-true}"
+DUMP_JOB_MESSAGES="${VELNOR_DUMP_JOB_MESSAGES:-$ROOT/.velnor-job-dumps/fixture}"
 REGISTERED_RUNNER=false
 
 cleanup_runner() {
@@ -42,6 +43,9 @@ echo "==> Checking runner source and local tests"
 cargo test -q
 
 run_args=(--work-dir "$WORK_DIR")
+if [[ -n "$DUMP_JOB_MESSAGES" ]]; then
+  run_args+=(--dump-job-message "$DUMP_JOB_MESSAGES")
+fi
 if [[ -n "$DOCKER_HOST_WORK_DIR" ]]; then
   run_args+=(--docker-host-work-dir "$DOCKER_HOST_WORK_DIR")
 fi
