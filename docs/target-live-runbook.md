@@ -52,7 +52,9 @@ scripts/fixture_smoke.sh
 That script runs the local verifier, Docker preflight, fixture runner
 registration, two Velnor `--once` jobs for the fixture matrix by default, and a
 GitHub run status summary. Override the count with `VELNOR_FIXTURE_JOB_COUNT`
-when the fixture shape changes. The manual equivalent is:
+when the fixture shape changes. Set `VELNOR_FIXTURE_DISPATCH=true` to start a
+fresh `compat.yml` run instead of using the existing queued run id. The manual
+equivalent is:
 
 ```sh
 cargo run --bin velnor-runner -- configure \

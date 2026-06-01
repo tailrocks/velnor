@@ -10,6 +10,8 @@ WORK_DIR="${VELNOR_WORK_DIR:-$ROOT/.velnor-work}"
 DOCKER_HOST_WORK_DIR="${VELNOR_DOCKER_HOST_WORK_DIR:-}"
 REQUIRE_DOCKER_SOCKET="${VELNOR_REQUIRE_DOCKER_SOCKET:-true}"
 IDLE_TIMEOUT_SECONDS="${VELNOR_IDLE_TIMEOUT_SECONDS:-900}"
+WORKFLOW="${VELNOR_FIXTURE_WORKFLOW:-compat.yml}"
+DISPATCH="${VELNOR_FIXTURE_DISPATCH:-false}"
 RUN_ID="${VELNOR_FIXTURE_RUN_ID:-26762850861}"
 JOB_COUNT="${VELNOR_FIXTURE_JOB_COUNT:-2}"
 
@@ -49,6 +51,23 @@ cargo run --bin velnor-runner -- configure \
   --name "$RUNNER_NAME" \
   --labels "$RUNNER_LABEL" \
   --replace
+
+if [[ "$DISPATCH" == "true" ]]; then
+  echo "==> Dispatching fresh fixture workflow $WORKFLOW"
+  gh workflow run "$WORKFLOW" --repo "$FIXTURE_REPO"
+  echo "==> Waiting for dispatched run to appear"
+  for _ in $(seq 1 30); do
+    RUN_ID="$(gh run list --repo "$FIXTURE_REPO" --workflow "$WORKFLOW" --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // ""')"
+    if [[ -n "$RUN_ID" ]]; then
+      break
+    fi
+    sleep 2
+  done
+  if [[ -z "$RUN_ID" ]]; then
+    echo "Timed out waiting for dispatched fixture workflow run." >&2
+    exit 1
+  fi
+fi
 
 echo "==> Fixture run before Velnor"
 gh run view "$RUN_ID" --repo "$FIXTURE_REPO" \
