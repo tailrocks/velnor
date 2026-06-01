@@ -161,9 +161,9 @@ scripts/java_target_smoke.sh
 ```
 
 It runs the live host doctor, registers `ChainArgos/java-monorepo` with the
-target label preset, validates stored V2/label config, and consumes one queued
-job with `--once`. Set `VELNOR_TARGET_CLEANUP_RUNNER=true` to remove the
-registered runner on exit. Sanitized job payloads are written to
+target label preset, validates stored V2/label config, and consumes queued jobs
+with repeated `--once` runs. Set `VELNOR_TARGET_CLEANUP_RUNNER=true` to remove
+the registered runner on exit. Sanitized job payloads are written to
 `.velnor-job-dumps/java-target` by default; set `VELNOR_DUMP_JOB_MESSAGES=` to
 disable dumps or point it at another directory. Set
 `VELNOR_TARGET_WORKFLOW=ansible.yml` to have the script dispatch the first
@@ -193,10 +193,10 @@ workflow dispatch, or runner registration are wrong.
 
 Initial recommended runs, in this order:
 
-1. `ansible.yml`: smallest `hetzner-sentry-ci` target, validates checkout, setup-python, defaults.run working directory, and bash script execution.
-2. `rust.yml`: validates path-filter outputs, required-job gates, setup/toolchain path propagation, and job status handling.
-3. `rust-docker.yml` or `rust-docker-build.yml`: validates Docker socket/CLI/Buildx, Docker Hub login, Buildx/Bake, cache env, and Docker action input/output flow.
-4. `kestra-build-publish.yml`: validates GitHub-expanded reusable workflow jobs using `kestra-build-image.yml`.
+1. `ansible.yml`: smallest `hetzner-sentry-ci` target; validates checkout, setup-python, defaults.run working directory, and bash script execution. Use `VELNOR_TARGET_JOB_COUNT=1`.
+2. `rust.yml`: validates path-filter outputs, required-job gates, setup/toolchain path propagation, and job status handling. Use workflow inputs to start narrow, for example `VELNOR_TARGET_INPUTS=packages=bitcoin-processor-app`, then raise `VELNOR_TARGET_JOB_COUNT` as GitHub queues additional package jobs.
+3. `rust-docker.yml` or `rust-docker-build.yml`: validates Docker socket/CLI/Buildx, Docker Hub login, Buildx/Bake, cache env, and Docker action input/output flow. Use `VELNOR_TARGET_INPUTS=push=false` for rehearsal runs.
+4. `kestra-build-publish.yml`: validates GitHub-expanded reusable workflow jobs using `kestra-build-image.yml`; set `VELNOR_TARGET_JOB_COUNT` high enough to drain the selected reusable build jobs.
 
 Run without `--once` after the first smoke job is clean:
 
@@ -217,7 +217,7 @@ scripts/jackin_target_smoke.sh
 
 It uses the same host readiness, target label preset, V2 config validation,
 sanitized job dumps, optional `VELNOR_TARGET_WORKFLOW=<workflow.yml>` dispatch,
-and `--once` execution shape as `scripts/java_target_smoke.sh`.
+and repeated `--once` execution shape as `scripts/java_target_smoke.sh`.
 Set `VELNOR_TARGET_MVP_ARM_LABEL=true` only on an ARM Linux host to add the
 `ubuntu-24.04-arm` label.
 
@@ -236,9 +236,9 @@ Only add `--target-mvp-arm-label` on an ARM Linux host. macOS labels are intenti
 
 Recommended Jackin live sequence:
 
-1. `ci.yml` Linux jobs: validates checkout, paths-filter, sccache soft-fail gate, mise, cache, artifact upload, aggregate-needs.
-2. `construct.yml`: validates Docker Buildx direct shell commands, Docker login, artifact upload/download, and aggregate-needs.
-3. `docs.yml`: validates Pages artifact/deploy runtime env, environment URL output, sitemap output, check-deployed-docs local action, and docs required aggregator.
+1. `ci.yml` Linux jobs: validates checkout, paths-filter, sccache soft-fail gate, mise, cache, artifact upload, aggregate-needs. Start with the `changes` job and then raise `VELNOR_TARGET_JOB_COUNT` to cover the queued Linux jobs.
+2. `construct.yml`: validates Docker Buildx direct shell commands, Docker login, artifact upload/download, and aggregate-needs. Use a non-publishing ref first, then add publish paths after Docker Buildx is proven.
+3. `docs.yml`: validates Pages artifact/deploy runtime env, environment URL output, sitemap output, check-deployed-docs local action, and docs required aggregator. Use workflow dispatch on a branch first, then main-branch deployment after dry paths pass.
 
 ## Evidence To Capture
 

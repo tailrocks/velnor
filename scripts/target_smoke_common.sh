@@ -29,6 +29,11 @@ cleanup_runner() {
 
 trap cleanup_runner EXIT
 
+if ! [[ "$JOB_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "VELNOR_TARGET_JOB_COUNT must be a positive integer." >&2
+  exit 2
+fi
+
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   echo "GITHUB_TOKEN is required to register the target self-hosted runner." >&2
   exit 2
