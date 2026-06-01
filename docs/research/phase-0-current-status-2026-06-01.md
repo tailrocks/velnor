@@ -52,6 +52,8 @@ Latest local verifier evidence:
   fixture audit/readiness/report/defaults/status self-tests, live
   evidence/sequence helper self-tests, smoke failure evidence self-test, and
   workflow dispatch helper self-test.
+- `cargo test -q` passed on 2026-06-01 with 289 unit tests and 1 integration
+  test.
 - `scripts/check_runner_reference.py` reported `actions/runner` `v2.334.0` as
   current during that verifier run.
 
