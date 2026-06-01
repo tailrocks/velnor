@@ -2563,8 +2563,11 @@ mod tests {
 
     #[test]
     fn cached_target_action_metadata_expressions_use_supported_subset() {
-        let actions_root = Path::new("/tmp/velnor-actions");
-        if !actions_root.exists() {
+        let action_roots = [
+            Path::new("/tmp/velnor-actions"),
+            Path::new("/tmp/velnor-targets/jackin/.github/actions"),
+        ];
+        if action_roots.iter().all(|root| !root.exists()) {
             return;
         }
 
@@ -2594,26 +2597,28 @@ mod tests {
             &workspace,
         );
 
-        for path in action_metadata_files(actions_root) {
-            let contents = fs::read_to_string(&path).unwrap();
-            let yaml = serde_yaml::from_str::<serde_yaml::Value>(&contents).unwrap();
-            let mut strings = Vec::new();
-            collect_yaml_strings(&yaml, &mut strings);
-            for value in strings {
-                if value.contains("${{") {
-                    let rendered = state.resolve_expressions(value);
-                    assert!(
-                        !rendered.contains("${{"),
-                        "{} left unresolved expression in {value:?}: {rendered:?}",
-                        path.display()
-                    );
+        for root in action_roots.into_iter().filter(|root| root.exists()) {
+            for path in action_metadata_files(root) {
+                let contents = fs::read_to_string(&path).unwrap();
+                let yaml = serde_yaml::from_str::<serde_yaml::Value>(&contents).unwrap();
+                let mut strings = Vec::new();
+                collect_yaml_strings(&yaml, &mut strings);
+                for value in strings {
+                    if value.contains("${{") {
+                        let rendered = state.resolve_expressions(value);
+                        assert!(
+                            !rendered.contains("${{"),
+                            "{} left unresolved expression in {value:?}: {rendered:?}",
+                            path.display()
+                        );
+                    }
                 }
-            }
 
-            let mut conditions = Vec::new();
-            collect_yaml_key_strings(&yaml, "if", &mut conditions);
-            for condition in conditions {
-                state.evaluate_condition(Some(condition));
+                let mut conditions = Vec::new();
+                collect_yaml_key_strings(&yaml, "if", &mut conditions);
+                for condition in conditions {
+                    state.evaluate_condition(Some(condition));
+                }
             }
         }
     }
