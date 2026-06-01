@@ -170,13 +170,18 @@ pub(crate) fn step_environment(step: &ActionStep) -> Result<Vec<(String, String)
         .ok_or_else(|| anyhow::anyhow!("step environment must be an object"))?;
     object
         .iter()
-        .map(|(name, value)| {
-            let value = value
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("step environment '{name}' must be a string"))?;
-            Ok((name.clone(), value.to_string()))
-        })
+        .map(|(name, value)| Ok((name.clone(), environment_value(value))))
         .collect()
+}
+
+fn environment_value(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(value) => value.clone(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        _ => String::new(),
+    }
 }
 
 pub(crate) fn github_shell(shell: &str) -> Result<Shell> {
@@ -525,6 +530,8 @@ mod tests {
                 },
                 "environment": {
                     "CARGO_TERM_COLOR": "always",
+                    "CARGO_INCREMENTAL": 0,
+                    "RENOVATE_ONBOARDING": false,
                     "TOKEN": "${{ github.token }}"
                 }
             },
@@ -551,7 +558,9 @@ mod tests {
         assert_eq!(
             mapped[0].env,
             vec![
+                ("CARGO_INCREMENTAL".into(), "0".into()),
                 ("CARGO_TERM_COLOR".into(), "always".into()),
+                ("RENOVATE_ONBOARDING".into(), "false".into()),
                 ("TOKEN".into(), "${{ github.token }}".into()),
             ]
         );
