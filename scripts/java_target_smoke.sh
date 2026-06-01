@@ -29,6 +29,13 @@ if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   exit 2
 fi
 
+if [[ -n "$WORKFLOW" || -n "$RUN_ID" ]]; then
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "GitHub CLI 'gh' is required when VELNOR_TARGET_WORKFLOW or VELNOR_TARGET_RUN_ID is set." >&2
+    exit 2
+  fi
+fi
+
 cd "$ROOT"
 
 run_args=(--work-dir "$WORK_DIR")
@@ -58,10 +65,6 @@ echo "==> Checking target MVP runner config"
 cargo run --bin velnor-runner -- status --check-target-mvp
 
 if [[ -n "$WORKFLOW" ]]; then
-  if ! command -v gh >/dev/null 2>&1; then
-    echo "GitHub CLI 'gh' is required when VELNOR_TARGET_WORKFLOW is set." >&2
-    exit 2
-  fi
   echo "==> Dispatching target workflow $WORKFLOW"
   gh workflow run "$WORKFLOW" --repo "$TARGET_REPO"
   echo "==> Waiting for dispatched run to appear"
