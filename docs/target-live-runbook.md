@@ -54,6 +54,27 @@ Docker environment can run the mounted job workspace. Use `--skip-preflight`
 only for `--complete-noop`, `--dry-run-jobs`, or a deliberately controlled
 diagnostic run.
 
+## Docker From Job Containers
+
+Velnor runs each Linux job inside a Docker job container. For the target
+workflows, that job container must also be able to run Docker commands itself.
+The Phase 0 model is Docker-outside-of-Docker:
+
+- Velnor mounts the host Docker socket at `/var/run/docker.sock` inside the job
+  container.
+- Velnor mounts the host Docker CLI at `/usr/local/bin/docker` when it can find
+  it.
+- Velnor mounts the host Docker CLI plugin directory at
+  `/usr/local/lib/docker/cli-plugins` when it can find Buildx.
+- Native Docker adapters and any shell steps that run `docker ...` or
+  `docker buildx ...` talk to the host daemon through that socket.
+
+This intentionally prioritizes compatibility with GitHub Actions Docker/Buildx
+workflows over strict container isolation. A later phase can add a DinD or
+rootless/containerized daemon mode, but Phase 0 uses the host socket because the
+two target repositories need Buildx/Bake and direct Docker commands to work from
+inside the job container.
+
 ## Run Public Fixture First
 
 Before the real target repositories, use the public fixture:
@@ -132,6 +153,17 @@ cargo run --bin velnor-runner -- status --check-target-mvp
 ```
 
 ## Run Java Target
+
+After the public fixture passes, the first real target smoke can be run with:
+
+```sh
+scripts/java_target_smoke.sh
+```
+
+It runs the live host doctor, registers `ChainArgos/java-monorepo` with the
+target label preset, validates stored V2/label config, and consumes one queued
+job with `--once`. Set `VELNOR_TARGET_CLEANUP_RUNNER=true` to remove the
+registered runner on exit.
 
 Start Velnor:
 
