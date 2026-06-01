@@ -354,7 +354,7 @@ cargo run --bin velnor-runner -- run \
 Remove the runner after live validation:
 
 ```sh
-cargo run --bin velnor-runner -- remove --pat "$GITHUB_TOKEN"
+cargo run --bin velnor-runner -- remove --pat "$GITHUB_TOKEN" --slots 1
 ```
 
 Delete `.velnor-work` only after logs, sanitized payloads, and GitHub run URLs are captured.

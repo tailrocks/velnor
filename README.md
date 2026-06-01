@@ -65,7 +65,7 @@ cargo run --bin velnor-runner -- daemon \
   --replace \
   --slots 2
 cargo run --bin velnor-runner -- run
-cargo run --bin velnor-runner -- remove --pat "$GITHUB_TOKEN"
+cargo run --bin velnor-runner -- remove --pat "$GITHUB_TOKEN" --slots 2
 ```
 
 `configure` validates runner scope URLs, can request a short-lived GitHub runner
@@ -84,7 +84,8 @@ With `--slots N` where `N > 1`, slot configs live under `<config-dir>/slots/slot
 `<config-dir>/slots/slot-2`, and so on; each slot also receives its own `slot-N`
 child under any explicit work, Docker-host work, or job-message dump directory.
 GitHub sees multiple runner identities/sessions, while the operator runs one
-daemon binary with one concurrency setting.
+daemon binary with one concurrency setting. Use `remove --slots N` to unregister
+and delete the same internal slot configs created by `daemon --slots N`.
 
 Local target coverage is checked with:
 

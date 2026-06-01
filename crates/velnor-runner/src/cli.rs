@@ -268,6 +268,10 @@ pub struct RemoveArgs {
     #[arg(long)]
     pub local_only: bool,
 
+    /// Number of daemon slot configs to remove. For --slots > 1, removes <config-dir>/slots/slot-N.
+    #[arg(long, default_value_t = 1)]
+    pub slots: usize,
+
     /// Store configuration under this directory.
     #[arg(long)]
     pub config_dir: Option<PathBuf>,

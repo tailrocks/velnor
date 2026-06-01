@@ -2562,7 +2562,28 @@ fn credential_str(credentials: &StoredCredentials, key: &str) -> Result<String> 
 }
 
 pub async fn remove(args: RemoveArgs) -> Result<()> {
-    let dir = config::config_dir(args.config_dir)?;
+    let config_base = config::config_dir(args.config_dir.clone())?;
+
+    for (slot_index, dir) in daemon_slot_config_dirs(&config_base, args.slots)?
+        .into_iter()
+        .enumerate()
+    {
+        remove_one(&args, &dir)
+            .await
+            .with_context(|| format!("remove daemon slot-{}", slot_index + 1))?;
+    }
+
+    Ok(())
+}
+
+fn daemon_slot_config_dirs(config_base: &Path, slots: usize) -> Result<Vec<PathBuf>> {
+    let slots = validate_daemon_slots(slots)?;
+    Ok((1..=slots)
+        .map(|slot_index| daemon_slot_config_dir(config_base, slot_index, slots))
+        .collect())
+}
+
+async fn remove_one(args: &RemoveArgs, dir: &Path) -> Result<()> {
     let stored = config::load(&dir).ok();
 
     if !args.local_only && (args.token.is_some() || args.pat.is_some()) {
@@ -2998,6 +3019,21 @@ mod tests {
             Some(Path::new("/tmp/jobs/slot-2").to_path_buf())
         );
         assert!(!run_args.once);
+    }
+
+    #[test]
+    fn daemon_slot_config_dirs_match_single_and_multislot_layouts() {
+        assert_eq!(
+            daemon_slot_config_dirs(Path::new("/config"), 1).unwrap(),
+            vec![Path::new("/config").to_path_buf()]
+        );
+        assert_eq!(
+            daemon_slot_config_dirs(Path::new("/config"), 2).unwrap(),
+            vec![
+                Path::new("/config/slots/slot-1").to_path_buf(),
+                Path::new("/config/slots/slot-2").to_path_buf()
+            ]
+        );
     }
 
     #[test]
