@@ -17,8 +17,9 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
+    io::Write,
     path::{Path, PathBuf},
-    process::{Command, ExitStatus},
+    process::{Command, ExitStatus, Stdio},
     thread,
     time::Duration,
 };
@@ -35,6 +36,16 @@ pub struct CommandResult {
 
 pub trait CommandRunner {
     fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult>;
+
+    fn run_with_stdin(
+        &mut self,
+        program: &str,
+        args: &[String],
+        stdin: &str,
+    ) -> Result<CommandResult> {
+        let _ = stdin;
+        self.run(program, args)
+    }
 }
 
 pub fn render_context_expressions(value: &str, context_data: &[(String, Value)]) -> String {
@@ -72,6 +83,35 @@ impl CommandRunner for ProcessCommandRunner {
             .args(args)
             .output()
             .with_context(|| format!("run {program} {}", args.join(" ")))?;
+
+        Ok(CommandResult {
+            code: exit_code(output.status)?,
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+
+    fn run_with_stdin(
+        &mut self,
+        program: &str,
+        args: &[String],
+        stdin: &str,
+    ) -> Result<CommandResult> {
+        let mut child = Command::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
+        if let Some(mut child_stdin) = child.stdin.take() {
+            child_stdin
+                .write_all(stdin.as_bytes())
+                .with_context(|| format!("write stdin for {program} {}", args.join(" ")))?;
+        }
+        let output = child
+            .wait_with_output()
+            .with_context(|| format!("wait for {program} {}", args.join(" ")))?;
 
         Ok(CommandResult {
             code: exit_code(output.status)?,
@@ -1202,11 +1242,10 @@ where
             registry,
             "--username".to_string(),
             username,
-            "--password".to_string(),
-            password,
+            "--password-stdin".to_string(),
         ];
         Ok(native_command_result(
-            self.runner.run("docker", &args)?,
+            self.runner.run_with_stdin("docker", &args, &password)?,
             StepCommandState::default(),
         ))
     }
@@ -3636,12 +3675,34 @@ mod tests {
     #[derive(Default)]
     struct RecordingRunner {
         calls: Vec<(String, Vec<String>)>,
+        stdin: Vec<String>,
         codes: Vec<i32>,
     }
 
     impl CommandRunner for RecordingRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             self.calls.push((program.to_string(), args.to_vec()));
+            self.stdin.push(String::new());
+            let code = if self.codes.is_empty() {
+                0
+            } else {
+                self.codes.remove(0)
+            };
+            Ok(CommandResult {
+                code,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_with_stdin(
+            &mut self,
+            program: &str,
+            args: &[String],
+            stdin: &str,
+        ) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            self.stdin.push(stdin.to_string());
             let code = if self.codes.is_empty() {
                 0
             } else {
@@ -3971,7 +4032,8 @@ mod tests {
 
         executor.start_job_environment_once(&spec).unwrap();
 
-        let calls = &executor.runner().calls;
+        let runner = executor.runner();
+        let calls = &runner.calls;
         assert_eq!(calls[2].1[0], "exec");
         assert!(calls[2]
             .1
@@ -3988,6 +4050,7 @@ mod tests {
         spec.verify_bind_mounts = true;
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
+            stdin: Vec::new(),
             codes: vec![0, 0, 1],
         });
 
@@ -4030,7 +4093,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.exit_code, 0);
-        let calls = &executor.runner().calls;
+        let runner = executor.runner();
+        let calls = &runner.calls;
         assert_eq!(
             calls[0],
             (
@@ -4079,6 +4143,7 @@ mod tests {
         };
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
+            stdin: Vec::new(),
             codes: vec![0, 0, 7, 0, 0],
         });
 
@@ -4125,7 +4190,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(results.len(), 2);
-        let calls = &executor.runner().calls;
+        let runner = executor.runner();
+        let calls = &runner.calls;
         assert_eq!(calls.len(), 6);
         assert_eq!(calls[0].1[0], "network");
         assert_eq!(calls[1].1[0], "run");
@@ -4599,7 +4665,8 @@ type=sha,format=long,prefix=,enable=true"
         assert!(results[2].state.outputs["labels"].contains(
             "org.opencontainers.image.source=https://github.com/ChainArgos/java-monorepo"
         ));
-        let calls = &executor.runner().calls;
+        let runner = executor.runner();
+        let calls = &runner.calls;
         assert!(calls.iter().any(|(program, args)| {
             program == "docker"
                 && args.starts_with(&[
@@ -4609,7 +4676,7 @@ type=sha,format=long,prefix=,enable=true"
                     "velnor-builder".into(),
                 ])
         }));
-        assert!(calls.iter().any(|(program, args)| {
+        let login_call = calls.iter().position(|(program, args)| {
             program == "docker"
                 && args
                     == &[
@@ -4617,10 +4684,11 @@ type=sha,format=long,prefix=,enable=true"
                         "https://index.docker.io/v1/".to_string(),
                         "--username".to_string(),
                         "docker-user".to_string(),
-                        "--password".to_string(),
-                        "docker-token".to_string(),
+                        "--password-stdin".to_string(),
                     ]
-        }));
+        });
+        assert!(login_call.is_some());
+        assert_eq!(runner.stdin[login_call.unwrap()], "docker-token");
         assert!(calls.iter().any(|(program, args)| {
             program == "docker"
                 && args.first().is_some_and(|arg| arg == "buildx")
@@ -4873,6 +4941,7 @@ type=sha,format=long,prefix=,enable=true"
         }];
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
+            stdin: Vec::new(),
             codes: vec![1, 0, 0, 0, 0, 0, 0, 0],
         });
 
@@ -6572,6 +6641,7 @@ fi"#
         )];
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
+            stdin: Vec::new(),
             codes: vec![0, 0, 1],
         });
 
@@ -6641,6 +6711,7 @@ fi"#
         ];
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
+            stdin: Vec::new(),
             codes: vec![0, 0, 7, 0, 0],
         });
 
@@ -6702,6 +6773,7 @@ fi"#
         ];
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
+            stdin: Vec::new(),
             codes: vec![0, 0, 1, 0, 0, 0],
         });
 
@@ -8576,6 +8648,7 @@ bitcoin-processor-app.push=true")
         }];
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
+            stdin: Vec::new(),
             codes: vec![0, 0, 9, 0, 0],
         });
 
@@ -8641,6 +8714,7 @@ bitcoin-processor-app.push=true")
         ];
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
+            stdin: Vec::new(),
             codes: vec![0, 0, 0, 1, 0, 0],
         });
 

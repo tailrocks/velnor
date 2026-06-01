@@ -110,7 +110,7 @@ until a new target workflow needs more.
 | `crazy-max/ghaction-github-runtime` | `GitHubRuntimeExport` | export runtime/cache/results env values |
 | `renovatebot/github-action` | `Renovate` | run Renovate with target env/token/Docker access |
 | `docker/setup-buildx-action` | `DockerSetupBuildx` | create/select builder and honor target inputs |
-| `docker/login-action` | `DockerLogin` | registry login from resolved credentials |
+| `docker/login-action` | `DockerLogin` | registry login from resolved credentials through `--password-stdin` |
 | `docker/metadata-action` | `DockerMetadata` | compute target tags/labels outputs |
 | `docker/build-push-action` | `DockerBuildPush` | invoke Buildx for target context/tag/cache/push shapes |
 | `docker/bake-action` | `DockerBake` | invoke Buildx Bake for target file/target/push/cache shapes |
