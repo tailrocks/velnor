@@ -7,3 +7,6 @@ dist/
 build/
 target/
 coverage/
+.velnor-work/
+.velnor-job-dumps/
+target-job-payloads/
