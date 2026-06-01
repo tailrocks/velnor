@@ -115,7 +115,7 @@ For Phase 0, we can either:
 1. Change only runner labels in `jackin` workflows to a Velnor self-hosted label, or
 2. Provide Velnor runner labels matching selected hosted labels.
 
-Option 2 is more "magic" but risky because labels like `macos-latest` imply OS capabilities that a Linux Docker runner cannot provide. Phase 0 should target Linux jobs first and explicitly defer macOS hosted-runner replacement.
+Option 2 is more "magic" but risky because labels like `macos-latest` imply OS capabilities that a Linux Docker runner cannot provide. Velnor should target Linux jobs only and should not claim macOS hosted-runner replacement.
 
 ## Docker Isolation Model
 

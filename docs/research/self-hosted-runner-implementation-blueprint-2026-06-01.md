@@ -171,7 +171,7 @@ Runtime requirements:
 
 ### `jackin-project/jackin`
 
-This is the second target because it has hosted-runner labels and macOS/ARM
+This is the second target because it has hosted-runner labels and ARM
 matrix legs.
 
 Required workflows:
@@ -189,7 +189,7 @@ Phase 0 scope:
 
 - Linux jobs on `ubuntu-latest`, `ubuntu-24.04`, and optionally
   `ubuntu-24.04-arm`
-- macOS matrix legs are not Docker-runner work
+- macOS matrix legs are not Velnor runner work
 - GitHub Pages actions are required for docs flows
 - upload/download artifacts are required for preview/release flows
 - external checkout of `jackin-project/homebrew-tap` with explicit token/path/ref

@@ -267,7 +267,8 @@ cargo run --bin velnor-runner -- configure \
   --replace
 ```
 
-Only add `--target-mvp-arm-label` on an ARM Linux host. macOS labels are intentionally out of Phase 0.
+Only add `--target-mvp-arm-label` on an ARM Linux host. Do not add macOS labels;
+macOS runner replacement is not a Velnor target.
 
 Recommended Jackin live sequence:
 

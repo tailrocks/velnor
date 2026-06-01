@@ -196,12 +196,12 @@ Observed action/runtime needs:
 
 - mostly `ubuntu-latest` and `ubuntu-24.04`
 - some `runs-on: ${{ matrix.os }}` and `runs-on: ${{ matrix.runner }}`
-- Linux, ARM Linux, and macOS targets
+- Linux and optional ARM Linux targets
 - local composite actions in `.github/actions`
 - GitHub Pages deploy actions
 - artifact-heavy preview/release flows
 
-Jackin first-pass scope should be Linux jobs only. macOS replacement is explicitly out of Phase 0 unless Velnor later has a macOS executor.
+Jackin scope should be Linux jobs only. macOS replacement is not a Velnor target.
 
 ## Action Support Order
 

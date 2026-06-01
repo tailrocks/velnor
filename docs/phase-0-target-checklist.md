@@ -182,7 +182,7 @@ Still needs live proof:
 
 Out of current Docker-Linux scope:
 
-- macOS matrix legs
+- macOS runner replacement is not a Velnor target
 - ARM Linux labels unless running on an actual ARM Linux host
 - full hosted-runner image parity beyond target workflow needs
 - broad marketplace action compatibility beyond the target action inventory

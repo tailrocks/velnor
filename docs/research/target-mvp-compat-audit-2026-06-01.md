@@ -67,7 +67,7 @@ Phase 0 target:
 
 - `ChainArgos/java-monorepo` is the first live target because all jobs use `hetzner-sentry-ci`.
 - Linux `jackin` jobs need Velnor registered with compatible Linux labels such as `ubuntu-latest`, `ubuntu-24.04`, and optionally `ubuntu-24.04-arm`.
-- macOS `jackin` matrix legs are not Phase 0 Docker runner work unless they are retargeted or skipped.
+- macOS `jackin` matrix legs are not Velnor runner work.
 
 ## Action Inventory
 
@@ -326,6 +326,6 @@ Live runbook: `docs/target-live-runbook.md`.
 1. Register Velnor with labels needed by `java-monorepo` first: `hetzner-sentry-ci`. The CLI `--target-mvp-labels` preset now adds this plus the x64 Linux Jackin labels.
 2. Run one small `java-monorepo` workflow through GitHub UI on Velnor.
 3. Run Docker-heavy `rust-docker.yml` or `rust-docker-build.yml` on a host where Docker bind mounts are visible to the daemon.
-4. Add labels or temporary retargeting for Linux `jackin` jobs. `--target-mvp-labels` covers `ubuntu-latest` and `ubuntu-24.04`; use `--target-mvp-arm-label` only on an ARM Linux runner; macOS labels remain excluded.
+4. Add labels or temporary retargeting for Linux `jackin` jobs. `--target-mvp-labels` covers `ubuntu-latest` and `ubuntu-24.04`; use `--target-mvp-arm-label` only on an ARM Linux runner; macOS labels remain excluded because macOS runner replacement is not a target.
 5. Run `jackin` Linux CI/construct/docs paths.
 6. Verify GitHub UI logs, annotations, cache/artifact behavior, job outputs, required aggregator jobs, and final success/failure statuses match the existing GitHub Actions experience.

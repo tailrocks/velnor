@@ -102,8 +102,8 @@ Source anchors:
 
 Velnor should keep its current model: fresh Docker job container for every
 target Linux job, shared workspace/temp/home/actions/tools mounts across job
-container, JavaScript sidecars, and Docker action containers, plus host Docker
-socket/CLI/Buildx mounts for the Docker-heavy target workflows.
+container and any action helper containers, plus host Docker socket/CLI/Buildx
+mounts for the Docker-heavy target workflows.
 
 ## Target-Repos Implementation Order
 
@@ -122,8 +122,8 @@ proof is:
    Velnor's `--target-mvp-labels` preset covers x64 labels:
    `hetzner-sentry-ci`, `ubuntu-latest`, and `ubuntu-24.04`. Add
    `--target-mvp-arm-label` only on an ARM Linux runner; macOS labels remain
-   excluded.
-7. Defer macOS `jackin` matrix legs and broad hosted-image parity.
+   excluded because macOS runner replacement is not a Velnor target.
+7. Exclude macOS `jackin` matrix legs and broad hosted-image parity.
 
 ## Current Velnor Delta After Refresh
 

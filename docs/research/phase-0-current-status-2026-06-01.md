@@ -144,7 +144,7 @@ Current local environment finding:
 | Live GitHub UI run on ChainArgos Rust workflows | Local unit tests cannot prove GitHub accepts the full live protocol and renders logs/status correctly. | Run `ansible.yml`, then `rust.yml`, then Docker/Buildx-heavy workflows through a registered Velnor runner. |
 | Live GitHub UI run on `jackin` Linux paths | `jackin` has Linux hosted labels plus artifact/pages/homebrew flows that must work without YAML changes for selected Linux jobs. | Register with target x64 labels and run `ci.yml`, `construct.yml`, and `docs.yml` Linux paths. |
 | GitHub artifact/cache service transport | Current artifact/cache handoff is shared-workdir local storage, good for one-host proof but not multi-runner parity. | Either prove target live jobs run on one host with shared workdir or implement service-backed transport before multi-host validation. |
-| MacOS matrix legs | Docker Linux runner cannot truthfully replace `macos-latest`. | Explicitly defer or run those legs on real macOS Velnor workers later. |
+| MacOS matrix legs | Docker Linux runner cannot truthfully replace `macos-latest`. | Not a Velnor target; keep those legs outside Velnor. |
 | Hosted image parity | Velnor uses a Docker image with common tools; it is not a byte-for-byte GitHub-hosted runner image. | Target workflow live runs prove enough parity for current scripts. |
 | Broad GitHub Actions compatibility | Not a Phase 0 requirement. | Add only when new target workflows need more features. |
 

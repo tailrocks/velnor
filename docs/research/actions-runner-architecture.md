@@ -6,6 +6,9 @@ Source inspected:
 
 - https://github.com/actions/runner
 - latest local refresh during implementation: `c6a124e18496a6e5d2357415052d1799afc64b63`
+- latest release refresh: `v2.334.0`
+  `f1995ede5d885c997d13d8eca5467c4ce97fe69c`; see
+  [latest-runner-v2-refresh-2026-06-01.md](latest-runner-v2-refresh-2026-06-01.md)
 
 Key files:
 
@@ -175,13 +178,21 @@ Official runner handler types:
 - Docker/container action
 - plugin/internal action
 
-Phase 0 needs:
+Phase 0 Velnor needs:
 
 - script step
-- JavaScript action
-- composite action
-- Docker action
-- enough built-in/plugin behavior for checkout/artifact/cache actions to work through normal action packages
+- composite action expansion for the target local actions
+- enough action metadata parsing to understand target repository and composite
+  action shape
+- Rust-native adapters for every target marketplace action family
+- Docker execution support for target shell steps and native Docker adapters
+
+Phase 0 intentionally does not execute marketplace JavaScript/TypeScript
+bundles. The YAML still says `uses: actions/cache@...`,
+`uses: docker/build-push-action@...`, etc., but Velnor ignores the pinned
+implementation package and routes those known action families to Rust-native
+adapters. Unknown marketplace actions should fail explicitly until they are
+added to the supported target inventory.
 
 ## Runtime Context Env
 
@@ -202,8 +213,13 @@ Important step-scoped behavior from `StepsRunner` and `ActionRunner`:
 
 Velnor implications:
 
-- `GITHUB_ACTION` must be step-scoped for script, JavaScript, Docker, checkout, and composite-output pseudo-steps before condition/env/script rendering.
-- Repository JavaScript/Docker actions get their action-scoped env overlay for `GITHUB_ACTION_PATH`, `GITHUB_ACTION_REPOSITORY`, and `GITHUB_ACTION_REF` before action env/input expressions are resolved.
+- `GITHUB_ACTION` must be step-scoped for script, native action adapter,
+  Docker, checkout, and composite-output pseudo-steps before
+  condition/env/script rendering.
+- Repository action steps get their action-scoped env overlay for
+  `GITHUB_ACTION_PATH`, `GITHUB_ACTION_REPOSITORY`, and `GITHUB_ACTION_REF`
+  before action env/input expressions are resolved, even when the marketplace
+  action is executed by a Rust-native adapter.
 - Composite `run:` steps need `GITHUB_ACTION_PATH` pointing at the parent composite action directory, including repository composites expanded from marketplace actions.
 - `github.action_status` is lower priority for the target repositories because no target workflow/action currently references it. Velnor now tracks composite execution boundaries so embedded composite steps resolve it from the current composite scope; top-level steps fall back to current job status.
 
@@ -294,12 +310,13 @@ Phase 0 needs:
 - optionally sets `ACTIONS_ORCHESTRATION_ID` when the orchestration feature flag is enabled
 - executes bundled runner Node binary
 
-For Velnor:
+For Velnor, this is reference material for environment shape only:
 
-- provide Node runtime in job container or mount runner-provided Node into container
 - parse action metadata
-- clone/download action repository at pinned ref/SHA
-- execute JS action entrypoint with proper env
+- expose matching `INPUT_*`, `GITHUB_*`, `RUNNER_*`, and `ACTIONS_*` values
+  where target native adapters and composite actions need them
+- do not execute marketplace JavaScript or TypeScript bundles in Phase 0
+- route known target action families to Rust-native adapters
 
 ## Composite Actions
 
@@ -314,9 +331,12 @@ Phase 0 must support local composite actions early.
 
 ## Docker Actions
 
-Some marketplace actions may be Docker actions.
+Some marketplace actions may be Docker actions. The official behavior remains
+useful reference material, but current target marketplace Docker-like behavior
+is implemented through Rust-native adapters and shell-level Docker/Buildx
+commands.
 
-Docker action support requires:
+Direct generic Docker action support would require:
 
 - parse `runs.using: docker`
 - build Dockerfile or pull image

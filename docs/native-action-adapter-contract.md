@@ -135,7 +135,7 @@ These are intentionally outside the first target contract:
 - broad `actions/checkout` features such as submodules, sparse checkout, or LFS
 - service containers unless a target workflow starts using them
 - job containers from workflow YAML unless a target workflow starts using them
-- macOS runner replacement inside Linux Docker
+- macOS runner replacement
 
 If a target repo adds one of these, the audit should fail first. Then Velnor
 should add the feature as a reusable capability, not as a workflow-specific case.

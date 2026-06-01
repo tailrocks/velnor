@@ -164,6 +164,6 @@ Use this sequence:
 
 - No Pkl/PQL implementation.
 - No broad marketplace action compatibility.
-- No macOS replacement from Linux Docker.
+- No macOS replacement.
 - No hardcoding target workflow/job/step ids in Velnor.
 - No large target monorepo clone in the fixture.

@@ -113,6 +113,8 @@ work directory.
 
 Phase 0 runner compatibility: [docs/phase-0-github-runner-compat.md](docs/phase-0-github-runner-compat.md).
 
+Phase 0 implementation contract: [docs/phase-0-implementation-contract.md](docs/phase-0-implementation-contract.md).
+
 Phase 0 target checklist: [docs/phase-0-target-checklist.md](docs/phase-0-target-checklist.md).
 
 Implementation roadmap: [docs/implementation-roadmap.md](docs/implementation-roadmap.md).
