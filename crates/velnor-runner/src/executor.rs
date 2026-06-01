@@ -859,6 +859,18 @@ where
             NativeActionAdapter::DownloadArtifact => native_download_artifact(action, state),
             NativeActionAdapter::UploadPagesArtifact => native_upload_pages_artifact(action, state),
             NativeActionAdapter::DeployPages => Ok(native_deploy_pages(action, state)),
+            NativeActionAdapter::SetupPython => self.native_setup_python(_container, action, state),
+            NativeActionAdapter::Mise => self.native_mise(_container, action, state),
+            NativeActionAdapter::Sccache => self.native_sccache(_container, action, state),
+            NativeActionAdapter::SetupMold => self.native_setup_mold(_container, action, state),
+            NativeActionAdapter::SetupJust => self.native_setup_just(_container, action, state),
+            NativeActionAdapter::RustToolchain => {
+                self.native_rust_toolchain(_container, action, state)
+            }
+            NativeActionAdapter::CargoInstall => {
+                self.native_cargo_install(_container, action, state)
+            }
+            NativeActionAdapter::RustCache => Ok(native_rust_cache(action, state)),
             NativeActionAdapter::GitHubRuntimeExport => {
                 Ok(native_github_runtime_export(action, state))
             }
@@ -878,6 +890,137 @@ where
                 )
             }
         }
+    }
+
+    fn native_setup_python(
+        &mut self,
+        container: &JobContainerSpec,
+        action: &NativeActionInvocation,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        let action_state = state.with_env(state.resolve_env(&action.env));
+        let version = native_input_or(&action_state, action, "python-version", "3");
+        let result = self.native_shell(
+            container,
+            state,
+            &format!("python{version} --version || python3 --version"),
+        )?;
+        Ok(native_command_result(
+            result,
+            StepCommandState {
+                outputs: [("python-version".to_string(), version)].into(),
+                ..StepCommandState::default()
+            },
+        ))
+    }
+
+    fn native_mise(
+        &mut self,
+        container: &JobContainerSpec,
+        action: &NativeActionInvocation,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        let action_state = state.with_env(state.resolve_env(&action.env));
+        let install = input_truthy(&native_input_or(&action_state, action, "install", "true"));
+        let script = if install {
+            "mise install".to_string()
+        } else {
+            "command -v mise >/dev/null 2>&1 || true".to_string()
+        };
+        let result = self.native_shell(container, state, &script)?;
+        Ok(native_command_result(
+            result,
+            StepCommandState {
+                path: vec!["/github/home/.local/share/mise/shims".to_string()],
+                ..StepCommandState::default()
+            },
+        ))
+    }
+
+    fn native_sccache(
+        &mut self,
+        container: &JobContainerSpec,
+        _action: &NativeActionInvocation,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        let result = self.native_shell(container, state, "sccache --start-server || true")?;
+        Ok(native_command_result(result, StepCommandState::default()))
+    }
+
+    fn native_setup_mold(
+        &mut self,
+        container: &JobContainerSpec,
+        _action: &NativeActionInvocation,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        let result = self.native_shell(container, state, "mold --version || true")?;
+        Ok(native_command_result(result, StepCommandState::default()))
+    }
+
+    fn native_setup_just(
+        &mut self,
+        container: &JobContainerSpec,
+        _action: &NativeActionInvocation,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        let result = self.native_shell(container, state, "just --version || true")?;
+        Ok(native_command_result(result, StepCommandState::default()))
+    }
+
+    fn native_rust_toolchain(
+        &mut self,
+        container: &JobContainerSpec,
+        action: &NativeActionInvocation,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        let action_state = state.with_env(state.resolve_env(&action.env));
+        let toolchain = native_input_or(&action_state, action, "toolchain", "stable");
+        let script = format!("rustup toolchain install {toolchain} && rustup default {toolchain}");
+        let result = self.native_shell(container, state, &script)?;
+        Ok(native_command_result(
+            result,
+            StepCommandState {
+                env: [("CARGO_HOME".to_string(), "/github/home/.cargo".to_string())].into(),
+                path: vec!["/github/home/.cargo/bin".to_string()],
+                ..StepCommandState::default()
+            },
+        ))
+    }
+
+    fn native_cargo_install(
+        &mut self,
+        container: &JobContainerSpec,
+        action: &NativeActionInvocation,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        let action_state = state.with_env(state.resolve_env(&action.env));
+        let krate = native_input(action, &action_state, "crate");
+        let version = native_input(action, &action_state, "version");
+        let locked = input_truthy(&native_input(action, &action_state, "locked"));
+        let mut script = format!("cargo install {krate}");
+        if !version.is_empty() && version != "latest" {
+            script.push_str(&format!(" --version {version}"));
+        }
+        if locked {
+            script.push_str(" --locked");
+        }
+        let result = self.native_shell(container, state, &script)?;
+        Ok(native_command_result(result, StepCommandState::default()))
+    }
+
+    fn native_shell(
+        &mut self,
+        container: &JobContainerSpec,
+        state: &JobExecutionState,
+        script: &str,
+    ) -> Result<CommandResult> {
+        let env = state.step_env(&[]);
+        let args = container.exec_process_args(
+            "/github/workspace",
+            &env,
+            &["sh".to_string(), "-lc".to_string(), script.to_string()],
+        );
+        self.runner.run("docker", &args)
     }
 
     fn native_docker_setup_buildx(
@@ -1321,6 +1464,32 @@ fn native_cache(action: &NativeActionInvocation, state: &JobExecutionState) -> S
         } else {
             String::new()
         },
+    }
+}
+
+fn native_rust_cache(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> StepExecutionResult {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let shared_key = native_input(action, &action_state, "shared-key");
+    let cache_on_failure = native_input_or(&action_state, action, "cache-on-failure", "false");
+    let mut outputs = BTreeMap::new();
+    outputs.insert("cache-hit".to_string(), "false".to_string());
+    if !shared_key.is_empty() {
+        outputs.insert("cache-primary-key".to_string(), shared_key.clone());
+    }
+    StepExecutionResult {
+        exit_code: 0,
+        state: StepCommandState {
+            outputs,
+            env: [("CACHE_ON_FAILURE".to_string(), cache_on_failure)].into(),
+            ..StepCommandState::default()
+        },
+        skipped: false,
+        failure_ignored: false,
+        stdout: format!("Rust cache miss for shared key '{shared_key}'\n"),
+        stderr: String::new(),
     }
 }
 
@@ -3886,6 +4055,155 @@ type=sha,format=long,prefix=,enable=true"
         }));
         assert_eq!(
             calls
+                .iter()
+                .filter(|(_, args)| args.first().is_some_and(|arg| arg == "run")
+                    && args.iter().any(|arg| arg.starts_with("node:")))
+                .count(),
+            0
+        );
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_setup_tool_adapters_use_job_container_without_node_sidecars() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Native {
+                step_id: "mise".into(),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::Mise,
+                    inputs: [("install".into(), "false".into())].into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::Native {
+                step_id: "setup-python".into(),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::SetupPython,
+                    inputs: [("python-version".into(), "3.13".into())].into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::Native {
+                step_id: "rust-toolchain".into(),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::RustToolchain,
+                    inputs: [("toolchain".into(), "stable".into())].into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::Native {
+                step_id: "setup-just".into(),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::SetupJust,
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::Native {
+                step_id: "cargo-install".into(),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::CargoInstall,
+                    inputs: [
+                        ("crate".into(), "cargo-binstall".into()),
+                        ("version".into(), "latest".into()),
+                        ("locked".into(), "true".into()),
+                    ]
+                    .into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::Native {
+                step_id: "sccache".into(),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::Sccache,
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::Native {
+                step_id: "rust-cache".into(),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::RustCache,
+                    inputs: [
+                        ("shared-key".into(), "kestra-rust-build-cache".into()),
+                        ("cache-on-failure".into(), "true".into()),
+                    ]
+                    .into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+        ];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        let results = executor
+            .execute_ordered_steps(
+                &container(&temp),
+                &steps,
+                &[
+                    (
+                        "GITHUB_REPOSITORY".into(),
+                        "ChainArgos/java-monorepo".into(),
+                    ),
+                    ("GITHUB_WORKSPACE".into(), "/__w".into()),
+                    ("RUNNER_TEMP".into(), "/__t".into()),
+                ],
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 7);
+        assert!(results[0]
+            .state
+            .path
+            .contains(&"/github/home/.local/share/mise/shims".into()));
+        assert_eq!(results[1].state.outputs["python-version"], "3.13");
+        assert_eq!(results[2].state.env["CARGO_HOME"], "/github/home/.cargo");
+        assert!(results[2]
+            .state
+            .path
+            .contains(&"/github/home/.cargo/bin".into()));
+        assert_eq!(results[6].state.outputs["cache-hit"], "false");
+        assert_eq!(results[6].state.env["CACHE_ON_FAILURE"], "true");
+        let docker_exec_calls = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(program, args)| {
+                program == "docker" && args.first().is_some_and(|arg| arg == "exec")
+            })
+            .map(|(_, args)| args)
+            .collect::<Vec<_>>();
+        assert_eq!(docker_exec_calls.len(), 6);
+        assert!(docker_exec_calls
+            .iter()
+            .any(|args| args.iter().any(|arg| arg.contains("python3.13 --version"))));
+        assert!(docker_exec_calls.iter().any(|args| args
+            .iter()
+            .any(|arg| arg.contains("rustup toolchain install stable"))));
+        assert!(docker_exec_calls.iter().any(|args| args
+            .iter()
+            .any(|arg| arg.contains("cargo install cargo-binstall --locked"))));
+        assert_eq!(
+            executor
+                .runner()
+                .calls
                 .iter()
                 .filter(|(_, args)| args.first().is_some_and(|arg| arg == "run")
                     && args.iter().any(|arg| arg.starts_with("node:")))
