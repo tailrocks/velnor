@@ -980,6 +980,18 @@ def iter_yaml_files(root: Path) -> list[Path]:
     )
 
 
+def validate_roots(roots: list[Path]) -> list[str]:
+    errors: list[str] = []
+    for root in roots:
+        github = root if root.name == ".github" else root / ".github"
+        workflows = github / "workflows"
+        if not github.is_dir():
+            errors.append(f"{root} does not contain a .github directory")
+        elif not workflows.is_dir():
+            errors.append(f"{root} does not contain a .github/workflows directory")
+    return errors
+
+
 def short_path(path: Path, roots: list[Path]) -> str:
     for root in roots:
         try:
@@ -1008,6 +1020,11 @@ def self_test() -> None:
         actual = normalize_uses(value)
         if actual != expected:
             raise AssertionError(f"normalize_uses({value!r}) = {actual!r}, want {expected!r}")
+
+    missing = Path("/tmp/velnor-target-audit-missing-root")
+    errors = validate_roots([missing])
+    if not errors or ".github" not in errors[0]:
+        raise AssertionError(f"validate_roots missing-root errors were not useful: {errors!r}")
 
 
 def collect_step(
@@ -1631,6 +1648,11 @@ def main() -> None:
     if args.self_test:
         self_test()
     roots = [root.resolve() for root in args.roots]
+    root_errors = validate_roots(roots)
+    if root_errors:
+        for error in root_errors:
+            print(f"target audit input error: {error}")
+        raise SystemExit(2)
     summary = audit(roots)
     print_report(summary)
     if args.check_target_mvp:
