@@ -45,6 +45,16 @@ The latest release was rechecked again on 2026-06-01 during scope cleanup.
 as current, and `crates/velnor-runner/src/protocol.rs` still advertises
 `actions-runner/2.334.0 (velnor)`.
 
+Latest local verifier evidence:
+
+- commit: `2367dd4bd01905a639b8c0f075437d037d342fc9`
+- `scripts/target_verify.sh` passed on 2026-06-01 with 80 focused Rust checks,
+  fixture audit/readiness/report/defaults/status self-tests, live
+  evidence/sequence helper self-tests, smoke failure evidence self-test, and
+  workflow dispatch helper self-test.
+- `scripts/check_runner_reference.py` reported `actions/runner` `v2.334.0` as
+  current during that verifier run.
+
 Implementation facts:
 
 - Hosted GitHub target path is V2 broker/run-service, not classic polling.
@@ -149,6 +159,12 @@ Current local environment finding:
 - `scripts/fixture_report.sh` writes the same non-mutating status/audit/host
   readiness checks to `.velnor-live-evidence/fixture-readiness-report.md` for
   operator handoff.
+- The latest report was generated on 2026-06-01T19:55:04Z at commit
+  `2367dd4bd01905a639b8c0f075437d037d342fc9`. It records:
+  `compat-github (app-a)` and `compat-github (app-b)` completed successfully,
+  `compat-velnor (app-a)` and `compat-velnor (app-b)` still queued, fixture
+  audit passing, and live host readiness failing only at Docker socket
+  preflight.
 - `VELNOR_REQUIRE_DOCKER_SOCKET=false scripts/live_host_doctor.sh` reaches the
   bind-mount visibility preflight, then fails because the remote Docker daemon
   cannot see `/Users/donbeave/Projects/velnor-project/velnor/.velnor-work`.
