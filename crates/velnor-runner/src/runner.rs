@@ -32,10 +32,10 @@ use crate::{
     },
     job_message::{ActionReferenceType, AgentJobRequestMessage, PIPELINE_AGENT_JOB_REQUEST},
     protocol::{
-        DistributedTaskClient, GitHubAuthResult, GitHubScope, JobCompletedEvent, OAuthClient,
-        OAuthJwtCredentials, RegistrationClient, RunnerEvent, RunnerKeyPair, RunnerStatus,
-        TaskAgent, TaskAgentPool, TaskAgentSession, TaskResult, TimelineRecord,
-        TimelineRecordFeedLines,
+        BrokerClient, DistributedTaskClient, GitHubAuthResult, GitHubScope, JobCompletedEvent,
+        OAuthClient, OAuthJwtCredentials, RegistrationClient, RunServiceClient, RunnerEvent,
+        RunnerJobRequestRef, RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool,
+        TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines, RUNNER_JOB_REQUEST,
     },
     runtime_env::job_runtime_env,
     script_step::github_script_steps_with_defaults,
@@ -294,7 +294,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let server_url = stored
         .settings
         .server_url
-        .as_deref()
+        .clone()
         .ok_or_else(|| anyhow::anyhow!("runner is not registered: missing server_url"))?;
     let pool_id = stored
         .settings
@@ -305,7 +305,10 @@ pub async fn run(args: RunArgs) -> Result<()> {
         .agent_id
         .ok_or_else(|| anyhow::anyhow!("runner is not registered: missing agent_id"))?;
     let token = oauth_access_token(&stored).await?;
-    let client = DistributedTaskClient::new(server_url, token)?;
+    if stored.settings.use_v2_flow {
+        return run_v2(args, dir, stored, &server_url, pool_id, agent_id, token).await;
+    }
+    let client = DistributedTaskClient::new(&server_url, token)?;
     let owner_name = format!("{} (PID: {})", default_agent_name(), std::process::id());
     let session = TaskAgentSession::new(owner_name, agent_id, stored.settings.agent_name.clone());
     let session = client.create_session(pool_id, &session).await?;
@@ -364,6 +367,77 @@ pub async fn run(args: RunArgs) -> Result<()> {
     Ok(())
 }
 
+async fn run_v2(
+    args: RunArgs,
+    config_dir: PathBuf,
+    stored: StoredRunnerConfig,
+    server_url: &str,
+    pool_id: i64,
+    agent_id: i64,
+    token: String,
+) -> Result<()> {
+    let server_url_v2 = stored.settings.server_url_v2.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("runner config enables V2 flow but missing server_url_v2")
+    })?;
+    let broker = BrokerClient::new(server_url_v2, token.clone())?;
+    let run_service = RunServiceClient::new(token.clone())?;
+    let task_client = DistributedTaskClient::new(server_url, token)?;
+    let owner_name = format!("{} (PID: {})", default_agent_name(), std::process::id());
+    let session = TaskAgentSession::new(owner_name, agent_id, stored.settings.agent_name.clone());
+    let session = broker.create_session(&session).await?;
+    let session_id = session
+        .session_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("GitHub broker returned session without sessionId"))?;
+
+    println!(
+        "Runner '{}' ready via broker with labels: {}",
+        stored.settings.agent_name,
+        stored.settings.labels.join(",")
+    );
+    println!("Created broker runner session {session_id}.");
+
+    loop {
+        let message = broker
+            .get_runner_message(
+                session_id,
+                RunnerStatus::Online,
+                stored.settings.disable_update,
+            )
+            .await?;
+
+        let Some(message) = message else {
+            println!("No broker message received.");
+            if args.once {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        };
+
+        handle_v2_message(
+            &broker,
+            &run_service,
+            &task_client,
+            pool_id,
+            session_id,
+            &stored.settings.agent_name,
+            &config_dir,
+            &args,
+            message,
+        )
+        .await?;
+        if args.once {
+            break;
+        }
+    }
+
+    broker.delete_session().await?;
+    println!("Deleted broker runner session.");
+
+    Ok(())
+}
+
 async fn handle_message(
     client: &DistributedTaskClient,
     pool_id: i64,
@@ -387,6 +461,96 @@ async fn handle_message(
     }
 
     let job = AgentJobRequestMessage::parse_json(&message.body)?;
+    handle_job_request(
+        client,
+        pool_id,
+        session_id,
+        worker_name,
+        config_dir,
+        args,
+        disable_update,
+        Some(message.message_id),
+        true,
+        job,
+    )
+    .await
+}
+
+async fn handle_v2_message(
+    broker: &BrokerClient,
+    run_service: &RunServiceClient,
+    client: &DistributedTaskClient,
+    pool_id: i64,
+    session_id: &str,
+    worker_name: &str,
+    config_dir: &std::path::Path,
+    args: &RunArgs,
+    message: crate::protocol::TaskAgentMessage,
+) -> Result<()> {
+    println!(
+        "Received broker message {} type {}.",
+        message.message_id, message.message_type
+    );
+    if !message
+        .message_type
+        .eq_ignore_ascii_case(RUNNER_JOB_REQUEST)
+    {
+        println!("Broker message is not acknowledged because type is not implemented.");
+        return Ok(());
+    }
+    let reference: RunnerJobRequestRef =
+        serde_json::from_str(&message.body).context("parse RunnerJobRequestRef")?;
+    if reference.should_acknowledge {
+        broker
+            .acknowledge_runner_request(
+                session_id,
+                &reference.runner_request_id,
+                RunnerStatus::Busy,
+            )
+            .await
+            .context("acknowledge broker runner request")?;
+    }
+    let run_service_url = reference
+        .run_service_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("V2 runner job request missing run_service_url"))?;
+    let job_value = run_service
+        .acquire_job(
+            run_service_url,
+            &reference.runner_request_id,
+            std::env::consts::OS,
+            reference.billing_owner_id.as_deref(),
+        )
+        .await?;
+    let job: AgentJobRequestMessage =
+        serde_json::from_value(job_value).context("parse acquired run-service job")?;
+    handle_job_request(
+        client,
+        pool_id,
+        session_id,
+        worker_name,
+        config_dir,
+        args,
+        false,
+        None,
+        false,
+        job,
+    )
+    .await
+}
+
+async fn handle_job_request(
+    client: &DistributedTaskClient,
+    pool_id: i64,
+    session_id: &str,
+    worker_name: &str,
+    config_dir: &std::path::Path,
+    args: &RunArgs,
+    disable_update: bool,
+    dispatch_message_id: Option<i64>,
+    acknowledge_classic_message: bool,
+    job: AgentJobRequestMessage,
+) -> Result<()> {
     println!(
         "Parsed job request {} for job '{}' ({} step(s), {} endpoint(s)).",
         job.request_id,
@@ -421,21 +585,27 @@ async fn handle_message(
             job.plan.plan_id.clone(),
         )
         .await?;
-        client
-            .delete_message(pool_id, message.message_id, session_id)
-            .await
-            .context("acknowledge dispatched job message")?;
+        if acknowledge_classic_message {
+            if let Some(message_id) = dispatch_message_id {
+                client
+                    .delete_message(pool_id, message_id, session_id)
+                    .await
+                    .context("acknowledge dispatched job message")?;
+            }
+        }
         let canceled = Arc::new(AtomicBool::new(false));
-        let cancellation = start_cancellation_poll(
-            client.clone(),
-            pool_id,
-            session_id.to_string(),
-            message.message_id,
-            disable_update,
-            job.job_id.clone(),
-            job_container_name(&job),
-            canceled.clone(),
-        );
+        let cancellation = dispatch_message_id.map(|message_id| {
+            start_cancellation_poll(
+                client.clone(),
+                pool_id,
+                session_id.to_string(),
+                message_id,
+                disable_update,
+                job.job_id.clone(),
+                job_container_name(&job),
+                canceled.clone(),
+            )
+        });
         let config_dir = config_dir.to_path_buf();
         let work_dir = args.work_dir.clone();
         let docker_image = args.docker_image.clone();
@@ -454,7 +624,9 @@ async fn handle_message(
         })
         .await
         .context("join Docker job execution task")?;
-        cancellation.abort();
+        if let Some(cancellation) = cancellation {
+            cancellation.abort();
+        }
         renewal.abort();
         let job_result = match job_result {
             Ok(mut job_result) => {
@@ -504,10 +676,14 @@ async fn handle_message(
             job_result.result
         );
     } else if args.complete_noop {
-        client
-            .delete_message(pool_id, message.message_id, session_id)
-            .await
-            .context("acknowledge no-op job message")?;
+        if acknowledge_classic_message {
+            if let Some(message_id) = dispatch_message_id {
+                client
+                    .delete_message(pool_id, message_id, session_id)
+                    .await
+                    .context("acknowledge no-op job message")?;
+            }
+        }
         complete_job(
             client,
             pool_id,
