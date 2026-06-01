@@ -26,6 +26,7 @@ cd "$ROOT"
 python3 scripts/target_audit.py --check-target-mvp "$JACKIN_ROOT" "$CHAINARGOS_ROOT" >/tmp/velnor-target-audit.txt
 python3 scripts/target_audit.py --self-test "$JACKIN_ROOT" "$CHAINARGOS_ROOT" >/tmp/velnor-target-audit-self-test.txt
 python3 scripts/check_runner_reference.py
+scripts/workflow_dispatch_common_test.sh
 
 tests=(
   cached_target_action_metadata_expressions_use_supported_subset
@@ -114,4 +115,4 @@ for test_name in "${tests[@]}"; do
 done
 
 echo "target audit written to /tmp/velnor-target-audit.txt"
-echo "target verifier passed ${#tests[@]} focused checks"
+echo "target verifier passed ${#tests[@]} focused checks plus workflow dispatch helper self-test"
