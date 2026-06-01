@@ -66,6 +66,12 @@ scripts/target_verify.sh
 cargo test -q
 ```
 
+Live host readiness is checked with:
+
+```sh
+scripts/live_host_doctor.sh
+```
+
 The remaining Phase 0 proof is live GitHub UI validation on the two target
 repositories from a Linux host whose Docker daemon can see Velnor's bind-mounted
 work directory.

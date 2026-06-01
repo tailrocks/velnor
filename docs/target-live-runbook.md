@@ -35,6 +35,16 @@ cargo run --bin velnor-runner -- preflight \
 
 This verifies host Git, Docker daemon access, Buildx, `/var/run/docker.sock`, Docker CLI/Buildx usability inside the job image, required job-image tools, execution of a temp script from `/__t` with `/__w` workdir, and whether the daemon can see Velnor's bind-mounted work directory.
 
+The same host readiness checks can be run with:
+
+```sh
+scripts/live_host_doctor.sh
+```
+
+Set `VELNOR_RUN_TARGET_VERIFY=true` to include the target workflow verifier, and
+set `VELNOR_CHECK_TARGET_MVP_CONFIG=true` after runner registration to validate
+the stored target labels, V2 settings, ids, and credentials.
+
 `velnor-runner run` also performs Docker preflight by default before it polls
 GitHub for executable jobs. For target repository runs, pass
 `--require-docker-socket` too, because the current target workflows include

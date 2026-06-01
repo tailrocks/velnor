@@ -122,6 +122,8 @@ Current local environment finding:
   for future Docker checks.
 - Velnor preflight still cannot run jobs here because the remote Docker daemon
   cannot see bind-mounted paths from this agent container.
+- `scripts/live_host_doctor.sh` reproduces the same expected blocker in this
+  environment before any GitHub job can be acquired.
 - Direct bind probes against the daemon showed the current workspace,
   `/Users/donbeave/Projects/velnor-project/velnor`, `/tmp`, and `/home/agent`
   are not visible inside containers created by that daemon.
