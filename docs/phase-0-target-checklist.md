@@ -131,6 +131,10 @@ Drift guards:
 - live proof script controls fail fast on invalid boolean flags and job counts
 - unsupported job containers, service containers, job timeouts, job-level
   concurrency, direct `docker://` uses, and unsupported checkout inputs
+- expected Linux-only exclusions from the current target scan: macOS/apple
+  matrix legs and outputs remain listed by `scripts/target_audit.py`, but are
+  accepted by `scripts/target_verify.sh` because macOS runner replacement is
+  explicitly outside Phase 0
 
 ## ChainArgos Rust Target
 
