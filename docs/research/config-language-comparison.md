@@ -5,6 +5,11 @@ This note compares candidate authoring languages for Velnor and tests them again
 - https://github.com/jackin-project/jackin
 - https://github.com/ChainArgos/java-monorepo
 
+Status: historical brainstorming. The current implementation scope is GitHub
+Actions runner compatibility with existing YAML unchanged. Do not implement
+Pkl, KCL, or any Velnor-native workflow language before live target repository
+proof.
+
 ## Sources
 
 - Pkl: https://pkl-lang.org/ and https://github.com/apple/pkl
@@ -805,9 +810,9 @@ Therefore Velnor should make these first-class typed primitives:
 
 If these are primitives, user workflow code becomes much smaller than GitHub Actions YAML while staying understandable.
 
-## Current Decision Bias
+## Deferred Decision Bias
 
-Pkl is the best current default for Velnor:
+If typed authoring is revisited later, Pkl is the best researched default:
 
 - authoring experience is strongest
 - visibility is strongest among the modern config-language candidates

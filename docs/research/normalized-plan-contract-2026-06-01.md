@@ -10,28 +10,28 @@ The contract matters for two reasons:
 
 - Phase 0 GitHub compatibility should keep executing GitHub-expanded
   `AgentJobRequestMessage` payloads.
-- The later Pkl authoring layer must compile to the same plan, not to a second
-  executor or a different workflow model.
+- Any future typed authoring layer must compile to the same plan, not to a
+  second executor or a different workflow model.
 
 ```text
 GitHub YAML -> GitHub scheduler -> AgentJobRequestMessage -> GitHub adapter
-Pkl workflow -> Pkl evaluator    -> typed workflow model   -> Pkl adapter
+Typed source -> future compiler  -> typed workflow model   -> future adapter
 
 GitHub adapter \
                 -> NormalizedJobPlan -> Docker executor -> reporter
-Pkl adapter    /
+Future adapter /
 ```
 
 ## Contract Rule
 
 The Docker executor and reporter must not care whether a job came from GitHub
-YAML or Pkl.
+YAML or a future typed source.
 
 All source-specific behavior belongs before `NormalizedJobPlan`:
 
 - GitHub wire decoding
 - V2 typed expression-value map normalization
-- Pkl evaluation and schema validation
+- future typed source evaluation and schema validation
 - GitHub Actions YAML compatibility shims
 - future Velnor-native scheduling
 
@@ -83,7 +83,7 @@ GitHub adapter source:
 - `JobId`, `JobName`, `JobDisplayName`, `RequestId`
 - `Variables` and `ContextData.github`
 
-Pkl adapter source:
+Future typed adapter source:
 
 - workflow name
 - job id/key
@@ -147,7 +147,7 @@ GitHub adapter source:
 - supported marketplace action families become native invocations without
   requiring downloaded marketplace metadata
 
-Pkl adapter source:
+Future typed adapter source:
 
 - typed workflow/job/env/defaults/container/services fields
 - generated GitHub-like context data only where scripts/actions expect it
@@ -232,10 +232,10 @@ Non-responsibilities:
 
 GitHub already performs those before assigning a job to the runner.
 
-## Pkl Adapter Responsibilities
+## Future Typed Adapter Responsibilities
 
-The Pkl adapter should eventually convert evaluated Pkl into the same
-`NormalizedJobPlan`.
+Any future typed adapter should convert evaluated typed workflow definitions
+into the same `NormalizedJobPlan`. This is not current Phase 0 work.
 
 Required responsibilities:
 
@@ -246,7 +246,7 @@ Required responsibilities:
 - lower typed helper primitives to normal steps
 - produce either GitHub-compatible YAML or a Velnor-native plan
 
-Pkl helper examples:
+Future helper examples:
 
 ```pkl
 steps = List(
@@ -305,10 +305,10 @@ still produce completion records and run-service step results. Still-open
 GitHub parity work is true line-by-line streaming during long-running steps and
 live validation.
 
-## Pkl Package Shape
+## Deferred Typed Package Shape
 
-The strict Pkl package should mirror GitHub Actions concepts, but with typed
-unions and domain helpers.
+If typed authoring is revisited, the strict package should mirror GitHub Actions
+concepts, but with typed unions and domain helpers.
 
 Initial core package modules:
 
@@ -341,12 +341,11 @@ Design rule for AI agents:
    passed container, environment, context, and step slices.
 4. Split GitHub run-service reporting into a reporter that consumes
    `NormalizedJobSummary`.
-5. Add a Pkl proof that compiles one target workflow to equivalent GitHub YAML.
-6. Add a Pkl proof that compiles the same workflow to `NormalizedJobPlan`.
+5. Defer typed workflow proofs until after live GitHub target compatibility.
 
-The first Pkl workflow to migrate should be a Linux `java-monorepo` workflow,
-not `jackin` release, because `java-monorepo` already targets the self-hosted
-label and avoids macOS matrix legs.
+If typed authoring is revisited, the first workflow to migrate should be a Linux
+`java-monorepo` workflow, not `jackin` release, because `java-monorepo` already
+targets the self-hosted label and avoids macOS matrix legs.
 
 ## Current Gap List
 
@@ -355,6 +354,6 @@ label and avoids macOS matrix legs.
 - some GitHub planning is still inside `runner.rs`, especially checkout/action
   resolution.
 - reporting is coupled to `runner.rs` instead of a report-target interface.
-- Pkl examples exist, but no package skeleton exists under the repository.
-- no Pkl-to-plan proof exists yet.
+- typed authoring is intentionally deferred; no package skeleton should exist
+  under the repository now.
 - live GitHub UI proof for target workflows is still missing.

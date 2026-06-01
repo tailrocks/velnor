@@ -1,6 +1,6 @@
 # Velnor Vision
 
-Velnor is a GitHub Actions-like workflow engine and runner with a Rust runtime. Phase 0 focuses on GitHub self-hosted runner compatibility for existing YAML workflows. Pkl workflow definitions come after that.
+Velnor is a GitHub Actions-like workflow engine and runner with a Rust runtime. Phase 0 focuses only on GitHub self-hosted runner compatibility for existing YAML workflows.
 
 ## Product Shape
 
@@ -18,11 +18,13 @@ The goal is not to invent a completely new CI/CD mental model. GitHub Actions al
 - environments and approvals
 - hosted or self-hosted runners
 
-Velnor should keep that model where it works. Phase 0 keeps GitHub YAML exactly as-is and replaces the self-hosted runner implementation. Later phases replace YAML plus ad hoc expressions with Pkl-based typed workflow definitions.
+Velnor should keep that model where it works. Phase 0 keeps GitHub YAML exactly as-is and replaces the self-hosted runner implementation.
 
-## Why Not YAML
+## Future Language Brainstorming
 
-YAML is good as a serialization format, but weak as a workflow authoring language:
+Typed workflow authoring was researched as a future idea, but it is not current implementation work. Phase 0 does not replace YAML, parse workflows, or introduce Pkl.
+
+YAML is weak as an authoring language:
 
 - structure is only validated after parsing
 - reuse is awkward
@@ -31,18 +33,17 @@ YAML is good as a serialization format, but weak as a workflow authoring languag
 - complex workflows become pseudo-code embedded in YAML
 - many mistakes are found only after pushing to the CI provider
 
-Velnor should keep the readability of GitHub Actions while adding static validation, composition, and richer domain types.
+Those points may matter later. They do not change the current goal: run existing GitHub Actions workflows unchanged on Velnor.
 
 ## Proposed Stack
 
-- Pkl: workflow authoring, schemas, defaults, validation, constraints, reusable modules
 - Rust: parser integration, planner, scheduler, runner, CLI, server
 - Containers/processes: execution isolation for arbitrary user commands
 - Typed plugins: reusable building blocks with declared inputs, outputs, permissions, and runtime requirements
 
-Phase 0 is the accepted first implementation target: existing GitHub Actions YAML should run on a Velnor self-hosted runner. Pkl is the accepted future workflow authoring language. Rust integration should start with unofficial bindings or the official CLI, then move toward `pkl server` embedding or a Rust-native parser/evaluator if the product needs it.
+Phase 0 is the accepted first implementation target: existing GitHub Actions YAML should run on a Velnor self-hosted runner.
 
-See [phase-0-github-runner-compat.md](phase-0-github-runner-compat.md), [decision-pkl.md](decision-pkl.md), and [research/pkl-rust.md](research/pkl-rust.md).
+See [phase-0-github-runner-compat.md](phase-0-github-runner-compat.md).
 
 ## Example: GitHub Actions
 
@@ -69,7 +70,7 @@ jobs:
       - run: cargo test
 ```
 
-## Example: Velnor Pkl Sketch
+## Deferred Example: Typed Workflow Sketch
 
 ```pkl
 amends "package://velnor.dev/workflow@1.0.0#/Workflow.pkl"
@@ -167,19 +168,23 @@ This keeps the marketplace idea, but avoids making JavaScript the default extens
 
 GitHub Actions is flexible because it lets users escape into YAML expressions, shell, JavaScript, Docker, and marketplace actions.
 
-Velnor should be flexible because users compose typed workflow primitives and only escape into scripts at execution boundaries.
+If typed authoring is revisited later, Velnor should be flexible because users
+compose typed workflow primitives and only escape into scripts at execution
+boundaries. This is not current Phase 0 work.
 
 ## Non-Goals
 
-- Do not build a YAML transpiler as the primary product.
+- Do not build a YAML transpiler in Phase 0.
 - Do not require JavaScript for custom workflow logic.
 - Do not hide runtime behavior behind untyped string interpolation.
-- Do not make Pkl users learn a completely different CI model from GitHub Actions.
+- Do not make future typed-workflow users learn a completely different CI model
+  from GitHub Actions.
 
 ## Open Questions
 
 - Should Velnor support importing existing GitHub Actions directly?
 - Should `Use` support OCI-based actions only, or also GitHub-style repositories?
-- Should Pkl evaluate on the control plane only, or can runners evaluate local modules?
+- If typed authoring is revisited, should evaluation happen on the control plane
+  only, or can runners evaluate local modules?
 - How much of GitHub Actions expression syntax should be preserved?
 - Should the first release target local execution, self-hosted server, or GitHub app integration?

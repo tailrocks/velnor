@@ -15,13 +15,12 @@ The first implementation target:
 - jobs run inside Docker-isolated environments
 - the initial scope is the workflows used by `jackin-project/jackin` and `ChainArgos/java-monorepo`
 
-The later typed workflow model:
+Out of current scope:
 
-- workflow definitions are written in Pkl instead of YAML
-- workflow primitives are strongly typed
-- validation happens before execution
-- the engine and runner are implemented in Rust
-- custom building blocks expose typed interfaces instead of unconstrained JavaScript actions
+- no Pkl workflow authoring
+- no Velnor-native workflow language
+- no replacement for GitHub's YAML parser or scheduler
+- no broad GitHub Actions parity beyond the two target repositories
 
 ## Direction
 
@@ -74,17 +73,7 @@ Phase 0 runner compatibility: [docs/phase-0-github-runner-compat.md](docs/phase-
 
 Implementation roadmap: [docs/implementation-roadmap.md](docs/implementation-roadmap.md).
 
-Language decision: [docs/decision-pkl.md](docs/decision-pkl.md).
-
-KCL research: [docs/research/kcl.md](docs/research/kcl.md).
-
-Language comparison and target repo workflow analysis: [docs/research/config-language-comparison.md](docs/research/config-language-comparison.md).
-
-Pkl/Rust integration research: [docs/research/pkl-rust.md](docs/research/pkl-rust.md).
-
-Pkl vs KCL language comparison: [docs/research/pkl-vs-kcl.md](docs/research/pkl-vs-kcl.md).
-
-Side-by-side GitHub Actions vs Pkl vs KCL examples: [docs/research/github-actions-vs-pkl-vs-kcl.md](docs/research/github-actions-vs-pkl-vs-kcl.md).
+Target workflow audit and language brainstorming history: [docs/research/config-language-comparison.md](docs/research/config-language-comparison.md).
 
 GitHub runner protocol contract: [docs/research/github-runner-protocol-contract.md](docs/research/github-runner-protocol-contract.md).
 

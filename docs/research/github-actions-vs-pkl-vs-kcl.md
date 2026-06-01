@@ -6,6 +6,11 @@ This compares three authoring models for Velnor:
 - Velnor with Pkl
 - Velnor with KCL
 
+Status: historical brainstorming. The current implementation scope is GitHub
+Actions runner compatibility with existing YAML unchanged. Do not implement
+Pkl, KCL, or any Velnor-native workflow language before live target repository
+proof.
+
 The examples focus on the workflows used in:
 
 - `jackin-project/jackin`
@@ -24,11 +29,11 @@ The examples focus on the workflows used in:
 | GitHub Actions migration | Native | Best migration target | Good, but less visually close |
 | Existing GitHub Actions typed reference | Native YAML docs | `pkl-pantry/com.github.actions` | No equally relevant package found |
 
-Recommendation:
+Historical research note:
 
 ```text
-Choose Pkl for Velnor authoring.
-Design Velnor's Pkl package with KCL-level strictness.
+If typed authoring is revisited later, Pkl was the strongest product-language
+candidate in this comparison. Do not implement it now.
 ```
 
 KCL is safer if we judge only raw language typing. Pkl is better if we judge the whole Velnor product: migration, readability, concision, and GitHub Actions similarity.
@@ -996,11 +1001,18 @@ Problems:
 - less CI/CD-specific prior art
 - may feel more like policy/IaC than workflow engine UX
 
-## Final Recommendation
+## Historical Recommendation
 
-Use Pkl for user-authored Velnor workflows, but borrow KCL's discipline.
+This recommendation is deferred. Do not implement Pkl, KCL, or any Velnor-native
+workflow language now.
 
-The Velnor Pkl package should be strict enough that AI agents get immediate failures when they invent wrong fields, wrong step kinds, wrong output references, or wrong runner labels.
+If typed authoring is revisited after live target GitHub Actions compatibility,
+Pkl was the preferred user-facing candidate in this comparison, with KCL's
+discipline as a schema benchmark.
+
+If this research is reopened later, any typed package should be strict enough
+that AI agents get immediate failures when they invent wrong fields, wrong step
+kinds, wrong output references, or wrong runner labels.
 
 Target authoring model:
 
@@ -1011,19 +1023,18 @@ amends "package://velnor.dev/workflow@1.0.0#/Workflow.pkl"
 Target runtime model:
 
 ```text
-Pkl source
-  -> strict Velnor Pkl package validation
-  -> normalized JSON or Pkl binary value
+future typed source
+  -> strict package validation
+  -> normalized JSON or equivalent value
   -> Rust structs
   -> Rust DAG/runtime semantic validation
   -> execution plan
 ```
 
-Decision:
+Historical decision:
 
 ```text
 GitHub Actions YAML = compatibility baseline
-Pkl                 = best user-facing language
-KCL                 = best strictness benchmark
+Pkl                 = researched future user-facing candidate
+KCL                 = researched strictness benchmark
 ```
-

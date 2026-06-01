@@ -1,8 +1,8 @@
 # Self-Hosted Runner Implementation Blueprint
 
 This document is the implementation-oriented version of the Velnor Phase 0 idea:
-be a Rust self-hosted GitHub runner replacement first, then add Pkl as a typed
-workflow authoring layer later.
+be a Rust self-hosted GitHub runner replacement first. Typed workflow authoring
+is deferred brainstorming and is not current implementation work.
 
 Phase 0 is runner compatibility, not workflow parsing. GitHub sends Velnor an
 expanded `AgentJobRequestMessage`, not the original workflow YAML. See
@@ -33,16 +33,17 @@ Phase 0 should look boring to a repository user:
 The target workflow files are evidence for what GitHub will likely send in
 expanded job payloads. They are not files Velnor should parse in Phase 0.
 
-The later Pkl layer should not replace this executor. It should compile into the
-same normalized job plan that the GitHub job-message adapter uses:
+If typed authoring is revisited later, it should not replace this executor. It
+should compile into the same normalized job plan that the GitHub job-message
+adapter uses:
 
 ```text
 GitHub YAML -> GitHub job message -> Velnor normalized plan -> Docker executor -> reporter
-Pkl workflow -> Velnor compiler    -> Velnor normalized plan -> Docker executor -> reporter
+Typed source -> Velnor compiler    -> Velnor normalized plan -> Docker executor -> reporter
 ```
 
-That keeps Phase 0 useful immediately and prevents the future typed language from
-forking the execution engine.
+That keeps Phase 0 useful immediately and prevents any future typed language
+from forking the execution engine.
 
 The normalized plan boundary is specified in
 `docs/research/normalized-plan-contract-2026-06-01.md`.
@@ -215,8 +216,8 @@ The current code is already aligned with the upstream split:
   files and stdout workflow commands
 
 Important implementation rule: keep all GitHub protocol drift contained in
-`protocol.rs`/`runner.rs`; keep the Docker executor independent of whether the
-plan came from GitHub YAML or future Pkl.
+`protocol.rs`/`runner.rs`; keep the Docker executor independent of any future
+non-GitHub plan source.
 
 ## Minimum End-To-End Sequence
 
@@ -243,12 +244,13 @@ For the target MVP, a real Velnor job should follow this sequence:
 16. Complete V2 job with the correct conclusion.
 17. Cleanup containers, network, checkout credentials, and temp dirs.
 
-## Pkl Design Constraint
+## Deferred Typed Authoring Constraint
 
-Pkl is the later authoring language, not the Phase 0 scheduler. It should stay
-close to GitHub Actions vocabulary but remove YAML ambiguity through types.
+Typed authoring is not the Phase 0 scheduler and should not be implemented now.
+If revisited later, it should stay close to GitHub Actions vocabulary but remove
+YAML ambiguity through types.
 
-The first useful Pkl package should model:
+The first useful typed package should model:
 
 - `Workflow`
 - typed event triggers
@@ -260,7 +262,7 @@ The first useful Pkl package should model:
 - typed cache/artifact/pages/Docker helper primitives
 - constrained identifiers and non-empty command strings
 
-Example direction:
+Example direction, not current work:
 
 ```pkl
 amends "package://velnor.dev/workflow@1.0.0#/Workflow.pkl"
@@ -301,8 +303,9 @@ jobs {
 }
 ```
 
-The Pkl compiler should lower helper primitives like `DockerBake` into the same
-normalized executable steps that the GitHub job-message adapter produces today.
+A future compiler should lower helper primitives like `DockerBake` into the
+same normalized executable steps that the GitHub job-message adapter produces
+today.
 
 ## Remaining Proof Path
 

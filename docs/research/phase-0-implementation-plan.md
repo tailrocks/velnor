@@ -280,9 +280,15 @@ Velnor still needs runtime step expression behavior from the job message:
 
 Implement only the expression subset that appears in the job message for target workflows.
 
-## Pkl Layer After Phase 0
+## Deferred Typed Authoring Brainstorm
 
-Pkl should remain close to GitHub Actions so migration is easy. The strict package should model the same concepts with typed fields and typed unions:
+Typed authoring is not part of current implementation. Phase 0 must keep GitHub
+Actions YAML unchanged and focus on runner compatibility for the target
+repositories.
+
+If typed authoring is revisited after live target proof, it should remain close
+to GitHub Actions so migration is easy. A strict package should model the same
+concepts with typed fields and typed unions:
 
 ```pkl
 amends "package://velnor.dev/workflow@1.0.0#/Workflow.pkl"
@@ -327,11 +333,14 @@ jobs {
 }
 ```
 
-Important design rule: Pkl must compile to the same normalized plan that the GitHub job-message adapter produces. That keeps one executor and one reporter. The plan boundary is defined in `docs/research/normalized-plan-contract-2026-06-01.md`.
+Important future design rule: typed authoring must compile to the same
+normalized plan that the GitHub job-message adapter produces. That keeps one
+executor and one reporter. The plan boundary is defined in
+`docs/research/normalized-plan-contract-2026-06-01.md`.
 
 ```text
 GitHub YAML -> GitHub job message -> Velnor normalized plan -> Docker executor
-Pkl workflow -> Velnor compiler    -> Velnor normalized plan -> Docker executor
+Typed source -> Velnor compiler    -> Velnor normalized plan -> Docker executor
 ```
 
 ## Current Concrete Next Work

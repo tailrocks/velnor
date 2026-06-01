@@ -1,20 +1,20 @@
-# Decision: Use Pkl For Workflow Authoring
+# Deferred Brainstorming: Pkl For Workflow Authoring
 
-Status: accepted for typed workflow authoring after Phase 0
+Status: deferred; no current implementation
 
-## Decision
+## Current Decision
 
-Velnor will use Pkl as its typed workflow authoring language, but not in Phase 0.
+Velnor will not implement Pkl support now.
 
 Phase 0 is GitHub runner compatibility: existing repositories keep `.github/workflows/*.yml`, and Velnor registers as a self-hosted GitHub runner replacement.
 
-After that is stable, Pkl will be evaluated into a typed workflow model, then Rust will validate and execute the normalized plan or generate GitHub-compatible YAML.
+The current product target is one-to-one GitHub Actions runner compatibility for the two target repositories. GitHub continues to own YAML parsing, workflow scheduling, matrices, reusable workflows, and the Actions UI.
 
-The normalized execution contract is captured in `research/normalized-plan-contract-2026-06-01.md`; Pkl must target that contract rather than introducing a separate executor.
+Pkl remains only a future authoring idea from earlier research. There is no Pkl CLI command, no Pkl package, no Pkl adapter, and no Pkl runtime support in the current runner.
 
 ## Rationale
 
-Pkl is the best fit for Velnor's user-facing workflow language:
+If typed workflow authoring is revisited after target GitHub Actions compatibility is proven, Pkl was previously considered attractive because:
 
 - more readable and concise than YAML for complex workflows
 - more flexible than KCL for configuration templating
@@ -24,11 +24,13 @@ Pkl is the best fit for Velnor's user-facing workflow language:
 - typed action catalogs in Pkl map well to Velnor's future plugin/action model
 - workflow authoring stays close to GitHub Actions while avoiding YAML's weak typing
 
-KCL remains useful comparison material, but it is not the chosen authoring language.
+KCL remains useful comparison material. Neither KCL nor Pkl is part of the current implementation scope.
 
-## Binding Roadmap
+## Possible Future Binding Roadmap
 
-### Phase 1: Unofficial Rust Bindings
+Do not start this roadmap until Phase 0 live GitHub target runs are proven.
+
+### Future Option 1: Unofficial Rust Bindings
 
 Prototype with existing unofficial Rust bindings:
 
@@ -47,7 +49,7 @@ workflow.pkl
   -> ExecutionPlan
 ```
 
-### Phase 2: CLI Fallback
+### Future Option 2: CLI Fallback
 
 Keep a conservative fallback through the official Pkl CLI:
 
@@ -59,19 +61,19 @@ pkl eval --format json workflow.pkl
 
 This gives us a reliable escape hatch if unofficial bindings are unstable.
 
-### Phase 3: Pkl Server Client
+### Future Option 3: Pkl Server Client
 
 If needed, implement a small Rust client for the official `pkl server` message-passing API.
 
 This avoids depending permanently on a third-party binding while still using official Pkl evaluation semantics.
 
-### Phase 4: Native Rust Parser/Evaluator Investigation
+### Future Option 4: Native Rust Parser/Evaluator Investigation
 
 Long term, investigate writing or adopting a Rust-native parser/evaluator.
 
 This should only happen after the Velnor workflow model is stable. The first versions should not own Pkl language semantics unless there is a clear product reason.
 
-## Strict Package Requirement
+## Future Strict Package Requirement
 
 Velnor will not expose arbitrary free-form Pkl as the workflow model.
 
@@ -96,7 +98,7 @@ The package must provide:
 - validation for job IDs and `needs`
 - validation for matrix references and outputs
 
-## AI Agent Safety
+## Future AI Agent Safety
 
 Pkl's flexibility is useful, but AI agents need guardrails.
 
@@ -112,6 +114,8 @@ Required guardrails:
 
 ## Implication
 
-The Velnor product language is Pkl.
+No product language is active now.
 
-KCL is kept as a benchmark for strict schema design. Velnor's Pkl package should aim for KCL-level discipline while keeping Pkl's better workflow authoring experience.
+The current implementation must keep moving toward GitHub Actions compatibility
+for `jackin-project/jackin` and `ChainArgos/java-monorepo`, using their existing
+YAML unchanged.

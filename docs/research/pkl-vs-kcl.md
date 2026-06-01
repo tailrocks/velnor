@@ -1,5 +1,10 @@
 # Pkl vs KCL For Velnor
 
+Status: historical brainstorming. The current implementation scope is GitHub
+Actions runner compatibility with existing YAML unchanged. Do not implement
+Pkl, KCL, or any Velnor-native workflow language before live target repository
+proof.
+
 This comparison focuses only on language suitability for AI-authored CI/CD workflows.
 
 Constraint:
@@ -293,9 +298,13 @@ Pkl version feels closer to workflow authoring. KCL version feels clearer around
 | GitHub Actions migration prior art | Pkl | `pkl-pantry/com.github.actions` already exists |
 | Product adoption UX | Pkl | Looks friendlier and more modern to users |
 
-## Recommendation
+## Historical Recommendation
 
-Use Pkl for Velnor, but design it as a strict typed DSL package.
+This recommendation is deferred. Do not implement a typed DSL package now.
+
+If typed authoring is revisited after live target GitHub Actions compatibility,
+Pkl was the preferred product-language candidate in this comparison, but only
+with a strict typed DSL package.
 
 Do not expose "free-form Pkl" as the workflow model. Expose:
 
@@ -318,7 +327,7 @@ Then make `Workflow.pkl` strict:
 - validation for required gates
 - no unknown dynamic fields in core structures
 
-Final call:
+Historical call:
 
 ```text
 Best pure type-safety language: KCL
@@ -326,4 +335,3 @@ Best Velnor product language:   Pkl
 ```
 
 Pkl gives better human and migration UX. KCL gives stronger raw schema posture. For AI agents, Pkl is acceptable only if Velnor's package is strict and examples/lints are first-class.
-

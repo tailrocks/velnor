@@ -1,6 +1,8 @@
-# Pkl And Rust Integration
+# Deferred Research: Pkl And Rust Integration
 
-Pkl is now the preferred workflow authoring language for Velnor.
+This is historical brainstorming. Pkl is not part of the current implementation
+scope. Do not implement Pkl support until the GitHub Actions runner replacement
+works against the two target repositories in live GitHub UI runs.
 
 ## Summary
 
@@ -34,7 +36,7 @@ That means Rust does not need to parse or evaluate Pkl itself. Velnor can treat 
 
 ## Recommended MVP Path
 
-Use Pkl as Velnor's workflow language and start with typed deserialization from evaluated Pkl.
+If Pkl is revisited later, use it as a workflow language through typed deserialization from evaluated Pkl.
 
 There are two viable MVP implementation paths:
 
@@ -167,7 +169,8 @@ Advantages:
 - better embedding story
 - custom module/resource readers become possible
 - closer to official binding architecture
-- enables future Rust-native Velnor Pkl package manager behavior
+- would enable future Rust-native typed-authoring package manager behavior if
+  this research is reopened
 
 This is also the model used by official non-JVM bindings such as Go and Swift.
 
@@ -274,7 +277,7 @@ Important distinction:
 
 ```text
 pkl-pantry/com.github.actions = typed generator for GitHub Actions YAML
-Velnor Pkl package           = typed source of truth for Velnor execution plan
+future typed package         = typed source of truth for Velnor execution plan
 ```
 
 So Velnor should borrow schema and UX ideas, but compile to Velnor's Rust execution plan instead of GitHub YAML.
@@ -333,7 +336,8 @@ velnor run workflow.pkl
 
 ## Recommendation
 
-Use Pkl as the product language. This is now captured as an accepted decision in [../decision-pkl.md](../decision-pkl.md).
+Pkl is not the active product language. The current implementation scope is
+GitHub Actions runner compatibility with existing YAML unchanged.
 
 Implement the first prototype with either:
 

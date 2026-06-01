@@ -8,7 +8,7 @@ Velnor's first phase is not Pkl workflow authoring.
 
 Phase 0 is a Rust implementation of a GitHub self-hosted runner-compatible agent. Existing repositories keep their current `.github/workflows/*.yml` files and local `.github/actions/*` actions. The user installs/registers Velnor as a self-hosted runner, gives it the same labels used by current workflows, and GitHub schedules existing jobs to it.
 
-Pkl remains the future authoring layer, but it comes after GitHub Actions compatibility.
+Typed authoring remains only brainstorming. It is not part of Phase 0.
 
 The GitHub runner wire protocol is private and can drift. That is acceptable for Phase 0. Velnor treats this as an implementation and maintenance cost, not as a product blocker, because the drop-in migration path is more important than having a public protocol contract at this stage.
 
@@ -396,14 +396,14 @@ Phase 0 is successful when:
 9. Docker Buildx/Bake workflows work using the selected Docker isolation mode.
 10. The job completes with correct success/failure status in GitHub.
 
-## Later Pkl Phase
+## Deferred Typed Authoring Brainstorm
 
-Once Phase 0 is stable, Pkl can become a higher-level authoring layer:
+After Phase 0 is proven with live target repository runs, typed authoring can be reconsidered. Do not implement it now.
 
 ```text
-Pkl workflow
+Typed workflow source
   -> compile to GitHub Actions YAML, or
   -> compile to Velnor native execution plan
 ```
 
-The first Pkl deliverable should likely be a generator/validator for GitHub-compatible YAML, because Phase 0 already relies on GitHub's scheduler.
+The first typed-authoring deliverable, if revisited later, should likely be a generator/validator for GitHub-compatible YAML, because Phase 0 already relies on GitHub's scheduler.

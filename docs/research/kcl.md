@@ -1,6 +1,10 @@
 # KCL Research
 
-KCL is a strong candidate for Velnor's workflow definition language.
+Status: historical brainstorming. The current implementation scope is GitHub
+Actions runner compatibility with existing YAML unchanged. Do not implement KCL
+or any Velnor-native workflow language before live target repository proof.
+
+KCL was researched as a candidate for a future workflow definition language.
 
 ## Summary
 
@@ -191,7 +195,8 @@ schema Step:
 
 ## Recommendation
 
-Use KCL as the primary workflow authoring language for the prototype.
+Historical research conclusion only: KCL was a plausible workflow authoring
+candidate during brainstorming. Do not implement it now.
 
 Keep first milestone narrow:
 
