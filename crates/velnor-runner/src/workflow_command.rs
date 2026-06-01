@@ -71,9 +71,9 @@ pub fn parse_workflow_commands(output: &str) -> StepCommandState {
                     .annotations
                     .push(command_annotation(StepAnnotationLevel::Notice, &command));
             }
-            "debug" => state.log_lines.push(format!("Debug: {}", command.value)),
-            "group" => state.log_lines.push(format!("Group: {}", command.value)),
-            "endgroup" => state.log_lines.push("End group".to_string()),
+            "debug" => state.log_lines.push(format!("##[debug]{}", command.value)),
+            "group" => state.log_lines.push(format!("##[group]{}", command.value)),
+            "endgroup" => state.log_lines.push("##[endgroup]".to_string()),
             _ => {}
         }
     }
@@ -267,10 +267,10 @@ mod tests {
         assert_eq!(
             state.log_lines,
             vec![
-                "Group: Build".to_string(),
+                "##[group]Build".to_string(),
                 "Notice: hit rate 80% [sccache stats]".to_string(),
-                "Debug: resolved key".to_string(),
-                "End group".to_string(),
+                "##[debug]resolved key".to_string(),
+                "##[endgroup]".to_string(),
             ]
         );
         assert_eq!(state.notice_count, 1);

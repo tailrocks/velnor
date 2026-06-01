@@ -253,11 +253,11 @@ GitHub UI compatibility needs reporting early. Minimal order:
 5. finish job with success/failure/cancelled
 6. include job outputs, step results, and evaluated environment URL in completion payload
 7. mask secrets in logs before upload. Current code builds masks from GitHub mask hints and secret variables for runner-uploaded feed lines, and stores `add-mask` workflow command values for the later step log uploader.
-8. support annotations from workflow commands. Current code parses state-changing stdout workflow commands (`set-output`, `set-env`, `add-path`, `save-state`) plus `add-mask`, counts `error`, `warning`, and `notice` commands on timeline records, preserves annotation title/location plus group/debug markers in uploaded step logs, and sends structured run-service step annotations. Native GitHub UI folding for groups remains open.
+8. support annotations from workflow commands. Current code parses state-changing stdout workflow commands (`set-output`, `set-env`, `add-path`, `save-state`) plus `add-mask`, counts `error`, `warning`, and `notice` commands on timeline records, preserves annotation title/location plus GitHub `##[group]`, `##[endgroup]`, and `##[debug]` markers in uploaded step logs, and sends structured run-service step annotations. Live validation of native GitHub UI folding remains open.
 9. classify runner infrastructure failures separately from user step failures. Current code reports known Docker bind-mount and Docker environment/bootstrap failures with `infrastructureFailureCategory`.
 
 Remaining reporting gaps are live validation against hosted GitHub, richer in-progress
-timeline updates, and native group-folding UI behavior.
+timeline updates, and native group-folding UI validation.
 
 ## Expression Boundary
 
