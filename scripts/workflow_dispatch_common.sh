@@ -6,11 +6,16 @@ workflow_dispatch_run_ids() {
   local ref="${3:-}"
   local -a args=(--repo "$repo" --workflow "$workflow" --event workflow_dispatch --limit 20 --json databaseId)
 
-  if [[ -n "$ref" ]]; then
+  if workflow_dispatch_ref_can_filter_branch "$ref"; then
     args+=(--branch "$ref")
   fi
 
   gh run list "${args[@]}" --jq '.[].databaseId'
+}
+
+workflow_dispatch_ref_can_filter_branch() {
+  local ref="${1:-}"
+  [[ -n "$ref" && ! "$ref" =~ ^[0-9a-fA-F]{40}$ ]]
 }
 
 dispatch_workflow_and_wait_run_id() {
