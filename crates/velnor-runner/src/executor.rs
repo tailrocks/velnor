@@ -35,6 +35,14 @@ pub fn render_context_expressions(value: &str, context_data: &[(String, Value)])
     JobExecutionState::new_with_context(&[], context_data).resolve_expressions(value)
 }
 
+pub fn render_expressions_with_context(
+    value: &str,
+    base_env: &[(String, String)],
+    context_data: &[(String, Value)],
+) -> String {
+    JobExecutionState::new_with_context(base_env, context_data).resolve_expressions(value)
+}
+
 fn node_action_image(runtime: &str, fallback: &str) -> String {
     if !fallback.trim().is_empty() {
         return fallback.to_string();

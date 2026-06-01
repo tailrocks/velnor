@@ -26,10 +26,7 @@ use crate::{
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     container::{split_container_options, JobContainerSpec, ServiceContainerSpec},
-    executor::{
-        render_context_expressions, DockerScriptExecutor, ExecutableStep, ProcessCommandRunner,
-        StepLog,
-    },
+    executor::{DockerScriptExecutor, ExecutableStep, ProcessCommandRunner, StepLog},
     job_message::{ActionReferenceType, AgentJobRequestMessage, PIPELINE_AGENT_JOB_REQUEST},
     protocol::{
         BrokerClient, DistributedTaskClient, GitHubAuthResult, GitHubScope, JobCompletedEvent,
@@ -1059,9 +1056,10 @@ fn execute_script_job(
     let (runtime_checkout_plans, eager_checkout_plans): (Vec<_>, Vec<_>) = checkout_plans
         .into_iter()
         .partition(CheckoutPlan::requires_runtime_context);
+    let base_env = job_runtime_env(job);
     let eager_checkout_plans = eager_checkout_plans
         .into_iter()
-        .map(|plan| resolve_checkout_plan_context(plan, &context_data))
+        .map(|plan| resolve_checkout_plan_context(plan, &base_env, &context_data))
         .collect::<Vec<_>>();
     execute_checkouts(&mut command_runner, &eager_checkout_plans)?;
     let local_action_plans =
@@ -1113,7 +1111,6 @@ fn execute_script_job(
         docker_cli_plugin_host_dir: host_docker_cli_plugin_dir(),
     };
     let mut executor = DockerScriptExecutor::new(command_runner);
-    let base_env = job_runtime_env(job);
     let summary = executor.execute_ordered_steps_with_job_outputs(
         &container,
         &ordered_steps,
@@ -1144,10 +1141,12 @@ fn execute_script_job(
 
 fn resolve_checkout_plan_context(
     mut plan: CheckoutPlan,
+    base_env: &[(String, String)],
     context_data: &[(String, Value)],
 ) -> CheckoutPlan {
     if let Some(version) = plan.version.as_mut() {
-        *version = render_context_expressions(version, context_data);
+        *version =
+            crate::executor::render_expressions_with_context(version, base_env, context_data);
     }
     plan
 }
@@ -2583,9 +2582,29 @@ runs:
             }),
         )];
 
-        let resolved = resolve_checkout_plan_context(plan, &context_data);
+        let resolved = resolve_checkout_plan_context(plan, &[], &context_data);
 
         assert_eq!(resolved.version.as_deref(), Some("def456"));
+        assert!(!resolved.requires_runtime_context());
+    }
+
+    #[test]
+    fn eager_checkout_resolves_ref_from_github_env_context() {
+        let plan = CheckoutPlan {
+            step_id: "checkout".into(),
+            clone_url: "https://github.com/jackin-project/jackin.git".into(),
+            version: Some("${{ github.sha }}".into()),
+            destination: Path::new("/tmp/work").to_path_buf(),
+            token: None,
+            fetch_depth: Some(1),
+            condition: None,
+            continue_on_error: false,
+        };
+        let base_env = vec![("GITHUB_SHA".to_string(), "abc123".to_string())];
+
+        let resolved = resolve_checkout_plan_context(plan, &base_env, &[]);
+
+        assert_eq!(resolved.version.as_deref(), Some("abc123"));
         assert!(!resolved.requires_runtime_context());
     }
 
