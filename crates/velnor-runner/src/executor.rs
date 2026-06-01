@@ -604,6 +604,7 @@ where
         env.extend(action_state.resolve_env(&action.env));
         env.extend(action_state_env.iter().cloned());
         env.extend(command_files.env.iter().cloned());
+        rewrite_command_file_env_for_action_container(&mut env);
         let node_image = node_action_image(&action.node, &container.node_action_image);
         let exec_args = container.run_node_action_args(
             "/__w",
@@ -689,6 +690,7 @@ where
         set_env_value(&mut env, "GITHUB_WORKSPACE", "/github/workspace");
         set_env_value(&mut env, "RUNNER_TEMP", "/github/runner_temp");
         env.extend(command_files.env.iter().cloned());
+        rewrite_command_file_env_for_action_container(&mut env);
         let entrypoint = action
             .entrypoint
             .as_ref()
@@ -855,6 +857,19 @@ fn set_env_value(env: &mut Vec<(String, String)>, name: &str, value: &str) {
         *existing = value.to_string();
     } else {
         env.push((name.to_string(), value.to_string()));
+    }
+}
+
+fn rewrite_command_file_env_for_action_container(env: &mut [(String, String)]) {
+    for (name, value) in env {
+        if matches!(
+            name.as_str(),
+            "GITHUB_OUTPUT" | "GITHUB_ENV" | "GITHUB_PATH" | "GITHUB_STATE" | "GITHUB_STEP_SUMMARY"
+        ) {
+            if let Some(file_name) = value.strip_prefix("/__t/") {
+                *value = format!("/github/file_commands/{file_name}");
+            }
+        }
     }
 }
 
@@ -1937,67 +1952,46 @@ mod tests {
                 && (args.first().is_some_and(|arg| arg == "exec")
                     || args.iter().any(|arg| arg.starts_with("node:")));
             if action_process {
-                if args
-                    .iter()
-                    .any(|arg| arg == "GITHUB_OUTPUT=/__t/producer_output")
-                {
+                if has_container_env_path(args, "GITHUB_OUTPUT", "producer_output") {
                     fs::write(self.temp.join("producer_output"), "answer=42\n")?;
                 }
-                if args
-                    .iter()
-                    .any(|arg| arg == "GITHUB_OUTPUT=/__t/paths_output")
-                {
+                if has_container_env_path(args, "GITHUB_OUTPUT", "paths_output") {
                     fs::write(
                         self.temp.join("paths_output"),
                         "construct=true\nconstruct_count=1\nchanges=[\"construct\"]\n",
                     )?;
                 }
-                if args
-                    .iter()
-                    .any(|arg| arg == "GITHUB_OUTPUT=/__t/upload-artifact_output")
-                {
+                if has_container_env_path(args, "GITHUB_OUTPUT", "upload-artifact_output") {
                     fs::write(
                         self.temp.join("upload-artifact_output"),
                         "artifact-id=777\nartifact-url=https://results.actions/artifacts/777\n",
                     )?;
                 }
-                if args
-                    .iter()
-                    .any(|arg| arg == "GITHUB_OUTPUT=/__t/deploy-pages_output")
-                {
+                if has_container_env_path(args, "GITHUB_OUTPUT", "deploy-pages_output") {
                     fs::write(
                         self.temp.join("deploy-pages_output"),
                         "page_url=https://jackin-project.github.io/jackin/\n",
                     )?;
                 }
-                if args
-                    .iter()
-                    .any(|arg| arg == "GITHUB_STATE=/__t/cache_state")
-                {
+                if has_container_env_path(args, "GITHUB_STATE", "cache_state") {
                     fs::write(self.temp.join("cache_state"), "primaryKey=linux-cache\n")?;
                 }
-                if args.iter().any(|arg| arg == "GITHUB_PATH=/__t/pather_path") {
+                if has_container_env_path(args, "GITHUB_PATH", "pather_path") {
                     fs::write(self.temp.join("pather_path"), "/github/home/.cargo/bin\n")?;
                 }
-                if args.iter().any(|arg| arg == "GITHUB_PATH=/__t/mise_path") {
+                if has_container_env_path(args, "GITHUB_PATH", "mise_path") {
                     fs::write(
                         self.temp.join("mise_path"),
                         "/github/home/.local/share/mise/shims\n",
                     )?;
                 }
-                if args
-                    .iter()
-                    .any(|arg| arg == "GITHUB_ENV=/__t/toolchain_env")
-                {
+                if has_container_env_path(args, "GITHUB_ENV", "toolchain_env") {
                     fs::write(
                         self.temp.join("toolchain_env"),
                         "CARGO_HOME=/github/home/.cargo\n",
                     )?;
                 }
-                if args
-                    .iter()
-                    .any(|arg| arg == "GITHUB_PATH=/__t/toolchain_path")
-                {
+                if has_container_env_path(args, "GITHUB_PATH", "toolchain_path") {
                     fs::write(
                         self.temp.join("toolchain_path"),
                         "/github/home/.cargo/bin\n",
@@ -2020,9 +2014,7 @@ mod tests {
     impl CommandRunner for PhaseStateRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             self.calls.push((program.to_string(), args.to_vec()));
-            let state_file = args
-                .iter()
-                .any(|arg| arg == "GITHUB_STATE=/__t/wrapped_state")
+            let state_file = has_container_env_path(args, "GITHUB_STATE", "wrapped_state")
                 .then(|| self.temp.join("wrapped_state"));
             if program == "docker" {
                 match (args.last().map(String::as_str), state_file) {
@@ -2051,7 +2043,7 @@ mod tests {
     impl CommandRunner for EnvAndFailureRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             self.calls.push((program.to_string(), args.to_vec()));
-            if args.iter().any(|arg| arg == "GITHUB_ENV=/__t/enable_env") {
+            if has_container_env_path(args, "GITHUB_ENV", "enable_env") {
                 fs::write(self.temp.join("enable_env"), "CACHE_ON_FAILURE=true\n")?;
             }
             let code = if args.iter().any(|arg| arg == "/__t/fail.sh") {
@@ -2122,6 +2114,13 @@ mod tests {
 
     fn host_temp_script_path(container_path: &str, temp: &Path) -> PathBuf {
         temp.join(container_path.trim_start_matches("/__t/"))
+    }
+
+    fn has_container_env_path(args: &[String], name: &str, file_name: &str) -> bool {
+        args.iter().any(|arg| {
+            arg == &format!("{name}=/__t/{file_name}")
+                || arg == &format!("{name}=/github/file_commands/{file_name}")
+        })
     }
 
     fn container(temp: &Path) -> JobContainerSpec {
@@ -3701,7 +3700,7 @@ mod tests {
             .contains(&"INPUT_ACTION_PATH=/__a/_actions/acme_action/v1".into()));
         assert!(calls[2]
             .1
-            .contains(&"GITHUB_OUTPUT=/__t/action1_output".into()));
+            .contains(&"GITHUB_OUTPUT=/github/file_commands/action1_output".into()));
         assert!(calls[2].1.ends_with(&[
             "node:20-bookworm".into(),
             "node".into(),
@@ -3762,6 +3761,9 @@ mod tests {
             .contains(&format!("{}:/github/runner_temp", temp.display())));
         assert!(calls[2]
             .1
+            .contains(&format!("{}:/github/file_commands", temp.display())));
+        assert!(calls[2]
+            .1
             .contains(&"GITHUB_WORKSPACE=/github/workspace".into()));
         assert!(calls[2]
             .1
@@ -3772,7 +3774,7 @@ mod tests {
             .contains(&"INPUT_ACTION_PATH=/__a/_actions/acme_docker/v1".into()));
         assert!(calls[2]
             .1
-            .contains(&"GITHUB_OUTPUT=/__t/docker1_output".into()));
+            .contains(&"GITHUB_OUTPUT=/github/file_commands/docker1_output".into()));
         assert!(calls[2]
             .1
             .windows(2)
@@ -3950,7 +3952,7 @@ mod tests {
         assert!(calls[3].1.contains(&"TOKEN=ghs_token".into()));
         assert!(calls[3]
             .1
-            .contains(&"GITHUB_OUTPUT=/__t/action1_output".into()));
+            .contains(&"GITHUB_OUTPUT=/github/file_commands/action1_output".into()));
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -4710,10 +4712,12 @@ mod tests {
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
         }
         assert!(node_calls[0].contains(&"INPUT_GITHUB_TOKEN=ghs_token".into()));
-        assert!(node_calls[0].contains(&"GITHUB_PATH=/__t/mise_path".into()));
+        assert!(node_calls[0].contains(&"GITHUB_PATH=/github/file_commands/mise_path".into()));
         assert!(node_calls[1].contains(&"INPUT_PYTHON-VERSION=3.13".into()));
         assert!(node_calls[1].contains(&"INPUT_TOKEN=ghs_token".into()));
-        assert!(node_calls[1].contains(&"GITHUB_PATH=/__t/setup-python_path".into()));
+        assert!(
+            node_calls[1].contains(&"GITHUB_PATH=/github/file_commands/setup-python_path".into())
+        );
         assert!(node_calls[1].last().is_some_and(|arg| {
             arg.contains("export PATH='/github/home/.local/share/mise/shims':\"$PATH\"")
         }));

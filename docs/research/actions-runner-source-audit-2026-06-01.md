@@ -130,7 +130,7 @@ Velnor rule:
 
 - always use a fresh Docker job container for target Linux jobs, even when the workflow does not declare `container:`
 - mount shared workspace/temp/home/actions/tools into job container, JavaScript sidecars, and Docker action containers
-- for `runs.using: docker` action containers, preserve GitHub's static `/github/workspace` workdir and `/github/runner_temp` temp alias
+- for action containers, preserve GitHub's static `/github/workspace` workdir, `/github/runner_temp` temp alias, and `/github/file_commands` command-file alias
 - mount Docker socket plus host Docker CLI/Buildx for target Docker workflows
 - preflight bind-mount visibility before running user steps
 - start service containers on the same job network with GitHub aliases and wait for running/healthy state
