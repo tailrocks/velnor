@@ -976,7 +976,10 @@ impl JobExecutionState {
             "runner.workspace" => "RUNNER_WORKSPACE",
             _ => return self.resolve_context_data_expression(expression),
         };
-        self.env.get(env_name).cloned()
+        self.env
+            .get(env_name)
+            .cloned()
+            .or_else(|| self.resolve_context_data_expression(expression))
     }
 
     fn job_status(&self) -> &'static str {

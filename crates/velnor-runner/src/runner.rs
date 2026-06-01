@@ -598,6 +598,10 @@ struct ScriptJobResult {
 
 fn job_context_data(job: &AgentJobRequestMessage) -> Vec<(String, Value)> {
     let mut context_data = job.context_data.clone();
+    let github_token = job
+        .variables
+        .get("system.github.token")
+        .and_then(|variable| variable.value.clone());
     let mut synthesized_secrets = Map::new();
     for (name, variable) in &job.variables {
         if !variable.is_secret {
@@ -623,6 +627,21 @@ fn job_context_data(job: &AgentJobRequestMessage) -> Vec<(String, Value)> {
             Some(_) => {}
             None => {
                 context_data.insert("secrets".to_string(), Value::Object(synthesized_secrets));
+            }
+        }
+    }
+    if let Some(token) = github_token {
+        match context_data.get_mut("github") {
+            Some(Value::Object(github)) => {
+                github
+                    .entry("token".to_string())
+                    .or_insert_with(|| Value::String(token));
+            }
+            Some(_) => {}
+            None => {
+                let mut github = Map::new();
+                github.insert("token".to_string(), Value::String(token));
+                context_data.insert("github".to_string(), Value::Object(github));
             }
         }
     }
@@ -1436,7 +1455,41 @@ mod tests {
         assert_eq!(secrets["DOCKERHUB_TOKEN"], "server_secret");
         assert_eq!(secrets["DOCKERHUB_USERNAME"], "docker_user");
         assert!(!secrets.contains_key("PUBLIC_VALUE"));
+        assert_eq!(context_data["github"]["token"], "ghs_token");
         assert_eq!(context_data["matrix"]["target"], "linux");
+    }
+
+    #[test]
+    fn local_action_inputs_can_render_github_token_context() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Docs",
+            "requestId": 1,
+            "variables": {
+                "system.github.token": { "value": "ghs_token", "isSecret": true }
+            },
+            "steps": [{
+                "id": "docs",
+                "reference": {
+                    "type": "Repository",
+                    "name": "./.github/actions/check-deployed-docs"
+                },
+                "inputs": {
+                    "github-token": "${{ github.token }}"
+                }
+            }]
+        }))
+        .unwrap();
+        let context_data = job_context_data(&job);
+
+        let plans =
+            local_action_plans_with_context(&job.steps, Path::new("/tmp/workspace"), &context_data)
+                .unwrap();
+
+        assert_eq!(plans[0].inputs["github-token"], "ghs_token");
     }
 
     #[test]
