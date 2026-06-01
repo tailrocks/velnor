@@ -10,6 +10,16 @@ Reference source:
 - `main` rechecked on 2026-06-01: `c6a124e18496a6e5d2357415052d1799afc64b63`
 - release page: <https://github.com/actions/runner/releases/tag/v2.334.0>
 
+Drift check:
+
+```sh
+scripts/check_runner_reference.py
+```
+
+This compares the pinned release above with GitHub's latest `actions/runner`
+release. If it fails, refresh this document and re-audit the V2 anchors before
+claiming latest-runner compatibility.
+
 This refresh exists because Velnor intentionally follows the latest hosted
 GitHub self-hosted runner path. Classic distributed-task execution remains a
 source reference only; the Velnor runner path targets broker/run-service V2.

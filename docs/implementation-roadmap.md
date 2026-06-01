@@ -4,7 +4,7 @@ This roadmap is ordered for the real first goal: run existing GitHub Actions YAM
 
 Detailed Phase 0 implementation research lives in `docs/research/phase-0-implementation-plan.md`.
 The current upstream source audit is `docs/research/actions-runner-source-audit-2026-06-01.md`.
-The latest runner V2 refresh is `docs/research/latest-runner-v2-refresh-2026-06-01.md`.
+The latest runner V2 refresh is `docs/research/latest-runner-v2-refresh-2026-06-01.md`; use `scripts/check_runner_reference.py` before live validation to detect upstream `actions/runner` release drift.
 The runner job-message contract is `docs/research/github-runner-job-message-contract-2026-06-01.md`; Velnor receives expanded `AgentJobRequestMessage` payloads, not raw workflow YAML, and the normal hosted-GitHub path targets broker/run-service V2 only.
 The normalized plan boundary for both GitHub job messages and future Pkl workflows is `docs/research/normalized-plan-contract-2026-06-01.md`.
 The implementation-oriented runner blueprint is `docs/research/self-hosted-runner-implementation-blueprint-2026-06-01.md`.
