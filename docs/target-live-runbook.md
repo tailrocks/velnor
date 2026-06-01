@@ -8,6 +8,8 @@ The implementation checklist is tracked in
 ## Prerequisites
 
 - Linux host where the Docker daemon can see Velnor's bind-mounted work directory.
+  `velnor-runner configure`, `velnor-runner run`, and `velnor-runner preflight`
+  fail immediately on non-Linux hosts.
 - A local Docker socket is preferred. Remote `DOCKER_HOST=tcp://...` daemons
   usually fail unless `--work-dir` points to a path mounted into that daemon,
   because Velnor mounts job scripts, workspace, temp files, artifacts, and cache
@@ -241,7 +243,7 @@ It uses the same host readiness, target label preset, V2 config validation,
 sanitized job dumps, optional `VELNOR_TARGET_WORKFLOW=<workflow.yml>` dispatch,
 and repeated `--once` execution shape as `scripts/chainargos_target_smoke.sh`.
 Set `VELNOR_TARGET_MVP_ARM_LABEL=true` only on an ARM Linux host to add the
-`ubuntu-24.04-arm` label.
+`ubuntu-24.04-arm` label. Velnor rejects that label on non-ARM hosts.
 
 To run the staged Jackin Rust/Linux proof path in one command, use:
 
@@ -267,8 +269,9 @@ cargo run --bin velnor-runner -- configure \
   --replace
 ```
 
-Only add `--target-mvp-arm-label` on an ARM Linux host. Do not add macOS labels;
-macOS runner replacement is not a Velnor target.
+Only add `--target-mvp-arm-label` on an ARM Linux host. Velnor rejects that
+label on non-ARM hosts. Do not add macOS labels; macOS runner replacement is
+not a Velnor target.
 
 Recommended Jackin live sequence:
 

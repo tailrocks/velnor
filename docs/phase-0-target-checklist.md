@@ -40,6 +40,8 @@ Runner protocol:
 
 - latest hosted GitHub V2 broker/run-service path
 - runner configure, status, remove, and run commands
+- Linux host enforcement for configure, run, and preflight
+- macOS label rejection and ARM label validation against host architecture
 - broker session creation, polling, control-message handling, and migration
 - run-service acquire, renew, complete
 - job-scoped token use when GitHub provides it

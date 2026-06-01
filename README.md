@@ -32,6 +32,8 @@ The first Rust crate is `velnor-runner`. It can register as a GitHub
 self-hosted runner, requires the current V2 broker/run-service flow, and runs
 supported target jobs in Docker with Rust-native adapters for the marketplace
 actions used by the target repositories.
+`configure`, `run`, and `preflight` are Linux-only commands; Velnor refuses
+non-Linux hosts instead of pretending to satisfy Linux runner labels elsewhere.
 
 ```sh
 cargo run --bin velnor-runner -- configure \
@@ -105,7 +107,8 @@ Set `VELNOR_TARGET_JOB_COUNT=<n>` when the target workflow needs Velnor to
 consume more than one queued job.
 Set `VELNOR_TARGET_WATCH_RUN=true` to wait for the GitHub workflow run to finish
 after the selected Velnor jobs are consumed.
-Set `VELNOR_TARGET_MVP_ARM_LABEL=true` only on ARM Linux target smoke hosts.
+Set `VELNOR_TARGET_MVP_ARM_LABEL=true` only on ARM Linux target smoke hosts; the
+runner rejects the ARM label on non-ARM hosts.
 
 The remaining Phase 0 proof is live GitHub UI validation on the two target
 repositories from a Linux host whose Docker daemon can see Velnor's bind-mounted

@@ -22,7 +22,8 @@ Goal: prove Velnor can appear as a GitHub self-hosted runner.
 Deliverables:
 
 - `velnor-runner configure --url ... --token ... --labels ...`
-- `velnor-runner configure --target-mvp-labels` opt-in adds the current target x64 Linux labels: `hetzner-sentry-ci`, `ubuntu-latest`, and `ubuntu-24.04`; it intentionally does not claim macOS labels, and claims ARM only when `--target-mvp-arm-label` is also passed on an ARM Linux host
+- `velnor-runner configure --target-mvp-labels` opt-in adds the current target x64 Linux labels: `hetzner-sentry-ci`, `ubuntu-latest`, and `ubuntu-24.04`; it intentionally does not claim macOS labels, rejects macOS/Darwin labels, and claims ARM only when `--target-mvp-arm-label` is also passed on an ARM Linux host
+- `velnor-runner configure`, `run`, and `preflight` reject non-Linux hosts because the Phase 0 runner execution model is Linux-only
 - local settings/credential store
 - repo-level runner registration
 - runner appears online in GitHub UI

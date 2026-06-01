@@ -21,7 +21,9 @@ Velnor should be drop-in compatible for the workflows currently used by:
 Velnor runner execution is Linux-only. macOS runner replacement is not a target
 for this project. If a target workflow contains macOS matrix legs, those legs
 remain on GitHub-hosted infrastructure or are outside Velnor's supported
-execution surface.
+execution surface. The `velnor-runner configure`, `velnor-runner run`, and
+`velnor-runner preflight` commands enforce this by rejecting non-Linux hosts.
+The `ubuntu-24.04-arm` label is accepted only on ARM Linux hosts.
 
 The supported unit is not a hardcoded workflow file. The supported unit is the
 runner-side behavior those workflows require: labels, job-message fields,
@@ -45,6 +47,7 @@ Required protocol behavior:
 
 - register with GitHub using a repository runner token or a PAT that can request
   one
+- refuse unsupported host/label combinations before registration
 - exchange the runner token through `actions/runner-registration`
 - add or replace a `TaskAgent` with the configured labels
 - store OAuth runner credentials, pool id, agent id, `UseV2Flow`, and
