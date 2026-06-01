@@ -84,7 +84,7 @@ pub struct RunArgs {
     pub execute_scripts: bool,
 
     /// Docker image for --execute-scripts jobs.
-    #[arg(long, default_value = "ubuntu:24.04")]
+    #[arg(long, default_value = "ghcr.io/catthehacker/ubuntu:act-latest")]
     pub docker_image: String,
 
     /// Override Docker image used to run JavaScript actions. By default Velnor uses the action's declared Node runtime image.

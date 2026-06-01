@@ -125,7 +125,7 @@ docker network rm <job network>
 
 Current code can map enabled GitHub `run:` message steps into internal script-step plans when the runner receives `Reference.Type = Script`. The mapper supports `script`, `shell` values `bash`/`sh`, and relative or absolute `workingDirectory`; unsupported shells are reported as incomplete mapping until broader shell support is added.
 
-When GitHub sends an explicit job container image, Velnor uses that image for the long-running Docker job container. If no job image is present, Velnor uses the CLI/default image. Job container environment variables from the job container payload are passed through to `docker run`.
+When GitHub sends an explicit job container image, Velnor uses that image for the long-running Docker job container. If no job image is present, Velnor uses the CLI/default image. The default is `ghcr.io/catthehacker/ubuntu:act-latest` rather than plain `ubuntu:24.04`, because the target workflows assume hosted-runner-style tools such as `curl`, `jq`, compilers, Docker/Buildx clients, and common archive utilities. Job container environment variables from the job container payload are passed through to `docker run`.
 
 Basic service containers from GitHub container resources are started on the same per-job Docker network before the job container, using the GitHub alias as Docker network alias. Velnor passes resource environment variables, port mappings, and container options to Docker, waits for Docker health/running status before starting the job container, then removes services during cleanup. Job container `options`/`createOptions` are also passed through to Docker.
 
@@ -200,7 +200,7 @@ Implement action support in the order that unlocks target workflows fastest:
    - download action repo/ref: implemented for repository action probe path
    - parse `action.yml`: metadata parser and repository action planner are implemented as groundwork
    - map `with:` to `INPUT_*`: implemented for JavaScript action invocation, including metadata defaults
-   - run Node entrypoint: implemented for ordered script/JavaScript execution. JavaScript actions run in a short-lived side container with the same workspace/temp/home/actions/tools mounts and job network so arbitrary job images do not need to carry Node. The default sidecar image is `ghcr.io/catthehacker/ubuntu:act-latest` instead of a plain `node:*` image because the target Docker JavaScript actions also need the Docker CLI while using the mounted Docker socket; operators can override it with `--node-action-image`.
+   - run Node entrypoint: implemented for ordered script/JavaScript execution. JavaScript actions run in a short-lived side container with the same workspace/temp/home/actions/tools mounts and job network so arbitrary job images do not need to carry Node. By default Velnor honors the action's declared Node runtime image and mounts host Docker client tooling when available; operators can override it with `--node-action-image`.
    - run `runs.post` cleanup/save entrypoints: implemented in reverse order with `GITHUB_STATE` to `STATE_*` propagation and target `runs.post-if` condition handling
    - provide `GITHUB_*`, `RUNNER_*`, `ACTIONS_*` runtime env: basic job-message extraction, `GITHUB_ACTIONS=true`, target repository owner/ref/workflow/server URL env, GitHub-style `RUNNER_ARCH` values, runner name/environment/workspace/debug, `GITHUB_EVENT_PATH` payload writing, per-action repository/ref/path env, and step injection are implemented; full runner parity remains open
 5. Composite action handler:

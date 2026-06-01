@@ -73,6 +73,7 @@ Current code progress:
 - runner can parse the outer `AgentJobRequestMessage` subset from GitHub job messages: plan/timeline ids, request/job ids, variables, endpoints, repositories, containers, and action steps
 - command-file parser supports `NAME=value` and heredoc `NAME<<EOF` syntax
 - Docker job container command builder covers network/container start, `docker exec`, and cleanup command shapes
+- default Docker job image is `ghcr.io/catthehacker/ubuntu:act-latest`, giving target workflows a hosted-runner-like Ubuntu base with common CI tools; `--docker-image` can still override it
 - Docker execution uses a shared `/github/home` mount and `HOME=/github/home` across the job, JavaScript action sidecar, and Docker action containers so setup actions can install tools into a home directory visible to later script steps
 - JavaScript actions run in a short-lived sidecar image selected from `runs.using`; `--node-action-image` can override the image when an operator wants a custom Node/tooling bundle
 - on Linux hosts, Velnor mounts the host Docker CLI and Buildx plugin directory into the job container, JavaScript action sidecars, and Docker action containers when it also mounts `/var/run/docker.sock`; target Docker actions such as `docker/setup-buildx-action`, `docker/login-action`, `docker/build-push-action`, and `docker/bake-action` need this client tooling when they talk to the mounted Docker socket
