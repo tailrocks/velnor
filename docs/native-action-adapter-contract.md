@@ -66,6 +66,12 @@ not execute that pinned marketplace implementation. For supported action
 families, Velnor ignores the pinned SHA/tag and runs its internal Rust adapter.
 Adapters should track the latest behavior Velnor intentionally supports for the
 target repositories; old marketplace versions are not a compatibility goal.
+Known native action families must not require downloaded marketplace metadata
+before execution. GitHub still sends the ref in the job message, and Velnor may
+keep it for diagnostics, but the implementation is selected from the repository
+family such as `actions/cache` or `docker/login-action`. Downloaded `action.yml`
+metadata is only required for non-native actions and for composite expansion that
+has not been replaced by a native adapter.
 
 The adapter receives already-resolved runner contexts where GitHub would resolve
 them for that step:

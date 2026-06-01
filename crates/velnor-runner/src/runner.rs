@@ -18,9 +18,10 @@ use crate::{
     action::{
         composite_action_invocations, composite_repository_action_plans,
         composite_repository_action_plans_from_resolved, download_repository_actions,
-        is_local_action_step, local_action_plans_with_context, repository_action_plans,
-        resolve_local_action, ActionMetadata, ActionRuntime, CompositeActionInvocation,
-        LocalActionPlan, RepositoryActionPlan, ResolvedAction,
+        is_local_action_step, local_action_plans_with_context, native_action_adapter,
+        native_invocation_from_plan, repository_action_plans, resolve_local_action, ActionMetadata,
+        ActionRuntime, CompositeActionInvocation, LocalActionPlan, RepositoryActionPlan,
+        ResolvedAction,
     },
     checkout::{
         checkout_plans, checkout_step_id, cleanup_checkout_credentials, configure_safe_directory,
@@ -1144,6 +1145,7 @@ fn execute_script_job(
     let ordered_steps = ordered_executable_steps(
         job,
         script_steps,
+        &repository_action_plans,
         &resolved_actions,
         &local_actions,
         &actions,
@@ -1400,7 +1402,15 @@ where
     let mut resolved = Vec::new();
     let mut pending = initial_plans.to_vec();
     while !pending.is_empty() {
-        let next = download_repository_actions(runner, &pending)?;
+        let downloadable = pending
+            .iter()
+            .filter(|plan| native_action_adapter(&plan.repository).is_none())
+            .cloned()
+            .collect::<Vec<_>>();
+        if downloadable.is_empty() {
+            break;
+        }
+        let next = download_repository_actions(runner, &downloadable)?;
         resolved.extend(next);
 
         let nested = composite_repository_action_plans_from_resolved(&resolved, actions_host)?;
@@ -1408,9 +1418,10 @@ where
         pending = nested
             .into_iter()
             .filter(|plan| {
-                !resolved
-                    .iter()
-                    .any(|action| same_action(&action.plan, plan))
+                native_action_adapter(&plan.repository).is_none()
+                    && !resolved
+                        .iter()
+                        .any(|action| same_action(&action.plan, plan))
                     && !previous_pending
                         .iter()
                         .any(|existing| same_action(existing, plan))
@@ -1430,6 +1441,7 @@ fn same_action(left: &RepositoryActionPlan, right: &RepositoryActionPlan) -> boo
 fn ordered_executable_steps(
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
+    repository_action_plans: &[RepositoryActionPlan],
     resolved_actions: &[ResolvedAction],
     local_actions: &[(LocalActionPlan, ActionMetadata)],
     actions_host: &std::path::Path,
@@ -1438,6 +1450,7 @@ fn ordered_executable_steps(
     let mut ordered = Vec::new();
     let mut script_iter = script_steps.iter();
     let mut local_iter = local_actions.iter();
+    let mut repository_iter = repository_action_plans.iter();
     for (step_index, step) in job
         .steps
         .iter()
@@ -1474,6 +1487,14 @@ fn ordered_executable_steps(
                                 ordered.push(ExecutableStep::Script(script));
                             }
                             CompositeActionInvocation::Repository(plan) => {
+                                if append_native_action_step_from_plan(
+                                    &mut ordered,
+                                    &plan,
+                                    parent_condition,
+                                    parent_continue_on_error,
+                                ) {
+                                    continue;
+                                }
                                 let action = resolved_actions
                                     .iter()
                                     .find(|action| action.plan.step_id == plan.step_id)
@@ -1524,13 +1545,15 @@ fn ordered_executable_steps(
                 let git_ref = reference.git_ref.as_deref().ok_or_else(|| {
                     anyhow::anyhow!("repository action '{repository}' missing ref")
                 })?;
+                let plan = repository_iter
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("repository action mapping count mismatch"))?;
+                if append_native_action_step_from_plan(&mut ordered, plan, None, false) {
+                    continue;
+                }
                 let action = resolved_actions
                     .iter()
-                    .find(|action| {
-                        action.plan.repository == repository
-                            && action.plan.git_ref == git_ref
-                            && action.plan.source_path.as_deref() == reference.path.as_deref()
-                    })
+                    .find(|action| same_action(&action.plan, plan))
                     .ok_or_else(|| {
                         anyhow::anyhow!(
                             "repository action '{repository}@{git_ref}' was not resolved"
@@ -1599,6 +1622,14 @@ fn append_resolved_action_steps(
                         ordered.push(ExecutableStep::Script(script));
                     }
                     CompositeActionInvocation::Repository(plan) => {
+                        if append_native_action_step_from_plan(
+                            ordered,
+                            &plan,
+                            action_condition.as_deref(),
+                            continue_on_error,
+                        ) {
+                            continue;
+                        }
                         let nested = resolved_actions
                             .iter()
                             .find(|resolved| resolved.plan.step_id == plan.step_id)
@@ -1632,6 +1663,24 @@ fn append_resolved_action_steps(
         }
     }
     Ok(())
+}
+
+fn append_native_action_step_from_plan(
+    ordered: &mut Vec<ExecutableStep>,
+    plan: &RepositoryActionPlan,
+    parent_condition: Option<&str>,
+    parent_continue_on_error: bool,
+) -> bool {
+    let Some(invocation) = native_invocation_from_plan(plan) else {
+        return false;
+    };
+    ordered.push(ExecutableStep::Native {
+        step_id: plan.step_id.clone(),
+        invocation,
+        condition: combine_conditions(parent_condition, plan.condition.as_deref()),
+        continue_on_error: parent_continue_on_error || plan.continue_on_error,
+    });
+    true
 }
 
 fn combine_conditions(parent: Option<&str>, child: Option<&str>) -> Option<String> {
@@ -2830,6 +2879,7 @@ runs:
             &job,
             &script_steps,
             &[],
+            &[],
             &[(local_plan, metadata)],
             Path::new("/tmp/actions"),
             &[],
@@ -2901,6 +2951,7 @@ runs:
         let ordered = ordered_executable_steps(
             &job,
             &script_steps,
+            &[],
             &[],
             &[],
             Path::new("/tmp/actions"),
@@ -3064,6 +3115,7 @@ runs:
         let ordered = ordered_executable_steps(
             &job,
             &[],
+            &[],
             &[resolved],
             &[(local_plan, local_metadata)],
             Path::new("/tmp/actions"),
@@ -3142,6 +3194,7 @@ runs:
 "#,
         )
         .unwrap();
+        let plans = vec![plan.clone()];
         let resolved = ResolvedAction {
             plan,
             metadata_path: actions_host.join("_actions/dtolnay_rust-toolchain/stable/action.yml"),
@@ -3150,7 +3203,8 @@ runs:
         };
 
         let ordered =
-            ordered_executable_steps(&job, &[], &[resolved], &[], actions_host, &[]).unwrap();
+            ordered_executable_steps(&job, &[], &plans, &[resolved], &[], actions_host, &[])
+                .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native {
@@ -3235,8 +3289,9 @@ runs:
             },
         ];
 
+        let plans = vec![resolved[1].plan.clone()];
         let ordered =
-            ordered_executable_steps(&job, &[], &resolved, &[], actions_host, &[]).unwrap();
+            ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[]).unwrap();
 
         let ExecutableStep::JavaScript { invocation, .. } = &ordered[0] else {
             panic!("repository action should expand to JavaScript step")
@@ -3299,8 +3354,9 @@ runs:
         let plans = repository_action_plans(&job.steps, actions_host).unwrap();
         let resolved = resolve_actions_from_cache(&plans, actions_host);
 
-        let ordered = ordered_executable_steps(&job, &[], &resolved, &[], actions_host, &[])
-            .unwrap_or_else(|error| panic!("plan target action inventory: {error:#}"));
+        let ordered =
+            ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[])
+                .unwrap_or_else(|error| panic!("plan target action inventory: {error:#}"));
 
         assert!(
             ordered.len() >= plans.len(),
@@ -3368,6 +3424,7 @@ runs:
 "#,
         )
         .unwrap();
+        let plans = vec![plan.clone()];
         let resolved = ResolvedAction {
             plan,
             metadata_path: actions_host
@@ -3377,7 +3434,8 @@ runs:
         };
 
         let ordered =
-            ordered_executable_steps(&job, &[], &[resolved], &[], actions_host, &[]).unwrap();
+            ordered_executable_steps(&job, &[], &plans, &[resolved], &[], actions_host, &[])
+                .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native {
@@ -3397,6 +3455,47 @@ runs:
             invocation.inputs["renovate-image"],
             "ghcr.io/renovatebot/renovate"
         );
+    }
+
+    #[test]
+    fn native_repository_actions_ignore_pinned_ref_metadata() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Cache",
+            "requestId": 1,
+            "steps": [{
+                "id": "cache",
+                "reference": {
+                    "type": "Repository",
+                    "name": "actions/cache",
+                    "ref": "pinned-sha-ignored-by-native-adapter"
+                },
+                "inputs": {
+                    "key": "linux-cache",
+                    "path": "~/.cargo"
+                }
+            }]
+        }))
+        .unwrap();
+        let actions_host = Path::new("/tmp/actions");
+        let plans = repository_action_plans(&job.steps, actions_host).unwrap();
+
+        let ordered =
+            ordered_executable_steps(&job, &[], &plans, &[], &[], actions_host, &[]).unwrap();
+
+        assert_eq!(ordered.len(), 1);
+        let ExecutableStep::Native { invocation, .. } = &ordered[0] else {
+            panic!("known native action should not require downloaded action metadata")
+        };
+        assert_eq!(
+            invocation.adapter,
+            crate::action::NativeActionAdapter::Cache
+        );
+        assert_eq!(invocation.inputs["key"], "linux-cache");
+        assert_eq!(invocation.inputs["path"], "~/.cargo");
     }
 
     #[test]
@@ -3446,6 +3545,7 @@ runs:
 "#,
         )
         .unwrap();
+        let plans = vec![plan.clone()];
         let resolved = ResolvedAction {
             plan,
             metadata_path: actions_host
@@ -3455,7 +3555,8 @@ runs:
         };
 
         let ordered =
-            ordered_executable_steps(&job, &[], &[resolved], &[], actions_host, &[]).unwrap();
+            ordered_executable_steps(&job, &[], &plans, &[resolved], &[], actions_host, &[])
+                .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native {
@@ -3533,6 +3634,7 @@ runs:
         let upload_metadata =
             parse_action_metadata("runs:\n  using: node20\n  main: dist/upload/index.js\n")
                 .unwrap();
+        let plans = vec![pages_plan.clone(), upload_plan.clone()];
         let pages = ResolvedAction {
             plan: pages_plan,
             metadata_path: actions_host
@@ -3548,7 +3650,8 @@ runs:
         };
 
         let ordered =
-            ordered_executable_steps(&job, &[], &[pages, upload], &[], actions_host, &[]).unwrap();
+            ordered_executable_steps(&job, &[], &plans, &[pages, upload], &[], actions_host, &[])
+                .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native {

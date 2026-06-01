@@ -475,11 +475,7 @@ pub struct NativeActionInvocation {
 
 impl ResolvedAction {
     pub fn native_invocation(&self) -> Option<NativeActionInvocation> {
-        native_action_adapter(&self.plan.repository).map(|adapter| NativeActionInvocation {
-            adapter,
-            inputs: self.plan.inputs.clone(),
-            env: self.plan.env.clone(),
-        })
+        native_invocation_from_plan(&self.plan)
     }
 
     pub fn javascript_invocation(&self, actions_host: &Path) -> Result<JavaScriptActionInvocation> {
@@ -633,6 +629,14 @@ impl ResolvedAction {
             &action_path,
         )
     }
+}
+
+pub fn native_invocation_from_plan(plan: &RepositoryActionPlan) -> Option<NativeActionInvocation> {
+    native_action_adapter(&plan.repository).map(|adapter| NativeActionInvocation {
+        adapter,
+        inputs: plan.inputs.clone(),
+        env: plan.env.clone(),
+    })
 }
 
 pub fn composite_script_steps(
