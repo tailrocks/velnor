@@ -107,7 +107,7 @@ loop:
 DeleteAgentSessionAsync(poolId, sessionId)
 ```
 
-Newer settings may use `BrokerMessageListener`, which talks to broker/run-service endpoints. Velnor likely needs to support this because current GitHub runner registration can set `UseV2Flow`. The protocol layer now models the V2 route shapes: broker `session`, `message`, and `acknowledge`, plus run-service `acquirejob`; the runner can create a broker session, acquire `RunnerJobRequest` jobs, and dispatch them into the Docker executor. Run-service renewal/completion still needs to replace the classic job-request finish path.
+Newer settings may use `BrokerMessageListener`, which talks to broker/run-service endpoints. Velnor likely needs to support this because current GitHub runner registration can set `UseV2Flow`. The protocol layer now models the V2 route shapes: broker `session`, `message`, and `acknowledge`, plus run-service `acquirejob`, `renewjob`, and `completejob`; the runner can create a broker session, acquire `RunnerJobRequest` jobs, renew them through run-service, dispatch them into the Docker executor, and complete them through run-service. Broker cancellation/migration remains open.
 
 Important message types:
 

@@ -520,6 +520,46 @@ impl RunServiceClient {
 
         parse_json_response(response, "acquire run-service job").await
     }
+
+    pub async fn renew_job(
+        &self,
+        run_service_url: &str,
+        plan_id: &str,
+        job_id: &str,
+    ) -> Result<RenewJobResponse> {
+        let url = run_service_renew_job_url(run_service_url)?;
+        let body = RenewJobRequest { plan_id, job_id };
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&self.bearer_token)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .json(&body)
+            .send()
+            .await
+            .context("send run-service renew job request")?;
+
+        parse_json_response(response, "renew run-service job").await
+    }
+
+    pub async fn complete_job(
+        &self,
+        run_service_url: &str,
+        completion: RunServiceCompleteJob,
+    ) -> Result<()> {
+        let url = run_service_complete_job_url(run_service_url)?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&self.bearer_token)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .json(&completion)
+            .send()
+            .await
+            .context("send run-service complete job request")?;
+
+        parse_empty_response(response, "complete run-service job").await
+    }
 }
 
 impl DistributedTaskClient {
@@ -964,6 +1004,18 @@ fn run_service_acquire_job_url(run_service_url: &str) -> Result<Url> {
         .context("build run-service acquire job URL")
 }
 
+fn run_service_renew_job_url(run_service_url: &str) -> Result<Url> {
+    slash_url(run_service_url)?
+        .join("renewjob")
+        .context("build run-service renew job URL")
+}
+
+fn run_service_complete_job_url(run_service_url: &str) -> Result<Url> {
+    slash_url(run_service_url)?
+        .join("completejob")
+        .context("build run-service complete job URL")
+}
+
 fn agent_request_url(base_url: &Url, pool_id: i64, request_id: i64) -> Result<Url> {
     let mut url = base_url.join(&format!("pools/{pool_id}/jobrequests/{request_id}"))?;
     {
@@ -1361,6 +1413,58 @@ struct AcquireJobRequest<'a> {
     runner_os: &'a str,
     #[serde(rename = "billingOwnerId", skip_serializing_if = "Option::is_none")]
     billing_owner_id: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+struct RenewJobRequest<'a> {
+    #[serde(rename = "planId")]
+    plan_id: &'a str,
+    #[serde(rename = "jobId")]
+    job_id: &'a str,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RenewJobResponse {
+    #[serde(rename = "lockedUntil", alias = "LockedUntil")]
+    pub locked_until: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunServiceCompleteJob {
+    #[serde(rename = "planId")]
+    pub plan_id: String,
+    #[serde(rename = "jobId")]
+    pub job_id: String,
+    #[serde(rename = "conclusion")]
+    pub conclusion: TaskResult,
+    #[serde(rename = "outputs", skip_serializing_if = "BTreeMap::is_empty")]
+    pub outputs: BTreeMap<String, RunServiceVariableValue>,
+    #[serde(rename = "stepResults", skip_serializing_if = "Vec::is_empty")]
+    pub step_results: Vec<RunServiceStepResult>,
+    #[serde(rename = "billingOwnerId", skip_serializing_if = "Option::is_none")]
+    pub billing_owner_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunServiceVariableValue {
+    #[serde(rename = "value")]
+    pub value: String,
+    #[serde(rename = "isSecret")]
+    pub is_secret: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunServiceStepResult {
+    #[serde(rename = "external_id", skip_serializing_if = "Option::is_none")]
+    pub external_id: Option<String>,
+    #[serde(rename = "name")]
+    pub name: String,
+    #[serde(rename = "status")]
+    pub status: TimelineRecordState,
+    #[serde(rename = "conclusion")]
+    pub conclusion: TaskResult,
+    #[serde(rename = "completed_log_lines")]
+    pub completed_log_lines: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1895,6 +1999,18 @@ mod tests {
             url.as_str(),
             "https://run.actions.githubusercontent.com/jobs/123/acquirejob"
         );
+        assert_eq!(
+            run_service_renew_job_url("https://run.actions.githubusercontent.com/jobs/123")
+                .unwrap()
+                .as_str(),
+            "https://run.actions.githubusercontent.com/jobs/123/renewjob"
+        );
+        assert_eq!(
+            run_service_complete_job_url("https://run.actions.githubusercontent.com/jobs/123")
+                .unwrap()
+                .as_str(),
+            "https://run.actions.githubusercontent.com/jobs/123/completejob"
+        );
     }
 
     #[test]
@@ -1931,6 +2047,51 @@ mod tests {
             serde_json::json!({
                 "jobMessageId": "request-1",
                 "runnerOS": "linux",
+                "billingOwnerId": "42"
+            })
+        );
+    }
+
+    #[test]
+    fn complete_job_request_matches_run_service_shape() {
+        let completion = RunServiceCompleteJob {
+            plan_id: "plan".into(),
+            job_id: "job".into(),
+            conclusion: TaskResult::Succeeded,
+            outputs: [(
+                "artifact".into(),
+                RunServiceVariableValue {
+                    value: "123".into(),
+                    is_secret: false,
+                },
+            )]
+            .into(),
+            step_results: vec![RunServiceStepResult {
+                external_id: Some("step".into()),
+                name: "step".into(),
+                status: TimelineRecordState::Completed,
+                conclusion: TaskResult::Succeeded,
+                completed_log_lines: 2,
+            }],
+            billing_owner_id: Some("42".into()),
+        };
+
+        assert_eq!(
+            serde_json::to_value(completion).unwrap(),
+            serde_json::json!({
+                "planId": "plan",
+                "jobId": "job",
+                "conclusion": "succeeded",
+                "outputs": {
+                    "artifact": { "value": "123", "isSecret": false }
+                },
+                "stepResults": [{
+                    "external_id": "step",
+                    "name": "step",
+                    "status": "completed",
+                    "conclusion": "succeeded",
+                    "completed_log_lines": 2
+                }],
                 "billingOwnerId": "42"
             })
         );

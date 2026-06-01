@@ -33,15 +33,24 @@ use crate::{
     job_message::{ActionReferenceType, AgentJobRequestMessage, PIPELINE_AGENT_JOB_REQUEST},
     protocol::{
         BrokerClient, DistributedTaskClient, GitHubAuthResult, GitHubScope, JobCompletedEvent,
-        OAuthClient, OAuthJwtCredentials, RegistrationClient, RunServiceClient, RunnerEvent,
+        OAuthClient, OAuthJwtCredentials, RegistrationClient, RunServiceClient,
+        RunServiceCompleteJob, RunServiceStepResult, RunServiceVariableValue, RunnerEvent,
         RunnerJobRequestRef, RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool,
-        TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines, RUNNER_JOB_REQUEST,
+        TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines, TimelineRecordState,
+        RUNNER_JOB_REQUEST,
     },
     runtime_env::job_runtime_env,
     script_step::github_script_steps_with_defaults,
 };
 
 const JOB_CANCELLATION_MESSAGE: &str = "JobCancellation";
+
+#[derive(Clone)]
+struct RunServiceJobContext {
+    client: RunServiceClient,
+    run_service_url: String,
+    billing_owner_id: Option<String>,
+}
 
 pub async fn configure(args: ConfigureArgs) -> Result<()> {
     let dir = config::config_dir(args.config_dir)?;
@@ -471,6 +480,7 @@ async fn handle_message(
         disable_update,
         Some(message.message_id),
         true,
+        None,
         job,
     )
     .await
@@ -524,6 +534,11 @@ async fn handle_v2_message(
         .await?;
     let job: AgentJobRequestMessage =
         serde_json::from_value(job_value).context("parse acquired run-service job")?;
+    let run_service_job = RunServiceJobContext {
+        client: run_service.clone(),
+        run_service_url: run_service_url.to_string(),
+        billing_owner_id: reference.billing_owner_id,
+    };
     handle_job_request(
         client,
         pool_id,
@@ -534,6 +549,7 @@ async fn handle_v2_message(
         false,
         None,
         false,
+        Some(run_service_job),
         job,
     )
     .await
@@ -549,6 +565,7 @@ async fn handle_job_request(
     disable_update: bool,
     dispatch_message_id: Option<i64>,
     acknowledge_classic_message: bool,
+    run_service_job: Option<RunServiceJobContext>,
     job: AgentJobRequestMessage,
 ) -> Result<()> {
     println!(
@@ -578,13 +595,23 @@ async fn handle_job_request(
         let Some(script_steps) = script_steps else {
             bail!("cannot execute scripts because step mapping failed");
         };
-        let renewal = start_lock_renewal(
-            client.clone(),
-            pool_id,
-            job.request_id,
-            job.plan.plan_id.clone(),
-        )
-        .await?;
+        let renewal = if let Some(run_service_job) = &run_service_job {
+            start_run_service_lock_renewal(
+                run_service_job.client.clone(),
+                run_service_job.run_service_url.clone(),
+                job.plan.plan_id.clone(),
+                job.job_id.clone(),
+            )
+            .await?
+        } else {
+            start_lock_renewal(
+                client.clone(),
+                pool_id,
+                job.request_id,
+                job.plan.plan_id.clone(),
+            )
+            .await?
+        };
         if acknowledge_classic_message {
             if let Some(message_id) = dispatch_message_id {
                 client
@@ -645,32 +672,60 @@ async fn handle_job_request(
                 } else {
                     let feed_line =
                         format!("Velnor failed while executing supported Docker job: {error:#}");
-                    complete_job(
-                        client,
-                        pool_id,
-                        worker_name,
-                        &job,
-                        TaskResult::Failed,
-                        BTreeMap::new(),
-                        Vec::new(),
-                        feed_line,
-                    )
-                    .await?;
+                    if let Some(run_service_job) = &run_service_job {
+                        complete_run_service_job(
+                            &run_service_job.client,
+                            &run_service_job.run_service_url,
+                            &job,
+                            TaskResult::Failed,
+                            BTreeMap::new(),
+                            Vec::new(),
+                            run_service_job.billing_owner_id.clone(),
+                        )
+                        .await?;
+                    } else {
+                        complete_job(
+                            client,
+                            pool_id,
+                            worker_name,
+                            &job,
+                            TaskResult::Failed,
+                            BTreeMap::new(),
+                            Vec::new(),
+                            feed_line,
+                        )
+                        .await?;
+                    }
                     return Err(error);
                 }
             }
         };
-        complete_job(
-            client,
-            pool_id,
-            worker_name,
-            &job,
-            job_result.result,
-            job_result.outputs,
-            job_result.step_logs,
-            "Velnor executed supported run and JavaScript action steps in Docker.".to_string(),
-        )
-        .await?;
+        let outputs = job_result.outputs;
+        let step_logs = job_result.step_logs;
+        if let Some(run_service_job) = run_service_job {
+            complete_run_service_job(
+                &run_service_job.client,
+                &run_service_job.run_service_url,
+                &job,
+                job_result.result,
+                outputs,
+                step_logs,
+                run_service_job.billing_owner_id,
+            )
+            .await?;
+        } else {
+            complete_job(
+                client,
+                pool_id,
+                worker_name,
+                &job,
+                job_result.result,
+                outputs,
+                step_logs,
+                "Velnor executed supported run and JavaScript action steps in Docker.".to_string(),
+            )
+            .await?;
+        }
         println!(
             "Job completed with result {:?} and message acknowledged.",
             job_result.result
@@ -684,17 +739,30 @@ async fn handle_job_request(
                     .context("acknowledge no-op job message")?;
             }
         }
-        complete_job(
-            client,
-            pool_id,
-            worker_name,
-            &job,
-            TaskResult::Succeeded,
-            BTreeMap::new(),
-            Vec::new(),
-            "Velnor no-op completion probe: user steps were not executed.".to_string(),
-        )
-        .await?;
+        if let Some(run_service_job) = run_service_job {
+            complete_run_service_job(
+                &run_service_job.client,
+                &run_service_job.run_service_url,
+                &job,
+                TaskResult::Succeeded,
+                BTreeMap::new(),
+                Vec::new(),
+                run_service_job.billing_owner_id,
+            )
+            .await?;
+        } else {
+            complete_job(
+                client,
+                pool_id,
+                worker_name,
+                &job,
+                TaskResult::Succeeded,
+                BTreeMap::new(),
+                Vec::new(),
+                "Velnor no-op completion probe: user steps were not executed.".to_string(),
+            )
+            .await?;
+        }
         println!("No-op job completed and message acknowledged.");
     } else {
         println!("Job is not acknowledged yet; pass --complete-noop to probe completion.");
@@ -721,6 +789,39 @@ async fn start_lock_renewal(
                 .await
             {
                 eprintln!("Job lock renewal failed: {error:#}");
+            }
+        }
+    }))
+}
+
+async fn start_run_service_lock_renewal(
+    client: RunServiceClient,
+    run_service_url: String,
+    plan_id: String,
+    job_id: String,
+) -> Result<JoinHandle<()>> {
+    let response = client
+        .renew_job(&run_service_url, &plan_id, &job_id)
+        .await
+        .context("initial run-service job lock renewal")?;
+    println!(
+        "Run-service job {} valid until {}.",
+        job_id, response.locked_until
+    );
+
+    Ok(tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            match client.renew_job(&run_service_url, &plan_id, &job_id).await {
+                Ok(response) => {
+                    println!(
+                        "Renewed run-service job {}; valid until {}.",
+                        job_id, response.locked_until
+                    );
+                }
+                Err(error) => {
+                    eprintln!("Run-service job lock renewal failed: {error:#}");
+                }
             }
         }
     }))
@@ -1606,6 +1707,51 @@ async fn complete_job(
         .await?;
 
     Ok(())
+}
+
+async fn complete_run_service_job(
+    client: &RunServiceClient,
+    run_service_url: &str,
+    job: &AgentJobRequestMessage,
+    result: TaskResult,
+    job_outputs: BTreeMap<String, String>,
+    step_logs: Vec<StepLog>,
+    billing_owner_id: Option<String>,
+) -> Result<()> {
+    let step_results = step_logs
+        .iter()
+        .map(|log| RunServiceStepResult {
+            external_id: None,
+            name: log.step_id.clone(),
+            status: TimelineRecordState::Completed,
+            conclusion: step_log_result(log),
+            completed_log_lines: log.lines.len() as i64,
+        })
+        .collect();
+    let outputs = job_outputs
+        .into_iter()
+        .map(|(name, value)| {
+            (
+                name,
+                RunServiceVariableValue {
+                    value,
+                    is_secret: false,
+                },
+            )
+        })
+        .collect();
+    let completion = RunServiceCompleteJob {
+        plan_id: job.plan.plan_id.clone(),
+        job_id: job.job_id.clone(),
+        conclusion: result,
+        outputs,
+        step_results,
+        billing_owner_id,
+    };
+    client
+        .complete_job(run_service_url, completion)
+        .await
+        .context("complete run-service job")
 }
 
 fn sanitize_path_segment(value: &str) -> String {

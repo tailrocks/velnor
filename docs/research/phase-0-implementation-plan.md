@@ -74,7 +74,7 @@ DeleteAgentSessionAsync(poolId, sessionId)
 
 Current code keeps one GitHub session open and long-polls this classic message route until stopped. `run --once` preserves the probe behavior by exiting after one message/no-message poll. While a Docker job is executing, Velnor starts a busy-status cancellation poll from the dispatched job message id; matching `JobCancellation` messages are acknowledged, the active job container is killed, and final completion is reported as canceled.
 
-Current GitHub can also send broker/run-service messages. Velnor now preserves V2 settings from the registered agent, including `ServerUrlV2` and `UseV2Flow`, and has typed client/request shapes for the official broker `session`, `message`, `acknowledge`, and run-service `acquirejob` routes. When `UseV2Flow` is enabled, `velnor-runner run` creates a broker session, polls broker messages, handles `RunnerJobRequest`, optionally acknowledges it, acquires the full job through run-service, and sends the acquired job into the same Docker executor. Remaining V2 parity work is run-service `renewjob`/`completejob` and broker cancellation/migration handling.
+Current GitHub can also send broker/run-service messages. Velnor now preserves V2 settings from the registered agent, including `ServerUrlV2` and `UseV2Flow`, and has typed client/request shapes for the official broker `session`, `message`, `acknowledge`, and run-service `acquirejob`, `renewjob`, and `completejob` routes. When `UseV2Flow` is enabled, `velnor-runner run` creates a broker session, polls broker messages, handles `RunnerJobRequest`, optionally acknowledges it, acquires the full job through run-service, renews the job through run-service while Docker executes, and completes the job through run-service. Remaining V2 parity work is broker cancellation/migration handling.
 
 Minimum message support:
 
@@ -260,7 +260,7 @@ Velnor still needs runtime step expression behavior from the job message:
 
 - step `if`: implemented for output comparisons, step outcome checks, selected GitHub/runner context values, generic job `ContextData` (`matrix.*`, `needs.*`, `inputs.*`, `vars.*`), synthesized `secrets.*` from GitHub secret variables, grouped simple `&&`/`||`, target-shaped `contains()`, and status functions `always()`, `success()`, `failure()`, and non-cancelled `cancelled()`
 - `steps.<id>.outputs.*`: implemented for direct interpolation in later scripts and JavaScript action env
-- job outputs: `JobOutputs` from the GitHub job message are evaluated after step execution from final step outputs and sent through the classic `JobCompleted` plan event; run-service completion payload parity remains open
+- job outputs: `JobOutputs` from the GitHub job message are evaluated after step execution from final step outputs and sent through the classic `JobCompleted` plan event or the V2 run-service `completejob` payload
 - env/context expansion in scripts and JavaScript action env: basic `steps.*.outputs.*`, `github.*` including `github.workflow`, `github.ref_name`, and nested `github.event.*`, `runner.*`, `env.*`, `secrets.*`, generic job `ContextData`, target-shaped `&&`/`||` value expressions, equality checks, unary `!`, `contains(...)`, `toJSON(...)`, and workspace-backed `hashFiles(...)` interpolation is implemented
 - `continue-on-error`: implemented for script and JavaScript action steps; failed steps keep failure outcome for later `steps.<id>.outcome` checks, but do not fail the job
 
