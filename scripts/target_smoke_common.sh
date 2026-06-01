@@ -129,6 +129,8 @@ if [[ -n "$RUN_ID" ]]; then
     --jq '.url, (.jobs[] | [.name,.status,(.conclusion // "")] | @tsv)'
 fi
 
+velnor_print_job_execution_model "$JOB_COUNT" "$TARGET_LABEL target"
+
 echo "==> Running $JOB_COUNT $TARGET_LABEL target job(s)"
 for job_index in $(seq 1 "$JOB_COUNT"); do
   echo "==> Velnor $TARGET_LABEL target job $job_index/$JOB_COUNT"

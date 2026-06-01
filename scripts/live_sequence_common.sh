@@ -116,3 +116,13 @@ velnor_fail_if_other_online_runners_match_labels() {
     return 2
   fi
 }
+
+velnor_print_job_execution_model() {
+  local job_count="$1"
+  local label="${2:-Velnor}"
+
+  echo "==> $label job execution model"
+  echo "One Velnor runner process handles one active GitHub job at a time."
+  echo "This smoke script will consume $job_count job(s) sequentially with repeated --once runs."
+  echo "For parallel GitHub jobs, run multiple Velnor processes with distinct runner names and work directories."
+}

@@ -126,6 +126,8 @@ gh run view "$RUN_ID" --repo "$FIXTURE_REPO" \
   --json status,conclusion,jobs,url \
   --jq '.url, (.jobs[] | [.name,.status,(.conclusion // "")] | @tsv)'
 
+velnor_print_job_execution_model "$JOB_COUNT" "Fixture"
+
 echo "==> Running $JOB_COUNT Velnor fixture job(s)"
 for job_index in $(seq 1 "$JOB_COUNT"); do
   echo "==> Velnor fixture job $job_index/$JOB_COUNT"

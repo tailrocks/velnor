@@ -48,8 +48,10 @@ GitHub self-hosted runners:
 - run-service jobs are renewed while executing.
 
 Important implementation consequence: a Velnor runner process should handle one
-active GitHub job at a time. Parallelism comes from multiple registered runner
-processes, not from one runner process executing multiple assigned GitHub jobs.
+active GitHub job at a time. A single registered runner can consume many jobs
+over its lifetime, but not concurrently. Parallelism comes from multiple
+registered runner processes with distinct names and work directories, not from
+one runner process executing multiple assigned GitHub jobs.
 
 ## Current Velnor Evidence
 
@@ -184,4 +186,3 @@ Required evidence:
 6. Run `scripts/jackin_rust_linux_sequence.sh`.
 7. After both target repositories pass in GitHub UI, revisit PQL/Pkl as a typed
    authoring layer over the normalized plan.
-

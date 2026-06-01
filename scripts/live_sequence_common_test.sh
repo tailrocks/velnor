@@ -90,4 +90,14 @@ assert_passes "matching runner override" \
   velnor_fail_if_other_online_runners_match_labels owner/repo velnor-target-mvp velnor-target-mvp
 unset VELNOR_ALLOW_OTHER_MATCHING_RUNNERS
 
+job_model="$(velnor_print_job_execution_model 3 "Target")"
+if [[ "$job_model" != *"one active GitHub job at a time"* ]]; then
+  echo "job execution model output did not describe one-active-job behavior" >&2
+  exit 1
+fi
+if [[ "$job_model" != *"3 job(s) sequentially"* ]]; then
+  echo "job execution model output did not describe sequential smoke execution" >&2
+  exit 1
+fi
+
 echo "live sequence helper self-test passed"
