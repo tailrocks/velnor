@@ -149,8 +149,8 @@ workflow lanes:
 
 The fixture proof should normally use a fresh run. `scripts/fixture_smoke.sh`
 dispatches `compat.yml` by default, then Velnor consumes the queued fixture jobs
-and the compare job verifies matching outputs. To inspect an existing fixture
-run instead, set `VELNOR_FIXTURE_RUN_ID` and use:
+and the compare job verifies matching outputs. To inspect the latest fixture run
+or an explicit `VELNOR_FIXTURE_RUN_ID`, use:
 
 ```sh
 scripts/fixture_status.sh

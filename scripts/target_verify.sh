@@ -29,6 +29,7 @@ bash -n \
   scripts/fixture_smoke.sh \
   scripts/fixture_smoke_defaults_test.sh \
   scripts/fixture_status.sh \
+  scripts/fixture_status_test.sh \
   scripts/jackin_rust_linux_sequence.sh \
   scripts/jackin_target_smoke.sh \
   scripts/live_evidence_common.sh \
@@ -43,6 +44,7 @@ python3 scripts/target_audit.py --check-target-mvp "$JACKIN_ROOT" "$CHAINARGOS_R
 python3 scripts/target_audit.py --self-test "$JACKIN_ROOT" "$CHAINARGOS_ROOT" >/tmp/velnor-target-audit-self-test.txt
 python3 scripts/check_runner_reference.py
 scripts/fixture_smoke_defaults_test.sh
+scripts/fixture_status_test.sh
 scripts/live_evidence_common_test.sh
 scripts/workflow_dispatch_common_test.sh
 
@@ -133,4 +135,4 @@ for test_name in "${tests[@]}"; do
 done
 
 echo "target audit written to /tmp/velnor-target-audit.txt"
-echo "target verifier passed shell syntax check, ${#tests[@]} focused checks, fixture defaults self-test, live evidence helper self-test, and workflow dispatch helper self-test"
+echo "target verifier passed shell syntax check, ${#tests[@]} focused checks, fixture defaults/status self-tests, live evidence helper self-test, and workflow dispatch helper self-test"

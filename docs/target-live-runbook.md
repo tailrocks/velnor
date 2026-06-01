@@ -127,7 +127,7 @@ cargo run --bin velnor-runner -- run \
 The GitHub-hosted `compat-github` matrix jobs should pass on the fresh run. The
 Velnor proof is that `compat-velnor` consumes the queued jobs and
 `compare-results` passes.
-Check current fixture status with:
+Check the latest fixture run, or an explicit `VELNOR_FIXTURE_RUN_ID`, with:
 
 ```sh
 scripts/fixture_status.sh
