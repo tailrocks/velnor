@@ -1993,14 +1993,10 @@ fn native_upload_artifact(
 
     let mut uploaded = Vec::new();
     for path in artifact_paths(&path_input) {
-        let Some(source) = resolve_host_path(state, &path) else {
-            continue;
-        };
-        if !source.exists() {
-            continue;
+        for source in resolve_artifact_sources(state, &path)? {
+            copy_artifact_source(&source, &artifact_dir)?;
+            uploaded.push(source);
         }
-        copy_artifact_source(&source, &artifact_dir)?;
-        uploaded.push(source);
     }
 
     if uploaded.is_empty() {
@@ -2303,6 +2299,111 @@ fn artifact_paths(paths: &str) -> Vec<String> {
         .filter(|path| !path.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn resolve_artifact_sources(state: &JobExecutionState, path: &str) -> Result<Vec<PathBuf>> {
+    if !has_glob_pattern(path) {
+        let Some(source) = resolve_host_path(state, path) else {
+            return Ok(Vec::new());
+        };
+        return Ok(if source.exists() {
+            vec![source]
+        } else {
+            Vec::new()
+        });
+    }
+
+    let Some((base, pattern)) = artifact_glob_base_and_pattern(state, path) else {
+        return Ok(Vec::new());
+    };
+    if !base.exists() {
+        return Ok(Vec::new());
+    }
+    let matcher = Glob::new(&normalize_glob_pattern(&pattern))?.compile_matcher();
+    let mut matches = Vec::new();
+    collect_artifact_glob_matches(&base, &base, &matcher, &mut matches)?;
+    matches.sort();
+    Ok(matches)
+}
+
+fn has_glob_pattern(path: &str) -> bool {
+    path.chars()
+        .any(|ch| matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
+}
+
+fn artifact_glob_base_and_pattern(
+    state: &JobExecutionState,
+    path: &str,
+) -> Option<(PathBuf, String)> {
+    let path = path.trim();
+    if let Some(rest) = path.strip_prefix("/__w/") {
+        return state
+            .workspace_host
+            .as_ref()
+            .map(|base| (base.clone(), rest.to_string()));
+    }
+    if let Some(rest) = path.strip_prefix("/github/workspace/") {
+        return state
+            .workspace_host
+            .as_ref()
+            .map(|base| (base.clone(), rest.to_string()));
+    }
+    if let Some(rest) = path.strip_prefix("/__t/") {
+        return state
+            .temp_host
+            .as_ref()
+            .map(|base| (base.clone(), rest.to_string()));
+    }
+    if let Some(rest) = path.strip_prefix("/github/runner_temp/") {
+        return state
+            .temp_host
+            .as_ref()
+            .map(|base| (base.clone(), rest.to_string()));
+    }
+    if Path::new(path).is_absolute() {
+        return absolute_glob_base_and_pattern(path);
+    }
+    state
+        .workspace_host
+        .as_ref()
+        .map(|base| (base.clone(), path.to_string()))
+}
+
+fn absolute_glob_base_and_pattern(path: &str) -> Option<(PathBuf, String)> {
+    let slash_index = path
+        .char_indices()
+        .take_while(|(_, ch)| !matches!(ch, '*' | '?' | '[' | ']' | '{' | '}'))
+        .filter_map(|(index, ch)| (ch == '/').then_some(index))
+        .last()
+        .unwrap_or(0);
+    let (base, pattern) = path.split_at(slash_index + 1);
+    let base = PathBuf::from(base);
+    let pattern = pattern.trim_start_matches('/').to_string();
+    Some((base, pattern))
+}
+
+fn normalize_glob_pattern(pattern: &str) -> String {
+    pattern.replace('\\', "/")
+}
+
+fn collect_artifact_glob_matches(
+    root: &Path,
+    current: &Path,
+    matcher: &globset::GlobMatcher,
+    matches: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in fs::read_dir(current).with_context(|| format!("read {}", current.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let relative = path.strip_prefix(root).unwrap_or(&path);
+        if matcher.is_match(relative) {
+            matches.push(path.clone());
+        }
+        if entry.file_type()?.is_dir() {
+            collect_artifact_glob_matches(root, &path, matcher, matches)?;
+        }
+    }
+    Ok(())
 }
 
 fn cache_paths(paths: &str) -> Vec<String> {
@@ -7498,6 +7599,61 @@ fi"#
             .join("_velnor_artifacts/123456-1/construct-digest-linux-amd64/linux-amd64.digest")
             .exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_upload_artifact_expands_target_release_globs() {
+        let temp = temp_dir();
+        fs::create_dir_all(temp.join("work")).unwrap();
+        fs::write(temp.join("work/jackin-1.2.3-x86_64.tar.gz"), "archive\n").unwrap();
+        fs::write(
+            temp.join("work/jackin-1.2.3-x86_64.tar.gz.sha256"),
+            "hash\n",
+        )
+        .unwrap();
+        fs::write(temp.join("work/ignore.txt"), "no\n").unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "upload".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::UploadArtifact,
+                inputs: [
+                    ("name".into(), "jackin-x86_64-unknown-linux-gnu".into()),
+                    (
+                        "path".into(),
+                        "jackin-*.tar.gz\njackin-*.tar.gz.sha256".into(),
+                    ),
+                    ("if-no-files-found".into(), "error".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results[0].exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(
+                temp.join("_velnor_artifacts/local-1/jackin-x86_64-unknown-linux-gnu/jackin-1.2.3-x86_64.tar.gz")
+            )
+            .unwrap(),
+            "archive\n"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                temp.join("_velnor_artifacts/local-1/jackin-x86_64-unknown-linux-gnu/jackin-1.2.3-x86_64.tar.gz.sha256")
+            )
+            .unwrap(),
+            "hash\n"
+        );
+        assert!(!temp
+            .join("_velnor_artifacts/local-1/jackin-x86_64-unknown-linux-gnu/ignore.txt")
+            .exists());
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
