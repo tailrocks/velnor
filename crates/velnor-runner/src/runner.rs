@@ -973,6 +973,16 @@ async fn handle_v2_message(
         println!("Received hosted runner shutdown message.");
         return Ok(V2MessageAction::Shutdown);
     }
+    if message
+        .message_type
+        .eq_ignore_ascii_case(JOB_CANCELLATION_MESSAGE)
+    {
+        println!(
+            "Received idle job cancellation message {}; no active job matched in this runner slot.",
+            message.message_id
+        );
+        return Ok(V2MessageAction::None);
+    }
     if !message
         .message_type
         .eq_ignore_ascii_case(RUNNER_JOB_REQUEST)
@@ -3758,6 +3768,36 @@ mod tests {
             broker_migration_url(&message).unwrap(),
             "https://broker.actions.githubusercontent.com/new/"
         );
+    }
+
+    #[tokio::test]
+    async fn idle_job_cancellation_is_control_message_not_unsupported_job() {
+        let broker = BrokerClient::new("https://broker.actions.githubusercontent.com/", "token")
+            .unwrap();
+        let run_service = RunServiceClient::new("token").unwrap();
+        let stored = stored_config();
+        let message = TaskAgentMessage {
+            message_id: 10,
+            message_type: "JobCancellation".into(),
+            body: serde_json::json!({ "jobId": "job-123" }).to_string(),
+            iv_base64: None,
+        };
+
+        let action = handle_v2_message(
+            &broker,
+            &run_service,
+            "session",
+            &stored,
+            Path::new("/config"),
+            &run_args(false, false, false),
+            true,
+            "velnor",
+            message,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(action, V2MessageAction::None);
     }
 
     #[test]
