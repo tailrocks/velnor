@@ -20,6 +20,7 @@ fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) ->
     let temp_dir = work_dir.join("preflight").join("temp");
     fs::create_dir_all(&temp_dir).with_context(|| format!("create {}", temp_dir.display()))?;
 
+    run_required(runner, "git", &["--version".to_string()], "Host git")?;
     run_required(runner, "docker", &["version".to_string()], "Docker daemon")?;
     if args.require_buildx {
         run_required(
@@ -33,6 +34,7 @@ fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) ->
         bail!("required Docker socket /var/run/docker.sock does not exist on this host");
     }
 
+    verify_job_image_tools(runner, &args.docker_image)?;
     verify_bind_mount(runner, &temp_dir, &args.docker_image)?;
 
     println!("Docker preflight passed.");
@@ -52,6 +54,27 @@ fn run_required(
         bail!(
             "{label} check failed with code {}: {}",
             result.code,
+            result.stderr
+        );
+    }
+    Ok(())
+}
+
+fn verify_job_image_tools(runner: &mut dyn CommandRunner, docker_image: &str) -> Result<()> {
+    let args = vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        docker_image.to_string(),
+        "sh".to_string(),
+        "-c".to_string(),
+        "command -v sh >/dev/null && command -v bash >/dev/null && command -v git >/dev/null"
+            .to_string(),
+    ];
+    let result = runner.run("docker", &args)?;
+    if result.code != 0 {
+        bail!(
+            "Docker image '{}' is missing target job tools sh, bash, or git. stderr: {}",
+            docker_image,
             result.stderr
         );
     }
@@ -151,16 +174,26 @@ mod tests {
 
         assert_eq!(
             runner.calls[0],
-            ("docker".to_string(), vec!["version".to_string()])
+            ("git".to_string(), vec!["--version".to_string()])
         );
         assert_eq!(
             runner.calls[1],
+            ("docker".to_string(), vec!["version".to_string()])
+        );
+        assert_eq!(
+            runner.calls[2],
             (
                 "docker".to_string(),
                 vec!["buildx".to_string(), "version".to_string()]
             )
         );
-        let bind_mount_call = &runner.calls[2];
+        let image_tools_call = &runner.calls[3];
+        assert_eq!(image_tools_call.0, "docker");
+        assert!(image_tools_call.1.contains(
+            &"command -v sh >/dev/null && command -v bash >/dev/null && command -v git >/dev/null"
+                .to_string()
+        ));
+        let bind_mount_call = &runner.calls[4];
         assert_eq!(bind_mount_call.0, "docker");
         assert_eq!(bind_mount_call.1[0], "run");
         assert!(bind_mount_call.1.contains(&format!(
@@ -189,7 +222,7 @@ mod tests {
         };
         let mut runner = RecordingRunner {
             calls: Vec::new(),
-            codes: vec![0, 1],
+            codes: vec![0, 0, 0, 1],
         };
 
         let error = preflight_with_runner(args, &mut runner).unwrap_err();
@@ -200,6 +233,26 @@ mod tests {
             .join("temp")
             .join(DOCKER_MOUNT_CHECK_FILE)
             .exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn preflight_reports_missing_job_image_tools() {
+        let temp = temp_dir();
+        let args = PreflightArgs {
+            work_dir: Some(temp.clone()),
+            docker_image: "minimal:latest".to_string(),
+            require_docker_socket: false,
+            require_buildx: false,
+        };
+        let mut runner = RecordingRunner {
+            calls: Vec::new(),
+            codes: vec![0, 0, 1],
+        };
+
+        let error = preflight_with_runner(args, &mut runner).unwrap_err();
+
+        assert!(error.to_string().contains("missing target job tools"));
         fs::remove_dir_all(temp).unwrap();
     }
 }

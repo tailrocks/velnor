@@ -5,7 +5,7 @@ This is the remaining Phase 0 proof path. Unit-level target verification is cove
 ## Prerequisites
 
 - Linux host where the Docker daemon can see Velnor's bind-mounted work directory.
-- Docker CLI and Buildx plugin installed on the host.
+- Git, Docker CLI, and Buildx plugin installed on the host.
 - GitHub PAT in `GITHUB_TOKEN` with permission to register a repository self-hosted runner for the target repo.
 - Current target verifier passes locally:
 
@@ -22,7 +22,7 @@ cargo run --bin velnor-runner -- preflight \
   --require-docker-socket
 ```
 
-This verifies Docker daemon access, Buildx, `/var/run/docker.sock`, and whether the daemon can see Velnor's bind-mounted work directory.
+This verifies host Git, Docker daemon access, Buildx, `/var/run/docker.sock`, required job-image tools, and whether the daemon can see Velnor's bind-mounted work directory.
 
 ## Register
 
