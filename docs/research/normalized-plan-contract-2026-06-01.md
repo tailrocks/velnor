@@ -133,10 +133,10 @@ pub struct JobExecutionPlan {
 }
 ```
 
-Current implementation has most of these pieces split across `runner.rs`,
-`script_step.rs`, `container.rs`, and `executor.rs`. The first `plan.rs` surface
-makes the target shape explicit so a Pkl compiler can produce the same runtime
-shape.
+Current implementation has these pieces split across `github_adapter.rs`,
+`runner.rs`, `script_step.rs`, `container.rs`, and `executor.rs`. The first
+`plan.rs` surface makes the target shape explicit so a Pkl compiler can produce
+the same runtime shape.
 
 GitHub adapter source:
 
@@ -308,8 +308,8 @@ Design rule for AI agents:
 ## Migration Strategy
 
 1. Keep Phase 0 on GitHub YAML and self-hosted runner compatibility.
-2. Move GitHub job-message planning from `runner.rs` into a GitHub adapter that
-   produces `NormalizedJobPlan`.
+2. Continue moving GitHub job-message planning from `runner.rs` into
+   `github_adapter.rs`; the adapter already creates `NormalizedJobPlan`.
 3. Make the Docker executor consume `NormalizedJobPlan` instead of separately
    passed container, environment, context, and step slices.
 4. Split GitHub run-service reporting into a reporter that consumes
@@ -323,10 +323,10 @@ label and avoids macOS matrix legs.
 
 ## Current Gap List
 
-- `NormalizedJobPlan` exists as a Rust type, and the GitHub execution path now
-  builds one after resolving checkouts/actions and before Docker execution.
-- GitHub planning is still mostly inside `runner.rs`; it should move to a
-  separate adapter module.
+- `NormalizedJobPlan` exists as a Rust type, and `github_adapter.rs` builds it
+  after `runner.rs` resolves checkouts/actions.
+- some GitHub planning is still inside `runner.rs`, especially checkout/action
+  resolution and Docker container construction.
 - reporting is coupled to `runner.rs` instead of a report-target interface.
 - Pkl examples exist, but no package skeleton exists under the repository.
 - no Pkl-to-plan proof exists yet.

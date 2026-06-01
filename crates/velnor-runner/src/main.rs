@@ -5,6 +5,7 @@ mod command_files;
 mod config;
 mod container;
 mod executor;
+mod github_adapter;
 mod job_message;
 mod plan;
 mod protocol;
