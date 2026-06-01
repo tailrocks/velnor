@@ -299,9 +299,12 @@ For each run, record:
 The smoke scripts write a Markdown evidence file under `.velnor-live-evidence`
 by default after Velnor consumes jobs and after a watched run completes or
 fails. Those files include a best-effort GitHub API snapshot of the registered
-runner labels, run artifacts, and a bounded first/last-line log excerpt. Set
+runner labels, run artifacts, a bounded first/last-line log excerpt, and a
+bounded snapshot of Velnor's local `_velnor_caches`, `_velnor_artifacts`, and
+`_velnor_sccache` directories under the shared work directory. Set
 `VELNOR_LIVE_EVIDENCE_DIR=<path>` to store those records elsewhere. Set
-`VELNOR_LIVE_EVIDENCE_LOG_LINES=<n>` to change the log excerpt size.
+`VELNOR_LIVE_EVIDENCE_LOG_LINES=<n>` to change the log excerpt size. Set
+`VELNOR_LIVE_EVIDENCE_LOCAL_ENTRIES=<n>` to change the per-store listing size.
 
 Keep sanitized job payloads for failures:
 

@@ -20,6 +20,7 @@ CLEANUP_RUNNER="${VELNOR_FIXTURE_CLEANUP_RUNNER:-true}"
 DUMP_JOB_MESSAGES="${VELNOR_DUMP_JOB_MESSAGES:-$ROOT/.velnor-job-dumps/fixture}"
 LIVE_EVIDENCE_DIR="${VELNOR_LIVE_EVIDENCE_DIR:-$ROOT/.velnor-live-evidence}"
 LIVE_EVIDENCE_LOG_LINES="${VELNOR_LIVE_EVIDENCE_LOG_LINES:-80}"
+LIVE_EVIDENCE_LOCAL_ENTRIES="${VELNOR_LIVE_EVIDENCE_LOCAL_ENTRIES:-80}"
 REGISTERED_RUNNER=false
 
 sanitize_filename() {
@@ -101,6 +102,40 @@ write_log_snapshot() {
   rm -f "$log_file" "$error_file"
 }
 
+write_local_storage_snapshot() {
+  local stores=()
+  local store_name store size
+
+  echo
+  echo "## Velnor Local Storage Snapshot"
+  echo
+  echo "- max entries per store: $LIVE_EVIDENCE_LOCAL_ENTRIES"
+  echo
+
+  for store_name in _velnor_caches _velnor_artifacts _velnor_sccache; do
+    while IFS= read -r store; do
+      stores+=("$store")
+    done < <(find "$WORK_DIR" -type d -name "$store_name" 2>/dev/null | sort || true)
+  done
+
+  if [[ "${#stores[@]}" -eq 0 ]]; then
+    echo "No Velnor local cache, artifact, or sccache stores found under $WORK_DIR."
+    return
+  fi
+
+  for store in "${stores[@]}"; do
+    size="$(du -sh "$store" 2>/dev/null | awk '{print $1}')"
+    echo "### $store"
+    echo
+    echo "- size: ${size:-unknown}"
+    echo
+    echo '```text'
+    find "$store" -mindepth 1 -maxdepth 3 2>/dev/null | sort | head -n "$LIVE_EVIDENCE_LOCAL_ENTRIES"
+    echo '```'
+    echo
+  done
+}
+
 write_live_evidence() {
   local phase="$1"
 
@@ -152,6 +187,7 @@ write_live_evidence() {
     write_runner_snapshot
     write_artifact_snapshot
     write_log_snapshot
+    write_local_storage_snapshot
   } >"$evidence_file"
 
   echo "==> Wrote live evidence $evidence_file"
