@@ -1337,8 +1337,9 @@ where
             args.push("--load".to_string());
         }
         args.push(host_context_path(&action_state, &context));
+        let env = action_state.step_env(&[]);
         Ok(native_command_result(
-            self.runner.run("docker", &args)?,
+            self.runner.run_with_env("docker", &args, &env)?,
             StepCommandState::default(),
         ))
     }
@@ -1368,7 +1369,7 @@ where
             &action_state,
             "targets",
         )));
-        let env = action_state.resolve_env(&action.env);
+        let env = action_state.step_env(&[]);
         Ok(native_command_result(
             self.runner.run_with_env("docker", &args, &env)?,
             StepCommandState::default(),
@@ -5322,6 +5323,8 @@ type=sha,format=long,prefix=,enable=true"
                     ("GITHUB_SERVER_URL".into(), "https://github.com".into()),
                     ("GITHUB_EVENT_NAME".into(), "pull_request".into()),
                     ("GITHUB_SHA".into(), "abcdef1234567890".into()),
+                    ("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into()),
+                    ("ACTIONS_CACHE_URL".into(), "https://cache.actions".into()),
                 ],
                 &[
                     (
@@ -5369,7 +5372,7 @@ type=sha,format=long,prefix=,enable=true"
         });
         assert!(login_call.is_some());
         assert_eq!(runner.stdin[login_call.unwrap()], "docker-token");
-        assert!(calls.iter().any(|(program, args)| {
+        let build_call = calls.iter().position(|(program, args)| {
             program == "docker"
                 && args.first().is_some_and(|arg| arg == "buildx")
                 && args.get(1).is_some_and(|arg| arg == "build")
@@ -5378,7 +5381,11 @@ type=sha,format=long,prefix=,enable=true"
                 && args.contains(&"--tag".into())
                 && args.contains(&"chainargos/rust-bitcoin-processor:abcdef1234567890".into())
                 && args.contains(&"type=gha,scope=bitcoin-processor-app-pr,mode=max".into())
-        }));
+        });
+        assert!(build_call.is_some());
+        let build_env = &runner.env[build_call.unwrap()];
+        assert!(build_env.contains(&("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into())));
+        assert!(build_env.contains(&("ACTIONS_CACHE_URL".into(), "https://cache.actions".into())));
         let bake_call = calls.iter().position(|(program, args)| {
             program == "docker"
                 && args.first().is_some_and(|arg| arg == "buildx")
