@@ -307,6 +307,92 @@ EXPECTED_WORKFLOW_ENV = Counter(
     }
 )
 
+EXPECTED_JOB_NEEDS = Counter(
+    {
+        (".github/workflows/ci.yml", "check", "changes"): 1,
+        (".github/workflows/ci.yml", "msrv", "changes"): 1,
+        (".github/workflows/ci.yml", "build-validator", "[changes, check]"): 1,
+        (
+            ".github/workflows/ci.yml",
+            "ci-required",
+            "[changes, check, msrv, build-validator]",
+        ): 1,
+        (".github/workflows/construct.yml", "build", "changes"): 1,
+        (
+            ".github/workflows/construct.yml",
+            "publish-manifest",
+            "[changes, build]",
+        ): 1,
+        (
+            ".github/workflows/construct.yml",
+            "publish-manifest-rehearsal",
+            "[changes, build]",
+        ): 1,
+        (
+            ".github/workflows/construct.yml",
+            "construct-required",
+            "[changes, build, publish-manifest, publish-manifest-rehearsal]",
+        ): 1,
+        (".github/workflows/docs.yml", "docs-link-check", "changes"): 1,
+        (
+            ".github/workflows/docs.yml",
+            "deploy",
+            "[docs-link-check, repo-link-check]",
+        ): 1,
+        (
+            ".github/workflows/docs.yml",
+            "docs-required",
+            "[changes, repo-link-check, docs-link-check, deploy, check-deployed]",
+        ): 1,
+        (".github/workflows/preview.yml", "build-preview", "source-changed"): 1,
+        (".github/workflows/preview.yml", "build-jackin-capsule", "source-changed"): 1,
+        (
+            ".github/workflows/preview.yml",
+            "publish-preview",
+            "[source-changed, build-preview, build-jackin-capsule]",
+        ): 1,
+        (".github/workflows/release.yml", "test", "check-version"): 1,
+        (".github/workflows/release.yml", "build", "[check-version, test]"): 1,
+        (
+            ".github/workflows/release.yml",
+            "build-jackin-capsule",
+            "[check-version, test]",
+        ): 1,
+        (
+            ".github/workflows/release.yml",
+            "release",
+            "[check-version, build, build-jackin-capsule]",
+        ): 1,
+        (".github/workflows/release.yml", "homebrew", "[check-version, release]"): 1,
+        (
+            ".github/workflows/kestra-build-publish.yml",
+            "docker-kestra-backup",
+            "docker-jvm-base",
+        ): 1,
+        (
+            ".github/workflows/kestra-build-publish.yml",
+            "docker-kestra-playwright",
+            "docker-jvm-base",
+        ): 1,
+        (".github/workflows/rust-docker.yml", "docker-bake", "changes"): 1,
+        (".github/workflows/rust-docker.yml", "docker-required", "docker-bake"): 1,
+        (".github/workflows/rust.yml", "check", "changes"): 1,
+        (".github/workflows/rust.yml", "test-bitcoin-processor", "changes"): 1,
+        (".github/workflows/rust.yml", "test-eth-processor", "changes"): 1,
+        (".github/workflows/rust.yml", "test-coingecko-pricing", "changes"): 1,
+        (".github/workflows/rust.yml", "test-tron-processor", "changes"): 1,
+        (".github/workflows/rust.yml", "test-blockchain-explorer", "changes"): 1,
+        (".github/workflows/rust.yml", "test-eth-grpc-server", "changes"): 1,
+        (".github/workflows/rust.yml", "test-tron-grpc-server", "changes"): 1,
+        (".github/workflows/rust.yml", "test-legacy-grpc-server", "changes"): 1,
+        (
+            ".github/workflows/rust.yml",
+            "rust-required",
+            "[check, test-bitcoin-processor, test-eth-processor, test-coingecko-pricing, test-tron-processor, test-blockchain-explorer, test-eth-grpc-server, test-tron-grpc-server, test-legacy-grpc-server]",
+        ): 1,
+    }
+)
+
 EXPECTED_WORKFLOW_PERMISSIONS = Counter(
     {
         (".github/workflows/ansible.yml", ("contents",)): 1,
@@ -917,6 +1003,13 @@ def check_target_mvp(summary: dict[str, Any]) -> list[str]:
         errors.append(
             "target MVP workflow env drift: "
             f"expected {dict(EXPECTED_WORKFLOW_ENV)}, got {dict(workflow_env)}"
+        )
+
+    job_needs = Counter(summary["job_needs"])
+    if job_needs != EXPECTED_JOB_NEEDS:
+        errors.append(
+            "target MVP job needs drift: "
+            f"expected {dict(EXPECTED_JOB_NEEDS)}, got {dict(job_needs)}"
         )
 
     workflow_permissions = Counter(
