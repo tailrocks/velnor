@@ -14,6 +14,16 @@ scripts/target_verify.sh
 cargo test -q
 ```
 
+Run the Docker host preflight on the same host and with the same work directory that the live runner will use:
+
+```sh
+cargo run --bin velnor-runner -- preflight \
+  --work-dir "$PWD/.velnor-work" \
+  --require-docker-socket
+```
+
+This verifies Docker daemon access, Buildx, `/var/run/docker.sock`, and whether the daemon can see Velnor's bind-mounted work directory.
+
 ## Register
 
 For `ChainArgos/java-monorepo`, register with the target preset. This includes `hetzner-sentry-ci`, `ubuntu-latest`, and `ubuntu-24.04`.

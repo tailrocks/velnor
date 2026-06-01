@@ -14,12 +14,33 @@ pub struct Cli {
 pub enum Command {
     /// Register this machine as a GitHub self-hosted runner.
     Configure(ConfigureArgs),
+    /// Validate local Docker prerequisites before polling GitHub for jobs.
+    Preflight(PreflightArgs),
     /// Start polling GitHub for jobs.
     Run(RunArgs),
     /// Remove local runner configuration.
     Remove(RemoveArgs),
     /// Print local runner configuration status.
     Status(StatusArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct PreflightArgs {
+    /// Host work directory for Docker job state. Defaults to ./.velnor-work.
+    #[arg(long)]
+    pub work_dir: Option<PathBuf>,
+
+    /// Docker image used for the bind-mount visibility check.
+    #[arg(long, default_value = "ghcr.io/catthehacker/ubuntu:act-latest")]
+    pub docker_image: String,
+
+    /// Require /var/run/docker.sock to exist on the host.
+    #[arg(long)]
+    pub require_docker_socket: bool,
+
+    /// Require docker buildx to be available on the host.
+    #[arg(long, default_value_t = true)]
+    pub require_buildx: bool,
 }
 
 #[derive(Debug, Args)]

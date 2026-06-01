@@ -8,6 +8,7 @@ mod executor;
 mod github_adapter;
 mod job_message;
 mod plan;
+mod preflight;
 mod protocol;
 mod runner;
 mod runtime_env;
@@ -25,6 +26,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Configure(args) => runner::configure(args).await,
+        Command::Preflight(args) => preflight::preflight(args),
         Command::Run(args) => runner::run(args).await,
         Command::Remove(args) => runner::remove(args).await,
         Command::Status(args) => runner::status(args).await,
