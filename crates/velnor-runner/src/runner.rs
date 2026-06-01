@@ -1000,7 +1000,7 @@ fn container_env_value(environment: &Value) -> Vec<(String, String)> {
     match environment {
         Value::Object(object) => object
             .iter()
-            .filter_map(|(name, value)| value.as_str().map(|value| (name.clone(), value.into())))
+            .map(|(name, value)| (name.clone(), scalar_env_value(value)))
             .collect(),
         Value::Array(values) => values
             .iter()
@@ -1010,14 +1010,21 @@ fn container_env_value(environment: &Value) -> Vec<(String, String)> {
                     .get("name")
                     .or_else(|| object.get("Name"))
                     .and_then(Value::as_str)?;
-                let value = object
-                    .get("value")
-                    .or_else(|| object.get("Value"))
-                    .and_then(Value::as_str)?;
-                Some((name.to_string(), value.to_string()))
+                let value = object.get("value").or_else(|| object.get("Value"))?;
+                Some((name.to_string(), scalar_env_value(value)))
             })
             .collect(),
         _ => Vec::new(),
+    }
+}
+
+fn scalar_env_value(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(value) => value.clone(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        _ => String::new(),
     }
 }
 
@@ -1476,7 +1483,10 @@ mod tests {
             "requestId": 1,
             "jobContainer": {
                 "environmentVariables": {
-                    "NODE_OPTIONS": "--max-old-space-size=4096"
+                    "NODE_OPTIONS": "--max-old-space-size=4096",
+                    "CACHE_ENABLED": true,
+                    "FETCH_DEPTH": 0,
+                    "EMPTY_VALUE": null
                 }
             }
         }))
@@ -1490,7 +1500,9 @@ mod tests {
             "requestId": 1,
             "jobContainer": {
                 "env": [
-                    { "name": "RUST_LOG", "value": "debug" }
+                    { "name": "RUST_LOG", "value": "debug" },
+                    { "name": "RETRY_COUNT", "value": 3 },
+                    { "name": "STRICT_MODE", "value": false }
                 ]
             }
         }))
@@ -1498,11 +1510,20 @@ mod tests {
 
         assert_eq!(
             job_container_env(&object_job),
-            vec![("NODE_OPTIONS".into(), "--max-old-space-size=4096".into())]
+            vec![
+                ("CACHE_ENABLED".into(), "true".into()),
+                ("EMPTY_VALUE".into(), "".into()),
+                ("FETCH_DEPTH".into(), "0".into()),
+                ("NODE_OPTIONS".into(), "--max-old-space-size=4096".into()),
+            ]
         );
         assert_eq!(
             job_container_env(&array_job),
-            vec![("RUST_LOG".into(), "debug".into())]
+            vec![
+                ("RUST_LOG".into(), "debug".into()),
+                ("RETRY_COUNT".into(), "3".into()),
+                ("STRICT_MODE".into(), "false".into()),
+            ]
         );
     }
 
