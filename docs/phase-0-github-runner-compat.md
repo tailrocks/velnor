@@ -1,6 +1,6 @@
 # Phase 0: GitHub Runner Compatibility
 
-Status: planned
+Status: active implementation
 
 ## Decision
 
@@ -9,6 +9,8 @@ Velnor's first phase is not Pkl workflow authoring.
 Phase 0 is a Rust implementation of a GitHub self-hosted runner-compatible agent. Existing repositories keep their current `.github/workflows/*.yml` files and local `.github/actions/*` actions. The user installs/registers Velnor as a self-hosted runner, gives it the same labels used by current workflows, and GitHub schedules existing jobs to it.
 
 Pkl remains the future authoring layer, but it comes after GitHub Actions compatibility.
+
+The GitHub runner wire protocol is private and can drift. That is acceptable for Phase 0. Velnor treats this as an implementation and maintenance cost, not as a product blocker, because the drop-in migration path is more important than having a public protocol contract at this stage.
 
 Detailed implementation notes: `docs/research/phase-0-implementation-plan.md`.
 
@@ -61,6 +63,7 @@ Velnor must implement enough of the runner side:
 - long-poll for job messages
 - acknowledge/delete messages
 - renew running job locks
+- support both classic distributed-task jobs and the newer broker/run-service job flow
 - execute assigned jobs
 - report logs/timeline/results
 - run shell steps

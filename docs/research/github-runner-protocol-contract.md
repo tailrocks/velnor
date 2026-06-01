@@ -4,6 +4,8 @@ Reference source: `actions/runner` commit `c6a124e` from `main`, inspected on 20
 
 This is the first concrete wire contract Velnor should emulate.
 
+GitHub does not document this protocol as a stable public API. Velnor still intentionally depends on it in Phase 0: the project goal is drop-in self-hosted runner compatibility, and that requires speaking the same registration, broker, run-service, and job-completion contracts as the official runner. Protocol drift should be handled with live compatibility tests and narrow contract fixtures.
+
 ## Scope URLs
 
 For hosted GitHub, the runner maps configured URLs to API URLs like this:
@@ -184,6 +186,20 @@ api version: 5.1-preview.1
 route: <server_url>/_apis/distributedtask/pools/{poolId}/sessions/{sessionId}
 ```
 
+V2 broker/run-service flow:
+
+```text
+POST <server_url_v2>/_apis/broker/session
+GET  <server_url_v2>/_apis/broker/message
+POST <server_url_v2>/_apis/broker/acknowledge
+
+POST <run_service_url>/_apis/runtime/runs/{planId}/jobs/{jobId}/acquire
+POST <run_service_url>/_apis/runtime/runs/{planId}/jobs/{jobId}/renew
+POST <run_service_url>/_apis/runtime/runs/{planId}/jobs/{jobId}/complete
+```
+
+The broker can also send control messages while a job is running. Velnor handles `JobCancellation` by killing the active Docker job container and completing the job as canceled. It handles `BrokerMigration` by replacing the broker base URL for later polls.
+
 ## Runner Removal
 
 Remote unregister mirrors registration:
@@ -220,6 +236,8 @@ Implement and test in this order:
 
 This avoids building Docker execution before Velnor can receive a real job.
 
-## Current Implementation Gap
+## Current Implementation Status
 
-The `velnor-runner run --once` path can now exchange stored OAuth credentials and call classic session/message APIs. This still needs a live GitHub registration test, and V2 broker/session support remains separate work if GitHub forces `use_v2_flow`.
+The `velnor-runner run` path can exchange stored OAuth credentials and call either the classic session/message APIs or the V2 broker/run-service APIs. Classic jobs finish through `JobCompleted` plus agent request finish; V2 jobs acquire, renew, and complete through run-service.
+
+Remaining proof gap: this still needs a live GitHub run against the target workflows to validate exact production payloads, especially run-service completion details.

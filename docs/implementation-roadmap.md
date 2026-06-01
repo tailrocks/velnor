@@ -17,6 +17,7 @@ Deliverables:
 - session create/delete
 - message long-poll loop: `run --once` exits after one poll/job; default `run` keeps polling the existing GitHub message route in one session
 - log raw message metadata for assigned job
+- private GitHub runner protocol dependency accepted as a Phase 0 implementation cost
 
 Exit criteria:
 
@@ -35,6 +36,7 @@ Deliverables:
 - report timeline/log output for a no-op job: opt-in `run --complete-noop` probe is implemented for classic timeline/feed routes
 - finish job request with success/failure: opt-in `run --complete-noop` probe finishes success
 - handle cancellation message: classic `JobCancellation` messages are recognized while a Docker job is running, acknowledged, and used to kill the active job container so the job can finish as canceled; V2 broker cancellation messages are also polled while the Docker job runs and kill the active job container
+- V2 broker migration messages are recognized while a Docker job is running and update the broker base URL for later polls
 
 Exit criteria:
 
