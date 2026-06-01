@@ -22,7 +22,7 @@ cargo run --bin velnor-runner -- preflight \
   --require-docker-socket
 ```
 
-This verifies host Git, Docker daemon access, Buildx, `/var/run/docker.sock`, required job-image tools, and whether the daemon can see Velnor's bind-mounted work directory.
+This verifies host Git, Docker daemon access, Buildx, `/var/run/docker.sock`, Docker CLI/Buildx usability inside the job image, required job-image tools, and whether the daemon can see Velnor's bind-mounted work directory.
 
 ## Register
 
