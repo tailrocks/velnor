@@ -403,6 +403,10 @@ async fn handle_message(
             job.plan.plan_id.clone(),
         )
         .await?;
+        client
+            .delete_message(pool_id, message.message_id, session_id)
+            .await
+            .context("acknowledge dispatched job message")?;
         let job_result = execute_script_job(
             config_dir,
             args.work_dir.clone(),
@@ -412,12 +416,28 @@ async fn handle_message(
             &script_steps,
         );
         renewal.abort();
-        let job_result = job_result?;
+        let job_result = match job_result {
+            Ok(job_result) => job_result,
+            Err(error) => {
+                let feed_line =
+                    format!("Velnor failed while executing supported Docker job: {error:#}");
+                complete_job(
+                    client,
+                    pool_id,
+                    worker_name,
+                    &job,
+                    TaskResult::Failed,
+                    BTreeMap::new(),
+                    Vec::new(),
+                    feed_line,
+                )
+                .await?;
+                return Err(error);
+            }
+        };
         complete_job(
             client,
             pool_id,
-            session_id,
-            message.message_id,
             worker_name,
             &job,
             job_result.result,
@@ -431,11 +451,13 @@ async fn handle_message(
             job_result.result
         );
     } else if args.complete_noop {
+        client
+            .delete_message(pool_id, message.message_id, session_id)
+            .await
+            .context("acknowledge no-op job message")?;
         complete_job(
             client,
             pool_id,
-            session_id,
-            message.message_id,
             worker_name,
             &job,
             TaskResult::Succeeded,
@@ -1095,8 +1117,6 @@ fn scalar_env_value(value: &Value) -> String {
 async fn complete_job(
     client: &DistributedTaskClient,
     pool_id: i64,
-    session_id: &str,
-    message_id: i64,
     worker_name: &str,
     job: &AgentJobRequestMessage,
     result: TaskResult,
@@ -1210,10 +1230,6 @@ async fn complete_job(
     client
         .finish_agent_request(pool_id, job.request_id, finish_time, result)
         .await?;
-    client
-        .delete_message(pool_id, message_id, session_id)
-        .await
-        .context("acknowledge completed job message")?;
 
     Ok(())
 }
