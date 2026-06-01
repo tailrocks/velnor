@@ -39,6 +39,16 @@ pub struct CommandResult {
 pub trait CommandRunner {
     fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult>;
 
+    fn run_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+    ) -> Result<CommandResult> {
+        let _ = env;
+        self.run(program, args)
+    }
+
     fn run_with_stdin(
         &mut self,
         program: &str,
@@ -83,6 +93,28 @@ impl CommandRunner for ProcessCommandRunner {
     fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
         let output = Command::new(program)
             .args(args)
+            .output()
+            .with_context(|| format!("run {program} {}", args.join(" ")))?;
+
+        Ok(CommandResult {
+            code: exit_code(output.status)?,
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+
+    fn run_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+    ) -> Result<CommandResult> {
+        let mut command = Command::new(program);
+        command.args(args);
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        let output = command
             .output()
             .with_context(|| format!("run {program} {}", args.join(" ")))?;
 
@@ -1336,8 +1368,9 @@ where
             &action_state,
             "targets",
         )));
+        let env = action_state.resolve_env(&action.env);
         Ok(native_command_result(
-            self.runner.run("docker", &args)?,
+            self.runner.run_with_env("docker", &args, &env)?,
             StepCommandState::default(),
         ))
     }
@@ -4044,6 +4077,7 @@ mod tests {
     struct RecordingRunner {
         calls: Vec<(String, Vec<String>)>,
         stdin: Vec<String>,
+        env: Vec<Vec<(String, String)>>,
         codes: Vec<i32>,
     }
 
@@ -4051,6 +4085,28 @@ mod tests {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             self.calls.push((program.to_string(), args.to_vec()));
             self.stdin.push(String::new());
+            self.env.push(Vec::new());
+            let code = if self.codes.is_empty() {
+                0
+            } else {
+                self.codes.remove(0)
+            };
+            Ok(CommandResult {
+                code,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+        ) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            self.stdin.push(String::new());
+            self.env.push(env.to_vec());
             let code = if self.codes.is_empty() {
                 0
             } else {
@@ -4071,6 +4127,7 @@ mod tests {
         ) -> Result<CommandResult> {
             self.calls.push((program.to_string(), args.to_vec()));
             self.stdin.push(stdin.to_string());
+            self.env.push(Vec::new());
             let code = if self.codes.is_empty() {
                 0
             } else {
@@ -4419,6 +4476,7 @@ mod tests {
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
+            env: Vec::new(),
             codes: vec![0, 0, 1],
         });
 
@@ -4512,6 +4570,7 @@ mod tests {
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
+            env: Vec::new(),
             codes: vec![0, 0, 7, 0, 0],
         });
 
@@ -5226,7 +5285,19 @@ type=sha,format=long,prefix=,enable=true"
                         ),
                     ]
                     .into(),
-                    env: Vec::new(),
+                    env: [
+                        (
+                            "PUSH".into(),
+                            "${{ github.event_name != 'pull_request' && 'true' || 'false' }}"
+                                .into(),
+                        ),
+                        ("SHA".into(), "${{ github.sha }}".into()),
+                        (
+                            "PR_NUMBER".into(),
+                            "${{ github.event.pull_request.number }}".into(),
+                        ),
+                    ]
+                    .into(),
                 },
                 condition: None,
                 continue_on_error: false,
@@ -5235,6 +5306,7 @@ type=sha,format=long,prefix=,enable=true"
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
+            env: Vec::new(),
             codes: vec![0, 0, 1],
         });
 
@@ -5248,12 +5320,19 @@ type=sha,format=long,prefix=,enable=true"
                         "ChainArgos/java-monorepo".into(),
                     ),
                     ("GITHUB_SERVER_URL".into(), "https://github.com".into()),
+                    ("GITHUB_EVENT_NAME".into(), "pull_request".into()),
                     ("GITHUB_SHA".into(), "abcdef1234567890".into()),
                 ],
-                &[(
-                    "secrets".into(),
-                    serde_json::json!({ "DOCKER_TOKEN": "docker-token" }),
-                )],
+                &[
+                    (
+                        "secrets".into(),
+                        serde_json::json!({ "DOCKER_TOKEN": "docker-token" }),
+                    ),
+                    (
+                        "github".into(),
+                        serde_json::json!({ "event": { "pull_request": { "number": 42 } } }),
+                    ),
+                ],
                 &temp,
             )
             .unwrap();
@@ -5300,14 +5379,19 @@ type=sha,format=long,prefix=,enable=true"
                 && args.contains(&"chainargos/rust-bitcoin-processor:abcdef1234567890".into())
                 && args.contains(&"type=gha,scope=bitcoin-processor-app-pr,mode=max".into())
         }));
-        assert!(calls.iter().any(|(program, args)| {
+        let bake_call = calls.iter().position(|(program, args)| {
             program == "docker"
                 && args.first().is_some_and(|arg| arg == "buildx")
                 && args.get(1).is_some_and(|arg| arg == "bake")
                 && args.contains(&"--set".into())
                 && args.contains(&"*.cache-to=type=gha,scope=rust-workspace,mode=max".into())
                 && args.contains(&"bitcoin-processor-app".into())
-        }));
+        });
+        assert!(bake_call.is_some());
+        let bake_env = &runner.env[bake_call.unwrap()];
+        assert!(bake_env.contains(&("PUSH".into(), "false".into())));
+        assert!(bake_env.contains(&("SHA".into(), "abcdef1234567890".into())));
+        assert!(bake_env.contains(&("PR_NUMBER".into(), "42".into())));
         assert_eq!(
             calls
                 .iter()
@@ -5671,6 +5755,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
+            env: Vec::new(),
             codes: vec![1, 0, 0, 0, 0, 0, 0, 0],
         });
 
@@ -7448,6 +7533,7 @@ fi"#
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
+            env: Vec::new(),
             codes: vec![0, 0, 1],
         });
 
@@ -7518,6 +7604,7 @@ fi"#
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
+            env: Vec::new(),
             codes: vec![0, 0, 7, 0, 0],
         });
 
@@ -7580,6 +7667,7 @@ fi"#
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
+            env: Vec::new(),
             codes: vec![0, 0, 1, 0, 0, 0],
         });
 
@@ -9990,6 +10078,7 @@ bitcoin-processor-app.push=true")
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
+            env: Vec::new(),
             codes: vec![0, 0, 9, 0, 0],
         });
 
@@ -10056,6 +10145,7 @@ bitcoin-processor-app.push=true")
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
             stdin: Vec::new(),
+            env: Vec::new(),
             codes: vec![0, 0, 0, 1, 0, 0],
         });
 

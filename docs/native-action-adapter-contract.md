@@ -119,7 +119,7 @@ until a new target workflow needs more.
 | `docker/login-action` | `DockerLogin` | registry login from resolved credentials through `--password-stdin` |
 | `docker/metadata-action` | `DockerMetadata` | compute target tags/labels outputs |
 | `docker/build-push-action` | `DockerBuildPush` | invoke Buildx for target context/tag/cache/push shapes, with `push` and `load` treated as separate latest-action inputs |
-| `docker/bake-action` | `DockerBake` | invoke Buildx Bake for target file/target/push/cache shapes |
+| `docker/bake-action` | `DockerBake` | invoke Buildx Bake for target file/target/push/cache shapes and pass resolved action `env` such as `PUSH`, `SHA`, and `PR_NUMBER` into the Bake process |
 
 Local composite actions remain first-class workflow code. Velnor should parse
 their metadata and expand their nested `run` and `uses` steps, but nested
