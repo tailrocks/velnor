@@ -1,16 +1,50 @@
 #![allow(dead_code)]
 
 use crate::{
-    container::JobContainerSpec,
+    container::{split_container_options, JobContainerSpec, ServiceContainerSpec},
     executor::ExecutableStep,
-    job_message::{AgentJobRequestMessage, ServiceEndpoint},
+    job_message::{AgentJobRequestMessage, ContainerResource, ServiceEndpoint},
     plan::{
         GitHubReportTarget, JobExecutionPlan, JobIdentity, NormalizedJobPlan,
         NormalizedRunDefaults, OutputExpression,
     },
 };
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::PathBuf};
+
+pub struct GitHubJobContainerPaths {
+    pub workspace_host: PathBuf,
+    pub temp_host: PathBuf,
+    pub home_host: PathBuf,
+    pub actions_host: PathBuf,
+    pub tools_host: PathBuf,
+}
+
+pub fn github_job_container_spec(
+    job: &AgentJobRequestMessage,
+    paths: GitHubJobContainerPaths,
+    docker_image: &str,
+    node_action_image: &str,
+) -> JobContainerSpec {
+    JobContainerSpec {
+        name: job_container_name(job),
+        image: job_container_image(job).unwrap_or(docker_image).to_string(),
+        network: job_network_name(job),
+        workspace_host: paths.workspace_host,
+        temp_host: paths.temp_host,
+        home_host: paths.home_host,
+        actions_host: paths.actions_host,
+        tools_host: paths.tools_host,
+        mount_docker_socket: true,
+        env: job_container_env(job),
+        options: job_container_options(job),
+        services: service_containers(job),
+        node_action_image: node_action_image.to_string(),
+        docker_cli_host_path: host_docker_cli_path(),
+        docker_cli_plugin_host_dir: host_docker_cli_plugin_dir(),
+        verify_bind_mounts: true,
+    }
+}
 
 pub fn github_normalized_job_plan(
     job: &AgentJobRequestMessage,
@@ -222,6 +256,226 @@ fn job_variable<'a>(job: &'a AgentJobRequestMessage, name: &str) -> Option<&'a s
         .and_then(|value| value.value.as_deref())
 }
 
+pub fn job_container_name(job: &AgentJobRequestMessage) -> String {
+    format!("velnor-job-{}", sanitize_path_segment(&job.job_id))
+}
+
+fn job_network_name(job: &AgentJobRequestMessage) -> String {
+    format!("velnor-net-{}", sanitize_path_segment(&job.job_id))
+}
+
+fn job_container_image(job: &AgentJobRequestMessage) -> Option<&str> {
+    job.job_container
+        .as_ref()
+        .and_then(container_image)
+        .or_else(|| {
+            job.resources
+                .containers
+                .iter()
+                .find(|container| {
+                    container
+                        .alias
+                        .as_deref()
+                        .is_some_and(|alias| alias == "__job" || alias.eq_ignore_ascii_case("job"))
+                })
+                .and_then(|container| container.image.as_deref())
+        })
+}
+
+fn job_container_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
+    job.job_container
+        .as_ref()
+        .into_iter()
+        .flat_map(container_env)
+        .collect()
+}
+
+fn job_container_options(job: &AgentJobRequestMessage) -> Vec<String> {
+    job.job_container
+        .as_ref()
+        .and_then(container_options)
+        .unwrap_or_default()
+}
+
+fn service_containers(job: &AgentJobRequestMessage) -> Vec<ServiceContainerSpec> {
+    let network = job_network_name(job);
+    job.resources
+        .containers
+        .iter()
+        .filter_map(|container| {
+            let alias = container.alias.as_deref()?;
+            if alias == "__job" || alias.eq_ignore_ascii_case("job") {
+                return None;
+            }
+            let image = container.image.as_ref()?.clone();
+            Some(ServiceContainerSpec {
+                name: format!(
+                    "velnor-service-{}-{}",
+                    sanitize_path_segment(&job.job_id),
+                    sanitize_path_segment(alias)
+                ),
+                image,
+                network_alias: alias.to_string(),
+                network: network.clone(),
+                env: service_env(container),
+                ports: service_ports(container),
+                options: container
+                    .options
+                    .as_deref()
+                    .map(split_container_options)
+                    .unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+fn service_env(container: &ContainerResource) -> Vec<(String, String)> {
+    container
+        .environment_variables
+        .as_ref()
+        .map(container_env_value)
+        .unwrap_or_default()
+}
+
+fn service_ports(container: &ContainerResource) -> Vec<String> {
+    let mut ports = container
+        .ports
+        .iter()
+        .filter_map(|(container_port, host_port)| {
+            let container_port = container_port.trim();
+            let host_port = host_port.trim();
+            if container_port.is_empty() {
+                None
+            } else if host_port.is_empty() {
+                Some(container_port.to_string())
+            } else {
+                Some(format!("{host_port}:{container_port}"))
+            }
+        })
+        .collect::<Vec<_>>();
+    ports.sort();
+    ports
+}
+
+fn container_image(value: &Value) -> Option<&str> {
+    value
+        .as_object()
+        .and_then(|object| {
+            object
+                .get("image")
+                .or_else(|| object.get("Image"))
+                .or_else(|| object.get("containerImage"))
+                .or_else(|| object.get("ContainerImage"))
+        })
+        .and_then(Value::as_str)
+        .filter(|image| !image.is_empty())
+}
+
+fn container_options(value: &Value) -> Option<Vec<String>> {
+    value
+        .as_object()
+        .and_then(|object| {
+            object
+                .get("options")
+                .or_else(|| object.get("Options"))
+                .or_else(|| object.get("createOptions"))
+                .or_else(|| object.get("CreateOptions"))
+        })
+        .and_then(Value::as_str)
+        .map(split_container_options)
+}
+
+fn container_env(value: &Value) -> Vec<(String, String)> {
+    let Some(environment) = value.as_object().and_then(|object| {
+        object
+            .get("environmentVariables")
+            .or_else(|| object.get("EnvironmentVariables"))
+            .or_else(|| object.get("env"))
+            .or_else(|| object.get("Env"))
+    }) else {
+        return Vec::new();
+    };
+    container_env_value(environment)
+}
+
+fn container_env_value(environment: &Value) -> Vec<(String, String)> {
+    match environment {
+        Value::Object(object) => object
+            .iter()
+            .map(|(name, value)| (name.clone(), scalar_env_value(value)))
+            .collect(),
+        Value::Array(values) => values
+            .iter()
+            .filter_map(|value| {
+                let object = value.as_object()?;
+                let name = object
+                    .get("name")
+                    .or_else(|| object.get("Name"))
+                    .and_then(Value::as_str)?;
+                let value = object.get("value").or_else(|| object.get("Value"))?;
+                Some((name.to_string(), scalar_env_value(value)))
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn scalar_env_value(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(value) => value.clone(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn host_docker_cli_path() -> Option<PathBuf> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    find_executable_on_path("docker")
+}
+
+fn host_docker_cli_plugin_dir() -> Option<PathBuf> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    if let Some(path) = find_executable_on_path("docker-buildx") {
+        return path.parent().map(std::path::Path::to_path_buf);
+    }
+    [
+        "/usr/local/lib/docker/cli-plugins/docker-buildx",
+        "/usr/local/libexec/docker/cli-plugins/docker-buildx",
+        "/usr/lib/docker/cli-plugins/docker-buildx",
+        "/usr/libexec/docker/cli-plugins/docker-buildx",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .find(|path| path.is_file())
+    .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+}
+
+fn find_executable_on_path(name: &str) -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths)
+        .map(|dir| dir.join(name))
+        .find(|path| path.is_file())
+}
+
+fn sanitize_path_segment(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,6 +575,170 @@ mod tests {
                 .get("image")
                 .map(|output| output.value.as_str()),
             Some("${{ steps.meta.outputs.tags }}")
+        );
+    }
+
+    #[test]
+    fn job_container_image_prefers_explicit_job_container() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Container",
+            "requestId": 1,
+            "jobContainer": {
+                "image": "ghcr.io/acme/job:latest"
+            },
+            "resources": {
+                "containers": [{
+                    "alias": "__job",
+                    "image": "ubuntu:24.04"
+                }]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(job_container_image(&job), Some("ghcr.io/acme/job:latest"));
+    }
+
+    #[test]
+    fn job_container_image_uses_job_resource_container() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Container",
+            "requestId": 1,
+            "resources": {
+                "containers": [{
+                    "alias": "__job",
+                    "image": "ghcr.io/acme/resource:latest"
+                }]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            job_container_image(&job),
+            Some("ghcr.io/acme/resource:latest")
+        );
+    }
+
+    #[test]
+    fn job_container_env_reads_object_and_array_shapes() {
+        let object_job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Container",
+            "requestId": 1,
+            "jobContainer": {
+                "environmentVariables": {
+                    "NODE_OPTIONS": "--max-old-space-size=4096",
+                    "CACHE_ENABLED": true,
+                    "FETCH_DEPTH": 0,
+                    "EMPTY_VALUE": null
+                }
+            }
+        }))
+        .unwrap();
+        let array_job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Container",
+            "requestId": 1,
+            "jobContainer": {
+                "env": [
+                    { "name": "RUST_LOG", "value": "debug" },
+                    { "name": "RETRY_COUNT", "value": 3 },
+                    { "name": "STRICT_MODE", "value": false }
+                ]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            job_container_env(&object_job),
+            vec![
+                ("CACHE_ENABLED".into(), "true".into()),
+                ("EMPTY_VALUE".into(), "".into()),
+                ("FETCH_DEPTH".into(), "0".into()),
+                ("NODE_OPTIONS".into(), "--max-old-space-size=4096".into()),
+            ]
+        );
+        assert_eq!(
+            job_container_env(&array_job),
+            vec![
+                ("RUST_LOG".into(), "debug".into()),
+                ("RETRY_COUNT".into(), "3".into()),
+                ("STRICT_MODE".into(), "false".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn job_container_options_read_create_options() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Container",
+            "requestId": 1,
+            "jobContainer": {
+                "createOptions": "--cpus 2 --memory 4g"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            job_container_options(&job),
+            vec!["--cpus", "2", "--memory", "4g"]
+        );
+    }
+
+    #[test]
+    fn service_containers_use_non_job_container_resources() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job/1",
+            "jobDisplayName": "Services",
+            "requestId": 1,
+            "resources": {
+                "containers": [
+                    { "alias": "__job", "image": "ubuntu:24.04" },
+                    {
+                        "alias": "postgres",
+                        "image": "postgres:16",
+                        "options": "--health-cmd \"pg_isready -U postgres\"",
+                        "environmentVariables": {
+                            "POSTGRES_PASSWORD": "postgres"
+                        },
+                        "ports": { "5432": "5432" }
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            service_containers(&job),
+            vec![ServiceContainerSpec {
+                name: "velnor-service-job_1-postgres".into(),
+                image: "postgres:16".into(),
+                network_alias: "postgres".into(),
+                network: "velnor-net-job_1".into(),
+                env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
+                ports: vec!["5432:5432".into()],
+                options: vec!["--health-cmd".into(), "pg_isready -U postgres".into()],
+            }]
         );
     }
 }
