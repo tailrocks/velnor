@@ -1322,7 +1322,7 @@ fn parse_contains(expression: &str) -> Option<(&str, &str)> {
         .trim()
         .strip_prefix("contains(")?
         .strip_suffix(')')?;
-    inner.split_once(',')
+    split_top_level(inner, ",")
 }
 
 fn parse_to_json(expression: &str) -> Option<&str> {
@@ -1436,8 +1436,25 @@ fn hex_digest(bytes: &[u8]) -> String {
 
 fn split_top_level<'a>(expression: &'a str, operator: &str) -> Option<(&'a str, &'a str)> {
     let mut depth = 0_i32;
+    let mut quote = None;
+    let mut escaped = false;
     for (index, ch) in expression.char_indices() {
+        if let Some(quote_char) = quote {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == quote_char {
+                quote = None;
+            }
+            continue;
+        }
         match ch {
+            '\'' | '"' => quote = Some(ch),
             '(' => depth += 1,
             ')' => depth -= 1,
             _ => {}
@@ -2249,6 +2266,10 @@ mod tests {
             "tool=rust zig cargo:cargo-zigbuild"
         );
         assert_eq!(
+            state.resolve_expressions("literal=${{ 'a || b && c == d' }}"),
+            "literal=a || b && c == d"
+        );
+        assert_eq!(
             state.resolve_expressions(
                 "push=${{ (github.event_name == 'push' && needs.changes.outputs.bitcoin-processor == 'true') || (github.event_name == 'workflow_dispatch' && inputs.packages) }}"
             ),
@@ -2259,6 +2280,10 @@ mod tests {
                 "selected=${{ contains(inputs.packages, 'BITCOIN-PROCESSOR-APP') }}"
             ),
             "selected=true"
+        );
+        assert_eq!(
+            state.resolve_expressions("comma=${{ contains('alpha,beta', 'BETA') }}"),
+            "comma=true"
         );
         assert_eq!(
             state.resolve_expressions(
