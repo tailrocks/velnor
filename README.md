@@ -86,7 +86,9 @@ child under any explicit work, Docker-host work, or job-message dump directory.
 GitHub sees multiple runner identities/sessions, while the operator runs one
 daemon binary with one concurrency setting. Use `status --slots N` to inspect
 the same internal slot configs and `remove --slots N` to unregister and delete
-them.
+them. The daemon supervises slot tasks as a group and surfaces the first slot
+panic or runner-loop error immediately instead of waiting for earlier slots to
+exit.
 
 Local target coverage is checked with:
 

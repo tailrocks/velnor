@@ -12,7 +12,10 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::{sync::mpsc::UnboundedReceiver, task::JoinHandle};
+use tokio::{
+    sync::mpsc::UnboundedReceiver,
+    task::{JoinHandle, JoinSet},
+};
 
 use crate::{
     action::{
@@ -403,7 +406,7 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
 
     let config_base = config::config_dir(args.config_dir.clone())?;
     configure_daemon_slots(&args, &config_base, slots).await?;
-    let mut handles = Vec::with_capacity(slots);
+    let mut slot_tasks = JoinSet::new();
 
     println!(
         "Starting Velnor daemon with {slots} internal runner slot{}.",
@@ -418,15 +421,15 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
 
     for slot_index in 1..=slots {
         let slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
-        handles.push(tokio::spawn(async move {
+        slot_tasks.spawn(async move {
             run(slot_args)
                 .await
                 .with_context(|| format!("daemon slot-{slot_index} failed"))
-        }));
+        });
     }
 
-    for handle in handles {
-        handle.await.context("daemon slot task panicked")??;
+    while let Some(result) = slot_tasks.join_next().await {
+        result.context("daemon slot task panicked")??;
     }
 
     Ok(())
