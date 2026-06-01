@@ -413,7 +413,8 @@ async fn run_v2(
     let mut run_service = RunServiceClient::new(token.clone())?;
     let owner_name = format!("{} (PID: {})", default_agent_name(), std::process::id());
     let session = TaskAgentSession::new(owner_name, agent_id, stored.settings.agent_name.clone());
-    let session = create_broker_session_with_retry(&broker, &session).await?;
+    let diagnostic = RunnerConnectionDiagnostic::from_config(&stored, &current_broker_url);
+    let session = create_broker_session_with_retry(&broker, &session, &diagnostic).await?;
     let session_id = session
         .session_id
         .as_deref()
@@ -496,6 +497,7 @@ async fn run_v2(
 async fn create_broker_session_with_retry(
     broker: &BrokerClient,
     session: &TaskAgentSession,
+    diagnostic: &RunnerConnectionDiagnostic,
 ) -> Result<TaskAgentSession> {
     let mut attempt = 1;
     loop {
@@ -512,9 +514,54 @@ async fn create_broker_session_with_retry(
                 tokio::time::sleep(delay).await;
             }
             Err(error) => {
-                return Err(error).context("create broker runner session");
+                return Err(error)
+                    .with_context(|| format!("create broker runner session ({diagnostic})"));
             }
         }
+    }
+}
+
+struct RunnerConnectionDiagnostic {
+    github_url: String,
+    broker_url: String,
+    agent_name: String,
+    agent_id: Option<i64>,
+    pool_id: Option<i64>,
+    labels: Vec<String>,
+    use_v2_flow: bool,
+}
+
+impl RunnerConnectionDiagnostic {
+    fn from_config(stored: &StoredRunnerConfig, broker_url: &str) -> Self {
+        Self {
+            github_url: stored.settings.github_url.clone(),
+            broker_url: broker_url.to_string(),
+            agent_name: stored.settings.agent_name.clone(),
+            agent_id: stored.settings.agent_id,
+            pool_id: stored.settings.pool_id,
+            labels: stored.settings.labels.clone(),
+            use_v2_flow: stored.settings.use_v2_flow,
+        }
+    }
+}
+
+impl std::fmt::Display for RunnerConnectionDiagnostic {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "github_url={}, broker_url={}, agent_name={}, agent_id={}, pool_id={}, use_v2_flow={}, labels={}",
+            self.github_url,
+            self.broker_url,
+            self.agent_name,
+            self.agent_id
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            self.pool_id
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            self.use_v2_flow,
+            self.labels.join(",")
+        )
     }
 }
 
@@ -2528,6 +2575,28 @@ mod tests {
             broker_session_create_retry_delay(4),
             Duration::from_secs(BROKER_SESSION_CREATE_RETRY_SECONDS * 3)
         );
+    }
+
+    #[test]
+    fn runner_connection_diagnostic_is_sanitized() {
+        let mut stored = stored_config();
+        stored.settings.labels = vec!["self-hosted".into(), "hetzner-sentry-ci".into()];
+        stored.credentials = Some(StoredCredentials {
+            scheme: CredentialScheme::OAuthAccessToken,
+            data: serde_json::json!({ "token": "secret-token" }),
+        });
+
+        let diagnostic =
+            RunnerConnectionDiagnostic::from_config(&stored, "https://broker.example/");
+        let rendered = diagnostic.to_string();
+
+        assert!(rendered.contains("github_url=https://github.com/owner/repo"));
+        assert!(rendered.contains("broker_url=https://broker.example/"));
+        assert!(rendered.contains("agent_name=velnor"));
+        assert!(rendered.contains("agent_id=2"));
+        assert!(rendered.contains("pool_id=1"));
+        assert!(rendered.contains("labels=self-hosted,hetzner-sentry-ci"));
+        assert!(!rendered.contains("secret-token"));
     }
 
     #[test]
