@@ -147,13 +147,10 @@ workflow lanes:
 - GitHub-hosted runner lane: `runs-on: ubuntu-latest`
 - Velnor lane: `runs-on: [self-hosted, velnor-target-mvp]`
 
-Current fixture run:
-https://github.com/donbeave/velnor-actions-fixture/actions/runs/26762850861
-
-The GitHub-hosted lane has passed. The Velnor lane is the next live proof: once
-Velnor is registered with label `velnor-target-mvp`, it should consume the
-queued fixture jobs and the compare job should verify matching outputs.
-Check the current fixture proof state with:
+The fixture proof should normally use a fresh run. `scripts/fixture_smoke.sh`
+dispatches `compat.yml` by default, then Velnor consumes the queued fixture jobs
+and the compare job verifies matching outputs. To inspect an existing fixture
+run instead, set `VELNOR_FIXTURE_RUN_ID` and use:
 
 ```sh
 scripts/fixture_status.sh
@@ -168,7 +165,9 @@ scripts/fixture_smoke.sh
 
 The script runs two Velnor `--once` jobs by default because the fixture compat
 workflow has two Velnor matrix jobs. Override with `VELNOR_FIXTURE_JOB_COUNT`
-for a different fixture shape. Set `VELNOR_FIXTURE_REF=<branch-or-sha>` and
+for a different fixture shape. Set `VELNOR_FIXTURE_RUN_ID=<run-id>` to consume a
+specific existing run; otherwise the script dispatches a fresh run. Set
+`VELNOR_FIXTURE_REF=<branch-or-sha>` and
 `VELNOR_FIXTURE_INPUTS=key=value,other=value` when dispatching fixture
 workflows from a non-default ref or with workflow inputs.
 
@@ -181,8 +180,8 @@ For target jobs, Velnor runs the job in a Docker container and mounts
 when the socket is present. This is the Phase 0 Docker-outside-of-Docker model:
 workflow steps inside the job container can run `docker`/`docker buildx`, and
 service containers share the per-job Docker network with GitHub-style aliases.
-To create a fresh fixture run instead of using the current queued run, set
-`VELNOR_FIXTURE_DISPATCH=true`.
+To force reuse of an existing run, set `VELNOR_FIXTURE_DISPATCH=false` together
+with `VELNOR_FIXTURE_RUN_ID=<run-id>`.
 The smoke script removes the temporary fixture runner on exit by default; set
 `VELNOR_FIXTURE_CLEANUP_RUNNER=false` to keep it registered for debugging.
 

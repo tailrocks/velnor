@@ -95,9 +95,10 @@ scripts/fixture_smoke.sh
 That script runs the local verifier, Docker preflight, fixture runner
 registration, two Velnor `--once` jobs for the fixture matrix by default, and a
 GitHub run status summary. Override the count with `VELNOR_FIXTURE_JOB_COUNT`
-when the fixture shape changes. Set `VELNOR_FIXTURE_DISPATCH=true` to start a
-fresh `compat.yml` run instead of using the existing queued run id. Set
-`VELNOR_FIXTURE_REF=<branch-or-sha>` and
+when the fixture shape changes. By default it dispatches a fresh `compat.yml`
+run and waits for the new run id. Set `VELNOR_FIXTURE_RUN_ID=<run-id>` to consume
+an existing run; set `VELNOR_FIXTURE_DISPATCH=false` only when using an existing
+run id. Set `VELNOR_FIXTURE_REF=<branch-or-sha>` and
 `VELNOR_FIXTURE_INPUTS=key=value,other=value` when dispatching fixture workflows
 from a non-default ref or with workflow inputs. The script removes the temporary
 fixture runner on exit by default; set
@@ -123,21 +124,16 @@ cargo run --bin velnor-runner -- run \
   --idle-timeout-seconds 900
 ```
 
-The fixture run to complete is:
-
-```text
-https://github.com/donbeave/velnor-actions-fixture/actions/runs/26762850861
-```
-
-The GitHub-hosted `compat-github` matrix jobs already passed. The Velnor proof
-is that `compat-velnor` consumes the queued jobs and `compare-results` passes.
+The GitHub-hosted `compat-github` matrix jobs should pass on the fresh run. The
+Velnor proof is that `compat-velnor` consumes the queued jobs and
+`compare-results` passes.
 Check current fixture status with:
 
 ```sh
 scripts/fixture_status.sh
 ```
 
-After the existing queued jobs are gone, new fixture runs can be started with:
+Manual fixture runs can still be started with:
 
 ```sh
 gh workflow run compat.yml --repo donbeave/velnor-actions-fixture

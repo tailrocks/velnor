@@ -11,10 +11,10 @@ DOCKER_HOST_WORK_DIR="${VELNOR_DOCKER_HOST_WORK_DIR:-}"
 REQUIRE_DOCKER_SOCKET="${VELNOR_REQUIRE_DOCKER_SOCKET:-true}"
 IDLE_TIMEOUT_SECONDS="${VELNOR_IDLE_TIMEOUT_SECONDS:-900}"
 WORKFLOW="${VELNOR_FIXTURE_WORKFLOW:-compat.yml}"
-DISPATCH="${VELNOR_FIXTURE_DISPATCH:-false}"
+DISPATCH="${VELNOR_FIXTURE_DISPATCH:-}"
 FIXTURE_REF="${VELNOR_FIXTURE_REF:-}"
 FIXTURE_INPUTS="${VELNOR_FIXTURE_INPUTS:-}"
-RUN_ID="${VELNOR_FIXTURE_RUN_ID:-26762850861}"
+RUN_ID="${VELNOR_FIXTURE_RUN_ID:-}"
 JOB_COUNT="${VELNOR_FIXTURE_JOB_COUNT:-2}"
 CLEANUP_RUNNER="${VELNOR_FIXTURE_CLEANUP_RUNNER:-true}"
 DUMP_JOB_MESSAGES="${VELNOR_DUMP_JOB_MESSAGES:-$ROOT/.velnor-job-dumps/fixture}"
@@ -43,6 +43,24 @@ trap cleanup_runner EXIT
 
 if ! [[ "$JOB_COUNT" =~ ^[1-9][0-9]*$ ]]; then
   echo "VELNOR_FIXTURE_JOB_COUNT must be a positive integer." >&2
+  exit 2
+fi
+
+if [[ -z "$DISPATCH" ]]; then
+  if [[ -n "$RUN_ID" ]]; then
+    DISPATCH=false
+  else
+    DISPATCH=true
+  fi
+fi
+
+if [[ "$DISPATCH" != "true" && "$DISPATCH" != "false" ]]; then
+  echo "VELNOR_FIXTURE_DISPATCH must be true or false." >&2
+  exit 2
+fi
+
+if [[ "$DISPATCH" == "false" && -z "$RUN_ID" ]]; then
+  echo "VELNOR_FIXTURE_RUN_ID is required when VELNOR_FIXTURE_DISPATCH=false." >&2
   exit 2
 fi
 
