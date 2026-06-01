@@ -709,7 +709,7 @@ fn composite_action_invocations_with_path(
             workspace_container,
             &step_ids,
         );
-        let env = step
+        let mut env = step
             .env
             .iter()
             .map(|(name, value)| {
@@ -724,7 +724,8 @@ fn composite_action_invocations_with_path(
                     ),
                 )
             })
-            .collect();
+            .collect::<Vec<_>>();
+        env.push(("GITHUB_ACTION_PATH".to_string(), action_path.to_string()));
         let working_directory_container = step
             .working_directory
             .as_deref()
@@ -1426,7 +1427,16 @@ runs:
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].id, "aggregate-1");
         assert_eq!(steps[0].condition.as_deref(), Some("${{ 'CI' == 'CI' }}"));
-        assert_eq!(steps[0].env, vec![("WORKFLOW_LABEL".into(), "CI".into())]);
+        assert_eq!(
+            steps[0].env,
+            vec![
+                ("WORKFLOW_LABEL".into(), "CI".into()),
+                (
+                    "GITHUB_ACTION_PATH".into(),
+                    "/__w/.github/actions/aggregate-needs".into()
+                )
+            ]
+        );
         assert!(steps[0].script.contains("::error::CI failed"));
         assert!(steps[0]
             .script
@@ -1458,7 +1468,16 @@ runs:
 
         let steps = composite_script_steps(&plan, &metadata, "/__w").unwrap();
 
-        assert_eq!(steps[0].env, vec![("EXTERNAL_LINKS".into(), "true".into())]);
+        assert_eq!(
+            steps[0].env,
+            vec![
+                ("EXTERNAL_LINKS".into(), "true".into()),
+                (
+                    "GITHUB_ACTION_PATH".into(),
+                    "/__w/.github/actions/check-deployed-docs".into()
+                )
+            ]
+        );
         assert!(steps[0].script.contains("echo \"true\""));
     }
 
@@ -1594,6 +1613,10 @@ runs:
         assert!(step
             .script
             .contains("/__a/_actions/dtolnay_rust-toolchain/stable stable"));
+        assert!(step.env.contains(&(
+            "GITHUB_ACTION_PATH".into(),
+            "/__a/_actions/dtolnay_rust-toolchain/stable".into()
+        )));
     }
 
     #[test]
@@ -1655,7 +1678,16 @@ runs:
         let CompositeActionInvocation::Script(flags) = &invocations[1] else {
             panic!("flags should expand to script")
         };
-        assert_eq!(parse.env, vec![("toolchain".into(), "stable".into())]);
+        assert_eq!(
+            parse.env,
+            vec![
+                ("toolchain".into(), "stable".into()),
+                (
+                    "GITHUB_ACTION_PATH".into(),
+                    "/__a/_actions/dtolnay_rust-toolchain/stable".into()
+                )
+            ]
+        );
         assert!(flags.env.contains(&(
             "targets".into(),
             "${{ '' || 'x86_64-unknown-linux-gnu' || '' }}".into()

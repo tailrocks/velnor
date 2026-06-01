@@ -153,6 +153,7 @@ Deliverables:
 - nested `uses` steps: implemented for repository JavaScript actions referenced from local composites
 - composite step conditions: `if:` is parsed, rendered with composite inputs, and propagated to expanded `run` and nested repository JavaScript steps
 - repository composite actions: downloaded marketplace composites now expand into ordered script steps; nested repository actions inside those composites are discovered and downloaded recursively
+- composite run steps receive GitHub-style `GITHUB_ACTION_PATH` pointing at the parent composite action directory, so scripts using `$GITHUB_ACTION_PATH` match runner behavior
 - composite `continue-on-error`: parsed for nested composite steps and applied to expanded script/repository steps
 - composite outputs: metadata `outputs.*.value` is evaluated after expanded inner steps and exposed as `steps.<composite-id>.outputs.*`
 - post-step state if needed
