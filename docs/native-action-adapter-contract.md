@@ -93,7 +93,7 @@ until a new target workflow needs more.
 | Action family | Native adapter | Required behavior |
 | --- | --- | --- |
 | `actions/checkout` | `Checkout` | self checkout, external repo checkout, `path`, `ref`, `token`, `fetch-depth` |
-| `actions/cache` | `Cache` | restore/save paths, key, restore keys, `hashFiles(...)` keys |
+| `actions/cache` | `Cache` | restore/save paths, key, restore keys, `hashFiles(...)` keys, shared workdir cache storage |
 | `actions/upload-artifact` | `UploadArtifact` | `name`, `path`, `if-no-files-found`, `retention-days`, target outputs, run-scoped workdir storage |
 | `actions/download-artifact` | `DownloadArtifact` | `name`, `pattern`, `path`, `merge-multiple`, same-run cross-job handoff on one Velnor host |
 | `actions/upload-pages-artifact` | `UploadPagesArtifact` | package pages directory and expose artifact handoff |
@@ -106,7 +106,7 @@ until a new target workflow needs more.
 | `extractions/setup-just` | `SetupJust` | install just binary for later scripts |
 | `dtolnay/rust-toolchain` | `RustToolchain` | install/select stable Rust toolchain |
 | `baptiste0928/cargo-install` | `CargoInstall` | install crate with `locked` support |
-| `Swatinem/rust-cache` | `RustCache` | restore/save cache dirs, `shared-key`, `cache-on-failure` |
+| `Swatinem/rust-cache` | `RustCache` | restore/save cache dirs, `shared-key`, `cache-on-failure`, shared workdir cache storage |
 | `crazy-max/ghaction-github-runtime` | `GitHubRuntimeExport` | export runtime/cache/results env values |
 | `renovatebot/github-action` | `Renovate` | run Renovate with target env/token/Docker access |
 | `docker/setup-buildx-action` | `DockerSetupBuildx` | create/select builder and honor target inputs |

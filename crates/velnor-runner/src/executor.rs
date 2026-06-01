@@ -164,6 +164,14 @@ struct PostJavaScriptAction {
     continue_on_error: bool,
 }
 
+#[derive(Debug, Clone)]
+struct PostNativeAction {
+    step_id: String,
+    invocation: NativeActionInvocation,
+    condition: Option<String>,
+    continue_on_error: bool,
+}
+
 impl ExecutableStep {
     fn id(&self) -> &str {
         match self {
@@ -420,6 +428,7 @@ where
         );
         let mut step_error = None;
         let mut post_actions = Vec::new();
+        let mut native_post_actions = Vec::new();
         let mut timeline_order = 0;
         for step in steps {
             match step {
@@ -604,6 +613,21 @@ where
                             });
                         }
                     }
+                    if let ExecutableStep::Native {
+                        invocation,
+                        continue_on_error,
+                        ..
+                    } = step
+                    {
+                        if let Some(condition) = native_post_condition(invocation.adapter) {
+                            native_post_actions.push(PostNativeAction {
+                                step_id: step_id.clone(),
+                                invocation: invocation.clone(),
+                                condition: Some(condition.to_string()),
+                                continue_on_error: *continue_on_error,
+                            });
+                        }
+                    }
                     if failed && step.continue_on_error() {
                         result.failure_ignored = true;
                     }
@@ -618,6 +642,36 @@ where
                 Err(error) => {
                     step_error = Some(error);
                     break;
+                }
+            }
+        }
+        for post_action in native_post_actions.into_iter().rev() {
+            if !state.evaluate_post_condition(post_action.condition.as_deref()) {
+                continue;
+            }
+            let post_step_id = format!("{}-post", post_action.step_id);
+            self.emit_step_started(post_step_id.clone(), &mut timeline_order);
+            let result = self.execute_native_post_action(
+                container,
+                &post_action.step_id,
+                &post_action.invocation,
+                &state,
+            );
+            match result {
+                Ok(mut result) => {
+                    if result.exit_code != 0 && post_action.continue_on_error {
+                        result.failure_ignored = true;
+                    }
+                    let log = step_log(&post_step_id, timeline_order, &result);
+                    self.emit_step_log(&log);
+                    step_logs.push(log);
+                    state.apply(&post_step_id, &result);
+                    results.push(result);
+                }
+                Err(error) => {
+                    if step_error.is_none() {
+                        step_error = Some(error);
+                    }
                 }
             }
         }
@@ -854,7 +908,7 @@ where
         state: &JobExecutionState,
     ) -> Result<StepExecutionResult> {
         match action.adapter {
-            NativeActionAdapter::Cache => Ok(native_cache(action, state)),
+            NativeActionAdapter::Cache => native_cache(action, state),
             NativeActionAdapter::UploadArtifact => native_upload_artifact(action, state),
             NativeActionAdapter::DownloadArtifact => native_download_artifact(action, state),
             NativeActionAdapter::UploadPagesArtifact => native_upload_pages_artifact(action, state),
@@ -870,7 +924,7 @@ where
             NativeActionAdapter::CargoInstall => {
                 self.native_cargo_install(_container, action, state)
             }
-            NativeActionAdapter::RustCache => Ok(native_rust_cache(action, state)),
+            NativeActionAdapter::RustCache => native_rust_cache(action, state),
             NativeActionAdapter::Renovate => self.native_renovate(_container, action, state),
             NativeActionAdapter::GitHubRuntimeExport => {
                 Ok(native_github_runtime_export(action, state))
@@ -890,6 +944,24 @@ where
                     step_id
                 )
             }
+        }
+    }
+
+    fn execute_native_post_action(
+        &mut self,
+        _container: &JobContainerSpec,
+        step_id: &str,
+        action: &NativeActionInvocation,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        match action.adapter {
+            NativeActionAdapter::Cache => native_cache_save(step_id, action, state),
+            NativeActionAdapter::RustCache => native_rust_cache_save(step_id, action, state),
+            _ => bail!(
+                "native action adapter {:?} for step '{}' does not have a post action",
+                action.adapter,
+                step_id
+            ),
         }
     }
 
@@ -1446,45 +1518,64 @@ fn rewrite_command_file_env_for_action_container(env: &mut [(String, String)]) {
     }
 }
 
-fn native_cache(action: &NativeActionInvocation, state: &JobExecutionState) -> StepExecutionResult {
+fn native_post_condition(adapter: NativeActionAdapter) -> Option<&'static str> {
+    match adapter {
+        NativeActionAdapter::Cache => Some("success()"),
+        NativeActionAdapter::RustCache => Some("success() || env.CACHE_ON_FAILURE == 'true'"),
+        _ => None,
+    }
+}
+
+fn native_cache(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
     let action_state = state.with_env(state.resolve_env(&action.env));
     let key = native_input(action, &action_state, "key");
     let path = native_input(action, &action_state, "path");
     let restore_keys = native_input(action, &action_state, "restore-keys");
     let fail_on_cache_miss =
         input_truthy(&native_input(action, &action_state, "fail-on-cache-miss"));
+    let matched_key = find_cache_match(&action_state, &key, &restore_keys)?;
+    if let Some(matched_key) = &matched_key {
+        restore_cache_paths(&action_state, matched_key, &path)?;
+    }
+    let exact_hit = matched_key.as_deref() == Some(key.as_str());
 
     let mut outputs = BTreeMap::new();
-    outputs.insert("cache-hit".to_string(), "false".to_string());
+    outputs.insert("cache-hit".to_string(), exact_hit.to_string());
     outputs.insert("cache-primary-key".to_string(), key.clone());
-    outputs.insert("cache-matched-key".to_string(), String::new());
+    outputs.insert(
+        "cache-matched-key".to_string(),
+        matched_key.clone().unwrap_or_default(),
+    );
 
     let mut state_values = BTreeMap::new();
     if !key.is_empty() {
         state_values.insert("primaryKey".to_string(), key.clone());
     }
+    if let Some(matched_key) = &matched_key {
+        state_values.insert("matchedKey".to_string(), matched_key.clone());
+    }
 
     let mut stdout = String::new();
-    stdout.push_str("Cache not found for input keys: ");
-    stdout.push_str(
-        &std::iter::once(key.as_str())
-            .chain(
-                restore_keys
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty()),
-            )
-            .filter(|value| !value.is_empty())
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
-    stdout.push('\n');
+    if let Some(matched_key) = &matched_key {
+        stdout.push_str(&format!("Cache restored from key: {matched_key}\n"));
+    } else {
+        stdout.push_str("Cache not found for input keys: ");
+        stdout.push_str(&cache_lookup_keys(&key, &restore_keys).join(", "));
+        stdout.push('\n');
+    }
     if !path.is_empty() {
         stdout.push_str(&format!("Cache path: {path}\n"));
     }
 
-    StepExecutionResult {
-        exit_code: if fail_on_cache_miss { 1 } else { 0 },
+    Ok(StepExecutionResult {
+        exit_code: if fail_on_cache_miss && matched_key.is_none() {
+            1
+        } else {
+            0
+        },
         state: StepCommandState {
             outputs,
             state: state_values,
@@ -1498,22 +1589,27 @@ fn native_cache(action: &NativeActionInvocation, state: &JobExecutionState) -> S
         } else {
             String::new()
         },
-    }
+    })
 }
 
 fn native_rust_cache(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
-) -> StepExecutionResult {
+) -> Result<StepExecutionResult> {
     let action_state = state.with_env(state.resolve_env(&action.env));
     let shared_key = native_input(action, &action_state, "shared-key");
+    let cache_directories = native_input(action, &action_state, "cache-directories");
     let cache_on_failure = native_input_or(&action_state, action, "cache-on-failure", "false");
+    let matched = find_cache_match(&action_state, &shared_key, "")?;
+    if let Some(matched_key) = &matched {
+        restore_cache_paths(&action_state, matched_key, &cache_directories)?;
+    }
     let mut outputs = BTreeMap::new();
-    outputs.insert("cache-hit".to_string(), "false".to_string());
+    outputs.insert("cache-hit".to_string(), matched.is_some().to_string());
     if !shared_key.is_empty() {
         outputs.insert("cache-primary-key".to_string(), shared_key.clone());
     }
-    StepExecutionResult {
+    Ok(StepExecutionResult {
         exit_code: 0,
         state: StepCommandState {
             outputs,
@@ -1522,8 +1618,178 @@ fn native_rust_cache(
         },
         skipped: false,
         failure_ignored: false,
-        stdout: format!("Rust cache miss for shared key '{shared_key}'\n"),
+        stdout: matched.map_or_else(
+            || format!("Rust cache miss for shared key '{shared_key}'\n"),
+            |key| format!("Rust cache restored from shared key '{key}'\n"),
+        ),
         stderr: String::new(),
+    })
+}
+
+fn native_cache_save(
+    step_id: &str,
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let key = native_input(action, &action_state, "key");
+    let path = native_input(action, &action_state, "path");
+    let exact_hit = state
+        .outputs
+        .get(step_id)
+        .and_then(|outputs| outputs.get("cache-hit"))
+        .is_some_and(|value| value == "true");
+    save_cache_result(&action_state, &key, &path, exact_hit)
+}
+
+fn native_rust_cache_save(
+    step_id: &str,
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let key = native_input(action, &action_state, "shared-key");
+    let path = native_input(action, &action_state, "cache-directories");
+    let exact_hit = state
+        .outputs
+        .get(step_id)
+        .and_then(|outputs| outputs.get("cache-hit"))
+        .is_some_and(|value| value == "true");
+    save_cache_result(&action_state, &key, &path, exact_hit)
+}
+
+fn cache_lookup_keys(key: &str, restore_keys: &str) -> Vec<String> {
+    std::iter::once(key)
+        .chain(restore_keys.lines().map(str::trim))
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn find_cache_match(
+    state: &JobExecutionState,
+    key: &str,
+    restore_keys: &str,
+) -> Result<Option<String>> {
+    let store = cache_store_dir(state)?;
+    if key.is_empty() || !store.exists() {
+        return Ok(None);
+    }
+    let exact = store.join(sanitize_artifact_name(key));
+    if exact.exists() {
+        return Ok(Some(key.to_string()));
+    }
+    for restore_key in restore_keys
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let mut matches = cache_entries_with_prefix(&store, restore_key)?;
+        matches.sort();
+        if let Some(matched_key) = matches.into_iter().next() {
+            return Ok(Some(matched_key));
+        }
+    }
+    Ok(None)
+}
+
+fn cache_entries_with_prefix(store: &Path, prefix: &str) -> Result<Vec<String>> {
+    let sanitized_prefix = sanitize_artifact_name(prefix);
+    let mut matches = Vec::new();
+    for entry in fs::read_dir(store).with_context(|| format!("read {}", store.display()))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let sanitized_key = entry.file_name().to_string_lossy().to_string();
+        if sanitized_key.starts_with(&sanitized_prefix) {
+            matches.push(cache_key_from_metadata(&entry.path()).unwrap_or(sanitized_key));
+        }
+    }
+    Ok(matches)
+}
+
+fn restore_cache_paths(state: &JobExecutionState, key: &str, paths: &str) -> Result<()> {
+    let cache_dir = cache_store_dir(state)?.join(sanitize_artifact_name(key));
+    for (index, path) in cache_paths(paths).into_iter().enumerate() {
+        let source = cache_dir.join(index.to_string());
+        if !source.exists() {
+            continue;
+        }
+        let Some(destination) = resolve_cache_path(state, &path) else {
+            continue;
+        };
+        fs::create_dir_all(&destination)
+            .with_context(|| format!("create cache restore path {}", destination.display()))?;
+        copy_dir_contents(&source, &destination)?;
+    }
+    Ok(())
+}
+
+fn save_cache_result(
+    state: &JobExecutionState,
+    key: &str,
+    paths: &str,
+    exact_hit: bool,
+) -> Result<StepExecutionResult> {
+    if key.is_empty() {
+        return Ok(cache_save_step_result(
+            0,
+            "Cache save skipped because key is empty\n",
+            "",
+        ));
+    }
+    if exact_hit {
+        return Ok(cache_save_step_result(
+            0,
+            &format!("Cache hit occurred on primary key '{key}', not saving cache\n"),
+            "",
+        ));
+    }
+    let cache_dir = cache_store_dir(state)?.join(sanitize_artifact_name(key));
+    fs::remove_dir_all(&cache_dir).ok();
+    fs::create_dir_all(&cache_dir)
+        .with_context(|| format!("create cache directory {}", cache_dir.display()))?;
+    fs::write(cache_dir.join(".velnor-key"), key)
+        .with_context(|| format!("write cache metadata {}", cache_dir.display()))?;
+
+    let mut saved = 0usize;
+    for (index, path) in cache_paths(paths).into_iter().enumerate() {
+        let Some(source) = resolve_cache_path(state, &path) else {
+            continue;
+        };
+        if !source.exists() {
+            continue;
+        }
+        let target = cache_dir.join(index.to_string());
+        fs::create_dir_all(&target)
+            .with_context(|| format!("create cache entry {}", target.display()))?;
+        copy_cache_source(&source, &target)?;
+        saved += 1;
+    }
+    if saved == 0 {
+        fs::remove_dir_all(&cache_dir).ok();
+        return Ok(cache_save_step_result(
+            0,
+            "",
+            &format!("Cache not saved because no paths exist for key '{key}'\n"),
+        ));
+    }
+    Ok(cache_save_step_result(
+        0,
+        &format!("Saved cache '{key}' with {saved} path(s)\n"),
+        "",
+    ))
+}
+
+fn cache_save_step_result(exit_code: i32, stdout: &str, stderr: &str) -> StepExecutionResult {
+    StepExecutionResult {
+        exit_code,
+        state: StepCommandState::default(),
+        skipped: false,
+        failure_ignored: false,
+        stdout: stdout.to_string(),
+        stderr: stderr.to_string(),
     }
 }
 
@@ -1796,15 +2062,27 @@ fn artifact_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("artifact actions require a temp directory"))?;
     let run_key = artifact_run_key(state);
-    let run_root = if temp.file_name().is_some_and(|name| name == "temp") {
+    let run_root = shared_work_root(temp);
+    Ok(run_root.join("_velnor_artifacts").join(run_key))
+}
+
+fn cache_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
+    let temp = state
+        .temp_host
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("cache actions require a temp directory"))?;
+    Ok(shared_work_root(temp).join("_velnor_caches"))
+}
+
+fn shared_work_root(temp: &Path) -> PathBuf {
+    if temp.file_name().is_some_and(|name| name == "temp") {
         temp.parent()
             .and_then(Path::parent)
             .map(Path::to_path_buf)
             .unwrap_or_else(|| temp.to_path_buf())
     } else {
         temp.to_path_buf()
-    };
-    Ok(run_root.join("_velnor_artifacts").join(run_key))
+    }
 }
 
 fn artifact_run_key(state: &JobExecutionState) -> String {
@@ -1830,6 +2108,29 @@ fn artifact_paths(paths: &str) -> Vec<String> {
         .filter(|path| !path.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn cache_paths(paths: &str) -> Vec<String> {
+    artifact_paths(paths)
+}
+
+fn resolve_cache_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> {
+    let path = path.trim();
+    if path == "~" {
+        return state_home_host(state);
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return state_home_host(state).map(|home| home.join(rest));
+    }
+    resolve_host_path(state, path)
+}
+
+fn state_home_host(state: &JobExecutionState) -> Option<PathBuf> {
+    let temp = state.temp_host.as_ref()?;
+    if temp.file_name().is_some_and(|name| name == "temp") {
+        return temp.parent().map(|job_dir| job_dir.join("home"));
+    }
+    Some(temp.join("home"))
 }
 
 fn resolve_host_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> {
@@ -1875,6 +2176,19 @@ fn copy_artifact_source(source: &Path, artifact_dir: &Path) -> Result<()> {
             .ok_or_else(|| anyhow::anyhow!("artifact source has no file name"))?;
         fs::copy(source, artifact_dir.join(file_name))
             .with_context(|| format!("copy artifact file {}", source.display()))?;
+        Ok(())
+    }
+}
+
+fn copy_cache_source(source: &Path, destination: &Path) -> Result<()> {
+    if source.is_dir() {
+        copy_dir_contents(source, destination)
+    } else {
+        let file_name = source
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("cache source has no file name"))?;
+        fs::copy(source, destination.join(file_name))
+            .with_context(|| format!("copy cache file {}", source.display()))?;
         Ok(())
     }
 }
@@ -1932,6 +2246,13 @@ fn matching_artifacts(store: &Path, name: &str, pattern: &str) -> Result<Vec<(St
     }
     artifacts.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(artifacts)
+}
+
+fn cache_key_from_metadata(path: &Path) -> Option<String> {
+    fs::read_to_string(path.join(".velnor-key"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn hash_artifact_dir(path: &Path) -> Result<String> {
@@ -3867,7 +4188,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(results.len(), 1);
+        assert_eq!(results.len(), 2);
         assert_eq!(results[0].exit_code, 0);
         assert_eq!(results[0].state.outputs["cache-hit"], "false");
         assert_eq!(
@@ -3884,6 +4205,9 @@ mod tests {
         assert!(results[0]
             .stdout
             .contains("Cache path: ~/.cache/rust-script"));
+        assert!(results[1]
+            .stderr
+            .contains("Cache not saved because no paths exist"));
         assert_eq!(
             executor
                 .runner()
@@ -3928,6 +4252,79 @@ mod tests {
         assert!(results[0].stderr.contains("fail-on-cache-miss"));
 
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_cache_saves_and_restores_from_shared_workdir() {
+        let root = temp_dir();
+        let save_temp = root.join("save-job/temp");
+        let restore_temp = root.join("restore-job/temp");
+        fs::create_dir_all(root.join("save-job/home/.cache/rust-script")).unwrap();
+        fs::create_dir_all(root.join("restore-job/home")).unwrap();
+        fs::write(
+            root.join("save-job/home/.cache/rust-script/state.bin"),
+            "cached\n",
+        )
+        .unwrap();
+        let env = vec![("GITHUB_RUN_ID".into(), "123456".into())];
+        let save = vec![ExecutableStep::Native {
+            step_id: "cache".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::Cache,
+                inputs: [
+                    ("path".into(), "~/.cache/rust-script".into()),
+                    ("key".into(), "linux-rust-script-abc".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+
+        let save_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
+            .unwrap();
+
+        assert_eq!(save_results[0].state.outputs["cache-hit"], "false");
+        assert!(save_results[1]
+            .stdout
+            .contains("Saved cache 'linux-rust-script-abc'"));
+        assert!(root
+            .join("_velnor_caches/linux-rust-script-abc/0/state.bin")
+            .exists());
+
+        let restore = vec![ExecutableStep::Native {
+            step_id: "cache".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::Cache,
+                inputs: [
+                    ("path".into(), "~/.cache/rust-script".into()),
+                    ("key".into(), "linux-rust-script-abc".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        let restore_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
+            .unwrap();
+
+        assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(
+            restore_results[0].state.outputs["cache-matched-key"],
+            "linux-rust-script-abc"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("restore-job/home/.cache/rust-script/state.bin")).unwrap(),
+            "cached\n"
+        );
+        assert!(restore_results[1]
+            .stdout
+            .contains("Cache hit occurred on primary key"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -4227,7 +4624,7 @@ type=sha,format=long,prefix=,enable=true"
             )
             .unwrap();
 
-        assert_eq!(results.len(), 7);
+        assert_eq!(results.len(), 8);
         assert!(results[0]
             .state
             .path

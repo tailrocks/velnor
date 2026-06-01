@@ -7,7 +7,7 @@ This is the remaining Phase 0 proof path. Unit-level target verification is cove
 - Linux host where the Docker daemon can see Velnor's bind-mounted work directory.
 - Git, Docker CLI, and Buildx plugin installed on the host.
 - GitHub PAT in `GITHUB_TOKEN` with permission to register a repository self-hosted runner for the target repo.
-- A persistent Velnor `--work-dir` shared by all jobs in the same validation run; native artifact upload/download uses this run-scoped work directory for cross-job handoff on a single Velnor host until GitHub artifact service transport is implemented.
+- A persistent Velnor `--work-dir` shared by all jobs in the same validation run; native cache restore/save and artifact upload/download use this shared work directory for single-host handoff until GitHub cache/artifact service transport is implemented.
 - Current target verifier passes locally:
 
 ```sh
@@ -93,7 +93,7 @@ For each run, record:
 - runner labels shown in GitHub UI
 - first and last step logs for each job assigned to Velnor
 - timeline/annotation readability for `::error::`, `::notice::`, and grouped logs where present
-- cache restore/save behavior for target cache actions
+- cache restore/save behavior for target cache actions through the shared Velnor work directory
 - artifact upload/download behavior for target artifact actions, including cross-job handoff through the shared Velnor work directory
 - job outputs used by downstream jobs
 - required aggregator job status and final workflow status

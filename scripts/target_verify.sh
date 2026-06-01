@@ -36,6 +36,7 @@ tests=(
   target_cache_and_artifact_actions_receive_runtime_env
   native_artifacts_are_shared_across_jobs_in_same_run_workdir
   native_cache_reports_miss_without_node_sidecar
+  native_cache_saves_and_restores_from_shared_workdir
   builds_target_upload_artifact_invocation_inputs
   builds_target_download_artifact_invocation_inputs
   target_aggregate_needs_expands_exact_failure_gate
