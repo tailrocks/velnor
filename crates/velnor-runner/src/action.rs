@@ -2065,6 +2065,57 @@ runs:
         assert!(parsed >= 20, "expected fetched target action metadata");
     }
 
+    #[test]
+    fn fetched_target_composite_actions_have_repository_action_closure() {
+        let actions_root = Path::new("/tmp/velnor-actions");
+        let roots = [
+            actions_root,
+            Path::new("/tmp/velnor-targets/jackin/.github/actions"),
+        ];
+        if roots.iter().all(|root| !root.exists()) {
+            return;
+        }
+
+        let mut checked = 0;
+        let mut missing = Vec::new();
+        for root in roots.into_iter().filter(|root| root.exists()) {
+            for path in action_metadata_files(root) {
+                let contents = fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+                let metadata = parse_action_metadata(&contents)
+                    .unwrap_or_else(|error| panic!("parse {}: {error:#}", path.display()));
+                if metadata.runtime().unwrap() != ActionRuntime::Composite {
+                    continue;
+                }
+                for step in &metadata.runs.steps {
+                    let Some(uses) = step.uses.as_deref() else {
+                        continue;
+                    };
+                    let reference = parse_repository_uses(uses)
+                        .unwrap_or_else(|error| panic!("parse uses {uses}: {error:#}"));
+                    let mut action_dir = actions_root.join(sanitize_segment(&reference.repository));
+                    if let Some(source_path) = reference.source_path {
+                        action_dir = action_dir.join(source_path);
+                    }
+                    checked += 1;
+                    if action_metadata_path(&action_dir).is_err() {
+                        missing.push(format!("{} -> {}", path.display(), uses));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            checked >= 8,
+            "expected target composite repository references to be checked"
+        );
+        assert!(
+            missing.is_empty(),
+            "missing fetched nested action metadata:\n{}",
+            missing.join("\n")
+        );
+    }
+
     fn action_metadata_files(root: &Path) -> Vec<PathBuf> {
         let mut files = Vec::new();
         collect_action_metadata_files(root, &mut files);
