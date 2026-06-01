@@ -925,6 +925,7 @@ impl JobExecutionState {
             "runner.os" => "RUNNER_OS",
             "runner.temp" => "RUNNER_TEMP",
             "runner.tool_cache" => "RUNNER_TOOL_CACHE",
+            "runner.workspace" => "RUNNER_WORKSPACE",
             _ => return self.resolve_context_data_expression(expression),
         };
         self.env.get(env_name).cloned()
@@ -1730,6 +1731,7 @@ mod tests {
             ("RUNNER_OS".into(), "Linux".into()),
             ("RUNNER_NAME".into(), "velnor".into()),
             ("RUNNER_ENVIRONMENT".into(), "self-hosted".into()),
+            ("RUNNER_WORKSPACE".into(), "/__w".into()),
         ]);
 
         assert_eq!(
@@ -1757,6 +1759,7 @@ mod tests {
                     "RUNNER_ENVIRONMENT".into(),
                     "${{ runner.environment }}".into()
                 ),
+                ("RUNNER_WORKSPACE".into(), "${{ runner.workspace }}".into()),
             ]),
             vec![
                 ("INPUT_TOKEN".into(), "ghs_token".into()),
@@ -1775,6 +1778,7 @@ mod tests {
                 ("OS".into(), "Linux".into()),
                 ("RUNNER_NAME".into(), "velnor".into()),
                 ("RUNNER_ENVIRONMENT".into(), "self-hosted".into()),
+                ("RUNNER_WORKSPACE".into(), "/__w".into()),
             ]
         );
     }

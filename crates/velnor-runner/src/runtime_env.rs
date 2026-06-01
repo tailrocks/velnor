@@ -14,6 +14,7 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         ("RUNNER_ENVIRONMENT".to_string(), "self-hosted".to_string()),
         ("RUNNER_TEMP".to_string(), "/__t".to_string()),
         ("RUNNER_TOOL_CACHE".to_string(), "/__tool".to_string()),
+        ("RUNNER_WORKSPACE".to_string(), "/__w".to_string()),
     ];
 
     let repository = job.variable("github.repository");
@@ -163,6 +164,9 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
             "ACTIONS_ORCHESTRATION_ID",
             job.variable("system.orchestrationId"),
         );
+    }
+    if job.variable_bool("ACTIONS_STEP_DEBUG") == Some(true) {
+        env.push(("RUNNER_DEBUG".to_string(), "1".to_string()));
     }
 
     for (name, value) in job_environment_variables(job) {
@@ -391,6 +395,7 @@ mod tests {
                 "github.workflow_sha": { "value": "def456" },
                 "github.run_attempt": { "value": "2" },
                 "github.retention_days": { "value": "90" },
+                "ACTIONS_STEP_DEBUG": { "value": "true" },
                 "system.github.token": { "value": "ghs_token", "isSecret": true },
                 "actions_uses_cache_service_v2": { "value": "true" },
                 "actions_set_orchestration_id_env_for_actions": { "value": "true" },
@@ -434,6 +439,8 @@ mod tests {
         assert!(env.contains(&("RUNNER_ARCH".into(), runner_arch().into())));
         assert!(env.contains(&("RUNNER_NAME".into(), runner_name())));
         assert!(env.contains(&("RUNNER_ENVIRONMENT".into(), "self-hosted".into())));
+        assert!(env.contains(&("RUNNER_WORKSPACE".into(), "/__w".into())));
+        assert!(env.contains(&("RUNNER_DEBUG".into(), "1".into())));
         assert!(env.contains(&("GITHUB_JOB".into(), "check".into())));
         assert!(env.contains(&("GITHUB_REPOSITORY".into(), "acme/repo".into())));
         assert!(env.contains(&("GITHUB_REPOSITORY_OWNER".into(), "acme".into())));
