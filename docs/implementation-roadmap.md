@@ -108,7 +108,7 @@ Deliverables:
 - action metadata parser for `action.yml`: JavaScript, composite, and Docker `runs.using` shapes are modeled
 - repository action planner for enabled non-checkout `uses:` steps
 - Node action handler: JavaScript action invocation and Docker `node <main>` executor shape are implemented and wired into the ordered Docker execution path
-- JavaScript actions run in a short-lived Node side container selected from `runs.using` with the same workspace/temp/actions/tools mounts and job network, so job images do not need to provide Node
+- JavaScript actions run in a short-lived Node side container selected from `runs.using` with the same workspace/temp/actions/tools mounts and job network, so job images do not need to provide Node; `--node-action-image` can override this when an operator supplies a custom image that already contains the required Node runtime and tools such as Docker CLI
 - JavaScript post hooks: `runs.post` is resolved, respects target `runs.post-if` conditions such as `success()`, executes in reverse order after main steps, and receives `STATE_*` values saved through `GITHUB_STATE`
 - Docker action handler: `runs.using: docker` actions are planned and run as short-lived Docker containers on the job network; `docker://` images are used directly, and local Dockerfile actions are built before execution
 - `INPUT_*` environment variables: planned action inputs and metadata defaults are converted to `INPUT_*` for JavaScript invocation

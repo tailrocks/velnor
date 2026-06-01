@@ -87,8 +87,8 @@ pub struct RunArgs {
     #[arg(long, default_value = "ubuntu:24.04")]
     pub docker_image: String,
 
-    /// Docker image used to run JavaScript actions. Must contain node and docker CLI.
-    #[arg(long, default_value = "ghcr.io/catthehacker/ubuntu:act-latest")]
+    /// Override Docker image used to run JavaScript actions. By default Velnor uses the action's declared Node runtime image.
+    #[arg(long, default_value = "")]
     pub node_action_image: String,
 
     /// Host work directory for Docker job state. Defaults under the runner config directory.
