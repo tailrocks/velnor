@@ -12,9 +12,6 @@ After that is stable, Pkl will be evaluated into a typed workflow model, then Ru
 
 The normalized execution contract is captured in `research/normalized-plan-contract-2026-06-01.md`; Pkl must target that contract rather than introducing a separate executor.
 
-The first Velnor-specific authoring contract is captured in
-`research/pkl-authoring-contract-2026-06-01.md`.
-
 ## Rationale
 
 Pkl is the best fit for Velnor's user-facing workflow language:

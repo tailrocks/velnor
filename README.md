@@ -86,8 +86,6 @@ Pkl vs KCL language comparison: [docs/research/pkl-vs-kcl.md](docs/research/pkl-
 
 Side-by-side GitHub Actions vs Pkl vs KCL examples: [docs/research/github-actions-vs-pkl-vs-kcl.md](docs/research/github-actions-vs-pkl-vs-kcl.md).
 
-Future Pkl authoring contract: [docs/research/pkl-authoring-contract-2026-06-01.md](docs/research/pkl-authoring-contract-2026-06-01.md).
-
 GitHub runner protocol contract: [docs/research/github-runner-protocol-contract.md](docs/research/github-runner-protocol-contract.md).
 
 GitHub runner job-message contract: [docs/research/github-runner-job-message-contract-2026-06-01.md](docs/research/github-runner-job-message-contract-2026-06-01.md).
