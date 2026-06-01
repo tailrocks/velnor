@@ -74,6 +74,9 @@ tests=(
   native_setup_tool_adapters_use_job_container_without_node_sidecars
   target_rust_tool_installers_share_cargo_home_path_and_cache_env
   target_rust_cache_receives_runtime_env_and_posts_on_failure
+  default_labels_keep_velnor_only
+  task_agent_payload_keeps_runner_labels
+  task_agent_accepts_lowercase_label_types_from_github
   target_mvp_labels_cover_current_x64_linux_target_jobs
   target_mvp_arm_label_is_explicit
 )
