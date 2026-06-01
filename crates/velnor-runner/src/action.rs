@@ -349,6 +349,7 @@ where
                 None,
                 Some(1),
                 false,
+                true,
             )?;
         }
         resolved.push(resolve_action(plan)?);

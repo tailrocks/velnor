@@ -2117,6 +2117,7 @@ mod tests {
                 token: None,
                 fetch_depth: None,
                 persist_credentials: true,
+                clean: true,
                 condition: None,
                 continue_on_error: false,
             }),

@@ -2574,6 +2574,7 @@ runs:
             token: None,
             fetch_depth: None,
             persist_credentials: true,
+            clean: true,
             condition: None,
             continue_on_error: false,
         };
@@ -2604,6 +2605,7 @@ runs:
             token: None,
             fetch_depth: Some(1),
             persist_credentials: true,
+            clean: true,
             condition: None,
             continue_on_error: false,
         };

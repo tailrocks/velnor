@@ -22,6 +22,7 @@ pub struct CheckoutPlan {
     pub token: Option<String>,
     pub fetch_depth: Option<u32>,
     pub persist_credentials: bool,
+    pub clean: bool,
     pub condition: Option<String>,
     pub continue_on_error: bool,
 }
@@ -78,6 +79,7 @@ pub fn checkout_plans(
                 .or_else(|| system_access_token(job.system_connection())),
             fetch_depth: checkout_fetch_depth(step)?,
             persist_credentials: checkout_persist_credentials(step),
+            clean: checkout_clean(step),
             condition: step.condition.clone(),
             continue_on_error: crate::script_step::step_continue_on_error(step),
         });
@@ -115,6 +117,7 @@ where
         plan.token.as_deref(),
         plan.fetch_depth,
         plan.persist_credentials,
+        plan.clean,
     )
 }
 
@@ -159,6 +162,7 @@ pub fn fetch_git_ref<R>(
     token: Option<&str>,
     fetch_depth: Option<u32>,
     persist_credentials: bool,
+    clean: bool,
 ) -> Result<()>
 where
     R: CommandRunner,
@@ -223,6 +227,28 @@ where
             "FETCH_HEAD".to_string(),
         ],
     )?;
+
+    if clean {
+        run_git(
+            runner,
+            &[
+                "-C".to_string(),
+                path_arg(destination),
+                "reset".to_string(),
+                "--hard".to_string(),
+                "HEAD".to_string(),
+            ],
+        )?;
+        run_git(
+            runner,
+            &[
+                "-C".to_string(),
+                path_arg(destination),
+                "clean".to_string(),
+                "-ffdx".to_string(),
+            ],
+        )?;
+    }
 
     if persist_credentials {
         if let Some(token) = token {
@@ -425,6 +451,15 @@ fn checkout_persist_credentials(step: &ActionStep) -> bool {
         .unwrap_or(true)
 }
 
+fn checkout_clean(step: &ActionStep) -> bool {
+    step.inputs
+        .as_ref()
+        .and_then(|inputs| inputs.get("clean"))
+        .and_then(|value| value.as_str())
+        .map(|value| !value.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
 fn checkout_token(step: &ActionStep, job: &AgentJobRequestMessage) -> Option<String> {
     let token = step
         .inputs
@@ -554,6 +589,7 @@ mod tests {
             token: Some("token".into()),
             fetch_depth: Some(1),
             persist_credentials: true,
+            clean: true,
             condition: None,
             continue_on_error: false,
         };
@@ -578,6 +614,15 @@ mod tests {
             "FETCH_HEAD".into()
         ])));
         assert!(runner.calls.iter().any(|(_, args)| args.ends_with(&[
+            "reset".into(),
+            "--hard".into(),
+            "HEAD".into()
+        ])));
+        assert!(runner
+            .calls
+            .iter()
+            .any(|(_, args)| args.ends_with(&["clean".into(), "-ffdx".into()])));
+        assert!(runner.calls.iter().any(|(_, args)| args.ends_with(&[
             "http.https://github.com/.extraheader".into(),
             "AUTHORIZATION: bearer token".into()
         ])));
@@ -599,6 +644,7 @@ mod tests {
             token: None,
             fetch_depth: None,
             persist_credentials: true,
+            clean: true,
             condition: None,
             continue_on_error: false,
         };
@@ -664,6 +710,7 @@ mod tests {
         assert_eq!(plans[0].token.as_deref(), Some("tap-token"));
         assert_eq!(plans[0].fetch_depth, None);
         assert!(plans[0].persist_credentials);
+        assert!(plans[0].clean);
     }
 
     #[test]
@@ -703,10 +750,11 @@ mod tests {
         assert_eq!(plans[0].token.as_deref(), Some("ghs-token"));
         assert_eq!(plans[0].fetch_depth, Some(1));
         assert!(plans[0].persist_credentials);
+        assert!(plans[0].clean);
     }
 
     #[test]
-    fn checkout_can_disable_credential_persistence() {
+    fn checkout_can_disable_credential_persistence_and_clean() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
             "plan": { "planId": "plan" },
@@ -730,7 +778,10 @@ mod tests {
             },
             "steps": [{
                 "reference": { "type": "Repository", "name": "actions/checkout" },
-                "inputs": { "persist-credentials": "false" }
+                "inputs": {
+                    "persist-credentials": "false",
+                    "clean": "false"
+                }
             }]
         }))
         .unwrap();
@@ -738,6 +789,7 @@ mod tests {
         let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
 
         assert!(!plans[0].persist_credentials);
+        assert!(!plans[0].clean);
     }
 
     #[test]
