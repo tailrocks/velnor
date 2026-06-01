@@ -376,7 +376,10 @@ where
                     );
                     let step_result = self.runner.run("docker", &exec_args)?;
                     let mut command_state = plan.collect_state()?;
-                    command_state.merge(parse_workflow_commands(&step_result.stdout));
+                    command_state.merge(parse_workflow_commands_from_output(
+                        &step_result.stdout,
+                        &step_result.stderr,
+                    ));
                     Ok(StepExecutionResult {
                         exit_code: step_result.code,
                         state: command_state,
@@ -561,7 +564,10 @@ where
         );
         let step_result = self.runner.run("docker", &exec_args)?;
         let mut state = command_files.collect_state()?;
-        state.merge(parse_workflow_commands(&step_result.stdout));
+        state.merge(parse_workflow_commands_from_output(
+            &step_result.stdout,
+            &step_result.stderr,
+        ));
         Ok(StepExecutionResult {
             exit_code: step_result.code,
             state,
@@ -642,7 +648,10 @@ where
         );
         let step_result = self.runner.run("docker", &exec_args)?;
         let mut state = command_files.collect_state()?;
-        state.merge(parse_workflow_commands(&step_result.stdout));
+        state.merge(parse_workflow_commands_from_output(
+            &step_result.stdout,
+            &step_result.stderr,
+        ));
         Ok(StepExecutionResult {
             exit_code: step_result.code,
             state,
@@ -1250,6 +1259,12 @@ fn step_log_lines(stdout: &str, stderr: &str) -> Vec<String> {
         .collect()
 }
 
+fn parse_workflow_commands_from_output(stdout: &str, stderr: &str) -> StepCommandState {
+    let mut state = parse_workflow_commands(stdout);
+    state.merge(parse_workflow_commands(stderr));
+    state
+}
+
 fn prepare_github_event_path(
     temp_host: &Path,
     context_data: &[(String, Value)],
@@ -1719,6 +1734,28 @@ mod tests {
                 code: 0,
                 stdout,
                 stderr: String::new(),
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct StderrCommandRunner {
+        calls: Vec<(String, Vec<String>)>,
+    }
+
+    impl CommandRunner for StderrCommandRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            let stderr = if program == "docker" && args.first().is_some_and(|arg| arg == "exec") {
+                "::set-output name=answer::42\n::add-path::/opt/tool\n::add-mask::hidden\n::warning::slow\nhidden\n"
+                    .to_string()
+            } else {
+                String::new()
+            };
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr,
             })
         }
     }
@@ -2522,6 +2559,57 @@ mod tests {
         assert_eq!(summary.step_logs[0].error_count, 1);
         assert_eq!(summary.step_logs[0].exit_code, 0);
         assert!(!summary.step_logs[0].skipped);
+        assert_eq!(
+            fs::read_to_string(temp.join("consumer.sh")).unwrap(),
+            "export PATH='/opt/tool':\"$PATH\"\necho answer=42\n"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn workflow_commands_from_stderr_update_later_steps() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "producer".into(),
+                script: "node old-action.js".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "consumer".into(),
+                script: "echo answer=${{ steps.producer.outputs.answer }}".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(StderrCommandRunner::default());
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        let results = &summary.step_results;
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].state.outputs["answer"], "42");
+        assert_eq!(results[0].state.path, vec!["/opt/tool"]);
+        assert_eq!(results[0].state.warning_count, 1);
+        assert_eq!(summary.step_logs[0].masks, vec!["hidden"]);
+        assert_eq!(summary.step_logs[0].warning_count, 1);
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
             "export PATH='/opt/tool':\"$PATH\"\necho answer=42\n"
