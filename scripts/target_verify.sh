@@ -180,6 +180,7 @@ tests=(
   daemon_rejects_zero_slots
   daemon_single_slot_preserves_base_config_and_paths
   daemon_multislot_run_args_use_isolated_config_and_work_dirs
+  daemon_dry_run_registration_cli_writes_slot_configs_and_exits
   run_preflight_args_preserve_target_docker_requirements
   run_preflight_args_default_work_dir_under_config
 )
@@ -187,7 +188,7 @@ tests=(
 for test_name in "${tests[@]}"; do
   output="$(cargo test -q -p velnor-runner "$test_name" 2>&1)"
   printf '%s\n' "$output"
-  if grep -q "running 0 tests" <<<"$output"; then
+  if ! grep -Eq "running [1-9][0-9]* tests?" <<<"$output"; then
     echo "test filter matched zero tests: $test_name" >&2
     exit 1
   fi
