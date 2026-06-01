@@ -1936,6 +1936,24 @@ mod tests {
                 }
                 if args
                     .iter()
+                    .any(|arg| arg == "GITHUB_OUTPUT=/__t/upload-artifact_output")
+                {
+                    fs::write(
+                        self.temp.join("upload-artifact_output"),
+                        "artifact-id=777\nartifact-url=https://results.actions/artifacts/777\n",
+                    )?;
+                }
+                if args
+                    .iter()
+                    .any(|arg| arg == "GITHUB_OUTPUT=/__t/deploy-pages_output")
+                {
+                    fs::write(
+                        self.temp.join("deploy-pages_output"),
+                        "page_url=https://jackin-project.github.io/jackin/\n",
+                    )?;
+                }
+                if args
+                    .iter()
                     .any(|arg| arg == "GITHUB_STATE=/__t/cache_state")
                 {
                     fs::write(self.temp.join("cache_state"), "primaryKey=linux-cache\n")?;
@@ -4116,6 +4134,157 @@ mod tests {
         }));
         let event = fs::read_to_string(temp.join("_github_workflow/event.json")).unwrap();
         assert!(event.contains("\"pull_request\""));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn target_pages_actions_receive_runtime_env_and_outputs() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let outputs = [(
+            "artifact_id".to_string(),
+            "${{ steps.upload-artifact.outputs.artifact-id }}".to_string(),
+        )]
+        .into();
+        let steps = vec![
+            ExecutableStep::CompositeStart {
+                step_id: "pages-artifact".into(),
+            },
+            ExecutableStep::Script(ScriptStep {
+                id: "pages-artifact-1".into(),
+                script: "tar --directory \"$INPUT_PATH\" -cvf \"$RUNNER_TEMP/artifact.tar\" ."
+                    .into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w".into(),
+                env: vec![("INPUT_PATH".into(), "docs/dist".into())],
+                condition: Some("runner.os == 'Linux'".into()),
+                continue_on_error: false,
+            }),
+            ExecutableStep::JavaScript {
+                step_id: "upload-artifact".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path:
+                        "/__a/_actions/actions_upload-artifact/dist/upload/index.js".into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/actions_upload-artifact".into(),
+                    env: vec![
+                        ("INPUT_NAME".into(), "github-pages".into()),
+                        (
+                            "INPUT_PATH".into(),
+                            "${{ runner.temp }}/artifact.tar".into(),
+                        ),
+                        ("INPUT_RETENTION-DAYS".into(), "1".into()),
+                        ("INPUT_IF-NO-FILES-FOUND".into(), "error".into()),
+                    ],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::CompositeOutputs {
+                step_id: "pages-artifact".into(),
+                outputs,
+                condition: None,
+            },
+            ExecutableStep::CompositeEnd {
+                step_id: "pages-artifact".into(),
+            },
+            ExecutableStep::JavaScript {
+                step_id: "deploy-pages".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/actions_deploy-pages/dist/index.js".into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/actions_deploy-pages".into(),
+                    env: vec![
+                        ("INPUT_TOKEN".into(), "${{ github.token }}".into()),
+                        ("INPUT_ARTIFACT_NAME".into(), "github-pages".into()),
+                    ],
+                },
+                condition: Some("steps.pages-artifact.outputs.artifact_id == '777'".into()),
+                continue_on_error: false,
+            },
+        ];
+        let runtime_env = vec![
+            ("GITHUB_TOKEN".into(), "ghs_token".into()),
+            ("GITHUB_REPOSITORY".into(), "jackin-project/jackin".into()),
+            ("GITHUB_WORKSPACE".into(), "/__w".into()),
+            ("GITHUB_RUN_ID".into(), "123456".into()),
+            ("GITHUB_RUN_NUMBER".into(), "12".into()),
+            ("GITHUB_SHA".into(), "abc123".into()),
+            ("GITHUB_ACTOR".into(), "donbeave".into()),
+            ("GITHUB_ACTION".into(), "deploy-pages".into()),
+            ("GITHUB_SERVER_URL".into(), "https://github.com".into()),
+            ("GITHUB_API_URL".into(), "https://api.github.com".into()),
+            ("GITHUB_RETENTION_DAYS".into(), "90".into()),
+            ("RUNNER_TEMP".into(), "/__t".into()),
+            ("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into()),
+            (
+                "ACTIONS_RESULTS_URL".into(),
+                "https://results.actions".into(),
+            ),
+            (
+                "ACTIONS_ID_TOKEN_REQUEST_URL".into(),
+                "https://oidc.actions/token".into(),
+            ),
+            (
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN".into(),
+                "id-token-request-token".into(),
+            ),
+        ];
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &runtime_env, &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[2].state.outputs["artifact_id"], "777");
+        assert_eq!(
+            results[3].state.outputs["page_url"],
+            "https://jackin-project.github.io/jackin/"
+        );
+        let node_calls = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:24-bookworm".into())
+            })
+            .map(|(_, args)| args)
+            .collect::<Vec<_>>();
+        assert_eq!(node_calls.len(), 2);
+        assert!(node_calls[0].contains(&"INPUT_NAME=github-pages".into()));
+        assert!(node_calls[0].contains(&"INPUT_PATH=/__t/artifact.tar".into()));
+        assert!(node_calls[0].contains(&"INPUT_RETENTION-DAYS=1".into()));
+        assert!(node_calls[0].contains(&"GITHUB_RETENTION_DAYS=90".into()));
+        for call in &node_calls {
+            assert!(call.contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
+            assert!(call.contains(&"ACTIONS_RESULTS_URL=https://results.actions".into()));
+            assert!(call.contains(&"GITHUB_REPOSITORY=jackin-project/jackin".into()));
+            assert!(call.contains(&"GITHUB_RUN_ID=123456".into()));
+            assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
+            assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
+        }
+        assert!(node_calls[1].contains(&"INPUT_TOKEN=ghs_token".into()));
+        assert!(node_calls[1].contains(&"INPUT_ARTIFACT_NAME=github-pages".into()));
+        assert!(node_calls[1].contains(&"GITHUB_SHA=abc123".into()));
+        assert!(node_calls[1].contains(&"GITHUB_ACTOR=donbeave".into()));
+        assert!(node_calls[1]
+            .contains(&"ACTIONS_ID_TOKEN_REQUEST_URL=https://oidc.actions/token".into()));
+        assert!(
+            node_calls[1].contains(&"ACTIONS_ID_TOKEN_REQUEST_TOKEN=id-token-request-token".into())
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 
