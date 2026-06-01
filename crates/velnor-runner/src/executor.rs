@@ -1969,6 +1969,24 @@ mod tests {
                         "/github/home/.local/share/mise/shims\n",
                     )?;
                 }
+                if args
+                    .iter()
+                    .any(|arg| arg == "GITHUB_ENV=/__t/toolchain_env")
+                {
+                    fs::write(
+                        self.temp.join("toolchain_env"),
+                        "CARGO_HOME=/github/home/.cargo\n",
+                    )?;
+                }
+                if args
+                    .iter()
+                    .any(|arg| arg == "GITHUB_PATH=/__t/toolchain_path")
+                {
+                    fs::write(
+                        self.temp.join("toolchain_path"),
+                        "/github/home/.cargo/bin\n",
+                    )?;
+                }
             }
             Ok(CommandResult {
                 code: 0,
@@ -4675,6 +4693,126 @@ mod tests {
             "-lc".into(),
             "export PATH='/github/home/.local/share/mise/shims':\"$PATH\"\nexec node '/__a/_actions/actions_setup-python/dist/cache-save/index.js'".into()
         ]));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn target_rust_tool_installers_share_cargo_home_path_and_cache_env() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "toolchain".into(),
+                script: "echo CARGO_HOME=/github/home/.cargo >> \"$GITHUB_ENV\"\necho /github/home/.cargo/bin >> \"$GITHUB_PATH\"".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/kestra-docker-containers".into(),
+                env: Vec::new(),
+                condition: Some("runner.os != 'Windows'".into()),
+                continue_on_error: false,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "setup-mold".into(),
+                script: "echo mold 2.41.0".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/kestra-docker-containers".into(),
+                env: Vec::new(),
+                condition: Some("runner.os == 'Linux'".into()),
+                continue_on_error: false,
+            }),
+            ExecutableStep::JavaScript {
+                step_id: "setup-just".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/extractions_setup-crate/dist/index.js"
+                        .into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/extractions_setup-crate".into(),
+                    env: vec![
+                        ("INPUT_REPO".into(), "casey/just".into()),
+                        ("INPUT_GITHUB-TOKEN".into(), "${{ github.token }}".into()),
+                    ],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "cargo-install".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/baptiste0928_cargo-install/dist/index.js"
+                        .into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/baptiste0928_cargo-install".into(),
+                    env: vec![
+                        ("INPUT_CRATE".into(), "cargo-binstall".into()),
+                        ("INPUT_VERSION".into(), "latest".into()),
+                        ("INPUT_LOCKED".into(), "true".into()),
+                    ],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+        ];
+        let runtime_env = vec![
+            ("GITHUB_TOKEN".into(), "ghs_token".into()),
+            (
+                "GITHUB_REPOSITORY".into(),
+                "ChainArgos/java-monorepo".into(),
+            ),
+            ("GITHUB_WORKSPACE".into(), "/__w".into()),
+            ("RUNNER_TEMP".into(), "/__t".into()),
+            ("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into()),
+            ("ACTIONS_CACHE_URL".into(), "https://cache.actions".into()),
+            ("ACTIONS_CACHE_SERVICE_V2".into(), "True".into()),
+            ("RUNNER_OS".into(), "Linux".into()),
+        ];
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &runtime_env, &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 4);
+        assert!(!results[0].skipped);
+        assert!(!results[1].skipped);
+        let node_calls = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:24-bookworm".into())
+            })
+            .map(|(_, args)| args)
+            .collect::<Vec<_>>();
+        assert_eq!(node_calls.len(), 2);
+        for call in &node_calls {
+            assert!(call.contains(&"HOME=/github/home".into()));
+            assert!(call.contains(&"CARGO_HOME=/github/home/.cargo".into()));
+            assert!(call.contains(&"GITHUB_REPOSITORY=ChainArgos/java-monorepo".into()));
+            assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
+            assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
+            assert!(call.last().is_some_and(|arg| {
+                arg.contains("export PATH='/github/home/.cargo/bin':\"$PATH\"")
+            }));
+        }
+        assert!(node_calls[0].contains(&"INPUT_REPO=casey/just".into()));
+        assert!(node_calls[0].contains(&"INPUT_GITHUB-TOKEN=ghs_token".into()));
+        assert!(node_calls[1].contains(&"INPUT_CRATE=cargo-binstall".into()));
+        assert!(node_calls[1].contains(&"INPUT_VERSION=latest".into()));
+        assert!(node_calls[1].contains(&"INPUT_LOCKED=true".into()));
+        assert!(node_calls[1].contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
+        assert!(node_calls[1].contains(&"ACTIONS_CACHE_URL=https://cache.actions".into()));
+        assert!(node_calls[1].contains(&"ACTIONS_CACHE_SERVICE_V2=True".into()));
         fs::remove_dir_all(temp).unwrap();
     }
 
