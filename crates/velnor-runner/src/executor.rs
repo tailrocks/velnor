@@ -1736,7 +1736,13 @@ fn native_cache(
     let exact_hit = matched_key.as_deref() == Some(key.as_str());
 
     let mut outputs = BTreeMap::new();
-    outputs.insert("cache-hit".to_string(), exact_hit.to_string());
+    outputs.insert(
+        "cache-hit".to_string(),
+        matched_key
+            .as_ref()
+            .map(|_| exact_hit.to_string())
+            .unwrap_or_default(),
+    );
     outputs.insert("cache-primary-key".to_string(), key.clone());
     outputs.insert(
         "cache-matched-key".to_string(),
@@ -4619,7 +4625,7 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].exit_code, 0);
-        assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(results[0].state.outputs["cache-hit"], "");
         assert_eq!(
             results[0].state.outputs["cache-primary-key"],
             format!("rust-script-Linux-{expected_hash}")
@@ -4677,7 +4683,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(results[0].exit_code, 1);
-        assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(results[0].state.outputs["cache-hit"], "");
         assert!(results[0].stderr.contains("fail-on-cache-miss"));
 
         fs::remove_dir_all(temp).unwrap();
@@ -4781,7 +4787,7 @@ mod tests {
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
-        assert_eq!(save_results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(save_results[0].state.outputs["cache-hit"], "");
         assert!(save_results[1]
             .stdout
             .contains("Saved cache 'linux-rust-script-abc'"));
@@ -7801,7 +7807,7 @@ fi"#
             .map(|(_, args)| args)
             .collect::<Vec<_>>();
         assert_eq!(node_calls.len(), 0);
-        assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(results[0].state.outputs["cache-hit"], "");
         assert_eq!(
             results[0].state.outputs["cache-primary-key"],
             format!("rust-script-Linux-{expected_hash}")
