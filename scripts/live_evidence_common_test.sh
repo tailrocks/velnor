@@ -26,6 +26,7 @@ gh() {
 source "$ROOT/scripts/live_evidence_common.sh"
 
 write_live_evidence "mock-failure"
+status_output="$(show_github_run_status)"
 
 evidence_file="$LIVE_EVIDENCE_DIR/owner_repo-ci.yml-123.md"
 
@@ -41,6 +42,11 @@ fi
 
 if ! grep -q "mock gh failure" "$evidence_file"; then
   echo "evidence file did not preserve GitHub CLI failure output" >&2
+  exit 1
+fi
+
+if [[ "$status_output" != *"GitHub run status unavailable"* ]]; then
+  echo "status helper did not preserve failure as output: $status_output" >&2
   exit 1
 fi
 

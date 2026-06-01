@@ -172,6 +172,19 @@ write_github_run_snapshot() {
   fi
 }
 
+show_github_run_status() {
+  local run_status
+
+  if run_status="$(gh run view "$RUN_ID" --repo "$LIVE_EVIDENCE_REPO" \
+    --json status,conclusion,jobs,url \
+    --jq '.url, (.jobs[] | [.name,.status,(.conclusion // "")] | @tsv)' 2>&1)"; then
+    printf '%s\n' "$run_status"
+  else
+    echo "GitHub run status unavailable:"
+    printf '%s\n' "$run_status"
+  fi
+}
+
 write_live_evidence() {
   local phase="$1"
 

@@ -126,9 +126,7 @@ for job_index in $(seq 1 "$JOB_COUNT"); do
 done
 
 echo "==> Fixture run after Velnor"
-gh run view "$RUN_ID" --repo "$FIXTURE_REPO" \
-  --json status,conclusion,jobs,url \
-  --jq '.url, (.jobs[] | [.name,.status,(.conclusion // "")] | @tsv)'
+show_github_run_status
 write_live_evidence "after-velnor"
 
 echo "==> Waiting briefly for compare-results"

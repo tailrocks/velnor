@@ -122,9 +122,7 @@ done
 
 if [[ -n "$RUN_ID" ]]; then
   echo "==> Target run after Velnor"
-  gh run view "$RUN_ID" --repo "$TARGET_REPO" \
-    --json status,conclusion,jobs,url \
-    --jq '.url, (.jobs[] | [.name,.status,(.conclusion // "")] | @tsv)'
+  show_github_run_status
   write_live_evidence "after-velnor"
   if [[ "$WATCH_RUN" == "true" ]]; then
     echo "==> Waiting for target run completion"
