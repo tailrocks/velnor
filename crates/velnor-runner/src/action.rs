@@ -7,7 +7,7 @@ use crate::{
     script_step::{step_environment, ScriptStep},
 };
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::{
     collections::BTreeMap,
     fs,
@@ -31,7 +31,11 @@ pub struct ActionMetadata {
 pub struct ActionInput {
     #[serde(default)]
     pub description: Option<String>,
-    #[serde(default, rename = "default")]
+    #[serde(
+        default,
+        rename = "default",
+        deserialize_with = "deserialize_optional_string_scalar"
+    )]
     pub default_value: Option<String>,
     #[serde(default)]
     pub required: bool,
@@ -78,9 +82,9 @@ pub struct CompositeActionStep {
     pub run: Option<String>,
     #[serde(default)]
     pub uses: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_map")]
     pub with: BTreeMap<String, String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_map")]
     pub env: BTreeMap<String, String>,
     #[serde(default, rename = "if")]
     pub condition: Option<String>,
@@ -158,6 +162,32 @@ pub struct CompositeActionOutputs {
 
 pub fn parse_action_metadata(contents: &str) -> Result<ActionMetadata> {
     serde_yaml::from_str(contents).context("parse action metadata")
+}
+
+fn deserialize_optional_string_scalar<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.map(|value| input_value(&value)))
+}
+
+fn deserialize_string_map<'de, D>(
+    deserializer: D,
+) -> std::result::Result<BTreeMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(object) = Option::<BTreeMap<String, serde_json::Value>>::deserialize(deserializer)?
+    else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(object
+        .into_iter()
+        .map(|(name, value)| (name, input_value(&value)))
+        .collect())
 }
 
 pub fn repository_action_plans(
@@ -1091,6 +1121,10 @@ inputs:
   version:
     required: true
     default: latest
+  update-environment:
+    default: true
+  check-latest:
+    default: false
 runs:
   using: node20
   main: dist/index.js
@@ -1103,6 +1137,16 @@ runs:
         assert_eq!(
             metadata.inputs["version"].default_value.as_deref(),
             Some("latest")
+        );
+        assert_eq!(
+            metadata.inputs["update-environment"]
+                .default_value
+                .as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            metadata.inputs["check-latest"].default_value.as_deref(),
+            Some("false")
         );
         assert_eq!(
             metadata.runtime().unwrap(),
@@ -1147,12 +1191,26 @@ runs:
             r#"
 runs:
   using: composite
-  steps: []
+  steps:
+    - id: run
+      shell: bash
+      env:
+        BOOL_VALUE: false
+        COUNT: 7
+      run: echo hi
+    - uses: actions/setup-buildx@v4
+      with:
+        cleanup: false
+        retries: 3
 "#,
         )
         .unwrap();
 
         assert_eq!(metadata.runtime().unwrap(), ActionRuntime::Composite);
+        assert_eq!(metadata.runs.steps[0].env["BOOL_VALUE"], "false");
+        assert_eq!(metadata.runs.steps[0].env["COUNT"], "7");
+        assert_eq!(metadata.runs.steps[1].with["cleanup"], "false");
+        assert_eq!(metadata.runs.steps[1].with["retries"], "3");
     }
 
     #[test]
