@@ -688,11 +688,18 @@ fn ordered_executable_steps(
                     let (plan, metadata) = local_iter
                         .next()
                         .ok_or_else(|| anyhow::anyhow!("local action mapping count mismatch"))?;
+                    let parent_condition = step.condition.as_deref();
+                    let parent_continue_on_error = crate::script_step::step_continue_on_error(step);
                     for invocation in
                         composite_action_invocations(plan, metadata, "/__w", actions_host)?
                     {
                         match invocation {
-                            CompositeActionInvocation::Script(script) => {
+                            CompositeActionInvocation::Script(mut script) => {
+                                script.condition = combine_conditions(
+                                    parent_condition,
+                                    script.condition.as_deref(),
+                                );
+                                script.continue_on_error |= parent_continue_on_error;
                                 ordered.push(ExecutableStep::Script(script));
                             }
                             CompositeActionInvocation::Repository(plan) => {
@@ -710,15 +717,15 @@ fn ordered_executable_steps(
                                     action,
                                     resolved_actions,
                                     actions_host,
-                                    None,
-                                    false,
+                                    parent_condition,
+                                    parent_continue_on_error,
                                 )?;
                             }
                             CompositeActionInvocation::Outputs(outputs) => {
                                 ordered.push(ExecutableStep::CompositeOutputs {
                                     step_id: outputs.step_id,
                                     outputs: outputs.outputs,
-                                    condition: None,
+                                    condition: parent_condition.map(ToOwned::to_owned),
                                 });
                             }
                         }
@@ -1614,6 +1621,8 @@ mod tests {
                         "type": "Repository",
                         "name": "./.github/actions/aggregate-needs"
                     },
+                    "condition": "always()",
+                    "continueOnError": true,
                     "inputs": { "workflow-label": "CI" }
                 }
             ]
@@ -1631,6 +1640,7 @@ runs:
   using: composite
   steps:
     - shell: bash
+      if: github.event_name != 'schedule'
       run: echo "${{ inputs.workflow-label }}"
 "#,
         )
@@ -1652,6 +1662,11 @@ runs:
         };
         assert_eq!(step.id, "aggregate-1");
         assert!(step.script.contains("echo \"CI\""));
+        assert_eq!(
+            step.condition.as_deref(),
+            Some("${{ (always()) && (github.event_name != 'schedule') }}")
+        );
+        assert!(step.continue_on_error);
     }
 
     #[test]
@@ -1669,6 +1684,8 @@ runs:
                     "type": "Repository",
                     "name": "./.github/actions/check-deployed-docs"
                 },
+                "condition": "github.event_name == 'push'",
+                "continueOnError": true,
                 "inputs": { "github-token": "ghs_token" }
             }]
         }))
@@ -1726,6 +1743,8 @@ runs:
         let ExecutableStep::JavaScript {
             step_id,
             invocation,
+            condition,
+            continue_on_error,
             ..
         } = &ordered[0]
         else {
@@ -1735,6 +1754,8 @@ runs:
         assert!(invocation
             .env
             .contains(&("INPUT_GITHUB_TOKEN".into(), "ghs_token".into())));
+        assert_eq!(condition.as_deref(), Some("github.event_name == 'push'"));
+        assert!(*continue_on_error);
     }
 
     #[test]
