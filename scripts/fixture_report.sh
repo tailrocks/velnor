@@ -52,7 +52,10 @@ run_report_section() {
   echo "- velnor_dirty_files: $(git status --short 2>/dev/null | wc -l | tr -d ' ' || printf 'unknown')"
   echo "- fixture_repo: ${VELNOR_FIXTURE_REPO:-donbeave/velnor-actions-fixture}"
   echo "- fixture_workflow: ${VELNOR_FIXTURE_WORKFLOW:-compat.yml}"
+  echo "- velnor_work_dir: ${VELNOR_WORK_DIR:-$ROOT/.velnor-work}"
   echo "- docker_host: ${DOCKER_HOST:-<local>}"
+  echo "- docker_host_work_dir: ${VELNOR_DOCKER_HOST_WORK_DIR:-<same as velnor_work_dir>}"
+  echo "- require_docker_socket: ${VELNOR_REQUIRE_DOCKER_SOCKET:-true}"
   echo
 } >"$REPORT_PATH"
 
