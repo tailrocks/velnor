@@ -1438,6 +1438,41 @@ runs:
     }
 
     #[test]
+    fn builds_target_cache_action_plan_from_multiline_inputs() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "cache",
+                "reference": {
+                    "type": "Repository",
+                    "name": "actions/cache",
+                    "ref": "27d5ce7f107fe9357f9df03efb73ab90386fccae"
+                },
+                "inputs": {
+                    "path": "~/.cache/rust-script",
+                    "key": "rust-script-${{ runner.os }}-${{ hashFiles('kestra-docker-containers/**/*.rs', 'kestra-docker-containers/**/build.toml', 'kestra-docker-containers/justfile') }}",
+                    "restore-keys": "rust-script-${{ runner.os }}-\n"
+                }
+            }
+        ]))
+        .unwrap();
+
+        let plans = repository_action_plans(&steps, Path::new("/tmp/actions")).unwrap();
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].repository, "actions/cache");
+        assert_eq!(plans[0].git_ref, "27d5ce7f107fe9357f9df03efb73ab90386fccae");
+        assert_eq!(plans[0].inputs["path"], "~/.cache/rust-script");
+        assert_eq!(
+            plans[0].inputs["key"],
+            "rust-script-${{ runner.os }}-${{ hashFiles('kestra-docker-containers/**/*.rs', 'kestra-docker-containers/**/build.toml', 'kestra-docker-containers/justfile') }}"
+        );
+        assert_eq!(
+            plans[0].inputs["restore-keys"],
+            "rust-script-${{ runner.os }}-\n"
+        );
+    }
+
+    #[test]
     fn builds_local_action_plan() {
         let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
             {

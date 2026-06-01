@@ -4067,28 +4067,50 @@ fi"#
     fn resolves_hash_files_in_action_env() {
         let temp = temp_dir();
         let workspace = temp.join("work");
-        fs::create_dir_all(workspace.join("nested")).unwrap();
-        fs::write(workspace.join("Cargo.lock"), "root-lock\n").unwrap();
-        fs::write(workspace.join("nested/Cargo.lock"), "nested-lock\n").unwrap();
+        fs::create_dir_all(workspace.join("kestra-docker-containers/app/src")).unwrap();
+        fs::create_dir_all(workspace.join("kestra-docker-containers/app")).unwrap();
+        fs::write(
+            workspace.join("kestra-docker-containers/app/src/main.rs"),
+            "fn main() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("kestra-docker-containers/app/build.toml"),
+            "image = 'app'\n",
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("kestra-docker-containers/justfile"),
+            "build:\n",
+        )
+        .unwrap();
         fs::write(workspace.join("ignored.txt"), "ignored\n").unwrap();
         let mut expected_hash = Sha256::new();
-        expected_hash.update(Sha256::digest(b"root-lock\n"));
-        expected_hash.update(Sha256::digest(b"nested-lock\n"));
+        expected_hash.update(Sha256::digest(b"image = 'app'\n"));
+        expected_hash.update(Sha256::digest(b"fn main() {}\n"));
+        expected_hash.update(Sha256::digest(b"build:\n"));
         let expected = hex_digest(expected_hash.finalize().as_slice());
         let steps = vec![ExecutableStep::JavaScript {
             step_id: "cache".into(),
             invocation: JavaScriptActionInvocation {
-                node: "node20".into(),
+                node: "node24".into(),
                 pre_container_path: None,
                 pre_condition: None,
-                main_container_path: "/__a/_actions/cache/dist/restore.js".into(),
+                main_container_path: "/__a/_actions/actions_cache/dist/restore/index.js".into(),
                 post_container_path: None,
                 post_condition: None,
-                action_container_path: "/__a/_actions/cache".into(),
-                env: vec![(
-                    "INPUT_KEY".into(),
-                    "cargo-${{ hashFiles('**/Cargo.lock') }}".into(),
-                )],
+                action_container_path: "/__a/_actions/actions_cache".into(),
+                env: vec![
+                    ("INPUT_PATH".into(), "~/.cache/rust-script".into()),
+                    (
+                        "INPUT_KEY".into(),
+                        "rust-script-${{ runner.os }}-${{ hashFiles('kestra-docker-containers/**/*.rs', 'kestra-docker-containers/**/build.toml', 'kestra-docker-containers/justfile') }}".into(),
+                    ),
+                    (
+                        "INPUT_RESTORE-KEYS".into(),
+                        "rust-script-${{ runner.os }}-\n".into(),
+                    ),
+                ],
             },
             condition: None,
             continue_on_error: false,
@@ -4096,13 +4118,19 @@ fi"#
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
         executor
-            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .execute_ordered_steps(
+                &container(&temp),
+                &steps,
+                &[("RUNNER_OS".into(), "Linux".into())],
+                &temp,
+            )
             .unwrap();
 
         assert!(!expected.is_empty());
-        assert!(executor.runner().calls[2]
-            .1
-            .contains(&format!("INPUT_KEY=cargo-{expected}")));
+        let cache_args = &executor.runner().calls[2].1;
+        assert!(cache_args.contains(&"INPUT_PATH=~/.cache/rust-script".into()));
+        assert!(cache_args.contains(&format!("INPUT_KEY=rust-script-Linux-{expected}")));
+        assert!(cache_args.contains(&"INPUT_RESTORE-KEYS=rust-script-Linux-\n".into()));
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -4799,8 +4827,15 @@ fi"#
                     post_condition: None,
                     action_container_path: "/__a/_actions/actions_cache".into(),
                     env: vec![
-                        ("INPUT_KEY".into(), "cargo-linux".into()),
-                        ("INPUT_PATH".into(), "~/.cargo/registry".into()),
+                        ("INPUT_PATH".into(), "~/.cache/rust-script".into()),
+                        (
+                            "INPUT_KEY".into(),
+                            "rust-script-${{ runner.os }}-${{ hashFiles('kestra-docker-containers/**/*.rs', 'kestra-docker-containers/**/build.toml', 'kestra-docker-containers/justfile') }}".into(),
+                        ),
+                        (
+                            "INPUT_RESTORE-KEYS".into(),
+                            "rust-script-${{ runner.os }}-\n".into(),
+                        ),
                     ],
                 },
                 condition: None,
@@ -4878,6 +4913,7 @@ fi"#
             ("GITHUB_RETENTION_DAYS".into(), "90".into()),
             ("GITHUB_SERVER_URL".into(), "https://github.com".into()),
             ("RUNNER_TEMP".into(), "/__t".into()),
+            ("RUNNER_OS".into(), "Linux".into()),
             ("DIGEST_DIR".into(), "/__w/digests".into()),
             ("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into()),
             (
@@ -4891,6 +4927,16 @@ fi"#
             ("ACTIONS_CACHE_URL".into(), "https://cache.actions".into()),
             ("ACTIONS_CACHE_SERVICE_V2".into(), "True".into()),
         ];
+        let workspace = temp.join("work/kestra-docker-containers");
+        fs::create_dir_all(workspace.join("app/src")).unwrap();
+        fs::write(workspace.join("app/src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(workspace.join("app/build.toml"), "image = 'app'\n").unwrap();
+        fs::write(workspace.join("justfile"), "build:\n").unwrap();
+        let mut expected_hash = Sha256::new();
+        expected_hash.update(Sha256::digest(b"image = 'app'\n"));
+        expected_hash.update(Sha256::digest(b"fn main() {}\n"));
+        expected_hash.update(Sha256::digest(b"build:\n"));
+        let expected_hash = hex_digest(expected_hash.finalize().as_slice());
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
         executor
@@ -4927,6 +4973,9 @@ fi"#
         }
         assert!(node_calls[0].contains(&"ACTIONS_CACHE_URL=https://cache.actions".into()));
         assert!(node_calls[0].contains(&"ACTIONS_CACHE_SERVICE_V2=True".into()));
+        assert!(node_calls[0].contains(&"INPUT_PATH=~/.cache/rust-script".into()));
+        assert!(node_calls[0].contains(&format!("INPUT_KEY=rust-script-Linux-{expected_hash}")));
+        assert!(node_calls[0].contains(&"INPUT_RESTORE-KEYS=rust-script-Linux-\n".into()));
         assert!(node_calls[1].contains(&"INPUT_NAME=construct-digest-linux-amd64".into()));
         assert!(node_calls[1].contains(&"INPUT_PATH=/__w/digests/linux-amd64.digest".into()));
         assert!(node_calls[1].contains(&"INPUT_IF-NO-FILES-FOUND=error".into()));
