@@ -38,7 +38,7 @@ fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) ->
     }
     if args.require_docker_socket {
         if !Path::new("/var/run/docker.sock").exists() {
-            bail!("required Docker socket /var/run/docker.sock does not exist on this host");
+            bail!("{}", missing_docker_socket_error());
         }
         verify_container_docker_client(runner, &args.docker_image, args.require_buildx)?;
     }
@@ -305,6 +305,17 @@ fn bind_mount_error_detail(path: &str, stderr: &str) -> String {
     format!("{remote_hint} stderr: {stderr}")
 }
 
+fn missing_docker_socket_error() -> String {
+    let docker_host = std::env::var("DOCKER_HOST").unwrap_or_default();
+    if docker_host.starts_with("tcp://") || docker_host.starts_with("ssh://") {
+        format!(
+            "required Docker socket /var/run/docker.sock does not exist on this host. Detected DOCKER_HOST={docker_host}; Phase 0 target Docker/Buildx jobs need a local Docker socket mounted into Velnor job containers. Use a Linux host with /var/run/docker.sock for target proof, or set VELNOR_REQUIRE_DOCKER_SOCKET=false only for fixture checks that do not need Docker from inside the job container."
+        )
+    } else {
+        "required Docker socket /var/run/docker.sock does not exist on this host".to_string()
+    }
+}
+
 fn preflight_work_dir(work_dir: Option<PathBuf>) -> Result<PathBuf> {
     match work_dir {
         Some(path) => Ok(path),
@@ -551,5 +562,23 @@ mod tests {
 
         assert!(error.to_string().contains("missing target job tools"));
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn missing_socket_error_explains_remote_docker_host_target_limit() {
+        let previous = std::env::var_os("DOCKER_HOST");
+        std::env::set_var("DOCKER_HOST", "tcp://docker.example:2376");
+
+        let error = missing_docker_socket_error();
+
+        assert!(error.contains("Detected DOCKER_HOST=tcp://docker.example:2376"));
+        assert!(error.contains("target Docker/Buildx jobs need a local Docker socket"));
+        assert!(error.contains("VELNOR_REQUIRE_DOCKER_SOCKET=false only for fixture checks"));
+
+        if let Some(previous) = previous {
+            std::env::set_var("DOCKER_HOST", previous);
+        } else {
+            std::env::remove_var("DOCKER_HOST");
+        }
     }
 }

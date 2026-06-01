@@ -138,6 +138,10 @@ Current local environment finding:
 - The active agent environment has `DOCKER_HOST=tcp://jk-php3ngrs-thearchitect-dind:2376`.
 - `scripts/live_host_doctor.sh` with the default socket requirement fails before
   registration because `/var/run/docker.sock` does not exist on this host.
+- The preflight error now calls out the remote `DOCKER_HOST` case explicitly:
+  target Docker/Buildx jobs need a local socket mounted into Velnor job
+  containers, while `VELNOR_REQUIRE_DOCKER_SOCKET=false` is only appropriate
+  for fixture checks that do not need Docker from inside the job container.
 - `scripts/fixture_readiness.sh` confirms the same safe stopping point: fixture
   GitHub-hosted jobs are complete, Velnor fixture jobs are queued, fixture audit
   passes, and host readiness fails before any runner registration or workflow
