@@ -406,6 +406,7 @@ async fn run_v2(
             &config_dir,
             &args,
             stored.settings.disable_update,
+            &stored.settings.agent_name,
             message,
         )
         .await?
@@ -447,6 +448,7 @@ async fn handle_v2_message(
     config_dir: &std::path::Path,
     args: &RunArgs,
     disable_update: bool,
+    runner_name: &str,
     message: crate::protocol::TaskAgentMessage,
 ) -> Result<V2MessageAction> {
     println!(
@@ -570,7 +572,15 @@ async fn handle_v2_message(
         session_id: session_id.to_string(),
         disable_update,
     };
-    handle_job_request(config_dir, args, run_service_job, broker_cancellation, job).await?;
+    handle_job_request(
+        config_dir,
+        args,
+        run_service_job,
+        broker_cancellation,
+        runner_name,
+        job,
+    )
+    .await?;
     Ok(V2MessageAction::None)
 }
 
@@ -579,6 +589,7 @@ async fn handle_job_request(
     args: &RunArgs,
     run_service_job: RunServiceJobContext,
     broker_cancellation: BrokerCancellationContext,
+    runner_name: &str,
     job: AgentJobRequestMessage,
 ) -> Result<()> {
     println!(
@@ -616,6 +627,9 @@ async fn handle_job_request(
         let Some(script_steps) = script_steps else {
             bail!("cannot execute scripts because step mapping failed");
         };
+        if let Err(error) = publish_timeline_job_started(&job, runner_name).await {
+            eprintln!("Best-effort timeline job start update failed: {error:#}");
+        }
         let renewal = start_run_service_lock_renewal(
             run_service_job.client.clone(),
             run_service_job.run_service_url.clone(),
@@ -1649,6 +1663,28 @@ fn run_service_telemetry(
         .collect()
 }
 
+async fn publish_timeline_job_started(
+    job: &AgentJobRequestMessage,
+    runner_name: &str,
+) -> Result<()> {
+    let Some(context) = timeline_publish_context(job)? else {
+        return Ok(());
+    };
+    let start_time = current_time_rfc3339()?;
+    let record = timeline_started_record(job, runner_name, &start_time);
+    context
+        .client
+        .update_timeline_records(
+            &context.scope_identifier,
+            &context.hub_name,
+            &job.plan.plan_id,
+            &job.timeline.id,
+            vec![record],
+        )
+        .await?;
+    Ok(())
+}
+
 async fn publish_timeline_logs(job: &AgentJobRequestMessage, step_logs: &[StepLog]) -> Result<()> {
     if step_logs.is_empty() {
         return Ok(());
@@ -1690,6 +1726,20 @@ async fn publish_timeline_logs(job: &AgentJobRequestMessage, step_logs: &[StepLo
             .await?;
     }
     Ok(())
+}
+
+fn timeline_started_record(
+    job: &AgentJobRequestMessage,
+    runner_name: &str,
+    start_time: &str,
+) -> TimelineRecord {
+    TimelineRecord::job_pending(
+        job.job_id.clone(),
+        job.job_display_name.clone(),
+        job.job_name.clone(),
+        runner_name.to_string(),
+    )
+    .in_progress(start_time.to_string())
 }
 
 struct TimelinePublishContext {
@@ -2190,6 +2240,44 @@ mod tests {
         assert_eq!(records[0].error_count, 1);
         assert_eq!(records[0].warning_count, 2);
         assert_eq!(records[0].notice_count, 3);
+    }
+
+    #[test]
+    fn timeline_started_record_marks_job_in_progress() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": {
+                "planId": "plan",
+                "planType": "Build",
+                "scopeIdentifier": "scope"
+            },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobName": "check",
+            "jobDisplayName": "Check",
+            "requestId": 1
+        }))
+        .unwrap();
+
+        let record = timeline_started_record(&job, "velnor-1", "2026-06-01T00:00:00Z");
+        let json = serde_json::to_value(record).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "id": "job",
+                "type": "Job",
+                "name": "Check",
+                "startTime": "2026-06-01T00:00:00Z",
+                "percentComplete": 0,
+                "state": "inProgress",
+                "workerName": "velnor-1",
+                "refName": "check",
+                "errorCount": 0,
+                "warningCount": 0,
+                "noticeCount": 0
+            })
+        );
     }
 
     #[test]

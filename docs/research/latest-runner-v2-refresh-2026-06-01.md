@@ -115,6 +115,7 @@ Implemented in this refresh:
 
 Still open for V2 parity:
 
-- richer live GitHub UI log/timeline behavior. Completion now serializes
-  telemetry and infrastructure failure category for implemented cases.
+- richer live GitHub UI log/timeline behavior. Velnor now sends an in-progress
+  job timeline record before execution and serializes telemetry and
+  infrastructure failure category for implemented cases.
 - live proof on the two target repositories

@@ -246,7 +246,7 @@ Implement action support in the order that unlocks target workflows fastest:
 
 GitHub UI compatibility needs reporting early. Minimal order:
 
-1. create/update job timeline record as in-progress
+1. create/update job timeline record as in-progress: current code sends a best-effort in-progress job record with runner name before Docker execution starts.
 2. create/update step timeline records
 3. stream or append logs per step: current code captures stdout/stderr after each executed script or JavaScript step, creates completed task timeline records, and appends masked lines to those records before `completejob`.
 4. finish step with success/failure/skipped
@@ -256,8 +256,8 @@ GitHub UI compatibility needs reporting early. Minimal order:
 8. support annotations from workflow commands. Current code parses state-changing stdout workflow commands (`set-output`, `set-env`, `add-path`, `save-state`) plus `add-mask`, counts `error`, `warning`, and `notice` commands on timeline records, preserves annotation title/location plus GitHub `##[group]`, `##[endgroup]`, and `##[debug]` markers in uploaded step logs, and sends structured run-service step annotations. Live validation of native GitHub UI folding remains open.
 9. classify runner infrastructure failures separately from user step failures. Current code reports known Docker bind-mount and Docker environment/bootstrap failures with `infrastructureFailureCategory`.
 
-Remaining reporting gaps are live validation against hosted GitHub, richer in-progress
-timeline updates, and native group-folding UI validation.
+Remaining reporting gaps are live validation against hosted GitHub, richer per-step
+in-progress timeline updates, and native group-folding UI validation.
 
 ## Expression Boundary
 
