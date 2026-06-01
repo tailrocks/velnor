@@ -58,7 +58,12 @@ cargo run --bin velnor-runner -- configure \
   --dry-run
 
 cargo run --bin velnor-runner -- status
-cargo run --bin velnor-runner -- daemon --slots 2
+cargo run --bin velnor-runner -- daemon \
+  --url https://github.com/OWNER/REPO \
+  --pat "$GITHUB_TOKEN" \
+  --labels velnor,hetzner-sentry-ci \
+  --replace \
+  --slots 2
 cargo run --bin velnor-runner -- run
 cargo run --bin velnor-runner -- remove --pat "$GITHUB_TOKEN"
 ```
@@ -70,13 +75,15 @@ runner credentials, requires GitHub's current V2 broker settings, runs Docker
 preflight before polling for executable jobs, creates a broker session, polls
 broker messages, acquires jobs from run-service, renews locks, executes
 supported jobs, and completes them through run-service.
-`daemon` runs the same V2 slot loop concurrently from one Velnor process. With
-`--slots 1`, it uses the normal config directory. With `--slots N` where `N > 1`,
-slot configs must already exist under `<config-dir>/slots/slot-1`,
-`<config-dir>/slots/slot-2`, and so on; each slot also receives its own
-`slot-N` child under any explicit work, Docker-host work, or job-message dump
-directory. This models the intended daemon architecture while preserving
-GitHub's one-active-job-per-runner-session protocol boundary.
+`daemon` runs the same V2 slot loop concurrently from one Velnor process. If
+`--url` is provided, it requests short-lived runner registration tokens through
+`--pat` or uses `--token`, configures each internal slot, then starts polling.
+With `--slots 1`, it uses the normal config directory. With `--slots N` where
+`N > 1`, slot configs live under `<config-dir>/slots/slot-1`,
+`<config-dir>/slots/slot-2`, and so on; each slot also receives its own `slot-N`
+child under any explicit work, Docker-host work, or job-message dump directory.
+GitHub sees multiple runner identities/sessions, while the operator runs one
+daemon binary with one concurrency setting.
 
 Local target coverage is checked with:
 

@@ -124,11 +124,15 @@ cargo run --bin velnor-runner -- configure \
 Start Velnor:
 
 ```sh
-cargo run --bin velnor-runner -- run \
+cargo run --bin velnor-runner -- daemon \
+  --url https://github.com/donbeave/velnor-actions-fixture \
+  --pat "$GITHUB_TOKEN" \
+  --name velnor-target-mvp \
+  --labels velnor-target-mvp \
+  --replace \
+  --slots 1 \
   --work-dir "$PWD/.velnor-work" \
-  --require-docker-socket \
-  --once \
-  --idle-timeout-seconds 900
+  --require-docker-socket
 ```
 
 The GitHub-hosted `compat-github` matrix jobs should pass on the fresh run. The

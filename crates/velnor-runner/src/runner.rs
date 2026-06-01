@@ -402,6 +402,7 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     }
 
     let config_base = config::config_dir(args.config_dir.clone())?;
+    configure_daemon_slots(&args, &config_base, slots).await?;
     let mut handles = Vec::with_capacity(slots);
 
     println!(
@@ -431,11 +432,54 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     Ok(())
 }
 
+async fn configure_daemon_slots(args: &DaemonArgs, config_base: &Path, slots: usize) -> Result<()> {
+    if args.url.is_none() {
+        return Ok(());
+    }
+
+    println!("Configuring {slots} Velnor daemon runner slot(s) before polling GitHub.");
+    for slot_index in 1..=slots {
+        let configure_args = daemon_slot_configure_args(args, config_base, slot_index, slots)?;
+        configure(configure_args)
+            .await
+            .with_context(|| format!("configure daemon slot-{slot_index}"))?;
+    }
+    Ok(())
+}
+
 fn validate_daemon_slots(slots: usize) -> Result<usize> {
     if slots == 0 {
         bail!("--slots must be greater than zero");
     }
     Ok(slots)
+}
+
+fn daemon_slot_configure_args(
+    args: &DaemonArgs,
+    config_base: &Path,
+    slot_index: usize,
+    slot_count: usize,
+) -> Result<ConfigureArgs> {
+    validate_daemon_slot_index(slot_index, slot_count)?;
+    let url = args
+        .url
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("daemon slot registration requires --url"))?;
+
+    Ok(ConfigureArgs {
+        url,
+        token: args.token.clone(),
+        pat: args.pat.clone(),
+        name: daemon_slot_agent_name(args.name.as_deref(), slot_index, slot_count),
+        labels: args.labels.clone(),
+        target_mvp_labels: args.target_mvp_labels,
+        target_mvp_arm_label: args.target_mvp_arm_label,
+        replace: args.replace,
+        pool_id: args.pool_id,
+        pool_name: args.pool_name.clone(),
+        dry_run: args.dry_run_registration,
+        config_dir: Some(daemon_slot_config_dir(config_base, slot_index, slot_count)),
+    })
 }
 
 fn daemon_slot_run_args(
@@ -501,6 +545,23 @@ fn daemon_slot_child_path(
 
 fn daemon_slot_name(slot_index: usize) -> String {
     format!("slot-{slot_index}")
+}
+
+fn daemon_slot_agent_name(
+    base_name: Option<&str>,
+    slot_index: usize,
+    slot_count: usize,
+) -> Option<String> {
+    match (base_name, slot_count) {
+        (None, 1) => None,
+        (Some(name), 1) => Some(name.to_string()),
+        (Some(name), _) => Some(format!("{name}-{}", daemon_slot_name(slot_index))),
+        (None, _) => Some(format!(
+            "{}-{}",
+            default_agent_name(),
+            daemon_slot_name(slot_index)
+        )),
+    }
 }
 
 fn preflight_before_executable_run(args: &RunArgs, config_dir: &Path) -> Result<()> {
@@ -2768,6 +2829,17 @@ mod tests {
     fn daemon_args(slots: usize) -> DaemonArgs {
         DaemonArgs {
             config_dir: None,
+            url: None,
+            token: None,
+            pat: None,
+            name: None,
+            labels: Vec::new(),
+            target_mvp_labels: false,
+            target_mvp_arm_label: false,
+            replace: false,
+            pool_id: None,
+            pool_name: None,
+            dry_run_registration: false,
             slots,
             idle_timeout_seconds: None,
             complete_noop: false,
@@ -2813,6 +2885,48 @@ mod tests {
             Some(Path::new("/tmp/job.json").to_path_buf())
         );
         assert!(!run_args.once);
+    }
+
+    #[test]
+    fn daemon_multislot_configure_args_register_isolated_runner_slots() {
+        let mut args = daemon_args(2);
+        args.url = Some("https://github.com/owner/repo".into());
+        args.pat = Some("pat".into());
+        args.name = Some("velnor-ci".into());
+        args.labels = vec!["velnor".into(), "ubuntu-24.04".into()];
+        args.replace = true;
+        args.pool_name = Some("Default".into());
+
+        let configure_args = daemon_slot_configure_args(&args, Path::new("/config"), 2, 2).unwrap();
+
+        assert_eq!(configure_args.url, "https://github.com/owner/repo");
+        assert_eq!(configure_args.pat.as_deref(), Some("pat"));
+        assert_eq!(configure_args.name.as_deref(), Some("velnor-ci-slot-2"));
+        assert_eq!(
+            configure_args.config_dir,
+            Some(Path::new("/config/slots/slot-2").to_path_buf())
+        );
+        assert_eq!(
+            configure_args.labels,
+            vec!["velnor".to_string(), "ubuntu-24.04".to_string()]
+        );
+        assert!(configure_args.replace);
+        assert_eq!(configure_args.pool_name.as_deref(), Some("Default"));
+    }
+
+    #[test]
+    fn daemon_single_slot_configure_args_preserve_runner_name() {
+        let mut args = daemon_args(1);
+        args.url = Some("https://github.com/owner/repo".into());
+        args.name = Some("velnor-ci".into());
+
+        let configure_args = daemon_slot_configure_args(&args, Path::new("/config"), 1, 1).unwrap();
+
+        assert_eq!(configure_args.name.as_deref(), Some("velnor-ci"));
+        assert_eq!(
+            configure_args.config_dir,
+            Some(Path::new("/config").to_path_buf())
+        );
     }
 
     #[test]

@@ -49,7 +49,7 @@ pub struct PreflightArgs {
     pub require_buildx: bool,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Clone, Args)]
 pub struct ConfigureArgs {
     /// Repository, organization, or enterprise URL accepted by GitHub runner registration.
     #[arg(long)]
@@ -160,6 +160,50 @@ pub struct DaemonArgs {
     /// Base configuration directory. For --slots > 1, each slot reads config from <config-dir>/slots/slot-N.
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
+
+    /// Repository, organization, or enterprise URL accepted by GitHub runner registration. If provided, daemon configures internal slots before polling.
+    #[arg(long)]
+    pub url: Option<String>,
+
+    /// GitHub runner registration token. If omitted, pass --pat to request one.
+    #[arg(long, env = "VELNOR_RUNNER_TOKEN")]
+    pub token: Option<String>,
+
+    /// GitHub personal access token used to request short-lived runner registration tokens.
+    #[arg(long, env = "GITHUB_TOKEN")]
+    pub pat: Option<String>,
+
+    /// Base runner display name. For --slots > 1, Velnor appends -slot-N.
+    #[arg(long)]
+    pub name: Option<String>,
+
+    /// Comma-separated labels to register. Example: velnor,hetzner-sentry-ci.
+    #[arg(long, value_delimiter = ',')]
+    pub labels: Vec<String>,
+
+    /// Add labels needed by the current target repositories' x64 Linux jobs.
+    #[arg(long)]
+    pub target_mvp_labels: bool,
+
+    /// Add the current target repositories' ARM Linux label.
+    #[arg(long)]
+    pub target_mvp_arm_label: bool,
+
+    /// Replace existing slot runners with the same names during daemon startup registration.
+    #[arg(long)]
+    pub replace: bool,
+
+    /// Runner group/pool id. If omitted, Velnor chooses the default self-hosted pool.
+    #[arg(long)]
+    pub pool_id: Option<i64>,
+
+    /// Runner group/pool name. Used when multiple self-hosted pools exist.
+    #[arg(long)]
+    pub pool_name: Option<String>,
+
+    /// Validate daemon slot registration payloads without calling GitHub.
+    #[arg(long)]
+    pub dry_run_registration: bool,
 
     /// Number of internal GitHub runner slots managed by this daemon.
     #[arg(long, default_value_t = 1)]
