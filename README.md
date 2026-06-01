@@ -101,6 +101,10 @@ proof can be run with:
 scripts/fixture_smoke.sh
 ```
 
+The script runs two Velnor `--once` jobs by default because the fixture compat
+workflow has two Velnor matrix jobs. Override with `VELNOR_FIXTURE_JOB_COUNT`
+for a different fixture shape.
+
 Target workflow audit and language brainstorming history: [docs/research/config-language-comparison.md](docs/research/config-language-comparison.md).
 
 GitHub runner protocol contract: [docs/research/github-runner-protocol-contract.md](docs/research/github-runner-protocol-contract.md).

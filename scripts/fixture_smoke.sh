@@ -9,6 +9,7 @@ RUNNER_LABEL="${VELNOR_RUNNER_LABEL:-velnor-target-mvp}"
 WORK_DIR="${VELNOR_WORK_DIR:-$ROOT/.velnor-work}"
 IDLE_TIMEOUT_SECONDS="${VELNOR_IDLE_TIMEOUT_SECONDS:-900}"
 RUN_ID="${VELNOR_FIXTURE_RUN_ID:-26762850861}"
+JOB_COUNT="${VELNOR_FIXTURE_JOB_COUNT:-2}"
 
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   echo "GITHUB_TOKEN is required to register the fixture self-hosted runner." >&2
@@ -44,14 +45,19 @@ gh run view "$RUN_ID" --repo "$FIXTURE_REPO" \
   --json status,conclusion,jobs,url \
   --jq '.url, (.jobs[] | [.name,.status,(.conclusion // "")] | @tsv)'
 
-echo "==> Running one Velnor fixture job"
-cargo run --bin velnor-runner -- run \
-  --work-dir "$WORK_DIR" \
-  --once \
-  --idle-timeout-seconds "$IDLE_TIMEOUT_SECONDS"
+echo "==> Running $JOB_COUNT Velnor fixture job(s)"
+for job_index in $(seq 1 "$JOB_COUNT"); do
+  echo "==> Velnor fixture job $job_index/$JOB_COUNT"
+  cargo run --bin velnor-runner -- run \
+    --work-dir "$WORK_DIR" \
+    --once \
+    --idle-timeout-seconds "$IDLE_TIMEOUT_SECONDS"
+done
 
 echo "==> Fixture run after Velnor"
 gh run view "$RUN_ID" --repo "$FIXTURE_REPO" \
   --json status,conclusion,jobs,url \
   --jq '.url, (.jobs[] | [.name,.status,(.conclusion // "")] | @tsv)'
 
+echo "==> Waiting briefly for compare-results"
+gh run watch "$RUN_ID" --repo "$FIXTURE_REPO" --exit-status
