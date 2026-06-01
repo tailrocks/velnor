@@ -3983,6 +3983,114 @@ mod tests {
     }
 
     #[test]
+    fn target_docker_javascript_actions_receive_socket_and_cli_mounts() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::JavaScript {
+                step_id: "buildx".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/docker_setup-buildx-action/dist/index.js"
+                        .into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/docker_setup-buildx-action".into(),
+                    env: vec![("INPUT_INSTALL".into(), "true".into())],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "login".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/docker_login-action/dist/index.js".into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/docker_login-action".into(),
+                    env: vec![
+                        ("INPUT_USERNAME".into(), "docker-user".into()),
+                        ("INPUT_PASSWORD".into(), "docker-token".into()),
+                    ],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "build-push".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/docker_build-push-action/dist/index.js"
+                        .into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/docker_build-push-action".into(),
+                    env: vec![
+                        ("INPUT_CONTEXT".into(), ".".into()),
+                        ("INPUT_PUSH".into(), "false".into()),
+                    ],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+        ];
+        let mut spec = container(&temp);
+        spec.mount_docker_socket = true;
+        spec.docker_cli_host_path = Some("/usr/bin/docker".into());
+        spec.docker_cli_plugin_host_dir = Some("/usr/libexec/docker/cli-plugins".into());
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps(
+                &spec,
+                &steps,
+                &[
+                    (
+                        "GITHUB_REPOSITORY".into(),
+                        "ChainArgos/java-monorepo".into(),
+                    ),
+                    ("GITHUB_TOKEN".into(), "ghs_token".into()),
+                    ("RUNNER_TEMP".into(), "/__t".into()),
+                ],
+                &temp,
+            )
+            .unwrap();
+
+        let node_calls = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:24-bookworm".into())
+            })
+            .map(|(_, args)| args)
+            .collect::<Vec<_>>();
+        assert_eq!(node_calls.len(), 3);
+        for call in &node_calls {
+            assert!(call.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
+            assert!(call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
+            assert!(call.contains(
+                &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
+            ));
+            assert!(call.contains(&"GITHUB_TOKEN=ghs_token".into()));
+            assert!(call.contains(&"GITHUB_REPOSITORY=ChainArgos/java-monorepo".into()));
+            assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
+        }
+        assert!(node_calls[0].contains(&"INPUT_INSTALL=true".into()));
+        assert!(node_calls[1].contains(&"INPUT_USERNAME=docker-user".into()));
+        assert!(node_calls[2].contains(&"INPUT_CONTEXT=.".into()));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn javascript_actions_receive_prior_github_path_entries() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
