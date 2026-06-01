@@ -249,7 +249,7 @@ fn environment_value(value: &Value) -> String {
 }
 
 fn is_protected_default_env(name: &str) -> bool {
-    name.starts_with("GITHUB_") || name.starts_with("RUNNER_")
+    name.starts_with("GITHUB_") || name.starts_with("RUNNER_") || name.starts_with("ACTIONS_")
 }
 
 fn push_var(env: &mut Vec<(String, String)>, name: &str, value: Option<&str>) {
@@ -405,7 +405,9 @@ mod tests {
                 {
                     "CARGO_TERM_COLOR": "always",
                     "CARGO_INCREMENTAL": 0,
-                    "GITHUB_REF": "refs/heads/evil"
+                    "GITHUB_REF": "refs/heads/evil",
+                    "ACTIONS_RUNTIME_URL": "https://evil.actions.example",
+                    "ACTIONS_CACHE_SERVICE_V2": "false"
                 },
                 {
                     "pairs": [
@@ -468,6 +470,10 @@ mod tests {
         assert!(env.contains(&("GITHUB_REF".into(), "refs/heads/main".into())));
         assert!(!env.contains(&("GITHUB_REF".into(), "refs/heads/evil".into())));
         assert!(env.contains(&("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into())));
+        assert!(!env.contains(&(
+            "ACTIONS_RUNTIME_URL".into(),
+            "https://evil.actions.example".into()
+        )));
         assert!(env.contains(&(
             "ACTIONS_RUNTIME_URL".into(),
             "https://pipelines-v2.actions.example".into()
@@ -489,6 +495,7 @@ mod tests {
             "runtime-token".into()
         )));
         assert!(env.contains(&("ACTIONS_CACHE_SERVICE_V2".into(), "true".into())));
+        assert!(!env.contains(&("ACTIONS_CACHE_SERVICE_V2".into(), "false".into())));
         assert!(env.contains(&("ACTIONS_ORCHESTRATION_ID".into(), "orch-123".into())));
     }
 }
