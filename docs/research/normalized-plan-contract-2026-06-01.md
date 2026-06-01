@@ -277,8 +277,9 @@ The reporter then performs source-specific completion:
 - future Velnor reporter: local/server logs, artifacts, status API
 
 The current runner already sends V2 `completejob` with conclusion, outputs, and
-step results. Still-open GitHub parity fields are annotations, environment URL,
-telemetry, infrastructure failure category, and richer UI log/timeline behavior.
+step results, workflow-command annotations, and evaluated environment URL.
+Still-open GitHub parity fields are telemetry, infrastructure failure category,
+and richer UI log/timeline behavior.
 
 ## Pkl Package Shape
 

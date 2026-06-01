@@ -1523,6 +1523,8 @@ pub struct RunServiceCompleteJob {
     pub step_results: Vec<RunServiceStepResult>,
     #[serde(rename = "annotations", skip_serializing_if = "Vec::is_empty")]
     pub annotations: Vec<RunServiceAnnotation>,
+    #[serde(rename = "environmentUrl", skip_serializing_if = "Option::is_none")]
+    pub environment_url: Option<String>,
     #[serde(rename = "billingOwnerId", skip_serializing_if = "Option::is_none")]
     pub billing_owner_id: Option<String>,
     #[serde(
@@ -2322,6 +2324,7 @@ mod tests {
                 }],
             }],
             annotations: Vec::new(),
+            environment_url: Some("https://example.com/env".into()),
             billing_owner_id: Some("42".into()),
             infrastructure_failure_category: Some("runner_bootstrap".into()),
         };
@@ -2353,6 +2356,7 @@ mod tests {
                         "isInfrastructureIssue": false
                     }]
                 }],
+                "environmentUrl": "https://example.com/env",
                 "billingOwnerId": "42",
                 "infrastructureFailureCategory": "runner_bootstrap"
             })

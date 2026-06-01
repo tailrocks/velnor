@@ -665,6 +665,7 @@ async fn handle_job_request(
                     ScriptJobResult {
                         result: TaskResult::Canceled,
                         outputs: BTreeMap::new(),
+                        environment_url: None,
                         step_logs: Vec::new(),
                     }
                 } else {
@@ -675,6 +676,7 @@ async fn handle_job_request(
                         TaskResult::Failed,
                         BTreeMap::new(),
                         Vec::new(),
+                        None,
                         run_service_job.billing_owner_id.clone(),
                     )
                     .await?;
@@ -691,6 +693,7 @@ async fn handle_job_request(
             job_result.result,
             outputs,
             step_logs,
+            job_result.environment_url,
             run_service_job.billing_owner_id,
         )
         .await?;
@@ -706,6 +709,7 @@ async fn handle_job_request(
             TaskResult::Succeeded,
             BTreeMap::new(),
             Vec::new(),
+            None,
             run_service_job.billing_owner_id,
         )
         .await?;
@@ -1096,12 +1100,13 @@ fn execute_script_job(
         .cloned()
         .collect::<Vec<_>>();
     let mut executor = DockerScriptExecutor::new(command_runner);
-    let summary_result = executor.execute_ordered_steps_with_job_outputs(
+    let summary_result = executor.execute_ordered_steps_with_completion(
         &plan.execution.job_container,
         &plan.steps,
         &plan.execution.env,
         &plan.execution.context_data,
         job.job_outputs.as_ref(),
+        actions_environment_url(job),
         &plan.execution.temp_host,
     );
     let mut command_runner = executor.into_runner();
@@ -1117,6 +1122,14 @@ fn execute_script_job(
     };
     if !summary.job_outputs.is_empty() {
         println!("Evaluated {} job output(s).", summary.job_outputs.len());
+    }
+    let environment_url = safe_environment_url(
+        summary.environment_url,
+        &job_secret_mask_values(job),
+        &summary.step_logs,
+    );
+    if let Some(environment_url) = &environment_url {
+        println!("Evaluated environment URL: {environment_url}");
     }
     let failed = summary
         .step_results
@@ -1140,8 +1153,53 @@ fn execute_script_job(
     Ok(ScriptJobResult {
         result,
         outputs: summary.job_outputs,
+        environment_url,
         step_logs: summary.step_logs,
     })
+}
+
+fn actions_environment_url(job: &AgentJobRequestMessage) -> Option<&Value> {
+    job.actions_environment
+        .as_ref()?
+        .as_object()
+        .and_then(|object| {
+            object
+                .get("Url")
+                .or_else(|| object.get("url"))
+                .filter(|value| !value.is_null())
+        })
+}
+
+fn safe_environment_url(
+    environment_url: Option<String>,
+    job_masks: &[String],
+    step_logs: &[StepLog],
+) -> Option<String> {
+    let environment_url = environment_url?;
+    let contains_masked_value = job_masks
+        .iter()
+        .chain(step_logs.iter().flat_map(|log| log.masks.iter()))
+        .filter(|mask| !mask.is_empty())
+        .any(|mask| environment_url.contains(mask));
+    if contains_masked_value {
+        eprintln!("Skipping environment URL because it contains a masked value.");
+        None
+    } else {
+        Some(environment_url)
+    }
+}
+
+fn job_secret_mask_values(job: &AgentJobRequestMessage) -> Vec<String> {
+    job.mask
+        .iter()
+        .filter_map(|mask| mask.value.clone())
+        .chain(
+            job.variables
+                .values()
+                .filter(|variable| variable.is_secret)
+                .filter_map(|variable| variable.value.clone()),
+        )
+        .collect()
 }
 
 fn resolve_checkout_plan_context(
@@ -1160,6 +1218,7 @@ fn resolve_checkout_plan_context(
 struct ScriptJobResult {
     result: TaskResult,
     outputs: BTreeMap<String, String>,
+    environment_url: Option<String>,
     step_logs: Vec<StepLog>,
 }
 
@@ -1512,6 +1571,7 @@ async fn complete_run_service_job(
     result: TaskResult,
     job_outputs: BTreeMap<String, String>,
     step_logs: Vec<StepLog>,
+    environment_url: Option<String>,
     billing_owner_id: Option<String>,
 ) -> Result<()> {
     let step_results = step_logs
@@ -1544,6 +1604,7 @@ async fn complete_run_service_job(
         outputs,
         step_results,
         annotations: Vec::new(),
+        environment_url,
         billing_owner_id,
         infrastructure_failure_category: None,
     };
@@ -1838,6 +1899,65 @@ mod tests {
             value["steps"][0]["inputs"]["repository"],
             serde_json::json!("owner/repo")
         );
+    }
+
+    #[test]
+    fn actions_environment_url_reads_template_token() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Deploy",
+            "requestId": 1,
+            "actionsEnvironment": {
+                "name": "github-pages",
+                "url": {
+                    "type": "String",
+                    "value": "${{ steps.deployment.outputs.page_url }}"
+                }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            actions_environment_url(&job).and_then(|value| value.get("value")),
+            Some(&serde_json::json!(
+                "${{ steps.deployment.outputs.page_url }}"
+            ))
+        );
+    }
+
+    #[test]
+    fn safe_environment_url_skips_masked_values() {
+        let log = StepLog {
+            step_id: "deploy".into(),
+            lines: Vec::new(),
+            masks: vec!["runtime-secret".into()],
+            annotations: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+        };
+
+        assert_eq!(
+            safe_environment_url(
+                Some("https://example.com/docs/".into()),
+                &["job-secret".into()],
+                std::slice::from_ref(&log),
+            )
+            .as_deref(),
+            Some("https://example.com/docs/")
+        );
+        assert!(safe_environment_url(
+            Some("https://example.com/runtime-secret".into()),
+            &["job-secret".into()],
+            &[log],
+        )
+        .is_none());
     }
 
     fn stored_config() -> StoredRunnerConfig {

@@ -251,9 +251,9 @@ GitHub UI compatibility needs reporting early. Minimal order:
 3. stream or append logs per step: current code captures stdout/stderr after each executed script or JavaScript step, creates completed task timeline records, and appends masked lines to those records after the job container run.
 4. finish step with success/failure/skipped
 5. finish job with success/failure/cancelled
-6. include job outputs and step results in completion payload
+6. include job outputs, step results, and evaluated environment URL in completion payload
 7. mask secrets in logs before upload. Current code builds masks from GitHub mask hints and secret variables for runner-uploaded feed lines, and stores `add-mask` workflow command values for the later step log uploader.
-8. support annotations from workflow commands. Current code parses state-changing stdout workflow commands (`set-output`, `set-env`, `add-path`, `save-state`) plus `add-mask`, counts `error`, `warning`, and `notice` commands on timeline records, and preserves annotation title/location plus group/debug markers in uploaded step logs. Native GitHub UI folding for groups remains open.
+8. support annotations from workflow commands. Current code parses state-changing stdout workflow commands (`set-output`, `set-env`, `add-path`, `save-state`) plus `add-mask`, counts `error`, `warning`, and `notice` commands on timeline records, preserves annotation title/location plus group/debug markers in uploaded step logs, and sends structured run-service step annotations. Native GitHub UI folding for groups remains open.
 
 Until reporting exists, Docker step execution can be locally correct but GitHub will not look correct.
 

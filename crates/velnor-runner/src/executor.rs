@@ -91,6 +91,7 @@ pub struct StepExecutionResult {
 pub struct JobExecutionSummary {
     pub step_results: Vec<StepExecutionResult>,
     pub job_outputs: BTreeMap<String, String>,
+    pub environment_url: Option<String>,
     pub step_logs: Vec<StepLog>,
 }
 
@@ -239,6 +240,7 @@ where
                 &[],
                 &[],
                 None,
+                None,
                 temp_host,
             )
             .map(|summary| summary.step_results);
@@ -289,6 +291,27 @@ where
         job_outputs: Option<&Value>,
         temp_host: &Path,
     ) -> Result<JobExecutionSummary> {
+        self.execute_ordered_steps_with_completion(
+            container,
+            steps,
+            base_env,
+            context_data,
+            job_outputs,
+            None,
+            temp_host,
+        )
+    }
+
+    pub fn execute_ordered_steps_with_completion(
+        &mut self,
+        container: &JobContainerSpec,
+        steps: &[ExecutableStep],
+        base_env: &[(String, String)],
+        context_data: &[(String, Value)],
+        job_outputs: Option<&Value>,
+        environment_url: Option<&Value>,
+        temp_host: &Path,
+    ) -> Result<JobExecutionSummary> {
         self.start_job_environment(container)?;
 
         let result = self.execute_ordered_steps_in_started_container(
@@ -297,6 +320,7 @@ where
             base_env,
             context_data,
             job_outputs,
+            environment_url,
             temp_host,
         );
 
@@ -314,6 +338,7 @@ where
         base_env: &[(String, String)],
         context_data: &[(String, Value)],
         job_outputs: Option<&Value>,
+        environment_url: Option<&Value>,
         temp_host: &Path,
     ) -> Result<JobExecutionSummary> {
         let mut results = Vec::new();
@@ -545,6 +570,7 @@ where
         }
         Ok(JobExecutionSummary {
             job_outputs: evaluate_job_outputs(job_outputs, &state),
+            environment_url: evaluate_environment_url(environment_url, &state),
             step_results: results,
             step_logs,
         })
@@ -1455,6 +1481,34 @@ fn evaluate_job_outputs(
             (!value.is_empty()).then_some((name, value))
         })
         .collect()
+}
+
+fn evaluate_environment_url(
+    environment_url: Option<&Value>,
+    state: &JobExecutionState,
+) -> Option<String> {
+    environment_url
+        .and_then(template_string_value)
+        .map(|value| state.resolve_expressions(value))
+        .filter(|value| !value.is_empty())
+}
+
+fn template_string_value(value: &Value) -> Option<&str> {
+    if let Some(value) = value.as_str() {
+        return Some(value);
+    }
+    value
+        .as_object()
+        .and_then(|object| {
+            object
+                .get("value")
+                .or_else(|| object.get("Value"))
+                .or_else(|| object.get("expression"))
+                .or_else(|| object.get("Expression"))
+                .or_else(|| object.get("lit"))
+                .or_else(|| object.get("Lit"))
+        })
+        .and_then(template_string_value)
 }
 
 fn job_output_pairs(job_outputs: Option<&Value>) -> Vec<(String, String)> {
@@ -3073,6 +3127,47 @@ mod tests {
         assert_eq!(summary.job_outputs["answer"], "42");
         assert_eq!(summary.job_outputs["fallback"], "default");
         assert!(!summary.job_outputs.contains_key("empty"));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn evaluates_environment_url_from_final_step_state() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Script(ScriptStep {
+            id: "deploy-pages".into(),
+            script: "echo page_url=https://example.com/docs/ >> $GITHUB_OUTPUT".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+        })];
+        let environment_url = serde_json::json!({
+            "type": "String",
+            "value": "${{ steps.deploy-pages.outputs.page_url }}"
+        });
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_completion(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                Some(&environment_url),
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(
+            summary.environment_url.as_deref(),
+            Some("https://jackin-project.github.io/jackin/")
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 
