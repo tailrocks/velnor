@@ -129,6 +129,7 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         args.target_mvp_labels,
         args.target_mvp_arm_label,
     );
+    validate_linux_only_labels(&labels)?;
     let key_pair = if args.dry_run {
         None
     } else {
@@ -2461,6 +2462,7 @@ pub async fn status(args: StatusArgs) -> Result<()> {
 
 fn validate_target_mvp_status(stored: &StoredRunnerConfig) -> Result<()> {
     let mut missing = Vec::new();
+    validate_linux_only_labels(&stored.settings.labels)?;
     if !stored.settings.use_v2_flow {
         missing.push("UseV2Flow is false".to_string());
     }
@@ -2528,6 +2530,24 @@ fn normalize_labels(
     labels.sort();
     labels.dedup();
     labels
+}
+
+fn validate_linux_only_labels(labels: &[String]) -> Result<()> {
+    let unsupported = labels
+        .iter()
+        .find(|label| is_macos_runner_label(label))
+        .map(String::as_str);
+    if let Some(label) = unsupported {
+        bail!(
+            "unsupported non-Linux runner label '{label}'; Velnor runner execution is Linux-only"
+        );
+    }
+    Ok(())
+}
+
+fn is_macos_runner_label(label: &str) -> bool {
+    let normalized = label.trim().to_ascii_lowercase();
+    normalized == "macos" || normalized.starts_with("macos-") || normalized.contains("darwin")
 }
 
 fn default_agent_name() -> String {
@@ -3281,6 +3301,17 @@ mod tests {
                 "velnor-target-mvp"
             ]
         );
+    }
+
+    #[test]
+    fn macos_runner_labels_are_rejected() {
+        let labels = vec!["velnor".into(), "macos-latest".into()];
+        let error = validate_linux_only_labels(&labels).unwrap_err().to_string();
+        assert!(error.contains("Velnor runner execution is Linux-only"));
+
+        let labels = vec!["x86_64-apple-darwin".into()];
+        let error = validate_linux_only_labels(&labels).unwrap_err().to_string();
+        assert!(error.contains("unsupported non-Linux runner label"));
     }
 
     #[test]
