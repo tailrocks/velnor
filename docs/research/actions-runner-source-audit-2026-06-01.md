@@ -2,6 +2,10 @@
 
 Source inspected: `actions/runner` `main` at `c6a124e18496a6e5d2357415052d1799afc64b63`.
 
+Latest release refresh: `v2.334.0` at
+`f1995ede5d885c997d13d8eca5467c4ce97fe69c`; see
+`docs/research/latest-runner-v2-refresh-2026-06-01.md`.
+
 This audit turns upstream runner behavior into Velnor implementation rules. The goal is not to port the full runner. The goal is to copy the smallest behavior set needed for the current `jackin-project/jackin` and `ChainArgos/java-monorepo` workflows to run as GitHub-scheduled self-hosted jobs.
 
 ## Protocol Loop

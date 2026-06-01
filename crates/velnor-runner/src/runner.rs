@@ -32,11 +32,11 @@ use crate::{
     executor::{DockerScriptExecutor, ExecutableStep, ProcessCommandRunner, StepLog},
     job_message::{ActionReferenceType, AgentJobRequestMessage},
     protocol::{
-        BrokerClient, DistributedTaskClient, GitHubAuthResult, GitHubScope, OAuthClient,
-        OAuthJwtCredentials, RegistrationClient, RunServiceClient, RunServiceCompleteJob,
-        RunServiceStepResult, RunServiceVariableValue, RunnerEvent, RunnerJobRequestRef,
-        RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool, TaskAgentSession, TaskResult,
-        TimelineRecordState, RUNNER_JOB_REQUEST,
+        AcquireJobOutcome, BrokerClient, DistributedTaskClient, GitHubAuthResult, GitHubScope,
+        OAuthClient, OAuthJwtCredentials, RegistrationClient, RunServiceClient,
+        RunServiceCompleteJob, RunServiceStepResult, RunServiceVariableValue, RunnerEvent,
+        RunnerJobRequestRef, RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool,
+        TaskAgentSession, TaskResult, TimelineRecordState, RUNNER_JOB_REQUEST,
     },
     runtime_env::job_runtime_env,
     script_step::github_script_steps_with_defaults,
@@ -434,14 +434,19 @@ async fn handle_v2_message(
     let reference: RunnerJobRequestRef =
         serde_json::from_str(&message.body).context("parse RunnerJobRequestRef")?;
     if reference.should_acknowledge {
-        broker
+        if let Err(error) = broker
             .acknowledge_runner_request(
                 session_id,
                 &reference.runner_request_id,
                 RunnerStatus::Busy,
             )
             .await
-            .context("acknowledge broker runner request")?;
+        {
+            eprintln!(
+                "Best-effort broker acknowledge failed for request {}: {error:#}",
+                reference.runner_request_id
+            );
+        }
     }
     let run_service_url = reference
         .run_service_url
@@ -455,6 +460,24 @@ async fn handle_v2_message(
             reference.billing_owner_id.as_deref(),
         )
         .await?;
+    let job_value = match job_value {
+        AcquireJobOutcome::Acquired(value) => value,
+        AcquireJobOutcome::Skipped {
+            status,
+            request_id,
+            body,
+        } => {
+            println!(
+                "Skipping run-service job request {} after non-retriable acquire response: status={}, request_id={}, body={}",
+                reference.runner_request_id,
+                status,
+                request_id.unwrap_or_else(|| "unknown".to_string()),
+                body
+            );
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            return Ok(None);
+        }
+    };
     let job: AgentJobRequestMessage =
         serde_json::from_value(job_value).context("parse acquired run-service job")?;
     let job_run_service = job

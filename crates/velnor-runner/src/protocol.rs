@@ -5,7 +5,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use reqwest::{
     header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT},
-    Client, Method,
+    Client, Method, StatusCode,
 };
 use rsa::{
     pkcs8::{EncodePrivateKey, LineEnding},
@@ -483,6 +483,15 @@ pub struct RunServiceClient {
     bearer_token: String,
 }
 
+pub enum AcquireJobOutcome {
+    Acquired(Value),
+    Skipped {
+        status: StatusCode,
+        request_id: Option<String>,
+        body: String,
+    },
+}
+
 impl RunServiceClient {
     pub fn new(bearer_token: impl Into<String>) -> Result<Self> {
         let http = Client::builder()
@@ -501,7 +510,7 @@ impl RunServiceClient {
         job_message_id: &str,
         runner_os: &str,
         billing_owner_id: Option<&str>,
-    ) -> Result<Value> {
+    ) -> Result<AcquireJobOutcome> {
         let url = run_service_acquire_job_url(run_service_url)?;
         let body = AcquireJobRequest {
             job_message_id,
@@ -518,7 +527,7 @@ impl RunServiceClient {
             .await
             .context("send run-service acquire job request")?;
 
-        parse_json_response(response, "acquire run-service job").await
+        parse_acquire_job_response(response).await
     }
 
     pub async fn renew_job(
@@ -1132,6 +1141,35 @@ where
         .json::<T>()
         .await
         .with_context(|| format!("parse {action} response"))
+}
+
+async fn parse_acquire_job_response(response: reqwest::Response) -> Result<AcquireJobOutcome> {
+    let status = response.status();
+    let request_id = response
+        .headers()
+        .get("x-github-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+
+    if is_non_retriable_acquire_status(status) {
+        let body = response.text().await.unwrap_or_default();
+        return Ok(AcquireJobOutcome::Skipped {
+            status,
+            request_id,
+            body,
+        });
+    }
+
+    parse_json_response::<Value>(response, "acquire run-service job")
+        .await
+        .map(AcquireJobOutcome::Acquired)
+}
+
+fn is_non_retriable_acquire_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::NOT_FOUND | StatusCode::CONFLICT | StatusCode::UNPROCESSABLE_ENTITY
+    )
 }
 
 async fn parse_optional_json_response<T>(
@@ -2158,6 +2196,19 @@ mod tests {
                 .as_str(),
             "https://run.actions.githubusercontent.com/jobs/123/completejob"
         );
+    }
+
+    #[test]
+    fn acquire_job_non_retriable_statuses_match_upstream() {
+        assert!(is_non_retriable_acquire_status(StatusCode::NOT_FOUND));
+        assert!(is_non_retriable_acquire_status(StatusCode::CONFLICT));
+        assert!(is_non_retriable_acquire_status(
+            StatusCode::UNPROCESSABLE_ENTITY
+        ));
+        assert!(!is_non_retriable_acquire_status(
+            StatusCode::INTERNAL_SERVER_ERROR
+        ));
+        assert!(!is_non_retriable_acquire_status(StatusCode::UNAUTHORIZED));
     }
 
     #[test]
