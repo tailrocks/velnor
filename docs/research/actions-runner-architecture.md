@@ -203,7 +203,7 @@ Velnor implications:
 - `GITHUB_ACTION` must be step-scoped for script, JavaScript, Docker, checkout, and composite-output pseudo-steps before condition/env/script rendering.
 - Repository JavaScript/Docker actions still need their action-scoped env overlay for `GITHUB_ACTION_PATH`, `GITHUB_ACTION_REPOSITORY`, and `GITHUB_ACTION_REF`.
 - Composite `run:` steps need `GITHUB_ACTION_PATH` pointing at the parent composite action directory, including repository composites expanded from marketplace actions.
-- `github.action_status` is lower priority for the target repositories because no target workflow/action currently references it, but it is a known composite parity gap.
+- `github.action_status` is lower priority for the target repositories because no target workflow/action currently references it. Velnor currently resolves it from current job status as an approximation; full parity needs nested composite-scope status tracking.
 
 ## Script Steps
 

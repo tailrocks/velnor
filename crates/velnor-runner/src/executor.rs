@@ -1052,6 +1052,9 @@ impl JobExecutionState {
         if expression.trim() == "job.status" {
             return Some(self.job_status().to_string());
         }
+        if expression.trim() == "github.action_status" {
+            return Some(self.job_status().to_string());
+        }
 
         let env_name = match expression.trim() {
             "github.actor" => "GITHUB_ACTOR",
@@ -2257,6 +2260,7 @@ mod tests {
                     "${{ runner.environment }}".into()
                 ),
                 ("RUNNER_WORKSPACE".into(), "${{ runner.workspace }}".into()),
+                ("ACTION_STATUS".into(), "${{ github.action_status }}".into()),
             ]),
             vec![
                 ("INPUT_TOKEN".into(), "ghs_token".into()),
@@ -2276,6 +2280,7 @@ mod tests {
                 ("RUNNER_NAME".into(), "velnor".into()),
                 ("RUNNER_ENVIRONMENT".into(), "self-hosted".into()),
                 ("RUNNER_WORKSPACE".into(), "/__w".into()),
+                ("ACTION_STATUS".into(), "success".into()),
             ]
         );
     }
@@ -3137,7 +3142,12 @@ mod tests {
         assert!(state.evaluate_condition(Some("runner.os == 'linux'")));
         assert!(state.evaluate_condition(Some("runner.os != 'windows'")));
         assert_eq!(state.resolve_expressions("${{ job.status }}"), "success");
+        assert_eq!(
+            state.resolve_expressions("${{ github.action_status }}"),
+            "success"
+        );
         assert!(state.evaluate_condition(Some("job.status == 'success'")));
+        assert!(state.evaluate_condition(Some("github.action_status == 'success'")));
         assert!(state.evaluate_condition(Some("success()")));
         assert!(!state.evaluate_condition(Some("failure()")));
         assert!(!state.evaluate_condition(Some("cancelled()")));
@@ -3160,7 +3170,12 @@ mod tests {
         assert!(state.evaluate_condition(Some("failure() && !cancelled()")));
         assert!(state.evaluate_condition(Some("always() && failure()")));
         assert_eq!(state.resolve_expressions("${{ job.status }}"), "failure");
+        assert_eq!(
+            state.resolve_expressions("${{ github.action_status }}"),
+            "failure"
+        );
         assert!(state.evaluate_condition(Some("always() && job.status == 'failure'")));
+        assert!(state.evaluate_condition(Some("always() && github.action_status == 'failure'")));
 
         let mut ignored_state = JobExecutionState::default();
         ignored_state.apply(
