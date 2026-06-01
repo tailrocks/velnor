@@ -2762,11 +2762,17 @@ mod tests {
                 (
                     "github".into(),
                     serde_json::json!({
+                        "repository": "jackin-project/jackin",
                         "event": {
                             "pull_request": { "number": 42 },
                             "workflow_run": {
+                                "conclusion": "success",
+                                "event": "push",
                                 "head_sha": "def456",
-                                "head_branch": "main"
+                                "head_branch": "main",
+                                "head_repository": {
+                                    "full_name": "jackin-project/jackin"
+                                }
                             }
                         }
                     }),
@@ -2833,6 +2839,12 @@ mod tests {
             "head=def456"
         );
         assert_eq!(
+            state.resolve_expressions(
+                "same=${{ github.event.workflow_run.head_repository.full_name == github.repository }}"
+            ),
+            "same=true"
+        );
+        assert_eq!(
             state.resolve_expressions("token=${{ secrets.DOCKERHUB_TOKEN }}"),
             "token=docker_secret"
         );
@@ -2859,6 +2871,45 @@ mod tests {
         );
         assert!(
             state.evaluate_condition(Some("(github.event_name == 'workflow_dispatch') == true"))
+        );
+    }
+
+    #[test]
+    fn target_workflow_run_preview_gate_matches_jackin_shape() {
+        let state = JobExecutionState::new_with_context(
+            &[
+                ("GITHUB_EVENT_NAME".into(), "workflow_run".into()),
+                ("GITHUB_REPOSITORY".into(), "jackin-project/jackin".into()),
+            ],
+            &[(
+                "github".into(),
+                serde_json::json!({
+                    "repository": "jackin-project/jackin",
+                    "event": {
+                        "workflow_run": {
+                            "conclusion": "success",
+                            "event": "push",
+                            "head_repository": {
+                                "full_name": "jackin-project/jackin"
+                            },
+                            "head_branch": "main",
+                            "head_sha": "def456"
+                        }
+                    }
+                }),
+            )],
+        );
+
+        assert!(state.evaluate_condition(Some(
+            "github.event_name == 'workflow_run' && \
+             github.event.workflow_run.conclusion == 'success' && \
+             github.event.workflow_run.event == 'push' && \
+             github.event.workflow_run.head_repository.full_name == github.repository && \
+             github.event.workflow_run.head_branch == 'main'"
+        )));
+        assert_eq!(
+            state.resolve_expressions("sha=${{ github.event.workflow_run.head_sha }}"),
+            "sha=def456"
         );
     }
 
@@ -6036,12 +6087,17 @@ bitcoin-processor-app.push=true")
             (
                 "github".into(),
                 serde_json::json!({
+                    "repository": "jackin-project/jackin",
                     "event": {
                         "pull_request": { "number": 42 },
                         "workflow_run": {
                             "conclusion": "success",
+                            "event": "push",
                             "head_branch": "main",
-                            "head_sha": "def456"
+                            "head_sha": "def456",
+                            "head_repository": {
+                                "full_name": "jackin-project/jackin"
+                            }
                         }
                     }
                 }),
