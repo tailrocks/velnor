@@ -147,6 +147,10 @@ pub struct RunArgs {
     /// Skip Docker preflight before polling GitHub for executable jobs.
     #[arg(long)]
     pub skip_preflight: bool,
+
+    /// Require /var/run/docker.sock before polling GitHub for executable jobs.
+    #[arg(long)]
+    pub require_docker_socket: bool,
 }
 
 #[derive(Debug, Args)]

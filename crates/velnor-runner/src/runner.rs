@@ -402,7 +402,7 @@ fn preflight_before_executable_run(args: &RunArgs, config_dir: &Path) -> Result<
         ),
         docker_host_work_dir: args.docker_host_work_dir.clone(),
         docker_image: args.docker_image.clone(),
-        require_docker_socket: false,
+        require_docker_socket: args.require_docker_socket,
         require_buildx: true,
     })
     .context("Docker preflight failed before polling GitHub for jobs")
@@ -2575,6 +2575,7 @@ mod tests {
             work_dir: None,
             docker_host_work_dir: None,
             skip_preflight: false,
+            require_docker_socket: false,
         }
     }
 

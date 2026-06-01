@@ -51,6 +51,7 @@ if [[ -n "$DOCKER_HOST_WORK_DIR" ]]; then
 fi
 if [[ "$REQUIRE_DOCKER_SOCKET" == "true" ]]; then
   preflight_args+=(--require-docker-socket)
+  run_args+=(--require-docker-socket)
 fi
 
 cargo run --bin velnor-runner -- preflight "${preflight_args[@]}"
