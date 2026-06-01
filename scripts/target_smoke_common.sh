@@ -12,6 +12,7 @@ IDLE_TIMEOUT_SECONDS="${VELNOR_IDLE_TIMEOUT_SECONDS:-900}"
 CLEANUP_RUNNER="${VELNOR_TARGET_CLEANUP_RUNNER:-false}"
 DUMP_JOB_MESSAGES="${VELNOR_DUMP_JOB_MESSAGES:-$ROOT/.velnor-job-dumps/target}"
 LIVE_EVIDENCE_DIR="${VELNOR_LIVE_EVIDENCE_DIR:-$ROOT/.velnor-live-evidence}"
+LIVE_EVIDENCE_LOG_LINES="${VELNOR_LIVE_EVIDENCE_LOG_LINES:-80}"
 JOB_COUNT="${VELNOR_TARGET_JOB_COUNT:-1}"
 WORKFLOW="${VELNOR_TARGET_WORKFLOW:-}"
 TARGET_REF="${VELNOR_TARGET_REF:-}"
@@ -68,6 +69,39 @@ write_artifact_snapshot() {
   fi
 }
 
+write_log_snapshot() {
+  local log_file error_file
+  log_file="$(mktemp)"
+  error_file="$(mktemp)"
+
+  echo
+  echo "## GitHub Log Excerpt"
+  echo
+  echo "- excerpt lines: $LIVE_EVIDENCE_LOG_LINES"
+  echo
+
+  if gh run view "$RUN_ID" --repo "$TARGET_REPO" --log >"$log_file" 2>"$error_file"; then
+    echo "### First Lines"
+    echo
+    echo '```text'
+    head -n "$LIVE_EVIDENCE_LOG_LINES" "$log_file"
+    echo '```'
+    echo
+    echo "### Last Lines"
+    echo
+    echo '```text'
+    tail -n "$LIVE_EVIDENCE_LOG_LINES" "$log_file"
+    echo '```'
+  else
+    echo '```text'
+    tr '\n' ' ' <"$error_file"
+    echo
+    echo '```'
+  fi
+
+  rm -f "$log_file" "$error_file"
+}
+
 write_live_evidence() {
   local phase="$1"
 
@@ -120,6 +154,7 @@ write_live_evidence() {
       '
     write_runner_snapshot
     write_artifact_snapshot
+    write_log_snapshot
   } >"$evidence_file"
 
   echo "==> Wrote live evidence $evidence_file"

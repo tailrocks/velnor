@@ -105,8 +105,9 @@ scripts/jackin_rust_linux_sequence.sh
 Smoke scripts write sanitized job payloads under `.velnor-job-dumps` by default.
 They also write live proof evidence under `.velnor-live-evidence` by default
 after Velnor consumes jobs and after a watched run completes or fails, including
-best-effort runner-label and artifact snapshots from GitHub. Override that path
-with `VELNOR_LIVE_EVIDENCE_DIR`.
+best-effort runner-label, artifact, and bounded log snapshots from GitHub.
+Override that path with `VELNOR_LIVE_EVIDENCE_DIR`; override log excerpt length
+with `VELNOR_LIVE_EVIDENCE_LOG_LINES`.
 Set `VELNOR_TARGET_WORKFLOW=<workflow.yml>` on target smoke scripts to dispatch
 that workflow before Velnor waits for target jobs.
 Set `VELNOR_TARGET_REF=<branch-or-sha>` to dispatch from a specific ref.

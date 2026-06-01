@@ -19,6 +19,7 @@ JOB_COUNT="${VELNOR_FIXTURE_JOB_COUNT:-2}"
 CLEANUP_RUNNER="${VELNOR_FIXTURE_CLEANUP_RUNNER:-true}"
 DUMP_JOB_MESSAGES="${VELNOR_DUMP_JOB_MESSAGES:-$ROOT/.velnor-job-dumps/fixture}"
 LIVE_EVIDENCE_DIR="${VELNOR_LIVE_EVIDENCE_DIR:-$ROOT/.velnor-live-evidence}"
+LIVE_EVIDENCE_LOG_LINES="${VELNOR_LIVE_EVIDENCE_LOG_LINES:-80}"
 REGISTERED_RUNNER=false
 
 sanitize_filename() {
@@ -65,6 +66,39 @@ write_artifact_snapshot() {
   else
     echo "| <unavailable> | 0 | false | $(printf '%s' "$artifact_snapshot" | tr '\n' ' ') |"
   fi
+}
+
+write_log_snapshot() {
+  local log_file error_file
+  log_file="$(mktemp)"
+  error_file="$(mktemp)"
+
+  echo
+  echo "## GitHub Log Excerpt"
+  echo
+  echo "- excerpt lines: $LIVE_EVIDENCE_LOG_LINES"
+  echo
+
+  if gh run view "$RUN_ID" --repo "$FIXTURE_REPO" --log >"$log_file" 2>"$error_file"; then
+    echo "### First Lines"
+    echo
+    echo '```text'
+    head -n "$LIVE_EVIDENCE_LOG_LINES" "$log_file"
+    echo '```'
+    echo
+    echo "### Last Lines"
+    echo
+    echo '```text'
+    tail -n "$LIVE_EVIDENCE_LOG_LINES" "$log_file"
+    echo '```'
+  else
+    echo '```text'
+    tr '\n' ' ' <"$error_file"
+    echo
+    echo '```'
+  fi
+
+  rm -f "$log_file" "$error_file"
 }
 
 write_live_evidence() {
@@ -117,6 +151,7 @@ write_live_evidence() {
       '
     write_runner_snapshot
     write_artifact_snapshot
+    write_log_snapshot
   } >"$evidence_file"
 
   echo "==> Wrote live evidence $evidence_file"
