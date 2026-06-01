@@ -27,6 +27,8 @@ Upstream source refreshed during this audit:
 - repository: <https://github.com/actions/runner>
 - latest release observed: `v2.334.0`
 - release commit: `f1995ede5d885c997d13d8eca5467c4ce97fe69c`
+- main branch rechecked during implementation planning:
+  `c6a124e18496a6e5d2357415052d1799afc64b63`
 - latest release page: <https://github.com/actions/runner/releases/tag/v2.334.0>
 
 The latest release still uses the broker/run-service V2 path for current hosted
@@ -175,6 +177,25 @@ Required evidence:
   normalized plan that the GitHub job-message adapter uses.
 - Do not treat local green tests as completion. Completion requires live GitHub
   UI runs on the two target repositories.
+
+## Research-To-Build Contract
+
+The current research points to this build contract:
+
+- registration/configuration may be automated by Velnor, but concurrency is not
+  one GitHub runner session handling many jobs. Concurrency is one daemon
+  supervising multiple isolated runner slots, each with its own GitHub runner
+  identity and broker session.
+- Velnor should follow latest `actions/runner` V2 control-plane behavior
+  closely, because GitHub owns scheduling and the wire protocol is private.
+- Velnor should intentionally diverge from the official runner's execution
+  model by always using Docker isolation for target Linux jobs, even when the
+  workflow YAML does not request a job container.
+- supported marketplace action families should be implemented as Rust adapters,
+  not by executing the marketplace JavaScript/TypeScript bundles.
+- future PQL/Pkl authoring should compile to the same normalized plan. It is a
+  typed authoring layer, not a replacement for the Phase 0 GitHub runner
+  protocol implementation.
 
 ## Next Engineering Sequence
 

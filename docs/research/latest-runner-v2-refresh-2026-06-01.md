@@ -8,6 +8,8 @@ Reference source:
 - tag commit: `f1995ede5d885c997d13d8eca5467c4ce97fe69c`
 - `main` at check time: `c6a124e18496a6e5d2357415052d1799afc64b63`
 - `main` rechecked on 2026-06-01: `c6a124e18496a6e5d2357415052d1799afc64b63`
+- `main` rechecked again on 2026-06-01 during implementation planning:
+  `c6a124e18496a6e5d2357415052d1799afc64b63`
 - release page: <https://github.com/actions/runner/releases/tag/v2.334.0>
 
 Drift check:
@@ -84,6 +86,32 @@ Source anchors in `actions/runner` `v2.334.0`:
   infrastructure failure category.
 - Treat `ForceTokenRefresh`, runner refresh/update, cancellation, hosted
   shutdown, and broker migration as control-plane messages, not user steps.
+
+## Source-To-Implementation Trace
+
+This is the compact implementation trace to keep current when `actions/runner`
+changes. Each row states what Velnor should copy, where that behavior belongs,
+and what should prove it.
+
+| Upstream source | Behavior to copy | Velnor owner | Proof |
+| --- | --- | --- | --- |
+| `Runner.cs` selects `BrokerMessageListener` when `UseV2Flow` is true. | Hosted GitHub target path is V2 broker/run-service only. | `protocol.rs`, `runner.rs` | `scripts/check_runner_reference.py`, protocol tests, live fixture job acquisition. |
+| `BrokerMessageListener.cs` requires `ServerUrlV2`, creates a broker session, and polls with session id, runner status, version, OS, architecture, and update flag. | Velnor must require V2 settings and report `Online`/`Busy` per internal slot. | `protocol.rs`, `runner.rs` | runner config tests, broker poll-state tests, live fixture evidence. |
+| `Runner.cs` treats run-service messages as `RunnerJobRequestRef` and best-effort acknowledges before acquire. | Broker messages are references, not workflow YAML; acknowledge failure must not block execution. | `runner.rs` | acquire/ack tests, sanitized job-message dumps. |
+| `RunServiceHttpClient.cs` sends `acquirejob`, `renewjob`, and `completejob`. | Use run-service for acquire, renewal, and completion; use job-scoped credentials when available. | `protocol.rs`, `runner.rs` | renew/complete tests and GitHub UI final status. |
+| `JobRunner.cs` completes V2 jobs with outputs, step results, annotations, environment URL, telemetry, billing owner id, and infrastructure failure category. | Local success is not enough; GitHub UI must get readable step/result data. | `runner.rs`, `executor.rs`, `workflow_command.rs` | timeline/feed tests and fixture/target UI review. |
+| `ContainerOperationProvider.cs` creates one network, mounts work/temp/actions/tools/home/workflow, starts a long-running job container, and waits for services. | Velnor should keep one fresh Docker job container and one per-job network, even when YAML has no `container:`. | `container.rs`, `executor.rs`, `preflight.rs` | Docker command-shape tests and live Docker fixture. |
+| `ContainerActionHandler.cs` uses `/github/workspace`, `/github/runner_temp`, `/github/file_commands`, `/github/home`, and `/github/workflow`. | Native/action helper containers must share GitHub-style paths with the job container. | `container.rs`, `executor.rs` | action adapter tests and artifact/cache fixture proof. |
+
+What not to copy in Phase 0:
+
+- the legacy/classic distributed-task worker path as a normal execution path
+- broad hosted image parity outside current target Linux workflows
+- marketplace JavaScript/TypeScript execution for supported target action
+  families
+- macOS runner behavior or labels
+- full YAML parsing, matrix scheduling, expression evaluation, or reusable
+  workflow expansion; GitHub already performs that before Velnor receives a job
 
 ## Docker Execution Shape To Keep
 

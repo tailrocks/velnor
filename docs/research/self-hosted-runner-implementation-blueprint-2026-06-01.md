@@ -244,6 +244,33 @@ For the target MVP, a real Velnor job should follow this sequence:
 16. Complete V2 job with the correct conclusion.
 17. Cleanup containers, network, checkout credentials, and temp dirs.
 
+## Implementation Priorities From Runner Source
+
+The upstream `actions/runner` source should be used as a behavior reference, not
+as a porting checklist. The current priority order is:
+
+1. Keep V2 control-plane compatibility current with the latest runner release:
+   `UseV2Flow`, `ServerUrlV2`, broker session lifecycle, broker poll shape,
+   run-service acquire/renew/complete, token refresh, cancellation, broker
+   migration, and runner refresh/shutdown messages.
+2. Keep GitHub protocol state one-job-per-slot, while exposing one Velnor daemon
+   with `--slots N` to the operator. A slot is a real GitHub runner identity,
+   not a coroutine sharing one identity with other active jobs.
+3. Keep the Docker executor independent of GitHub-specific scheduling. The
+   executor takes a normalized plan and creates a fresh Linux Docker job
+   container plus per-job network for every target job.
+4. Prefer Rust-native adapters for known target marketplace action families.
+   The GitHub `uses:` value stays as compatibility syntax, but Velnor selects
+   the adapter by action family and ignores the pinned SHA for implementation
+   selection.
+5. Prove behavior through the public fixture before any real target repository
+   validation. The fixture is where agent-owned live debugging happens; real
+   ChainArgos and Jackin runs are manual operator validation only.
+
+This priority order gives PQL a clean future path: a typed compiler can lower
+into the same normalized plan as GitHub job messages, but it must not fork the
+executor, Docker model, native adapter behavior, or reporting model.
+
 ## Deferred Typed Authoring Constraint
 
 Typed authoring is not the Phase 0 scheduler and should not be implemented now.
