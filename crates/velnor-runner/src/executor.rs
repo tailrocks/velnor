@@ -5746,6 +5746,31 @@ type=sha,format=long,prefix=,enable=true"
     }
 
     #[test]
+    fn target_jackin_release_job_env_resolves_needs_version() {
+        let state = JobExecutionState::new_with_context(
+            &[(
+                "VERSION".into(),
+                "${{ needs.check-version.outputs.version }}".into(),
+            )],
+            &[(
+                "needs".into(),
+                serde_json::json!({
+                    "check-version": {
+                        "outputs": {
+                            "version": "0.6.0"
+                        },
+                        "result": "success"
+                    }
+                }),
+            )],
+        );
+
+        let env = state.step_env(&[]);
+
+        assert!(env.contains(&("VERSION".into(), "0.6.0".into())));
+    }
+
+    #[test]
     fn script_steps_receive_github_action_context() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();

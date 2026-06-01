@@ -36,6 +36,7 @@ tests=(
   target_check_image_output_gates_java_monorepo_build_steps
   applies_job_run_defaults_to_script_steps
   applies_run_service_typed_job_run_defaults
+  target_jackin_release_job_env_resolves_needs_version
   target_required_job_cancelled_need_condition_fails_and_skips_ok_step
   builds_target_cache_action_plan_from_multiline_inputs
   target_cache_and_artifact_actions_receive_runtime_env
