@@ -122,7 +122,7 @@ velnor_print_job_execution_model() {
   local label="${2:-Velnor}"
 
   echo "==> $label job execution model"
-  echo "One Velnor runner process handles one active GitHub job at a time."
-  echo "This smoke script will consume $job_count job(s) sequentially with repeated --once runs."
-  echo "For parallel GitHub jobs, run multiple Velnor processes with distinct runner names and work directories."
+  echo "Production Velnor should run as one daemon with multiple internal GitHub runner slots."
+  echo "Each assigned job gets its own isolated Docker container and can run concurrently with other assigned jobs."
+  echo "This smoke script currently exercises $job_count job(s) through repeated --once runs until the daemon scheduler is implemented."
 }

@@ -32,7 +32,9 @@ Official runner behavior:
 Velnor rule:
 
 - keep protocol code separate from Docker execution
-- keep one active GitHub job per registered runner process
+- keep one active GitHub job per internal runner session/slot, while designing
+  the Velnor daemon to own multiple slots and run multiple job containers
+  concurrently
 - require V2 broker/run-service for the normal hosted-GitHub path
 - do not treat classic distributed-task polling as target MVP compatibility
 - do not implement classic distributed-task polling in the normal runner path

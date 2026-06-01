@@ -58,8 +58,9 @@ Source anchors in `actions/runner` `v2.334.0`:
   one place.
 - Require `UseV2Flow` and `ServerUrlV2` at registration/run time for hosted
   GitHub targets.
-- Create one broker session per runner process and run one active GitHub job at
-  a time.
+- Model one active GitHub job per broker session, but let the Velnor daemon own
+  multiple internal runner slots/sessions so one daemon can execute multiple
+  assigned jobs concurrently.
 - Retry broker session creation briefly before failing, matching the upstream
   expectation that transient GitHub/network startup errors are not immediately
   fatal.

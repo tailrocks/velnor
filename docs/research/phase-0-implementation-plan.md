@@ -96,7 +96,12 @@ Minimum message support:
 
 ## Job Dispatch Contract
 
-The official runner assumes one active job per runner. Velnor should keep the same first:
+The official runner assumes one active job per runner session. Velnor should
+preserve that protocol boundary internally, but the product should be one daemon
+that manages multiple internal runner slots/sessions. Each slot follows the
+sequence below for one assigned job, and the daemon can run several slots at the
+same time as long as each job gets its own Docker container, temp/workspace
+state, cancellation path, and lock-renewal loop:
 
 1. Receive job message.
 2. Mark runner status busy for the message poll loop.

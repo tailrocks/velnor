@@ -47,11 +47,13 @@ GitHub self-hosted runners:
   infrastructure failure category.
 - run-service jobs are renewed while executing.
 
-Important implementation consequence: a Velnor runner process should handle one
-active GitHub job at a time. A single registered runner can consume many jobs
-over its lifetime, but not concurrently. Parallelism comes from multiple
-registered runner processes with distinct names and work directories, not from
-one runner process executing multiple assigned GitHub jobs.
+Important implementation consequence: the GitHub runner protocol still assigns
+one active job to one runner session, but Velnor should not expose that as the
+product model. Production Velnor should run as one daemon with a managed pool of
+internal GitHub runner slots. Each slot owns its own broker session/runner
+identity, and the daemon spawns one isolated Docker job container per assigned
+job. That lets one Velnor daemon consume and execute multiple GitHub jobs at the
+same time while keeping GitHub protocol state separated per slot.
 
 ## Current Velnor Evidence
 

@@ -33,6 +33,10 @@ The first Rust crate is `velnor-runner`. It can register as a GitHub
 self-hosted runner, requires the current V2 broker/run-service flow, and runs
 supported target jobs in Docker with Rust-native adapters for the marketplace
 actions used by the target repositories.
+The product target is a daemon that manages multiple internal GitHub runner
+slots, so one Velnor process can acquire multiple GitHub jobs and spawn one
+isolated Docker container per job concurrently. The current `run --once` path is
+the single-slot compatibility/proof path until the daemon scheduler lands.
 `configure`, `run`, and `preflight` are Linux-only commands; Velnor refuses
 non-Linux hosts instead of pretending to satisfy Linux runner labels elsewhere.
 It also refuses macOS/Darwin runner labels. Any macOS legs in existing target

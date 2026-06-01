@@ -40,6 +40,35 @@ Exit criteria:
 - A workflow with `runs-on: velnor` is assigned to Velnor.
 - Velnor receives a real job message.
 
+## Milestone 0.5: Daemon Slot Scheduler
+
+Goal: make Velnor different from the stock runner by presenting one daemon to
+the operator while managing multiple GitHub runner slots internally.
+
+Design:
+
+- the daemon owns a configured concurrency limit, for example `--slots <n>`
+- each slot has its own GitHub runner identity, broker session, work directory,
+  temp directory, cancellation path, and job lock-renewal loop
+- the daemon supervises all slots and restarts unhealthy idle slots without
+  stopping active jobs in other slots
+- each assigned job starts its own isolated Docker job container and per-job
+  Docker network
+- cache/artifact handoff for Phase 0 still assumes a shared daemon workdir on
+  one host, but the scheduler must not share mutable per-job temp state between
+  concurrent containers
+- live proof scripts may continue using repeated `--once` runs as a compatibility
+  smoke path, but the product target is concurrent daemon execution
+
+Exit criteria:
+
+- one `velnor-runner daemon --slots 2` invocation registers or refreshes two
+  internal runner slots for a repository.
+- two queued GitHub jobs can be acquired by the same Velnor daemon at the same
+  time.
+- each job runs in a distinct Docker container and reports independent logs,
+  cancellation, and final status.
+
 ## Milestone 1: Minimal Job Completion
 
 Goal: receive one job and mark it completed.

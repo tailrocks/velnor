@@ -46,7 +46,9 @@ Implementation facts:
 - GitHub owns YAML parsing, trigger matching, reusable workflow expansion,
   matrix expansion, job graph scheduling, secrets, permissions, and UI.
 - Velnor receives `AgentJobRequestMessage` payloads after GitHub expansion.
-- Velnor should execute one active job per registered runner process.
+- Velnor's current CLI path executes one acquired job at a time, but the product
+  target is a daemon that owns multiple internal runner slots and executes one
+  isolated Docker container per assigned job concurrently.
 - Each target Linux job runs in a fresh Docker job container.
 - Supported marketplace action families are selected by normalized action name;
   YAML refs, tags, and SHAs are ignored for Velnor's Rust-native implementation.
