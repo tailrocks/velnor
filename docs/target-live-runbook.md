@@ -105,7 +105,8 @@ run and waits for the new run id. Set `VELNOR_FIXTURE_RUN_ID=<run-id>` to consum
 an existing run; set `VELNOR_FIXTURE_DISPATCH=false` only when using an existing
 run id. Set `VELNOR_FIXTURE_REF=<branch-or-sha>` and
 `VELNOR_FIXTURE_INPUTS=key=value,other=value` when dispatching fixture workflows
-from a non-default ref or with workflow inputs. The script removes the temporary
+from a non-default ref or with workflow inputs. Input validation uses the same
+`key=value` rules as target smoke scripts. The script removes the temporary
 fixture runner on exit by default; set
 `VELNOR_FIXTURE_CLEANUP_RUNNER=false` to keep it registered for debugging. The
 manual equivalent is:
@@ -202,7 +203,9 @@ unset to consume already queued work. Set `VELNOR_TARGET_REF=<branch-or-sha>` wh
 workflow should be dispatched from a non-default ref. Set
 `VELNOR_TARGET_INPUTS=packages=bitcoin-processor-app,push=false` for
 `workflow_dispatch` inputs; each comma-separated `key=value` is passed to
-`gh workflow run -f`. Set `VELNOR_TARGET_JOB_COUNT=<n>` when validating a
+`gh workflow run -f`. Input keys must match `[A-Za-z_][A-Za-z0-9_-]*`; empty
+entries and entries without `=` are rejected before runner registration. Set
+`VELNOR_TARGET_JOB_COUNT=<n>` when validating a
 workflow that queues multiple Velnor jobs and should be consumed by one smoke
 script invocation. Set `VELNOR_TARGET_WATCH_RUN=true` when the selected job
 count should be followed by `gh run watch --exit-status` to prove the full

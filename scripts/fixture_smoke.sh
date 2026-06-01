@@ -48,6 +48,7 @@ velnor_require_optional_positive_int VELNOR_FIXTURE_RUN_ID "$RUN_ID"
 velnor_require_bool VELNOR_REQUIRE_DOCKER_SOCKET "$REQUIRE_DOCKER_SOCKET"
 velnor_require_bool VELNOR_FIXTURE_CLEANUP_RUNNER "$CLEANUP_RUNNER"
 velnor_require_live_evidence_controls
+validate_workflow_dispatch_inputs "$FIXTURE_INPUTS"
 
 if [[ -z "$DISPATCH" ]]; then
   if [[ -n "$RUN_ID" ]]; then

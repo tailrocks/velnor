@@ -90,7 +90,35 @@ assert_sha_ref_dispatch() {
   fi
 }
 
+assert_input_validation() {
+  if ! validate_workflow_dispatch_inputs ""; then
+    echo "empty workflow dispatch inputs should be accepted" >&2
+    exit 1
+  fi
+
+  if ! validate_workflow_dispatch_inputs "packages=bitcoin-processor-app,push=false,empty="; then
+    echo "valid workflow dispatch inputs should be accepted" >&2
+    exit 1
+  fi
+
+  if validate_workflow_dispatch_inputs "packages" >/dev/null 2>&1; then
+    echo "input without key=value should be rejected" >&2
+    exit 1
+  fi
+
+  if validate_workflow_dispatch_inputs ",push=false" >/dev/null 2>&1; then
+    echo "empty input entry should be rejected" >&2
+    exit 1
+  fi
+
+  if validate_workflow_dispatch_inputs "bad key=value" >/dev/null 2>&1; then
+    echo "input key with whitespace should be rejected" >&2
+    exit 1
+  fi
+}
+
 assert_branch_ref_dispatch
 assert_sha_ref_dispatch
+assert_input_validation
 
 echo "workflow dispatch helper self-test passed"

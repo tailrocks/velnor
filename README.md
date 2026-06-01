@@ -124,6 +124,8 @@ Set `VELNOR_TARGET_WORKFLOW=<workflow.yml>` on target smoke scripts to dispatch
 that workflow before Velnor waits for target jobs.
 Set `VELNOR_TARGET_REF=<branch-or-sha>` to dispatch from a specific ref.
 Set `VELNOR_TARGET_INPUTS=key=value,other=value` for workflow dispatch inputs.
+Input keys must match `[A-Za-z_][A-Za-z0-9_-]*`; empty entries and entries
+without `=` are rejected before runner registration.
 Set `VELNOR_TARGET_JOB_COUNT=<n>` when the target workflow needs Velnor to
 consume more than one queued job.
 Set `VELNOR_TARGET_WATCH_RUN=true` to wait for the GitHub workflow run to finish
@@ -180,7 +182,8 @@ for a different fixture shape. Set `VELNOR_FIXTURE_RUN_ID=<run-id>` to consume a
 specific existing run; otherwise the script dispatches a fresh run. Set
 `VELNOR_FIXTURE_REF=<branch-or-sha>` and
 `VELNOR_FIXTURE_INPUTS=key=value,other=value` when dispatching fixture
-workflows from a non-default ref or with workflow inputs.
+workflows from a non-default ref or with workflow inputs. Input validation uses
+the same `key=value` rules as target smoke scripts.
 
 If the Docker daemon sees the work directory at a different path than the
 runner process, set `VELNOR_DOCKER_HOST_WORK_DIR` to that daemon-visible path.
