@@ -276,12 +276,13 @@ The reporter then performs source-specific completion:
 - GitHub V2 reporter: `renewjob`, log/timeline upload, `completejob`
 - future Velnor reporter: local/server logs, artifacts, status API
 
-The current runner already sends V2 `completejob` with conclusion, outputs, and
-step results, workflow-command annotations, and evaluated environment URL.
-Known Docker environment/bootstrap failures are marked with
-`infrastructureFailureCategory`. Timeline task records and masked feed lines are
-uploaded before completion on a best-effort basis. Still-open GitHub parity
-fields are telemetry and richer UI log/timeline behavior.
+The current runner already sends V2 `completejob` with conclusion, outputs,
+step results, workflow-command annotations, evaluated environment URL, masked
+job telemetry for implemented workflow-command cases, billing owner id, and
+known Docker environment/bootstrap `infrastructureFailureCategory`. Timeline
+task records and masked feed lines are uploaded before completion on a
+best-effort basis. Still-open GitHub parity work is richer UI log/timeline
+behavior and live validation.
 
 ## Pkl Package Shape
 

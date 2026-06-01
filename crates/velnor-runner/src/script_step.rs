@@ -538,6 +538,7 @@ impl CommandFileSet {
             masks: Vec::new(),
             log_lines: Vec::new(),
             annotations: Vec::new(),
+            telemetry: Vec::new(),
             error_count: 0,
             warning_count: 0,
             notice_count: 0,
@@ -571,9 +572,16 @@ pub struct StepCommandState {
     pub masks: Vec<String>,
     pub log_lines: Vec<String>,
     pub annotations: Vec<StepAnnotation>,
+    pub telemetry: Vec<StepCommandTelemetry>,
     pub error_count: i32,
     pub warning_count: i32,
     pub notice_count: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepCommandTelemetry {
+    pub message: String,
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -610,6 +618,11 @@ impl StepCommandState {
         self.masks.extend(other.masks);
         self.log_lines.extend(other.log_lines);
         self.annotations.extend(other.annotations);
+        for telemetry in other.telemetry {
+            if !self.telemetry.contains(&telemetry) {
+                self.telemetry.push(telemetry);
+            }
+        }
         self.error_count += other.error_count;
         self.warning_count += other.warning_count;
         self.notice_count += other.notice_count;

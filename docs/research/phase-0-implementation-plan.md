@@ -251,7 +251,7 @@ GitHub UI compatibility needs reporting early. Minimal order:
 3. stream or append logs per step: current code captures stdout/stderr after each executed script or JavaScript step, creates completed task timeline records, and appends masked lines to those records before `completejob`.
 4. finish step with success/failure/skipped
 5. finish job with success/failure/cancelled
-6. include job outputs, step results, and evaluated environment URL in completion payload
+6. include job outputs, step results, evaluated environment URL, telemetry for implemented workflow-command cases, billing owner id, and infrastructure failure category in the completion payload
 7. mask secrets in logs before upload. Current code builds masks from GitHub mask hints and secret variables for runner-uploaded feed lines, and stores `add-mask` workflow command values for the later step log uploader.
 8. support annotations from workflow commands. Current code parses state-changing stdout workflow commands (`set-output`, `set-env`, `add-path`, `save-state`) plus `add-mask`, counts `error`, `warning`, and `notice` commands on timeline records, preserves annotation title/location plus GitHub `##[group]`, `##[endgroup]`, and `##[debug]` markers in uploaded step logs, and sends structured run-service step annotations. Live validation of native GitHub UI folding remains open.
 9. classify runner infrastructure failures separately from user step failures. Current code reports known Docker bind-mount and Docker environment/bootstrap failures with `infrastructureFailureCategory`.

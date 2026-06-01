@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
-use crate::script_step::{StepAnnotation, StepAnnotationLevel, StepCommandState};
+use crate::script_step::{
+    StepAnnotation, StepAnnotationLevel, StepCommandState, StepCommandTelemetry,
+};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +35,7 @@ pub fn parse_workflow_commands(output: &str) -> StepCommandState {
                 if let Some(name) = command.properties.get("name") {
                     state.outputs.insert(name.clone(), command.value);
                 }
+                record_deprecated_command_telemetry(&mut state, "set-output");
             }
             "set-env" => {
                 if let Some(name) = command.properties.get("name") {
@@ -44,6 +47,7 @@ pub fn parse_workflow_commands(output: &str) -> StepCommandState {
                 if let Some(name) = command.properties.get("name") {
                     state.state.insert(name.clone(), command.value);
                 }
+                record_deprecated_command_telemetry(&mut state, "save-state");
             }
             "add-mask" => {
                 if !command.value.is_empty() {
@@ -78,6 +82,20 @@ pub fn parse_workflow_commands(output: &str) -> StepCommandState {
         }
     }
     state
+}
+
+fn record_deprecated_command_telemetry(state: &mut StepCommandState, command: &str) {
+    let message = format!("DeprecatedCommand: {command}");
+    if !state
+        .telemetry
+        .iter()
+        .any(|telemetry| telemetry.kind == "ActionCommand" && telemetry.message == message)
+    {
+        state.telemetry.push(StepCommandTelemetry {
+            message,
+            kind: "ActionCommand".to_string(),
+        });
+    }
 }
 
 fn command_annotation(level: StepAnnotationLevel, command: &WorkflowCommand<'_>) -> StepAnnotation {
@@ -216,6 +234,19 @@ mod tests {
         assert_eq!(state.warning_count, 1);
         assert_eq!(state.notice_count, 1);
         assert_eq!(state.annotations.len(), 3);
+        assert_eq!(
+            state.telemetry,
+            vec![
+                StepCommandTelemetry {
+                    message: "DeprecatedCommand: set-output".to_string(),
+                    kind: "ActionCommand".to_string(),
+                },
+                StepCommandTelemetry {
+                    message: "DeprecatedCommand: save-state".to_string(),
+                    kind: "ActionCommand".to_string(),
+                }
+            ]
+        );
         assert_eq!(state.annotations[0].level, StepAnnotationLevel::Failure);
         assert_eq!(state.annotations[0].message, "broken");
         assert_eq!(state.annotations[0].path.as_deref(), Some("src/main.rs"));
@@ -253,6 +284,31 @@ mod tests {
         assert_eq!(state.outputs["answer"], "42");
         assert_eq!(state.error_count, 0);
         assert_eq!(state.warning_count, 1);
+        assert_eq!(state.telemetry.len(), 1);
+    }
+
+    #[test]
+    fn emits_deprecated_command_telemetry_once_per_parse() {
+        let state = parse_workflow_commands(
+            "::set-output name=one::1\n\
+             ::set-output name=two::2\n\
+             ::save-state name=cleanup::yes\n\
+             ::save-state name=cleanup2::yes\n",
+        );
+
+        assert_eq!(
+            state.telemetry,
+            vec![
+                StepCommandTelemetry {
+                    message: "DeprecatedCommand: set-output".to_string(),
+                    kind: "ActionCommand".to_string(),
+                },
+                StepCommandTelemetry {
+                    message: "DeprecatedCommand: save-state".to_string(),
+                    kind: "ActionCommand".to_string(),
+                }
+            ]
+        );
     }
 
     #[test]

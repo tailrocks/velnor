@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::PathBuf,
     process::Command,
@@ -38,12 +38,15 @@ use crate::{
         AcquireJobOutcome, BrokerClient, DistributedTaskClient, GitHubAuthResult, GitHubScope,
         OAuthClient, OAuthJwtCredentials, RegistrationClient, RunServiceAnnotation,
         RunServiceAnnotationLevel, RunServiceClient, RunServiceCompleteJob, RunServiceStepResult,
-        RunServiceVariableValue, RunnerEvent, RunnerJobRequestRef, RunnerKeyPair, RunnerStatus,
-        TaskAgent, TaskAgentPool, TaskAgentSession, TaskResult, TimelineRecord,
-        TimelineRecordFeedLines, TimelineRecordState, RUNNER_JOB_REQUEST,
+        RunServiceTelemetry, RunServiceVariableValue, RunnerEvent, RunnerJobRequestRef,
+        RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool, TaskAgentSession, TaskResult,
+        TimelineRecord, TimelineRecordFeedLines, TimelineRecordState, RUNNER_JOB_REQUEST,
     },
     runtime_env::job_runtime_env,
-    script_step::{github_script_steps_with_defaults, StepAnnotation, StepAnnotationLevel},
+    script_step::{
+        github_script_steps_with_defaults, StepAnnotation, StepAnnotationLevel,
+        StepCommandTelemetry,
+    },
 };
 
 const JOB_CANCELLATION_MESSAGE: &str = "JobCancellation";
@@ -1606,6 +1609,7 @@ async fn complete_run_service_job(
             )
         })
         .collect();
+    let telemetry = run_service_telemetry(job, &step_logs);
     let completion = RunServiceCompleteJob {
         plan_id: job.plan.plan_id.clone(),
         job_id: job.job_id.clone(),
@@ -1613,6 +1617,7 @@ async fn complete_run_service_job(
         outputs,
         step_results,
         annotations: Vec::new(),
+        telemetry,
         environment_url,
         billing_owner_id,
         infrastructure_failure_category,
@@ -1621,6 +1626,27 @@ async fn complete_run_service_job(
         .complete_job(run_service_url, completion)
         .await
         .context("complete run-service job")
+}
+
+fn run_service_telemetry(
+    job: &AgentJobRequestMessage,
+    step_logs: &[StepLog],
+) -> Vec<RunServiceTelemetry> {
+    let masks = job_secret_mask_values(job);
+    let mut seen = BTreeSet::new();
+    step_logs
+        .iter()
+        .flat_map(|log| log.telemetry.iter().map(move |telemetry| (log, telemetry)))
+        .map(|(log, telemetry)| {
+            let mut all_masks = masks.clone();
+            all_masks.extend(log.masks.iter().cloned());
+            RunServiceTelemetry {
+                message: mask_value(&telemetry.message, &all_masks),
+                kind: telemetry.kind.clone(),
+            }
+        })
+        .filter(|telemetry| seen.insert((telemetry.kind.clone(), telemetry.message.clone())))
+        .collect()
 }
 
 async fn publish_timeline_logs(job: &AgentJobRequestMessage, step_logs: &[StepLog]) -> Result<()> {
@@ -1723,15 +1749,14 @@ fn timeline_records_for_step_logs(
 }
 
 fn mask_log_lines(lines: &[String], masks: &[String]) -> Vec<String> {
-    lines
+    lines.iter().map(|line| mask_value(line, masks)).collect()
+}
+
+fn mask_value(value: &str, masks: &[String]) -> String {
+    masks
         .iter()
-        .map(|line| {
-            masks
-                .iter()
-                .filter(|mask| !mask.is_empty())
-                .fold(line.clone(), |line, mask| line.replace(mask, "***"))
-        })
-        .collect()
+        .filter(|mask| !mask.is_empty())
+        .fold(value.to_string(), |value, mask| value.replace(mask, "***"))
 }
 
 fn current_time_rfc3339() -> Result<String> {
@@ -2079,6 +2104,7 @@ mod tests {
             lines: Vec::new(),
             masks: vec!["runtime-secret".into()],
             annotations: Vec::new(),
+            telemetry: Vec::new(),
             exit_code: 0,
             skipped: false,
             failure_ignored: false,
@@ -2146,6 +2172,7 @@ mod tests {
             lines: vec!["hello".into()],
             masks: Vec::new(),
             annotations: Vec::new(),
+            telemetry: Vec::new(),
             exit_code: 1,
             skipped: false,
             failure_ignored: false,
@@ -2176,6 +2203,57 @@ mod tests {
             mask_log_lines(&lines, &["secret-value".into()]),
             vec!["token=***".to_string(), "ordinary line".to_string()]
         );
+    }
+
+    #[test]
+    fn run_service_telemetry_masks_step_and_job_secrets() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "variables": {
+                "SECRET_TOKEN": {
+                    "value": "job-secret",
+                    "isSecret": true
+                }
+            }
+        }))
+        .unwrap();
+        let log = StepLog {
+            step_id: "step-1".into(),
+            lines: Vec::new(),
+            masks: vec!["step-secret".into()],
+            annotations: Vec::new(),
+            telemetry: vec![StepCommandTelemetry {
+                message: "DeprecatedCommand: set-output job-secret step-secret".into(),
+                kind: "ActionCommand".into(),
+            }],
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+        };
+        let duplicate_log = StepLog {
+            telemetry: vec![StepCommandTelemetry {
+                message: "DeprecatedCommand: set-output job-secret step-secret".into(),
+                kind: "ActionCommand".into(),
+            }],
+            ..log.clone()
+        };
+
+        let telemetry = run_service_telemetry(&job, &[log, duplicate_log]);
+
+        assert_eq!(telemetry.len(), 1);
+        assert_eq!(
+            telemetry[0].message,
+            "DeprecatedCommand: set-output *** ***"
+        );
+        assert_eq!(telemetry[0].kind, "ActionCommand");
     }
 
     #[test]

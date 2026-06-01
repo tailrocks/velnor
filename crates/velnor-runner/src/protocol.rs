@@ -1523,6 +1523,8 @@ pub struct RunServiceCompleteJob {
     pub step_results: Vec<RunServiceStepResult>,
     #[serde(rename = "annotations", skip_serializing_if = "Vec::is_empty")]
     pub annotations: Vec<RunServiceAnnotation>,
+    #[serde(rename = "telemetry", skip_serializing_if = "Vec::is_empty")]
+    pub telemetry: Vec<RunServiceTelemetry>,
     #[serde(rename = "environmentUrl", skip_serializing_if = "Option::is_none")]
     pub environment_url: Option<String>,
     #[serde(rename = "billingOwnerId", skip_serializing_if = "Option::is_none")]
@@ -1532,6 +1534,14 @@ pub struct RunServiceCompleteJob {
         skip_serializing_if = "Option::is_none"
     )]
     pub infrastructure_failure_category: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunServiceTelemetry {
+    #[serde(rename = "message")]
+    pub message: String,
+    #[serde(rename = "type")]
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2324,6 +2334,10 @@ mod tests {
                 }],
             }],
             annotations: Vec::new(),
+            telemetry: vec![RunServiceTelemetry {
+                message: "DeprecatedCommand: set-output".into(),
+                kind: "ActionCommand".into(),
+            }],
             environment_url: Some("https://example.com/env".into()),
             billing_owner_id: Some("42".into()),
             infrastructure_failure_category: Some("runner_bootstrap".into()),
@@ -2355,6 +2369,10 @@ mod tests {
                         "endColumn": 4,
                         "isInfrastructureIssue": false
                     }]
+                }],
+                "telemetry": [{
+                    "message": "DeprecatedCommand: set-output",
+                    "type": "ActionCommand"
                 }],
                 "environmentUrl": "https://example.com/env",
                 "billingOwnerId": "42",
