@@ -2116,6 +2116,57 @@ runs:
         );
     }
 
+    #[test]
+    fn fetched_target_workflow_actions_have_metadata() {
+        let actions_root = Path::new("/tmp/velnor-actions");
+        let workflow_roots = [
+            Path::new("/tmp/velnor-targets/jackin/.github/workflows"),
+            Path::new("/tmp/velnor-targets-java/java-monorepo/.github/workflows"),
+        ];
+        if !actions_root.exists() || workflow_roots.iter().all(|root| !root.exists()) {
+            return;
+        }
+
+        let mut checked = 0;
+        let mut missing = Vec::new();
+        for root in workflow_roots.into_iter().filter(|root| root.exists()) {
+            for path in workflow_files(root) {
+                let contents = fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+                let yaml = serde_yaml::from_str::<serde_yaml::Value>(&contents)
+                    .unwrap_or_else(|error| panic!("parse {}: {error:#}", path.display()));
+                for uses in workflow_uses_values(&yaml) {
+                    if uses.starts_with('.') || uses.starts_with("docker://") {
+                        continue;
+                    }
+                    let reference = parse_repository_uses(&uses)
+                        .unwrap_or_else(|error| panic!("parse uses {uses}: {error:#}"));
+                    if reference
+                        .repository
+                        .eq_ignore_ascii_case("actions/checkout")
+                    {
+                        continue;
+                    }
+                    let mut action_dir = actions_root.join(sanitize_segment(&reference.repository));
+                    if let Some(source_path) = reference.source_path {
+                        action_dir = action_dir.join(source_path);
+                    }
+                    checked += 1;
+                    if action_metadata_path(&action_dir).is_err() {
+                        missing.push(format!("{} -> {}", path.display(), uses));
+                    }
+                }
+            }
+        }
+
+        assert!(checked >= 40, "expected target workflow action references");
+        assert!(
+            missing.is_empty(),
+            "missing fetched target action metadata:\n{}",
+            missing.join("\n")
+        );
+    }
+
     fn action_metadata_files(root: &Path) -> Vec<PathBuf> {
         let mut files = Vec::new();
         collect_action_metadata_files(root, &mut files);
@@ -2138,6 +2189,52 @@ runs:
             {
                 files.push(path);
             }
+        }
+    }
+
+    fn workflow_files(root: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(root) else {
+            return Vec::new();
+        };
+        let mut files = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| matches!(extension, "yml" | "yaml"))
+            })
+            .collect::<Vec<_>>();
+        files.sort();
+        files
+    }
+
+    fn workflow_uses_values(value: &serde_yaml::Value) -> Vec<String> {
+        let mut values = Vec::new();
+        collect_workflow_uses_values(value, &mut values);
+        values.sort();
+        values.dedup();
+        values
+    }
+
+    fn collect_workflow_uses_values(value: &serde_yaml::Value, values: &mut Vec<String>) {
+        match value {
+            serde_yaml::Value::Mapping(map) => {
+                for (key, value) in map {
+                    if key.as_str() == Some("uses") {
+                        if let Some(uses) = value.as_str() {
+                            values.push(uses.to_string());
+                        }
+                    }
+                    collect_workflow_uses_values(value, values);
+                }
+            }
+            serde_yaml::Value::Sequence(sequence) => {
+                for value in sequence {
+                    collect_workflow_uses_values(value, values);
+                }
+            }
+            _ => {}
         }
     }
 }
