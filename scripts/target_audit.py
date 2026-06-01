@@ -43,12 +43,21 @@ def collect_step(
     local_uses: list[tuple[str, str, str]],
     shells: set[str],
     continue_on_error: list[tuple[str, str, str, Any]],
+    unsupported_checkout_inputs: list[tuple[str, str, str, Any]],
 ) -> None:
     if "uses" in step:
         value = str(step["uses"])
         uses[value] += 1
         if value.startswith("./"):
             local_uses.append((short_path(path, roots), job_name, value))
+        if value.startswith("actions/checkout@"):
+            inputs = step.get("with") or {}
+            if isinstance(inputs, dict):
+                for name in ["submodules", "sparse-checkout", "lfs"]:
+                    if input_enabled(inputs.get(name)):
+                        unsupported_checkout_inputs.append(
+                            (short_path(path, roots), job_name, name, inputs[name])
+                        )
     if "shell" in step:
         shells.add(str(step["shell"]))
     if "continue-on-error" in step:
@@ -83,6 +92,18 @@ def compact_value(value: Any) -> str:
     return str(value)
 
 
+def input_enabled(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "false", "0", "no", "off"}
+    return True
+
+
 def audit(roots: list[Path]) -> dict[str, Any]:
     workflow_files: list[str] = []
     action_files: list[tuple[str, str]] = []
@@ -102,6 +123,7 @@ def audit(roots: list[Path]) -> dict[str, Any]:
     job_defaults: list[tuple[str, str, str]] = []
     job_environments: list[tuple[str, str, str]] = []
     job_timeouts: list[tuple[str, str, Any]] = []
+    unsupported_checkout_inputs: list[tuple[str, str, str, Any]] = []
 
     for root in roots:
         for path in iter_yaml_files(root):
@@ -121,6 +143,7 @@ def audit(roots: list[Path]) -> dict[str, Any]:
                             local_uses,
                             shells,
                             continue_on_error,
+                            unsupported_checkout_inputs,
                         )
                 continue
 
@@ -181,6 +204,7 @@ def audit(roots: list[Path]) -> dict[str, Any]:
                             local_uses,
                             shells,
                             continue_on_error,
+                            unsupported_checkout_inputs,
                         )
 
     return {
@@ -202,6 +226,7 @@ def audit(roots: list[Path]) -> dict[str, Any]:
         "job_defaults": job_defaults,
         "job_environments": job_environments,
         "job_timeouts": job_timeouts,
+        "unsupported_checkout_inputs": unsupported_checkout_inputs,
     }
 
 
@@ -305,6 +330,38 @@ def print_report(summary: dict[str, Any]) -> None:
     for path, job, label, value in summary["continue_on_error"]:
         print(f"- {path} :: {job} :: {label} = {value}")
 
+    print("\nUnsupported checkout inputs:")
+    if summary["unsupported_checkout_inputs"]:
+        for path, job, name, value in summary["unsupported_checkout_inputs"]:
+            print(f"- {path} :: {job} :: {name} = {compact_value(value)}")
+    else:
+        print("- none")
+
+
+def check_target_mvp(summary: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    for label, key in [
+        ("job containers", "containers"),
+        ("services", "services"),
+        ("job-level concurrency", "job_concurrency"),
+        ("job timeouts", "job_timeouts"),
+        ("unsupported checkout inputs", "unsupported_checkout_inputs"),
+    ]:
+        if summary[key]:
+            errors.append(f"target MVP does not support {label}: {summary[key]}")
+
+    unexpected_shells = [shell for shell in summary["shells"] if shell != "bash"]
+    if unexpected_shells:
+        errors.append(f"target MVP supports only explicit bash shells: {unexpected_shells}")
+
+    direct_docker_uses = [
+        name for name in summary["uses"] if str(name).startswith("docker://")
+    ]
+    if direct_docker_uses:
+        errors.append(f"target MVP does not support direct docker:// uses: {direct_docker_uses}")
+
+    return errors
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -314,9 +371,21 @@ def main() -> None:
         type=Path,
         help="Repository roots containing .github directories",
     )
+    parser.add_argument(
+        "--check-target-mvp",
+        action="store_true",
+        help="Fail if target repositories use features outside the current MVP contract",
+    )
     args = parser.parse_args()
     roots = [root.resolve() for root in args.roots]
-    print_report(audit(roots))
+    summary = audit(roots)
+    print_report(summary)
+    if args.check_target_mvp:
+        errors = check_target_mvp(summary)
+        if errors:
+            for error in errors:
+                print(error)
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":
