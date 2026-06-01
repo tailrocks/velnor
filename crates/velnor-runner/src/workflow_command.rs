@@ -12,11 +12,23 @@ struct WorkflowCommand<'a> {
 
 pub fn parse_workflow_commands(output: &str) -> StepCommandState {
     let mut state = StepCommandState::default();
+    let mut stopped_token = None::<String>;
     for line in output.lines() {
+        if let Some(token) = stopped_token.as_deref() {
+            if line == format!("::{token}::") {
+                stopped_token = None;
+            }
+            continue;
+        }
         let Some(command) = parse_workflow_command(line) else {
             continue;
         };
         match command.name {
+            "stop-commands" => {
+                if !command.value.is_empty() {
+                    stopped_token = Some(command.value);
+                }
+            }
             "set-output" => {
                 if let Some(name) = command.properties.get("name") {
                     state.outputs.insert(name.clone(), command.value);
@@ -114,5 +126,22 @@ mod tests {
         let state = parse_workflow_commands("::set-output name=one%2Ctwo::a%0Ab%25c\n");
 
         assert_eq!(state.outputs["one,two"], "a\nb%c");
+    }
+
+    #[test]
+    fn ignores_commands_between_stop_and_resume_token() {
+        let state = parse_workflow_commands(
+            "::stop-commands::pause\n\
+             ::set-output name=ignored::nope\n\
+             ::error::ignored\n\
+             ::pause::\n\
+             ::set-output name=answer::42\n\
+             ::warning::careful\n",
+        );
+
+        assert!(!state.outputs.contains_key("ignored"));
+        assert_eq!(state.outputs["answer"], "42");
+        assert_eq!(state.error_count, 0);
+        assert_eq!(state.warning_count, 1);
     }
 }
