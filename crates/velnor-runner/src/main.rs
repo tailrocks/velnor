@@ -13,6 +13,7 @@ mod protocol;
 mod runner;
 mod runtime_env;
 mod script_step;
+mod workflow_authoring;
 mod workflow_command;
 
 use anyhow::Result;
@@ -30,5 +31,6 @@ async fn main() -> Result<()> {
         Command::Run(args) => runner::run(args).await,
         Command::Remove(args) => runner::remove(args).await,
         Command::Status(args) => runner::status(args).await,
+        Command::Workflow(args) => workflow_authoring::workflow(args),
     }
 }

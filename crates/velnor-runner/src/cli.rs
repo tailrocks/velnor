@@ -22,6 +22,8 @@ pub enum Command {
     Remove(RemoveArgs),
     /// Print local runner configuration status.
     Status(StatusArgs),
+    /// Check future Pkl workflow authoring files.
+    Workflow(WorkflowArgs),
 }
 
 #[derive(Debug, Args)]
@@ -157,4 +159,26 @@ pub struct StatusArgs {
     /// Store configuration under this directory.
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct WorkflowArgs {
+    #[command(subcommand)]
+    pub command: WorkflowCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum WorkflowCommand {
+    /// Evaluate a Pkl workflow file to JSON and run Velnor structural checks.
+    Check(WorkflowCheckArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct WorkflowCheckArgs {
+    /// Pkl workflow module to evaluate.
+    pub path: PathBuf,
+
+    /// Pkl executable to use. Defaults to pkl on PATH.
+    #[arg(long, default_value = "pkl")]
+    pub pkl_bin: PathBuf,
 }
