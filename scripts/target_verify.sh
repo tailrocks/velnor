@@ -98,6 +98,7 @@ tests=(
   task_agent_accepts_lowercase_label_types_from_github
   target_mvp_labels_cover_current_x64_linux_target_jobs
   target_mvp_arm_label_is_explicit
+  arm_label_requires_arm_host
   run_preflight_args_preserve_target_docker_requirements
   run_preflight_args_default_work_dir_under_config
 )
