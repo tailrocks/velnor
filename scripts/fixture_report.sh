@@ -69,6 +69,17 @@ run_report_section "Live Host Readiness" "$LIVE_HOST_DOCTOR_SCRIPT" || overall=1
   echo
   if [[ "$overall" -eq 0 ]]; then
     echo "Fixture readiness passed. Run \`scripts/fixture_smoke.sh\` on this host."
+    echo
+    echo '```sh'
+    echo "scripts/fixture_smoke.sh"
+    echo '```'
+    echo
+    echo "After the smoke run, inspect the run and evidence:"
+    echo
+    echo '```sh'
+    echo "scripts/fixture_status.sh"
+    echo "ls -1 .velnor-live-evidence"
+    echo '```'
   else
     echo "Fixture readiness has blockers. Fix the failing section above before running \`scripts/fixture_smoke.sh\`."
     echo
@@ -77,6 +88,13 @@ run_report_section "Live Host Readiness" "$LIVE_HOST_DOCTOR_SCRIPT" || overall=1
     echo "- For target-repository proof, use a Linux host where \`/var/run/docker.sock\` exists and the Docker daemon can see \`velnor_work_dir\`."
     echo "- For fixture-only checks without Docker-in-job coverage, \`VELNOR_REQUIRE_DOCKER_SOCKET=false\` may be used deliberately."
     echo "- For remote Docker daemons, set \`VELNOR_DOCKER_HOST_WORK_DIR\` only when the daemon host sees the same work directory at a different path."
+    echo
+    echo "Re-run the non-mutating checks after fixing host readiness:"
+    echo
+    echo '```sh'
+    echo "scripts/live_host_doctor.sh"
+    echo "scripts/fixture_readiness.sh"
+    echo '```'
     echo
     echo "Do not register Velnor or dispatch real target repository workflows from this report alone."
   fi

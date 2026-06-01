@@ -53,6 +53,8 @@ expected_values=(
   "audit ok"
   "doctor ok"
   'Run `scripts/fixture_smoke.sh`'
+  "scripts/fixture_status.sh"
+  "ls -1 .velnor-live-evidence"
 )
 
 for expected in "${expected_values[@]}"; do
@@ -100,6 +102,16 @@ fi
 
 if ! grep -q "VELNOR_REQUIRE_DOCKER_SOCKET=false" "$report"; then
   echo "fixture report did not mention fixture-only socket override" >&2
+  exit 1
+fi
+
+if ! grep -q "scripts/live_host_doctor.sh" "$report"; then
+  echo "fixture report did not include live host doctor rerun command" >&2
+  exit 1
+fi
+
+if ! grep -q "scripts/fixture_readiness.sh" "$report"; then
+  echo "fixture report did not include fixture readiness rerun command" >&2
   exit 1
 fi
 
