@@ -1927,6 +1927,15 @@ mod tests {
                 }
                 if args
                     .iter()
+                    .any(|arg| arg == "GITHUB_OUTPUT=/__t/paths_output")
+                {
+                    fs::write(
+                        self.temp.join("paths_output"),
+                        "construct=true\nconstruct_count=1\nchanges=[\"construct\"]\n",
+                    )?;
+                }
+                if args
+                    .iter()
                     .any(|arg| arg == "GITHUB_STATE=/__t/cache_state")
                 {
                     fs::write(self.temp.join("cache_state"), "primaryKey=linux-cache\n")?;
@@ -3996,6 +4005,111 @@ mod tests {
         assert!(node_calls[0].contains(&"ACTIONS_CACHE_SERVICE_V2=True".into()));
         assert!(node_calls[1].contains(&"GITHUB_RETENTION_DAYS=90".into()));
         assert!(node_calls[3].contains(&"INPUT_GITHUB-TOKEN=ghs_token".into()));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn target_paths_filter_receives_event_context_and_outputs_gate_steps() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::JavaScript {
+                step_id: "paths".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/dorny_paths-filter/dist/index.js".into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/dorny_paths-filter".into(),
+                    env: vec![
+                        ("INPUT_TOKEN".into(), "${{ github.token }}".into()),
+                        ("INPUT_BASE".into(), "main".into()),
+                        (
+                            "INPUT_FILTERS".into(),
+                            "construct:\n  - 'construct/**'\n  - '.github/workflows/construct.yml'"
+                                .into(),
+                        ),
+                    ],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::Script(ScriptStep {
+                id: "consume".into(),
+                script: "echo construct changed".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w".into(),
+                env: Vec::new(),
+                condition: Some("steps.paths.outputs.construct == 'true'".into()),
+                continue_on_error: false,
+            }),
+        ];
+        let context_data = vec![(
+            "github".into(),
+            serde_json::json!({
+                "event": {
+                    "pull_request": {
+                        "number": 42,
+                        "base": { "sha": "base-sha" }
+                    },
+                    "repository": { "default_branch": "main" }
+                }
+            }),
+        )];
+        let base_env = vec![
+            ("GITHUB_EVENT_NAME".into(), "pull_request".into()),
+            ("GITHUB_REPOSITORY".into(), "jackin-project/jackin".into()),
+            ("GITHUB_SHA".into(), "head-sha".into()),
+            ("GITHUB_REF".into(), "refs/pull/42/merge".into()),
+            ("GITHUB_TOKEN".into(), "ghs_token".into()),
+            ("GITHUB_WORKSPACE".into(), "/__w".into()),
+        ];
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let results = executor
+            .execute_ordered_steps_with_context(
+                &container(&temp),
+                &steps,
+                &base_env,
+                &context_data,
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].state.outputs["construct"], "true");
+        assert_eq!(results[0].state.outputs["construct_count"], "1");
+        assert!(!results[1].skipped);
+        let node_call = executor
+            .runner()
+            .calls
+            .iter()
+            .find(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:24-bookworm".into())
+            })
+            .map(|(_, args)| args)
+            .unwrap();
+        assert!(node_call.contains(&"INPUT_TOKEN=ghs_token".into()));
+        assert!(node_call.contains(&"INPUT_BASE=main".into()));
+        assert!(node_call
+            .iter()
+            .any(|arg| arg.starts_with("INPUT_FILTERS=construct:\n")));
+        assert!(node_call.contains(&"GITHUB_EVENT_NAME=pull_request".into()));
+        assert!(node_call.contains(&"GITHUB_EVENT_PATH=/__t/_github_workflow/event.json".into()));
+        assert!(node_call.contains(&"GITHUB_REPOSITORY=jackin-project/jackin".into()));
+        assert!(node_call.contains(&"GITHUB_WORKSPACE=/__w".into()));
+        assert!(executor.runner().calls.iter().any(|(_, args)| {
+            args.first().is_some_and(|arg| arg == "exec")
+                && args.iter().any(|arg| arg == "/__t/consume.sh")
+        }));
+        let event = fs::read_to_string(temp.join("_github_workflow/event.json")).unwrap();
+        assert!(event.contains("\"pull_request\""));
         fs::remove_dir_all(temp).unwrap();
     }
 
