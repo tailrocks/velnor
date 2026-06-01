@@ -127,7 +127,11 @@ impl JobContainerSpec {
             "-v".into(),
             mount(&self.workspace_host, "/__w"),
             "-v".into(),
+            mount(&self.workspace_host, "/github/workspace"),
+            "-v".into(),
             mount(&self.temp_host, "/__t"),
+            "-v".into(),
+            mount(&self.temp_host, "/github/runner_temp"),
             "-v".into(),
             mount(&self.home_host, "/github/home"),
             "-v".into(),
@@ -200,7 +204,11 @@ impl JobContainerSpec {
             "-v".into(),
             mount(&self.workspace_host, "/__w"),
             "-v".into(),
+            mount(&self.workspace_host, "/github/workspace"),
+            "-v".into(),
             mount(&self.temp_host, "/__t"),
+            "-v".into(),
+            mount(&self.temp_host, "/github/runner_temp"),
             "-v".into(),
             mount(&self.home_host, "/github/home"),
             "-v".into(),
@@ -500,7 +508,10 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--network", "velnor-net-1"]));
+        assert!(args.windows(2).any(|pair| pair == ["--workdir", "/__w"]));
         assert!(args.contains(&"/tmp/work:/__w".into()));
+        assert!(args.contains(&"/tmp/work:/github/workspace".into()));
+        assert!(args.contains(&"/tmp/temp:/github/runner_temp".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
         assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"HOME=/github/home".into()));

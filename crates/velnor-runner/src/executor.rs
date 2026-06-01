@@ -686,6 +686,8 @@ where
         let action_state = state.with_env(action_context_env(&action.env));
         let mut env = action_state.step_env(&[]);
         env.extend(action_state.resolve_env(&action.env));
+        set_env_value(&mut env, "GITHUB_WORKSPACE", "/github/workspace");
+        set_env_value(&mut env, "RUNNER_TEMP", "/github/runner_temp");
         env.extend(command_files.env.iter().cloned());
         let entrypoint = action
             .entrypoint
@@ -697,7 +699,7 @@ where
             .map(|value| state.resolve_expressions(value))
             .collect::<Vec<_>>();
         let exec_args = container.run_docker_action_args(
-            "/__w",
+            "/github/workspace",
             &env,
             &action.image,
             entrypoint.as_deref(),
@@ -846,6 +848,14 @@ fn action_context_env(env: &[(String, String)]) -> Vec<(String, String)> {
         })
         .cloned()
         .collect()
+}
+
+fn set_env_value(env: &mut Vec<(String, String)>, name: &str, value: &str) {
+    if let Some((_, existing)) = env.iter_mut().find(|(key, _)| key == name) {
+        *existing = value.to_string();
+    } else {
+        env.push((name.to_string(), value.to_string()));
+    }
 }
 
 #[derive(Debug, Default)]
@@ -3739,6 +3749,23 @@ mod tests {
         assert_eq!(results.len(), 1);
         let calls = &executor.runner().calls;
         assert_eq!(calls[2].1[0], "run");
+        assert!(calls[2]
+            .1
+            .windows(2)
+            .any(|pair| pair == ["--workdir", "/github/workspace"]));
+        assert!(calls[2].1.contains(&format!(
+            "{}:/github/workspace",
+            temp.join("work").display()
+        )));
+        assert!(calls[2]
+            .1
+            .contains(&format!("{}:/github/runner_temp", temp.display())));
+        assert!(calls[2]
+            .1
+            .contains(&"GITHUB_WORKSPACE=/github/workspace".into()));
+        assert!(calls[2]
+            .1
+            .contains(&"RUNNER_TEMP=/github/runner_temp".into()));
         assert!(calls[2].1.contains(&"INPUT_NAME=value".into()));
         assert!(calls[2]
             .1

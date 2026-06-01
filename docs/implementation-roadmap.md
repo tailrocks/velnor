@@ -120,6 +120,7 @@ Deliverables:
 - JavaScript actions run in a short-lived Node side container selected from `runs.using` with the same workspace/temp/actions/tools mounts and job network, so job images do not need to provide Node; `--node-action-image` can override this when an operator supplies a custom image that already contains the required Node runtime and tools such as Docker CLI
 - JavaScript post hooks: `runs.post` is resolved, respects target `runs.post-if` conditions such as `success()`, executes in reverse order after main steps, and receives `STATE_*` values saved through `GITHUB_STATE`
 - Docker action handler: `runs.using: docker` actions are planned and run as short-lived Docker containers on the job network; `docker://` images are used directly, and local Dockerfile actions are built before execution
+- Docker action containers use GitHub's static action-container paths for workspace/temp aliases: `/github/workspace` and `/github/runner_temp`, while keeping Velnor's shared `/__w` and `/__t` mounts available
 - `INPUT_*` environment variables: planned action inputs and metadata defaults are converted to `INPUT_*` for JavaScript invocation
 - step `env:` from GitHub job messages is parsed for script and JavaScript action steps, with basic expression resolution at execution time
 - workflow/job `env:` from GitHub job messages is overlaid into the runtime environment; protected `GITHUB_*`/`RUNNER_*` defaults are not overwritten
