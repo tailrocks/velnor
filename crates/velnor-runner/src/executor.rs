@@ -1206,6 +1206,7 @@ impl JobExecutionState {
     fn resolve_context_data_expression(&self, expression: &str) -> Option<String> {
         self.resolve_context_data_value(expression)
             .and_then(context_value_string)
+            .or_else(|| missing_context_value(expression))
     }
 
     fn resolve_context_data_value(&self, expression: &str) -> Option<&Value> {
@@ -1217,6 +1218,15 @@ impl JobExecutionState {
         }
         Some(value)
     }
+}
+
+fn missing_context_value(expression: &str) -> Option<String> {
+    let expression = expression.trim();
+    if expression.starts_with("github.event.") {
+        return Some(String::new());
+    }
+    let root = expression.split('.').next()?;
+    matches!(root, "matrix" | "needs" | "inputs" | "vars" | "secrets").then(String::new)
 }
 
 fn evaluate_job_outputs(
@@ -2313,6 +2323,14 @@ mod tests {
             state.resolve_expressions("token=${{ secrets.DOCKERHUB_TOKEN }}"),
             "token=docker_secret"
         );
+        assert_eq!(
+            state.resolve_expressions("missing=${{ github.event.issue.number }}"),
+            "missing="
+        );
+        assert_eq!(
+            state.resolve_expressions("missing-input=${{ inputs.publish }}"),
+            "missing-input="
+        );
         assert!(state.evaluate_condition(Some("matrix.zigbuild")));
         assert!(state.evaluate_condition(Some("contains(matrix.target, 'apple')")));
         assert!(state.evaluate_condition(Some("needs.test-bitcoin-processor.result == 'failure'")));
@@ -2329,6 +2347,74 @@ mod tests {
         assert!(
             state.evaluate_condition(Some("(github.event_name == 'workflow_dispatch') == true"))
         );
+    }
+
+    #[test]
+    fn target_workflow_expressions_use_supported_subset() {
+        let workflow_roots = [
+            Path::new("/tmp/velnor-targets/jackin/.github/workflows"),
+            Path::new("/tmp/velnor-targets-java/java-monorepo/.github/workflows"),
+        ];
+        if workflow_roots.iter().all(|root| !root.exists()) {
+            return;
+        }
+
+        let workspace = std::env::current_dir().unwrap();
+        let state = JobExecutionState::new_with_workspace(
+            &[
+                ("GITHUB_EVENT_NAME".into(), "workflow_dispatch".into()),
+                ("GITHUB_REF".into(), "refs/heads/main".into()),
+                ("GITHUB_REF_NAME".into(), "main".into()),
+                ("GITHUB_REPOSITORY".into(), "jackin-project/jackin".into()),
+                ("GITHUB_SHA".into(), "abc123".into()),
+                ("GITHUB_TOKEN".into(), "ghs_token".into()),
+                ("GITHUB_WORKFLOW".into(), "CI".into()),
+                ("GITHUB_WORKSPACE".into(), "/__w".into()),
+                ("RUNNER_OS".into(), "Linux".into()),
+                ("DOCS_SITE_URL".into(), "https://docs.example".into()),
+                (
+                    "JACKIN_REPO_EDIT_URL".into(),
+                    "https://github.com/jackin-project/jackin/edit/main".into(),
+                ),
+                (
+                    "JACKIN_REPO_BLOB_URL".into(),
+                    "https://github.com/jackin-project/jackin/blob/main".into(),
+                ),
+                (
+                    "REGISTRY_IMAGE".into(),
+                    "docker.io/jackinproject/jackin".into(),
+                ),
+                ("DIGEST_DIR".into(), "/tmp/digests".into()),
+                ("BUILDX_BUILDER".into(), "velnor-builder".into()),
+            ],
+            &target_expression_context(),
+            &workspace,
+        );
+
+        for root in workflow_roots.into_iter().filter(|root| root.exists()) {
+            for path in workflow_files(root) {
+                let contents = fs::read_to_string(&path).unwrap();
+                let yaml = serde_yaml::from_str::<serde_yaml::Value>(&contents).unwrap();
+                let mut strings = Vec::new();
+                collect_yaml_strings(&yaml, &mut strings);
+                for value in strings {
+                    if value.contains("${{") {
+                        let rendered = state.resolve_expressions(value);
+                        assert!(
+                            !rendered.contains("${{"),
+                            "{} left unresolved expression in {value:?}: {rendered:?}",
+                            path.display()
+                        );
+                    }
+                }
+
+                let mut conditions = Vec::new();
+                collect_yaml_key_strings(&yaml, "if", &mut conditions);
+                for condition in conditions {
+                    state.evaluate_condition(Some(condition));
+                }
+            }
+        }
     }
 
     #[test]
@@ -3639,5 +3725,173 @@ mod tests {
             "/__a/_actions/rust-cache/dist/save/index.js".into()
         ]));
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    fn target_expression_context() -> Vec<(String, Value)> {
+        vec![
+            (
+                "github".into(),
+                serde_json::json!({
+                    "event": {
+                        "pull_request": { "number": 42 },
+                        "workflow_run": {
+                            "conclusion": "success",
+                            "head_branch": "main",
+                            "head_sha": "def456"
+                        }
+                    }
+                }),
+            ),
+            (
+                "inputs".into(),
+                serde_json::json!({
+                    "app": "bitcoin-processor-app",
+                    "image": "docker.io/chainargos/bitcoin-processor-app",
+                    "package": "prod",
+                    "packages": "bitcoin-processor-app",
+                    "publish": false,
+                    "push": true,
+                    "targets": "bitcoin-processor-app"
+                }),
+            ),
+            (
+                "matrix".into(),
+                serde_json::json!({
+                    "arch": "x86_64",
+                    "os": "ubuntu-latest",
+                    "platform": "linux-amd64",
+                    "runner": "ubuntu-latest",
+                    "target": "x86_64-unknown-linux-gnu",
+                    "zigbuild": true,
+                    "zigbuild_target": "x86_64-unknown-linux-gnu"
+                }),
+            ),
+            (
+                "needs".into(),
+                serde_json::json!({
+                    "changes": {
+                        "outputs": {
+                            "bake-targets": "bitcoin-processor-app",
+                            "bitcoin-processor": "true",
+                            "blockchain-explorer": "true",
+                            "coingecko-pricing": "true",
+                            "construct": "true",
+                            "docs": "true",
+                            "eth-grpc-server": "true",
+                            "eth-processor": "true",
+                            "is_publish": "false",
+                            "legacy-grpc-server": "true",
+                            "rust": "true",
+                            "tron-grpc-server": "true",
+                            "tron-processor": "true"
+                        },
+                        "result": "success"
+                    },
+                    "check": { "result": "success" },
+                    "check-version": {
+                        "outputs": { "version": "1.2.3" },
+                        "result": "success"
+                    },
+                    "docker-bake": { "result": "success" },
+                    "release": {
+                        "outputs": {
+                            "arm64_linux": "sha",
+                            "arm64_macos": "sha",
+                            "capsule_arm64_linux": "sha",
+                            "capsule_x86_linux": "sha",
+                            "x86_linux": "sha",
+                            "x86_macos": "sha"
+                        },
+                        "result": "success"
+                    },
+                    "source-changed": {
+                        "outputs": {
+                            "sha": "abc123",
+                            "source": "true"
+                        },
+                        "result": "success"
+                    },
+                    "test-bitcoin-processor": { "result": "success" },
+                    "test-blockchain-explorer": { "result": "success" },
+                    "test-coingecko-pricing": { "result": "success" },
+                    "test-eth-grpc-server": { "result": "success" },
+                    "test-eth-processor": { "result": "success" },
+                    "test-legacy-grpc-server": { "result": "success" },
+                    "test-tron-grpc-server": { "result": "success" },
+                    "test-tron-processor": { "result": "success" }
+                }),
+            ),
+            (
+                "secrets".into(),
+                serde_json::json!({
+                    "DOCKERHUB_TOKEN": "secret",
+                    "DOCKERHUB_USERNAME": "user",
+                    "GH_READONLY_TOKEN": "secret",
+                    "GITHUB_TOKEN": "secret",
+                    "HOMEBREW_TAP_TOKEN": "secret",
+                    "RENOVATE_TOKEN": "secret"
+                }),
+            ),
+        ]
+    }
+
+    fn workflow_files(root: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(root) else {
+            return Vec::new();
+        };
+        let mut files = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| matches!(extension, "yml" | "yaml"))
+            })
+            .collect::<Vec<_>>();
+        files.sort();
+        files
+    }
+
+    fn collect_yaml_strings<'a>(value: &'a serde_yaml::Value, strings: &mut Vec<&'a str>) {
+        match value {
+            serde_yaml::Value::String(value) => strings.push(value),
+            serde_yaml::Value::Sequence(sequence) => {
+                for value in sequence {
+                    collect_yaml_strings(value, strings);
+                }
+            }
+            serde_yaml::Value::Mapping(map) => {
+                for (key, value) in map {
+                    collect_yaml_strings(key, strings);
+                    collect_yaml_strings(value, strings);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_yaml_key_strings<'a>(
+        value: &'a serde_yaml::Value,
+        name: &str,
+        strings: &mut Vec<&'a str>,
+    ) {
+        match value {
+            serde_yaml::Value::Mapping(map) => {
+                for (key, value) in map {
+                    if key.as_str() == Some(name) {
+                        if let Some(value) = value.as_str() {
+                            strings.push(value);
+                        }
+                    }
+                    collect_yaml_key_strings(value, name, strings);
+                }
+            }
+            serde_yaml::Value::Sequence(sequence) => {
+                for value in sequence {
+                    collect_yaml_key_strings(value, name, strings);
+                }
+            }
+            _ => {}
+        }
     }
 }
