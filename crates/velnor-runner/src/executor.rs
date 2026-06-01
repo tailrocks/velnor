@@ -2656,7 +2656,7 @@ mod tests {
     fn target_workflow_expressions_use_supported_subset() {
         let workflow_roots = [
             Path::new("/tmp/velnor-targets/jackin/.github/workflows"),
-            Path::new("/tmp/velnor-targets-java/java-monorepo/.github/workflows"),
+            Path::new("/tmp/velnor-targets/java-monorepo/.github/workflows"),
         ];
         if workflow_roots.iter().all(|root| !root.exists()) {
             return;

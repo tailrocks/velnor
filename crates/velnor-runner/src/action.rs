@@ -2267,10 +2267,13 @@ runs:
                     };
                     let reference = parse_repository_uses(uses)
                         .unwrap_or_else(|error| panic!("parse uses {uses}: {error:#}"));
-                    let mut action_dir = actions_root.join(sanitize_segment(&reference.repository));
-                    if let Some(source_path) = reference.source_path {
-                        action_dir = action_dir.join(source_path);
-                    }
+                    let action_dir = action_dir(
+                        actions_root,
+                        &reference.repository,
+                        &reference.git_ref,
+                        reference.source_path.as_deref(),
+                    )
+                    .unwrap_or_else(|error| panic!("resolve action dir for {uses}: {error:#}"));
                     checked += 1;
                     if action_metadata_path(&action_dir).is_err() {
                         missing.push(format!("{} -> {}", path.display(), uses));
@@ -2295,7 +2298,7 @@ runs:
         let actions_root = Path::new("/tmp/velnor-actions");
         let workflow_roots = [
             Path::new("/tmp/velnor-targets/jackin/.github/workflows"),
-            Path::new("/tmp/velnor-targets-java/java-monorepo/.github/workflows"),
+            Path::new("/tmp/velnor-targets/java-monorepo/.github/workflows"),
         ];
         if !actions_root.exists() || workflow_roots.iter().all(|root| !root.exists()) {
             return;
@@ -2321,10 +2324,13 @@ runs:
                     {
                         continue;
                     }
-                    let mut action_dir = actions_root.join(sanitize_segment(&reference.repository));
-                    if let Some(source_path) = reference.source_path {
-                        action_dir = action_dir.join(source_path);
-                    }
+                    let action_dir = action_dir(
+                        actions_root,
+                        &reference.repository,
+                        &reference.git_ref,
+                        reference.source_path.as_deref(),
+                    )
+                    .unwrap_or_else(|error| panic!("resolve action dir for {uses}: {error:#}"));
                     checked += 1;
                     if action_metadata_path(&action_dir).is_err() {
                         missing.push(format!("{} -> {}", path.display(), uses));
