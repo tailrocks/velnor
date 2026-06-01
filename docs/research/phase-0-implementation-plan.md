@@ -15,6 +15,8 @@ Sources inspected on 2026-05-31:
 - https://github.com/jackin-project/jackin/tree/main/.github
 - https://github.com/ChainArgos/java-monorepo/tree/main/.github
 
+Current upstream line-level audit: `docs/research/actions-runner-source-audit-2026-06-01.md`.
+
 ## Product Rule
 
 Phase 0 is not a new workflow language.

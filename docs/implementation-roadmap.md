@@ -3,6 +3,7 @@
 This roadmap is ordered for the real first goal: run existing GitHub Actions YAML on a Rust Velnor self-hosted runner replacement.
 
 Detailed Phase 0 implementation research lives in `docs/research/phase-0-implementation-plan.md`.
+The current upstream source audit is `docs/research/actions-runner-source-audit-2026-06-01.md`.
 
 ## Milestone 0: Protocol Spike
 
