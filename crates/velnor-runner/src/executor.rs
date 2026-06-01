@@ -2024,7 +2024,7 @@ fn native_upload_artifact(
         });
     }
 
-    let artifact_id = "777".to_string();
+    let artifact_id = artifact_id_for_name(state, &name);
     let digest = hash_artifact_dir(&artifact_dir)?;
     let results_url = action_state
         .env
@@ -2283,6 +2283,17 @@ fn artifact_run_key(state: &JobExecutionState) -> String {
         .map(String::as_str)
         .unwrap_or("1");
     sanitize_artifact_name(&format!("{run_id}-{attempt}"))
+}
+
+fn artifact_id_for_name(state: &JobExecutionState, name: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(artifact_run_key(state).as_bytes());
+    hasher.update(b"\0");
+    hasher.update(name.as_bytes());
+    let digest = hasher.finalize();
+    let mut id_bytes = [0u8; 8];
+    id_bytes.copy_from_slice(&digest[..8]);
+    u64::from_be_bytes(id_bytes).to_string()
 }
 
 fn artifact_paths(paths: &str) -> Vec<String> {
@@ -7389,10 +7400,17 @@ fi"#
         assert!(results[0]
             .stdout
             .contains("Cache path: ~/.cache/rust-script"));
-        assert_eq!(results[1].state.outputs["artifact-id"], "777");
+        let expected_artifact_id = artifact_id_for_name(
+            &JobExecutionState::new(&runtime_env),
+            "construct-digest-linux-amd64",
+        );
+        assert_eq!(
+            results[1].state.outputs["artifact-id"],
+            expected_artifact_id
+        );
         assert_eq!(
             results[1].state.outputs["artifact-url"],
-            "https://results.actions/artifacts/777"
+            format!("https://results.actions/artifacts/{expected_artifact_id}")
         );
         assert_eq!(
             results[2].state.outputs["download-path"],
@@ -7480,6 +7498,22 @@ fi"#
             .join("_velnor_artifacts/123456-1/construct-digest-linux-amd64/linux-amd64.digest")
             .exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_artifact_ids_are_stable_per_run_and_name() {
+        let state = JobExecutionState::new(&[
+            ("GITHUB_RUN_ID".into(), "123456".into()),
+            ("GITHUB_RUN_ATTEMPT".into(), "1".into()),
+        ]);
+
+        let first = artifact_id_for_name(&state, "construct-digest-linux-amd64");
+        let repeat = artifact_id_for_name(&state, "construct-digest-linux-amd64");
+        let second = artifact_id_for_name(&state, "construct-digest-linux-arm64");
+
+        assert_eq!(first, repeat);
+        assert_ne!(first, second);
+        assert!(first.parse::<u64>().is_ok());
     }
 
     #[test]
@@ -7645,7 +7679,7 @@ fi"#
                     .into(),
                     env: Vec::new(),
                 },
-                condition: Some("steps.pages-artifact.outputs.artifact_id == '777'".into()),
+                condition: Some("steps.pages-artifact.outputs.artifact_id != ''".into()),
                 continue_on_error: false,
             },
         ];
@@ -7687,7 +7721,12 @@ fi"#
             .unwrap();
 
         assert_eq!(results.len(), 4);
-        assert_eq!(results[2].state.outputs["artifact_id"], "777");
+        let expected_artifact_id =
+            artifact_id_for_name(&JobExecutionState::new(&runtime_env), "github-pages");
+        assert_eq!(
+            results[2].state.outputs["artifact_id"],
+            expected_artifact_id
+        );
         assert_eq!(
             results[3].state.outputs["page_url"],
             "https://jackin-project.github.io/jackin/"
