@@ -198,12 +198,7 @@ where
         steps: &[ScriptStep],
         temp_host: &Path,
     ) -> Result<Vec<StepExecutionResult>> {
-        self.run_docker(&container.create_network_args())?;
-        for service in &container.services {
-            self.run_docker(&service.start_args())?;
-            self.wait_for_service(service)?;
-        }
-        self.run_docker(&container.start_args())?;
+        self.start_job_environment(container)?;
 
         let ordered = steps
             .iter()
@@ -267,12 +262,7 @@ where
         job_outputs: Option<&Value>,
         temp_host: &Path,
     ) -> Result<JobExecutionSummary> {
-        self.run_docker(&container.create_network_args())?;
-        for service in &container.services {
-            self.run_docker(&service.start_args())?;
-            self.wait_for_service(service)?;
-        }
-        self.run_docker(&container.start_args())?;
+        self.start_job_environment(container)?;
 
         let result = self.execute_ordered_steps_in_started_container(
             container,
@@ -514,12 +504,7 @@ where
         action: &JavaScriptActionInvocation,
         temp_host: &Path,
     ) -> Result<StepExecutionResult> {
-        self.run_docker(&container.create_network_args())?;
-        for service in &container.services {
-            self.run_docker(&service.start_args())?;
-            self.wait_for_service(service)?;
-        }
-        self.run_docker(&container.start_args())?;
+        self.start_job_environment(container)?;
 
         let result = (|| {
             self.execute_javascript_action_in_started_container(
@@ -675,6 +660,33 @@ where
         }
         network_result?;
         Ok(())
+    }
+
+    fn start_job_environment(&mut self, container: &JobContainerSpec) -> Result<()> {
+        if let Err(error) = self.start_job_environment_once(container) {
+            eprintln!("Docker job environment start failed, removing stale resources: {error:#}");
+            self.cleanup_stale(container);
+            self.start_job_environment_once(container)?;
+        }
+        Ok(())
+    }
+
+    fn start_job_environment_once(&mut self, container: &JobContainerSpec) -> Result<()> {
+        self.run_docker(&container.create_network_args())?;
+        for service in &container.services {
+            self.run_docker(&service.start_args())?;
+            self.wait_for_service(service)?;
+        }
+        self.run_docker(&container.start_args())?;
+        Ok(())
+    }
+
+    fn cleanup_stale(&mut self, container: &JobContainerSpec) {
+        self.run_docker(&container.remove_container_args()).ok();
+        for service in container.services.iter().rev() {
+            self.run_docker(&service.remove_args()).ok();
+        }
+        self.run_docker(&container.remove_network_args()).ok();
     }
 
     fn run_docker(&mut self, args: &[String]) -> Result<CommandResult> {
@@ -1869,6 +1881,37 @@ mod tests {
         assert!(calls[1].1.windows(2).any(|pair| pair == ["--name", "svc"]));
         assert_eq!(calls[2].1[0], "inspect");
         assert_eq!(calls[3].1[0], "run");
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn retries_start_after_removing_stale_job_resources() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ScriptStep {
+            id: "step1".into(),
+            script: "echo one".into(),
+            shell: Shell::Bash,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+        }];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+            calls: Vec::new(),
+            codes: vec![1, 0, 0, 0, 0, 0, 0, 0],
+        });
+
+        let results = executor
+            .execute_steps(&container(&temp), &steps, &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        let calls = &executor.runner().calls;
+        assert_eq!(calls[0].1, vec!["network", "create", "net"]);
+        assert_eq!(calls[1].1, vec!["rm", "--force", "job"]);
+        assert_eq!(calls[2].1, vec!["network", "rm", "net"]);
+        assert_eq!(calls[3].1, vec!["network", "create", "net"]);
         fs::remove_dir_all(temp).unwrap();
     }
 

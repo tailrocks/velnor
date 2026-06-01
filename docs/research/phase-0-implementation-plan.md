@@ -129,6 +129,8 @@ When GitHub sends an explicit job container image, Velnor uses that image for th
 
 Basic service containers from GitHub container resources are started on the same per-job Docker network before the job container, using the GitHub alias as Docker network alias. Velnor passes resource environment variables, port mappings, and container options to Docker, waits for Docker health/running status before starting the job container, then removes services during cleanup. Job container `options`/`createOptions` are also passed through to Docker.
 
+If Docker startup fails, Velnor removes any stale job container, service containers, and job network with the same generated names, then retries startup once. This covers crash/restart cases where a previous Velnor process exited before normal cleanup.
+
 Velnor mounts one host-backed home directory at `/github/home` and sets `HOME=/github/home` for the long-running job container, JavaScript action side containers, and Docker action containers. This is required for target setup actions such as `jdx/mise-action` because tools installed under `$HOME` must remain visible to later script steps.
 
 Current code also treats enabled `actions/checkout` as a native host-side checkout before starting the Docker job container. It uses the self repository resource clone URL, job version/ref, and system access token by default; explicit `repository`, `path`, `ref`, `token`, and `fetch-depth` inputs are supported for target shapes such as Jackin's Homebrew tap checkout. Submodules, sparse checkout, LFS, and full credential cleanup remain later compatibility work.
