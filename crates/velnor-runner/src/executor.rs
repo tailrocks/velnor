@@ -2508,6 +2508,8 @@ mod tests {
                 ("GITHUB_REF".into(), "refs/heads/main".into()),
                 ("GITHUB_REF_NAME".into(), "main".into()),
                 ("GITHUB_REPOSITORY".into(), "jackin-project/jackin".into()),
+                ("GITHUB_RUN_ID".into(), "123456".into()),
+                ("GITHUB_RUN_NUMBER".into(), "42".into()),
                 ("GITHUB_SHA".into(), "abc123".into()),
                 ("GITHUB_TOKEN".into(), "ghs_token".into()),
                 ("GITHUB_WORKFLOW".into(), "CI".into()),
@@ -2555,6 +2557,63 @@ mod tests {
                 for condition in conditions {
                     state.evaluate_condition(Some(condition));
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn cached_target_action_metadata_expressions_use_supported_subset() {
+        let actions_root = Path::new("/tmp/velnor-actions");
+        if !actions_root.exists() {
+            return;
+        }
+
+        let workspace = std::env::current_dir().unwrap();
+        let state = JobExecutionState::new_with_workspace(
+            &[
+                ("GITHUB_ACTION".into(), "setup".into()),
+                (
+                    "GITHUB_ACTION_PATH".into(),
+                    "/__a/_actions/acme_action/v1".into(),
+                ),
+                ("CACHE_HIT".into(), "false".into()),
+                ("CACHE_KEY".into(), "node_modules-cache".into()),
+                ("GITHUB_EVENT_NAME".into(), "workflow_dispatch".into()),
+                ("GITHUB_REF".into(), "refs/heads/main".into()),
+                ("GITHUB_REPOSITORY".into(), "jackin-project/jackin".into()),
+                ("GITHUB_RUN_ID".into(), "123456".into()),
+                ("GITHUB_RUN_NUMBER".into(), "42".into()),
+                ("GITHUB_SHA".into(), "abc123".into()),
+                ("GITHUB_TOKEN".into(), "ghs_token".into()),
+                ("GITHUB_WORKSPACE".into(), "/__w".into()),
+                ("RUNNER_OS".into(), "Linux".into()),
+                ("RUNNER_TEMP".into(), "/__t".into()),
+                ("RUNNER_TOOL_CACHE".into(), "/__tool".into()),
+            ],
+            &target_expression_context(),
+            &workspace,
+        );
+
+        for path in action_metadata_files(actions_root) {
+            let contents = fs::read_to_string(&path).unwrap();
+            let yaml = serde_yaml::from_str::<serde_yaml::Value>(&contents).unwrap();
+            let mut strings = Vec::new();
+            collect_yaml_strings(&yaml, &mut strings);
+            for value in strings {
+                if value.contains("${{") {
+                    let rendered = state.resolve_expressions(value);
+                    assert!(
+                        !rendered.contains("${{"),
+                        "{} left unresolved expression in {value:?}: {rendered:?}",
+                        path.display()
+                    );
+                }
+            }
+
+            let mut conditions = Vec::new();
+            collect_yaml_key_strings(&yaml, "if", &mut conditions);
+            for condition in conditions {
+                state.evaluate_condition(Some(condition));
             }
         }
     }
@@ -4147,6 +4206,33 @@ mod tests {
             .collect::<Vec<_>>();
         files.sort();
         files
+    }
+
+    fn action_metadata_files(root: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        collect_action_metadata_files(root, &mut files);
+        files.sort();
+        files
+    }
+
+    fn collect_action_metadata_files(root: &Path, files: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_action_metadata_files(&path, files);
+                continue;
+            }
+            if path
+                .file_name()
+                .and_then(|file_name| file_name.to_str())
+                .is_some_and(|file_name| matches!(file_name, "action.yml" | "action.yaml"))
+            {
+                files.push(path);
+            }
+        }
     }
 
     fn collect_yaml_strings<'a>(value: &'a serde_yaml::Value, strings: &mut Vec<&'a str>) {
