@@ -144,7 +144,7 @@ Deliverables:
   - `github.action_status` is expression-resolvable for composite action steps from the current composite scope, while top-level steps fall back to current job status
   - basic `RUNNER_*` variables are injected for the Docker runner environment, including GitHub-style `RUNNER_ARCH` values such as `X64`/`ARM64`, `RUNNER_NAME`, `RUNNER_WORKSPACE`, `RUNNER_ENVIRONMENT=self-hosted`, `RUNNER_TOOL_CACHE=/__tool`, matching `AGENT_TOOLSDIRECTORY=/__tool` for toolcache actions, and `RUNNER_DEBUG=1` when `ACTIONS_STEP_DEBUG=true`
   - action runtime values from `SystemVssConnection` are injected: `ACTIONS_RUNTIME_URL`, `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_CACHE_URL`, `ACTIONS_RESULTS_URL`, OIDC request URL/token, cache service v2, and orchestration id when GitHub sends them
-  - target-shaped cache, artifact, and runtime-export execution is covered by executor tests: `actions/cache` now runs through the native adapter with multiline key/restore-key and multi-pattern `hashFiles(...)` inputs; artifact sidecars still verify runtime/cache/results URLs, runtime token, workspace, runner temp, run id, repository, retention env, direct `actions/upload-artifact` `name`/`path`/`if-no-files-found`/`retention-days` inputs, `actions/download-artifact` `pattern`/`path`/`merge-multiple` inputs, and `crazy-max/ghaction-github-runtime` inputs are present
+  - target-shaped cache, artifact, and runtime-export execution is covered by executor tests: `actions/cache`, `actions/upload-artifact`, `actions/download-artifact`, `actions/deploy-pages`, and `crazy-max/ghaction-github-runtime` now run through native adapters for the target input shapes; upload/download currently use Velnor temp-backed artifact storage, so cross-job GitHub artifact service upload remains open for live parity
   - target-shaped Docker JavaScript action sidecars are covered by executor tests that verify `/var/run/docker.sock`, host Docker CLI, Buildx plugin mounts, repository/token/temp env, and action inputs reach `docker/setup-buildx-action`, `docker/login-action`, `docker/metadata-action`, `docker/build-push-action`, and `docker/bake-action` including its post hook
   - broader GitHub runner env parity remains incomplete
 - `secrets.*` expressions are resolved from GitHub secret job variables, including `secrets.GITHUB_TOKEN` from `system.github.token`; GitHub mask hints and secret variables are applied to runner-uploaded feed lines, and `::add-mask::` workflow commands are tracked for later step log masking
@@ -209,7 +209,7 @@ Deliverables:
 - ensure mounted paths match action expectations
 - resolve target cache keys that use `${{ hashFiles(...) }}` against the checked-out workspace
 - support native `actions/cache` miss behavior, outputs, state, and `fail-on-cache-miss`
-- support upload/download artifact actions
+- support native upload/download artifact actions for same-run handoff; add GitHub artifact service transport for cross-job live parity
 
 Exit criteria:
 

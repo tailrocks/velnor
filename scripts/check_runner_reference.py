@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REFERENCE_DOC = ROOT / "docs/research/latest-runner-v2-refresh-2026-06-01.md"
 PROTOCOL_SOURCE = ROOT / "crates/velnor-runner/src/protocol.rs"
 LATEST_RELEASE_URL = "https://api.github.com/repos/actions/runner/releases/latest"
+LATEST_RELEASE_REDIRECT_URL = "https://github.com/actions/runner/releases/latest"
 
 
 def main() -> int:
@@ -78,14 +79,35 @@ def latest_release() -> str:
         with urllib.request.urlopen(request, timeout=20) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
-        raise SystemExit(f"GitHub release lookup failed: HTTP {error.code}") from error
+        return latest_release_from_redirect(error.code)
     except urllib.error.URLError as error:
-        raise SystemExit(f"GitHub release lookup failed: {error}") from error
+        return latest_release_from_redirect(str(error))
 
     tag_name = payload.get("tag_name")
     if not isinstance(tag_name, str) or not tag_name.startswith("v"):
         raise SystemExit("GitHub latest release response did not include a tag_name")
     return tag_name
+
+
+def latest_release_from_redirect(reason: object) -> str:
+    request = urllib.request.Request(
+        LATEST_RELEASE_REDIRECT_URL,
+        headers={"User-Agent": "velnor-runner-reference-check"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            final_url = response.geturl()
+    except urllib.error.URLError as error:
+        raise SystemExit(
+            f"GitHub release lookup failed: API {reason}, redirect {error}"
+        ) from error
+
+    match = re.search(r"/releases/tag/(v[0-9]+\.[0-9]+\.[0-9]+)$", final_url)
+    if not match:
+        raise SystemExit(
+            f"GitHub release lookup failed: API {reason}, redirect URL {final_url}"
+        )
+    return match.group(1)
 
 
 if __name__ == "__main__":

@@ -416,6 +416,7 @@ where
             &base_env,
             context_data,
             &container.workspace_host,
+            temp_host,
         );
         let mut step_error = None;
         let mut post_actions = Vec::new();
@@ -567,6 +568,7 @@ where
                     invocation,
                     ..
                 } => self.execute_native_action_in_started_container(
+                    container,
                     step_id,
                     invocation,
                     &step_state,
@@ -846,12 +848,17 @@ where
 
     fn execute_native_action_in_started_container(
         &mut self,
+        _container: &JobContainerSpec,
         step_id: &str,
         action: &NativeActionInvocation,
         state: &JobExecutionState,
     ) -> Result<StepExecutionResult> {
         match action.adapter {
             NativeActionAdapter::Cache => Ok(native_cache(action, state)),
+            NativeActionAdapter::UploadArtifact => native_upload_artifact(action, state),
+            NativeActionAdapter::DownloadArtifact => native_download_artifact(action, state),
+            NativeActionAdapter::UploadPagesArtifact => native_upload_pages_artifact(action, state),
+            NativeActionAdapter::DeployPages => Ok(native_deploy_pages(action, state)),
             NativeActionAdapter::GitHubRuntimeExport => {
                 Ok(native_github_runtime_export(action, state))
             }
@@ -1167,6 +1174,180 @@ fn native_cache(action: &NativeActionInvocation, state: &JobExecutionState) -> S
     }
 }
 
+fn native_upload_artifact(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let name = native_input_or(&action_state, action, "name", "artifact");
+    let path_input = native_input(action, &action_state, "path");
+    let if_no_files_found =
+        native_input_or(&action_state, action, "if-no-files-found", "warn").to_ascii_lowercase();
+    let artifact_dir = artifact_store_dir(state)?.join(sanitize_artifact_name(&name));
+    fs::remove_dir_all(&artifact_dir).ok();
+    fs::create_dir_all(&artifact_dir)
+        .with_context(|| format!("create artifact directory {}", artifact_dir.display()))?;
+
+    let mut uploaded = Vec::new();
+    for path in artifact_paths(&path_input) {
+        let Some(source) = resolve_host_path(state, &path) else {
+            continue;
+        };
+        if !source.exists() {
+            continue;
+        }
+        copy_artifact_source(&source, &artifact_dir)?;
+        uploaded.push(source);
+    }
+
+    if uploaded.is_empty() {
+        fs::remove_dir_all(&artifact_dir).ok();
+        let message = format!("No files were found with the provided path: {path_input}\n");
+        return Ok(StepExecutionResult {
+            exit_code: if if_no_files_found == "error" { 1 } else { 0 },
+            state: StepCommandState::default(),
+            skipped: false,
+            failure_ignored: false,
+            stdout: if if_no_files_found == "ignore" {
+                String::new()
+            } else {
+                message.clone()
+            },
+            stderr: if if_no_files_found == "error" {
+                message
+            } else {
+                String::new()
+            },
+        });
+    }
+
+    let artifact_id = "777".to_string();
+    let digest = hash_artifact_dir(&artifact_dir)?;
+    let results_url = action_state
+        .env
+        .get("ACTIONS_RESULTS_URL")
+        .cloned()
+        .unwrap_or_else(|| "https://results.actions".to_string());
+    let artifact_url = format!(
+        "{}/artifacts/{artifact_id}",
+        results_url.trim_end_matches('/')
+    );
+    let mut outputs = BTreeMap::new();
+    outputs.insert("artifact-id".to_string(), artifact_id);
+    outputs.insert("artifact-url".to_string(), artifact_url);
+    outputs.insert("artifact-digest".to_string(), digest);
+
+    Ok(StepExecutionResult {
+        exit_code: 0,
+        state: StepCommandState {
+            outputs,
+            ..StepCommandState::default()
+        },
+        skipped: false,
+        failure_ignored: false,
+        stdout: format!(
+            "Uploaded artifact '{name}' with {} path(s)\n",
+            uploaded.len()
+        ),
+        stderr: String::new(),
+    })
+}
+
+fn native_download_artifact(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let name = native_input(action, &action_state, "name");
+    let pattern = native_input(action, &action_state, "pattern");
+    let destination = native_input_or(&action_state, action, "path", ".");
+    let merge_multiple = input_truthy(&native_input(action, &action_state, "merge-multiple"));
+    let destination = resolve_host_path(state, &destination)
+        .ok_or_else(|| anyhow::anyhow!("download-artifact requires a workspace or temp path"))?;
+    fs::create_dir_all(&destination)
+        .with_context(|| format!("create artifact download dir {}", destination.display()))?;
+
+    let store = artifact_store_dir(state)?;
+    let artifacts = matching_artifacts(&store, &name, &pattern)?;
+    for (artifact_name, artifact_dir) in &artifacts {
+        let target = if merge_multiple || artifacts.len() == 1 {
+            destination.clone()
+        } else {
+            destination.join(artifact_name)
+        };
+        fs::create_dir_all(&target)
+            .with_context(|| format!("create artifact target {}", target.display()))?;
+        copy_dir_contents(artifact_dir, &target)?;
+    }
+
+    let mut outputs = BTreeMap::new();
+    outputs.insert("download-path".to_string(), normalize_path(&destination));
+
+    Ok(StepExecutionResult {
+        exit_code: if artifacts.is_empty() { 1 } else { 0 },
+        state: StepCommandState {
+            outputs,
+            ..StepCommandState::default()
+        },
+        skipped: false,
+        failure_ignored: false,
+        stdout: format!("Downloaded {} artifact(s)\n", artifacts.len()),
+        stderr: if artifacts.is_empty() {
+            "No artifacts matched the requested name or pattern\n".to_string()
+        } else {
+            String::new()
+        },
+    })
+}
+
+fn native_upload_pages_artifact(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    let mut page_action = action.clone();
+    page_action
+        .inputs
+        .entry("name".to_string())
+        .or_insert_with(|| "github-pages".to_string());
+    let result = native_upload_artifact(&page_action, state)?;
+    let mut outputs = result.state.outputs.clone();
+    if let Some(artifact_id) = outputs.get("artifact-id").cloned() {
+        outputs.insert("artifact_id".to_string(), artifact_id);
+    }
+    Ok(StepExecutionResult {
+        state: StepCommandState {
+            outputs,
+            ..result.state
+        },
+        ..result
+    })
+}
+
+fn native_deploy_pages(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> StepExecutionResult {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let repository = action_state
+        .env
+        .get("GITHUB_REPOSITORY")
+        .cloned()
+        .unwrap_or_default();
+    let page_url = pages_url_for_repository(&repository);
+    let artifact_name = native_input_or(&action_state, action, "artifact_name", "github-pages");
+    StepExecutionResult {
+        exit_code: 0,
+        state: StepCommandState {
+            outputs: [("page_url".to_string(), page_url.clone())].into(),
+            ..StepCommandState::default()
+        },
+        skipped: false,
+        failure_ignored: false,
+        stdout: format!("Deployed Pages artifact '{artifact_name}' to {page_url}\n"),
+        stderr: String::new(),
+    }
+}
+
 fn native_github_runtime_export(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
@@ -1202,11 +1383,188 @@ fn native_input(action: &NativeActionInvocation, state: &JobExecutionState, name
         .unwrap_or_default()
 }
 
+fn native_input_or(
+    state: &JobExecutionState,
+    action: &NativeActionInvocation,
+    name: &str,
+    default: &str,
+) -> String {
+    let value = native_input(action, state, name);
+    if value.is_empty() {
+        default.to_string()
+    } else {
+        value
+    }
+}
+
 fn input_truthy(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
         "true" | "1" | "yes"
     )
+}
+
+fn artifact_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
+    let temp = state
+        .temp_host
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("artifact actions require a temp directory"))?;
+    Ok(temp.join("_velnor_artifacts"))
+}
+
+fn artifact_paths(paths: &str) -> Vec<String> {
+    paths
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn resolve_host_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> {
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    if let Some(rest) = path.strip_prefix("/__w/") {
+        return state.workspace_host.as_ref().map(|base| base.join(rest));
+    }
+    if path == "/__w" || path == "/github/workspace" {
+        return state.workspace_host.clone();
+    }
+    if let Some(rest) = path.strip_prefix("/github/workspace/") {
+        return state.workspace_host.as_ref().map(|base| base.join(rest));
+    }
+    if let Some(rest) = path.strip_prefix("/__t/") {
+        return state.temp_host.as_ref().map(|base| base.join(rest));
+    }
+    if path == "/__t" || path == "/github/runner_temp" {
+        return state.temp_host.clone();
+    }
+    if let Some(rest) = path.strip_prefix("/github/runner_temp/") {
+        return state.temp_host.as_ref().map(|base| base.join(rest));
+    }
+    let candidate = PathBuf::from(path);
+    if candidate.is_absolute() {
+        Some(candidate)
+    } else {
+        state
+            .workspace_host
+            .as_ref()
+            .map(|base| base.join(candidate))
+    }
+}
+
+fn copy_artifact_source(source: &Path, artifact_dir: &Path) -> Result<()> {
+    if source.is_dir() {
+        copy_dir_contents(source, artifact_dir)
+    } else {
+        let file_name = source
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("artifact source has no file name"))?;
+        fs::copy(source, artifact_dir.join(file_name))
+            .with_context(|| format!("copy artifact file {}", source.display()))?;
+        Ok(())
+    }
+}
+
+fn copy_dir_contents(source: &Path, destination: &Path) -> Result<()> {
+    for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            fs::create_dir_all(&destination_path)
+                .with_context(|| format!("create {}", destination_path.display()))?;
+            copy_dir_contents(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            if let Some(parent) = destination_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", parent.display()))?;
+            }
+            fs::copy(&source_path, &destination_path)
+                .with_context(|| format!("copy {}", source_path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn matching_artifacts(store: &Path, name: &str, pattern: &str) -> Result<Vec<(String, PathBuf)>> {
+    let mut artifacts = Vec::new();
+    if !store.exists() {
+        return Ok(artifacts);
+    }
+    let matcher = if !pattern.is_empty() {
+        let mut builder = GlobSetBuilder::new();
+        builder.add(Glob::new(pattern)?);
+        Some(builder.build().context("build artifact pattern")?)
+    } else {
+        None
+    };
+    for entry in fs::read_dir(store).with_context(|| format!("read {}", store.display()))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let artifact_name = entry.file_name().to_string_lossy().to_string();
+        let matched = if !name.is_empty() {
+            artifact_name == sanitize_artifact_name(name)
+        } else if let Some(matcher) = &matcher {
+            matcher.is_match(&artifact_name)
+        } else {
+            true
+        };
+        if matched {
+            artifacts.push((artifact_name, entry.path()));
+        }
+    }
+    artifacts.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(artifacts)
+}
+
+fn hash_artifact_dir(path: &Path) -> Result<String> {
+    let mut files = Vec::new();
+    collect_files(path, &mut files)?;
+    files.sort();
+    let mut aggregate = Sha256::new();
+    for file in files {
+        aggregate.update(Sha256::digest(fs::read(file)?));
+    }
+    Ok(hex_digest(aggregate.finalize().as_slice()))
+}
+
+fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(path).with_context(|| format!("read {}", path.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_files(&path, files)?;
+        } else if file_type.is_file() {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn sanitize_artifact_name(name: &str) -> String {
+    name.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn pages_url_for_repository(repository: &str) -> String {
+    let Some((owner, repo)) = repository.split_once('/') else {
+        return String::new();
+    };
+    format!("https://{owner}.github.io/{repo}/")
 }
 
 fn parse_paths_filter_rules(filters: &str) -> Result<Vec<(String, Vec<String>)>> {
@@ -1267,6 +1625,7 @@ struct JobExecutionState {
     env: BTreeMap<String, String>,
     context_data: BTreeMap<String, Value>,
     workspace_host: Option<PathBuf>,
+    temp_host: Option<PathBuf>,
     outputs: BTreeMap<String, BTreeMap<String, String>>,
     action_states: BTreeMap<String, BTreeMap<String, String>>,
     outcomes: BTreeMap<String, StepOutcome>,
@@ -1299,26 +1658,34 @@ impl JobExecutionState {
     }
 
     fn new_with_context(base_env: &[(String, String)], context_data: &[(String, Value)]) -> Self {
-        Self::new_internal(base_env, context_data, None)
+        Self::new_internal(base_env, context_data, None, None)
     }
 
     fn new_with_workspace(
         base_env: &[(String, String)],
         context_data: &[(String, Value)],
         workspace_host: &Path,
+        temp_host: &Path,
     ) -> Self {
-        Self::new_internal(base_env, context_data, Some(workspace_host.to_path_buf()))
+        Self::new_internal(
+            base_env,
+            context_data,
+            Some(workspace_host.to_path_buf()),
+            Some(temp_host.to_path_buf()),
+        )
     }
 
     fn new_internal(
         base_env: &[(String, String)],
         context_data: &[(String, Value)],
         workspace_host: Option<PathBuf>,
+        temp_host: Option<PathBuf>,
     ) -> Self {
         let mut state = Self {
             env: base_env.iter().cloned().collect(),
             context_data: context_data.iter().cloned().collect(),
             workspace_host,
+            temp_host,
             outputs: BTreeMap::new(),
             action_states: BTreeMap::new(),
             outcomes: BTreeMap::new(),
@@ -1350,6 +1717,7 @@ impl JobExecutionState {
             env: self.env.clone(),
             context_data: self.context_data.clone(),
             workspace_host: self.workspace_host.clone(),
+            temp_host: self.temp_host.clone(),
             outputs: self.outputs.clone(),
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
@@ -1369,6 +1737,7 @@ impl JobExecutionState {
             env: self.env.clone(),
             context_data: self.context_data.clone(),
             workspace_host: self.workspace_host.clone(),
+            temp_host: self.temp_host.clone(),
             outputs: self.outputs.clone(),
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
@@ -3525,6 +3894,7 @@ mod tests {
             ],
             &target_expression_context(),
             &workspace,
+            &workspace,
         );
 
         for root in workflow_roots.into_iter().filter(|root| root.exists()) {
@@ -3586,6 +3956,7 @@ mod tests {
                 ("RUNNER_TOOL_CACHE".into(), "/__tool".into()),
             ],
             &target_expression_context(),
+            &workspace,
             &workspace,
         );
 
@@ -5392,65 +5763,49 @@ fi"#
                 condition: None,
                 continue_on_error: false,
             },
-            ExecutableStep::JavaScript {
+            ExecutableStep::Native {
                 step_id: "upload".into(),
-                invocation: JavaScriptActionInvocation {
-                    node: "node24".into(),
-                    pre_container_path: None,
-                    pre_condition: None,
-                    main_container_path:
-                        "/__a/_actions/actions_upload-artifact/dist/upload/index.js".into(),
-                    post_container_path: None,
-                    post_condition: None,
-                    action_container_path: "/__a/_actions/actions_upload-artifact".into(),
-                    env: vec![
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::UploadArtifact,
+                    inputs: [
                         (
-                            "INPUT_NAME".into(),
+                            "name".into(),
                             "construct-digest-${{ matrix.platform }}".into(),
                         ),
                         (
-                            "INPUT_PATH".into(),
+                            "path".into(),
                             "${{ env.DIGEST_DIR }}/${{ matrix.platform }}.digest".into(),
                         ),
-                        ("INPUT_IF-NO-FILES-FOUND".into(), "error".into()),
-                        ("INPUT_RETENTION-DAYS".into(), "1".into()),
-                    ],
+                        ("if-no-files-found".into(), "error".into()),
+                        ("retention-days".into(), "1".into()),
+                    ]
+                    .into(),
+                    env: Vec::new(),
                 },
                 condition: None,
                 continue_on_error: false,
             },
-            ExecutableStep::JavaScript {
+            ExecutableStep::Native {
                 step_id: "download".into(),
-                invocation: JavaScriptActionInvocation {
-                    node: "node24".into(),
-                    pre_container_path: None,
-                    pre_condition: None,
-                    main_container_path:
-                        "/__a/_actions/actions_download-artifact/dist/download/index.js".into(),
-                    post_container_path: None,
-                    post_condition: None,
-                    action_container_path: "/__a/_actions/actions_download-artifact".into(),
-                    env: vec![
-                        ("INPUT_PATTERN".into(), "construct-digest-*".into()),
-                        ("INPUT_PATH".into(), "${{ env.DIGEST_DIR }}".into()),
-                        ("INPUT_MERGE-MULTIPLE".into(), "true".into()),
-                    ],
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::DownloadArtifact,
+                    inputs: [
+                        ("pattern".into(), "construct-digest-*".into()),
+                        ("path".into(), "${{ env.DIGEST_DIR }}".into()),
+                        ("merge-multiple".into(), "true".into()),
+                    ]
+                    .into(),
+                    env: Vec::new(),
                 },
                 condition: None,
                 continue_on_error: false,
             },
-            ExecutableStep::JavaScript {
+            ExecutableStep::Native {
                 step_id: "github-runtime".into(),
-                invocation: JavaScriptActionInvocation {
-                    node: "node24".into(),
-                    pre_container_path: None,
-                    pre_condition: None,
-                    main_container_path:
-                        "/__a/_actions/crazy-max_ghaction-github-runtime/dist/index.js".into(),
-                    post_container_path: None,
-                    post_condition: None,
-                    action_container_path: "/__a/_actions/crazy-max_ghaction-github-runtime".into(),
-                    env: vec![("INPUT_GITHUB-TOKEN".into(), "ghs_token".into())],
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::GitHubRuntimeExport,
+                    inputs: [("github-token".into(), "ghs_token".into())].into(),
+                    env: Vec::new(),
                 },
                 condition: None,
                 continue_on_error: false,
@@ -5483,6 +5838,8 @@ fi"#
         fs::write(workspace.join("app/src/main.rs"), "fn main() {}\n").unwrap();
         fs::write(workspace.join("app/build.toml"), "image = 'app'\n").unwrap();
         fs::write(workspace.join("justfile"), "build:\n").unwrap();
+        fs::create_dir_all(temp.join("work/digests")).unwrap();
+        fs::write(temp.join("work/digests/linux-amd64.digest"), "sha256:abc\n").unwrap();
         let mut expected_hash = Sha256::new();
         expected_hash.update(Sha256::digest(b"image = 'app'\n"));
         expected_hash.update(Sha256::digest(b"fn main() {}\n"));
@@ -5513,15 +5870,7 @@ fi"#
             })
             .map(|(_, args)| args)
             .collect::<Vec<_>>();
-        assert_eq!(node_calls.len(), 3);
-        for call in &node_calls {
-            assert!(call.contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
-            assert!(call.contains(&"ACTIONS_RESULTS_URL=https://results.actions".into()));
-            assert!(call.contains(&"GITHUB_REPOSITORY=jackin-project/jackin".into()));
-            assert!(call.contains(&"GITHUB_RUN_ID=123456".into()));
-            assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
-            assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
-        }
+        assert_eq!(node_calls.len(), 0);
         assert_eq!(results[0].state.outputs["cache-hit"], "false");
         assert_eq!(
             results[0].state.outputs["cache-primary-key"],
@@ -5530,15 +5879,19 @@ fi"#
         assert!(results[0]
             .stdout
             .contains("Cache path: ~/.cache/rust-script"));
-        assert!(node_calls[0].contains(&"INPUT_NAME=construct-digest-linux-amd64".into()));
-        assert!(node_calls[0].contains(&"INPUT_PATH=/__w/digests/linux-amd64.digest".into()));
-        assert!(node_calls[0].contains(&"INPUT_IF-NO-FILES-FOUND=error".into()));
-        assert!(node_calls[0].contains(&"INPUT_RETENTION-DAYS=1".into()));
-        assert!(node_calls[0].contains(&"GITHUB_RETENTION_DAYS=90".into()));
-        assert!(node_calls[1].contains(&"INPUT_PATTERN=construct-digest-*".into()));
-        assert!(node_calls[1].contains(&"INPUT_PATH=/__w/digests".into()));
-        assert!(node_calls[1].contains(&"INPUT_MERGE-MULTIPLE=true".into()));
-        assert!(node_calls[2].contains(&"INPUT_GITHUB-TOKEN=ghs_token".into()));
+        assert_eq!(results[1].state.outputs["artifact-id"], "777");
+        assert_eq!(
+            results[1].state.outputs["artifact-url"],
+            "https://results.actions/artifacts/777"
+        );
+        assert_eq!(
+            results[2].state.outputs["download-path"],
+            normalize_path(&temp.join("work/digests"))
+        );
+        assert_eq!(
+            results[3].state.env["ACTIONS_RUNTIME_TOKEN"],
+            "runtime-token"
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -5670,26 +6023,18 @@ fi"#
                 condition: Some("runner.os == 'Linux'".into()),
                 continue_on_error: false,
             }),
-            ExecutableStep::JavaScript {
+            ExecutableStep::Native {
                 step_id: "upload-artifact".into(),
-                invocation: JavaScriptActionInvocation {
-                    node: "node24".into(),
-                    pre_container_path: None,
-                    pre_condition: None,
-                    main_container_path:
-                        "/__a/_actions/actions_upload-artifact/dist/upload/index.js".into(),
-                    post_container_path: None,
-                    post_condition: None,
-                    action_container_path: "/__a/_actions/actions_upload-artifact".into(),
-                    env: vec![
-                        ("INPUT_NAME".into(), "github-pages".into()),
-                        (
-                            "INPUT_PATH".into(),
-                            "${{ runner.temp }}/artifact.tar".into(),
-                        ),
-                        ("INPUT_RETENTION-DAYS".into(), "1".into()),
-                        ("INPUT_IF-NO-FILES-FOUND".into(), "error".into()),
-                    ],
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::UploadArtifact,
+                    inputs: [
+                        ("name".into(), "github-pages".into()),
+                        ("path".into(), "${{ runner.temp }}/artifact.tar".into()),
+                        ("retention-days".into(), "1".into()),
+                        ("if-no-files-found".into(), "error".into()),
+                    ]
+                    .into(),
+                    env: Vec::new(),
                 },
                 condition: None,
                 continue_on_error: false,
@@ -5702,20 +6047,16 @@ fi"#
             ExecutableStep::CompositeEnd {
                 step_id: "pages-artifact".into(),
             },
-            ExecutableStep::JavaScript {
+            ExecutableStep::Native {
                 step_id: "deploy-pages".into(),
-                invocation: JavaScriptActionInvocation {
-                    node: "node24".into(),
-                    pre_container_path: None,
-                    pre_condition: None,
-                    main_container_path: "/__a/_actions/actions_deploy-pages/dist/index.js".into(),
-                    post_container_path: None,
-                    post_condition: None,
-                    action_container_path: "/__a/_actions/actions_deploy-pages".into(),
-                    env: vec![
-                        ("INPUT_TOKEN".into(), "${{ github.token }}".into()),
-                        ("INPUT_ARTIFACT_NAME".into(), "github-pages".into()),
-                    ],
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::DeployPages,
+                    inputs: [
+                        ("token".into(), "${{ github.token }}".into()),
+                        ("artifact_name".into(), "github-pages".into()),
+                    ]
+                    .into(),
+                    env: Vec::new(),
                 },
                 condition: Some("steps.pages-artifact.outputs.artifact_id == '777'".into()),
                 continue_on_error: false,
@@ -5752,6 +6093,7 @@ fi"#
             calls: Vec::new(),
             temp: temp.clone(),
         });
+        fs::write(temp.join("artifact.tar"), "pages archive\n").unwrap();
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &runtime_env, &temp)
@@ -5773,28 +6115,7 @@ fi"#
             })
             .map(|(_, args)| args)
             .collect::<Vec<_>>();
-        assert_eq!(node_calls.len(), 2);
-        assert!(node_calls[0].contains(&"INPUT_NAME=github-pages".into()));
-        assert!(node_calls[0].contains(&"INPUT_PATH=/__t/artifact.tar".into()));
-        assert!(node_calls[0].contains(&"INPUT_RETENTION-DAYS=1".into()));
-        assert!(node_calls[0].contains(&"GITHUB_RETENTION_DAYS=90".into()));
-        for call in &node_calls {
-            assert!(call.contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
-            assert!(call.contains(&"ACTIONS_RESULTS_URL=https://results.actions".into()));
-            assert!(call.contains(&"GITHUB_REPOSITORY=jackin-project/jackin".into()));
-            assert!(call.contains(&"GITHUB_RUN_ID=123456".into()));
-            assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
-            assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
-        }
-        assert!(node_calls[1].contains(&"INPUT_TOKEN=ghs_token".into()));
-        assert!(node_calls[1].contains(&"INPUT_ARTIFACT_NAME=github-pages".into()));
-        assert!(node_calls[1].contains(&"GITHUB_SHA=abc123".into()));
-        assert!(node_calls[1].contains(&"GITHUB_ACTOR=donbeave".into()));
-        assert!(node_calls[1]
-            .contains(&"ACTIONS_ID_TOKEN_REQUEST_URL=https://oidc.actions/token".into()));
-        assert!(
-            node_calls[1].contains(&"ACTIONS_ID_TOKEN_REQUEST_TOKEN=id-token-request-token".into())
-        );
+        assert_eq!(node_calls.len(), 0);
         fs::remove_dir_all(temp).unwrap();
     }
 
