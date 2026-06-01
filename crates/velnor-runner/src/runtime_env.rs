@@ -14,6 +14,7 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         ("RUNNER_ENVIRONMENT".to_string(), "self-hosted".to_string()),
         ("RUNNER_TEMP".to_string(), "/__t".to_string()),
         ("RUNNER_TOOL_CACHE".to_string(), "/__tool".to_string()),
+        ("AGENT_TOOLSDIRECTORY".to_string(), "/__tool".to_string()),
         ("RUNNER_WORKSPACE".to_string(), "/__w".to_string()),
     ];
 
@@ -249,7 +250,10 @@ fn environment_value(value: &Value) -> String {
 }
 
 fn is_protected_default_env(name: &str) -> bool {
-    name.starts_with("GITHUB_") || name.starts_with("RUNNER_") || name.starts_with("ACTIONS_")
+    name.starts_with("GITHUB_")
+        || name.starts_with("RUNNER_")
+        || name.starts_with("ACTIONS_")
+        || name == "AGENT_TOOLSDIRECTORY"
 }
 
 fn push_var(env: &mut Vec<(String, String)>, name: &str, value: Option<&str>) {
@@ -442,6 +446,8 @@ mod tests {
         assert!(env.contains(&("RUNNER_NAME".into(), runner_name())));
         assert!(env.contains(&("RUNNER_ENVIRONMENT".into(), "self-hosted".into())));
         assert!(env.contains(&("RUNNER_WORKSPACE".into(), "/__w".into())));
+        assert!(env.contains(&("RUNNER_TOOL_CACHE".into(), "/__tool".into())));
+        assert!(env.contains(&("AGENT_TOOLSDIRECTORY".into(), "/__tool".into())));
         assert!(env.contains(&("RUNNER_DEBUG".into(), "1".into())));
         assert!(env.contains(&("GITHUB_JOB".into(), "check".into())));
         assert!(env.contains(&("GITHUB_REPOSITORY".into(), "acme/repo".into())));

@@ -52,6 +52,8 @@ impl JobContainerSpec {
             "RUNNER_TEMP=/__t".into(),
             "-e".into(),
             "RUNNER_TOOL_CACHE=/__tool".into(),
+            "-e".into(),
+            "AGENT_TOOLSDIRECTORY=/__tool".into(),
         ];
         for (name, value) in &self.env {
             args.extend(["-e".into(), format!("{name}={value}")]);
@@ -131,6 +133,10 @@ impl JobContainerSpec {
             mount(&self.tools_host, "/__tool"),
             "-e".into(),
             "HOME=/github/home".into(),
+            "-e".into(),
+            "RUNNER_TOOL_CACHE=/__tool".into(),
+            "-e".into(),
+            "AGENT_TOOLSDIRECTORY=/__tool".into(),
         ];
         if self.mount_docker_socket {
             args.extend([
@@ -198,6 +204,10 @@ impl JobContainerSpec {
             mount(&self.tools_host, "/__tool"),
             "-e".into(),
             "HOME=/github/home".into(),
+            "-e".into(),
+            "RUNNER_TOOL_CACHE=/__tool".into(),
+            "-e".into(),
+            "AGENT_TOOLSDIRECTORY=/__tool".into(),
         ];
         if self.mount_docker_socket {
             args.extend([
@@ -406,6 +416,8 @@ mod tests {
         assert!(args.contains(&"/tmp/work:/__w".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
         assert!(args.contains(&"HOME=/github/home".into()));
+        assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
+        assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"NODE_OPTIONS=--max-old-space-size=4096".into()));
         assert!(args.windows(2).any(|pair| pair == ["--cpus", "2"]));
         assert!(args.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
@@ -478,6 +490,8 @@ mod tests {
         assert!(args.contains(&"/tmp/work:/__w".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
         assert!(args.contains(&"HOME=/github/home".into()));
+        assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
+        assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"GITHUB_OUTPUT=/__t/out".into()));
         assert_eq!(
             &args[args.len() - 3..],
@@ -570,6 +584,8 @@ mod tests {
         assert!(args.contains(&"/tmp/work:/__w".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
         assert!(args.contains(&"HOME=/github/home".into()));
+        assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
+        assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"INPUT_NAME=value".into()));
         assert!(args
             .windows(2)
