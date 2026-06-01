@@ -747,6 +747,12 @@ where
     }
 
     fn start_job_environment_once(&mut self, container: &JobContainerSpec) -> Result<()> {
+        fs::create_dir_all(container.temp_host.join("_github_workflow")).with_context(|| {
+            format!(
+                "create GitHub workflow directory under {}",
+                container.temp_host.display()
+            )
+        })?;
         self.run_docker(&container.create_network_args())?;
         for service in &container.services {
             self.run_docker(&service.start_args())?;
@@ -1554,7 +1560,7 @@ fn prepare_github_event_path(
     fs::create_dir_all(&event_dir).with_context(|| format!("create {}", event_dir.display()))?;
     let event_path = event_dir.join("event.json");
     fs::write(&event_path, payload).with_context(|| format!("write {}", event_path.display()))?;
-    Ok(Some("/__t/_github_workflow/event.json".to_string()))
+    Ok(Some("/github/workflow/event.json".to_string()))
 }
 
 fn github_event_payload(context_data: &[(String, Value)]) -> Option<String> {
@@ -2498,7 +2504,7 @@ mod tests {
             ),
             (
                 "GITHUB_EVENT_PATH".into(),
-                "/__t/_github_workflow/event.json".into(),
+                "/github/workflow/event.json".into(),
             ),
             ("GITHUB_REF".into(), "refs/heads/main".into()),
             ("GITHUB_REPOSITORY_OWNER".into(), "acme".into()),
@@ -2547,10 +2553,7 @@ mod tests {
                 ("ACTION_PATH".into(), "/__a/actions_setup-node/v4".into()),
                 ("ACTION_REF".into(), "v4".into()),
                 ("ACTION_REPOSITORY".into(), "actions/setup-node".into()),
-                (
-                    "EVENT_PATH".into(),
-                    "/__t/_github_workflow/event.json".into()
-                ),
+                ("EVENT_PATH".into(), "/github/workflow/event.json".into()),
                 ("OWNER".into(), "acme".into()),
                 ("SERVER_URL".into(), "https://github.com".into()),
                 ("DOCS_SITE_URL".into(), "https://docs.example".into()),
@@ -2972,7 +2975,7 @@ mod tests {
             .unwrap();
 
         let exec_args = &executor.runner().calls[2].1;
-        assert!(exec_args.contains(&"GITHUB_EVENT_PATH=/__t/_github_workflow/event.json".into()));
+        assert!(exec_args.contains(&"GITHUB_EVENT_PATH=/github/workflow/event.json".into()));
         assert_eq!(
             fs::read_to_string(temp.join("_github_workflow/event.json")).unwrap(),
             r#"{"pull_request":{"number":42},"workflow_run":{"head_sha":"abc123"}}"#
@@ -4145,7 +4148,7 @@ mod tests {
             .iter()
             .any(|arg| arg.starts_with("INPUT_FILTERS=construct:\n")));
         assert!(node_call.contains(&"GITHUB_EVENT_NAME=pull_request".into()));
-        assert!(node_call.contains(&"GITHUB_EVENT_PATH=/__t/_github_workflow/event.json".into()));
+        assert!(node_call.contains(&"GITHUB_EVENT_PATH=/github/workflow/event.json".into()));
         assert!(node_call.contains(&"GITHUB_REPOSITORY=jackin-project/jackin".into()));
         assert!(node_call.contains(&"GITHUB_WORKSPACE=/__w".into()));
         assert!(executor.runner().calls.iter().any(|(_, args)| {

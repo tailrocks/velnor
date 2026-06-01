@@ -44,6 +44,8 @@ impl JobContainerSpec {
             "-v".into(),
             mount(&self.home_host, "/github/home"),
             "-v".into(),
+            mount(&workflow_host(&self.temp_host), "/github/workflow"),
+            "-v".into(),
             mount(&self.actions_host, "/__a"),
             "-v".into(),
             mount(&self.tools_host, "/__tool"),
@@ -129,6 +131,8 @@ impl JobContainerSpec {
             "-v".into(),
             mount(&self.home_host, "/github/home"),
             "-v".into(),
+            mount(&workflow_host(&self.temp_host), "/github/workflow"),
+            "-v".into(),
             mount(&self.actions_host, "/__a"),
             "-v".into(),
             mount(&self.tools_host, "/__tool"),
@@ -199,6 +203,8 @@ impl JobContainerSpec {
             mount(&self.temp_host, "/__t"),
             "-v".into(),
             mount(&self.home_host, "/github/home"),
+            "-v".into(),
+            mount(&workflow_host(&self.temp_host), "/github/workflow"),
             "-v".into(),
             mount(&self.actions_host, "/__a"),
             "-v".into(),
@@ -328,6 +334,10 @@ fn mount(host: &Path, container: &str) -> String {
     format!("{}:{container}", host.display())
 }
 
+fn workflow_host(temp_host: &Path) -> PathBuf {
+    temp_host.join("_github_workflow")
+}
+
 fn node_action_shell_command(path_prepend: &[String], entrypoint_container_path: &str) -> String {
     let joined = path_prepend
         .iter()
@@ -417,6 +427,7 @@ mod tests {
             .any(|pair| pair == ["--name", "velnor-job-1"]));
         assert!(args.contains(&"/tmp/work:/__w".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
+        assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
@@ -491,6 +502,7 @@ mod tests {
             .any(|pair| pair == ["--network", "velnor-net-1"]));
         assert!(args.contains(&"/tmp/work:/__w".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
+        assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
@@ -585,6 +597,7 @@ mod tests {
             .any(|pair| pair == ["--network", "velnor-net-1"]));
         assert!(args.contains(&"/tmp/work:/__w".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
+        assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));

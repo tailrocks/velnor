@@ -78,6 +78,7 @@ Current code progress:
 - Docker job container command builder covers network/container start, `docker exec`, and cleanup command shapes
 - default Docker job image is `ghcr.io/catthehacker/ubuntu:act-latest`, giving target workflows a hosted-runner-like Ubuntu base with common CI tools; `--docker-image` can still override it
 - Docker execution uses a shared `/github/home` mount and `HOME=/github/home` across the job, JavaScript action sidecar, and Docker action containers so setup actions can install tools into a home directory visible to later script steps
+- Docker execution mounts the GitHub workflow directory at `/github/workflow` across the job, JavaScript action sidecar, and Docker action containers; `GITHUB_EVENT_PATH` points at `/github/workflow/event.json`
 - JavaScript actions run in a short-lived sidecar image selected from `runs.using`; `--node-action-image` can override the image when an operator wants a custom Node/tooling bundle
 - on Linux hosts, Velnor mounts the host Docker CLI and Buildx plugin directory into the job container, JavaScript action sidecars, and Docker action containers when it also mounts `/var/run/docker.sock`; target Docker actions such as `docker/setup-buildx-action`, `docker/login-action`, `docker/build-push-action`, and `docker/bake-action` need this client tooling when they talk to the mounted Docker socket
 - script-step plan writes the script under runner temp, exposes per-step command-file env vars, and collects output/env/path/state/summary files after execution
@@ -126,7 +127,7 @@ Deliverables:
   - basic `GITHUB_*` variables are extracted from the job message and injected into script and JavaScript steps, including `GITHUB_ACTIONS=true`
   - target `GITHUB_WORKFLOW` and `GITHUB_REF_NAME` are injected; `GITHUB_REF_NAME` is derived from `GITHUB_REF` when GitHub does not send it directly
   - target GitHub context/env values such as `GITHUB_REPOSITORY_OWNER`, ref metadata, workflow metadata, run attempt, retention days, and server/API URLs are injected when present or derived where safe
-  - `github.event` from job `ContextData` is written to `/__t/_github_workflow/event.json` and exposed through `GITHUB_EVENT_PATH`
+  - `github.event` from job `ContextData` is written to `/github/workflow/event.json` and exposed through `GITHUB_EVENT_PATH`
   - repository JavaScript and Docker actions receive per-action `GITHUB_ACTION`, `GITHUB_ACTION_PATH`, `GITHUB_ACTION_REPOSITORY`, and `GITHUB_ACTION_REF`; these values are present while resolving action env/input expressions such as `${{ github.action_path }}`
   - all executable steps receive step-scoped `GITHUB_ACTION` before condition, env, and script expression rendering
   - `github.action_status` is expression-resolvable for composite action steps from the current composite scope, while top-level steps fall back to current job status
