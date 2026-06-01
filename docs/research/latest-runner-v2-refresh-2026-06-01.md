@@ -17,8 +17,10 @@ scripts/check_runner_reference.py
 ```
 
 This compares the pinned release above with GitHub's latest `actions/runner`
-release. If it fails, refresh this document and re-audit the V2 anchors before
-claiming latest-runner compatibility.
+release and verifies `crates/velnor-runner/src/protocol.rs` advertises the same
+runner version/user-agent. If it fails, refresh this document, update the
+protocol constants, and re-audit the V2 anchors before claiming latest-runner
+compatibility.
 
 This refresh exists because Velnor intentionally follows the latest hosted
 GitHub self-hosted runner path. Classic distributed-task execution remains a
