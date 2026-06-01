@@ -209,7 +209,7 @@ Jackin first-pass scope should be Linux jobs only. macOS replacement is explicit
 Implement action support in the order that unlocks target workflows fastest:
 
 1. Script steps: already partially implemented.
-2. Command files and env/path propagation: implemented for parsing and per-step files, with V2 typed job/step env maps normalized and `GITHUB_PATH` entries applied to later script steps and JavaScript action sidecars.
+2. Command files and env/path propagation: implemented for parsing and per-step files, with V2 typed job/step env and run defaults normalized and `GITHUB_PATH` entries applied to later script steps and JavaScript action sidecars.
 3. `actions/checkout`: either native plugin first or JavaScript action support first. Native plugin is faster for Phase 0.
 4. Marketplace JavaScript action handler:
    - download action repo/ref: implemented for repository action probe path

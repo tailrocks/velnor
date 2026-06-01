@@ -128,10 +128,7 @@ impl RunDefaults {
         let Some(object) = value.as_object() else {
             return Ok(());
         };
-        let run = object
-            .get("run")
-            .or_else(|| object.get("Run"))
-            .or_else(|| object.get("RUN"));
+        let run = object_field(object, &["run", "Run", "RUN"]);
         if let Some(run) = run.and_then(Value::as_object) {
             if let Some(shell) = string_field(run, &["shell", "Shell"]) {
                 github_shell(shell)?;
@@ -153,10 +150,44 @@ impl RunDefaults {
     }
 }
 
+fn object_field<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    names: &[&str],
+) -> Option<&'a Value> {
+    names
+        .iter()
+        .find_map(|name| object.get(*name))
+        .or_else(|| typed_map_field(object, names))
+}
+
 fn string_field<'a>(object: &'a serde_json::Map<String, Value>, names: &[&str]) -> Option<&'a str> {
     names
         .iter()
-        .find_map(|name| object.get(*name).and_then(Value::as_str))
+        .find_map(|name| object.get(*name).and_then(input_value_as_str))
+        .or_else(|| typed_map_field(object, names).and_then(input_value_as_str))
+}
+
+fn typed_map_field<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    names: &[&str],
+) -> Option<&'a Value> {
+    let map = object.get("map").or_else(|| object.get("Map"))?;
+    if let Some(map) = map.as_object() {
+        return names.iter().find_map(|name| map.get(*name));
+    }
+    map.as_array().and_then(|items| {
+        items.iter().find_map(|item| {
+            let item = item.as_object()?;
+            let name = input_name_field(item)?;
+            if !names
+                .iter()
+                .any(|expected| name.eq_ignore_ascii_case(expected))
+            {
+                return None;
+            }
+            item.get("value").or_else(|| item.get("Value"))
+        })
+    })
 }
 
 fn string_input_field<'a>(
@@ -907,6 +938,46 @@ mod tests {
         assert_eq!(
             mapped[1].working_directory_container,
             "/__w/repo/backend-rust"
+        );
+    }
+
+    #[test]
+    fn applies_run_service_typed_job_run_defaults() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "kestra",
+                "reference": { "type": "Script" },
+                "inputs": {
+                    "type": "map",
+                    "map": [
+                        { "Key": { "lit": "script" }, "Value": { "lit": "just build-jvm-base" } }
+                    ]
+                }
+            }
+        ]))
+        .unwrap();
+        let defaults = vec![serde_json::json!({
+            "type": "map",
+            "map": [
+                {
+                    "Key": { "lit": "run" },
+                    "Value": {
+                        "type": "map",
+                        "map": [
+                            { "Key": { "lit": "shell" }, "Value": { "lit": "bash" } },
+                            { "Key": { "lit": "workingDirectory" }, "Value": { "lit": "./kestra-docker-containers" } }
+                        ]
+                    }
+                }
+            ]
+        })];
+
+        let mapped = github_script_steps_with_defaults(&steps, "/__w/repo", &defaults).unwrap();
+
+        assert!(matches!(mapped[0].shell, Shell::Bash));
+        assert_eq!(
+            mapped[0].working_directory_container,
+            "/__w/repo/kestra-docker-containers"
         );
     }
 
