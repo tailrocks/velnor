@@ -310,6 +310,8 @@ These prove the current target action inventory, target-local composites, expres
 
 The remaining proof must be live, not just unit-level:
 
+Live runbook: `docs/target-live-runbook.md`.
+
 1. Register Velnor with labels needed by `java-monorepo` first: `hetzner-sentry-ci`. The CLI `--target-mvp-labels` preset now adds this plus the x64 Linux Jackin labels.
 2. Run one small `java-monorepo` workflow through GitHub UI on Velnor.
 3. Run Docker-heavy `rust-docker.yml` or `rust-docker-build.yml` on a host where Docker bind mounts are visible to the daemon.

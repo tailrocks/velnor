@@ -72,3 +72,5 @@ GitHub runner protocol contract: [docs/research/github-runner-protocol-contract.
 GitHub runner job-message contract: [docs/research/github-runner-job-message-contract-2026-06-01.md](docs/research/github-runner-job-message-contract-2026-06-01.md).
 
 Self-hosted runner implementation blueprint: [docs/research/self-hosted-runner-implementation-blueprint-2026-06-01.md](docs/research/self-hosted-runner-implementation-blueprint-2026-06-01.md).
+
+Target live validation runbook: [docs/target-live-runbook.md](docs/target-live-runbook.md).
