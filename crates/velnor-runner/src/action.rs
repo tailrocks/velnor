@@ -643,33 +643,29 @@ fn composite_action_invocations_with_path(
             .map(crate::script_step::github_shell)
             .transpose()?
             .unwrap_or(crate::container::Shell::Bash);
-        let mut rendered = render_composite_scoped_value(
+        let rendered = render_composite_scoped_value(
             script,
             &action_inputs,
             action_path,
             workspace_container,
             &step_ids,
         );
-        if !step.env.is_empty() {
-            let exports = step
-                .env
-                .iter()
-                .map(|(name, value)| {
-                    Ok(format!(
-                        "export {}={}\n",
-                        shell_identifier(name)?,
-                        shell_single_quote(&render_composite_scoped_value(
-                            value,
-                            &action_inputs,
-                            action_path,
-                            workspace_container,
-                            &step_ids,
-                        ))
-                    ))
-                })
-                .collect::<Result<String>>()?;
-            rendered = format!("{exports}{rendered}");
-        }
+        let env = step
+            .env
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.clone(),
+                    render_composite_scoped_value(
+                        value,
+                        &action_inputs,
+                        action_path,
+                        workspace_container,
+                        &step_ids,
+                    ),
+                )
+            })
+            .collect();
         let working_directory_container = step
             .working_directory
             .as_deref()
@@ -680,7 +676,7 @@ fn composite_action_invocations_with_path(
             script: rendered,
             shell,
             working_directory_container,
-            env: Vec::new(),
+            env,
             condition: step.condition.as_ref().map(|condition| {
                 render_composite_scoped_value(
                     condition,
@@ -907,14 +903,87 @@ fn render_composite_value(
     action_path: &str,
     workspace_container: &str,
 ) -> String {
+    let mut rendered = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find("${{") {
+        rendered.push_str(&replace_composite_bare_tokens(
+            &rest[..start],
+            inputs,
+            action_path,
+            workspace_container,
+        ));
+        let after_start = &rest[start + 3..];
+        let Some(end) = after_start.find("}}") else {
+            rendered.push_str(&rest[start..]);
+            return rendered;
+        };
+        let expression = after_start[..end].trim();
+        rendered.push_str(&render_composite_expression(
+            expression,
+            inputs,
+            action_path,
+            workspace_container,
+        ));
+        rest = &after_start[end + 2..];
+    }
+    rendered.push_str(&replace_composite_bare_tokens(
+        rest,
+        inputs,
+        action_path,
+        workspace_container,
+    ));
+    rendered
+}
+
+fn render_composite_expression(
+    expression: &str,
+    inputs: &BTreeMap<String, String>,
+    action_path: &str,
+    workspace_container: &str,
+) -> String {
+    if expression == "github.action_path" {
+        return action_path.to_string();
+    }
+    if expression == "github.workspace" {
+        return workspace_container.to_string();
+    }
+    if let Some(name) = expression.strip_prefix("inputs.") {
+        if let Some(value) = inputs.get(name) {
+            return value.clone();
+        }
+    }
+
+    let mut rendered = expression
+        .replace("github.action_path", &expression_single_quote(action_path))
+        .replace(
+            "github.workspace",
+            &expression_single_quote(workspace_container),
+        );
+    for (name, value) in inputs_by_descending_name_len(inputs) {
+        rendered = rendered.replace(&format!("inputs.{name}"), &expression_single_quote(value));
+    }
+    format!("${{{{ {rendered} }}}}")
+}
+
+fn replace_composite_bare_tokens(
+    value: &str,
+    inputs: &BTreeMap<String, String>,
+    action_path: &str,
+    workspace_container: &str,
+) -> String {
     let mut rendered = value
-        .replace("${{ github.action_path }}", action_path)
-        .replace("${{ github.workspace }}", workspace_container);
-    for (name, value) in inputs {
-        rendered = rendered.replace(&format!("${{{{ inputs.{name} }}}}"), value);
+        .replace("github.action_path", action_path)
+        .replace("github.workspace", workspace_container);
+    for (name, value) in inputs_by_descending_name_len(inputs) {
         rendered = rendered.replace(&format!("inputs.{name}"), value);
     }
     rendered
+}
+
+fn inputs_by_descending_name_len(inputs: &BTreeMap<String, String>) -> Vec<(&String, &String)> {
+    let mut pairs = inputs.iter().collect::<Vec<_>>();
+    pairs.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
+    pairs
 }
 
 fn render_composite_scoped_value(
@@ -985,23 +1054,8 @@ fn workspace_path(workspace_container: &str, path: &str) -> String {
     }
 }
 
-fn shell_identifier(name: &str) -> Result<&str> {
-    if name
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        && name
-            .chars()
-            .next()
-            .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
-    {
-        Ok(name)
-    } else {
-        bail!("unsupported composite env name '{name}'")
-    }
-}
-
-fn shell_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
+fn expression_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn sanitize_segment(value: &str) -> String {
@@ -1236,8 +1290,8 @@ runs:
 
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].id, "aggregate-1");
-        assert_eq!(steps[0].condition.as_deref(), Some("${{ CI == 'CI' }}"));
-        assert!(steps[0].script.contains("export WORKFLOW_LABEL='CI'"));
+        assert_eq!(steps[0].condition.as_deref(), Some("${{ 'CI' == 'CI' }}"));
+        assert_eq!(steps[0].env, vec![("WORKFLOW_LABEL".into(), "CI".into())]);
         assert!(steps[0].script.contains("::error::CI failed"));
         assert!(steps[0]
             .script
@@ -1269,7 +1323,7 @@ runs:
 
         let steps = composite_script_steps(&plan, &metadata, "/__w").unwrap();
 
-        assert!(steps[0].script.contains("export EXTERNAL_LINKS='true'"));
+        assert_eq!(steps[0].env, vec![("EXTERNAL_LINKS".into(), "true".into())]);
         assert!(steps[0].script.contains("echo \"true\""));
     }
 
@@ -1345,7 +1399,7 @@ runs:
         assert_eq!(plans[0].inputs["github_token"], "ghs_token");
         assert_eq!(
             plans[0].condition.as_deref(),
-            Some("${{ ghs_token != '' }}")
+            Some("${{ 'ghs_token' != '' }}")
         );
     }
 
@@ -1400,6 +1454,75 @@ runs:
         assert!(step
             .script
             .contains("/__a/_actions/dtolnay_rust-toolchain/stable stable"));
+    }
+
+    #[test]
+    fn expands_composite_expressions_without_whitespace() {
+        let actions_host = Path::new("/tmp/actions");
+        let plan = RepositoryActionPlan {
+            step_id: "toolchain".into(),
+            repository: "dtolnay/rust-toolchain".into(),
+            git_ref: "stable".into(),
+            source_path: None,
+            repository_dir: actions_host.join("_actions/dtolnay_rust-toolchain/stable"),
+            action_dir: actions_host.join("_actions/dtolnay_rust-toolchain/stable"),
+            inputs: [
+                ("toolchain".to_string(), "stable".to_string()),
+                ("target".to_string(), "x86_64-unknown-linux-gnu".to_string()),
+                ("targets".to_string(), String::new()),
+                ("components".to_string(), String::new()),
+            ]
+            .into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+        };
+        let metadata = parse_action_metadata(
+            r#"
+runs:
+  using: composite
+  steps:
+    - id: parse
+      shell: bash
+      env:
+        toolchain: ${{inputs.toolchain}}
+      run: echo "toolchain=${{inputs.toolchain}}" >> "$GITHUB_OUTPUT"
+    - id: flags
+      shell: bash
+      env:
+        targets: ${{inputs.targets || inputs.target || ''}}
+      run: echo "downgrade=${{steps.parse.outputs.toolchain == 'nightly' && inputs.components && ' --allow-downgrade' || ''}}" >> "$GITHUB_OUTPUT"
+"#,
+        )
+        .unwrap();
+        let runtime = metadata.runtime().unwrap();
+        let resolved = ResolvedAction {
+            plan,
+            metadata_path: actions_host.join("_actions/dtolnay_rust-toolchain/stable/action.yml"),
+            metadata,
+            runtime,
+        };
+
+        let invocations = resolved
+            .composite_invocations("/__w", actions_host)
+            .unwrap();
+
+        let CompositeActionInvocation::Script(parse) = &invocations[0] else {
+            panic!("parse should expand to script")
+        };
+        assert!(parse.script.contains("toolchain=stable"));
+
+        let CompositeActionInvocation::Script(flags) = &invocations[1] else {
+            panic!("flags should expand to script")
+        };
+        assert_eq!(parse.env, vec![("toolchain".into(), "stable".into())]);
+        assert!(flags.env.contains(&(
+            "targets".into(),
+            "${{ '' || 'x86_64-unknown-linux-gnu' || '' }}".into()
+        )));
+        assert!(flags.script.contains(
+            "${{ steps.toolchain-parse.outputs.toolchain == 'nightly' && '' && ' --allow-downgrade' || '' }}"
+        ));
     }
 
     #[test]
