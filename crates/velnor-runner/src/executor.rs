@@ -1,7 +1,10 @@
 #![allow(dead_code)]
 
 use crate::{
-    action::{DockerActionInvocation, JavaScriptActionInvocation, NativeActionInvocation},
+    action::{
+        DockerActionInvocation, JavaScriptActionInvocation, NativeActionAdapter,
+        NativeActionInvocation,
+    },
     checkout::{configure_safe_directory, execute_checkout, CheckoutPlan},
     container::JobContainerSpec,
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
@@ -563,7 +566,11 @@ where
                     step_id,
                     invocation,
                     ..
-                } => self.execute_native_action_in_started_container(step_id, invocation),
+                } => self.execute_native_action_in_started_container(
+                    step_id,
+                    invocation,
+                    &step_state,
+                ),
                 ExecutableStep::CompositeOutputs { outputs, .. } => Ok(StepExecutionResult {
                     exit_code: 0,
                     state: StepCommandState {
@@ -841,12 +848,20 @@ where
         &mut self,
         step_id: &str,
         action: &NativeActionInvocation,
+        state: &JobExecutionState,
     ) -> Result<StepExecutionResult> {
-        bail!(
-            "native action adapter {:?} for step '{}' is declared but not implemented yet",
-            action.adapter,
-            step_id
-        )
+        match action.adapter {
+            NativeActionAdapter::GitHubRuntimeExport => {
+                Ok(native_github_runtime_export(action, state))
+            }
+            _ => {
+                bail!(
+                    "native action adapter {:?} for step '{}' is declared but not implemented yet",
+                    action.adapter,
+                    step_id
+                )
+            }
+        }
     }
 
     fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
@@ -996,6 +1011,32 @@ fn rewrite_command_file_env_for_action_container(env: &mut [(String, String)]) {
                 *value = format!("/github/file_commands/{file_name}");
             }
         }
+    }
+}
+
+fn native_github_runtime_export(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> StepExecutionResult {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let mut exported = BTreeMap::new();
+    let mut stdout = String::new();
+    for (name, value) in action_state.step_env(&[]) {
+        if name.starts_with("ACTIONS_") {
+            stdout.push_str(&format!("{name}={value}\n"));
+            exported.insert(name, value);
+        }
+    }
+    StepExecutionResult {
+        exit_code: 0,
+        state: StepCommandState {
+            env: exported,
+            ..StepCommandState::default()
+        },
+        skipped: false,
+        failure_ignored: false,
+        stdout,
+        stderr: String::new(),
     }
 }
 
@@ -2504,6 +2545,68 @@ mod tests {
         assert_eq!(calls[3].1[0], "exec");
         assert_eq!(calls[4].1[0], "rm");
         assert_eq!(calls[5].1[0], "network");
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_github_runtime_export_exports_actions_env() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "github-runtime".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::GitHubRuntimeExport,
+                inputs: [("github-token".into(), "ghs_token".into())].into(),
+                env: vec![("ACTIONS_CUSTOM".into(), "${{ env.CUSTOM_RUNTIME }}".into())],
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        let results = executor
+            .execute_ordered_steps(
+                &container(&temp),
+                &steps,
+                &[
+                    ("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into()),
+                    (
+                        "ACTIONS_RUNTIME_URL".into(),
+                        "https://runtime.actions".into(),
+                    ),
+                    ("CUSTOM_RUNTIME".into(), "custom-value".into()),
+                    ("GITHUB_TOKEN".into(), "ghs_token".into()),
+                ],
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].exit_code, 0);
+        assert_eq!(
+            results[0].state.env["ACTIONS_RUNTIME_TOKEN"],
+            "runtime-token"
+        );
+        assert_eq!(
+            results[0].state.env["ACTIONS_RUNTIME_URL"],
+            "https://runtime.actions"
+        );
+        assert_eq!(results[0].state.env["ACTIONS_CUSTOM"], "custom-value");
+        assert!(!results[0].state.env.contains_key("GITHUB_TOKEN"));
+        assert!(results[0]
+            .stdout
+            .contains("ACTIONS_RUNTIME_TOKEN=runtime-token"));
+        assert_eq!(
+            executor
+                .runner()
+                .calls
+                .iter()
+                .filter(|(_, args)| args.first().is_some_and(|arg| arg == "run")
+                    && args.iter().any(|arg| arg.starts_with("node:")))
+                .count(),
+            0
+        );
 
         fs::remove_dir_all(temp).unwrap();
     }
