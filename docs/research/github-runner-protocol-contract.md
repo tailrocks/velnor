@@ -124,7 +124,7 @@ The minimum payload shape Velnor needs:
 }
 ```
 
-GitHub returns agent id and OAuth authorization data. Velnor stores `clientId`, `authorizationUrl`, and the generated private key so it can mint OAuth JWT credentials for session/message APIs later. If GitHub returns V2 runner authorization, Velnor must store `ServerUrlV2` and use broker flow.
+GitHub returns agent id, OAuth authorization data, and sometimes agent properties that enforce V2. Velnor stores `clientId`, `authorizationUrl`, and the generated private key so it can mint OAuth JWT credentials for session/message APIs later. It also preserves `ServerUrlV2` and `UseV2Flow` from returned agent properties; the remaining V2 work is wiring the runner loop to the broker and run-service clients.
 
 ## OAuth Credential Exchange
 

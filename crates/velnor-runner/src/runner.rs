@@ -112,7 +112,9 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
             server_url: registration
                 .as_ref()
                 .map(|registration| registration.auth.server_url.clone()),
-            server_url_v2: None,
+            server_url_v2: registration
+                .as_ref()
+                .and_then(|registration| agent_string_property(&registration.agent, "ServerUrlV2")),
             pool_id: registration
                 .as_ref()
                 .map(|registration| registration.pool.id),
@@ -124,9 +126,10 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
                 .and_then(|registration| registration.agent.id),
             agent_name,
             labels,
-            use_v2_flow: registration
-                .as_ref()
-                .is_some_and(|registration| registration.auth.use_v2_flow),
+            use_v2_flow: registration.as_ref().is_some_and(|registration| {
+                registration.auth.use_v2_flow
+                    || agent_bool_property(&registration.agent, "UseV2Flow") == Some(true)
+            }),
             ephemeral: false,
             disable_update: true,
         },
@@ -1599,6 +1602,10 @@ pub async fn status(args: StatusArgs) -> Result<()> {
     println!("Labels: {}", stored.settings.labels.join(","));
     println!("Use V2 flow: {}", stored.settings.use_v2_flow);
     println!(
+        "Server URL V2: {}",
+        stored.settings.server_url_v2.as_deref().unwrap_or("none")
+    );
+    println!(
         "Credentials stored: {}",
         if stored.credentials.is_some() {
             "yes"
@@ -1623,6 +1630,24 @@ fn default_agent_name() -> String {
         .ok()
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "velnor-runner".to_string())
+}
+
+fn agent_string_property(agent: &TaskAgent, name: &str) -> Option<String> {
+    agent
+        .properties
+        .as_ref()
+        .and_then(|properties| properties.get(name))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn agent_bool_property(agent: &TaskAgent, name: &str) -> Option<bool> {
+    agent
+        .properties
+        .as_ref()
+        .and_then(|properties| properties.get(name))
+        .and_then(Value::as_bool)
 }
 
 #[cfg(test)]
@@ -1657,6 +1682,21 @@ mod tests {
         };
 
         assert!(!is_job_cancellation_for(&message, "job-123"));
+    }
+
+    #[test]
+    fn reads_v2_settings_from_agent_properties() {
+        let mut agent = TaskAgent::new("velnor", vec![], None, false);
+        agent.properties = Some(serde_json::json!({
+            "ServerUrlV2": "https://broker.actions.githubusercontent.com/tenant/",
+            "UseV2Flow": true
+        }));
+
+        assert_eq!(
+            agent_string_property(&agent, "ServerUrlV2").as_deref(),
+            Some("https://broker.actions.githubusercontent.com/tenant/")
+        );
+        assert_eq!(agent_bool_property(&agent, "UseV2Flow"), Some(true));
     }
 
     #[test]

@@ -14,7 +14,7 @@ use rsa::{
     RsaPrivateKey,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     time::{SystemTime, UNIX_EPOCH},
@@ -385,6 +385,141 @@ pub struct DistributedTaskClient {
     server_root_url: Url,
     base_url: Url,
     bearer_token: String,
+}
+
+#[derive(Clone)]
+pub struct BrokerClient {
+    http: Client,
+    base_url: Url,
+    bearer_token: String,
+}
+
+impl BrokerClient {
+    pub fn new(server_url_v2: &str, bearer_token: impl Into<String>) -> Result<Self> {
+        let http = Client::builder()
+            .user_agent(RUNNER_USER_AGENT)
+            .build()
+            .context("build broker HTTP client")?;
+        Ok(Self {
+            http,
+            base_url: slash_url(server_url_v2)?,
+            bearer_token: bearer_token.into(),
+        })
+    }
+
+    pub async fn create_session(&self, session: &TaskAgentSession) -> Result<TaskAgentSession> {
+        let url = broker_session_url(&self.base_url)?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&self.bearer_token)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .json(session)
+            .send()
+            .await
+            .context("send create broker session request")?;
+
+        parse_json_response(response, "create broker session").await
+    }
+
+    pub async fn delete_session(&self) -> Result<()> {
+        let url = broker_session_url(&self.base_url)?;
+        let response = self
+            .http
+            .delete(url)
+            .bearer_auth(&self.bearer_token)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .send()
+            .await
+            .context("send delete broker session request")?;
+
+        parse_empty_response(response, "delete broker session").await
+    }
+
+    pub async fn get_runner_message(
+        &self,
+        session_id: &str,
+        status: RunnerStatus,
+        disable_update: bool,
+    ) -> Result<Option<TaskAgentMessage>> {
+        let url = broker_message_url(&self.base_url, session_id, status, disable_update)?;
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(&self.bearer_token)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .send()
+            .await
+            .context("send get broker message request")?;
+
+        parse_optional_json_response(response, "get broker message").await
+    }
+
+    pub async fn acknowledge_runner_request(
+        &self,
+        session_id: &str,
+        runner_request_id: &str,
+        status: RunnerStatus,
+    ) -> Result<()> {
+        let url = broker_acknowledge_url(&self.base_url, session_id, status)?;
+        let body = json!({ "runnerRequestId": runner_request_id });
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&self.bearer_token)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .json(&body)
+            .send()
+            .await
+            .context("send broker acknowledge request")?;
+
+        parse_empty_response(response, "acknowledge broker runner request").await
+    }
+}
+
+#[derive(Clone)]
+pub struct RunServiceClient {
+    http: Client,
+    bearer_token: String,
+}
+
+impl RunServiceClient {
+    pub fn new(bearer_token: impl Into<String>) -> Result<Self> {
+        let http = Client::builder()
+            .user_agent(RUNNER_USER_AGENT)
+            .build()
+            .context("build run-service HTTP client")?;
+        Ok(Self {
+            http,
+            bearer_token: bearer_token.into(),
+        })
+    }
+
+    pub async fn acquire_job(
+        &self,
+        run_service_url: &str,
+        job_message_id: &str,
+        runner_os: &str,
+        billing_owner_id: Option<&str>,
+    ) -> Result<Value> {
+        let url = run_service_acquire_job_url(run_service_url)?;
+        let body = AcquireJobRequest {
+            job_message_id,
+            runner_os,
+            billing_owner_id,
+        };
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&self.bearer_token)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .json(&body)
+            .send()
+            .await
+            .context("send run-service acquire job request")?;
+
+        parse_json_response(response, "acquire run-service job").await
+    }
 }
 
 impl DistributedTaskClient {
@@ -767,6 +902,10 @@ struct VssJsonCollectionWrapper<T> {
 }
 
 fn server_root_url(server_url: &str) -> Result<Url> {
+    slash_url(server_url)
+}
+
+fn slash_url(server_url: &str) -> Result<Url> {
     let mut root =
         Url::parse(server_url).with_context(|| format!("parse server URL '{server_url}'"))?;
     if !root.path().ends_with('/') {
@@ -774,6 +913,55 @@ fn server_root_url(server_url: &str) -> Result<Url> {
         root.set_path(&path);
     }
     Ok(root)
+}
+
+fn broker_session_url(base_url: &Url) -> Result<Url> {
+    base_url.join("session").context("build broker session URL")
+}
+
+fn broker_message_url(
+    base_url: &Url,
+    session_id: &str,
+    status: RunnerStatus,
+    disable_update: bool,
+) -> Result<Url> {
+    let mut url = base_url
+        .join("message")
+        .context("build broker message URL")?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("sessionId", session_id);
+        query.append_pair("status", status.as_query_value());
+        query.append_pair("runnerVersion", RUNNER_VERSION);
+        query.append_pair("os", std::env::consts::OS);
+        query.append_pair("architecture", std::env::consts::ARCH);
+        query.append_pair(
+            "disableUpdate",
+            if disable_update { "true" } else { "false" },
+        );
+    }
+    Ok(url)
+}
+
+fn broker_acknowledge_url(base_url: &Url, session_id: &str, status: RunnerStatus) -> Result<Url> {
+    let mut url = base_url
+        .join("acknowledge")
+        .context("build broker acknowledge URL")?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("sessionId", session_id);
+        query.append_pair("status", status.as_query_value());
+        query.append_pair("runnerVersion", RUNNER_VERSION);
+        query.append_pair("os", std::env::consts::OS);
+        query.append_pair("architecture", std::env::consts::ARCH);
+    }
+    Ok(url)
+}
+
+fn run_service_acquire_job_url(run_service_url: &str) -> Result<Url> {
+    slash_url(run_service_url)?
+        .join("acquirejob")
+        .context("build run-service acquire job URL")
 }
 
 fn agent_request_url(base_url: &Url, pool_id: i64, request_id: i64) -> Result<Url> {
@@ -1147,6 +1335,32 @@ pub struct TaskAgentMessage {
     pub body: String,
     #[serde(rename = "iv", skip_serializing_if = "Option::is_none")]
     pub iv_base64: Option<String>,
+}
+
+pub const RUNNER_JOB_REQUEST: &str = "RunnerJobRequest";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunnerJobRequestRef {
+    #[serde(default, rename = "id")]
+    pub id: Option<String>,
+    #[serde(rename = "runner_request_id", alias = "runnerRequestId")]
+    pub runner_request_id: String,
+    #[serde(default, rename = "should_acknowledge", alias = "shouldAcknowledge")]
+    pub should_acknowledge: bool,
+    #[serde(default, rename = "run_service_url", alias = "runServiceUrl")]
+    pub run_service_url: Option<String>,
+    #[serde(default, rename = "billing_owner_id", alias = "billingOwnerId")]
+    pub billing_owner_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct AcquireJobRequest<'a> {
+    #[serde(rename = "jobMessageId")]
+    job_message_id: &'a str,
+    #[serde(rename = "runnerOS")]
+    runner_os: &'a str,
+    #[serde(rename = "billingOwnerId", skip_serializing_if = "Option::is_none")]
+    billing_owner_id: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1649,6 +1863,76 @@ mod tests {
         assert_eq!(
             url.as_str(),
             "https://pipelines.actions.githubusercontent.com/abc/_apis/distributedtask/pools/7/jobrequests/99?api-version=5.1-preview.1&lockToken=00000000-0000-0000-0000-000000000000"
+        );
+    }
+
+    #[test]
+    fn broker_urls_match_official_v2_routes() {
+        let base = slash_url("https://broker.actions.githubusercontent.com/tenant").unwrap();
+
+        assert_eq!(
+            broker_session_url(&base).unwrap().as_str(),
+            "https://broker.actions.githubusercontent.com/tenant/session"
+        );
+        let message = broker_message_url(&base, "session-1", RunnerStatus::Busy, true).unwrap();
+        assert_eq!(message.path(), "/tenant/message");
+        let query = message.query().unwrap();
+        assert!(query.contains("sessionId=session-1"));
+        assert!(query.contains("status=Busy"));
+        assert!(query.contains("runnerVersion=2.326.0"));
+        assert!(query.contains("disableUpdate=true"));
+        let ack = broker_acknowledge_url(&base, "session-1", RunnerStatus::Online).unwrap();
+        assert_eq!(ack.path(), "/tenant/acknowledge");
+        assert!(ack.query().unwrap().contains("status=Online"));
+    }
+
+    #[test]
+    fn run_service_acquire_url_matches_official_route() {
+        let url = run_service_acquire_job_url("https://run.actions.githubusercontent.com/jobs/123")
+            .unwrap();
+
+        assert_eq!(
+            url.as_str(),
+            "https://run.actions.githubusercontent.com/jobs/123/acquirejob"
+        );
+    }
+
+    #[test]
+    fn runner_job_request_ref_accepts_snake_case_broker_body() {
+        let reference: RunnerJobRequestRef = serde_json::from_value(serde_json::json!({
+            "id": "broker-message",
+            "runner_request_id": "request-1",
+            "should_acknowledge": true,
+            "run_service_url": "https://run.actions.githubusercontent.com/jobs/123/",
+            "billing_owner_id": "42"
+        }))
+        .unwrap();
+
+        assert_eq!(reference.runner_request_id, "request-1");
+        assert!(reference.should_acknowledge);
+        assert_eq!(
+            reference.run_service_url.as_deref(),
+            Some("https://run.actions.githubusercontent.com/jobs/123/")
+        );
+        assert_eq!(reference.billing_owner_id.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn acquire_job_request_matches_run_service_shape() {
+        let body = serde_json::to_value(AcquireJobRequest {
+            job_message_id: "request-1",
+            runner_os: "linux",
+            billing_owner_id: Some("42"),
+        })
+        .unwrap();
+
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "jobMessageId": "request-1",
+                "runnerOS": "linux",
+                "billingOwnerId": "42"
+            })
         );
     }
 

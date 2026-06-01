@@ -107,7 +107,7 @@ loop:
 DeleteAgentSessionAsync(poolId, sessionId)
 ```
 
-Newer settings may use `BrokerMessageListener`, which talks to broker/run-service endpoints. Velnor likely needs to support this because current GitHub runner registration can set `UseV2Flow`.
+Newer settings may use `BrokerMessageListener`, which talks to broker/run-service endpoints. Velnor likely needs to support this because current GitHub runner registration can set `UseV2Flow`. The protocol layer now models the V2 route shapes: broker `session`, `message`, and `acknowledge`, plus run-service `acquirejob`; the dispatcher still needs a V2 execution path.
 
 Important message types:
 
