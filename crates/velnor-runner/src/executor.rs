@@ -919,6 +919,9 @@ impl JobExecutionState {
             "github.ref_name" => "GITHUB_REF_NAME",
             "github.workspace" => "GITHUB_WORKSPACE",
             "runner.arch" => "RUNNER_ARCH",
+            "runner.debug" => "RUNNER_DEBUG",
+            "runner.environment" => "RUNNER_ENVIRONMENT",
+            "runner.name" => "RUNNER_NAME",
             "runner.os" => "RUNNER_OS",
             "runner.temp" => "RUNNER_TEMP",
             "runner.tool_cache" => "RUNNER_TOOL_CACHE",
@@ -1725,6 +1728,8 @@ mod tests {
             ("GITHUB_WORKSPACE".into(), "/__w".into()),
             ("DOCS_SITE_URL".into(), "https://docs.example".into()),
             ("RUNNER_OS".into(), "Linux".into()),
+            ("RUNNER_NAME".into(), "velnor".into()),
+            ("RUNNER_ENVIRONMENT".into(), "self-hosted".into()),
         ]);
 
         assert_eq!(
@@ -1747,6 +1752,11 @@ mod tests {
                 ("DOCS_SITE_URL".into(), "${{ env.DOCS_SITE_URL }}".into()),
                 ("WORKSPACE".into(), "${{ github.workspace }}".into()),
                 ("OS".into(), "${{ runner.os }}".into()),
+                ("RUNNER_NAME".into(), "${{ runner.name }}".into()),
+                (
+                    "RUNNER_ENVIRONMENT".into(),
+                    "${{ runner.environment }}".into()
+                ),
             ]),
             vec![
                 ("INPUT_TOKEN".into(), "ghs_token".into()),
@@ -1763,6 +1773,8 @@ mod tests {
                 ("DOCS_SITE_URL".into(), "https://docs.example".into()),
                 ("WORKSPACE".into(), "/__w".into()),
                 ("OS".into(), "Linux".into()),
+                ("RUNNER_NAME".into(), "velnor".into()),
+                ("RUNNER_ENVIRONMENT".into(), "self-hosted".into()),
             ]
         );
     }

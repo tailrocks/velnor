@@ -10,6 +10,8 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         ("GITHUB_WORKSPACE".to_string(), "/__w".to_string()),
         ("RUNNER_OS".to_string(), "Linux".to_string()),
         ("RUNNER_ARCH".to_string(), runner_arch().to_string()),
+        ("RUNNER_NAME".to_string(), runner_name()),
+        ("RUNNER_ENVIRONMENT".to_string(), "self-hosted".to_string()),
         ("RUNNER_TEMP".to_string(), "/__t".to_string()),
         ("RUNNER_TOOL_CACHE".to_string(), "/__tool".to_string()),
     ];
@@ -328,6 +330,10 @@ fn runner_arch() -> &'static str {
     }
 }
 
+fn runner_name() -> String {
+    std::env::var("VELNOR_RUNNER_NAME").unwrap_or_else(|_| "velnor".to_string())
+}
+
 trait JobRuntimeExt {
     fn variable(&self, name: &str) -> Option<&str>;
     fn variable_bool(&self, name: &str) -> Option<bool>;
@@ -426,6 +432,8 @@ mod tests {
         assert!(env.contains(&("GITHUB_ACTIONS".into(), "true".into())));
         assert!(env.contains(&("HOME".into(), "/github/home".into())));
         assert!(env.contains(&("RUNNER_ARCH".into(), runner_arch().into())));
+        assert!(env.contains(&("RUNNER_NAME".into(), runner_name())));
+        assert!(env.contains(&("RUNNER_ENVIRONMENT".into(), "self-hosted".into())));
         assert!(env.contains(&("GITHUB_JOB".into(), "check".into())));
         assert!(env.contains(&("GITHUB_REPOSITORY".into(), "acme/repo".into())));
         assert!(env.contains(&("GITHUB_REPOSITORY_OWNER".into(), "acme".into())));
