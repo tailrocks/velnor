@@ -82,6 +82,8 @@ bash -n \
   scripts/fixture_audit_test.sh \
   scripts/fixture_readiness.sh \
   scripts/fixture_readiness_test.sh \
+  scripts/fixture_report.sh \
+  scripts/fixture_report_test.sh \
   scripts/fixture_smoke.sh \
   scripts/fixture_smoke_defaults_test.sh \
   scripts/fixture_status.sh \
@@ -103,6 +105,7 @@ python3 scripts/target_audit.py --self-test "$JACKIN_ROOT" "$CHAINARGOS_ROOT" >/
 python3 scripts/check_runner_reference.py
 scripts/fixture_audit_test.sh
 scripts/fixture_readiness_test.sh
+scripts/fixture_report_test.sh
 scripts/fixture_smoke_defaults_test.sh
 scripts/fixture_status_test.sh
 scripts/live_evidence_common_test.sh

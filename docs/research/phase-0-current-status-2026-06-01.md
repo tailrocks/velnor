@@ -137,6 +137,9 @@ Current local environment finding:
   GitHub-hosted jobs are complete, Velnor fixture jobs are queued, fixture audit
   passes, and host readiness fails before any runner registration or workflow
   dispatch.
+- `scripts/fixture_report.sh` writes the same non-mutating status/audit/host
+  readiness checks to `.velnor-live-evidence/fixture-readiness-report.md` for
+  operator handoff.
 - `VELNOR_REQUIRE_DOCKER_SOCKET=false scripts/live_host_doctor.sh` reaches the
   bind-mount visibility preflight, then fails because the remote Docker daemon
   cannot see `/Users/donbeave/Projects/velnor-project/velnor/.velnor-work`.
@@ -171,17 +174,19 @@ Current local environment finding:
 2. Run `scripts/fixture_readiness.sh` on the live Linux host and intended
    workdir. It checks fixture status, fixture feature surface, and live host
    readiness without registering a runner or dispatching workflows.
-3. On a host that passes readiness, run `scripts/fixture_smoke.sh`. This
+3. If readiness fails, run `scripts/fixture_report.sh` and share the generated
+   Markdown report with the implementation loop.
+4. On a host that passes readiness, run `scripts/fixture_smoke.sh`. This
    registers `donbeave/velnor-actions-fixture` with label `velnor-target-mvp`,
    runs the queued fixture jobs through `daemon --once --slots N`, and confirms
    `compare-results` passes.
-4. Fix only failures backed by fixture live evidence, sanitized job payloads, or
+5. Fix only failures backed by fixture live evidence, sanitized job payloads, or
    target workflow drift.
-5. When fixture evidence is green, report that Velnor is ready for manual
+6. When fixture evidence is green, report that Velnor is ready for manual
    target-repository validation.
-6. The user/operator explicitly sets `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`
-   and runs the ChainArgos target sequence.
 7. The user/operator explicitly sets `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`
+   and runs the ChainArgos target sequence.
+8. The user/operator explicitly sets `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`
    and runs the Jackin Linux target sequence.
 
 ## Completion Rule

@@ -119,6 +119,13 @@ dispatching a workflow:
 scripts/fixture_readiness.sh
 ```
 
+To write a shareable readiness report without registering a runner or
+dispatching a workflow:
+
+```sh
+scripts/fixture_report.sh
+```
+
 The fixture repository feature surface can be audited directly with:
 
 ```sh
