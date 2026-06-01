@@ -19,6 +19,13 @@ Upstream reference:
 
 ## Communication Path
 
+Hosted GitHub V2 is the target for Velnor. The normal runner path should require
+`UseV2Flow` and `ServerUrlV2` from registration and should fail fast if they are
+missing. Classic polling is legacy for this project; it can exist as internal
+debug/migration reference code, but it is not target MVP compatibility.
+
+New target compatibility work must be validated through broker/run-service V2.
+
 Classic path:
 
 ```text
@@ -220,3 +227,34 @@ syntax:
 The next live proof should therefore capture and archive real dry-run job
 payload metadata from `java-monorepo`, then compare it with the target audit.
 That payload is stronger evidence than reading YAML alone.
+
+## Payload Capture Command
+
+Velnor has a runner-side inspection mode for this:
+
+```sh
+cargo run --bin velnor-runner -- run \
+  --once \
+  --dry-run-jobs \
+  --dump-job-message ./target-job-payloads
+```
+
+Behavior:
+
+- the runner still registers/polls normally
+- when a job is assigned, Velnor parses the acquired `AgentJobRequestMessage`
+- Velnor writes a pretty JSON snapshot named like
+  `job-<request-id>-<job-id>.json` under the provided directory
+- secret variables, mask hints, endpoint authorization parameters, and obvious
+  token/password/secret fields are replaced with `***`
+- `--dry-run-jobs` leaves the job unacknowledged and unexecuted, so this should
+  be used only with disposable or intentionally triggered target runs
+
+Recommended first live capture:
+
+1. Register a Velnor runner with the `hetzner-sentry-ci` label.
+2. Trigger the smallest `ChainArgos/java-monorepo` workflow job.
+3. Run the command above.
+4. Compare the captured `Steps`, `Defaults`, `EnvironmentVariables`,
+   `ContextData`, `Resources`, and `JobOutputs` shapes against
+   `docs/research/target-mvp-compat-audit-2026-06-01.md`.

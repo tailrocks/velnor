@@ -152,6 +152,13 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
         },
         credentials,
     };
+    if registration.is_some()
+        && (!stored.settings.use_v2_flow || stored.settings.server_url_v2.is_none())
+    {
+        bail!(
+            "GitHub did not return required V2 runner settings (UseV2Flow/ServerUrlV2); Velnor targets the latest hosted GitHub broker/run-service protocol only"
+        );
+    }
 
     config::save(&dir, &stored)?;
     println!("Wrote local runner config to {}", dir.display());
@@ -307,7 +314,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     }
 
     let dir = config::config_dir(args.config_dir.clone())?;
-    let mut stored = config::load(&dir)?;
+    let stored = config::load(&dir)?;
     let server_url = stored
         .settings
         .server_url
@@ -322,9 +329,29 @@ pub async fn run(args: RunArgs) -> Result<()> {
         .agent_id
         .ok_or_else(|| anyhow::anyhow!("runner is not registered: missing agent_id"))?;
     let token = oauth_access_token(&stored).await?;
-    if stored.settings.use_v2_flow {
-        return run_v2(args, dir, stored, &server_url, pool_id, agent_id, token).await;
+    ensure_v2_runner_settings(&stored)?;
+    return run_v2(args, dir, stored, &server_url, pool_id, agent_id, token).await;
+}
+
+fn ensure_v2_runner_settings(stored: &StoredRunnerConfig) -> Result<()> {
+    if stored.settings.use_v2_flow && stored.settings.server_url_v2.is_some() {
+        return Ok(());
     }
+    bail!(
+        "runner config is missing required V2 settings (UseV2Flow/ServerUrlV2); reconfigure against hosted GitHub with the latest runner registration flow"
+    )
+}
+
+#[allow(dead_code)]
+async fn run_classic_migration_probe(
+    args: RunArgs,
+    dir: PathBuf,
+    mut stored: StoredRunnerConfig,
+    server_url: &str,
+    pool_id: i64,
+    agent_id: i64,
+    token: String,
+) -> Result<()> {
     let client = DistributedTaskClient::new(&server_url, token.clone())?;
     let owner_name = format!("{} (PID: {})", default_agent_name(), std::process::id());
     let session = TaskAgentSession::new(owner_name, agent_id, stored.settings.agent_name.clone());
@@ -371,7 +398,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
             println!("Deleted classic runner session.");
             stored.settings.server_url_v2 = Some(migration_url);
             stored.settings.use_v2_flow = true;
-            return run_v2(args, dir, stored, &server_url, pool_id, agent_id, token).await;
+            return run_v2(args, dir, stored, server_url, pool_id, agent_id, token).await;
         }
         last_message_id = Some(message.message_id);
         handle_message(
@@ -625,6 +652,14 @@ async fn handle_job_request(
         job.steps.len(),
         job.resources.endpoints.len()
     );
+    if let Some(path) = &args.dump_job_message {
+        let dump_path = write_sanitized_job_message_dump(&job, path)
+            .context("write sanitized job message dump")?;
+        println!(
+            "Wrote sanitized job message dump to {}.",
+            dump_path.display()
+        );
+    }
     let script_steps = match github_script_steps_with_defaults(&job.steps, "/__w", &job.defaults) {
         Ok(script_steps) => {
             println!("Mapped {} script run step(s).", script_steps.len());
@@ -835,6 +870,145 @@ async fn handle_job_request(
 
 fn should_execute_job(args: &RunArgs) -> bool {
     args.execute_scripts || (!args.complete_noop && !args.dry_run_jobs)
+}
+
+fn write_sanitized_job_message_dump(
+    job: &AgentJobRequestMessage,
+    destination: &std::path::Path,
+) -> Result<std::path::PathBuf> {
+    let mut value = serde_json::to_value(job).context("serialize job message")?;
+    sanitize_job_message_value(&mut value);
+    let path = job_dump_path(job, destination);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create job dump directory {}", parent.display()))?;
+    }
+    let bytes = serde_json::to_vec_pretty(&value).context("render sanitized job message")?;
+    std::fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
+    Ok(path)
+}
+
+fn job_dump_path(
+    job: &AgentJobRequestMessage,
+    destination: &std::path::Path,
+) -> std::path::PathBuf {
+    if destination.extension().is_some() {
+        return destination.to_path_buf();
+    }
+    destination.join(format!(
+        "job-{}-{}.json",
+        job.request_id,
+        sanitize_path_segment(&job.job_id)
+    ))
+}
+
+fn sanitize_job_message_value(value: &mut Value) {
+    sanitize_secret_variables(value);
+    sanitize_mask_hints(value);
+    sanitize_endpoint_authorization(value);
+    sanitize_sensitive_keys(value);
+}
+
+fn sanitize_secret_variables(value: &mut Value) {
+    let Some(variables) = object_field_mut(value, &["Variables", "variables"]) else {
+        return;
+    };
+    let Some(variables) = variables.as_object_mut() else {
+        return;
+    };
+    for variable in variables.values_mut() {
+        let is_secret = object_field(variable, &["IsSecret", "isSecret"])
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if is_secret {
+            if let Some(value) = object_field_mut(variable, &["Value", "value"]) {
+                *value = Value::String("***".to_string());
+            }
+        }
+    }
+}
+
+fn sanitize_mask_hints(value: &mut Value) {
+    let Some(masks) = object_field_mut(value, &["Mask", "mask"]) else {
+        return;
+    };
+    let Some(masks) = masks.as_array_mut() else {
+        return;
+    };
+    for mask in masks {
+        if let Some(value) = object_field_mut(mask, &["Value", "value"]) {
+            *value = Value::String("***".to_string());
+        }
+    }
+}
+
+fn sanitize_endpoint_authorization(value: &mut Value) {
+    let Some(resources) = object_field_mut(value, &["Resources", "resources"]) else {
+        return;
+    };
+    let Some(endpoints) = object_field_mut(resources, &["Endpoints", "endpoints"]) else {
+        return;
+    };
+    let Some(endpoints) = endpoints.as_array_mut() else {
+        return;
+    };
+    for endpoint in endpoints {
+        let Some(authorization) = object_field_mut(endpoint, &["Authorization", "authorization"])
+        else {
+            continue;
+        };
+        let Some(parameters) = object_field_mut(authorization, &["Parameters", "parameters"])
+        else {
+            continue;
+        };
+        let Some(parameters) = parameters.as_object_mut() else {
+            continue;
+        };
+        for value in parameters.values_mut() {
+            if value.is_string() {
+                *value = Value::String("***".to_string());
+            }
+        }
+    }
+}
+
+fn sanitize_sensitive_keys(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if is_sensitive_key(key) && value.is_string() {
+                    *value = Value::String("***".to_string());
+                } else {
+                    sanitize_sensitive_keys(value);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                sanitize_sensitive_keys(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.contains("token")
+        || key.contains("password")
+        || key.contains("secret")
+        || key == "authorization"
+}
+
+fn object_field<'a>(value: &'a Value, names: &[&str]) -> Option<&'a Value> {
+    let object = value.as_object()?;
+    names.iter().find_map(|name| object.get(*name))
+}
+
+fn object_field_mut<'a>(value: &'a mut Value, names: &[&str]) -> Option<&'a mut Value> {
+    let object = value.as_object_mut()?;
+    let key = names.iter().find(|name| object.contains_key(**name))?;
+    object.get_mut(*key)
 }
 
 fn system_connection_access_token(
@@ -2166,6 +2340,7 @@ mod tests {
             complete_noop,
             execute_scripts,
             dry_run_jobs,
+            dump_job_message: None,
             docker_image: "ubuntu:24.04".into(),
             node_action_image: String::new(),
             work_dir: None,
@@ -2178,6 +2353,103 @@ mod tests {
         assert!(should_execute_job(&run_args(false, true, false)));
         assert!(!should_execute_job(&run_args(true, false, false)));
         assert!(!should_execute_job(&run_args(false, false, true)));
+    }
+
+    #[test]
+    fn normal_run_requires_v2_settings() {
+        let mut stored = stored_config();
+        stored.settings.use_v2_flow = false;
+        stored.settings.server_url_v2 = None;
+        assert!(ensure_v2_runner_settings(&stored).is_err());
+
+        stored.settings.use_v2_flow = true;
+        stored.settings.server_url_v2 = None;
+        assert!(ensure_v2_runner_settings(&stored).is_err());
+
+        stored.settings.server_url_v2 =
+            Some("https://broker.actions.githubusercontent.com/".into());
+        assert!(ensure_v2_runner_settings(&stored).is_ok());
+    }
+
+    #[test]
+    fn sanitized_job_message_dump_redacts_runtime_secrets() {
+        let mut value = serde_json::json!({
+            "variables": {
+                "system.github.token": { "value": "ghs_secret", "isSecret": true },
+                "github.repository": { "value": "ChainArgos/java-monorepo", "isSecret": false }
+            },
+            "mask": [
+                { "type": "Regex", "value": "secret-regex" }
+            ],
+            "resources": {
+                "endpoints": [
+                    {
+                        "name": "SystemVssConnection",
+                        "authorization": {
+                            "parameters": {
+                                "AccessToken": "job-token",
+                                "Other": "also-sensitive"
+                            }
+                        }
+                    }
+                ]
+            },
+            "steps": [
+                {
+                    "inputs": {
+                        "token": "step-token",
+                        "repository": "owner/repo"
+                    }
+                }
+            ]
+        });
+
+        sanitize_job_message_value(&mut value);
+
+        assert_eq!(
+            value["variables"]["system.github.token"]["value"],
+            serde_json::json!("***")
+        );
+        assert_eq!(
+            value["variables"]["github.repository"]["value"],
+            serde_json::json!("ChainArgos/java-monorepo")
+        );
+        assert_eq!(value["mask"][0]["value"], serde_json::json!("***"));
+        assert_eq!(
+            value["resources"]["endpoints"][0]["authorization"]["parameters"]["AccessToken"],
+            serde_json::json!("***")
+        );
+        assert_eq!(
+            value["resources"]["endpoints"][0]["authorization"]["parameters"]["Other"],
+            serde_json::json!("***")
+        );
+        assert_eq!(
+            value["steps"][0]["inputs"]["token"],
+            serde_json::json!("***")
+        );
+        assert_eq!(
+            value["steps"][0]["inputs"]["repository"],
+            serde_json::json!("owner/repo")
+        );
+    }
+
+    fn stored_config() -> StoredRunnerConfig {
+        StoredRunnerConfig {
+            settings: RunnerSettings {
+                github_url: "https://github.com/owner/repo".into(),
+                server_url: Some("https://pipelines.actions.githubusercontent.com/".into()),
+                server_url_v2: Some("https://broker.actions.githubusercontent.com/".into()),
+                pool_id: Some(1),
+                pool_name: Some("default".into()),
+                agent_id: Some(2),
+                agent_name: "velnor".into(),
+                labels: vec!["self-hosted".into(), "velnor".into()],
+                use_v2_flow: true,
+                ephemeral: false,
+                disable_update: true,
+            },
+            credentials: None,
+        }
     }
 
     #[test]

@@ -87,6 +87,10 @@ pub struct RunArgs {
     #[arg(long)]
     pub dry_run_jobs: bool,
 
+    /// Write a sanitized AgentJobRequestMessage JSON snapshot to this file or directory.
+    #[arg(long)]
+    pub dump_job_message: Option<PathBuf>,
+
     /// Docker image for --execute-scripts jobs.
     #[arg(long, default_value = "ghcr.io/catthehacker/ubuntu:act-latest")]
     pub docker_image: String,

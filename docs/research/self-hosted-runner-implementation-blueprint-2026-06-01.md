@@ -84,7 +84,10 @@ Source anchors:
 Rules for Velnor:
 
 - Create one runner session, then long-poll for messages.
-- Support classic distributed-task messages and broker/run-service V2 messages.
+- Require broker/run-service V2 for hosted GitHub target runs.
+- Do not treat classic distributed-task messages as target MVP compatibility.
+- Keep classic code only as internal debug/migration reference until it can be
+  deleted.
 - Treat `BrokerMigration` as a control-plane redirect to broker polling.
 - Treat `RunnerJobRequest` as a job reference that must be acquired from
   run-service before execution.

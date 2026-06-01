@@ -29,7 +29,9 @@ Velnor rule:
 
 - keep protocol code separate from Docker execution
 - keep one active GitHub job per registered runner process
-- support both classic and V2 paths, because hosted GitHub can migrate classic sessions to broker V2
+- require V2 broker/run-service for the normal hosted-GitHub path
+- do not treat classic distributed-task polling as target MVP compatibility
+- keep any classic code only as internal debug/migration reference until it can be deleted
 - treat runner update/self-update messages as log-and-ignore or graceful restart for Phase 0
 - treat broker acknowledge as best-effort; failure should not block job execution
 - retry only where upstream retries; skip already-acquired/unprocessable run-service jobs
