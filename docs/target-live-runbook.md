@@ -25,7 +25,45 @@ cargo run --bin velnor-runner -- preflight \
 
 This verifies host Git, Docker daemon access, Buildx, `/var/run/docker.sock`, Docker CLI/Buildx usability inside the job image, required job-image tools, execution of a temp script from `/__t` with `/__w` workdir, and whether the daemon can see Velnor's bind-mounted work directory.
 
-## Register
+## Run Public Fixture First
+
+Before the real target repositories, use the public fixture:
+
+```sh
+cargo run --bin velnor-runner -- configure \
+  --url https://github.com/donbeave/velnor-actions-fixture \
+  --pat "$GITHUB_TOKEN" \
+  --name velnor-target-mvp \
+  --labels velnor-target-mvp \
+  --replace
+```
+
+Start Velnor:
+
+```sh
+cargo run --bin velnor-runner -- run \
+  --work-dir "$PWD/.velnor-work" \
+  --once \
+  --idle-timeout-seconds 900
+```
+
+The fixture run to complete is:
+
+```text
+https://github.com/donbeave/velnor-actions-fixture/actions/runs/26762850861
+```
+
+The GitHub-hosted `compat-github` matrix jobs already passed. The Velnor proof
+is that `compat-velnor` consumes the queued jobs and `compare-results` passes.
+
+After the existing queued jobs are gone, new fixture runs can be started with:
+
+```sh
+gh workflow run compat.yml --repo donbeave/velnor-actions-fixture
+gh workflow run docker.yml --repo donbeave/velnor-actions-fixture
+```
+
+## Register Target Repositories
 
 For `ChainArgos/java-monorepo`, register with the target preset. This includes `hetzner-sentry-ci`, `ubuntu-latest`, and `ubuntu-24.04`.
 

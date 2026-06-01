@@ -21,9 +21,19 @@ UI runs on the two target repositories.
 Reference upstream:
 
 - `actions/runner` latest release: `v2.334.0`
+- `actions/runner` release commit: `f1995ede5d885c997d13d8eca5467c4ce97fe69c`
+- `actions/runner` `main` rechecked on 2026-06-01:
+  `c6a124e18496a6e5d2357415052d1799afc64b63`
 - Velnor drift check: `scripts/check_runner_reference.py`
 - source audit: `docs/research/actions-runner-source-audit-2026-06-01.md`
 - latest V2 refresh: `docs/research/latest-runner-v2-refresh-2026-06-01.md`
+
+The 2026-06-01 source refresh found no broker/run-service protocol file changes
+between `v2.334.0` and `origin/main`. The relevant diff in `src/Runner.Listener`,
+`src/Sdk/RSWebApi`, and `src/Runner.Worker` is concentrated in worker/debugger
+code (`ActionManager`, DAP files, `ExecutionContext`, `JobExtension`,
+`NodeScriptActionHandler`, and `JobRunner`). That does not change Phase 0's
+V2 broker/run-service implementation contract.
 
 Implementation facts:
 
@@ -58,10 +68,57 @@ Implementation facts:
 | Timeline/results | Velnor sends best-effort in-progress job/step records, step feed lines, annotations, telemetry, step results, job outputs, environment URL, and final run-service completion. |
 | Target drift audit | `scripts/target_audit.py --check-target-mvp` gates current workflow files, action inventory, triggers, matrices, env, outputs, permissions, needs, conditions, defaults, labels, and unsupported feature drift. |
 
+## Public Fixture Proof
+
+Public repo:
+
+- `https://github.com/donbeave/velnor-actions-fixture`
+
+Purpose:
+
+- give Velnor a small public repository that mimics the target workflow feature
+  classes before using the large target repositories
+- run equivalent lanes on `ubuntu-latest` and `[self-hosted, velnor-target-mvp]`
+- compare normalized artifacts from both lanes after Velnor runs
+
+Fixture coverage:
+
+- Rust workspace with multiple packages
+- matrix jobs
+- `actions/checkout@v6`
+- `dorny/paths-filter@v4`
+- `dtolnay/rust-toolchain@stable`
+- `extractions/setup-just@v4`
+- `actions/cache@v5`
+- `actions/upload-artifact@v7`
+- `actions/download-artifact@v8`
+- local composite actions
+- `GITHUB_ENV`, `GITHUB_OUTPUT`, `GITHUB_PATH`, and `GITHUB_STEP_SUMMARY`
+- Docker Buildx setup/build workflow through `docker/setup-buildx-action@v4`
+  and `docker/build-push-action@v7`
+
+Evidence captured on 2026-06-01:
+
+- GitHub accepted and activated both fixture workflows: `compat` and `docker`.
+- Push run `26762850861` parsed correctly:
+  `https://github.com/donbeave/velnor-actions-fixture/actions/runs/26762850861`
+- `changes` passed on GitHub-hosted runner, including checkout and
+  `dorny/paths-filter`.
+- `compat-github (app-a)` and `compat-github (app-b)` passed on
+  GitHub-hosted runners, including rust-toolchain, setup-just, cache, command
+  files, local composite action, Rust tests, and upload-artifact.
+- `compat-velnor (app-a)` and `compat-velnor (app-b)` are queued until a
+  Velnor self-hosted runner with label `velnor-target-mvp` is registered.
+
+This fixture is not a replacement for target-repo proof. It is the next live
+bridge: first make the queued Velnor fixture jobs pass, then move the same
+runner path to `java-monorepo` and `jackin`.
+
 ## Still Not Proven
 
 | Gap | Why it matters | Proof needed |
 | --- | --- | --- |
+| Live fixture Velnor run | GitHub-hosted lanes pass, but Velnor has not yet consumed the queued fixture jobs. | Register Velnor to `donbeave/velnor-actions-fixture` with label `velnor-target-mvp`; run queued `compat-velnor` jobs; verify `compare-results` passes. |
 | Live GitHub UI run on `java-monorepo` | Local unit tests cannot prove GitHub accepts the full live protocol and renders logs/status correctly. | Run `ansible.yml`, then `rust.yml`, then Docker-heavy workflows through a registered Velnor runner. |
 | Live GitHub UI run on `jackin` Linux paths | `jackin` has Linux hosted labels plus artifact/pages/homebrew flows that must work without YAML changes for selected Linux jobs. | Register with target x64 labels and run `ci.yml`, `construct.yml`, and `docs.yml` Linux paths. |
 | GitHub artifact/cache service transport | Current artifact/cache handoff is shared-workdir local storage, good for one-host proof but not multi-runner parity. | Either prove target live jobs run on one host with shared workdir or implement service-backed transport before multi-host validation. |
@@ -73,11 +130,14 @@ Implementation facts:
 
 1. Run `scripts/target_verify.sh` and `cargo test -q`.
 2. Run `velnor-runner preflight` on the live Linux host and intended workdir.
-3. Register `ChainArgos/java-monorepo` with `--target-mvp-labels`.
-4. Run `ansible.yml` with `--once` and capture sanitized job dump on failure.
-5. Fix only failures backed by live payloads or target workflow evidence.
-6. Move to `rust.yml`, then Docker-heavy Java workflows.
-7. Register `jackin-project/jackin` with x64 target labels and prove Linux
+3. Register `donbeave/velnor-actions-fixture` with label
+   `velnor-target-mvp`; run the queued fixture `compat-velnor` jobs and confirm
+   `compare-results` passes.
+4. Register `ChainArgos/java-monorepo` with `--target-mvp-labels`.
+5. Run `ansible.yml` with `--once` and capture sanitized job dump on failure.
+6. Fix only failures backed by live payloads or target workflow evidence.
+7. Move to `rust.yml`, then Docker-heavy Java workflows.
+8. Register `jackin-project/jackin` with x64 target labels and prove Linux
    `ci.yml`, `construct.yml`, and `docs.yml` paths.
 
 ## Completion Rule

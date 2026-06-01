@@ -75,6 +75,8 @@ Implementation roadmap: [docs/implementation-roadmap.md](docs/implementation-roa
 
 Public fixture repository plan: [docs/public-fixture-repo-plan.md](docs/public-fixture-repo-plan.md).
 
+Public fixture repository: https://github.com/donbeave/velnor-actions-fixture.
+
 Target workflow audit and language brainstorming history: [docs/research/config-language-comparison.md](docs/research/config-language-comparison.md).
 
 GitHub runner protocol contract: [docs/research/github-runner-protocol-contract.md](docs/research/github-runner-protocol-contract.md).
