@@ -326,7 +326,7 @@ jobs {
 }
 ```
 
-Important design rule: Pkl must compile to the same normalized plan that the GitHub job-message adapter produces. That keeps one executor and one reporter.
+Important design rule: Pkl must compile to the same normalized plan that the GitHub job-message adapter produces. That keeps one executor and one reporter. The plan boundary is defined in `docs/research/normalized-plan-contract-2026-06-01.md`.
 
 ```text
 GitHub YAML -> GitHub job message -> Velnor normalized plan -> Docker executor

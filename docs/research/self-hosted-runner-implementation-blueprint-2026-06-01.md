@@ -44,6 +44,9 @@ Pkl workflow -> Velnor compiler    -> Velnor normalized plan -> Docker executor 
 That keeps Phase 0 useful immediately and prevents the future typed language from
 forking the execution engine.
 
+The normalized plan boundary is specified in
+`docs/research/normalized-plan-contract-2026-06-01.md`.
+
 ## What GitHub Owns In Phase 0
 
 Because Velnor registers as a runner, GitHub still owns the expensive workflow

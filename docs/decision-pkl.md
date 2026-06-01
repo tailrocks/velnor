@@ -10,6 +10,8 @@ Phase 0 is GitHub runner compatibility: existing repositories keep `.github/work
 
 After that is stable, Pkl will be evaluated into a typed workflow model, then Rust will validate and execute the normalized plan or generate GitHub-compatible YAML.
 
+The normalized execution contract is captured in `research/normalized-plan-contract-2026-06-01.md`; Pkl must target that contract rather than introducing a separate executor.
+
 ## Rationale
 
 Pkl is the best fit for Velnor's user-facing workflow language:

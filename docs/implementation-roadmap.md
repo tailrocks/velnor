@@ -6,6 +6,7 @@ Detailed Phase 0 implementation research lives in `docs/research/phase-0-impleme
 The current upstream source audit is `docs/research/actions-runner-source-audit-2026-06-01.md`.
 The latest runner V2 refresh is `docs/research/latest-runner-v2-refresh-2026-06-01.md`.
 The runner job-message contract is `docs/research/github-runner-job-message-contract-2026-06-01.md`; Velnor receives expanded `AgentJobRequestMessage` payloads, not raw workflow YAML, and the normal hosted-GitHub path targets broker/run-service V2 only.
+The normalized plan boundary for both GitHub job messages and future Pkl workflows is `docs/research/normalized-plan-contract-2026-06-01.md`.
 The implementation-oriented runner blueprint is `docs/research/self-hosted-runner-implementation-blueprint-2026-06-01.md`.
 The target-only MVP contract is `docs/research/target-mvp-compat-audit-2026-06-01.md`; Phase 0 work should be judged against those two repositories' current `.github` trees, not broad GitHub Actions parity.
 
@@ -270,6 +271,7 @@ Goal: introduce typed workflow authoring after runner compatibility.
 
 Deliverables:
 
+- extract the current implicit `ExecutableStep` planning boundary into a named `NormalizedJobPlan`
 - `velnor.workflow` Pkl package
 - compile Pkl to GitHub Actions YAML or Velnor native plan
 - strict validation/lints
