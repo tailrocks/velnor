@@ -68,6 +68,15 @@ VELNOR_LIVE_EVIDENCE_LOCAL_ENTRIES=abc
 assert_fails "bad local entries" velnor_require_live_evidence_controls
 unset VELNOR_LIVE_EVIDENCE_LOCAL_ENTRIES
 
+assert_passes "fixture repo does not need manual target confirmation" \
+  velnor_require_real_target_manual_confirmation donbeave/velnor-actions-fixture
+assert_fails "real target repo needs manual target confirmation" \
+  velnor_require_real_target_manual_confirmation ChainArgos/java-monorepo
+assert_passes "real target repo accepts explicit manual target confirmation" \
+  env VELNOR_REAL_TARGET_MANUAL_CONFIRM=true bash -c 'source scripts/live_sequence_common.sh; velnor_require_real_target_manual_confirmation jackin-project/jackin'
+assert_fails "real target confirmation must be boolean" \
+  env VELNOR_REAL_TARGET_MANUAL_CONFIRM=yes bash -c 'source scripts/live_sequence_common.sh; velnor_require_real_target_manual_confirmation jackin-project/jackin'
+
 gh() {
   if [[ "$1 $2" == "api repos/owner/repo/actions/runners" ]]; then
     printf 'velnor-target-mvp\tonline\tself-hosted,velnor-target-mvp\n'

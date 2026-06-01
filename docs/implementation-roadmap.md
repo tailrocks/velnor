@@ -83,7 +83,10 @@ must not automatically migrate, edit, or retarget those repositories. The agent
 should implement Velnor, run local gates, run the public fixture proof, collect
 evidence, and then report that the target repositories are ready for manual
 operator testing. The user owns the final manual target-repository tests and
-will report findings back into the implementation loop.
+will report findings back into the implementation loop. Scripts that operate on
+the real target repositories must require an explicit operator confirmation,
+currently `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`, before runner registration
+or workflow dispatch.
 
 Before asking for manual target-repository validation, prove equivalent behavior
 in the public fixture repository. The fixture must emulate the feature classes

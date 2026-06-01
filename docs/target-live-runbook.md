@@ -196,6 +196,12 @@ Boolean controls must be exactly `true` or `false`, and job counts must be
 positive integers; the sequence fails before runner registration on invalid
 values.
 
+The real target repositories are manual validation surfaces. Before running any
+target smoke or target sequence script against `ChainArgos/java-monorepo` or
+`jackin-project/jackin`, the operator must explicitly set
+`VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`. Without that confirmation, the scripts
+fail before runner registration or workflow dispatch.
+
 It runs the live host doctor, registers `ChainArgos/java-monorepo` with the
 target label preset and consumes queued jobs through bounded daemon mode
 (`daemon --once --slots N`). Set `VELNOR_TARGET_CLEANUP_RUNNER=true` to remove

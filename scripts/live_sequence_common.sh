@@ -75,6 +75,23 @@ velnor_require_live_evidence_controls() {
   velnor_require_positive_int VELNOR_LIVE_EVIDENCE_LOCAL_ENTRIES "$local_entries" || return $?
 }
 
+velnor_require_real_target_manual_confirmation() {
+  local repo="$1"
+  local confirm="${VELNOR_REAL_TARGET_MANUAL_CONFIRM:-false}"
+
+  case "$repo" in
+    ChainArgos/java-monorepo | jackin-project/jackin)
+      velnor_require_bool VELNOR_REAL_TARGET_MANUAL_CONFIRM "$confirm" || return $?
+      if [[ "$confirm" != "true" ]]; then
+        echo "$repo is a real target repository. Set VELNOR_REAL_TARGET_MANUAL_CONFIRM=true only when the user/operator is intentionally running manual target validation." >&2
+        return 2
+      fi
+      ;;
+    *)
+      ;;
+  esac
+}
+
 velnor_fail_if_other_online_runners_match_labels() {
   local repo="$1"
   local expected_name="$2"

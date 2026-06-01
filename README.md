@@ -171,6 +171,9 @@ Smoke scripts fail before dispatch if another online self-hosted runner can
 match the proof labels, because Phase 0 cache/artifact proof assumes one Velnor
 host. Set `VELNOR_ALLOW_OTHER_MATCHING_RUNNERS=true` only for a deliberate
 non-exclusive run.
+The real target repositories are guarded from accidental agent execution. Set
+`VELNOR_REAL_TARGET_MANUAL_CONFIRM=true` only when you are intentionally running
+manual validation against `ChainArgos/java-monorepo` or `jackin-project/jackin`.
 
 The remaining Phase 0 proof is live GitHub UI validation on the two target
 repositories from a Linux host whose Docker daemon can see Velnor's bind-mounted

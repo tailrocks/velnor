@@ -57,6 +57,7 @@ velnor_require_bool VELNOR_TARGET_WATCH_RUN "$WATCH_RUN"
 velnor_require_bool VELNOR_TARGET_MVP_ARM_LABEL "$TARGET_MVP_ARM_LABEL"
 velnor_require_bool VELNOR_ALLOW_OTHER_MATCHING_RUNNERS "$ALLOW_OTHER_MATCHING_RUNNERS"
 velnor_require_live_evidence_controls
+velnor_require_real_target_manual_confirmation "$TARGET_REPO"
 validate_workflow_dispatch_inputs "$TARGET_INPUTS"
 
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then

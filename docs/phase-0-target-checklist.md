@@ -40,7 +40,9 @@ and compare GitHub-hosted runner behavior with Velnor behavior. The agent must
 not automatically migrate, edit, retarget, or dispatch the real ChainArgos or
 Jackin repositories without explicit user direction. After fixture evidence is
 green, the agent should report readiness; the user/operator performs the manual
-target-repository validation and reports findings back.
+target-repository validation and reports findings back. The target smoke scripts
+enforce this boundary for the two real repositories with
+`VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`.
 
 ## Implemented
 

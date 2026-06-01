@@ -166,7 +166,9 @@ Use this sequence:
 Velnor implementation agents must not automatically modify, migrate, retarget,
 or dispatch the real target repositories as a substitute for user approval. The
 fixture is the agent-owned compatibility lab. The real target repositories are
-manual validation surfaces owned by the user/operator.
+manual validation surfaces owned by the user/operator. Target smoke scripts
+require `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true` for the two real repositories
+so accidental execution fails before runner registration or workflow dispatch.
 
 ## Out Of Scope
 
