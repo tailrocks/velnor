@@ -165,7 +165,10 @@ target label preset, validates stored V2/label config, and consumes one queued
 job with `--once`. Set `VELNOR_TARGET_CLEANUP_RUNNER=true` to remove the
 registered runner on exit. Sanitized job payloads are written to
 `.velnor-job-dumps/java-target` by default; set `VELNOR_DUMP_JOB_MESSAGES=` to
-disable dumps or point it at another directory.
+disable dumps or point it at another directory. Set
+`VELNOR_TARGET_WORKFLOW=ansible.yml` to have the script dispatch the first
+recommended Java workflow before waiting for one Velnor job, or leave it unset
+to consume already queued work.
 
 Start Velnor:
 
@@ -207,7 +210,8 @@ scripts/jackin_target_smoke.sh
 ```
 
 It uses the same host readiness, target label preset, V2 config validation,
-sanitized job dumps, and `--once` execution shape as `scripts/java_target_smoke.sh`.
+sanitized job dumps, optional `VELNOR_TARGET_WORKFLOW=<workflow.yml>` dispatch,
+and `--once` execution shape as `scripts/java_target_smoke.sh`.
 
 Register the same runner to `jackin-project/jackin` with x64 Linux labels:
 
