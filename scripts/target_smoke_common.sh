@@ -32,6 +32,7 @@ live_evidence_extra_metadata() {
 }
 
 source "$ROOT/scripts/live_evidence_common.sh"
+source "$ROOT/scripts/workflow_dispatch_common.sh"
 
 cleanup_runner() {
   if [[ "$REGISTERED_RUNNER" == "true" && "$CLEANUP_RUNNER" == "true" ]]; then
@@ -96,30 +97,8 @@ cargo run --bin velnor-runner -- status --check-target-mvp
 
 if [[ -n "$WORKFLOW" ]]; then
   echo "==> Dispatching target workflow $WORKFLOW"
-  workflow_run_args=("$WORKFLOW" --repo "$TARGET_REPO")
-  if [[ -n "$TARGET_REF" ]]; then
-    workflow_run_args+=(--ref "$TARGET_REF")
-  fi
-  if [[ -n "$TARGET_INPUTS" ]]; then
-    IFS=',' read -r -a target_inputs <<<"$TARGET_INPUTS"
-    for input in "${target_inputs[@]}"; do
-      workflow_run_args+=(-f "$input")
-    done
-  fi
-  gh workflow run "${workflow_run_args[@]}"
   echo "==> Waiting for dispatched run to appear"
-  for _ in $(seq 1 30); do
-    run_list_args=(--repo "$TARGET_REPO" --workflow "$WORKFLOW" --event workflow_dispatch --limit 1 --json databaseId)
-    if [[ -n "$TARGET_REF" ]]; then
-      run_list_args+=(--branch "$TARGET_REF")
-    fi
-    RUN_ID="$(gh run list "${run_list_args[@]}" --jq '.[0].databaseId // ""')"
-    if [[ -n "$RUN_ID" ]]; then
-      break
-    fi
-    sleep 2
-  done
-  if [[ -z "$RUN_ID" ]]; then
+  if ! RUN_ID="$(dispatch_workflow_and_wait_run_id "$TARGET_REPO" "$WORKFLOW" "$TARGET_REF" "$TARGET_INPUTS")"; then
     echo "Timed out waiting for dispatched target workflow run." >&2
     exit 1
   fi

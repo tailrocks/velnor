@@ -30,6 +30,7 @@ live_evidence_extra_metadata() {
 }
 
 source "$ROOT/scripts/live_evidence_common.sh"
+source "$ROOT/scripts/workflow_dispatch_common.sh"
 
 cleanup_runner() {
   if [[ "$REGISTERED_RUNNER" == "true" && "$CLEANUP_RUNNER" == "true" ]]; then
@@ -85,30 +86,8 @@ REGISTERED_RUNNER=true
 
 if [[ "$DISPATCH" == "true" ]]; then
   echo "==> Dispatching fresh fixture workflow $WORKFLOW"
-  workflow_run_args=("$WORKFLOW" --repo "$FIXTURE_REPO")
-  if [[ -n "$FIXTURE_REF" ]]; then
-    workflow_run_args+=(--ref "$FIXTURE_REF")
-  fi
-  if [[ -n "$FIXTURE_INPUTS" ]]; then
-    IFS=',' read -r -a fixture_inputs <<<"$FIXTURE_INPUTS"
-    for input in "${fixture_inputs[@]}"; do
-      workflow_run_args+=(-f "$input")
-    done
-  fi
-  gh workflow run "${workflow_run_args[@]}"
   echo "==> Waiting for dispatched run to appear"
-  for _ in $(seq 1 30); do
-    run_list_args=(--repo "$FIXTURE_REPO" --workflow "$WORKFLOW" --event workflow_dispatch --limit 1 --json databaseId)
-    if [[ -n "$FIXTURE_REF" ]]; then
-      run_list_args+=(--branch "$FIXTURE_REF")
-    fi
-    RUN_ID="$(gh run list "${run_list_args[@]}" --jq '.[0].databaseId // ""')"
-    if [[ -n "$RUN_ID" ]]; then
-      break
-    fi
-    sleep 2
-  done
-  if [[ -z "$RUN_ID" ]]; then
+  if ! RUN_ID="$(dispatch_workflow_and_wait_run_id "$FIXTURE_REPO" "$WORKFLOW" "$FIXTURE_REF" "$FIXTURE_INPUTS")"; then
     echo "Timed out waiting for dispatched fixture workflow run." >&2
     exit 1
   fi
