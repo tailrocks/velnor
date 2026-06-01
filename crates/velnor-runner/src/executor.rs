@@ -399,9 +399,6 @@ where
                     }
                     state.apply(&step_id, &result);
                     results.push(result);
-                    if failed && !step.continue_on_error() {
-                        break;
-                    }
                 }
                 Err(error) => {
                     step_error = Some(error);
@@ -410,7 +407,7 @@ where
             }
         }
         for post_action in post_actions.into_iter().rev() {
-            if !state.evaluate_condition(post_action.condition.as_deref()) {
+            if !state.evaluate_post_condition(post_action.condition.as_deref()) {
                 continue;
             }
             let result = self.execute_javascript_action_in_started_container(
@@ -944,9 +941,27 @@ impl JobExecutionState {
             .map(str::trim)
             .filter(|condition| !condition.is_empty())
         else {
+            return self.evaluate_condition_expr("success()");
+        };
+        let expression = strip_expression(condition);
+        if condition_has_status_check(expression) {
+            return self.evaluate_condition_expr(expression);
+        }
+        self.evaluate_condition_expr("success()") && self.evaluate_condition_expr(expression)
+    }
+
+    fn evaluate_post_condition(&self, condition: Option<&str>) -> bool {
+        let Some(condition) = condition
+            .map(str::trim)
+            .filter(|condition| !condition.is_empty())
+        else {
             return true;
         };
-        self.evaluate_condition_expr(strip_expression(condition))
+        let expression = strip_expression(condition);
+        if condition_has_status_check(expression) {
+            return self.evaluate_condition_expr(expression);
+        }
+        self.evaluate_condition_expr("success()") && self.evaluate_condition_expr(expression)
     }
 
     fn evaluate_condition_expr(&self, expression: &str) -> bool {
@@ -1340,6 +1355,12 @@ fn condition_returns_bool(expression: &str) -> bool {
         || split_top_level(expression, "!=").is_some()
         || split_top_level(expression, "==").is_some()
         || parse_contains(expression).is_some()
+}
+
+fn condition_has_status_check(expression: &str) -> bool {
+    ["always()", "success()", "failure()", "cancelled()"]
+        .iter()
+        .any(|function| expression.contains(function))
 }
 
 fn is_quoted(value: &str) -> bool {
@@ -2340,6 +2361,61 @@ mod tests {
                     || (args.first().is_some_and(|arg| arg == "run")
                         && args.contains(&"node:20-bookworm".into()))
             })
+            .count();
+        assert_eq!(exec_count, 2);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn conditions_without_status_check_require_success() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "fail".into(),
+                script: "exit 1".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "plain-condition".into(),
+                script: "echo plain".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: Some("steps.fail.outcome == 'failure'".into()),
+                continue_on_error: false,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "status-condition".into(),
+                script: "echo status".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: Some("failure() && steps.fail.outcome == 'failure'".into()),
+                continue_on_error: false,
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+            calls: Vec::new(),
+            codes: vec![0, 0, 1, 0, 0, 0],
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert!(results[1].skipped);
+        assert_eq!(results[2].exit_code, 0);
+        let exec_count = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| args.first().is_some_and(|arg| arg == "exec"))
             .count();
         assert_eq!(exec_count, 2);
         fs::remove_dir_all(temp).unwrap();
