@@ -24,7 +24,7 @@ write_runner_snapshot() {
   echo "| --- | --- | --- | --- | --- |"
 
   if runner_snapshot="$(gh api "repos/$LIVE_EVIDENCE_REPO/actions/runners" --paginate \
-    --jq ".runners[] | select(.name == \"$RUNNER_NAME\") | \"| \" + .name + \" | \" + .os + \" | \" + .status + \" | \" + (.busy | tostring) + \" | \" + ([.labels[].name] | join(\", \")) + \" |\"" 2>&1)"; then
+    --jq ".runners[] | select(.name == \"$RUNNER_NAME\" or (.name | startswith(\"$RUNNER_NAME-slot-\"))) | \"| \" + .name + \" | \" + .os + \" | \" + .status + \" | \" + (.busy | tostring) + \" | \" + ([.labels[].name] | join(\", \")) + \" |\"" 2>&1)"; then
     if [[ -n "$runner_snapshot" ]]; then
       printf '%s\n' "$runner_snapshot"
     else

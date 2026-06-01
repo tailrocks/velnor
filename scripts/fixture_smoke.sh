@@ -37,7 +37,7 @@ source "$ROOT/scripts/workflow_dispatch_common.sh"
 cleanup_runner() {
   if [[ "$REGISTERED_RUNNER" == "true" && "$CLEANUP_RUNNER" == "true" ]]; then
     echo "==> Removing fixture runner"
-    cargo run --bin velnor-runner -- remove --pat "$GITHUB_TOKEN" || true
+    cargo run --bin velnor-runner -- remove --pat "$GITHUB_TOKEN" --slots "$JOB_COUNT" || true
   fi
 }
 
@@ -100,15 +100,6 @@ fi
 echo "==> Checking live host readiness"
 scripts/live_host_doctor.sh
 
-echo "==> Registering fixture runner"
-cargo run --bin velnor-runner -- configure \
-  --url "$FIXTURE_URL" \
-  --pat "$GITHUB_TOKEN" \
-  --name "$RUNNER_NAME" \
-  --labels "$RUNNER_LABEL" \
-  --replace
-REGISTERED_RUNNER=true
-
 echo "==> Checking fixture runner label exclusivity"
 velnor_fail_if_other_online_runners_match_labels "$FIXTURE_REPO" "$RUNNER_NAME" "$RUNNER_LABEL"
 
@@ -128,14 +119,18 @@ gh run view "$RUN_ID" --repo "$FIXTURE_REPO" \
 
 velnor_print_job_execution_model "$JOB_COUNT" "Fixture"
 
-echo "==> Running $JOB_COUNT Velnor fixture job(s)"
-for job_index in $(seq 1 "$JOB_COUNT"); do
-  echo "==> Velnor fixture job $job_index/$JOB_COUNT"
-  cargo run --bin velnor-runner -- run \
-    "${run_args[@]}" \
-    --once \
-    --idle-timeout-seconds "$IDLE_TIMEOUT_SECONDS"
-done
+echo "==> Running Velnor fixture daemon with $JOB_COUNT slot(s)"
+REGISTERED_RUNNER=true
+cargo run --bin velnor-runner -- daemon \
+  --url "$FIXTURE_URL" \
+  --pat "$GITHUB_TOKEN" \
+  --name "$RUNNER_NAME" \
+  --labels "$RUNNER_LABEL" \
+  --replace \
+  --slots "$JOB_COUNT" \
+  --once \
+  --idle-timeout-seconds "$IDLE_TIMEOUT_SECONDS" \
+  "${run_args[@]}"
 
 echo "==> Fixture run after Velnor"
 show_github_run_status

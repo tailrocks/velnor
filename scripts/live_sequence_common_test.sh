@@ -99,8 +99,12 @@ if [[ "$job_model" != *"can run concurrently"* ]]; then
   echo "job execution model output did not describe concurrent job containers" >&2
   exit 1
 fi
-if [[ "$job_model" != *"3 job(s) through repeated --once"* ]]; then
-  echo "job execution model output did not describe current smoke execution" >&2
+if [[ "$job_model" != *"3 job(s) through a bounded proof path"* ]]; then
+  echo "job execution model output did not describe bounded smoke execution" >&2
+  exit 1
+fi
+if [[ "$job_model" != *"daemon --once"* ]]; then
+  echo "job execution model output did not mention bounded daemon mode" >&2
   exit 1
 fi
 

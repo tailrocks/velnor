@@ -101,6 +101,7 @@ velnor_fail_if_other_online_runners_match_labels() {
     [[ -n "$name" ]] || continue
     [[ "$status" == "online" ]] || continue
     [[ "$name" != "$expected_name" ]] || continue
+    [[ "$name" != "$expected_name"-slot-* ]] || continue
 
     for label in "${labels[@]}"; do
       if [[ ",$label_csv," == *",$label,"* ]]; then
@@ -124,5 +125,5 @@ velnor_print_job_execution_model() {
   echo "==> $label job execution model"
   echo "Production Velnor should run as one daemon with multiple internal GitHub runner slots."
   echo "Each assigned job gets its own isolated Docker container and can run concurrently with other assigned jobs."
-  echo "This smoke script currently exercises $job_count job(s) through repeated --once runs until the daemon scheduler is implemented."
+  echo "This smoke script exercises $job_count job(s) through a bounded proof path: daemon --once when available, or repeated run --once for legacy proof scripts."
 }
