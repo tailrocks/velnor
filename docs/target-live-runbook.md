@@ -75,6 +75,7 @@ Start Velnor:
 ```sh
 cargo run --bin velnor-runner -- run \
   --work-dir "$PWD/.velnor-work" \
+  --require-docker-socket \
   --once \
   --idle-timeout-seconds 900
 ```

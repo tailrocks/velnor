@@ -394,7 +394,12 @@ fn preflight_before_executable_run(args: &RunArgs, config_dir: &Path) -> Result<
         return Ok(());
     }
 
-    crate::preflight::preflight(PreflightArgs {
+    crate::preflight::preflight(preflight_args_for_run(args, config_dir))
+        .context("Docker preflight failed before polling GitHub for jobs")
+}
+
+fn preflight_args_for_run(args: &RunArgs, config_dir: &Path) -> PreflightArgs {
+    PreflightArgs {
         work_dir: Some(
             args.work_dir
                 .clone()
@@ -404,8 +409,7 @@ fn preflight_before_executable_run(args: &RunArgs, config_dir: &Path) -> Result<
         docker_image: args.docker_image.clone(),
         require_docker_socket: args.require_docker_socket,
         require_buildx: true,
-    })
-    .context("Docker preflight failed before polling GitHub for jobs")
+    }
 }
 
 fn ensure_v2_runner_settings(stored: &StoredRunnerConfig) -> Result<()> {
@@ -2585,6 +2589,46 @@ mod tests {
         assert!(should_execute_job(&run_args(false, true, false)));
         assert!(!should_execute_job(&run_args(true, false, false)));
         assert!(!should_execute_job(&run_args(false, false, true)));
+    }
+
+    #[test]
+    fn run_preflight_args_preserve_target_docker_requirements() {
+        let mut args = run_args(false, false, false);
+        args.work_dir = Some(Path::new("/runner/work").to_path_buf());
+        args.docker_host_work_dir = Some(Path::new("/daemon/work").to_path_buf());
+        args.docker_image = "ghcr.io/catthehacker/ubuntu:act-latest".into();
+        args.require_docker_socket = true;
+
+        let preflight = preflight_args_for_run(&args, Path::new("/config"));
+
+        assert_eq!(
+            preflight.work_dir,
+            Some(Path::new("/runner/work").to_path_buf())
+        );
+        assert_eq!(
+            preflight.docker_host_work_dir,
+            Some(Path::new("/daemon/work").to_path_buf())
+        );
+        assert_eq!(
+            preflight.docker_image,
+            "ghcr.io/catthehacker/ubuntu:act-latest"
+        );
+        assert!(preflight.require_docker_socket);
+        assert!(preflight.require_buildx);
+    }
+
+    #[test]
+    fn run_preflight_args_default_work_dir_under_config() {
+        let args = run_args(false, false, false);
+        let preflight = preflight_args_for_run(&args, Path::new("/config"));
+
+        assert_eq!(
+            preflight.work_dir,
+            Some(Path::new("/config/_work").to_path_buf())
+        );
+        assert_eq!(preflight.docker_host_work_dir, None);
+        assert!(!preflight.require_docker_socket);
+        assert!(preflight.require_buildx);
     }
 
     #[test]
