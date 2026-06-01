@@ -640,6 +640,7 @@ struct JobExecutionState {
     outputs: BTreeMap<String, BTreeMap<String, String>>,
     action_states: BTreeMap<String, BTreeMap<String, String>>,
     outcomes: BTreeMap<String, StepOutcome>,
+    conclusions: BTreeMap<String, StepOutcome>,
     path: Vec<String>,
     masks: Vec<String>,
 }
@@ -690,6 +691,7 @@ impl JobExecutionState {
             outputs: BTreeMap::new(),
             action_states: BTreeMap::new(),
             outcomes: BTreeMap::new(),
+            conclusions: BTreeMap::new(),
             path: Vec::new(),
             masks: Vec::new(),
         }
@@ -713,7 +715,13 @@ impl JobExecutionState {
         } else {
             StepOutcome::Failure
         };
+        let conclusion = if result.failure_ignored && outcome == StepOutcome::Failure {
+            StepOutcome::Success
+        } else {
+            outcome
+        };
         self.outcomes.insert(step_id.to_string(), outcome);
+        self.conclusions.insert(step_id.to_string(), conclusion);
 
         if !result.state.outputs.is_empty() {
             self.outputs
@@ -948,13 +956,13 @@ impl JobExecutionState {
         }
         if expression == "success()" {
             return !self
-                .outcomes
+                .conclusions
                 .values()
                 .any(|outcome| *outcome == StepOutcome::Failure);
         }
         if expression == "failure()" {
             return self
-                .outcomes
+                .conclusions
                 .values()
                 .any(|outcome| *outcome == StepOutcome::Failure);
         }
@@ -1013,9 +1021,15 @@ impl JobExecutionState {
         }
         if let Some(expression) = expression.strip_prefix("steps.") {
             let (step_id, field) = expression.split_once('.')?;
-            if field == "outcome" || field == "conclusion" {
+            if field == "outcome" {
                 return self
                     .outcomes
+                    .get(step_id)
+                    .map(|outcome| outcome.as_str().to_string());
+            }
+            if field == "conclusion" {
+                return self
+                    .conclusions
                     .get(step_id)
                     .map(|outcome| outcome.as_str().to_string());
             }
@@ -2299,7 +2313,7 @@ mod tests {
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
                 env: Vec::new(),
-                condition: None,
+                condition: Some("success()".into()),
                 continue_on_error: false,
             }),
         ];
@@ -2358,7 +2372,9 @@ mod tests {
         );
 
         assert!(state.evaluate_condition(Some("steps.sccache.outcome == 'success'")));
+        assert!(state.evaluate_condition(Some("steps.sccache.conclusion == 'success'")));
         assert!(state.evaluate_condition(Some("steps.disabled.outcome != 'success'")));
+        assert!(state.evaluate_condition(Some("steps.disabled.conclusion == 'skipped'")));
         assert!(state.evaluate_condition(Some("runner.os == 'Linux'")));
         assert!(state.evaluate_condition(Some("success()")));
         assert!(!state.evaluate_condition(Some("failure()")));
@@ -2381,6 +2397,24 @@ mod tests {
         assert!(state.evaluate_condition(Some("failure()")));
         assert!(state.evaluate_condition(Some("failure() && !cancelled()")));
         assert!(state.evaluate_condition(Some("always() && failure()")));
+
+        let mut ignored_state = JobExecutionState::default();
+        ignored_state.apply(
+            "ignored",
+            &StepExecutionResult {
+                exit_code: 1,
+                skipped: false,
+                failure_ignored: true,
+                state: StepCommandState::default(),
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+
+        assert!(ignored_state.evaluate_condition(Some("steps.ignored.outcome == 'failure'")));
+        assert!(ignored_state.evaluate_condition(Some("steps.ignored.conclusion == 'success'")));
+        assert!(ignored_state.evaluate_condition(Some("success()")));
+        assert!(!ignored_state.evaluate_condition(Some("failure()")));
     }
 
     #[test]
