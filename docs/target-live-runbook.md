@@ -212,6 +212,8 @@ scripts/jackin_target_smoke.sh
 It uses the same host readiness, target label preset, V2 config validation,
 sanitized job dumps, optional `VELNOR_TARGET_WORKFLOW=<workflow.yml>` dispatch,
 and `--once` execution shape as `scripts/java_target_smoke.sh`.
+Set `VELNOR_TARGET_MVP_ARM_LABEL=true` only on an ARM Linux host to add the
+`ubuntu-24.04-arm` label.
 
 Register the same runner to `jackin-project/jackin` with x64 Linux labels:
 

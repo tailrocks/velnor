@@ -14,6 +14,7 @@ DUMP_JOB_MESSAGES="${VELNOR_DUMP_JOB_MESSAGES:-$ROOT/.velnor-job-dumps/target}"
 WORKFLOW="${VELNOR_TARGET_WORKFLOW:-}"
 RUN_ID="${VELNOR_TARGET_RUN_ID:-}"
 TARGET_LABEL="${VELNOR_TARGET_LABEL:-target}"
+TARGET_MVP_ARM_LABEL="${VELNOR_TARGET_MVP_ARM_LABEL:-false}"
 REGISTERED_RUNNER=false
 
 cleanup_runner() {
@@ -54,12 +55,19 @@ echo "==> Checking live host readiness"
 VELNOR_CHECK_TARGET_MVP_CONFIG=false scripts/live_host_doctor.sh
 
 echo "==> Registering $TARGET_LABEL target runner"
-cargo run --bin velnor-runner -- configure \
-  --url "$TARGET_URL" \
-  --pat "$GITHUB_TOKEN" \
-  --name "$RUNNER_NAME" \
-  --target-mvp-labels \
+configure_args=(
+  --url "$TARGET_URL"
+  --pat "$GITHUB_TOKEN"
+  --name "$RUNNER_NAME"
+  --target-mvp-labels
   --replace
+)
+if [[ "$TARGET_MVP_ARM_LABEL" == "true" ]]; then
+  configure_args+=(--target-mvp-arm-label)
+fi
+
+cargo run --bin velnor-runner -- configure \
+  "${configure_args[@]}"
 REGISTERED_RUNNER=true
 
 echo "==> Checking target MVP runner config"
