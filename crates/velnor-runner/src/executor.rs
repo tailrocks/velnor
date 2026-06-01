@@ -599,8 +599,9 @@ where
             },
             temp_host,
         )?;
-        let mut env = state.step_env(&[]);
-        env.extend(state.resolve_env(&action.env));
+        let action_state = state.with_env(action_context_env(&action.env));
+        let mut env = action_state.step_env(&[]);
+        env.extend(action_state.resolve_env(&action.env));
         env.extend(action_state_env.iter().cloned());
         env.extend(command_files.env.iter().cloned());
         let node_image = node_action_image(&action.node, &container.node_action_image);
@@ -682,8 +683,9 @@ where
             },
             temp_host,
         )?;
-        let mut env = state.step_env(&[]);
-        env.extend(state.resolve_env(&action.env));
+        let action_state = state.with_env(action_context_env(&action.env));
+        let mut env = action_state.step_env(&[]);
+        env.extend(action_state.resolve_env(&action.env));
         env.extend(command_files.env.iter().cloned());
         let entrypoint = action
             .entrypoint
@@ -825,6 +827,21 @@ where
     }
 }
 
+fn action_context_env(env: &[(String, String)]) -> Vec<(String, String)> {
+    env.iter()
+        .filter(|(name, _)| {
+            matches!(
+                name.as_str(),
+                "GITHUB_ACTION"
+                    | "GITHUB_ACTION_PATH"
+                    | "GITHUB_ACTION_REPOSITORY"
+                    | "GITHUB_ACTION_REF"
+            )
+        })
+        .cloned()
+        .collect()
+}
+
 #[derive(Debug, Default)]
 struct JobExecutionState {
     env: BTreeMap<String, String>,
@@ -924,6 +941,25 @@ impl JobExecutionState {
         state
             .env
             .insert("GITHUB_ACTION".to_string(), step_id.to_string());
+        state
+    }
+
+    fn with_env(&self, env: Vec<(String, String)>) -> Self {
+        let mut state = Self {
+            env: self.env.clone(),
+            context_data: self.context_data.clone(),
+            workspace_host: self.workspace_host.clone(),
+            outputs: self.outputs.clone(),
+            action_states: self.action_states.clone(),
+            outcomes: self.outcomes.clone(),
+            conclusions: self.conclusions.clone(),
+            path: self.path.clone(),
+            masks: self.masks.clone(),
+            composite_stack: self.composite_stack.clone(),
+        };
+        for (name, value) in env {
+            state.env.insert(name, value);
+        }
         state
     }
 
@@ -3472,6 +3508,10 @@ mod tests {
                     "/__a/_actions/acme_action/v1".into(),
                 ),
                 ("INPUT_NAME".into(), "value".into()),
+                (
+                    "INPUT_ACTION_PATH".into(),
+                    "${{ github.action_path }}".into(),
+                ),
             ],
         };
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
@@ -3484,6 +3524,9 @@ mod tests {
         let calls = &executor.runner().calls;
         assert_eq!(calls[2].1[0], "run");
         assert!(calls[2].1.contains(&"INPUT_NAME=value".into()));
+        assert!(calls[2]
+            .1
+            .contains(&"INPUT_ACTION_PATH=/__a/_actions/acme_action/v1".into()));
         assert!(calls[2]
             .1
             .contains(&"GITHUB_OUTPUT=/__t/action1_output".into()));
@@ -3511,6 +3554,10 @@ mod tests {
                     "/__a/_actions/acme_docker/v1".into(),
                 ),
                 ("INPUT_NAME".into(), "value".into()),
+                (
+                    "INPUT_ACTION_PATH".into(),
+                    "${{ github.action_path }}".into(),
+                ),
             ],
             entrypoint: Some("/entrypoint.sh".into()),
             args: vec!["arg1".into()],
@@ -3531,6 +3578,9 @@ mod tests {
         let calls = &executor.runner().calls;
         assert_eq!(calls[2].1[0], "run");
         assert!(calls[2].1.contains(&"INPUT_NAME=value".into()));
+        assert!(calls[2]
+            .1
+            .contains(&"INPUT_ACTION_PATH=/__a/_actions/acme_docker/v1".into()));
         assert!(calls[2]
             .1
             .contains(&"GITHUB_OUTPUT=/__t/docker1_output".into()));

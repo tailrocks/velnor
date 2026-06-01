@@ -126,7 +126,7 @@ Deliverables:
   - target `GITHUB_WORKFLOW` and `GITHUB_REF_NAME` are injected; `GITHUB_REF_NAME` is derived from `GITHUB_REF` when GitHub does not send it directly
   - target GitHub context/env values such as `GITHUB_REPOSITORY_OWNER`, ref metadata, workflow metadata, run attempt, retention days, and server/API URLs are injected when present or derived where safe
   - `github.event` from job `ContextData` is written to `/__t/_github_workflow/event.json` and exposed through `GITHUB_EVENT_PATH`
-  - repository JavaScript actions receive per-action `GITHUB_ACTION`, `GITHUB_ACTION_PATH`, `GITHUB_ACTION_REPOSITORY`, and `GITHUB_ACTION_REF`
+  - repository JavaScript and Docker actions receive per-action `GITHUB_ACTION`, `GITHUB_ACTION_PATH`, `GITHUB_ACTION_REPOSITORY`, and `GITHUB_ACTION_REF`; these values are present while resolving action env/input expressions such as `${{ github.action_path }}`
   - all executable steps receive step-scoped `GITHUB_ACTION` before condition, env, and script expression rendering
   - `github.action_status` is expression-resolvable for composite action steps from the current composite scope, while top-level steps fall back to current job status
   - basic `RUNNER_*` variables are injected for the Docker runner environment, including GitHub-style `RUNNER_ARCH` values such as `X64`/`ARM64`, `RUNNER_NAME`, `RUNNER_WORKSPACE`, `RUNNER_ENVIRONMENT=self-hosted`, `RUNNER_TOOL_CACHE=/__tool`, matching `AGENT_TOOLSDIRECTORY=/__tool` for toolcache actions, and `RUNNER_DEBUG=1` when `ACTIONS_STEP_DEBUG=true`
