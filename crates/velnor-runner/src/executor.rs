@@ -5357,6 +5357,97 @@ type=sha,format=long,prefix=,enable=true"
     }
 
     #[test]
+    fn native_docker_metadata_matches_target_pr_and_publish_tags() {
+        let temp = temp_dir();
+        fs::create_dir_all(temp.join("work")).unwrap();
+        let tags_input = "type=raw,value=latest,enable=${{ inputs.publish }}\n\
+type=sha,format=long,prefix=,enable=${{ inputs.publish }}\n\
+type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.publish && github.event_name == 'pull_request' }}";
+        let steps = vec![ExecutableStep::Native {
+            step_id: "pr-meta".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::DockerMetadata,
+                inputs: [
+                    ("images".into(), "${{ inputs.image }}".into()),
+                    ("tags".into(), tags_input.into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        let results = executor
+            .execute_ordered_steps_with_context(
+                &container(&temp),
+                &steps,
+                &[
+                    ("GITHUB_EVENT_NAME".into(), "pull_request".into()),
+                    ("GITHUB_SHA".into(), "abcdef1234567890".into()),
+                    (
+                        "GITHUB_REPOSITORY".into(),
+                        "ChainArgos/java-monorepo".into(),
+                    ),
+                ],
+                &[
+                    (
+                        "inputs".into(),
+                        serde_json::json!({
+                            "image": "chainargos/rust-bitcoin-processor",
+                            "publish": false
+                        }),
+                    ),
+                    (
+                        "github".into(),
+                        serde_json::json!({ "event": { "pull_request": { "number": 42 } } }),
+                    ),
+                ],
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(
+            results[0].state.outputs["tags"],
+            "chainargos/rust-bitcoin-processor:pr-42"
+        );
+
+        let publish_state = JobExecutionState::new_with_context(
+            &[
+                ("GITHUB_EVENT_NAME".into(), "push".into()),
+                ("GITHUB_SHA".into(), "abcdef1234567890".into()),
+                (
+                    "GITHUB_REPOSITORY".into(),
+                    "ChainArgos/java-monorepo".into(),
+                ),
+            ],
+            &[(
+                "inputs".into(),
+                serde_json::json!({
+                    "image": "chainargos/rust-bitcoin-processor",
+                    "publish": true
+                }),
+            )],
+        );
+        let publish_action = NativeActionInvocation {
+            adapter: NativeActionAdapter::DockerMetadata,
+            inputs: [
+                ("images".into(), "${{ inputs.image }}".into()),
+                ("tags".into(), tags_input.into()),
+            ]
+            .into(),
+            env: Vec::new(),
+        };
+        let publish_result = native_docker_metadata(&publish_action, &publish_state);
+        assert_eq!(
+            publish_result.state.outputs["tags"],
+            "chainargos/rust-bitcoin-processor:latest\nchainargos/rust-bitcoin-processor:abcdef1234567890"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn native_setup_tool_adapters_use_job_container_without_node_sidecars() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
