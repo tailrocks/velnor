@@ -48,8 +48,14 @@ the operator while managing multiple GitHub runner slots internally.
 Design:
 
 - the daemon owns a configured concurrency limit, for example `--slots <n>`
+- after initial configuration, the user-facing operation should be one command:
+  run the daemon binary, connect to GitHub, and let it keep accepting work until
+  stopped
 - each slot has its own GitHub runner identity, broker session, work directory,
   temp directory, cancellation path, and job lock-renewal loop
+- the daemon owns slot registration/refresh as product behavior; manually
+  preconfiguring slot directories is acceptable only as an intermediate
+  implementation step
 - the daemon supervises all slots and restarts unhealthy idle slots without
   stopping active jobs in other slots
 - each assigned job starts its own isolated Docker job container and per-job

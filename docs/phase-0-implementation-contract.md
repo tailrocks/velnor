@@ -48,6 +48,12 @@ Required protocol behavior:
 
 - register with GitHub using a repository runner token or a PAT that can request
   one
+- expose a one-binary operator experience: `velnor-runner daemon --slots N`
+  should be enough to keep a host connected to GitHub and continuously accepting
+  work after initial configuration
+- hide GitHub's one-active-job-per-runner-session limit behind internal slots:
+  one Velnor daemon can supervise multiple runner identities, but each identity
+  still owns exactly one broker session and one active job at a time
 - refuse unsupported host/label combinations before registration
 - exchange the runner token through `actions/runner-registration`
 - add or replace a `TaskAgent` with the configured labels
@@ -70,13 +76,17 @@ normal Phase 0 execution path.
 ## Execution Model
 
 Every target Linux job runs inside a fresh Docker job container, even when the
-workflow does not declare `container:`.
+workflow does not declare `container:`. The daemon may run many jobs at the same
+time, bounded by its configured slot count, but per-job mutable state must stay
+isolated.
 
 Required container behavior:
 
 - per-job Docker network
 - shared host work directory mounted into the job container
 - shared workspace, temp, home, actions, tools, and sccache directories
+- per-slot and per-job directory isolation so concurrent jobs cannot write the
+  same runner temp, command-file, checkout, or action-download state
 - GitHub-style container paths for workspace/temp/actions/tools where target
   commands expect them
 - bind-mount visibility preflight before polling GitHub for work

@@ -126,7 +126,10 @@ For Phase 0, Velnor can skip self-update and treat runner refresh as "log and co
 
 ## Job Dispatch
 
-`JobDispatcher` assumes one job at a time per runner.
+`JobDispatcher` assumes one job at a time per registered runner identity. The
+source explicitly says the dispatcher is not thread-safe and relies on the
+service not sending another job while the current one is running. That is the
+GitHub scheduler/session boundary Velnor must respect.
 
 Important behavior:
 
@@ -139,10 +142,21 @@ Important behavior:
 
 For Velnor:
 
-- one assigned GitHub job per runner process is enough initially
-- later, multiple runner registrations/processes can share one host
-- one Docker container per job
-- cancellation should stop/kill job container
+- the operator-facing product is one long-running `velnor-runner daemon`
+  process, not a pile of manually managed runner processes
+- the daemon owns a configured concurrency limit such as `--slots 4`
+- each slot maps to one GitHub runner identity and one broker session, because
+  GitHub still treats a runner session as one-active-job-at-a-time
+- the daemon supervises all slots, receives jobs continuously, and starts each
+  acquired job immediately when a slot is free
+- every acquired job gets a distinct Docker job container, Docker network,
+  workspace/temp/actions/tools directories, cancellation path, and lock-renewal
+  loop
+- cancellation should stop/kill only the affected job container and must not
+  stop the daemon or unrelated slots
+
+This is the key difference from the stock runner UX. GitHub sees multiple
+runner agents/sessions, but the user runs and operates one Velnor daemon.
 
 ## Job Message
 
