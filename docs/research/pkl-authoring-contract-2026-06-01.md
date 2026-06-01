@@ -329,10 +329,8 @@ velnor-runner workflow check workflow.pkl
 ```
 
 It evaluates through `pkl eval --format json` and validates the first structural
-invariants in Rust: job id syntax, `needs` references, self-dependencies,
-duplicate step ids inside a job, and mutually exclusive `run`/`uses` step
-shape. GitHub YAML rendering and Velnor plan output are still the next compiler
-steps.
+invariants in Rust. GitHub YAML rendering and Velnor plan output are still the
+next compiler steps.
 
 ## Rust Integration Rule
 

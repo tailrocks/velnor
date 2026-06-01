@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, path::Path, process::Command};
+use std::{path::Path, process::Command};
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -65,14 +65,13 @@ fn validate_workflow_json(value: &Value) -> Result<WorkflowCheckSummary> {
         let job = job
             .as_object()
             .ok_or_else(|| anyhow::anyhow!("jobs.{job_id} must be an object"))?;
-        validate_job_needs(job_id, job.get("needs"), jobs.keys().map(String::as_str))?;
+        validate_job_needs(job_id, job.get("needs"))?;
         if let Some(job_steps) = job.get("steps") {
             let job_steps = job_steps
                 .as_array()
                 .ok_or_else(|| anyhow::anyhow!("jobs.{job_id}.steps must be an array"))?;
-            let mut step_ids = BTreeSet::new();
             for (index, step) in job_steps.iter().enumerate() {
-                validate_step(job_id, index, step, &mut step_ids)?;
+                validate_step(job_id, index, step)?;
             }
             steps += job_steps.len();
         }
@@ -98,34 +97,20 @@ fn validate_job_id(job_id: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_job_needs<'a>(
-    job_id: &str,
-    needs: Option<&Value>,
-    known_jobs: impl Iterator<Item = &'a str>,
-) -> Result<()> {
+fn validate_job_needs(job_id: &str, needs: Option<&Value>) -> Result<()> {
     let Some(needs) = needs else {
         return Ok(());
     };
-    let known_jobs = known_jobs.collect::<BTreeSet<_>>();
-    let validate_need = |value: &str| -> Result<()> {
-        validate_job_id(value)
-            .with_context(|| format!("jobs.{job_id}.needs contains invalid job id"))?;
-        if value == job_id {
-            bail!("jobs.{job_id}.needs must not reference itself");
-        }
-        if !known_jobs.contains(value) {
-            bail!("jobs.{job_id}.needs references unknown job '{value}'");
-        }
-        Ok(())
-    };
     match needs {
-        Value::String(value) => validate_need(value),
+        Value::String(value) => validate_job_id(value)
+            .with_context(|| format!("jobs.{job_id}.needs contains invalid job id")),
         Value::Array(values) => {
             for value in values {
                 let value = value.as_str().ok_or_else(|| {
                     anyhow::anyhow!("jobs.{job_id}.needs entries must be strings")
                 })?;
-                validate_need(value)?;
+                validate_job_id(value)
+                    .with_context(|| format!("jobs.{job_id}.needs contains invalid job id"))?;
             }
             Ok(())
         }
@@ -133,12 +118,7 @@ fn validate_job_needs<'a>(
     }
 }
 
-fn validate_step(
-    job_id: &str,
-    index: usize,
-    step: &Value,
-    seen_step_ids: &mut BTreeSet<String>,
-) -> Result<()> {
+fn validate_step(job_id: &str, index: usize, step: &Value) -> Result<()> {
     let step = step
         .as_object()
         .ok_or_else(|| anyhow::anyhow!("jobs.{job_id}.steps[{index}] must be an object"))?;
@@ -153,9 +133,6 @@ fn validate_step(
     if let Some(step_id) = step.get("id").and_then(Value::as_str) {
         validate_job_id(step_id)
             .with_context(|| format!("jobs.{job_id}.steps[{index}].id is invalid"))?;
-        if !seen_step_ids.insert(step_id.to_string()) {
-            bail!("jobs.{job_id}.steps[{index}].id duplicates earlier step id '{step_id}'");
-        }
     }
     Ok(())
 }
@@ -222,39 +199,5 @@ mod tests {
 
         let error = validate_workflow_json(&value).unwrap_err().to_string();
         assert!(error.contains("unsupported characters"));
-    }
-
-    #[test]
-    fn rejects_unknown_needed_job() {
-        let value = json!({
-            "jobs": {
-                "test": {
-                    "needs": ["build"],
-                    "steps": [
-                        { "run": "echo no" }
-                    ]
-                }
-            }
-        });
-
-        let error = validate_workflow_json(&value).unwrap_err().to_string();
-        assert!(error.contains("references unknown job 'build'"));
-    }
-
-    #[test]
-    fn rejects_duplicate_step_id_in_job() {
-        let value = json!({
-            "jobs": {
-                "check": {
-                    "steps": [
-                        { "id": "same", "run": "echo one" },
-                        { "id": "same", "run": "echo two" }
-                    ]
-                }
-            }
-        });
-
-        let error = validate_workflow_json(&value).unwrap_err().to_string();
-        assert!(error.contains("duplicates earlier step id 'same'"));
     }
 }
