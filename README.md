@@ -64,6 +64,7 @@ cargo run --bin velnor-runner -- daemon \
   --labels velnor,hetzner-sentry-ci \
   --replace \
   --slots 2
+cargo run --bin velnor-runner -- daemon --slots 2 --once
 cargo run --bin velnor-runner -- run
 cargo run --bin velnor-runner -- remove --pat "$GITHUB_TOKEN" --slots 2
 ```
@@ -90,7 +91,8 @@ daemon binary with one concurrency setting. Use `status --slots N` to inspect
 the same internal slot configs and `remove --slots N` to unregister and delete
 them. The daemon supervises slot tasks as a group and surfaces the first slot
 panic or runner-loop error immediately instead of waiting for earlier slots to
-exit.
+exit. `daemon --once` is available for bounded proof runs; each slot exits after
+one handled job, while normal daemon mode keeps polling.
 
 Local target coverage is checked with:
 

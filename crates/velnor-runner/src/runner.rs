@@ -521,7 +521,7 @@ fn daemon_slot_run_args(
 
     Ok(RunArgs {
         config_dir: Some(daemon_slot_config_dir(config_base, slot_index, slot_count)),
-        once: false,
+        once: args.once,
         idle_timeout_seconds: args.idle_timeout_seconds,
         complete_noop: args.complete_noop,
         execute_scripts: args.execute_scripts,
@@ -2910,6 +2910,7 @@ mod tests {
             pool_name: None,
             dry_run_registration: false,
             slots,
+            once: false,
             idle_timeout_seconds: None,
             complete_noop: false,
             execute_scripts: false,
@@ -3054,6 +3055,16 @@ mod tests {
             Some(Path::new("/tmp/jobs/slot-2").to_path_buf())
         );
         assert!(!run_args.once);
+    }
+
+    #[test]
+    fn daemon_run_args_propagate_once_to_each_slot() {
+        let mut args = daemon_args(2);
+        args.once = true;
+
+        let run_args = daemon_slot_run_args(&args, Path::new("/config"), 1, 2).unwrap();
+
+        assert!(run_args.once);
     }
 
     #[test]

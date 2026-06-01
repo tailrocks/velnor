@@ -38,6 +38,7 @@ fn daemon_dry_run_registration_cli_writes_slot_configs_and_exits() {
             "velnor,ubuntu-24.04",
             "--slots",
             "2",
+            "--once",
             "--config-dir",
             config_dir.to_str().unwrap(),
             "--dry-run-registration",

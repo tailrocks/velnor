@@ -209,6 +209,10 @@ pub struct DaemonArgs {
     #[arg(long, default_value_t = 1)]
     pub slots: usize,
 
+    /// Exit each internal slot after one job. Useful for bounded live proof runs.
+    #[arg(long)]
+    pub once: bool,
+
     /// Fail each slot if no job is acquired within this many seconds. Default is no idle timeout.
     #[arg(long)]
     pub idle_timeout_seconds: Option<u64>,
