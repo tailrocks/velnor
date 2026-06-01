@@ -327,6 +327,7 @@ where
                 results.push(result);
                 continue;
             }
+            let mut post_registered = false;
             if let ExecutableStep::JavaScript {
                 step_id,
                 invocation,
@@ -336,6 +337,15 @@ where
             {
                 if let Some(pre_container_path) = invocation.pre_container_path.as_deref() {
                     if state.evaluate_post_condition(invocation.pre_condition.as_deref()) {
+                        if invocation.post_container_path.is_some() {
+                            post_actions.push(PostJavaScriptAction {
+                                step_id: step_id.clone(),
+                                invocation: invocation.clone(),
+                                condition: invocation.post_condition.clone(),
+                                continue_on_error: *continue_on_error,
+                            });
+                            post_registered = true;
+                        }
                         let mut result = self.execute_javascript_action_in_started_container(
                             container,
                             step_id,
@@ -428,7 +438,7 @@ where
                         ..
                     } = step
                     {
-                        if invocation.post_container_path.is_some() {
+                        if invocation.post_container_path.is_some() && !post_registered {
                             post_actions.push(PostJavaScriptAction {
                                 step_id: step_id.clone(),
                                 invocation: invocation.clone(),
@@ -3117,6 +3127,60 @@ mod tests {
             "/__a/_actions/cache/dist/restore.js".into()
         ]));
         assert!(node_calls[1].contains(&"STATE_primaryKey=linux-cache".into()));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn javascript_pre_action_registers_post_before_main() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::JavaScript {
+            step_id: "wrapped".into(),
+            invocation: JavaScriptActionInvocation {
+                node: "node20".into(),
+                pre_container_path: Some("/__a/_actions/wrapped/dist/pre.js".into()),
+                pre_condition: None,
+                main_container_path: "/__a/_actions/wrapped/dist/main.js".into(),
+                post_container_path: Some("/__a/_actions/wrapped/dist/post.js".into()),
+                post_condition: None,
+                action_container_path: "/__a/_actions/wrapped".into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+            calls: Vec::new(),
+            codes: vec![0, 0, 9, 0, 0],
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].exit_code, 9);
+        let node_calls = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:20-bookworm".into())
+            })
+            .map(|(_, args)| args)
+            .collect::<Vec<_>>();
+        assert_eq!(node_calls.len(), 2);
+        assert!(node_calls[0].ends_with(&[
+            "node:20-bookworm".into(),
+            "node".into(),
+            "/__a/_actions/wrapped/dist/pre.js".into()
+        ]));
+        assert!(node_calls[1].ends_with(&[
+            "node:20-bookworm".into(),
+            "node".into(),
+            "/__a/_actions/wrapped/dist/post.js".into()
+        ]));
         fs::remove_dir_all(temp).unwrap();
     }
 
