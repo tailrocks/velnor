@@ -81,7 +81,11 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
     let dir = config::config_dir(args.config_dir)?;
     let scope = GitHubScope::parse(&args.url)?;
     let agent_name = args.name.unwrap_or_else(default_agent_name);
-    let labels = normalize_labels(args.labels, args.target_mvp_labels);
+    let labels = normalize_labels(
+        args.labels,
+        args.target_mvp_labels,
+        args.target_mvp_arm_label,
+    );
     let key_pair = if args.dry_run {
         None
     } else {
@@ -2115,7 +2119,11 @@ pub async fn status(args: StatusArgs) -> Result<()> {
     Ok(())
 }
 
-fn normalize_labels(mut labels: Vec<String>, target_mvp_labels: bool) -> Vec<String> {
+fn normalize_labels(
+    mut labels: Vec<String>,
+    target_mvp_labels: bool,
+    target_mvp_arm_label: bool,
+) -> Vec<String> {
     if labels.is_empty() {
         labels.push("velnor".to_string());
     }
@@ -2130,6 +2138,9 @@ fn normalize_labels(mut labels: Vec<String>, target_mvp_labels: bool) -> Vec<Str
             .into_iter()
             .map(ToOwned::to_owned),
         );
+    }
+    if target_mvp_arm_label {
+        labels.push("ubuntu-24.04-arm".to_string());
     }
     labels.sort();
     labels.dedup();
@@ -2650,18 +2661,33 @@ mod tests {
 
     #[test]
     fn default_labels_keep_velnor_only() {
-        assert_eq!(normalize_labels(Vec::new(), false), vec!["velnor"]);
+        assert_eq!(normalize_labels(Vec::new(), false, false), vec!["velnor"]);
     }
 
     #[test]
-    fn target_mvp_labels_cover_current_linux_target_jobs() {
+    fn target_mvp_labels_cover_current_x64_linux_target_jobs() {
         assert_eq!(
-            normalize_labels(vec!["custom".into()], true),
+            normalize_labels(vec!["custom".into()], true, false),
             vec![
                 "custom",
                 "hetzner-sentry-ci",
                 "ubuntu-24.04",
                 "ubuntu-latest",
+                "velnor-target-mvp"
+            ]
+        );
+    }
+
+    #[test]
+    fn target_mvp_arm_label_is_explicit() {
+        assert_eq!(
+            normalize_labels(Vec::new(), true, true),
+            vec![
+                "hetzner-sentry-ci",
+                "ubuntu-24.04",
+                "ubuntu-24.04-arm",
+                "ubuntu-latest",
+                "velnor",
                 "velnor-target-mvp"
             ]
         );

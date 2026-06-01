@@ -44,9 +44,13 @@ pub struct ConfigureArgs {
     #[arg(long, value_delimiter = ',')]
     pub labels: Vec<String>,
 
-    /// Add labels needed by the current target repositories' Linux jobs.
+    /// Add labels needed by the current target repositories' x64 Linux jobs.
     #[arg(long)]
     pub target_mvp_labels: bool,
+
+    /// Add the current target repositories' ARM Linux label.
+    #[arg(long)]
+    pub target_mvp_arm_label: bool,
 
     /// Replace an existing runner with the same name.
     #[arg(long)]

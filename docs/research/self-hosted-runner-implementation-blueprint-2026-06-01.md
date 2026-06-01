@@ -312,12 +312,14 @@ The next evidence must be live, not only unit tests:
 2. Register it to a disposable repo and prove a checkout plus bash script job
    succeeds with readable GitHub UI logs.
 3. Register it with `hetzner-sentry-ci`, or use `--target-mvp-labels` to add
-   `hetzner-sentry-ci`, `ubuntu-latest`, and `ubuntu-24.04`.
+   `hetzner-sentry-ci`, `ubuntu-latest`, and `ubuntu-24.04`. Add
+   `--target-mvp-arm-label` only on an ARM Linux runner.
 4. Run `java-monorepo` `ansible.yml`.
 5. Run `java-monorepo` `rust.yml` with path-filter and required-check behavior.
 6. Run `java-monorepo` Docker build workflows with Buildx/Bake/cache/login.
-7. Add Linux-compatible labels for `jackin` through `--target-mvp-labels`, then
-   run CI/docs/construct Linux paths.
+7. Add Linux-compatible labels for `jackin` through `--target-mvp-labels`, add
+   `--target-mvp-arm-label` only on ARM Linux, then run CI/docs/construct Linux
+   paths.
 8. Verify artifacts, cache, Pages, local composites, job outputs, step outcomes,
    annotations, masking, cancellation, and final required-check status in the
    GitHub UI.

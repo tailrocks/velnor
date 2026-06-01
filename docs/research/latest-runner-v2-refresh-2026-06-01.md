@@ -98,8 +98,10 @@ proof is:
 5. Prove Docker-heavy Buildx/Bake jobs with mounted host Docker socket, Docker
    CLI, and Buildx plugin.
 6. Add compatible Linux labels or temporary retargeting for `jackin` Linux jobs.
-   Velnor's `--target-mvp-labels` preset covers `hetzner-sentry-ci`,
-   `ubuntu-latest`, and `ubuntu-24.04`, but not macOS labels.
+   Velnor's `--target-mvp-labels` preset covers x64 labels:
+   `hetzner-sentry-ci`, `ubuntu-latest`, and `ubuntu-24.04`. Add
+   `--target-mvp-arm-label` only on an ARM Linux runner; macOS labels remain
+   excluded.
 7. Defer macOS `jackin` matrix legs and broad hosted-image parity.
 
 ## Current Velnor Delta After Refresh
