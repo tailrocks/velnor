@@ -4760,7 +4760,11 @@ fi"#
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/actions_download-artifact".into(),
-                    env: vec![("INPUT_PATH".into(), "artifacts".into())],
+                    env: vec![
+                        ("INPUT_PATTERN".into(), "construct-digest-*".into()),
+                        ("INPUT_PATH".into(), "${{ env.DIGEST_DIR }}".into()),
+                        ("INPUT_MERGE-MULTIPLE".into(), "true".into()),
+                    ],
                 },
                 condition: None,
                 continue_on_error: false,
@@ -4790,6 +4794,7 @@ fi"#
             ("GITHUB_RETENTION_DAYS".into(), "90".into()),
             ("GITHUB_SERVER_URL".into(), "https://github.com".into()),
             ("RUNNER_TEMP".into(), "/__t".into()),
+            ("DIGEST_DIR".into(), "/__w/digests".into()),
             ("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into()),
             (
                 "ACTIONS_RUNTIME_URL".into(),
@@ -4830,6 +4835,9 @@ fi"#
         assert!(node_calls[0].contains(&"ACTIONS_CACHE_URL=https://cache.actions".into()));
         assert!(node_calls[0].contains(&"ACTIONS_CACHE_SERVICE_V2=True".into()));
         assert!(node_calls[1].contains(&"GITHUB_RETENTION_DAYS=90".into()));
+        assert!(node_calls[2].contains(&"INPUT_PATTERN=construct-digest-*".into()));
+        assert!(node_calls[2].contains(&"INPUT_PATH=/__w/digests".into()));
+        assert!(node_calls[2].contains(&"INPUT_MERGE-MULTIPLE=true".into()));
         assert!(node_calls[3].contains(&"INPUT_GITHUB-TOKEN=ghs_token".into()));
         fs::remove_dir_all(temp).unwrap();
     }

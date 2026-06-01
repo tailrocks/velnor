@@ -2289,6 +2289,66 @@ runs:
     }
 
     #[test]
+    fn builds_target_download_artifact_invocation_inputs() {
+        let actions_host = Path::new("/tmp/actions");
+        let plan = RepositoryActionPlan {
+            step_id: "download-platform-digests".into(),
+            repository: "actions/download-artifact".into(),
+            git_ref: "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c".into(),
+            source_path: None,
+            repository_dir: actions_host.join(
+                "_actions/actions_download-artifact/3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+            ),
+            action_dir: actions_host.join(
+                "_actions/actions_download-artifact/3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+            ),
+            inputs: [
+                ("pattern".to_string(), "construct-digest-*".to_string()),
+                ("path".to_string(), "${{ env.DIGEST_DIR }}".to_string()),
+                ("merge-multiple".to_string(), "true".to_string()),
+            ]
+            .into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+        };
+        let metadata = parse_action_metadata(
+            r#"
+runs:
+  using: node24
+  main: dist/download/index.js
+"#,
+        )
+        .unwrap();
+        let runtime = metadata.runtime().unwrap();
+        let resolved = ResolvedAction {
+            plan,
+            metadata_path: actions_host.join(
+                "_actions/actions_download-artifact/3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c/action.yml",
+            ),
+            metadata,
+            runtime,
+        };
+
+        let invocation = resolved.javascript_invocation(actions_host).unwrap();
+
+        assert_eq!(invocation.node, "node24");
+        assert_eq!(
+            invocation.main_container_path,
+            "/__a/_actions/actions_download-artifact/3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c/dist/download/index.js"
+        );
+        assert!(invocation
+            .env
+            .contains(&("INPUT_PATTERN".into(), "construct-digest-*".into())));
+        assert!(invocation
+            .env
+            .contains(&("INPUT_PATH".into(), "${{ env.DIGEST_DIR }}".into())));
+        assert!(invocation
+            .env
+            .contains(&("INPUT_MERGE-MULTIPLE".into(), "true".into())));
+    }
+
+    #[test]
     fn builds_docker_action_invocation() {
         let actions_host = Path::new("/tmp/actions");
         let plan = RepositoryActionPlan {
