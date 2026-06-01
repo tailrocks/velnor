@@ -128,6 +128,8 @@ Set `VELNOR_TARGET_JOB_COUNT=<n>` when the target workflow needs Velnor to
 consume more than one queued job.
 Set `VELNOR_TARGET_WATCH_RUN=true` to wait for the GitHub workflow run to finish
 after the selected Velnor jobs are consumed.
+Set `VELNOR_IDLE_TIMEOUT_SECONDS=<n>` to tune per-job wait time; it must be a
+positive integer. Explicit run IDs must also be positive integers.
 Set `VELNOR_TARGET_MVP_ARM_LABEL=true` only on ARM Linux target smoke hosts; the
 live scripts and runner reject the ARM label on non-ARM hosts.
 

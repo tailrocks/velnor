@@ -45,6 +45,8 @@ cleanup_runner() {
 trap cleanup_runner EXIT
 
 velnor_require_positive_int VELNOR_TARGET_JOB_COUNT "$JOB_COUNT"
+velnor_require_positive_int VELNOR_IDLE_TIMEOUT_SECONDS "$IDLE_TIMEOUT_SECONDS"
+velnor_require_optional_positive_int VELNOR_TARGET_RUN_ID "$RUN_ID"
 velnor_require_bool VELNOR_REQUIRE_DOCKER_SOCKET "$REQUIRE_DOCKER_SOCKET"
 velnor_require_bool VELNOR_TARGET_CLEANUP_RUNNER "$CLEANUP_RUNNER"
 velnor_require_bool VELNOR_TARGET_WATCH_RUN "$WATCH_RUN"

@@ -35,6 +35,9 @@ assert_passes "many jobs" velnor_require_positive_int TEST_COUNT 42
 assert_fails "zero jobs" velnor_require_positive_int TEST_COUNT 0
 assert_fails "negative jobs" velnor_require_positive_int TEST_COUNT -1
 assert_fails "non-number jobs" velnor_require_positive_int TEST_COUNT two
+assert_passes "empty optional count" velnor_require_optional_positive_int TEST_COUNT ""
+assert_passes "valid optional count" velnor_require_optional_positive_int TEST_COUNT 123
+assert_fails "invalid optional count" velnor_require_optional_positive_int TEST_COUNT abc
 
 assert_passes "default evidence controls" velnor_require_live_evidence_controls
 

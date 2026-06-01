@@ -51,4 +51,9 @@ if [[ "$calls" == *"run list"* ]]; then
   exit 1
 fi
 
+if PATH="$mock_bin:$PATH" VELNOR_FIXTURE_STATUS_TEST_CALLS="$calls_file" VELNOR_FIXTURE_RUN_ID=abc "$SCRIPT" >/dev/null 2>&1; then
+  echo "fixture status should reject non-numeric explicit run id" >&2
+  exit 1
+fi
+
 echo "fixture status self-test passed"

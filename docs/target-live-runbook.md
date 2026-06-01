@@ -206,7 +206,10 @@ workflow should be dispatched from a non-default ref. Set
 workflow that queues multiple Velnor jobs and should be consumed by one smoke
 script invocation. Set `VELNOR_TARGET_WATCH_RUN=true` when the selected job
 count should be followed by `gh run watch --exit-status` to prove the full
-GitHub workflow conclusion.
+GitHub workflow conclusion. Set `VELNOR_IDLE_TIMEOUT_SECONDS=<n>` to tune
+per-job wait time; it must be a positive integer. Explicit run IDs such as
+`VELNOR_TARGET_RUN_ID` and `VELNOR_FIXTURE_RUN_ID` must also be positive
+integers.
 
 Start Velnor:
 
