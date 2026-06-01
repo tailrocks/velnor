@@ -863,18 +863,7 @@ fn container_path(actions_host: &Path, host_path: &Path) -> Result<String> {
 }
 
 fn input_env_name(name: &str) -> String {
-    format!(
-        "INPUT_{}",
-        name.chars()
-            .map(|ch| {
-                if ch.is_ascii_alphanumeric() {
-                    ch.to_ascii_uppercase()
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>()
-    )
+    format!("INPUT_{}", name.replace(' ', "_").to_ascii_uppercase())
 }
 
 fn docker_action_tag(repository: &str, git_ref: &str, source_path: Option<&str>) -> String {
@@ -1804,7 +1793,7 @@ runs:
         assert_eq!(invocation.post_condition.as_deref(), Some("success()"));
         assert!(invocation
             .env
-            .contains(&("INPUT_NODE_VERSION".into(), "22".into())));
+            .contains(&("INPUT_NODE-VERSION".into(), "22".into())));
         assert!(invocation.env.contains(&(
             "GITHUB_ACTION_PATH".into(),
             "/__a/_actions/actions_setup-node/v4".into()
@@ -1867,7 +1856,7 @@ runs:
             .contains(&("INPUT_PATH".into(), "~/.cargo".into())));
         assert!(invocation
             .env
-            .contains(&("INPUT_FAIL_ON_CACHE_MISS".into(), "false".into())));
+            .contains(&("INPUT_FAIL-ON-CACHE-MISS".into(), "false".into())));
     }
 
     #[test]
@@ -1927,7 +1916,7 @@ runs:
             ]
         );
         assert!(invocation.env.contains(&(
-            "INPUT_RENOVATE_IMAGE".into(),
+            "INPUT_RENOVATE-IMAGE".into(),
             "ghcr.io/renovatebot/renovate".into()
         )));
         assert!(invocation
