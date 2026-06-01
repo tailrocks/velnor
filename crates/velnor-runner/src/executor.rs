@@ -6357,6 +6357,58 @@ fi"#
     }
 
     #[test]
+    fn target_jackin_release_job_outputs_collect_platform_shas() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::CompositeOutputs {
+            step_id: "shas".into(),
+            outputs: BTreeMap::from([
+                ("arm64_linux".into(), "sha-arm64-linux".into()),
+                ("arm64_macos".into(), "sha-arm64-macos".into()),
+                ("capsule_arm64_linux".into(), "sha-capsule-arm64".into()),
+                ("capsule_x86_linux".into(), "sha-capsule-x86".into()),
+                ("x86_linux".into(), "sha-x86-linux".into()),
+                ("x86_macos".into(), "sha-x86-macos".into()),
+            ]),
+            condition: None,
+        }];
+        let job_outputs = serde_json::json!({
+            "arm64_linux": "${{ steps.shas.outputs.arm64_linux }}",
+            "arm64_macos": "${{ steps.shas.outputs.arm64_macos }}",
+            "capsule_arm64_linux": "${{ steps.shas.outputs.capsule_arm64_linux }}",
+            "capsule_x86_linux": "${{ steps.shas.outputs.capsule_x86_linux }}",
+            "x86_linux": "${{ steps.shas.outputs.x86_linux }}",
+            "x86_macos": "${{ steps.shas.outputs.x86_macos }}"
+        });
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                Some(&job_outputs),
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(summary.job_outputs["arm64_linux"], "sha-arm64-linux");
+        assert_eq!(summary.job_outputs["arm64_macos"], "sha-arm64-macos");
+        assert_eq!(
+            summary.job_outputs["capsule_arm64_linux"],
+            "sha-capsule-arm64"
+        );
+        assert_eq!(summary.job_outputs["capsule_x86_linux"], "sha-capsule-x86");
+        assert_eq!(summary.job_outputs["x86_linux"], "sha-x86-linux");
+        assert_eq!(summary.job_outputs["x86_macos"], "sha-x86-macos");
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn materializes_composite_outputs_as_outer_step_outputs() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
