@@ -27,7 +27,7 @@ use crate::{
         checkout_plans, checkout_step_id, cleanup_checkout_credentials, configure_safe_directory,
         execute_checkouts, CheckoutPlan,
     },
-    cli::{ConfigureArgs, PreflightArgs, RemoveArgs, RunArgs, StatusArgs},
+    cli::{ConfigureArgs, DaemonArgs, PreflightArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     executor::{
         DockerScriptExecutor, ExecutableStep, ProcessCommandRunner, StepLog, StepStartEvent,
@@ -392,6 +392,115 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let token = oauth_access_token(&stored).await?;
     ensure_v2_runner_settings(&stored)?;
     run_v2(args, dir, stored, agent_id, token).await
+}
+
+pub async fn daemon(args: DaemonArgs) -> Result<()> {
+    platform::validate_linux_host(std::env::consts::OS)?;
+    let slots = validate_daemon_slots(args.slots)?;
+    if args.complete_noop && args.execute_scripts {
+        bail!("--complete-noop and --execute-scripts are mutually exclusive");
+    }
+
+    let config_base = config::config_dir(args.config_dir.clone())?;
+    let mut handles = Vec::with_capacity(slots);
+
+    println!(
+        "Starting Velnor daemon with {slots} internal runner slot{}.",
+        if slots == 1 { "" } else { "s" }
+    );
+    if slots > 1 {
+        println!(
+            "Each slot uses its own GitHub runner config under {}/slots/slot-N.",
+            config_base.display()
+        );
+    }
+
+    for slot_index in 1..=slots {
+        let slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
+        handles.push(tokio::spawn(async move {
+            run(slot_args)
+                .await
+                .with_context(|| format!("daemon slot-{slot_index} failed"))
+        }));
+    }
+
+    for handle in handles {
+        handle.await.context("daemon slot task panicked")??;
+    }
+
+    Ok(())
+}
+
+fn validate_daemon_slots(slots: usize) -> Result<usize> {
+    if slots == 0 {
+        bail!("--slots must be greater than zero");
+    }
+    Ok(slots)
+}
+
+fn daemon_slot_run_args(
+    args: &DaemonArgs,
+    config_base: &Path,
+    slot_index: usize,
+    slot_count: usize,
+) -> Result<RunArgs> {
+    validate_daemon_slot_index(slot_index, slot_count)?;
+
+    Ok(RunArgs {
+        config_dir: Some(daemon_slot_config_dir(config_base, slot_index, slot_count)),
+        once: false,
+        idle_timeout_seconds: args.idle_timeout_seconds,
+        complete_noop: args.complete_noop,
+        execute_scripts: args.execute_scripts,
+        dry_run_jobs: args.dry_run_jobs,
+        dump_job_message: daemon_slot_child_path(
+            args.dump_job_message.as_deref(),
+            slot_index,
+            slot_count,
+        ),
+        docker_image: args.docker_image.clone(),
+        node_action_image: args.node_action_image.clone(),
+        work_dir: daemon_slot_child_path(args.work_dir.as_deref(), slot_index, slot_count),
+        docker_host_work_dir: daemon_slot_child_path(
+            args.docker_host_work_dir.as_deref(),
+            slot_index,
+            slot_count,
+        ),
+        skip_preflight: args.skip_preflight,
+        require_docker_socket: args.require_docker_socket,
+    })
+}
+
+fn validate_daemon_slot_index(slot_index: usize, slot_count: usize) -> Result<()> {
+    if slot_index == 0 || slot_index > slot_count {
+        bail!("daemon slot index {slot_index} is outside 1..={slot_count}");
+    }
+    Ok(())
+}
+
+fn daemon_slot_config_dir(config_base: &Path, slot_index: usize, slot_count: usize) -> PathBuf {
+    if slot_count == 1 {
+        return config_base.to_path_buf();
+    }
+    config_base.join("slots").join(daemon_slot_name(slot_index))
+}
+
+fn daemon_slot_child_path(
+    base: Option<&Path>,
+    slot_index: usize,
+    slot_count: usize,
+) -> Option<PathBuf> {
+    base.map(|path| {
+        if slot_count == 1 {
+            path.to_path_buf()
+        } else {
+            path.join(daemon_slot_name(slot_index))
+        }
+    })
+}
+
+fn daemon_slot_name(slot_index: usize) -> String {
+    format!("slot-{slot_index}")
 }
 
 fn preflight_before_executable_run(args: &RunArgs, config_dir: &Path) -> Result<()> {
@@ -2654,6 +2763,84 @@ mod tests {
         assert_eq!(preflight.docker_host_work_dir, None);
         assert!(!preflight.require_docker_socket);
         assert!(preflight.require_buildx);
+    }
+
+    fn daemon_args(slots: usize) -> DaemonArgs {
+        DaemonArgs {
+            config_dir: None,
+            slots,
+            idle_timeout_seconds: None,
+            complete_noop: false,
+            execute_scripts: false,
+            dry_run_jobs: false,
+            dump_job_message: None,
+            docker_image: "ubuntu:24.04".into(),
+            node_action_image: String::new(),
+            work_dir: None,
+            docker_host_work_dir: None,
+            skip_preflight: false,
+            require_docker_socket: false,
+        }
+    }
+
+    #[test]
+    fn daemon_rejects_zero_slots() {
+        let error = validate_daemon_slots(0).unwrap_err().to_string();
+
+        assert!(error.contains("--slots must be greater than zero"));
+    }
+
+    #[test]
+    fn daemon_single_slot_preserves_base_config_and_paths() {
+        let mut args = daemon_args(1);
+        args.work_dir = Some(Path::new("/work").to_path_buf());
+        args.docker_host_work_dir = Some(Path::new("/host-work").to_path_buf());
+        args.dump_job_message = Some(Path::new("/tmp/job.json").to_path_buf());
+
+        let run_args = daemon_slot_run_args(&args, Path::new("/config"), 1, 1).unwrap();
+
+        assert_eq!(
+            run_args.config_dir,
+            Some(Path::new("/config").to_path_buf())
+        );
+        assert_eq!(run_args.work_dir, Some(Path::new("/work").to_path_buf()));
+        assert_eq!(
+            run_args.docker_host_work_dir,
+            Some(Path::new("/host-work").to_path_buf())
+        );
+        assert_eq!(
+            run_args.dump_job_message,
+            Some(Path::new("/tmp/job.json").to_path_buf())
+        );
+        assert!(!run_args.once);
+    }
+
+    #[test]
+    fn daemon_multislot_run_args_use_isolated_config_and_work_dirs() {
+        let mut args = daemon_args(3);
+        args.work_dir = Some(Path::new("/work").to_path_buf());
+        args.docker_host_work_dir = Some(Path::new("/host-work").to_path_buf());
+        args.dump_job_message = Some(Path::new("/tmp/jobs").to_path_buf());
+
+        let run_args = daemon_slot_run_args(&args, Path::new("/config"), 2, 3).unwrap();
+
+        assert_eq!(
+            run_args.config_dir,
+            Some(Path::new("/config/slots/slot-2").to_path_buf())
+        );
+        assert_eq!(
+            run_args.work_dir,
+            Some(Path::new("/work/slot-2").to_path_buf())
+        );
+        assert_eq!(
+            run_args.docker_host_work_dir,
+            Some(Path::new("/host-work/slot-2").to_path_buf())
+        );
+        assert_eq!(
+            run_args.dump_job_message,
+            Some(Path::new("/tmp/jobs/slot-2").to_path_buf())
+        );
+        assert!(!run_args.once);
     }
 
     #[test]

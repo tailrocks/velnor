@@ -35,8 +35,10 @@ supported target jobs in Docker with Rust-native adapters for the marketplace
 actions used by the target repositories.
 The product target is a daemon that manages multiple internal GitHub runner
 slots, so one Velnor process can acquire multiple GitHub jobs and spawn one
-isolated Docker container per job concurrently. The current `run --once` path is
-the single-slot compatibility/proof path until the daemon scheduler lands.
+isolated Docker container per job concurrently. The daemon does not reuse one
+GitHub runner identity across concurrent jobs; each slot owns a separate runner
+registration and broker session. The current `run --once` path remains the
+single-slot compatibility/proof path.
 `configure`, `run`, and `preflight` are Linux-only commands; Velnor refuses
 non-Linux hosts instead of pretending to satisfy Linux runner labels elsewhere.
 It also refuses macOS/Darwin runner labels. Any macOS legs in existing target
@@ -56,6 +58,7 @@ cargo run --bin velnor-runner -- configure \
   --dry-run
 
 cargo run --bin velnor-runner -- status
+cargo run --bin velnor-runner -- daemon --slots 2
 cargo run --bin velnor-runner -- run
 cargo run --bin velnor-runner -- remove --pat "$GITHUB_TOKEN"
 ```
@@ -67,6 +70,13 @@ runner credentials, requires GitHub's current V2 broker settings, runs Docker
 preflight before polling for executable jobs, creates a broker session, polls
 broker messages, acquires jobs from run-service, renews locks, executes
 supported jobs, and completes them through run-service.
+`daemon` runs the same V2 slot loop concurrently from one Velnor process. With
+`--slots 1`, it uses the normal config directory. With `--slots N` where `N > 1`,
+slot configs must already exist under `<config-dir>/slots/slot-1`,
+`<config-dir>/slots/slot-2`, and so on; each slot also receives its own
+`slot-N` child under any explicit work, Docker-host work, or job-message dump
+directory. This models the intended daemon architecture while preserving
+GitHub's one-active-job-per-runner-session protocol boundary.
 
 Local target coverage is checked with:
 

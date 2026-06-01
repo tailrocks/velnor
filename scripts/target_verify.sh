@@ -177,6 +177,9 @@ tests=(
   target_mvp_arm_label_is_explicit
   arm_label_requires_arm_host
   linux_host_is_required
+  daemon_rejects_zero_slots
+  daemon_single_slot_preserves_base_config_and_paths
+  daemon_multislot_run_args_use_isolated_config_and_work_dirs
   run_preflight_args_preserve_target_docker_requirements
   run_preflight_args_default_work_dir_under_config
 )

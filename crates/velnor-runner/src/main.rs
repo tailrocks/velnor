@@ -27,6 +27,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Configure(args) => runner::configure(args).await,
+        Command::Daemon(args) => runner::daemon(args).await,
         Command::Preflight(args) => preflight::preflight(args),
         Command::Run(args) => runner::run(args).await,
         Command::Remove(args) => runner::remove(args).await,
