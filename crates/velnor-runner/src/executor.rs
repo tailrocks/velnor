@@ -1419,6 +1419,30 @@ mod tests {
         }
     }
 
+    struct EnvAndFailureRunner {
+        calls: Vec<(String, Vec<String>)>,
+        temp: PathBuf,
+    }
+
+    impl CommandRunner for EnvAndFailureRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            if args.iter().any(|arg| arg == "GITHUB_ENV=/__t/enable_env") {
+                fs::write(self.temp.join("enable_env"), "CACHE_ON_FAILURE=true\n")?;
+            }
+            let code = if args.iter().any(|arg| arg == "/__t/fail.sh") {
+                1
+            } else {
+                0
+            };
+            Ok(CommandResult {
+                code,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
     #[derive(Default)]
     struct StdoutCommandRunner {
         calls: Vec<(String, Vec<String>)>,
@@ -2740,6 +2764,73 @@ mod tests {
             })
             .count();
         assert_eq!(node_calls, 1);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn javascript_post_if_reads_env_after_failure() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::JavaScript {
+                step_id: "rust-cache".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node20".into(),
+                    main_container_path: "/__a/_actions/rust-cache/dist/restore/index.js".into(),
+                    post_container_path: Some("/__a/_actions/rust-cache/dist/save/index.js".into()),
+                    post_condition: Some("success() || env.CACHE_ON_FAILURE == 'true'".into()),
+                    action_container_path: "/__a/_actions/rust-cache".into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::Script(ScriptStep {
+                id: "enable".into(),
+                script: "echo CACHE_ON_FAILURE=true >> $GITHUB_ENV".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "fail".into(),
+                script: "exit 1".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(EnvAndFailureRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[2].exit_code, 1);
+        let node_calls = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:20-bookworm".into())
+            })
+            .map(|(_, args)| args)
+            .collect::<Vec<_>>();
+        assert_eq!(node_calls.len(), 2);
+        assert!(node_calls[1].ends_with(&[
+            "node:20-bookworm".into(),
+            "node".into(),
+            "/__a/_actions/rust-cache/dist/save/index.js".into()
+        ]));
         fs::remove_dir_all(temp).unwrap();
     }
 }
