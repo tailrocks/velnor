@@ -7,9 +7,10 @@ self-hosted runner replacement for the selected GitHub Actions workflows in:
 - `ChainArgos/java-monorepo`, specifically the Rust, Docker, Buildx, and related
   workflow paths
 
-Typed workflow authoring is deferred. The Phase 0 input format remains the
-existing GitHub Actions YAML, with GitHub handling triggers, matrix expansion,
-reusable workflow expansion, secrets, permissions, scheduling, and UI.
+Pkl, PQL, KCL, typed workflow authoring, and Velnor-native workflow languages
+are not Phase 0 work. The Phase 0 input format remains the existing GitHub
+Actions YAML, with GitHub handling triggers, matrix expansion, reusable
+workflow expansion, secrets, permissions, scheduling, and UI.
 
 ## Current Gates
 
@@ -65,6 +66,8 @@ Docker execution:
 - host Docker socket mount
 - host Docker CLI and Buildx plugin mounts when discoverable
 - Docker bind-mount visibility preflight before polling GitHub
+- daemon `--url` startup runs Docker preflight before registering runner slots,
+  so a Docker-broken host does not leave newly registered but unusable runners
 - shared workspace, temp, home, actions, tools, and sccache directories
 - stale container/network cleanup and one retry on startup collision
 

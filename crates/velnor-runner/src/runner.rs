@@ -405,6 +405,7 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     }
 
     let config_base = config::config_dir(args.config_dir.clone())?;
+    preflight_before_daemon_registration(&args, &config_base, slots)?;
     configure_daemon_slots(&args, &config_base, slots).await?;
     if !daemon_should_poll_after_registration(&args) {
         println!("Daemon registration dry run complete; skipped polling GitHub for jobs.");
@@ -474,6 +475,44 @@ fn daemon_slot_should_register(
 
 fn daemon_should_poll_after_registration(args: &DaemonArgs) -> bool {
     !args.dry_run_registration
+}
+
+fn preflight_before_daemon_registration(
+    args: &DaemonArgs,
+    config_base: &Path,
+    slots: usize,
+) -> Result<()> {
+    if args.url.is_none() || args.dry_run_registration {
+        return Ok(());
+    }
+
+    for preflight_args in daemon_preflight_args(args, config_base, slots)? {
+        crate::preflight::preflight(preflight_args)
+            .context("Docker preflight failed before daemon runner registration")?;
+    }
+    Ok(())
+}
+
+fn daemon_preflight_args(
+    args: &DaemonArgs,
+    config_base: &Path,
+    slots: usize,
+) -> Result<Vec<PreflightArgs>> {
+    (1..=slots)
+        .map(|slot_index| {
+            let run_args = daemon_slot_run_args(args, config_base, slot_index, slots)?;
+            if !should_execute_job(&run_args) || run_args.skip_preflight {
+                Ok(None)
+            } else {
+                let config_dir = run_args
+                    .config_dir
+                    .as_deref()
+                    .unwrap_or(config_base);
+                Ok(Some(preflight_args_for_run(&run_args, config_dir)))
+            }
+        })
+        .filter_map(Result::transpose)
+        .collect()
 }
 
 fn validate_daemon_slots(slots: usize) -> Result<usize> {
@@ -3012,6 +3051,63 @@ mod tests {
 
         args.dry_run_registration = true;
         assert!(!daemon_should_poll_after_registration(&args));
+    }
+
+    #[test]
+    fn daemon_preflight_args_cover_each_registration_slot_before_polling() {
+        let mut args = daemon_args(2);
+        args.url = Some("https://github.com/owner/repo".into());
+        args.work_dir = Some(Path::new("/runner/work").to_path_buf());
+        args.docker_host_work_dir = Some(Path::new("/daemon/work").to_path_buf());
+        args.docker_image = "ghcr.io/catthehacker/ubuntu:act-latest".into();
+        args.require_docker_socket = true;
+
+        let preflight = daemon_preflight_args(&args, Path::new("/config"), 2).unwrap();
+
+        assert_eq!(preflight.len(), 2);
+        assert_eq!(
+            preflight[0].work_dir,
+            Some(Path::new("/runner/work/slot-1").to_path_buf())
+        );
+        assert_eq!(
+            preflight[0].docker_host_work_dir,
+            Some(Path::new("/daemon/work/slot-1").to_path_buf())
+        );
+        assert_eq!(
+            preflight[1].work_dir,
+            Some(Path::new("/runner/work/slot-2").to_path_buf())
+        );
+        assert_eq!(
+            preflight[1].docker_host_work_dir,
+            Some(Path::new("/daemon/work/slot-2").to_path_buf())
+        );
+        assert!(preflight.iter().all(|args| args.require_docker_socket));
+        assert!(preflight.iter().all(|args| args.require_buildx));
+        assert!(preflight
+            .iter()
+            .all(|args| args.docker_image == "ghcr.io/catthehacker/ubuntu:act-latest"));
+    }
+
+    #[test]
+    fn daemon_preflight_args_skip_non_executable_modes() {
+        let mut args = daemon_args(2);
+        args.url = Some("https://github.com/owner/repo".into());
+        args.complete_noop = true;
+        assert!(daemon_preflight_args(&args, Path::new("/config"), 2)
+            .unwrap()
+            .is_empty());
+
+        args.complete_noop = false;
+        args.dry_run_jobs = true;
+        assert!(daemon_preflight_args(&args, Path::new("/config"), 2)
+            .unwrap()
+            .is_empty());
+
+        args.dry_run_jobs = false;
+        args.skip_preflight = true;
+        assert!(daemon_preflight_args(&args, Path::new("/config"), 2)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
