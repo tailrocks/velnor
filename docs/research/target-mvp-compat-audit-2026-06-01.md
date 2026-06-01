@@ -14,8 +14,10 @@ python3 scripts/target_audit.py /tmp/velnor-targets/jackin /tmp/velnor-targets/j
 ```
 
 The helper reports workflow files, action metadata, exact `uses:` inventory,
-explicit shells, job containers, services, local actions, reusable workflows,
-and `continue-on-error` shapes.
+explicit shells, triggers, permissions, concurrency, `runs-on`, defaults,
+environments, job timeouts, job containers, services, local actions, reusable
+workflows, and `continue-on-error` shapes. It accepts either repository roots or
+their `.github` directories.
 
 ## Scope Rule
 
@@ -96,6 +98,51 @@ Exact `uses:` references currently present:
 Reusable workflow references are expanded by GitHub before a runner receives a job. Velnor Phase 0 does not need to parse workflow-level `jobs.<id>.uses`; it needs to execute the expanded job payload.
 
 ## Exact Configuration Shapes To Support
+
+### Workflow Routing And Server-Side Features
+
+The target workflows use these triggers:
+
+- `pull_request`, `push`, and `workflow_dispatch`
+- `schedule`
+- `merge_group`
+- `workflow_run` in `jackin` preview publishing
+- `workflow_call` for `java-monorepo` reusable Docker image build workflows
+
+These are GitHub orchestration concerns before the runner receives an expanded
+job. Velnor Phase 0 does not need to parse event triggers or expand reusable
+workflow jobs locally. It needs to execute the `AgentJobRequestMessage` payloads
+GitHub sends after trigger evaluation, matrix expansion, and reusable workflow
+expansion.
+
+Target workflow-level `concurrency` groups:
+
+- PR concurrency with `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`
+  for `ci`, `construct`, `docs`, `renovate-validate`, `rust-docker`, and `rust`
+- singleton groups for `renovate`, `release`, and Homebrew preview publishing
+
+Concurrency is also server-side. Velnor only needs to react correctly if GitHub
+sends a broker cancellation message for a job that loses the concurrency race.
+
+Target permissions are limited to:
+
+- workflow-level `contents`
+- workflow-level `pull-requests` for `java-monorepo` Rust path filters
+- job-level `contents`
+- job-level `id-token` and `pages` for the `jackin` docs deploy job
+
+Permissions are enforced by the `GITHUB_TOKEN` and OIDC/runtime endpoints GitHub
+provides in the acquired job payload. Velnor must pass those tokens and endpoint
+environment variables through to actions; it should not implement an independent
+permission engine in Phase 0.
+
+Target job `environment` usage is limited to the `jackin` docs deploy job:
+
+- `name: github-pages`
+- `url: ${{ steps.deployment.outputs.page_url }}`
+
+The runner-side requirement is already concrete: evaluate `environment.url` from
+final step outputs and include the value in the run-service completion payload.
 
 ### Shell And Run Defaults
 
@@ -217,6 +264,8 @@ Current target scan found no usage of:
 
 - workflow `services:`
 - job `container:`
+- job-level `concurrency:`
+- `timeout-minutes`
 - non-bash explicit shells
 - `docker://` direct action references in workflows
 - checkout `submodules`
