@@ -56,7 +56,7 @@ Implementation facts:
 | Broker controls | `BrokerMigration`, `ForceTokenRefresh`, runner update/refresh, hosted shutdown, busy-job cancellation, transient broker poll retry, and empty-message backoff are recognized. |
 | V2 job tokens | Run-service renew/complete use the job-scoped `SystemVssConnection` token when available. |
 | Job acquisition | Run-service acquire handles non-retriable `404`, `409`, and `422` as stale/unusable messages. |
-| Docker job isolation | Fresh workspace/temp/home/actions/tools layout, Docker job container, network, host Docker socket plus Docker CLI/Buildx mounting into the job container, and bind-mount preflight exist. |
+| Docker job isolation | Fresh workspace/temp/home/actions/tools layout, Docker job container, network, host Docker socket plus Docker CLI/Buildx mounting into the job container and action sidecars, and bind-mount preflight exist. |
 | Script steps | Bash/sh steps, defaults, working directory, env/context rendering, command files, outputs, summaries, and protected env handling are covered. |
 | Expression subset | Target-shaped `github`, `runner`, `env`, `steps`, `needs`, `matrix`, `inputs`, `vars`, `secrets`, `contains`, `toJSON`, `hashFiles`, status functions, and boolean/value `&&`/`||` are guarded. |
 | Checkout | Native `actions/checkout` covers self/external repository, path, ref, token, fetch-depth, fetch-tags, persist-credentials, clean, safe-directory, cleanup, step-output refs, and needs/github refs. |
