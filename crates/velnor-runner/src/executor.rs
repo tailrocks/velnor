@@ -1943,6 +1943,12 @@ mod tests {
                 if args.iter().any(|arg| arg == "GITHUB_PATH=/__t/pather_path") {
                     fs::write(self.temp.join("pather_path"), "/github/home/.cargo/bin\n")?;
                 }
+                if args.iter().any(|arg| arg == "GITHUB_PATH=/__t/mise_path") {
+                    fs::write(
+                        self.temp.join("mise_path"),
+                        "/github/home/.local/share/mise/shims\n",
+                    )?;
+                }
             }
             Ok(CommandResult {
                 code: 0,
@@ -4317,6 +4323,111 @@ mod tests {
         assert!(node_call.last().is_some_and(
             |arg| arg.contains("exec node '/__a/_actions/cargo-install/dist/index.js'")
         ));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn target_setup_actions_share_home_toolcache_and_path() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::JavaScript {
+                step_id: "mise".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/jdx_mise-action/dist/index.js".into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/jdx_mise-action".into(),
+                    env: vec![
+                        ("INPUT_INSTALL".into(), "false".into()),
+                        ("INPUT_CACHE".into(), "false".into()),
+                        ("INPUT_GITHUB_TOKEN".into(), "${{ github.token }}".into()),
+                    ],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "setup-python".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/actions_setup-python/dist/setup/index.js"
+                        .into(),
+                    post_container_path: Some(
+                        "/__a/_actions/actions_setup-python/dist/cache-save/index.js".into(),
+                    ),
+                    post_condition: Some("success()".into()),
+                    action_container_path: "/__a/_actions/actions_setup-python".into(),
+                    env: vec![
+                        ("INPUT_PYTHON-VERSION".into(), "3.13".into()),
+                        (
+                            "INPUT_TOKEN".into(),
+                            "${{ github.server_url == 'https://github.com' && github.token || '' }}"
+                                .into(),
+                        ),
+                    ],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+        ];
+        let base_env = vec![
+            ("GITHUB_TOKEN".into(), "ghs_token".into()),
+            ("GITHUB_SERVER_URL".into(), "https://github.com".into()),
+            (
+                "GITHUB_REPOSITORY".into(),
+                "ChainArgos/java-monorepo".into(),
+            ),
+            ("GITHUB_WORKSPACE".into(), "/__w".into()),
+            ("RUNNER_TEMP".into(), "/__t".into()),
+        ];
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &base_env, &temp)
+            .unwrap();
+
+        let node_calls = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:24-bookworm".into())
+            })
+            .map(|(_, args)| args)
+            .collect::<Vec<_>>();
+        assert_eq!(node_calls.len(), 3);
+        for call in &node_calls {
+            assert!(call.contains(&"HOME=/github/home".into()));
+            assert!(call.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
+            assert!(call.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
+            assert!(call.contains(&"GITHUB_REPOSITORY=ChainArgos/java-monorepo".into()));
+            assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
+            assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
+        }
+        assert!(node_calls[0].contains(&"INPUT_GITHUB_TOKEN=ghs_token".into()));
+        assert!(node_calls[0].contains(&"GITHUB_PATH=/__t/mise_path".into()));
+        assert!(node_calls[1].contains(&"INPUT_PYTHON-VERSION=3.13".into()));
+        assert!(node_calls[1].contains(&"INPUT_TOKEN=ghs_token".into()));
+        assert!(node_calls[1].contains(&"GITHUB_PATH=/__t/setup-python_path".into()));
+        assert!(node_calls[1].last().is_some_and(|arg| {
+            arg.contains("export PATH='/github/home/.local/share/mise/shims':\"$PATH\"")
+        }));
+        assert!(node_calls[2].ends_with(&[
+            "node:24-bookworm".into(),
+            "sh".into(),
+            "-lc".into(),
+            "export PATH='/github/home/.local/share/mise/shims':\"$PATH\"\nexec node '/__a/_actions/actions_setup-python/dist/cache-save/index.js'".into()
+        ]));
         fs::remove_dir_all(temp).unwrap();
     }
 
