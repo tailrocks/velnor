@@ -38,6 +38,29 @@ EXPECTED_TARGET_USES = {
     "./.github/actions/check-deployed-docs",
 }
 
+EXPECTED_WORKFLOW_FILES = Counter(
+    {
+        ".github/workflows/ansible.yml": 1,
+        ".github/workflows/ci.yml": 1,
+        ".github/workflows/construct.yml": 1,
+        ".github/workflows/docs.yml": 1,
+        ".github/workflows/kestra-build-image.yml": 1,
+        ".github/workflows/kestra-build-publish.yml": 1,
+        ".github/workflows/preview.yml": 1,
+        ".github/workflows/release.yml": 1,
+        ".github/workflows/renovate-validate.yml": 1,
+        ".github/workflows/renovate.yml": 2,
+        ".github/workflows/rust-docker-build.yml": 1,
+        ".github/workflows/rust-docker.yml": 1,
+        ".github/workflows/rust.yml": 1,
+    }
+)
+
+EXPECTED_ACTION_FILES = {
+    (".github/actions/aggregate-needs/action.yml", "composite"),
+    (".github/actions/check-deployed-docs/action.yml", "composite"),
+}
+
 
 def load_yaml(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
@@ -368,6 +391,20 @@ def print_report(summary: dict[str, Any]) -> None:
 
 def check_target_mvp(summary: dict[str, Any]) -> list[str]:
     errors: list[str] = []
+    workflow_files = Counter(summary["workflow_files"])
+    if workflow_files != EXPECTED_WORKFLOW_FILES:
+        errors.append(
+            "target MVP workflow file drift: "
+            f"expected {dict(EXPECTED_WORKFLOW_FILES)}, got {dict(workflow_files)}"
+        )
+
+    action_files = set(summary["action_files"])
+    if action_files != EXPECTED_ACTION_FILES:
+        errors.append(
+            "target MVP local action metadata drift: "
+            f"expected {sorted(EXPECTED_ACTION_FILES)}, got {sorted(action_files)}"
+        )
+
     for label, key in [
         ("job containers", "containers"),
         ("services", "services"),
