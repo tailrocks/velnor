@@ -15,28 +15,28 @@ EXPECTED_TARGET_USES = Counter(
     {
         "./.github/actions/aggregate-needs": 3,
         "./.github/actions/check-deployed-docs": 2,
-        "actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae": 13,
-        "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd": 46,
-        "actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128": 1,
-        "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c": 3,
-        "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405": 1,
-        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a": 6,
-        "actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9": 1,
-        "baptiste0928/cargo-install@f204293d9709061b7bc1756fec3ec4e2cd57dec0": 1,
-        "crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487": 2,
-        "docker/bake-action@6614cfa25eff9a0b2b2697efb0b6159e7680d584": 1,
-        "docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf": 1,
-        "docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee": 5,
-        "docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9": 1,
-        "docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5": 5,
-        "dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d": 5,
-        "dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8": 1,
-        "extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3": 4,
-        "jdx/mise-action@1648a7812b9aeae629881980618f079932869151": 13,
-        "mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696": 7,
-        "renovatebot/github-action@693b9ef15eec82123529a37c782242f091365961": 2,
-        "rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444": 5,
-        "Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32": 1,
+        "actions/cache": 13,
+        "actions/checkout": 46,
+        "actions/deploy-pages": 1,
+        "actions/download-artifact": 3,
+        "actions/setup-python": 1,
+        "actions/upload-artifact": 6,
+        "actions/upload-pages-artifact": 1,
+        "baptiste0928/cargo-install": 1,
+        "crazy-max/ghaction-github-runtime": 2,
+        "docker/bake-action": 1,
+        "docker/build-push-action": 1,
+        "docker/login-action": 5,
+        "docker/metadata-action": 1,
+        "docker/setup-buildx-action": 5,
+        "dorny/paths-filter": 5,
+        "dtolnay/rust-toolchain": 1,
+        "extractions/setup-just": 4,
+        "jdx/mise-action": 13,
+        "mozilla-actions/sccache-action": 7,
+        "renovatebot/github-action": 2,
+        "rui314/setup-mold": 5,
+        "Swatinem/rust-cache": 1,
     }
 )
 
@@ -255,43 +255,43 @@ EXPECTED_CONTINUE_ON_ERROR = Counter(
         (
             ".github/workflows/ci.yml",
             "check",
-            "mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696",
+            "mozilla-actions/sccache-action",
             True,
         ): 1,
         (
             ".github/workflows/ci.yml",
             "build-validator",
-            "mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696",
+            "mozilla-actions/sccache-action",
             True,
         ): 1,
         (
             ".github/workflows/preview.yml",
             "build-preview",
-            "mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696",
+            "mozilla-actions/sccache-action",
             True,
         ): 1,
         (
             ".github/workflows/preview.yml",
             "build-jackin-capsule",
-            "mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696",
+            "mozilla-actions/sccache-action",
             True,
         ): 1,
         (
             ".github/workflows/release.yml",
             "test",
-            "mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696",
+            "mozilla-actions/sccache-action",
             True,
         ): 1,
         (
             ".github/workflows/release.yml",
             "build",
-            "mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696",
+            "mozilla-actions/sccache-action",
             True,
         ): 1,
         (
             ".github/workflows/release.yml",
             "build-jackin-capsule",
-            "mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696",
+            "mozilla-actions/sccache-action",
             True,
         ): 1,
     }
@@ -321,6 +321,12 @@ def short_path(path: Path, roots: list[Path]) -> str:
     return str(path)
 
 
+def normalize_uses(value: str) -> str:
+    if value.startswith("./") or value.startswith("../") or value.startswith("docker://"):
+        return value
+    return value.split("@", 1)[0]
+
+
 def collect_step(
     path: Path,
     job_name: str,
@@ -334,10 +340,11 @@ def collect_step(
 ) -> None:
     if "uses" in step:
         value = str(step["uses"])
-        uses[value] += 1
+        normalized = normalize_uses(value)
+        uses[normalized] += 1
         if value.startswith("./"):
             local_uses.append((short_path(path, roots), job_name, value))
-        if value.startswith("actions/checkout@"):
+        if normalized == "actions/checkout":
             inputs = step.get("with") or {}
             if isinstance(inputs, dict):
                 for name in ["submodules", "sparse-checkout", "lfs"]:
@@ -349,6 +356,8 @@ def collect_step(
         shells.add(str(step["shell"]))
     if "continue-on-error" in step:
         label = str(step.get("uses") or step.get("name") or step.get("id") or "run")
+        if "uses" in step:
+            label = normalize_uses(label)
         continue_on_error.append(
             (short_path(path, roots), job_name, label, step["continue-on-error"])
         )

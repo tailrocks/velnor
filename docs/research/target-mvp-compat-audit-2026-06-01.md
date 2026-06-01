@@ -13,11 +13,14 @@ Refresh command:
 python3 scripts/target_audit.py /tmp/velnor-targets/jackin /tmp/velnor-targets/java-monorepo
 ```
 
-The helper reports workflow files, action metadata, exact `uses:` inventory,
+The helper reports workflow files, action metadata, normalized `uses:` inventory,
 explicit shells, triggers, workflow/job env, job `if`, `needs`, strategy,
 outputs, permissions, concurrency, `runs-on`, defaults, environments, job
 timeouts, job containers, services, local actions, reusable workflows, and
-`continue-on-error` shapes. It accepts either repository roots or their `.github`
+`continue-on-error` shapes. Marketplace action refs and pinned SHAs are ignored
+in this inventory because Phase 0 routes supported action families to
+latest-only Rust-native adapters instead of executing the pinned marketplace
+implementation. It accepts either repository roots or their `.github`
 directories.
 
 ## Scope Rule
