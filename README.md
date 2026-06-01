@@ -75,7 +75,23 @@ Implementation roadmap: [docs/implementation-roadmap.md](docs/implementation-roa
 
 Public fixture repository plan: [docs/public-fixture-repo-plan.md](docs/public-fixture-repo-plan.md).
 
-Public fixture repository: https://github.com/donbeave/velnor-actions-fixture.
+## Proof-Of-Concept Test Repository
+
+Public fixture repository: https://github.com/donbeave/velnor-actions-fixture
+
+This is the small public repository used to prove Velnor against real GitHub
+Actions scheduling before running the large target repositories. It has paired
+workflow lanes:
+
+- GitHub-hosted runner lane: `runs-on: ubuntu-latest`
+- Velnor lane: `runs-on: [self-hosted, velnor-target-mvp]`
+
+Current fixture run:
+https://github.com/donbeave/velnor-actions-fixture/actions/runs/26762850861
+
+The GitHub-hosted lane has passed. The Velnor lane is the next live proof: once
+Velnor is registered with label `velnor-target-mvp`, it should consume the
+queued fixture jobs and the compare job should verify matching outputs.
 
 Target workflow audit and language brainstorming history: [docs/research/config-language-comparison.md](docs/research/config-language-comparison.md).
 

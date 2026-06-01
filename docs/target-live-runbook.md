@@ -5,6 +5,10 @@ This is the remaining Phase 0 proof path. Unit-level target verification is cove
 ## Prerequisites
 
 - Linux host where the Docker daemon can see Velnor's bind-mounted work directory.
+- A local Docker socket is preferred. Remote `DOCKER_HOST=tcp://...` daemons
+  usually fail unless `--work-dir` points to a path mounted into that daemon,
+  because Velnor mounts job scripts, workspace, temp files, artifacts, and cache
+  state into job containers.
 - Git, Docker CLI, and Buildx plugin installed on the host.
 - GitHub PAT in `GITHUB_TOKEN` with permission to register a repository self-hosted runner for the target repo.
 - A persistent Velnor `--work-dir` shared by all jobs in the same validation run; native cache restore/save and artifact upload/download use this shared work directory for single-host handoff until GitHub cache/artifact service transport is implemented.

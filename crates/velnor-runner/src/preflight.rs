@@ -104,9 +104,9 @@ fn verify_script_execution(
     if result.code != 0 {
         fs::remove_file(&output).ok();
         bail!(
-            "Docker image '{}' could not execute a Velnor temp script from /__t with /__w workdir. stderr: {}",
+            "Docker image '{}' could not execute a Velnor temp script from /__t with /__w workdir. {}",
             docker_image,
-            result.stderr
+            bind_mount_error_detail(&temp_dir.display().to_string(), &result.stderr)
         );
     }
 
@@ -233,13 +233,26 @@ fn verify_bind_mount(
     let result = result?;
     if result.code != 0 {
         bail!(
-            "Docker daemon cannot see Velnor bind-mounted work directory '{}'. \
-             Use a local Docker daemon or pass --work-dir to a path visible to the daemon. stderr: {}",
+            "Docker daemon cannot see Velnor bind-mounted work directory '{}'. {}",
             temp_dir.display(),
-            result.stderr
+            bind_mount_error_detail(&temp_dir.display().to_string(), &result.stderr)
         );
     }
     Ok(())
+}
+
+fn bind_mount_error_detail(path: &str, stderr: &str) -> String {
+    let docker_host = std::env::var("DOCKER_HOST").unwrap_or_default();
+    let remote_hint = if docker_host.starts_with("tcp://") || docker_host.starts_with("ssh://") {
+        format!(
+            "Detected DOCKER_HOST={docker_host}; Velnor live jobs need a Docker daemon that can see the host work directory '{path}'. Use a local Docker socket or a --work-dir path mounted into the remote daemon."
+        )
+    } else {
+        format!(
+            "Use a local Docker daemon or pass --work-dir to a path visible to the daemon at '{path}'."
+        )
+    };
+    format!("{remote_hint} stderr: {stderr}")
 }
 
 fn preflight_work_dir(work_dir: Option<PathBuf>) -> Result<PathBuf> {
