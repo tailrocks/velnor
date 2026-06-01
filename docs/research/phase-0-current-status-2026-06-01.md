@@ -46,9 +46,10 @@ Implementation facts:
 - GitHub owns YAML parsing, trigger matching, reusable workflow expansion,
   matrix expansion, job graph scheduling, secrets, permissions, and UI.
 - Velnor receives `AgentJobRequestMessage` payloads after GitHub expansion.
-- Velnor's current CLI path executes one acquired job at a time, but the product
-  target is a daemon that owns multiple internal runner slots and executes one
-  isolated Docker container per assigned job concurrently.
+- Velnor's daemon path owns multiple internal runner slots and executes one
+  isolated Docker container per assigned job concurrently. Bounded proof scripts
+  now use `daemon --once --slots N` instead of repeated single-slot `run --once`
+  loops.
 - Each target Linux job runs in a fresh Docker job container.
 - Supported marketplace action families are selected by normalized action name;
   YAML refs, tags, and SHAs are ignored for Velnor's Rust-native implementation.
@@ -115,18 +116,23 @@ Evidence captured on 2026-06-01:
 - `compat-github (app-a)` and `compat-github (app-b)` passed on
   GitHub-hosted runners, including rust-toolchain, setup-just, cache, command
   files, local composite action, Rust tests, and upload-artifact.
-- `compat-velnor (app-a)` and `compat-velnor (app-b)` are queued until a
-  Velnor self-hosted runner with label `velnor-target-mvp` is registered.
+- `scripts/fixture_status.sh` still shows `compat-velnor (app-a)` and
+  `compat-velnor (app-b)` queued until a Velnor self-hosted runner with label
+  `velnor-target-mvp` is registered.
 
 This fixture is not a replacement for target-repo proof. It is the next live
-bridge: first make the queued Velnor fixture jobs pass, then move the same
-runner path to the ChainArgos Rust workflows and `jackin`.
+bridge: first make the queued Velnor fixture jobs pass, collect evidence, then
+report readiness for manual target-repository validation. The user/operator,
+not the agent, owns the real ChainArgos and Jackin validation run.
 
 Current local environment finding:
 
 - The active agent environment has `DOCKER_HOST=tcp://jk-php3ngrs-thearchitect-dind:2376`.
-- `docker buildx` was installed locally as `~/.docker/cli-plugins/docker-buildx`
-  for future Docker checks.
+- `scripts/live_host_doctor.sh` with the default socket requirement fails before
+  registration because `/var/run/docker.sock` does not exist on this host.
+- `VELNOR_REQUIRE_DOCKER_SOCKET=false scripts/live_host_doctor.sh` reaches the
+  bind-mount visibility preflight, then fails because the remote Docker daemon
+  cannot see `/Users/donbeave/Projects/velnor-project/velnor/.velnor-work`.
 - Velnor preflight still cannot run jobs here because the remote Docker daemon
   cannot see bind-mounted paths from this agent container.
 - `scripts/live_host_doctor.sh` reproduces the same expected blocker in this
@@ -145,8 +151,8 @@ Current local environment finding:
 | Gap | Why it matters | Proof needed |
 | --- | --- | --- |
 | Live fixture Velnor run | GitHub-hosted lanes pass, but Velnor has not yet consumed the queued fixture jobs. | Register Velnor to `donbeave/velnor-actions-fixture` with label `velnor-target-mvp`; run queued `compat-velnor` jobs; verify `compare-results` passes. |
-| Live GitHub UI run on ChainArgos Rust workflows | Local unit tests cannot prove GitHub accepts the full live protocol and renders logs/status correctly. | Run `ansible.yml`, then `rust.yml`, then Docker/Buildx-heavy workflows through a registered Velnor runner. |
-| Live GitHub UI run on `jackin` Linux paths | `jackin` has Linux hosted labels plus artifact/pages/homebrew flows that must work without YAML changes for selected Linux jobs. | Register with target x64 labels and run `ci.yml`, `construct.yml`, and `docs.yml` Linux paths. |
+| Live GitHub UI run on ChainArgos Rust workflows | Local unit tests cannot prove GitHub accepts the full live protocol and renders logs/status correctly. | User/operator manually runs `ansible.yml`, then `rust.yml`, then Docker/Buildx-heavy workflows through a registered Velnor runner after fixture evidence is green. |
+| Live GitHub UI run on `jackin` Linux paths | `jackin` has Linux hosted labels plus artifact/pages/homebrew flows that must work without YAML changes for selected Linux jobs. | User/operator manually registers with target x64 labels and runs `ci.yml`, `construct.yml`, and `docs.yml` Linux paths after fixture evidence is green. |
 | GitHub artifact/cache service transport | Current artifact/cache handoff is shared-workdir local storage, good for one-host proof but not multi-runner parity. | Either prove target live jobs run on one host with shared workdir or implement service-backed transport before multi-host validation. |
 | MacOS matrix legs | Docker Linux runner cannot truthfully replace `macos-latest`. | Not a Velnor target; keep those legs outside Velnor. |
 | Hosted image parity | Velnor uses a Docker image with common tools; it is not a byte-for-byte GitHub-hosted runner image. | Target workflow live runs prove enough parity for current scripts. |
@@ -156,15 +162,18 @@ Current local environment finding:
 
 1. Run `scripts/target_verify.sh` and `cargo test -q`.
 2. Run `velnor-runner preflight` on the live Linux host and intended workdir.
-3. Register `donbeave/velnor-actions-fixture` with label
-   `velnor-target-mvp`; run the queued fixture `compat-velnor` jobs and confirm
+3. On a host that passes preflight, run `scripts/fixture_smoke.sh`. This
+   registers `donbeave/velnor-actions-fixture` with label `velnor-target-mvp`,
+   runs the queued fixture jobs through `daemon --once --slots N`, and confirms
    `compare-results` passes.
-4. Register `ChainArgos/java-monorepo` with `--target-mvp-labels`.
-5. Run `ansible.yml` with `--once` and capture sanitized job dump on failure.
-6. Fix only failures backed by live payloads or target workflow evidence.
-7. Move to `rust.yml`, then Docker/Buildx-heavy Rust workflows.
-8. Register `jackin-project/jackin` with x64 target labels and prove Linux
-   `ci.yml`, `construct.yml`, and `docs.yml` paths.
+4. Fix only failures backed by fixture live evidence, sanitized job payloads, or
+   target workflow drift.
+5. When fixture evidence is green, report that Velnor is ready for manual
+   target-repository validation.
+6. The user/operator explicitly sets `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`
+   and runs the ChainArgos target sequence.
+7. The user/operator explicitly sets `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`
+   and runs the Jackin Linux target sequence.
 
 ## Completion Rule
 
