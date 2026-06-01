@@ -43,7 +43,17 @@ cleanup_runner() {
   fi
 }
 
+record_failure_evidence() {
+  local status=$?
+  trap cleanup_runner EXIT
+  if [[ -n "${RUN_ID:-}" ]]; then
+    write_live_evidence "failed-before-completion" || true
+  fi
+  exit "$status"
+}
+
 trap cleanup_runner EXIT
+trap record_failure_evidence ERR
 
 velnor_require_repo_slug VELNOR_TARGET_REPO "$TARGET_REPO"
 velnor_require_nonempty VELNOR_RUNNER_NAME "$RUNNER_NAME"
