@@ -4,6 +4,7 @@ This roadmap is ordered for the real first goal: run existing GitHub Actions YAM
 
 Detailed Phase 0 implementation research lives in `docs/research/phase-0-implementation-plan.md`.
 The current upstream source audit is `docs/research/actions-runner-source-audit-2026-06-01.md`.
+The target-only MVP contract is `docs/research/target-mvp-compat-audit-2026-06-01.md`; Phase 0 work should be judged against those two repositories' current `.github` trees, not broad GitHub Actions parity.
 
 ## Milestone 0: Protocol Spike
 
