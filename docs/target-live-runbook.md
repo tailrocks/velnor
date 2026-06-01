@@ -298,7 +298,9 @@ For each run, record:
 
 The smoke scripts write a Markdown evidence file under `.velnor-live-evidence`
 by default after Velnor consumes jobs and after a watched run completes or
-fails. Set `VELNOR_LIVE_EVIDENCE_DIR=<path>` to store those records elsewhere.
+fails. Those files include a best-effort GitHub API snapshot of the registered
+runner labels and run artifacts. Set `VELNOR_LIVE_EVIDENCE_DIR=<path>` to store
+those records elsewhere.
 
 Keep sanitized job payloads for failures:
 

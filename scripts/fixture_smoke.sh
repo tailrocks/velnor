@@ -25,6 +25,48 @@ sanitize_filename() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
 }
 
+write_runner_snapshot() {
+  local runner_snapshot
+
+  echo
+  echo "## Registered Runner Snapshot"
+  echo
+  echo "| name | os | status | busy | labels |"
+  echo "| --- | --- | --- | --- | --- |"
+
+  if runner_snapshot="$(gh api "repos/$FIXTURE_REPO/actions/runners" --paginate \
+    --jq ".runners[] | select(.name == \"$RUNNER_NAME\") | \"| \" + .name + \" | \" + .os + \" | \" + .status + \" | \" + (.busy | tostring) + \" | \" + ([.labels[].name] | join(\", \")) + \" |\"" 2>&1)"; then
+    if [[ -n "$runner_snapshot" ]]; then
+      printf '%s\n' "$runner_snapshot"
+    else
+      echo "| $RUNNER_NAME | <not found> | <not found> | <not found> | <not found> |"
+    fi
+  else
+    echo "| $RUNNER_NAME | <unavailable> | <unavailable> | <unavailable> | $(printf '%s' "$runner_snapshot" | tr '\n' ' ') |"
+  fi
+}
+
+write_artifact_snapshot() {
+  local artifact_snapshot
+
+  echo
+  echo "## Run Artifacts"
+  echo
+  echo "| name | size bytes | expired | download URL |"
+  echo "| --- | ---: | --- | --- |"
+
+  if artifact_snapshot="$(gh api "repos/$FIXTURE_REPO/actions/runs/$RUN_ID/artifacts" --paginate \
+    --jq '.artifacts[] | "| " + .name + " | " + (.size_in_bytes | tostring) + " | " + (.expired | tostring) + " | " + .archive_download_url + " |"' 2>&1)"; then
+    if [[ -n "$artifact_snapshot" ]]; then
+      printf '%s\n' "$artifact_snapshot"
+    else
+      echo "| <none> | 0 | false | <none> |"
+    fi
+  else
+    echo "| <unavailable> | 0 | false | $(printf '%s' "$artifact_snapshot" | tr '\n' ' ') |"
+  fi
+}
+
 write_live_evidence() {
   local phase="$1"
 
@@ -73,6 +115,8 @@ write_live_evidence() {
         "| --- | --- | --- |",
         (.jobs[] | "| " + .name + " | " + .status + " | " + (.conclusion // "") + " |")
       '
+    write_runner_snapshot
+    write_artifact_snapshot
   } >"$evidence_file"
 
   echo "==> Wrote live evidence $evidence_file"
