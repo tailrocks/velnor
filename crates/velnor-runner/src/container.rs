@@ -658,6 +658,41 @@ mod tests {
     }
 
     #[test]
+    fn skips_host_docker_cli_when_socket_is_not_mounted() {
+        let mut spec = spec();
+        spec.mount_docker_socket = false;
+        spec.docker_cli_host_path = Some("/usr/bin/docker".into());
+        spec.docker_cli_plugin_host_dir = Some("/usr/libexec/docker/cli-plugins".into());
+
+        let start_args = spec.start_args();
+        assert!(!start_args.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
+        assert!(!start_args.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
+        assert!(!start_args.contains(
+            &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
+        ));
+
+        let node_args = spec.run_node_action_args(
+            "/__w",
+            &[],
+            &[],
+            "node:24-bookworm",
+            "/__a/action/dist/index.js",
+        );
+        assert!(!node_args.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
+        assert!(!node_args.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
+        assert!(!node_args.contains(
+            &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
+        ));
+
+        let docker_action_args = spec.run_docker_action_args("/__w", &[], "alpine:3.20", None, &[]);
+        assert!(!docker_action_args.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
+        assert!(!docker_action_args.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
+        assert!(!docker_action_args.contains(
+            &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
+        ));
+    }
+
+    #[test]
     fn builds_docker_action_args() {
         let spec = spec();
 
