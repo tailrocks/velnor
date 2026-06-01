@@ -323,9 +323,10 @@ label and avoids macOS matrix legs.
 
 ## Current Gap List
 
-- `NormalizedJobPlan` exists as a Rust type, but the runner does not produce it
-  yet.
-- GitHub planning is still mostly inside `runner.rs`.
+- `NormalizedJobPlan` exists as a Rust type, and the GitHub execution path now
+  builds one after resolving checkouts/actions and before Docker execution.
+- GitHub planning is still mostly inside `runner.rs`; it should move to a
+  separate adapter module.
 - reporting is coupled to `runner.rs` instead of a report-target interface.
 - Pkl examples exist, but no package skeleton exists under the repository.
 - no Pkl-to-plan proof exists yet.
