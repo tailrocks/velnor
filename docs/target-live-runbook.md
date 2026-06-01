@@ -138,6 +138,7 @@ Start Velnor:
 ```sh
 cargo run --bin velnor-runner -- run \
   --work-dir "$PWD/.velnor-work" \
+  --require-docker-socket \
   --once \
   --idle-timeout-seconds 900
 ```
@@ -158,7 +159,8 @@ Run without `--once` after the first smoke job is clean:
 
 ```sh
 cargo run --bin velnor-runner -- run \
-  --work-dir "$PWD/.velnor-work"
+  --work-dir "$PWD/.velnor-work" \
+  --require-docker-socket
 ```
 
 ## Run Jackin Linux Paths
@@ -200,6 +202,7 @@ Keep sanitized job payloads for failures:
 ```sh
 cargo run --bin velnor-runner -- run \
   --work-dir "$PWD/.velnor-work" \
+  --require-docker-socket \
   --dump-job-message "$PWD/.velnor-job-dumps" \
   --once
 ```
