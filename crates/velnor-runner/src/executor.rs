@@ -2116,7 +2116,7 @@ fn native_download_artifact(
     let store = artifact_store_dir(state)?;
     let artifacts = matching_artifacts(&store, &name, &pattern)?;
     for (artifact_name, artifact_dir) in &artifacts {
-        let target = if merge_multiple || artifacts.len() == 1 {
+        let target = if merge_multiple || !name.is_empty() {
             destination.clone()
         } else {
             destination.join(artifact_name)
@@ -7912,6 +7912,83 @@ fi"#
         assert!(root
             .join("_velnor_artifacts/123456-1/construct-digest-linux-amd64/linux-amd64.digest")
             .exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_download_artifact_all_mode_uses_named_directories() {
+        let root = temp_dir();
+        let upload_temp = root.join("upload-job/temp");
+        let download_temp = root.join("download-job/temp");
+        fs::create_dir_all(upload_temp.join("work")).unwrap();
+        fs::create_dir_all(download_temp.join("work")).unwrap();
+        fs::write(upload_temp.join("work/linux.txt"), "linux\n").unwrap();
+        fs::write(upload_temp.join("work/macos.txt"), "macos\n").unwrap();
+        let runtime_env = vec![
+            ("GITHUB_RUN_ID".into(), "123456".into()),
+            ("GITHUB_RUN_ATTEMPT".into(), "1".into()),
+            ("GITHUB_WORKSPACE".into(), "/__w".into()),
+        ];
+        for (name, path) in [
+            ("artifact-linux", "/__w/linux.txt"),
+            ("artifact-macos", "/__w/macos.txt"),
+        ] {
+            let upload = vec![ExecutableStep::Native {
+                step_id: format!("upload-{name}"),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::UploadArtifact,
+                    inputs: [
+                        ("name".into(), name.into()),
+                        ("path".into(), path.into()),
+                        ("if-no-files-found".into(), "error".into()),
+                    ]
+                    .into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            }];
+            DockerScriptExecutor::new(RecordingRunner::default())
+                .execute_ordered_steps(
+                    &container(&upload_temp),
+                    &upload,
+                    &runtime_env,
+                    &upload_temp,
+                )
+                .unwrap();
+        }
+        let download = vec![ExecutableStep::Native {
+            step_id: "download".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::DownloadArtifact,
+                inputs: [("path".into(), "/__w/downloaded".into())].into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&download_temp),
+                &download,
+                &runtime_env,
+                &download_temp,
+            )
+            .unwrap();
+
+        assert_eq!(results[0].exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(download_temp.join("work/downloaded/artifact-linux/linux.txt"))
+                .unwrap(),
+            "linux\n"
+        );
+        assert_eq!(
+            fs::read_to_string(download_temp.join("work/downloaded/artifact-macos/macos.txt"))
+                .unwrap(),
+            "macos\n"
+        );
+        assert!(!download_temp.join("work/downloaded/linux.txt").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

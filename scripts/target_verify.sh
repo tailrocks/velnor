@@ -49,6 +49,7 @@ tests=(
   builds_github_runtime_env_from_job_message
   reads_runtime_endpoint_values_case_insensitively
   native_artifacts_are_shared_across_jobs_in_same_run_workdir
+  native_download_artifact_all_mode_uses_named_directories
   native_upload_artifact_expands_target_release_globs
   native_upload_artifact_excludes_hidden_files_by_default
   native_upload_artifact_requires_overwrite_for_duplicate_name
