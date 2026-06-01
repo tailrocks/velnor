@@ -39,7 +39,8 @@ feature class that Velnor does not support yet.
 
 ## Adapter Shape
 
-A native adapter is selected by action reference, not by workflow location:
+A native adapter is selected by action family, not by workflow location or the
+literal `@ref` in YAML:
 
 ```text
 uses: actions/cache@<sha>
@@ -59,6 +60,12 @@ NativeAction::Cache {
   runtime_token,
 }
 ```
+
+The `@ref` portion is accepted for GitHub YAML compatibility, but Velnor does
+not execute that pinned marketplace implementation. For supported action
+families, Velnor ignores the pinned SHA/tag and runs its internal Rust adapter.
+Adapters should track the latest behavior Velnor intentionally supports for the
+target repositories; old marketplace versions are not a compatibility goal.
 
 The adapter receives already-resolved runner contexts where GitHub would resolve
 them for that step:
@@ -83,7 +90,7 @@ These adapters are required because the two target repositories use them now.
 The implementation should cover only the input shapes observed in those repos
 until a new target workflow needs more.
 
-| Action reference family | Native adapter | Required behavior |
+| Action family | Native adapter | Required behavior |
 | --- | --- | --- |
 | `actions/checkout` | `Checkout` | self checkout, external repo checkout, `path`, `ref`, `token`, `fetch-depth` |
 | `actions/cache` | `Cache` | restore/save paths, key, restore keys, `hashFiles(...)` keys |
@@ -126,4 +133,3 @@ These are intentionally outside the first target contract:
 
 If a target repo adds one of these, the audit should fail first. Then Velnor
 should add the feature as a reusable capability, not as a workflow-specific case.
-

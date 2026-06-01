@@ -851,6 +851,7 @@ where
         state: &JobExecutionState,
     ) -> Result<StepExecutionResult> {
         match action.adapter {
+            NativeActionAdapter::Cache => Ok(native_cache(action, state)),
             NativeActionAdapter::GitHubRuntimeExport => {
                 Ok(native_github_runtime_export(action, state))
             }
@@ -1111,6 +1112,61 @@ fn rewrite_command_file_env_for_action_container(env: &mut [(String, String)]) {
     }
 }
 
+fn native_cache(action: &NativeActionInvocation, state: &JobExecutionState) -> StepExecutionResult {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let key = native_input(action, &action_state, "key");
+    let path = native_input(action, &action_state, "path");
+    let restore_keys = native_input(action, &action_state, "restore-keys");
+    let fail_on_cache_miss =
+        input_truthy(&native_input(action, &action_state, "fail-on-cache-miss"));
+
+    let mut outputs = BTreeMap::new();
+    outputs.insert("cache-hit".to_string(), "false".to_string());
+    outputs.insert("cache-primary-key".to_string(), key.clone());
+    outputs.insert("cache-matched-key".to_string(), String::new());
+
+    let mut state_values = BTreeMap::new();
+    if !key.is_empty() {
+        state_values.insert("primaryKey".to_string(), key.clone());
+    }
+
+    let mut stdout = String::new();
+    stdout.push_str("Cache not found for input keys: ");
+    stdout.push_str(
+        &std::iter::once(key.as_str())
+            .chain(
+                restore_keys
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty()),
+            )
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    stdout.push('\n');
+    if !path.is_empty() {
+        stdout.push_str(&format!("Cache path: {path}\n"));
+    }
+
+    StepExecutionResult {
+        exit_code: if fail_on_cache_miss { 1 } else { 0 },
+        state: StepCommandState {
+            outputs,
+            state: state_values,
+            ..StepCommandState::default()
+        },
+        skipped: false,
+        failure_ignored: false,
+        stdout,
+        stderr: if fail_on_cache_miss {
+            "Cache not found and fail-on-cache-miss is true\n".to_string()
+        } else {
+            String::new()
+        },
+    }
+}
+
 fn native_github_runtime_export(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
@@ -1135,6 +1191,22 @@ fn native_github_runtime_export(
         stdout,
         stderr: String::new(),
     }
+}
+
+fn native_input(action: &NativeActionInvocation, state: &JobExecutionState, name: &str) -> String {
+    action
+        .inputs
+        .get(name)
+        .or_else(|| action.inputs.get(&name.to_ascii_lowercase()))
+        .map(|value| state.resolve_expressions(value))
+        .unwrap_or_default()
+}
+
+fn input_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "yes"
+    )
 }
 
 fn parse_paths_filter_rules(filters: &str) -> Result<Vec<(String, Vec<String>)>> {
@@ -2851,6 +2923,114 @@ mod tests {
                 .count(),
             0
         );
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_cache_reports_miss_without_node_sidecar() {
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(workspace.join("crate/src")).unwrap();
+        fs::write(
+            workspace.join("crate/src/lib.rs"),
+            "pub fn answer() -> u8 { 42 }\n",
+        )
+        .unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "cache".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::Cache,
+                inputs: [
+                    ("path".into(), "~/.cache/rust-script".into()),
+                    (
+                        "key".into(),
+                        "rust-script-${{ runner.os }}-${{ hashFiles('crate/**/*.rs') }}".into(),
+                    ),
+                    (
+                        "restore-keys".into(),
+                        "rust-script-${{ runner.os }}-\n".into(),
+                    ),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        let mut expected_hash = Sha256::new();
+        expected_hash.update(Sha256::digest(b"pub fn answer() -> u8 { 42 }\n"));
+        let expected_hash = hex_digest(expected_hash.finalize().as_slice());
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        let results = executor
+            .execute_ordered_steps(
+                &container(&temp),
+                &steps,
+                &[("RUNNER_OS".into(), "Linux".into())],
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].exit_code, 0);
+        assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(
+            results[0].state.outputs["cache-primary-key"],
+            format!("rust-script-Linux-{expected_hash}")
+        );
+        assert_eq!(
+            results[0].state.state["primaryKey"],
+            format!("rust-script-Linux-{expected_hash}")
+        );
+        assert!(results[0]
+            .stdout
+            .contains("Cache not found for input keys: rust-script-Linux-"));
+        assert!(results[0]
+            .stdout
+            .contains("Cache path: ~/.cache/rust-script"));
+        assert_eq!(
+            executor
+                .runner()
+                .calls
+                .iter()
+                .filter(|(_, args)| args.first().is_some_and(|arg| arg == "run")
+                    && args.iter().any(|arg| arg.starts_with("node:")))
+                .count(),
+            0
+        );
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_cache_can_fail_on_miss() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "cache".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::Cache,
+                inputs: [
+                    ("path".into(), "target".into()),
+                    ("key".into(), "linux-cache".into()),
+                    ("fail-on-cache-miss".into(), "true".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results[0].exit_code, 1);
+        assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        assert!(results[0].stderr.contains("fail-on-cache-miss"));
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -5191,27 +5371,23 @@ fi"#
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![
-            ExecutableStep::JavaScript {
+            ExecutableStep::Native {
                 step_id: "cache".into(),
-                invocation: JavaScriptActionInvocation {
-                    node: "node24".into(),
-                    pre_container_path: None,
-                    pre_condition: None,
-                    main_container_path: "/__a/_actions/actions_cache/dist/restore/index.js".into(),
-                    post_container_path: None,
-                    post_condition: None,
-                    action_container_path: "/__a/_actions/actions_cache".into(),
-                    env: vec![
-                        ("INPUT_PATH".into(), "~/.cache/rust-script".into()),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::Cache,
+                    inputs: [
+                        ("path".into(), "~/.cache/rust-script".into()),
                         (
-                            "INPUT_KEY".into(),
+                            "key".into(),
                             "rust-script-${{ runner.os }}-${{ hashFiles('kestra-docker-containers/**/*.rs', 'kestra-docker-containers/**/build.toml', 'kestra-docker-containers/justfile') }}".into(),
                         ),
                         (
-                            "INPUT_RESTORE-KEYS".into(),
+                            "restore-keys".into(),
                             "rust-script-${{ runner.os }}-\n".into(),
                         ),
-                    ],
+                    ]
+                    .into(),
+                    env: Vec::new(),
                 },
                 condition: None,
                 continue_on_error: false,
@@ -5314,7 +5490,7 @@ fi"#
         let expected_hash = hex_digest(expected_hash.finalize().as_slice());
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
-        executor
+        let results = executor
             .execute_ordered_steps_with_context(
                 &container(&temp),
                 &steps,
@@ -5337,7 +5513,7 @@ fi"#
             })
             .map(|(_, args)| args)
             .collect::<Vec<_>>();
-        assert_eq!(node_calls.len(), 4);
+        assert_eq!(node_calls.len(), 3);
         for call in &node_calls {
             assert!(call.contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
             assert!(call.contains(&"ACTIONS_RESULTS_URL=https://results.actions".into()));
@@ -5346,20 +5522,23 @@ fi"#
             assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
         }
-        assert!(node_calls[0].contains(&"ACTIONS_CACHE_URL=https://cache.actions".into()));
-        assert!(node_calls[0].contains(&"ACTIONS_CACHE_SERVICE_V2=True".into()));
-        assert!(node_calls[0].contains(&"INPUT_PATH=~/.cache/rust-script".into()));
-        assert!(node_calls[0].contains(&format!("INPUT_KEY=rust-script-Linux-{expected_hash}")));
-        assert!(node_calls[0].contains(&"INPUT_RESTORE-KEYS=rust-script-Linux-\n".into()));
-        assert!(node_calls[1].contains(&"INPUT_NAME=construct-digest-linux-amd64".into()));
-        assert!(node_calls[1].contains(&"INPUT_PATH=/__w/digests/linux-amd64.digest".into()));
-        assert!(node_calls[1].contains(&"INPUT_IF-NO-FILES-FOUND=error".into()));
-        assert!(node_calls[1].contains(&"INPUT_RETENTION-DAYS=1".into()));
-        assert!(node_calls[1].contains(&"GITHUB_RETENTION_DAYS=90".into()));
-        assert!(node_calls[2].contains(&"INPUT_PATTERN=construct-digest-*".into()));
-        assert!(node_calls[2].contains(&"INPUT_PATH=/__w/digests".into()));
-        assert!(node_calls[2].contains(&"INPUT_MERGE-MULTIPLE=true".into()));
-        assert!(node_calls[3].contains(&"INPUT_GITHUB-TOKEN=ghs_token".into()));
+        assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(
+            results[0].state.outputs["cache-primary-key"],
+            format!("rust-script-Linux-{expected_hash}")
+        );
+        assert!(results[0]
+            .stdout
+            .contains("Cache path: ~/.cache/rust-script"));
+        assert!(node_calls[0].contains(&"INPUT_NAME=construct-digest-linux-amd64".into()));
+        assert!(node_calls[0].contains(&"INPUT_PATH=/__w/digests/linux-amd64.digest".into()));
+        assert!(node_calls[0].contains(&"INPUT_IF-NO-FILES-FOUND=error".into()));
+        assert!(node_calls[0].contains(&"INPUT_RETENTION-DAYS=1".into()));
+        assert!(node_calls[0].contains(&"GITHUB_RETENTION_DAYS=90".into()));
+        assert!(node_calls[1].contains(&"INPUT_PATTERN=construct-digest-*".into()));
+        assert!(node_calls[1].contains(&"INPUT_PATH=/__w/digests".into()));
+        assert!(node_calls[1].contains(&"INPUT_MERGE-MULTIPLE=true".into()));
+        assert!(node_calls[2].contains(&"INPUT_GITHUB-TOKEN=ghs_token".into()));
         fs::remove_dir_all(temp).unwrap();
     }
 
