@@ -3873,6 +3873,116 @@ mod tests {
     }
 
     #[test]
+    fn target_cache_and_artifact_actions_receive_runtime_env() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::JavaScript {
+                step_id: "cache".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/actions_cache/dist/restore/index.js".into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/actions_cache".into(),
+                    env: vec![
+                        ("INPUT_KEY".into(), "cargo-linux".into()),
+                        ("INPUT_PATH".into(), "~/.cargo/registry".into()),
+                    ],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "upload".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path:
+                        "/__a/_actions/actions_upload-artifact/dist/upload/index.js".into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/actions_upload-artifact".into(),
+                    env: vec![
+                        ("INPUT_NAME".into(), "dist".into()),
+                        ("INPUT_PATH".into(), "target/release".into()),
+                    ],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "download".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path:
+                        "/__a/_actions/actions_download-artifact/dist/download/index.js".into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/actions_download-artifact".into(),
+                    env: vec![("INPUT_PATH".into(), "artifacts".into())],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+        ];
+        let runtime_env = vec![
+            ("GITHUB_REPOSITORY".into(), "jackin-project/jackin".into()),
+            ("GITHUB_WORKSPACE".into(), "/__w".into()),
+            ("GITHUB_RUN_ID".into(), "123456".into()),
+            ("GITHUB_RUN_ATTEMPT".into(), "1".into()),
+            ("GITHUB_RETENTION_DAYS".into(), "90".into()),
+            ("GITHUB_SERVER_URL".into(), "https://github.com".into()),
+            ("RUNNER_TEMP".into(), "/__t".into()),
+            ("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into()),
+            (
+                "ACTIONS_RUNTIME_URL".into(),
+                "https://runtime.actions".into(),
+            ),
+            (
+                "ACTIONS_RESULTS_URL".into(),
+                "https://results.actions".into(),
+            ),
+            ("ACTIONS_CACHE_URL".into(), "https://cache.actions".into()),
+            ("ACTIONS_CACHE_SERVICE_V2".into(), "True".into()),
+        ];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &runtime_env, &temp)
+            .unwrap();
+
+        let node_calls = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:24-bookworm".into())
+            })
+            .map(|(_, args)| args)
+            .collect::<Vec<_>>();
+        assert_eq!(node_calls.len(), 3);
+        for call in &node_calls {
+            assert!(call.contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
+            assert!(call.contains(&"ACTIONS_RESULTS_URL=https://results.actions".into()));
+            assert!(call.contains(&"GITHUB_REPOSITORY=jackin-project/jackin".into()));
+            assert!(call.contains(&"GITHUB_RUN_ID=123456".into()));
+            assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
+            assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
+        }
+        assert!(node_calls[0].contains(&"ACTIONS_CACHE_URL=https://cache.actions".into()));
+        assert!(node_calls[0].contains(&"ACTIONS_CACHE_SERVICE_V2=True".into()));
+        assert!(node_calls[1].contains(&"GITHUB_RETENTION_DAYS=90".into()));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn javascript_actions_receive_prior_github_path_entries() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
