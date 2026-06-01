@@ -3318,6 +3318,58 @@ mod tests {
     }
 
     #[test]
+    fn target_docs_sitemap_step_receives_deployment_page_url() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "deployment".into(),
+                script: "echo deploy".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "sitemap".into(),
+                script: r#"echo "url=${PAGE_URL%/}/sitemap.xml" >> "$GITHUB_OUTPUT""#.into(),
+                shell: Shell::Bash,
+                working_directory_container: "/__w/repo".into(),
+                env: vec![(
+                    "PAGE_URL".into(),
+                    "${{ steps.deployment.outputs.page_url }}".into(),
+                )],
+                condition: None,
+                continue_on_error: false,
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        let sitemap_exec = executor
+            .runner()
+            .calls
+            .iter()
+            .find(|(_program, args)| args.iter().any(|arg| arg.ends_with("/sitemap.sh")))
+            .expect("sitemap script should be executed");
+        assert!(sitemap_exec
+            .1
+            .contains(&"PAGE_URL=https://jackin-project.github.io/jackin/".into()));
+        assert_eq!(
+            fs::read_to_string(temp.join("sitemap.sh")).unwrap(),
+            "echo \"url=${PAGE_URL%/}/sitemap.xml\" >> \"$GITHUB_OUTPUT\"\n"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn evaluates_typed_job_outputs_from_final_step_state() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
