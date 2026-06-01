@@ -90,8 +90,13 @@ pub struct CompositeActionStep {
     pub condition: Option<String>,
     #[serde(default, rename = "working-directory", alias = "workingDirectory")]
     pub working_directory: Option<String>,
-    #[serde(default, rename = "continue-on-error", alias = "continueOnError")]
-    pub continue_on_error: Option<bool>,
+    #[serde(
+        default,
+        rename = "continue-on-error",
+        alias = "continueOnError",
+        deserialize_with = "deserialize_optional_string_scalar"
+    )]
+    pub continue_on_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -659,7 +664,13 @@ fn composite_action_invocations_with_path(
                     inputs,
                     env,
                     condition,
-                    continue_on_error: step.continue_on_error.unwrap_or(false),
+                    continue_on_error: composite_continue_on_error(
+                        step,
+                        &action_inputs,
+                        action_path,
+                        workspace_container,
+                        &step_ids,
+                    ),
                 },
             ));
             continue;
@@ -716,7 +727,13 @@ fn composite_action_invocations_with_path(
                     &step_ids,
                 )
             }),
-            continue_on_error: step.continue_on_error.unwrap_or(false),
+            continue_on_error: composite_continue_on_error(
+                step,
+                &action_inputs,
+                action_path,
+                workspace_container,
+                &step_ids,
+            ),
         }));
     }
     let outputs = metadata
@@ -1034,6 +1051,22 @@ fn render_composite_scoped_value(
         &render_composite_value(value, inputs, action_path, workspace_container),
         step_ids,
     )
+}
+
+fn composite_continue_on_error(
+    step: &CompositeActionStep,
+    inputs: &BTreeMap<String, String>,
+    action_path: &str,
+    workspace_container: &str,
+    step_ids: &BTreeMap<String, String>,
+) -> bool {
+    step.continue_on_error
+        .as_deref()
+        .map(|value| {
+            render_composite_scoped_value(value, inputs, action_path, workspace_container, step_ids)
+                .eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false)
 }
 
 fn render_action_scoped_value(
@@ -1590,6 +1623,59 @@ runs:
         assert!(flags.script.contains(
             "${{ steps.toolchain-parse.outputs.toolchain == 'nightly' && '' && ' --allow-downgrade' || '' }}"
         ));
+    }
+
+    #[test]
+    fn expands_composite_continue_on_error_from_string_inputs() {
+        let actions_host = Path::new("/tmp/actions");
+        let plan = RepositoryActionPlan {
+            step_id: "setup".into(),
+            repository: "acme/setup".into(),
+            git_ref: "v1".into(),
+            source_path: None,
+            repository_dir: actions_host.join("_actions/acme_setup/v1"),
+            action_dir: actions_host.join("_actions/acme_setup/v1"),
+            inputs: [("soft-fail".to_string(), "true".to_string())].into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+        };
+        let metadata = parse_action_metadata(
+            r#"
+inputs:
+  soft-fail:
+    default: false
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      continue-on-error: ${{ inputs.soft-fail }}
+      run: cargo install acme-cli
+    - uses: actions/cache@v5
+      continue-on-error: "true"
+"#,
+        )
+        .unwrap();
+        let runtime = metadata.runtime().unwrap();
+        let resolved = ResolvedAction {
+            plan,
+            metadata_path: actions_host.join("_actions/acme_setup/v1/action.yml"),
+            metadata,
+            runtime,
+        };
+
+        let invocations = resolved
+            .composite_invocations("/__w", actions_host)
+            .unwrap();
+
+        let CompositeActionInvocation::Script(script) = &invocations[0] else {
+            panic!("first composite step should expand to script")
+        };
+        assert!(script.continue_on_error);
+        let CompositeActionInvocation::Repository(repository) = &invocations[1] else {
+            panic!("second composite step should expand to repository action")
+        };
+        assert!(repository.continue_on_error);
     }
 
     #[test]
