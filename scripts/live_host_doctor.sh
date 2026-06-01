@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/scripts/live_sequence_common.sh"
+
 WORK_DIR="${VELNOR_WORK_DIR:-$ROOT/.velnor-work}"
 DOCKER_HOST_WORK_DIR="${VELNOR_DOCKER_HOST_WORK_DIR:-}"
 REQUIRE_DOCKER_SOCKET="${VELNOR_REQUIRE_DOCKER_SOCKET:-true}"
@@ -10,6 +12,11 @@ RUN_TARGET_VERIFY="${VELNOR_RUN_TARGET_VERIFY:-false}"
 TARGET_MVP_ARM_LABEL="${VELNOR_TARGET_MVP_ARM_LABEL:-false}"
 
 cd "$ROOT"
+
+velnor_require_bool VELNOR_REQUIRE_DOCKER_SOCKET "$REQUIRE_DOCKER_SOCKET"
+velnor_require_bool VELNOR_CHECK_TARGET_MVP_CONFIG "$CHECK_TARGET_MVP_CONFIG"
+velnor_require_bool VELNOR_RUN_TARGET_VERIFY "$RUN_TARGET_VERIFY"
+velnor_require_bool VELNOR_TARGET_MVP_ARM_LABEL "$TARGET_MVP_ARM_LABEL"
 
 host_os="$(uname -s)"
 if [[ "$host_os" != "Linux" ]]; then

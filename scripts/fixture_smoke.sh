@@ -30,6 +30,7 @@ live_evidence_extra_metadata() {
 }
 
 source "$ROOT/scripts/live_evidence_common.sh"
+source "$ROOT/scripts/live_sequence_common.sh"
 source "$ROOT/scripts/workflow_dispatch_common.sh"
 
 cleanup_runner() {
@@ -41,10 +42,9 @@ cleanup_runner() {
 
 trap cleanup_runner EXIT
 
-if ! [[ "$JOB_COUNT" =~ ^[1-9][0-9]*$ ]]; then
-  echo "VELNOR_FIXTURE_JOB_COUNT must be a positive integer." >&2
-  exit 2
-fi
+velnor_require_positive_int VELNOR_FIXTURE_JOB_COUNT "$JOB_COUNT"
+velnor_require_bool VELNOR_REQUIRE_DOCKER_SOCKET "$REQUIRE_DOCKER_SOCKET"
+velnor_require_bool VELNOR_FIXTURE_CLEANUP_RUNNER "$CLEANUP_RUNNER"
 
 if [[ -z "$DISPATCH" ]]; then
   if [[ -n "$RUN_ID" ]]; then
@@ -54,10 +54,7 @@ if [[ -z "$DISPATCH" ]]; then
   fi
 fi
 
-if [[ "$DISPATCH" != "true" && "$DISPATCH" != "false" ]]; then
-  echo "VELNOR_FIXTURE_DISPATCH must be true or false." >&2
-  exit 2
-fi
+velnor_require_bool VELNOR_FIXTURE_DISPATCH "$DISPATCH"
 
 if [[ "$DISPATCH" == "false" && -z "$RUN_ID" ]]; then
   echo "VELNOR_FIXTURE_RUN_ID is required when VELNOR_FIXTURE_DISPATCH=false." >&2
