@@ -123,6 +123,7 @@ struct PostJavaScriptAction {
     step_id: String,
     invocation: JavaScriptActionInvocation,
     condition: Option<String>,
+    continue_on_error: bool,
 }
 
 impl ExecutableStep {
@@ -382,12 +383,18 @@ where
             match result {
                 Ok(mut result) => {
                     let failed = result.exit_code != 0;
-                    if let ExecutableStep::JavaScript { invocation, .. } = step {
+                    if let ExecutableStep::JavaScript {
+                        invocation,
+                        continue_on_error,
+                        ..
+                    } = step
+                    {
                         if invocation.post_container_path.is_some() {
                             post_actions.push(PostJavaScriptAction {
                                 step_id: step_id.clone(),
                                 invocation: invocation.clone(),
                                 condition: invocation.post_condition.clone(),
+                                continue_on_error: *continue_on_error,
                             });
                         }
                     }
@@ -424,7 +431,10 @@ where
                 &state,
             );
             match result {
-                Ok(result) => {
+                Ok(mut result) => {
+                    if result.exit_code != 0 && post_action.continue_on_error {
+                        result.failure_ignored = true;
+                    }
                     if let Some(log) = step_log(&format!("{}-post", post_action.step_id), &result) {
                         step_logs.push(log);
                     }
@@ -1448,6 +1458,30 @@ mod tests {
                 0
             } else {
                 self.codes.remove(0)
+            };
+            Ok(CommandResult {
+                code,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct FailingPostRunner {
+        calls: Vec<(String, Vec<String>)>,
+    }
+
+    impl CommandRunner for FailingPostRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            let code = if args
+                .iter()
+                .any(|arg| arg.contains("/__a/_actions/sccache/dist/show_stats/index.js"))
+            {
+                1
+            } else {
+                0
             };
             Ok(CommandResult {
                 code,
@@ -2936,6 +2970,37 @@ mod tests {
             })
             .count();
         assert_eq!(node_calls, 1);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn javascript_post_action_inherits_continue_on_error() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::JavaScript {
+            step_id: "sccache".into(),
+            invocation: JavaScriptActionInvocation {
+                node: "node20".into(),
+                main_container_path: "/__a/_actions/sccache/dist/setup/index.js".into(),
+                post_container_path: Some("/__a/_actions/sccache/dist/show_stats/index.js".into()),
+                post_condition: None,
+                action_container_path: "/__a/_actions/sccache".into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: true,
+        }];
+        let mut executor = DockerScriptExecutor::new(FailingPostRunner { calls: Vec::new() });
+
+        let results = executor
+            .execute_ordered_steps_with_context(&container(&temp), &steps, &[], &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].exit_code, 0);
+        assert!(!results[0].failure_ignored);
+        assert_eq!(results[1].exit_code, 1);
+        assert!(results[1].failure_ignored);
         fs::remove_dir_all(temp).unwrap();
     }
 
