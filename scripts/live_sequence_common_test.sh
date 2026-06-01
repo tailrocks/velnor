@@ -49,6 +49,9 @@ assert_passes "yml workflow" velnor_require_optional_workflow_file TEST_WORKFLOW
 assert_passes "yaml workflow" velnor_require_optional_workflow_file TEST_WORKFLOW release.yaml
 assert_fails "workflow path" velnor_require_optional_workflow_file TEST_WORKFLOW .github/workflows/ci.yml
 assert_fails "workflow extension" velnor_require_optional_workflow_file TEST_WORKFLOW ci.txt
+assert_passes "required workflow" velnor_require_workflow_file TEST_WORKFLOW compat.yml
+assert_fails "empty required workflow" velnor_require_workflow_file TEST_WORKFLOW ""
+assert_fails "bad required workflow" velnor_require_workflow_file TEST_WORKFLOW compat.txt
 
 assert_passes "default evidence controls" velnor_require_live_evidence_controls
 

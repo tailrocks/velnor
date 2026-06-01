@@ -9,7 +9,7 @@ WORKFLOW="${VELNOR_FIXTURE_WORKFLOW:-compat.yml}"
 RUN_ID="${VELNOR_FIXTURE_RUN_ID:-}"
 
 velnor_require_repo_slug VELNOR_FIXTURE_REPO "$FIXTURE_REPO"
-velnor_require_optional_workflow_file VELNOR_FIXTURE_WORKFLOW "$WORKFLOW"
+velnor_require_workflow_file VELNOR_FIXTURE_WORKFLOW "$WORKFLOW"
 velnor_require_optional_positive_int VELNOR_FIXTURE_RUN_ID "$RUN_ID"
 
 if ! command -v gh >/dev/null 2>&1; then

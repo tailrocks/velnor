@@ -106,8 +106,8 @@ an existing run; set `VELNOR_FIXTURE_DISPATCH=false` only when using an existing
 run id. Set `VELNOR_FIXTURE_REF=<branch-or-sha>` and
 `VELNOR_FIXTURE_INPUTS=key=value,other=value` when dispatching fixture workflows
 from a non-default ref or with workflow inputs. Input validation uses the same
-`key=value` rules as target smoke scripts. Fixture workflow values must be file
-names ending in `.yml` or `.yaml`. The script removes the temporary
+`key=value` rules as target smoke scripts. Fixture workflow values are required
+and must be file names ending in `.yml` or `.yaml`. The script removes the temporary
 fixture runner on exit by default; set
 `VELNOR_FIXTURE_CLEANUP_RUNNER=false` to keep it registered for debugging. The
 manual equivalent is:

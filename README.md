@@ -185,7 +185,8 @@ specific existing run; otherwise the script dispatches a fresh run. Set
 `VELNOR_FIXTURE_INPUTS=key=value,other=value` when dispatching fixture
 workflows from a non-default ref or with workflow inputs. Input validation uses
 the same `key=value` rules as target smoke scripts.
-Fixture workflow values must be file names ending in `.yml` or `.yaml`.
+Fixture workflow values are required and must be file names ending in `.yml` or
+`.yaml`.
 
 If the Docker daemon sees the work directory at a different path than the
 runner process, set `VELNOR_DOCKER_HOST_WORK_DIR` to that daemon-visible path.
