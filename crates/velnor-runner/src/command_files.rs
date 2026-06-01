@@ -27,6 +27,21 @@ pub fn parse_command_file_contents(contents: &str) -> Result<Vec<FileCommand>> {
             continue;
         }
 
+        let equals_index = line.find('=');
+        let heredoc_index = line.find("<<");
+
+        if let (Some(equals_index), Some(heredoc_index)) = (equals_index, heredoc_index) {
+            if equals_index < heredoc_index {
+                let (name, value) = line.split_once('=').expect("line contains equals");
+                validate_name(name)?;
+                commands.push(FileCommand {
+                    name: name.to_string(),
+                    value: value.to_string(),
+                });
+                continue;
+            }
+        }
+
         if let Some((name, delimiter)) = line.split_once("<<") {
             validate_name(name)?;
             let mut value_lines = Vec::new();
@@ -112,6 +127,19 @@ mod tests {
             vec![FileCommand {
                 name: "payload".into(),
                 value: "one\ntwo".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn treats_equals_before_heredoc_marker_as_key_value() {
+        let commands = parse_command_file_contents("payload=value<<not-heredoc\n").unwrap();
+
+        assert_eq!(
+            commands,
+            vec![FileCommand {
+                name: "payload".into(),
+                value: "value<<not-heredoc".into(),
             }]
         );
     }

@@ -613,7 +613,7 @@ fn env_commands_to_map(commands: Vec<FileCommand>) -> BTreeMap<String, String> {
 }
 
 fn is_blocked_env_mutation(name: &str) -> bool {
-    name.starts_with("GITHUB_") || name.starts_with("RUNNER_")
+    name.starts_with("GITHUB_") || name.starts_with("RUNNER_") || name == "NODE_OPTIONS"
 }
 
 fn fix_script(script: &str) -> String {
@@ -701,7 +701,7 @@ mod tests {
         .unwrap();
         fs::write(
             temp.join("step1_env"),
-            "NAME=value\nGITHUB_REF=evil\nRUNNER_TEMP=/bad\nACTIONS_RUNTIME_URL=https://runtime\n",
+            "NAME=value\nGITHUB_REF=evil\nRUNNER_TEMP=/bad\nNODE_OPTIONS=--require bad\nACTIONS_RUNTIME_URL=https://runtime\n",
         )
         .unwrap();
         fs::write(temp.join("step1_path"), "/opt/tool\n\n").unwrap();
@@ -716,6 +716,7 @@ mod tests {
         assert_eq!(state.env["ACTIONS_RUNTIME_URL"], "https://runtime");
         assert!(!state.env.contains_key("GITHUB_REF"));
         assert!(!state.env.contains_key("RUNNER_TEMP"));
+        assert!(!state.env.contains_key("NODE_OPTIONS"));
         assert_eq!(state.path, vec!["/opt/tool"]);
         assert_eq!(state.state["cleanup"], "yes");
         assert_eq!(state.summary, "summary text");

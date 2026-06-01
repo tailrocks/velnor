@@ -155,6 +155,7 @@ mod tests {
              ::set-env name=MODE::release\n\
              ::set-env name=GITHUB_REF::evil\n\
              ::set-env name=RUNNER_TEMP::/bad\n\
+             ::set-env name=NODE_OPTIONS::--require bad\n\
              ::set-env name=ACTIONS_RUNTIME_URL::https://runtime\n\
              ::add-path::/opt/tool\n\
              ::save-state name=cleanup::yes\n\
@@ -169,6 +170,7 @@ mod tests {
         assert_eq!(state.env["ACTIONS_RUNTIME_URL"], "https://runtime");
         assert!(!state.env.contains_key("GITHUB_REF"));
         assert!(!state.env.contains_key("RUNNER_TEMP"));
+        assert!(!state.env.contains_key("NODE_OPTIONS"));
         assert_eq!(state.path, vec!["/opt/tool"]);
         assert_eq!(state.state["cleanup"], "yes");
         assert_eq!(state.masks, vec!["top-secret"]);

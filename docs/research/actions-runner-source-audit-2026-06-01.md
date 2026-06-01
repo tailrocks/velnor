@@ -106,7 +106,7 @@ Velnor rule:
 - command file behavior is required, not optional; target workflows rely on outputs, env, path, state, and summaries
 - path entries must affect later script steps and JavaScript action sidecars
 - output/env parsing should keep matching upstream heredoc behavior
-- `GITHUB_*` and `RUNNER_*` should remain protected in Velnor even though upstream's explicit file blocklist is narrower; target runtime-export actions still need mutable `ACTIONS_*`
+- `GITHUB_*`, `RUNNER_*`, and `NODE_OPTIONS` should remain protected in Velnor; target runtime-export actions still need mutable `ACTIONS_*`
 
 ## Docker And Container Shape
 
@@ -151,4 +151,3 @@ Priority implementation order:
 5. run Docker-heavy `java-monorepo` Buildx/Bake jobs
 6. retarget or label-match selected Linux `jackin` workflows
 7. defer macOS and full hosted-runner image parity
-
