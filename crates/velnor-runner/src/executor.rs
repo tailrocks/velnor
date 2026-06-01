@@ -1416,17 +1416,86 @@ fn evaluate_job_outputs(
     job_outputs: Option<&Value>,
     state: &JobExecutionState,
 ) -> BTreeMap<String, String> {
-    let Some(Value::Object(outputs)) = job_outputs else {
-        return BTreeMap::new();
-    };
-    outputs
-        .iter()
+    job_output_pairs(job_outputs)
+        .into_iter()
         .filter_map(|(name, value)| {
-            let value = job_output_expression(value)?;
-            let value = state.resolve_expressions(value);
-            (!value.is_empty()).then(|| (name.clone(), value))
+            let value = state.resolve_expressions(&value);
+            (!value.is_empty()).then_some((name, value))
         })
         .collect()
+}
+
+fn job_output_pairs(job_outputs: Option<&Value>) -> Vec<(String, String)> {
+    match job_outputs {
+        Some(Value::Object(outputs)) => {
+            if outputs
+                .get("type")
+                .or_else(|| outputs.get("Type"))
+                .is_some()
+                && outputs.get("map").or_else(|| outputs.get("Map")).is_some()
+            {
+                return job_output_pairs(outputs.get("map").or_else(|| outputs.get("Map")));
+            }
+            outputs
+                .iter()
+                .filter(|(name, _)| !name.eq_ignore_ascii_case("type"))
+                .filter_map(|(name, value)| {
+                    job_output_expression(value).map(|value| (name.clone(), value.to_string()))
+                })
+                .collect()
+        }
+        Some(Value::Array(outputs)) => outputs.iter().filter_map(job_output_pair_value).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn job_output_pair_value(value: &Value) -> Option<(String, String)> {
+    match value {
+        Value::Object(object) => {
+            let key = object.get("Key").or_else(|| object.get("key"))?;
+            let value = object.get("Value").or_else(|| object.get("value"))?;
+            Some((
+                job_output_name(key)?.to_string(),
+                job_output_expression(value)?.to_string(),
+            ))
+        }
+        Value::Array(pair) if pair.len() == 2 => Some((
+            job_output_name(&pair[0])?.to_string(),
+            job_output_expression(&pair[1])?.to_string(),
+        )),
+        _ => None,
+    }
+}
+
+fn job_output_name(value: &Value) -> Option<&str> {
+    value.as_str().or_else(|| {
+        value.as_object().and_then(|object| {
+            object
+                .get("value")
+                .or_else(|| object.get("Value"))
+                .or_else(|| object.get("lit"))
+                .or_else(|| object.get("Lit"))
+                .and_then(job_output_name)
+        })
+    })
+}
+
+fn job_output_expression(value: &Value) -> Option<&str> {
+    if let Some(value) = value.as_str() {
+        return Some(value);
+    }
+    value
+        .as_object()
+        .and_then(|object| {
+            object
+                .get("value")
+                .or_else(|| object.get("Value"))
+                .or_else(|| object.get("expression"))
+                .or_else(|| object.get("Expression"))
+                .or_else(|| object.get("lit"))
+                .or_else(|| object.get("Lit"))
+        })
+        .and_then(job_output_expression)
 }
 
 fn step_log(step_id: &str, result: &StepExecutionResult) -> Option<StepLog> {
@@ -1498,22 +1567,6 @@ fn github_event_payload(context_data: &[(String, Value)]) -> Option<String> {
         Value::Null => None,
         value => serde_json::to_string(value).ok(),
     }
-}
-
-fn job_output_expression(value: &Value) -> Option<&str> {
-    if let Some(value) = value.as_str() {
-        return Some(value);
-    }
-    value
-        .as_object()
-        .and_then(|object| {
-            object
-                .get("value")
-                .or_else(|| object.get("Value"))
-                .or_else(|| object.get("expression"))
-                .or_else(|| object.get("Expression"))
-        })
-        .and_then(Value::as_str)
 }
 
 fn context_value_string(value: &Value) -> Option<String> {
@@ -2932,6 +2985,59 @@ mod tests {
             "answer": "${{ steps.producer.outputs.answer }}",
             "fallback": "${{ steps.missing.outputs.value || 'default' }}",
             "empty": "${{ steps.missing.outputs.value }}"
+        });
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                Some(&job_outputs),
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(summary.step_results.len(), 1);
+        assert_eq!(summary.job_outputs["answer"], "42");
+        assert_eq!(summary.job_outputs["fallback"], "default");
+        assert!(!summary.job_outputs.contains_key("empty"));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn evaluates_typed_job_outputs_from_final_step_state() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Script(ScriptStep {
+            id: "producer".into(),
+            script: "echo answer=42 >> $GITHUB_OUTPUT".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+        })];
+        let job_outputs = serde_json::json!({
+            "type": "map",
+            "map": [
+                {
+                    "Key": { "lit": "answer" },
+                    "Value": { "lit": "${{ steps.producer.outputs.answer }}" }
+                },
+                {
+                    "Key": { "lit": "fallback" },
+                    "Value": { "value": "${{ steps.missing.outputs.value || 'default' }}" }
+                },
+                {
+                    "Key": { "lit": "empty" },
+                    "Value": { "lit": "${{ steps.missing.outputs.value }}" }
+                }
+            ]
         });
         let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
             calls: Vec::new(),
