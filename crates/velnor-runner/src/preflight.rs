@@ -18,7 +18,10 @@ pub fn preflight(args: PreflightArgs) -> Result<()> {
 fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) -> Result<()> {
     let work_dir = preflight_work_dir(args.work_dir)?;
     let temp_dir = work_dir.join("preflight").join("temp");
-    fs::create_dir_all(&temp_dir).with_context(|| format!("create {}", temp_dir.display()))?;
+    let workspace_dir = work_dir.join("preflight").join("workspace");
+    for path in [&temp_dir, &workspace_dir] {
+        fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
+    }
 
     run_required(runner, "git", &["--version".to_string()], "Host git")?;
     run_required(runner, "docker", &["version".to_string()], "Docker daemon")?;
@@ -38,6 +41,7 @@ fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) ->
     }
 
     verify_job_image_tools(runner, &args.docker_image)?;
+    verify_script_execution(runner, &temp_dir, &workspace_dir, &args.docker_image)?;
     verify_bind_mount(runner, &temp_dir, &args.docker_image)?;
 
     println!("Docker preflight passed.");
@@ -58,6 +62,61 @@ fn run_required(
             "{label} check failed with code {}: {}",
             result.code,
             result.stderr
+        );
+    }
+    Ok(())
+}
+
+fn verify_script_execution(
+    runner: &mut dyn CommandRunner,
+    temp_dir: &Path,
+    workspace_dir: &Path,
+    docker_image: &str,
+) -> Result<()> {
+    let script = temp_dir.join("velnor-preflight.sh");
+    let output = temp_dir.join("velnor-preflight-output");
+    fs::write(
+        &script,
+        "set -euo pipefail\n\
+         test \"$PWD\" = /__w\n\
+         echo velnor-script-ok > /__t/velnor-preflight-output\n",
+    )
+    .with_context(|| format!("write preflight script {}", script.display()))?;
+    fs::remove_file(&output).ok();
+
+    let args = vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "--workdir".to_string(),
+        "/__w".to_string(),
+        "-v".to_string(),
+        format!("{}:/__t", temp_dir.display()),
+        "-v".to_string(),
+        format!("{}:/__w", workspace_dir.display()),
+        docker_image.to_string(),
+        "bash".to_string(),
+        "/__t/velnor-preflight.sh".to_string(),
+    ];
+    let result = runner.run("docker", &args);
+    fs::remove_file(&script).ok();
+
+    let result = result?;
+    if result.code != 0 {
+        fs::remove_file(&output).ok();
+        bail!(
+            "Docker image '{}' could not execute a Velnor temp script from /__t with /__w workdir. stderr: {}",
+            docker_image,
+            result.stderr
+        );
+    }
+
+    let output_value = fs::read_to_string(&output)
+        .with_context(|| format!("read preflight output {}", output.display()))?;
+    fs::remove_file(&output).ok();
+    if output_value.trim() != "velnor-script-ok" {
+        bail!(
+            "Docker script preflight wrote unexpected output '{}'",
+            output_value.trim()
         );
     }
     Ok(())
@@ -232,6 +291,20 @@ mod tests {
             } else {
                 self.codes.remove(0)
             };
+            if code == 0 && args.contains(&"/__t/velnor-preflight.sh".to_string()) {
+                if let Some(temp_mount) = args.windows(2).find_map(|items| {
+                    if items[0] == "-v" {
+                        items[1].strip_suffix(":/__t")
+                    } else {
+                        None
+                    }
+                }) {
+                    fs::write(
+                        Path::new(temp_mount).join("velnor-preflight-output"),
+                        "velnor-script-ok\n",
+                    )?;
+                }
+            }
             Ok(CommandResult {
                 code,
                 stdout: String::new(),
@@ -299,7 +372,16 @@ mod tests {
             &"command -v sh >/dev/null && command -v bash >/dev/null && command -v git >/dev/null"
                 .to_string()
         ));
-        let bind_mount_call = &runner.calls[4];
+        let script_call = &runner.calls[4];
+        assert_eq!(script_call.0, "docker");
+        assert!(script_call
+            .1
+            .contains(&"/__t/velnor-preflight.sh".to_string()));
+        assert!(script_call.1.contains(&format!(
+            "{}:/__w",
+            temp.join("preflight").join("workspace").display()
+        )));
+        let bind_mount_call = &runner.calls[5];
         assert_eq!(bind_mount_call.0, "docker");
         assert_eq!(bind_mount_call.1[0], "run");
         assert!(bind_mount_call.1.contains(&format!(
@@ -328,7 +410,7 @@ mod tests {
         };
         let mut runner = RecordingRunner {
             calls: Vec::new(),
-            codes: vec![0, 0, 0, 1],
+            codes: vec![0, 0, 0, 0, 1],
         };
 
         let error = preflight_with_runner(args, &mut runner).unwrap_err();
@@ -338,6 +420,33 @@ mod tests {
             .join("preflight")
             .join("temp")
             .join(DOCKER_MOUNT_CHECK_FILE)
+            .exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn preflight_reports_script_execution_failure() {
+        let temp = temp_dir();
+        let args = PreflightArgs {
+            work_dir: Some(temp.clone()),
+            docker_image: "ubuntu:24.04".to_string(),
+            require_docker_socket: false,
+            require_buildx: false,
+        };
+        let mut runner = RecordingRunner {
+            calls: Vec::new(),
+            codes: vec![0, 0, 0, 1],
+        };
+
+        let error = preflight_with_runner(args, &mut runner).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("could not execute a Velnor temp script"));
+        assert!(!temp
+            .join("preflight")
+            .join("temp")
+            .join("velnor-preflight.sh")
             .exists());
         fs::remove_dir_all(temp).unwrap();
     }
