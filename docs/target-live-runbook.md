@@ -199,6 +199,16 @@ cargo run --bin velnor-runner -- run \
 
 ## Run Jackin Linux Paths
 
+After the Java target passes, the first Jackin Linux target smoke can be run
+with:
+
+```sh
+scripts/jackin_target_smoke.sh
+```
+
+It uses the same host readiness, target label preset, V2 config validation,
+sanitized job dumps, and `--once` execution shape as `scripts/java_target_smoke.sh`.
+
 Register the same runner to `jackin-project/jackin` with x64 Linux labels:
 
 ```sh
