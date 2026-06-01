@@ -201,6 +201,8 @@ pub struct RepositoryActionPlan {
     pub continue_on_error: bool,
 }
 
+pub const NATIVE_ACTION_REF: &str = "__native";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalActionPlan {
     pub step_id: String,
@@ -275,6 +277,7 @@ pub fn repository_action_plans(
         let git_ref = reference
             .git_ref
             .clone()
+            .or_else(|| native_action_adapter(repository).map(|_| NATIVE_ACTION_REF.to_string()))
             .ok_or_else(|| anyhow::anyhow!("repository action '{repository}' missing ref"))?;
         let repository_dir = repository_dir(actions_host, repository, &git_ref);
         let action_dir = action_dir(
@@ -1508,6 +1511,34 @@ runs:
         );
         assert_eq!(plans[0].inputs["fail-on-cache-miss"], "false");
         assert_eq!(plans[0].inputs["lookup-only"], "true");
+    }
+
+    #[test]
+    fn native_repository_action_plan_does_not_require_ref() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "cache",
+                "reference": {
+                    "type": "Repository",
+                    "name": "actions/cache"
+                },
+                "inputs": {
+                    "path": "~/.cargo",
+                    "key": "cargo-linux"
+                }
+            }
+        ]))
+        .unwrap();
+
+        let plans = repository_action_plans(&steps, Path::new("/tmp/actions")).unwrap();
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].repository, "actions/cache");
+        assert_eq!(plans[0].git_ref, NATIVE_ACTION_REF);
+        assert_eq!(
+            native_invocation_from_plan(&plans[0]).unwrap().adapter,
+            NativeActionAdapter::Cache
+        );
     }
 
     #[test]

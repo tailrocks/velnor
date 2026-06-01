@@ -1542,9 +1542,6 @@ fn ordered_executable_steps(
                     }
                     continue;
                 }
-                let git_ref = reference.git_ref.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("repository action '{repository}' missing ref")
-                })?;
                 let plan = repository_iter
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("repository action mapping count mismatch"))?;
@@ -1556,7 +1553,9 @@ fn ordered_executable_steps(
                     .find(|action| same_action(&action.plan, plan))
                     .ok_or_else(|| {
                         anyhow::anyhow!(
-                            "repository action '{repository}@{git_ref}' was not resolved"
+                            "repository action '{}@{}' was not resolved",
+                            repository,
+                            plan.git_ref
                         )
                     })?;
                 append_resolved_action_steps(
@@ -3472,6 +3471,46 @@ runs:
                     "type": "Repository",
                     "name": "actions/cache",
                     "ref": "pinned-sha-ignored-by-native-adapter"
+                },
+                "inputs": {
+                    "key": "linux-cache",
+                    "path": "~/.cargo"
+                }
+            }]
+        }))
+        .unwrap();
+        let actions_host = Path::new("/tmp/actions");
+        let plans = repository_action_plans(&job.steps, actions_host).unwrap();
+
+        let ordered =
+            ordered_executable_steps(&job, &[], &plans, &[], &[], actions_host, &[]).unwrap();
+
+        assert_eq!(ordered.len(), 1);
+        let ExecutableStep::Native { invocation, .. } = &ordered[0] else {
+            panic!("known native action should not require downloaded action metadata")
+        };
+        assert_eq!(
+            invocation.adapter,
+            crate::action::NativeActionAdapter::Cache
+        );
+        assert_eq!(invocation.inputs["key"], "linux-cache");
+        assert_eq!(invocation.inputs["path"], "~/.cargo");
+    }
+
+    #[test]
+    fn native_repository_actions_do_not_require_ref_metadata() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Cache",
+            "requestId": 1,
+            "steps": [{
+                "id": "cache",
+                "reference": {
+                    "type": "Repository",
+                    "name": "actions/cache"
                 },
                 "inputs": {
                     "key": "linux-cache",
