@@ -99,7 +99,7 @@ if [[ "$job_model" != *"can run concurrently"* ]]; then
   echo "job execution model output did not describe concurrent job containers" >&2
   exit 1
 fi
-if [[ "$job_model" != *"3 job(s) through a bounded proof path"* ]]; then
+if [[ "$job_model" != *"3 job(s) through one bounded daemon"* ]]; then
   echo "job execution model output did not describe bounded smoke execution" >&2
   exit 1
 fi

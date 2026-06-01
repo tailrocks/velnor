@@ -197,8 +197,8 @@ positive integers; the sequence fails before runner registration on invalid
 values.
 
 It runs the live host doctor, registers `ChainArgos/java-monorepo` with the
-target label preset, validates stored V2/label config, and consumes queued jobs
-with repeated `--once` runs. Set `VELNOR_TARGET_CLEANUP_RUNNER=true` to remove
+target label preset and consumes queued jobs through bounded daemon mode
+(`daemon --once --slots N`). Set `VELNOR_TARGET_CLEANUP_RUNNER=true` to remove
 the registered runner on exit. Sanitized job payloads are written to
 `.velnor-job-dumps/chainargos-target` by default; set
 `VELNOR_DUMP_JOB_MESSAGES=` to disable dumps or point it at another directory. Set
@@ -211,13 +211,12 @@ workflow should be dispatched from a non-default ref. Set
 `workflow_dispatch` inputs; each comma-separated `key=value` is passed to
 `gh workflow run -f`. Input keys must match `[A-Za-z_][A-Za-z0-9_-]*`; empty
 entries and entries without `=` are rejected before runner registration. Set
-`VELNOR_TARGET_JOB_COUNT=<n>` when validating a
-workflow that queues multiple Velnor jobs and should be consumed by one smoke
-script invocation. Production Velnor should be one daemon with multiple
-internal GitHub runner slots: each slot owns a broker session, and each assigned
-job gets its own isolated Docker container so jobs can run concurrently. The
-current smoke scripts still exercise jobs with repeated `--once` runs until the
-daemon scheduler is implemented. Set `VELNOR_TARGET_WATCH_RUN=true` when the
+`VELNOR_TARGET_JOB_COUNT=<n>` when validating a workflow that queues multiple
+Velnor jobs and should be consumed by one smoke script invocation. Production
+Velnor is one daemon with multiple internal GitHub runner slots: each slot owns
+a broker session, and each assigned job gets its own isolated Docker container
+so jobs can run concurrently. The smoke scripts use the same daemon shape in a
+bounded proof mode. Set `VELNOR_TARGET_WATCH_RUN=true` when the
 selected job count should be followed by `gh run watch --exit-status` to prove
 the full GitHub workflow conclusion. Set `VELNOR_IDLE_TIMEOUT_SECONDS=<n>` to
 tune per-job wait time; it must be a positive integer. Explicit run IDs such as

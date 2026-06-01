@@ -125,5 +125,5 @@ velnor_print_job_execution_model() {
   echo "==> $label job execution model"
   echo "Production Velnor should run as one daemon with multiple internal GitHub runner slots."
   echo "Each assigned job gets its own isolated Docker container and can run concurrently with other assigned jobs."
-  echo "This smoke script exercises $job_count job(s) through a bounded proof path: daemon --once when available, or repeated run --once for legacy proof scripts."
+  echo "This smoke script exercises $job_count job(s) through one bounded daemon: daemon --once with one internal runner slot per requested job."
 }

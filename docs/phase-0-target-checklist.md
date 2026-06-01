@@ -34,6 +34,14 @@ files and unit-level runner behavior. They do not prove Phase 0 completion.
 Completion requires successful GitHub UI runs on a Linux host whose Docker
 daemon can see Velnor's bind-mounted work directory.
 
+The agent-owned live proof surface is the public fixture repository first. The
+fixture should emulate the feature classes used by the two target repositories
+and compare GitHub-hosted runner behavior with Velnor behavior. The agent must
+not automatically migrate, edit, retarget, or dispatch the real ChainArgos or
+Jackin repositories without explicit user direction. After fixture evidence is
+green, the agent should report readiness; the user/operator performs the manual
+target-repository validation and reports findings back.
+
 ## Implemented
 
 Runner protocol:

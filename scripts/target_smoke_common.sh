@@ -39,7 +39,7 @@ source "$ROOT/scripts/workflow_dispatch_common.sh"
 cleanup_runner() {
   if [[ "$REGISTERED_RUNNER" == "true" && "$CLEANUP_RUNNER" == "true" ]]; then
     echo "==> Removing target runner"
-    cargo run --bin velnor-runner -- remove --pat "$GITHUB_TOKEN" || true
+    cargo run --bin velnor-runner -- remove --pat "$GITHUB_TOKEN" --slots "$JOB_COUNT" || true
   fi
 }
 
@@ -87,24 +87,19 @@ fi
 echo "==> Checking live host readiness"
 VELNOR_CHECK_TARGET_MVP_CONFIG=false scripts/live_host_doctor.sh
 
-echo "==> Registering $TARGET_LABEL target runner"
-configure_args=(
+daemon_args=(
   --url "$TARGET_URL"
   --pat "$GITHUB_TOKEN"
   --name "$RUNNER_NAME"
   --target-mvp-labels
   --replace
+  --slots "$JOB_COUNT"
+  --once
+  --idle-timeout-seconds "$IDLE_TIMEOUT_SECONDS"
 )
 if [[ "$TARGET_MVP_ARM_LABEL" == "true" ]]; then
-  configure_args+=(--target-mvp-arm-label)
+  daemon_args+=(--target-mvp-arm-label)
 fi
-
-cargo run --bin velnor-runner -- configure \
-  "${configure_args[@]}"
-REGISTERED_RUNNER=true
-
-echo "==> Checking target MVP runner config"
-cargo run --bin velnor-runner -- status --check-target-mvp
 
 echo "==> Checking target runner label exclusivity"
 target_scheduling_labels=(hetzner-sentry-ci ubuntu-latest ubuntu-24.04)
@@ -131,14 +126,11 @@ fi
 
 velnor_print_job_execution_model "$JOB_COUNT" "$TARGET_LABEL target"
 
-echo "==> Running $JOB_COUNT $TARGET_LABEL target job(s)"
-for job_index in $(seq 1 "$JOB_COUNT"); do
-  echo "==> Velnor $TARGET_LABEL target job $job_index/$JOB_COUNT"
-  cargo run --bin velnor-runner -- run \
-    "${run_args[@]}" \
-    --once \
-    --idle-timeout-seconds "$IDLE_TIMEOUT_SECONDS"
-done
+echo "==> Running Velnor $TARGET_LABEL target daemon with $JOB_COUNT slot(s)"
+REGISTERED_RUNNER=true
+cargo run --bin velnor-runner -- daemon \
+  "${daemon_args[@]}" \
+  "${run_args[@]}"
 
 if [[ -n "$RUN_ID" ]]; then
   echo "==> Target run after Velnor"

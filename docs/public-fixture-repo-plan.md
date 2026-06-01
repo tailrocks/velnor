@@ -154,11 +154,19 @@ Use this sequence:
 2. Run all fixture workflows on GitHub-hosted runners only.
 3. Register Velnor as a repository self-hosted runner with
    `velnor-target-mvp`.
-4. Run Velnor fixture lane with `--once`, `--idle-timeout-seconds`, and
-   `--dump-job-message`.
+4. Run Velnor fixture lane through bounded daemon mode with `daemon --once`,
+   `--slots`, `--idle-timeout-seconds`, and `--dump-job-message`.
 5. Fix Velnor behavior until fixture comparison passes.
-6. Move to `ChainArgos/java-monorepo` smoke workflows.
-7. Move to `jackin-project/jackin` Linux paths.
+6. Report fixture evidence and implementation readiness.
+7. Wait for the user/operator to manually run `ChainArgos/java-monorepo` smoke
+   workflows.
+8. Wait for the user/operator to manually run `jackin-project/jackin` Linux
+   paths.
+
+Velnor implementation agents must not automatically modify, migrate, retarget,
+or dispatch the real target repositories as a substitute for user approval. The
+fixture is the agent-owned compatibility lab. The real target repositories are
+manual validation surfaces owned by the user/operator.
 
 ## Out Of Scope
 

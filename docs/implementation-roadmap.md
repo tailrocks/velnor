@@ -63,8 +63,8 @@ Design:
 - cache/artifact handoff for Phase 0 still assumes a shared daemon workdir on
   one host, but the scheduler must not share mutable per-job temp state between
   concurrent containers
-- live proof scripts may continue using repeated `--once` runs as a compatibility
-  smoke path, but the product target is concurrent daemon execution
+- live proof scripts should use bounded daemon mode (`daemon --once --slots N`)
+  so implementation evidence follows the same model as the product runtime
 
 Exit criteria:
 
@@ -74,6 +74,22 @@ Exit criteria:
   time.
 - each job runs in a distinct Docker container and reports independent logs,
   cancellation, and final status.
+
+## Validation Ownership Rule
+
+The implementation target is still eventual migration readiness for
+`ChainArgos/java-monorepo` and `jackin-project/jackin`, but Velnor development
+must not automatically migrate, edit, or retarget those repositories. The agent
+should implement Velnor, run local gates, run the public fixture proof, collect
+evidence, and then report that the target repositories are ready for manual
+operator testing. The user owns the final manual target-repository tests and
+will report findings back into the implementation loop.
+
+Before asking for manual target-repository validation, prove equivalent behavior
+in the public fixture repository. The fixture must emulate the feature classes
+used by both target repositories and compare GitHub-hosted runner behavior
+against Velnor behavior, so the remaining target tests are confirmation on the
+real projects rather than first discovery of basic CI/CD behavior.
 
 ## Milestone 1: Minimal Job Completion
 
