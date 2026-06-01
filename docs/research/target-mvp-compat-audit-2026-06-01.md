@@ -179,6 +179,25 @@ Target expressions include:
 - output fallbacks such as `steps.dispatch.outputs.rust || steps.filter.outputs.rust`
 - dynamic values inside multiline Docker action inputs
 
+Expression timing is part of the target contract:
+
+- job-start contexts such as `github.*`, `github.event.*`, `runner.*`,
+  `matrix.*`, `needs.*`, `inputs.*`, `vars.*`, and `secrets.*` may be resolved
+  during planning when the value is needed to download actions or run eager
+  checkout
+- `steps.<id>.outputs.<name>` must not be resolved during planning, because the
+  producing step may not have run yet
+- target examples requiring runtime step-output resolution include `jackin`
+  preview checkout `ref: ${{ steps.source.outputs.sha }}`, docs deploy
+  `environment.url: ${{ steps.deployment.outputs.page_url }}`, docs sitemap
+  `PAGE_URL: ${{ steps.deployment.outputs.page_url }}`, local
+  `check-deployed-docs` input `sitemap-url: ${{ steps.sitemap.outputs.url }}`,
+  and Docker action inputs such as `steps.meta.outputs.tags` and
+  `steps.cache.outputs.from`
+- repository actions and Docker actions should carry unresolved step-output
+  expressions into execution, where Velnor resolves them from accumulated step
+  state before setting `INPUT_*` env
+
 ### Path Filters
 
 `dorny/paths-filter` is used with multiline `filters:` blocks for:
