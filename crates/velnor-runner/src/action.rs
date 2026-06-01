@@ -874,12 +874,19 @@ fn string_inputs(step: &ActionStep) -> Result<BTreeMap<String, String>> {
     };
     let mut result = BTreeMap::new();
     for (name, value) in inputs {
-        let Some(value) = value.as_str() else {
-            bail!("repository action input '{name}' is not a string")
-        };
-        result.insert(name.clone(), value.to_string());
+        result.insert(name.clone(), input_value(value));
     }
     Ok(result)
+}
+
+fn input_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        _ => String::new(),
+    }
 }
 
 fn render_inputs(
@@ -1161,7 +1168,7 @@ runs:
                     "ref": "v5",
                     "path": "sub/action"
                 },
-                "inputs": { "python-version": "3.12" },
+                "inputs": { "python-version": "3.12", "cache-on-failure": true, "fetch-depth": 0 },
                 "environment": { "PIP_INDEX_URL": "${{ github.server_url }}" }
             }
         ]))
@@ -1181,6 +1188,8 @@ runs:
                 .join("v5")
         );
         assert_eq!(plans[0].inputs["python-version"], "3.12");
+        assert_eq!(plans[0].inputs["cache-on-failure"], "true");
+        assert_eq!(plans[0].inputs["fetch-depth"], "0");
         assert_eq!(
             plans[0].env,
             vec![("PIP_INDEX_URL".into(), "${{ github.server_url }}".into())]
