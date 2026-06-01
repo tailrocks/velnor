@@ -1,6 +1,17 @@
 use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use std::{collections::BTreeMap, fs, path::PathBuf, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::PathBuf,
+    process::Command,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::task::JoinHandle;
 
 use crate::{
@@ -29,6 +40,8 @@ use crate::{
     runtime_env::job_runtime_env,
     script_step::github_script_steps_with_defaults,
 };
+
+const JOB_CANCELLATION_MESSAGE: &str = "JobCancellation";
 
 pub async fn configure(args: ConfigureArgs) -> Result<()> {
     let dir = config::config_dir(args.config_dir)?;
@@ -333,6 +346,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
             &stored.settings.agent_name,
             &dir,
             &args,
+            stored.settings.disable_update,
             message,
         )
         .await?;
@@ -354,6 +368,7 @@ async fn handle_message(
     worker_name: &str,
     config_dir: &std::path::Path,
     args: &RunArgs,
+    disable_update: bool,
     message: crate::protocol::TaskAgentMessage,
 ) -> Result<()> {
     println!(
@@ -407,32 +422,67 @@ async fn handle_message(
             .delete_message(pool_id, message.message_id, session_id)
             .await
             .context("acknowledge dispatched job message")?;
-        let job_result = execute_script_job(
-            config_dir,
-            args.work_dir.clone(),
-            &args.docker_image,
-            &args.node_action_image,
-            &job,
-            &script_steps,
+        let canceled = Arc::new(AtomicBool::new(false));
+        let cancellation = start_cancellation_poll(
+            client.clone(),
+            pool_id,
+            session_id.to_string(),
+            message.message_id,
+            disable_update,
+            job.job_id.clone(),
+            job_container_name(&job),
+            canceled.clone(),
         );
+        let config_dir = config_dir.to_path_buf();
+        let work_dir = args.work_dir.clone();
+        let docker_image = args.docker_image.clone();
+        let node_action_image = args.node_action_image.clone();
+        let job_to_execute = job.clone();
+        let script_steps = script_steps.clone();
+        let job_result = tokio::task::spawn_blocking(move || {
+            execute_script_job(
+                &config_dir,
+                work_dir,
+                &docker_image,
+                &node_action_image,
+                &job_to_execute,
+                &script_steps,
+            )
+        })
+        .await
+        .context("join Docker job execution task")?;
+        cancellation.abort();
         renewal.abort();
         let job_result = match job_result {
-            Ok(job_result) => job_result,
+            Ok(mut job_result) => {
+                if canceled.load(Ordering::SeqCst) {
+                    job_result.result = TaskResult::Canceled;
+                }
+                job_result
+            }
             Err(error) => {
-                let feed_line =
-                    format!("Velnor failed while executing supported Docker job: {error:#}");
-                complete_job(
-                    client,
-                    pool_id,
-                    worker_name,
-                    &job,
-                    TaskResult::Failed,
-                    BTreeMap::new(),
-                    Vec::new(),
-                    feed_line,
-                )
-                .await?;
-                return Err(error);
+                if canceled.load(Ordering::SeqCst) {
+                    ScriptJobResult {
+                        result: TaskResult::Canceled,
+                        outputs: BTreeMap::new(),
+                        step_logs: Vec::new(),
+                    }
+                } else {
+                    let feed_line =
+                        format!("Velnor failed while executing supported Docker job: {error:#}");
+                    complete_job(
+                        client,
+                        pool_id,
+                        worker_name,
+                        &job,
+                        TaskResult::Failed,
+                        BTreeMap::new(),
+                        Vec::new(),
+                        feed_line,
+                    )
+                    .await?;
+                    return Err(error);
+                }
             }
         };
         complete_job(
@@ -497,6 +547,112 @@ async fn start_lock_renewal(
     }))
 }
 
+fn start_cancellation_poll(
+    client: DistributedTaskClient,
+    pool_id: i64,
+    session_id: String,
+    initial_last_message_id: i64,
+    disable_update: bool,
+    job_id: String,
+    job_container_name: String,
+    canceled: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut last_message_id = Some(initial_last_message_id);
+        loop {
+            let message = match client
+                .get_message(
+                    pool_id,
+                    &session_id,
+                    last_message_id,
+                    RunnerStatus::Busy,
+                    disable_update,
+                )
+                .await
+            {
+                Ok(message) => message,
+                Err(error) => {
+                    eprintln!("Cancellation poll failed: {error:#}");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+            };
+            let Some(message) = message else {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            };
+            last_message_id = Some(message.message_id);
+            if !is_job_cancellation_for(&message, &job_id) {
+                println!(
+                    "Busy runner received unsupported message {} type {}; leaving it for main loop.",
+                    message.message_id, message.message_type
+                );
+                continue;
+            }
+            canceled.store(true, Ordering::SeqCst);
+            if let Err(error) = client
+                .delete_message(pool_id, message.message_id, &session_id)
+                .await
+            {
+                eprintln!(
+                    "Failed to acknowledge cancellation message {}: {error:#}",
+                    message.message_id
+                );
+            }
+            kill_job_container(&job_container_name);
+            break;
+        }
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct JobCancelMessage {
+    #[serde(default, rename = "JobId", alias = "jobId")]
+    job_id: Option<String>,
+}
+
+fn is_job_cancellation_for(message: &crate::protocol::TaskAgentMessage, job_id: &str) -> bool {
+    if !message
+        .message_type
+        .eq_ignore_ascii_case(JOB_CANCELLATION_MESSAGE)
+    {
+        return false;
+    }
+    match serde_json::from_str::<JobCancelMessage>(&message.body) {
+        Ok(cancel) => match cancel.job_id.as_deref() {
+            Some(value) => value == job_id,
+            None => true,
+        },
+        Err(error) => {
+            eprintln!(
+                "Treating malformed cancellation message {} as job cancellation: {error:#}",
+                message.message_id
+            );
+            true
+        }
+    }
+}
+
+fn kill_job_container(container_name: &str) {
+    match Command::new("docker")
+        .args(["kill", container_name])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            println!("Killed Docker job container {container_name} after GitHub cancellation.");
+        }
+        Ok(output) => {
+            eprintln!(
+                "Failed to kill Docker job container {container_name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Err(error) => {
+            eprintln!("Failed to run docker kill for {container_name}: {error:#}");
+        }
+    }
+}
+
 fn execute_script_job(
     config_dir: &std::path::Path,
     work_dir: Option<PathBuf>,
@@ -557,7 +713,7 @@ fn execute_script_job(
     )?;
 
     let container = JobContainerSpec {
-        name: format!("velnor-job-{}", sanitize_path_segment(&job.job_id)),
+        name: job_container_name(job),
         image: job_container_image(job).unwrap_or(docker_image).to_string(),
         network: format!("velnor-net-{}", sanitize_path_segment(&job.job_id)),
         workspace_host: workspace,
@@ -760,6 +916,10 @@ fn same_action(left: &RepositoryActionPlan, right: &RepositoryActionPlan) -> boo
         && left.repository == right.repository
         && left.git_ref == right.git_ref
         && left.source_path == right.source_path
+}
+
+fn job_container_name(job: &AgentJobRequestMessage) -> String {
+    format!("velnor-job-{}", sanitize_path_segment(&job.job_id))
 }
 
 fn ordered_executable_steps(
@@ -1471,7 +1631,33 @@ mod tests {
     use crate::action::{
         parse_action_metadata, ActionRuntime, LocalActionPlan, RepositoryActionPlan,
     };
+    use crate::protocol::TaskAgentMessage;
     use std::path::Path;
+
+    #[test]
+    fn recognizes_matching_job_cancellation_message() {
+        let message = TaskAgentMessage {
+            message_id: 7,
+            message_type: "JobCancellation".into(),
+            body: serde_json::json!({ "jobId": "job-123", "timeout": "00:05:00" }).to_string(),
+            iv_base64: None,
+        };
+
+        assert!(is_job_cancellation_for(&message, "job-123"));
+        assert!(!is_job_cancellation_for(&message, "job-456"));
+    }
+
+    #[test]
+    fn ignores_non_cancellation_message_type() {
+        let message = TaskAgentMessage {
+            message_id: 8,
+            message_type: "PipelineAgentJobRequest".into(),
+            body: "{}".into(),
+            iv_base64: None,
+        };
+
+        assert!(!is_job_cancellation_for(&message, "job-123"));
+    }
 
     #[test]
     fn job_context_data_synthesizes_secrets_from_secret_variables() {

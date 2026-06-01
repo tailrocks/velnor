@@ -72,7 +72,7 @@ loop:
 DeleteAgentSessionAsync(poolId, sessionId)
 ```
 
-Current code keeps one GitHub session open and long-polls this classic message route until stopped. `run --once` preserves the probe behavior by exiting after one message/no-message poll.
+Current code keeps one GitHub session open and long-polls this classic message route until stopped. `run --once` preserves the probe behavior by exiting after one message/no-message poll. While a Docker job is executing, Velnor starts a busy-status cancellation poll from the dispatched job message id; matching `JobCancellation` messages are acknowledged, the active job container is killed, and final completion is reported as canceled.
 
 Current GitHub can also send broker/run-service messages. Velnor already stores whether registration returned V2 settings; it still needs broker support before claiming broad drop-in compatibility.
 
