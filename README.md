@@ -92,4 +92,6 @@ GitHub runner job-message contract: [docs/research/github-runner-job-message-con
 
 Self-hosted runner implementation blueprint: [docs/research/self-hosted-runner-implementation-blueprint-2026-06-01.md](docs/research/self-hosted-runner-implementation-blueprint-2026-06-01.md).
 
+Phase 0 current status and live proof gaps: [docs/research/phase-0-current-status-2026-06-01.md](docs/research/phase-0-current-status-2026-06-01.md).
+
 Target live validation runbook: [docs/target-live-runbook.md](docs/target-live-runbook.md).
