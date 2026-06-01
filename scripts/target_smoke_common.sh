@@ -70,6 +70,27 @@ write_artifact_snapshot() {
   fi
 }
 
+write_step_snapshot() {
+  local step_snapshot
+
+  echo
+  echo "## GitHub Job Step Snapshot"
+  echo
+  echo "| job | step | number | status | conclusion | started | completed |"
+  echo "| --- | --- | ---: | --- | --- | --- | --- |"
+
+  if step_snapshot="$(gh run view "$RUN_ID" --repo "$TARGET_REPO" --json jobs \
+    --jq '.jobs[] as $job | ($job.steps // [])[] | "| " + $job.name + " | " + .name + " | " + (.number | tostring) + " | " + .status + " | " + (.conclusion // "") + " | " + (.startedAt // "") + " | " + (.completedAt // "") + " |"' 2>&1)"; then
+    if [[ -n "$step_snapshot" ]]; then
+      printf '%s\n' "$step_snapshot"
+    else
+      echo "| <none> | <none> | 0 | <none> | <none> | <none> | <none> |"
+    fi
+  else
+    echo "| <unavailable> | $(printf '%s' "$step_snapshot" | tr '\n' ' ') | 0 | <unavailable> | <unavailable> | <unavailable> | <unavailable> |"
+  fi
+}
+
 write_log_snapshot() {
   local log_file error_file
   log_file="$(mktemp)"
@@ -189,6 +210,7 @@ write_live_evidence() {
       '
     write_runner_snapshot
     write_artifact_snapshot
+    write_step_snapshot
     write_log_snapshot
     write_local_storage_snapshot
   } >"$evidence_file"

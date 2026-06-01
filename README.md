@@ -105,8 +105,8 @@ scripts/jackin_rust_linux_sequence.sh
 Smoke scripts write sanitized job payloads under `.velnor-job-dumps` by default.
 They also write live proof evidence under `.velnor-live-evidence` by default
 after Velnor consumes jobs and after a watched run completes or fails, including
-best-effort runner-label, artifact, bounded log snapshots from GitHub, and
-bounded local cache/artifact/sccache store snapshots from Velnor's shared
+best-effort runner-label, artifact, job-step, bounded log snapshots from GitHub,
+and bounded local cache/artifact/sccache store snapshots from Velnor's shared
 workdir. Override that path with `VELNOR_LIVE_EVIDENCE_DIR`; override log
 excerpt length with `VELNOR_LIVE_EVIDENCE_LOG_LINES`; override local store entry
 count with `VELNOR_LIVE_EVIDENCE_LOCAL_ENTRIES`.
