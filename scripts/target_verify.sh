@@ -23,6 +23,20 @@ fi
 
 cd "$ROOT"
 
+bash -n \
+  scripts/chainargos_rust_target_sequence.sh \
+  scripts/chainargos_target_smoke.sh \
+  scripts/fixture_smoke.sh \
+  scripts/fixture_status.sh \
+  scripts/jackin_rust_linux_sequence.sh \
+  scripts/jackin_target_smoke.sh \
+  scripts/live_evidence_common.sh \
+  scripts/live_host_doctor.sh \
+  scripts/target_smoke_common.sh \
+  scripts/target_verify.sh \
+  scripts/workflow_dispatch_common.sh \
+  scripts/workflow_dispatch_common_test.sh
+
 python3 scripts/target_audit.py --check-target-mvp "$JACKIN_ROOT" "$CHAINARGOS_ROOT" >/tmp/velnor-target-audit.txt
 python3 scripts/target_audit.py --self-test "$JACKIN_ROOT" "$CHAINARGOS_ROOT" >/tmp/velnor-target-audit-self-test.txt
 python3 scripts/check_runner_reference.py
@@ -115,4 +129,4 @@ for test_name in "${tests[@]}"; do
 done
 
 echo "target audit written to /tmp/velnor-target-audit.txt"
-echo "target verifier passed ${#tests[@]} focused checks plus workflow dispatch helper self-test"
+echo "target verifier passed shell syntax check, ${#tests[@]} focused checks, and workflow dispatch helper self-test"
