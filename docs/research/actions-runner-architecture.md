@@ -92,7 +92,7 @@ For Velnor:
 - support remove/unregister
 - store settings in a local file
 - support OAuth credential flow
-- support V2 broker flow if GitHub requires it for new runners
+- require V2 broker/run-service flow for hosted GitHub target runs
 
 ## Message Loop
 
@@ -108,7 +108,9 @@ loop:
 DeleteAgentSessionAsync(poolId, sessionId)
 ```
 
-Newer settings may use `BrokerMessageListener`, which talks to broker/run-service endpoints. Velnor likely needs to support this because current GitHub runner registration can set `UseV2Flow`. The protocol layer now models the V2 route shapes: broker `session`, `message`, and `acknowledge`, plus run-service `acquirejob`, `renewjob`, and `completejob`; the runner can create a broker session, acquire `RunnerJobRequest` jobs, renew them through run-service, dispatch them into the Docker executor, complete them through run-service, poll broker cancellation while jobs run, and reconnect to a new broker base URL on `BrokerMigration`.
+Current hosted GitHub settings use `BrokerMessageListener` when `UseV2Flow` is set, which talks to broker/run-service endpoints. Velnor treats this as the only normal runner path. The protocol layer models the V2 route shapes: broker `session`, `message`, and `acknowledge`, plus run-service `acquirejob`, `renewjob`, and `completejob`; the runner can create a broker session, acquire `RunnerJobRequest` jobs, renew them through run-service, dispatch them into the Docker executor, complete them through run-service, poll broker cancellation while jobs run, and reconnect to a new broker base URL on `BrokerMigration`.
+
+The classic listener remains useful as upstream reference for shared message shapes and migration behavior, but it is not an MVP compatibility target.
 
 Important message types:
 
@@ -378,4 +380,4 @@ Mitigations:
 - send compatible version/user-agent values
 - implement only repo-level self-hosted runner first
 - build integration tests against real GitHub disposable repo
-- keep feature flags for V1/V2 message listener
+- keep live compatibility tests pinned to the latest official V2 runner behavior

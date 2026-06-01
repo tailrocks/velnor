@@ -49,7 +49,7 @@ cargo run --bin velnor-runner -- run
 cargo run --bin velnor-runner -- remove --pat "$GITHUB_TOKEN"
 ```
 
-`configure` now validates runner scope URLs, can request a short-lived GitHub runner token from `--pat`, exchanges that runner token for tenant credentials, and can add/replace a runner agent in the selected pool. `run --once` can exchange stored OAuth runner credentials, create a classic runner session, and poll one message.
+`configure` now validates runner scope URLs, can request a short-lived GitHub runner token from `--pat`, exchanges that runner token for tenant credentials, and can add/replace a runner agent in the selected pool. `run --once` exchanges stored OAuth runner credentials, requires GitHub's current V2 broker settings, creates a broker session, polls broker messages, acquires jobs from run-service, and completes them through run-service.
 
 Phase 0 runner compatibility: [docs/phase-0-github-runner-compat.md](docs/phase-0-github-runner-compat.md).
 
