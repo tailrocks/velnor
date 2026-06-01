@@ -139,6 +139,7 @@ Deliverables:
 - target expression coverage now checks workflow YAML from both target repositories, cached marketplace action metadata under `/tmp/velnor-actions`, and target-local composite action metadata under `jackin/.github/actions`, including multiline composite expressions and multi-argument `hashFiles(...)`
 - cached target action metadata verification now uses the same `_actions/<repo>/<ref>/<path>` layout as the runtime downloader, so the direct workflow action inventory and nested composite action closure are checked against the runner's real on-disk action resolution shape
 - cached target composite metadata is also expanded into the same script/repository/output invocation variants used by execution planning, catching unsupported nested composite constructs before live runs
+- target workflow repository action references are assembled into a synthetic GitHub job and passed through Velnor's real repository-action planning and ordered executable-step expansion against cached metadata
 - `continue-on-error`: script and JavaScript action steps can ignore a nonzero exit for job failure while preserving `steps.<id>.outcome == 'failure'`, covering target optional `sccache` setup
 - V2 typed `continueOnError` wrapper values are accepted for target soft-fail action steps
 - ordered job execution for script steps and JavaScript actions in original message order is wired, with JavaScript post hooks executed in reverse order; host-side checkout still runs before the Docker container starts

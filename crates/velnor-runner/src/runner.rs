@@ -2154,7 +2154,7 @@ fn agent_bool_property(agent: &TaskAgent, name: &str) -> Option<bool> {
 mod tests {
     use super::*;
     use crate::action::{
-        parse_action_metadata, ActionRuntime, LocalActionPlan, RepositoryActionPlan,
+        parse_action_metadata, resolve_action, ActionRuntime, LocalActionPlan, RepositoryActionPlan,
     };
     use crate::protocol::TaskAgentMessage;
     use std::path::Path;
@@ -2947,6 +2947,67 @@ runs:
     }
 
     #[test]
+    fn target_workflow_repository_actions_plan_from_cached_metadata() {
+        let actions_host = Path::new("/tmp/velnor-actions");
+        let workflow_roots = [
+            Path::new("/tmp/velnor-targets/jackin/.github/workflows"),
+            Path::new("/tmp/velnor-targets/java-monorepo/.github/workflows"),
+        ];
+        if !actions_host.exists() || workflow_roots.iter().all(|root| !root.exists()) {
+            return;
+        }
+
+        let mut references = BTreeMap::new();
+        for root in workflow_roots.into_iter().filter(|root| root.exists()) {
+            for path in workflow_files(root) {
+                let contents = fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+                let yaml = serde_yaml::from_str::<serde_yaml::Value>(&contents)
+                    .unwrap_or_else(|error| panic!("parse {}: {error:#}", path.display()));
+                collect_repository_uses(&yaml, &mut references);
+            }
+        }
+
+        let steps = references
+            .into_iter()
+            .enumerate()
+            .map(|(index, (_, reference))| {
+                serde_json::json!({
+                    "id": format!("target-action-{index}"),
+                    "reference": {
+                        "type": "Repository",
+                        "name": reference.repository,
+                        "ref": reference.git_ref,
+                        "path": reference.source_path
+                    },
+                    "inputs": {}
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(steps.len() >= 20, "expected target repository actions");
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "target-actions",
+            "jobDisplayName": "Target Actions",
+            "requestId": 1,
+            "steps": steps
+        }))
+        .unwrap();
+        let plans = repository_action_plans(&job.steps, actions_host).unwrap();
+        let resolved = resolve_actions_from_cache(&plans, actions_host);
+
+        let ordered = ordered_executable_steps(&job, &[], &resolved, &[], actions_host, &[])
+            .unwrap_or_else(|error| panic!("plan target action inventory: {error:#}"));
+
+        assert!(
+            ordered.len() >= plans.len(),
+            "expected target action inventory to produce executable steps"
+        );
+    }
+
+    #[test]
     fn ordered_steps_expand_repository_docker_action() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
@@ -3199,5 +3260,124 @@ runs:
             &ordered[2],
             ExecutableStep::CompositeEnd { step_id } if step_id == "pages"
         ));
+    }
+
+    #[derive(Clone)]
+    struct TargetActionReference {
+        repository: String,
+        source_path: Option<String>,
+        git_ref: String,
+    }
+
+    fn collect_repository_uses(
+        value: &serde_yaml::Value,
+        references: &mut BTreeMap<String, TargetActionReference>,
+    ) {
+        match value {
+            serde_yaml::Value::Mapping(mapping) => {
+                for (key, value) in mapping {
+                    if key.as_str() == Some("uses") {
+                        if let Some(reference) = target_repository_uses(value) {
+                            references.insert(
+                                format!(
+                                    "{}@{}:{}",
+                                    reference.repository,
+                                    reference.git_ref,
+                                    reference.source_path.as_deref().unwrap_or("")
+                                ),
+                                reference,
+                            );
+                        }
+                    }
+                    collect_repository_uses(value, references);
+                }
+            }
+            serde_yaml::Value::Sequence(values) => {
+                for value in values {
+                    collect_repository_uses(value, references);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn target_repository_uses(value: &serde_yaml::Value) -> Option<TargetActionReference> {
+        let uses = value.as_str()?.trim();
+        if uses.starts_with('.') || uses.starts_with("docker://") {
+            return None;
+        }
+        let (path, git_ref) = uses.rsplit_once('@')?;
+        let parts = path.split('/').collect::<Vec<_>>();
+        if parts.len() < 2 {
+            return None;
+        }
+        let repository = format!("{}/{}", parts[0], parts[1]);
+        if repository.eq_ignore_ascii_case("actions/checkout") {
+            return None;
+        }
+        let source_path = (parts.len() > 2).then(|| parts[2..].join("/"));
+        Some(TargetActionReference {
+            repository,
+            source_path,
+            git_ref: git_ref.to_string(),
+        })
+    }
+
+    fn workflow_files(root: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        collect_workflow_files(root, &mut files);
+        files.sort();
+        files
+    }
+
+    fn collect_workflow_files(root: &Path, files: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_workflow_files(&path, files);
+            } else if matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("yml" | "yaml")
+            ) {
+                files.push(path);
+            }
+        }
+    }
+
+    fn resolve_actions_from_cache(
+        initial_plans: &[RepositoryActionPlan],
+        actions_host: &Path,
+    ) -> Vec<ResolvedAction> {
+        let mut resolved = Vec::new();
+        let mut pending = initial_plans.to_vec();
+        while !pending.is_empty() {
+            for plan in &pending {
+                let action = resolve_action(plan)
+                    .unwrap_or_else(|error| panic!("resolve cached action {plan:?}: {error:#}"));
+                if !resolved
+                    .iter()
+                    .any(|existing: &ResolvedAction| same_action(&existing.plan, &action.plan))
+                {
+                    resolved.push(action);
+                }
+            }
+            let previous_pending = pending;
+            pending = composite_repository_action_plans_from_resolved(&resolved, actions_host)
+                .unwrap()
+                .into_iter()
+                .filter(|plan| {
+                    !resolved
+                        .iter()
+                        .any(|action| same_action(&action.plan, plan))
+                        && !previous_pending
+                            .iter()
+                            .any(|existing| same_action(existing, plan))
+                })
+                .collect();
+        }
+        resolved
     }
 }
