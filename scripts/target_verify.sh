@@ -203,4 +203,4 @@ for test_name in "${tests[@]}"; do
 done
 
 echo "target audit written to /tmp/velnor-target-audit.txt"
-echo "target verifier passed shell syntax check, ${#tests[@]} focused checks, fixture defaults/status self-tests, live evidence/sequence helper self-tests, and workflow dispatch helper self-test"
+echo "target verifier passed shell syntax check, ${#tests[@]} focused checks, fixture audit/readiness/report/defaults/status self-tests, live evidence/sequence helper self-tests, and workflow dispatch helper self-test"

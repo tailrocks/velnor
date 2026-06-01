@@ -88,6 +88,14 @@ the real target repositories must require an explicit operator confirmation,
 currently `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`, before runner registration
 or workflow dispatch.
 
+That confirmation is for a human operator only. An agent must not set
+`VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`, register Velnor against
+`ChainArgos/java-monorepo` or `jackin-project/jackin`, dispatch those workflows,
+or perform the repository migration by itself. The correct agent stopping point
+is: local gates pass, fixture audit/readiness pass, the fixture smoke proof has
+matching GitHub-hosted and Velnor behavior, and the agent reports that manual
+target validation is ready.
+
 Before asking for manual target-repository validation, prove equivalent behavior
 in the public fixture repository. The fixture must emulate the feature classes
 used by both target repositories and compare GitHub-hosted runner behavior

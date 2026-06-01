@@ -37,7 +37,18 @@ if [[ ! -s "$report" ]]; then
   exit 1
 fi
 
-for expected in "Fixture Workflow Status" "Fixture Feature Audit" "Live Host Readiness" "status ok" "audit ok" "doctor ok"; do
+expected_values=(
+  "Fixture Workflow Status"
+  "Fixture Feature Audit"
+  "Live Host Readiness"
+  "Next Action"
+  "status ok"
+  "audit ok"
+  "doctor ok"
+  'Run `scripts/fixture_smoke.sh`'
+)
+
+for expected in "${expected_values[@]}"; do
   if ! grep -q "$expected" "$report"; then
     echo "fixture report missing expected content: $expected" >&2
     exit 1
@@ -67,6 +78,11 @@ fi
 
 if ! grep -q -- "- status: 42" "$report"; then
   echo "fixture report did not record failing section status" >&2
+  exit 1
+fi
+
+if ! grep -q "Fix the failing section above" "$report"; then
+  echo "fixture report did not include failure next action" >&2
   exit 1
 fi
 

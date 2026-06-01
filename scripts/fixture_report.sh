@@ -58,6 +58,19 @@ run_report_section "Fixture Workflow Status" "$FIXTURE_STATUS_SCRIPT" || overall
 run_report_section "Fixture Feature Audit" "$FIXTURE_AUDIT_SCRIPT" || overall=1
 run_report_section "Live Host Readiness" "$LIVE_HOST_DOCTOR_SCRIPT" || overall=1
 
+{
+  echo "## Next Action"
+  echo
+  if [[ "$overall" -eq 0 ]]; then
+    echo "Fixture readiness passed. Run \`scripts/fixture_smoke.sh\` on this host."
+  else
+    echo "Fixture readiness has blockers. Fix the failing section above before running \`scripts/fixture_smoke.sh\`."
+    echo
+    echo "Do not register Velnor or dispatch real target repository workflows from this report alone."
+  fi
+  echo
+} >>"$REPORT_PATH"
+
 if [[ "$overall" -eq 0 ]]; then
   echo "Fixture report passed: $REPORT_PATH"
 else

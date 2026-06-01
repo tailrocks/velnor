@@ -194,6 +194,11 @@ non-exclusive run.
 The real target repositories are guarded from accidental agent execution. Set
 `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true` only when you are intentionally running
 manual validation against `ChainArgos/java-monorepo` or `jackin-project/jackin`.
+Agents must not set this variable, migrate those repositories, dispatch their
+workflows, or register Velnor against them automatically. Agent-owned proof
+stops at the public fixture repository and a clear "ready for manual target
+testing" report; the user/operator performs the real ChainArgos and Jackin
+validation manually and reports findings back.
 
 The remaining Phase 0 proof is live GitHub UI validation on the two target
 repositories from a Linux host whose Docker daemon can see Velnor's bind-mounted

@@ -184,9 +184,12 @@ Current local environment finding:
    target workflow drift.
 6. When fixture evidence is green, report that Velnor is ready for manual
    target-repository validation.
-7. The user/operator explicitly sets `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`
-   and runs the ChainArgos target sequence.
+7. Stop agent-owned execution there. The agent must not set
+   `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`, register Velnor against the real
+   target repositories, dispatch their workflows, or migrate either repository.
 8. The user/operator explicitly sets `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`
+   and runs the ChainArgos target sequence.
+9. The user/operator explicitly sets `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`
    and runs the Jackin Linux target sequence.
 
 ## Completion Rule
