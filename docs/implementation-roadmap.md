@@ -271,7 +271,7 @@ Goal: introduce typed workflow authoring after runner compatibility.
 
 Deliverables:
 
-- extract the current implicit `ExecutableStep` planning boundary into a named `NormalizedJobPlan`
+- make the GitHub job-message adapter produce the existing `NormalizedJobPlan` Rust type
 - `velnor.workflow` Pkl package
 - compile Pkl to GitHub Actions YAML or Velnor native plan
 - strict validation/lints

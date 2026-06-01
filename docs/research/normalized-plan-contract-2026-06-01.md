@@ -3,9 +3,8 @@
 Date: 2026-06-01
 
 This document defines the boundary between workflow inputs and Velnor execution.
-It is intentionally close to the current Rust implementation, where
-`ExecutableStep` is already the practical normalized step enum used by the
-Docker executor.
+The initial Rust surface lives in `crates/velnor-runner/src/plan.rs` and wraps
+the current `ExecutableStep` enum used by the Docker executor.
 
 The contract matters for two reasons:
 
@@ -134,9 +133,10 @@ pub struct JobExecutionPlan {
 }
 ```
 
-Current implementation has these pieces split across `runner.rs`,
-`script_step.rs`, `container.rs`, and `executor.rs`. The contract should make
-them explicit so a Pkl compiler can produce the same runtime shape.
+Current implementation has most of these pieces split across `runner.rs`,
+`script_step.rs`, `container.rs`, and `executor.rs`. The first `plan.rs` surface
+makes the target shape explicit so a Pkl compiler can produce the same runtime
+shape.
 
 GitHub adapter source:
 
@@ -308,10 +308,12 @@ Design rule for AI agents:
 ## Migration Strategy
 
 1. Keep Phase 0 on GitHub YAML and self-hosted runner compatibility.
-2. Extract the current implicit `ExecutableStep` planning into a named
-   `NormalizedJobPlan` module.
-3. Make the GitHub job-message adapter produce `NormalizedJobPlan`.
-4. Make the Docker executor consume only `NormalizedJobPlan`.
+2. Move GitHub job-message planning from `runner.rs` into a GitHub adapter that
+   produces `NormalizedJobPlan`.
+3. Make the Docker executor consume `NormalizedJobPlan` instead of separately
+   passed container, environment, context, and step slices.
+4. Split GitHub run-service reporting into a reporter that consumes
+   `NormalizedJobSummary`.
 5. Add a Pkl proof that compiles one target workflow to equivalent GitHub YAML.
 6. Add a Pkl proof that compiles the same workflow to `NormalizedJobPlan`.
 
@@ -321,7 +323,8 @@ label and avoids macOS matrix legs.
 
 ## Current Gap List
 
-- `ExecutableStep` exists, but there is no named `NormalizedJobPlan` struct yet.
+- `NormalizedJobPlan` exists as a Rust type, but the runner does not produce it
+  yet.
 - GitHub planning is still mostly inside `runner.rs`.
 - reporting is coupled to `runner.rs` instead of a report-target interface.
 - Pkl examples exist, but no package skeleton exists under the repository.

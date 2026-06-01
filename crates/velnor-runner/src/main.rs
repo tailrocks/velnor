@@ -6,6 +6,7 @@ mod config;
 mod container;
 mod executor;
 mod job_message;
+mod plan;
 mod protocol;
 mod runner;
 mod runtime_env;
