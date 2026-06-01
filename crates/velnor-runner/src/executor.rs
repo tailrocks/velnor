@@ -3930,6 +3930,22 @@ mod tests {
                 condition: None,
                 continue_on_error: false,
             },
+            ExecutableStep::JavaScript {
+                step_id: "github-runtime".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path:
+                        "/__a/_actions/crazy-max_ghaction-github-runtime/dist/index.js".into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/crazy-max_ghaction-github-runtime".into(),
+                    env: vec![("INPUT_GITHUB-TOKEN".into(), "ghs_token".into())],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
         ];
         let runtime_env = vec![
             ("GITHUB_REPOSITORY".into(), "jackin-project/jackin".into()),
@@ -3967,7 +3983,7 @@ mod tests {
             })
             .map(|(_, args)| args)
             .collect::<Vec<_>>();
-        assert_eq!(node_calls.len(), 3);
+        assert_eq!(node_calls.len(), 4);
         for call in &node_calls {
             assert!(call.contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
             assert!(call.contains(&"ACTIONS_RESULTS_URL=https://results.actions".into()));
@@ -3979,6 +3995,7 @@ mod tests {
         assert!(node_calls[0].contains(&"ACTIONS_CACHE_URL=https://cache.actions".into()));
         assert!(node_calls[0].contains(&"ACTIONS_CACHE_SERVICE_V2=True".into()));
         assert!(node_calls[1].contains(&"GITHUB_RETENTION_DAYS=90".into()));
+        assert!(node_calls[3].contains(&"INPUT_GITHUB-TOKEN=ghs_token".into()));
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -4022,6 +4039,25 @@ mod tests {
                 continue_on_error: false,
             },
             ExecutableStep::JavaScript {
+                step_id: "metadata".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/docker_metadata-action/dist/index.cjs"
+                        .into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/docker_metadata-action".into(),
+                    env: vec![
+                        ("INPUT_IMAGES".into(), "ghcr.io/chainargos/app".into()),
+                        ("INPUT_TAGS".into(), "type=sha".into()),
+                    ],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::JavaScript {
                 step_id: "build-push".into(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
@@ -4035,6 +4071,26 @@ mod tests {
                     env: vec![
                         ("INPUT_CONTEXT".into(), ".".into()),
                         ("INPUT_PUSH".into(), "false".into()),
+                    ],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "bake".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/docker_bake-action/dist/index.cjs".into(),
+                    post_container_path: Some(
+                        "/__a/_actions/docker_bake-action/dist/index.cjs".into(),
+                    ),
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/docker_bake-action".into(),
+                    env: vec![
+                        ("INPUT_FILES".into(), "docker-bake.hcl".into()),
+                        ("INPUT_TARGETS".into(), "app".into()),
                     ],
                 },
                 condition: None,
@@ -4073,7 +4129,7 @@ mod tests {
             })
             .map(|(_, args)| args)
             .collect::<Vec<_>>();
-        assert_eq!(node_calls.len(), 3);
+        assert_eq!(node_calls.len(), 6);
         for call in &node_calls {
             assert!(call.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
             assert!(call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
@@ -4086,7 +4142,9 @@ mod tests {
         }
         assert!(node_calls[0].contains(&"INPUT_INSTALL=true".into()));
         assert!(node_calls[1].contains(&"INPUT_USERNAME=docker-user".into()));
-        assert!(node_calls[2].contains(&"INPUT_CONTEXT=.".into()));
+        assert!(node_calls[2].contains(&"INPUT_IMAGES=ghcr.io/chainargos/app".into()));
+        assert!(node_calls[3].contains(&"INPUT_CONTEXT=.".into()));
+        assert!(node_calls[4].contains(&"INPUT_FILES=docker-bake.hcl".into()));
         fs::remove_dir_all(temp).unwrap();
     }
 
