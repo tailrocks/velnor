@@ -27,7 +27,7 @@ cd "$ROOT"
 check_target_checkout_fresh() {
   local checkout="$1"
   local label="$2"
-  local upstream remote branch remote_sha local_sha
+  local upstream remote branch remote_sha local_sha github_status
 
   if [[ "$SKIP_TARGET_FRESHNESS_CHECK" == "true" ]]; then
     return
@@ -37,6 +37,14 @@ check_target_checkout_fresh() {
     echo "$label target checkout is not a git checkout: $checkout" >&2
     echo "set VELNOR_SKIP_TARGET_FRESHNESS_CHECK=true only for deliberate local snapshots" >&2
     exit 2
+  fi
+
+  github_status="$(git -C "$checkout" status --porcelain -- .github)"
+  if [[ -n "$github_status" ]]; then
+    echo "$label target checkout has local .github changes: $checkout" >&2
+    printf '%s\n' "$github_status" >&2
+    echo "commit/revert the local workflow changes or set VELNOR_SKIP_TARGET_FRESHNESS_CHECK=true for a deliberate snapshot" >&2
+    exit 1
   fi
 
   upstream="$(git -C "$checkout" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
