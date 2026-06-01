@@ -359,7 +359,16 @@ Live hosted GitHub compatibility proof from 2026-06-01:
 - run-service completion works for `--complete-noop`
 - real run-service script input payloads are normalized into Velnor script steps
 
-Remaining live proof gaps are Docker execution and full target workflow action coverage. The local development Docker daemon accepted bind mounts but exposed empty directories inside containers, so script execution could not be considered a valid failure of Velnor's step runner.
+Current local target proof covers the target workflow action inventory, native
+adapter routing, expression subset, cache/artifact handoff, Docker/Buildx action
+shapes, Pages, Renovate, setup/tool actions, local composites, and command/log
+behavior through `scripts/target_verify.sh` plus the Rust test suite.
+
+Remaining proof is live, not unit-level: run the two target repositories through
+GitHub UI on a host where Docker can see Velnor's bind-mounted work directory.
+The earlier local development Docker daemon accepted bind mounts but exposed
+empty directories inside containers, so Docker execution could not be accepted
+as a valid failure of the Velnor step runner.
 
 ## Non-Goals For Phase 0
 

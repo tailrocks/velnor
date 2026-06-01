@@ -296,7 +296,9 @@ These should stay out of Phase 0 unless a target workflow starts using them or G
 
 ## Current Evidence
 
-After refreshing both target repositories, these Velnor checks pass against the current `.github` trees and cached action metadata:
+After refreshing both target repositories, these Velnor checks pass against the
+current `.github` trees, cached action metadata, and Rust-native adapter
+execution model:
 
 - `scripts/target_verify.sh`
 - `cargo test -q target_workflow_repository_actions_plan_from_cached_metadata`
@@ -304,8 +306,13 @@ After refreshing both target repositories, these Velnor checks pass against the 
 - `cargo test -q target_workflow_expressions_use_supported_subset`
 - `cargo test -q cached_target_action_metadata_expressions_use_supported_subset`
 - `cargo test -q target_docker_action_inputs_match_current_workflows`
+- `cargo test -q native_repository_actions_ignore_pinned_ref_metadata`
+- `cargo test -q native_cache_trims_folded_yaml_primary_key`
 
-These prove the current target action inventory, target-local composites, expression subset, and exact Docker/buildx action input shapes still fit the runner's planned execution model. They do not prove live completion in GitHub UI.
+These prove the current target action inventory, target-local composites,
+expression subset, native action routing, cache key normalization, and exact
+Docker/buildx action input shapes still fit the runner's planned execution
+model. They do not prove live completion in GitHub UI.
 
 ## Remaining Target MVP Proof
 

@@ -27,9 +27,12 @@ The later typed workflow model:
 
 See [docs/vision.md](docs/vision.md).
 
-## Current Runner Scaffold
+## Current Runner State
 
-The first Rust crate is `velnor-runner`. It currently provides the local CLI/config shell for Milestone 0:
+The first Rust crate is `velnor-runner`. It can register as a GitHub
+self-hosted runner, requires the current V2 broker/run-service flow, and runs
+supported target jobs in Docker with Rust-native adapters for the marketplace
+actions used by the target repositories.
 
 ```sh
 cargo run --bin velnor-runner -- configure \
@@ -49,7 +52,23 @@ cargo run --bin velnor-runner -- run
 cargo run --bin velnor-runner -- remove --pat "$GITHUB_TOKEN"
 ```
 
-`configure` now validates runner scope URLs, can request a short-lived GitHub runner token from `--pat`, exchanges that runner token for tenant credentials, and can add/replace a runner agent in the selected pool. `run --once` exchanges stored OAuth runner credentials, requires GitHub's current V2 broker settings, creates a broker session, polls broker messages, acquires jobs from run-service, and completes them through run-service.
+`configure` validates runner scope URLs, can request a short-lived GitHub runner
+token from `--pat`, exchanges that runner token for tenant credentials, and can
+add/replace a runner agent in the selected pool. `run` exchanges stored OAuth
+runner credentials, requires GitHub's current V2 broker settings, creates a
+broker session, polls broker messages, acquires jobs from run-service, renews
+locks, executes supported jobs, and completes them through run-service.
+
+Local target coverage is checked with:
+
+```sh
+scripts/target_verify.sh
+cargo test -q
+```
+
+The remaining Phase 0 proof is live GitHub UI validation on the two target
+repositories from a Linux host whose Docker daemon can see Velnor's bind-mounted
+work directory.
 
 Phase 0 runner compatibility: [docs/phase-0-github-runner-compat.md](docs/phase-0-github-runner-compat.md).
 
