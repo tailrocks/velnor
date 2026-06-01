@@ -624,12 +624,21 @@ where
         let mut env = state.step_env(&[]);
         env.extend(state.resolve_env(&action.env));
         env.extend(command_files.env.iter().cloned());
+        let entrypoint = action
+            .entrypoint
+            .as_ref()
+            .map(|value| state.resolve_expressions(value));
+        let args = action
+            .args
+            .iter()
+            .map(|value| state.resolve_expressions(value))
+            .collect::<Vec<_>>();
         let exec_args = container.run_docker_action_args(
             "/__w",
             &env,
             &action.image,
-            action.entrypoint.as_deref(),
-            &action.args,
+            entrypoint.as_deref(),
+            &args,
         );
         let step_result = self.runner.run("docker", &exec_args)?;
         let mut state = command_files.collect_state()?;
@@ -2865,6 +2874,64 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--entrypoint", "/entrypoint.sh"]));
         assert!(calls[2].1.ends_with(&["alpine:3.20".into(), "arg1".into()]));
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn resolves_docker_action_entrypoint_and_args_at_execution_time() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let action = DockerActionInvocation {
+            image: "alpine:3.20".into(),
+            build_context_host: None,
+            dockerfile_host: None,
+            action_container_path: "/__a/_actions/acme_docker/v1".into(),
+            env: Vec::new(),
+            entrypoint: Some("${{ env.DOCKER_ENTRYPOINT }}".into()),
+            args: vec![
+                "pr-${{ github.event.pull_request.number }}".into(),
+                "${{ secrets.DOCKER_TOKEN }}".into(),
+            ],
+        };
+        let steps = vec![ExecutableStep::Docker {
+            step_id: "docker1".into(),
+            invocation: action,
+            condition: None,
+            continue_on_error: false,
+        }];
+        let context = vec![
+            (
+                "github".into(),
+                serde_json::json!({ "event": { "pull_request": { "number": 42 } } }),
+            ),
+            (
+                "secrets".into(),
+                serde_json::json!({ "DOCKER_TOKEN": "secret-token" }),
+            ),
+        ];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps_with_context(
+                &container(&temp),
+                &steps,
+                &[("DOCKER_ENTRYPOINT".into(), "/entrypoint.sh".into())],
+                &context,
+                &temp,
+            )
+            .unwrap();
+
+        let calls = &executor.runner().calls;
+        assert!(calls[2]
+            .1
+            .windows(2)
+            .any(|pair| pair == ["--entrypoint", "/entrypoint.sh"]));
+        assert!(calls[2].1.ends_with(&[
+            "alpine:3.20".into(),
+            "pr-42".into(),
+            "secret-token".into()
+        ]));
 
         fs::remove_dir_all(temp).unwrap();
     }
