@@ -871,6 +871,7 @@ where
                 self.native_cargo_install(_container, action, state)
             }
             NativeActionAdapter::RustCache => Ok(native_rust_cache(action, state)),
+            NativeActionAdapter::Renovate => self.native_renovate(_container, action, state),
             NativeActionAdapter::GitHubRuntimeExport => {
                 Ok(native_github_runtime_export(action, state))
             }
@@ -1021,6 +1022,39 @@ where
             &["sh".to_string(), "-lc".to_string(), script.to_string()],
         );
         self.runner.run("docker", &args)
+    }
+
+    fn native_renovate(
+        &mut self,
+        container: &JobContainerSpec,
+        action: &NativeActionInvocation,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        let action_state = state.with_env(state.resolve_env(&action.env));
+        let version = native_input(action, &action_state, "renovate-version");
+        let image = native_input(action, &action_state, "renovate-image");
+        let image = if !image.is_empty() {
+            image
+        } else if !version.is_empty() {
+            format!("ghcr.io/renovatebot/renovate:{version}")
+        } else {
+            "ghcr.io/renovatebot/renovate:latest".to_string()
+        };
+        let token = native_input(action, &action_state, "token");
+        let mut env = action_state.step_env(&[]);
+        env.extend(action_state.resolve_env(&action.env));
+        if !token.is_empty() {
+            set_env_value(&mut env, "RENOVATE_TOKEN", &token);
+            set_env_value(&mut env, "INPUT_TOKEN", &token);
+        }
+        if let Some(repository) = action_state.env.get("GITHUB_REPOSITORY") {
+            set_env_value(&mut env, "RENOVATE_REPOSITORIES", repository);
+        }
+        let args = container.run_docker_action_args("/github/workspace", &env, &image, None, &[]);
+        Ok(native_command_result(
+            self.runner.run("docker", &args)?,
+            StepCommandState::default(),
+        ))
     }
 
     fn native_docker_setup_buildx(
@@ -7339,19 +7373,16 @@ bitcoin-processor-app.push=true")
     fn target_renovate_action_receives_docker_cli_socket_and_env() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
-        let steps = vec![ExecutableStep::JavaScript {
+        let steps = vec![ExecutableStep::Native {
             step_id: "renovate".into(),
-            invocation: JavaScriptActionInvocation {
-                node: "node24".into(),
-                pre_container_path: None,
-                pre_condition: None,
-                main_container_path: "/__a/_actions/renovatebot_github-action/dist/index.js".into(),
-                post_container_path: None,
-                post_condition: None,
-                action_container_path: "/__a/_actions/renovatebot_github-action".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::Renovate,
+                inputs: [
+                    ("token".into(), "${{ secrets.RENOVATE_TOKEN }}".into()),
+                    ("renovate-version".into(), "43".into()),
+                ]
+                .into(),
                 env: vec![
-                    ("INPUT_TOKEN".into(), "${{ secrets.RENOVATE_TOKEN }}".into()),
-                    ("INPUT_RENOVATE-VERSION".into(), "43".into()),
                     (
                         "RENOVATE_REPOSITORIES".into(),
                         "${{ github.repository }}".into(),
@@ -7391,23 +7422,29 @@ bitcoin-processor-app.push=true")
             .iter()
             .find(|(_, args)| {
                 args.first().is_some_and(|arg| arg == "run")
-                    && args.contains(&"node:24-bookworm".into())
+                    && args.contains(&"ghcr.io/renovatebot/renovate:43".into())
             })
             .map(|(_, args)| args)
             .unwrap();
         assert!(node_call.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
         assert!(node_call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
         assert!(node_call.contains(&"INPUT_TOKEN=renovate-token".into()));
-        assert!(node_call.contains(&"INPUT_RENOVATE-VERSION=43".into()));
+        assert!(node_call.contains(&"RENOVATE_TOKEN=renovate-token".into()));
         assert!(node_call.contains(&"RENOVATE_REPOSITORIES=ChainArgos/java-monorepo".into()));
         assert!(node_call.contains(&"RENOVATE_ONBOARDING=false".into()));
         assert!(node_call.contains(&"LOG_LEVEL=debug".into()));
         assert!(node_call.contains(&"GITHUB_REPOSITORY=ChainArgos/java-monorepo".into()));
-        assert!(node_call.ends_with(&[
-            "node:24-bookworm".into(),
-            "node".into(),
-            "/__a/_actions/renovatebot_github-action/dist/index.js".into()
-        ]));
+        assert!(node_call.ends_with(&["ghcr.io/renovatebot/renovate:43".into()]));
+        assert_eq!(
+            executor
+                .runner()
+                .calls
+                .iter()
+                .filter(|(_, args)| args.first().is_some_and(|arg| arg == "run")
+                    && args.iter().any(|arg| arg.starts_with("node:")))
+                .count(),
+            0
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 
