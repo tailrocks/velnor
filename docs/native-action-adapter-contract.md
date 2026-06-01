@@ -118,7 +118,7 @@ until a new target workflow needs more.
 | `docker/setup-buildx-action` | `DockerSetupBuildx` | inspect/reuse or create/select builder and honor target inputs |
 | `docker/login-action` | `DockerLogin` | registry login from resolved credentials through `--password-stdin` |
 | `docker/metadata-action` | `DockerMetadata` | compute target tags/labels outputs |
-| `docker/build-push-action` | `DockerBuildPush` | invoke Buildx for target context/tag/cache/push shapes |
+| `docker/build-push-action` | `DockerBuildPush` | invoke Buildx for target context/tag/cache/push shapes, with `push` and `load` treated as separate latest-action inputs |
 | `docker/bake-action` | `DockerBake` | invoke Buildx Bake for target file/target/push/cache shapes |
 
 Local composite actions remain first-class workflow code. Velnor should parse

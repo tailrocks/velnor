@@ -1300,7 +1300,8 @@ where
         }
         if input_truthy(&native_input(action, &action_state, "push")) {
             args.push("--push".to_string());
-        } else {
+        }
+        if input_truthy(&native_input(action, &action_state, "load")) {
             args.push("--load".to_string());
         }
         args.push(host_context_path(&action_state, &context));
@@ -5293,7 +5294,8 @@ type=sha,format=long,prefix=,enable=true"
             program == "docker"
                 && args.first().is_some_and(|arg| arg == "buildx")
                 && args.get(1).is_some_and(|arg| arg == "build")
-                && args.contains(&"--load".into())
+                && !args.contains(&"--load".into())
+                && !args.contains(&"--push".into())
                 && args.contains(&"--tag".into())
                 && args.contains(&"chainargos/rust-bitcoin-processor:abcdef1234567890".into())
                 && args.contains(&"type=gha,scope=bitcoin-processor-app-pr,mode=max".into())
@@ -5315,6 +5317,42 @@ type=sha,format=long,prefix=,enable=true"
             0
         );
 
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_docker_build_push_honors_load_input_separately() {
+        let temp = temp_dir();
+        fs::create_dir_all(temp.join("work")).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "build-push".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::DockerBuildPush,
+                inputs: [
+                    ("context".into(), ".".into()),
+                    ("push".into(), "false".into()),
+                    ("load".into(), "true".into()),
+                    ("tags".into(), "example/app:test".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        let calls = &executor.runner().calls;
+        assert!(calls.iter().any(|(program, args)| {
+            program == "docker"
+                && args.starts_with(&["buildx".into(), "build".into()])
+                && args.contains(&"--load".into())
+                && !args.contains(&"--push".into())
+        }));
         fs::remove_dir_all(temp).unwrap();
     }
 
