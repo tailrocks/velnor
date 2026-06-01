@@ -2084,6 +2084,9 @@ mod tests {
                 if has_container_env_path(args, "GITHUB_OUTPUT", "producer_output") {
                     fs::write(self.temp.join("producer_output"), "answer=42\n")?;
                 }
+                if has_container_env_path(args, "GITHUB_OUTPUT", "check-image_output") {
+                    fs::write(self.temp.join("check-image_output"), "exists=false\n")?;
+                }
                 if has_container_env_path(args, "GITHUB_OUTPUT", "paths_output") {
                     fs::write(
                         self.temp.join("paths_output"),
@@ -3238,6 +3241,130 @@ mod tests {
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
             "echo answer=42\n"
         );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn target_check_image_output_gates_java_monorepo_build_steps() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let condition = "steps.check-image.outputs.exists == 'false'";
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "check-image".into(),
+                script: r#"if [ "$(just exists ${{ inputs.package }})" = "true" ]; then
+  echo "exists=true" >> "$GITHUB_OUTPUT"
+else
+  echo "exists=false" >> "$GITHUB_OUTPUT"
+fi"#
+                .into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+            ExecutableStep::JavaScript {
+                step_id: "login-docker-hub".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/docker_login-action/v4/dist/index.js"
+                        .into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/docker_login-action/v4".into(),
+                    env: vec![
+                        (
+                            "INPUT_USERNAME".into(),
+                            "${{ secrets.DOCKERHUB_USERNAME }}".into(),
+                        ),
+                        (
+                            "INPUT_PASSWORD".into(),
+                            "${{ secrets.DOCKERHUB_TOKEN }}".into(),
+                        ),
+                    ],
+                },
+                condition: Some(condition.into()),
+                continue_on_error: false,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "setup-buildx".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path:
+                        "/__a/_actions/docker_setup-buildx-action/v4/dist/index.js".into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/docker_setup-buildx-action/v4".into(),
+                    env: Vec::new(),
+                },
+                condition: Some(condition.into()),
+                continue_on_error: false,
+            },
+            ExecutableStep::Script(ScriptStep {
+                id: "build-docker-image".into(),
+                script: "just build-${{ inputs.package }}".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: vec![("GITHUB_TOKEN".into(), "${{ secrets.GITHUB_TOKEN }}".into())],
+                condition: Some(condition.into()),
+                continue_on_error: false,
+            }),
+        ];
+        let context = vec![
+            (
+                "inputs".into(),
+                serde_json::json!({ "package": "bitcoin-processor-app" }),
+            ),
+            (
+                "secrets".into(),
+                serde_json::json!({
+                    "DOCKERHUB_USERNAME": "docker_user",
+                    "DOCKERHUB_TOKEN": "docker_secret",
+                    "GITHUB_TOKEN": "ghs_token"
+                }),
+            ),
+        ];
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let results = executor
+            .execute_ordered_steps_with_context(&container(&temp), &steps, &[], &context, &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 4);
+        assert!(results.iter().all(|result| !result.skipped));
+        assert_eq!(results[0].state.outputs["exists"], "false");
+        assert_eq!(
+            fs::read_to_string(temp.join("build-docker-image.sh")).unwrap(),
+            "just build-bitcoin-processor-app\n"
+        );
+        let node_calls = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:24-bookworm".into())
+            })
+            .map(|(_, args)| args)
+            .collect::<Vec<_>>();
+        assert_eq!(node_calls.len(), 2);
+        assert!(node_calls[0].contains(&"INPUT_USERNAME=docker_user".into()));
+        assert!(node_calls[0].contains(&"INPUT_PASSWORD=docker_secret".into()));
+        let build_exec = executor
+            .runner()
+            .calls
+            .iter()
+            .find(|(_, args)| args.iter().any(|arg| arg == "/__t/build-docker-image.sh"))
+            .expect("build script should execute");
+        assert!(build_exec.1.contains(&"GITHUB_TOKEN=ghs_token".into()));
         fs::remove_dir_all(temp).unwrap();
     }
 

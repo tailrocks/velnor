@@ -102,7 +102,7 @@ Current code progress:
 - before Docker execution starts, Velnor publishes a best-effort in-progress GitHub job timeline record with the runner name; while Docker execution runs, Velnor publishes best-effort in-progress task records as executable steps start, then uploads completed task records and masked stdout/stderr feed lines as executable steps exit; silent and skipped executable steps still produce completion records and run-service step results
 - stdout workflow commands are parsed for legacy/state-changing commands: `set-output`, `set-env`, `add-path`, and `save-state`
 - basic `${{ github.* }}` and `${{ runner.* }}` context expressions are resolved from runtime env in later scripts and JavaScript action env
-- basic step `if` evaluation is implemented for output comparisons, step outcome checks, `runner.os`, `github.event_name`, `github.ref`, status functions, and simple `&&`/`||`
+- basic step `if` evaluation is implemented for output comparisons, step outcome checks, `runner.os`, `github.event_name`, `github.ref`, status functions, and simple `&&`/`||`; target coverage includes Java `steps.check-image.outputs.exists == 'false'` gates over Docker login, Buildx setup, and build script steps
 - native `actions/checkout` support is wired before Docker execution through host `git init/fetch/checkout`; self and explicit `repository:` checkouts are supported, including target `path`, `ref`, `token`, and `fetch-depth` inputs
 
 Exit criteria:
