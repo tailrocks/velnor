@@ -1019,10 +1019,12 @@ fn render_inputs(
     inputs
         .iter()
         .map(|(name, value)| {
-            (
-                name.clone(),
-                render_context_expressions(value, context_data),
-            )
+            let rendered = if value.contains("steps.") {
+                value.clone()
+            } else {
+                render_context_expressions(value, context_data)
+            };
+            (name.clone(), rendered)
         })
         .collect()
 }
@@ -1531,6 +1533,42 @@ runs:
     }
 
     #[test]
+    fn preserves_step_output_inputs_for_runtime_resolution() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "check-deployed",
+                "reference": {
+                    "type": "Repository",
+                    "name": "./.github/actions/check-deployed-docs"
+                },
+                "inputs": {
+                    "sitemap-url": "${{ steps.sitemap.outputs.url }}",
+                    "edit-url": "${{ env.JACKIN_REPO_EDIT_URL }}",
+                    "github-token": "${{ github.token }}"
+                }
+            }
+        ]))
+        .unwrap();
+        let context = vec![(
+            "github".to_string(),
+            serde_json::json!({ "token": "ghs_token" }),
+        )];
+
+        let plans =
+            local_action_plans_with_context(&steps, Path::new("/tmp/workspace"), &context).unwrap();
+
+        assert_eq!(
+            plans[0].inputs["sitemap-url"],
+            "${{ steps.sitemap.outputs.url }}"
+        );
+        assert_eq!(plans[0].inputs["github-token"], "ghs_token");
+        assert_eq!(
+            plans[0].inputs["edit-url"],
+            "${{ env.JACKIN_REPO_EDIT_URL }}"
+        );
+    }
+
+    #[test]
     fn expands_composite_run_steps() {
         let plan = LocalActionPlan {
             step_id: "aggregate".into(),
@@ -1611,6 +1649,79 @@ runs:
             ]
         );
         assert!(steps[0].script.contains("echo \"true\""));
+    }
+
+    #[test]
+    fn target_check_deployed_docs_keeps_sitemap_step_output_input() {
+        let plan = LocalActionPlan {
+            step_id: "check-deployed".into(),
+            action_dir: Path::new("/tmp/workspace").join(".github/actions/check-deployed-docs"),
+            inputs: [
+                (
+                    "sitemap-url".to_string(),
+                    "${{ steps.sitemap.outputs.url }}".to_string(),
+                ),
+                (
+                    "edit-url".to_string(),
+                    "${{ env.JACKIN_REPO_EDIT_URL }}".to_string(),
+                ),
+                (
+                    "blob-url".to_string(),
+                    "${{ env.JACKIN_REPO_BLOB_URL }}".to_string(),
+                ),
+                ("github-token".to_string(), "ghs_token".to_string()),
+                ("external-links".to_string(), "false".to_string()),
+            ]
+            .into(),
+        };
+        let metadata = parse_action_metadata(
+            r#"
+inputs:
+  sitemap-url:
+    required: true
+  edit-url:
+    required: true
+  blob-url:
+    required: true
+  github-token:
+    required: true
+  external-links:
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SITEMAP_URL: ${{ inputs.sitemap-url }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        EXTERNAL_LINKS: ${{ inputs.external-links }}
+      run: |
+        lychee --dump "${{ inputs.sitemap-url }}" > lychee/deployed-pages.txt
+        lychee --remap "${{ inputs.edit-url }}/(.*) file://${{ github.workspace }}/\$1"
+"#,
+        )
+        .unwrap();
+
+        let steps = composite_script_steps(&plan, &metadata, "/__w").unwrap();
+
+        assert!(steps[0].env.contains(&(
+            "SITEMAP_URL".into(),
+            "${{ steps.sitemap.outputs.url }}".into()
+        )));
+        assert!(steps[0]
+            .env
+            .contains(&("GITHUB_TOKEN".into(), "ghs_token".into())));
+        assert!(steps[0]
+            .env
+            .contains(&("EXTERNAL_LINKS".into(), "false".into())));
+        assert!(steps[0].env.contains(&(
+            "GITHUB_ACTION_PATH".into(),
+            "/__w/.github/actions/check-deployed-docs".into()
+        )));
+        assert!(steps[0]
+            .script
+            .contains(r#"lychee --dump "${{ steps.sitemap.outputs.url }}""#));
+        assert!(steps[0].script.contains(r#"file:///__w/\$1"#));
     }
 
     #[test]
