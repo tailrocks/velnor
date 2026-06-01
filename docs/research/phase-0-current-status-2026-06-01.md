@@ -114,6 +114,20 @@ This fixture is not a replacement for target-repo proof. It is the next live
 bridge: first make the queued Velnor fixture jobs pass, then move the same
 runner path to `java-monorepo` and `jackin`.
 
+Current local environment finding:
+
+- The active agent environment has `DOCKER_HOST=tcp://jk-php3ngrs-thearchitect-dind:2376`.
+- `docker buildx` was installed locally as `~/.docker/cli-plugins/docker-buildx`
+  for future Docker checks.
+- Velnor preflight still cannot run jobs here because the remote Docker daemon
+  cannot see bind-mounted paths from this agent container.
+- Direct bind probes against the daemon showed the current workspace,
+  `/Users/donbeave/Projects/velnor-project/velnor`, `/tmp`, and `/home/agent`
+  are not visible inside containers created by that daemon.
+- This blocks live fixture execution in this environment. The live fixture proof
+  needs a local Docker socket or a `--work-dir` path mounted into the Docker
+  daemon host.
+
 ## Still Not Proven
 
 | Gap | Why it matters | Proof needed |
