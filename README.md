@@ -20,7 +20,7 @@ Out of current scope:
 - no Pkl workflow authoring
 - no Velnor-native workflow language
 - no replacement for GitHub's YAML parser or scheduler
-- no macOS host or runner replacement support
+- no macOS support in Velnor at all; Phase 0 runs Linux jobs only
 - no broad GitHub Actions parity beyond the two target repositories
 
 ## Direction
@@ -35,6 +35,8 @@ supported target jobs in Docker with Rust-native adapters for the marketplace
 actions used by the target repositories.
 `configure`, `run`, and `preflight` are Linux-only commands; Velnor refuses
 non-Linux hosts instead of pretending to satisfy Linux runner labels elsewhere.
+It also refuses macOS/Darwin runner labels. Any macOS legs in existing target
+workflows are outside Velnor's execution surface.
 
 ```sh
 cargo run --bin velnor-runner -- configure \
