@@ -1255,7 +1255,7 @@ fn evaluate_job_outputs(
 }
 
 fn step_log(step_id: &str, result: &StepExecutionResult) -> Option<StepLog> {
-    let lines = step_log_lines(&result.stdout, &result.stderr);
+    let lines = step_log_lines(&result.stdout, &result.stderr, &result.state.summary);
     (!lines.is_empty()).then(|| StepLog {
         step_id: step_id.to_string(),
         lines,
@@ -1269,12 +1269,17 @@ fn step_log(step_id: &str, result: &StepExecutionResult) -> Option<StepLog> {
     })
 }
 
-fn step_log_lines(stdout: &str, stderr: &str) -> Vec<String> {
-    stdout
+fn step_log_lines(stdout: &str, stderr: &str, summary: &str) -> Vec<String> {
+    let mut lines = stdout
         .lines()
         .chain(stderr.lines())
         .map(ToOwned::to_owned)
-        .collect()
+        .collect::<Vec<_>>();
+    if !summary.is_empty() {
+        lines.push("Step summary:".to_string());
+        lines.extend(summary.lines().map(ToOwned::to_owned));
+    }
+    lines
 }
 
 fn parse_workflow_commands_from_output(stdout: &str, stderr: &str) -> StepCommandState {
@@ -1587,8 +1592,11 @@ mod tests {
     use std::{
         fs,
         path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[derive(Default)]
     struct RecordingRunner {
@@ -1800,7 +1808,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("velnor-executor-test-{nonce}"))
+        let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("velnor-executor-test-{nonce}-{sequence}"))
     }
 
     fn container(temp: &Path) -> JobContainerSpec {
@@ -2734,6 +2743,33 @@ mod tests {
             "export PATH='/opt/tool':\"$PATH\"\necho answer=42\n"
         );
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn step_log_includes_step_summary_file_content() {
+        let result = StepExecutionResult {
+            exit_code: 0,
+            state: StepCommandState {
+                summary: "### cache stats\nhit rate: 80%\n".into(),
+                ..StepCommandState::default()
+            },
+            skipped: false,
+            failure_ignored: false,
+            stdout: "done\n".into(),
+            stderr: String::new(),
+        };
+
+        let log = step_log("sccache", &result).unwrap();
+
+        assert_eq!(
+            log.lines,
+            vec![
+                "done".to_string(),
+                "Step summary:".to_string(),
+                "### cache stats".to_string(),
+                "hit rate: 80%".to_string()
+            ]
+        );
     }
 
     #[test]
