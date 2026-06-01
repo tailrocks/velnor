@@ -177,7 +177,9 @@ workflow should be dispatched from a non-default ref. Set
 `workflow_dispatch` inputs; each comma-separated `key=value` is passed to
 `gh workflow run -f`. Set `VELNOR_TARGET_JOB_COUNT=<n>` when validating a
 workflow that queues multiple Velnor jobs and should be consumed by one smoke
-script invocation.
+script invocation. Set `VELNOR_TARGET_WATCH_RUN=true` when the selected job
+count should be followed by `gh run watch --exit-status` to prove the full
+GitHub workflow conclusion.
 
 Start Velnor:
 

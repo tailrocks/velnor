@@ -91,6 +91,8 @@ Set `VELNOR_TARGET_REF=<branch-or-sha>` to dispatch from a specific ref.
 Set `VELNOR_TARGET_INPUTS=key=value,other=value` for workflow dispatch inputs.
 Set `VELNOR_TARGET_JOB_COUNT=<n>` when the target workflow needs Velnor to
 consume more than one queued job.
+Set `VELNOR_TARGET_WATCH_RUN=true` to wait for the GitHub workflow run to finish
+after the selected Velnor jobs are consumed.
 Set `VELNOR_TARGET_MVP_ARM_LABEL=true` only on ARM Linux target smoke hosts.
 
 The remaining Phase 0 proof is live GitHub UI validation on the two target

@@ -16,6 +16,7 @@ WORKFLOW="${VELNOR_TARGET_WORKFLOW:-}"
 TARGET_REF="${VELNOR_TARGET_REF:-}"
 TARGET_INPUTS="${VELNOR_TARGET_INPUTS:-}"
 RUN_ID="${VELNOR_TARGET_RUN_ID:-}"
+WATCH_RUN="${VELNOR_TARGET_WATCH_RUN:-false}"
 TARGET_LABEL="${VELNOR_TARGET_LABEL:-target}"
 TARGET_MVP_ARM_LABEL="${VELNOR_TARGET_MVP_ARM_LABEL:-false}"
 REGISTERED_RUNNER=false
@@ -112,6 +113,13 @@ if [[ -n "$WORKFLOW" ]]; then
   fi
 fi
 
+if [[ -n "$RUN_ID" ]]; then
+  echo "==> Target run before Velnor"
+  gh run view "$RUN_ID" --repo "$TARGET_REPO" \
+    --json status,conclusion,jobs,url \
+    --jq '.url, (.jobs[] | [.name,.status,(.conclusion // "")] | @tsv)'
+fi
+
 echo "==> Running $JOB_COUNT $TARGET_LABEL target job(s)"
 for job_index in $(seq 1 "$JOB_COUNT"); do
   echo "==> Velnor $TARGET_LABEL target job $job_index/$JOB_COUNT"
@@ -126,6 +134,10 @@ if [[ -n "$RUN_ID" ]]; then
   gh run view "$RUN_ID" --repo "$TARGET_REPO" \
     --json status,conclusion,jobs,url \
     --jq '.url, (.jobs[] | [.name,.status,(.conclusion // "")] | @tsv)'
+  if [[ "$WATCH_RUN" == "true" ]]; then
+    echo "==> Waiting for target run completion"
+    gh run watch "$RUN_ID" --repo "$TARGET_REPO" --exit-status
+  fi
 fi
 
 echo "$TARGET_LABEL target smoke job completed."
