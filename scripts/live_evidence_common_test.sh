@@ -14,9 +14,11 @@ LIVE_EVIDENCE_TITLE=Test
 LIVE_EVIDENCE_REF=main
 LIVE_EVIDENCE_INPUTS=package=a
 REQUIRE_DOCKER_SOCKET=true
-DUMP_JOB_MESSAGES=
+DUMP_JOB_MESSAGES="$(mktemp -d)"
 DOCKER_HOST_WORK_DIR=
 trap 'rm -rf "$WORK_DIR" "$LIVE_EVIDENCE_DIR"' EXIT
+
+printf '{}\n' >"$DUMP_JOB_MESSAGES/job-123.json"
 
 gh() {
   echo "mock gh failure for: $*" >&2
@@ -42,6 +44,16 @@ fi
 
 if ! grep -q "mock gh failure" "$evidence_file"; then
   echo "evidence file did not preserve GitHub CLI failure output" >&2
+  exit 1
+fi
+
+if ! grep -q "Sanitized Job Message Dumps" "$evidence_file"; then
+  echo "evidence file did not include job message dump snapshot" >&2
+  exit 1
+fi
+
+if ! grep -q "job-123.json" "$evidence_file"; then
+  echo "evidence file did not list sanitized job message dump files" >&2
   exit 1
 fi
 

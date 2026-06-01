@@ -144,6 +144,33 @@ write_local_storage_snapshot() {
   done
 }
 
+write_job_dump_snapshot() {
+  local dump_count
+
+  echo
+  echo "## Sanitized Job Message Dumps"
+  echo
+
+  if [[ -z "${DUMP_JOB_MESSAGES:-}" ]]; then
+    echo "Job message dumps disabled."
+    return
+  fi
+
+  echo "- directory: $DUMP_JOB_MESSAGES"
+
+  if [[ ! -d "$DUMP_JOB_MESSAGES" ]]; then
+    echo "- files: 0"
+    return
+  fi
+
+  dump_count="$(find "$DUMP_JOB_MESSAGES" -type f 2>/dev/null | wc -l | tr -d ' ')"
+  echo "- files: ${dump_count:-0}"
+  echo
+  echo '```text'
+  find "$DUMP_JOB_MESSAGES" -type f 2>/dev/null | sort | head -n "$LIVE_EVIDENCE_LOCAL_ENTRIES"
+  echo '```'
+}
+
 write_github_run_snapshot() {
   local run_snapshot
 
@@ -158,9 +185,9 @@ write_github_run_snapshot() {
       "- status: " + .status,
       "- conclusion: " + (.conclusion // ""),
       "",
-      "| job | status | conclusion |",
-      "| --- | --- | --- |",
-      (.jobs[] | "| " + .name + " | " + .status + " | " + (.conclusion // "") + " |")
+      "| job | database id | status | conclusion | URL |",
+      "| --- | ---: | --- | --- | --- |",
+      (.jobs[] | "| " + .name + " | " + ((.databaseId // "") | tostring) + " | " + (.status // "") + " | " + (.conclusion // "") + " | " + (.url // "") + " |")
     ' 2>&1)"; then
     printf '%s\n' "$run_snapshot"
   else
@@ -226,6 +253,7 @@ write_live_evidence() {
     write_step_snapshot
     write_log_snapshot
     write_local_storage_snapshot
+    write_job_dump_snapshot
   } >"$evidence_file"
 
   echo "==> Wrote live evidence $evidence_file"
