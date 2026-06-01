@@ -34,7 +34,7 @@ Deliverables:
 - renew job request lock: client method implemented for classic `jobrequests` route; script execution starts with an initial renewal and keeps a background renewal loop alive while user code runs
 - report timeline/log output for a no-op job: opt-in `run --complete-noop` probe is implemented for classic timeline/feed routes
 - finish job request with success/failure: opt-in `run --complete-noop` probe finishes success
-- handle cancellation message: classic `JobCancellation` messages are recognized while a Docker job is running, acknowledged, and used to kill the active job container so the job can finish as canceled
+- handle cancellation message: classic `JobCancellation` messages are recognized while a Docker job is running, acknowledged, and used to kill the active job container so the job can finish as canceled; V2 broker cancellation messages are also polled while the Docker job runs and kill the active job container
 
 Exit criteria:
 

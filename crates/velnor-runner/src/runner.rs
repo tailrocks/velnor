@@ -44,12 +44,20 @@ use crate::{
 };
 
 const JOB_CANCELLATION_MESSAGE: &str = "JobCancellation";
+const BROKER_MIGRATION_MESSAGE: &str = "BrokerMigration";
 
 #[derive(Clone)]
 struct RunServiceJobContext {
     client: RunServiceClient,
     run_service_url: String,
     billing_owner_id: Option<String>,
+}
+
+#[derive(Clone)]
+struct BrokerCancellationContext {
+    broker: BrokerClient,
+    session_id: String,
+    disable_update: bool,
 }
 
 pub async fn configure(args: ConfigureArgs) -> Result<()> {
@@ -388,7 +396,8 @@ async fn run_v2(
     let server_url_v2 = stored.settings.server_url_v2.as_deref().ok_or_else(|| {
         anyhow::anyhow!("runner config enables V2 flow but missing server_url_v2")
     })?;
-    let broker = BrokerClient::new(server_url_v2, token.clone())?;
+    let broker_token = token.clone();
+    let mut broker = BrokerClient::new(server_url_v2, broker_token.clone())?;
     let run_service = RunServiceClient::new(token.clone())?;
     let task_client = DistributedTaskClient::new(server_url, token)?;
     let owner_name = format!("{} (PID: {})", default_agent_name(), std::process::id());
@@ -424,7 +433,7 @@ async fn run_v2(
             continue;
         };
 
-        handle_v2_message(
+        if let Some(migration_url) = handle_v2_message(
             &broker,
             &run_service,
             &task_client,
@@ -433,9 +442,14 @@ async fn run_v2(
             &stored.settings.agent_name,
             &config_dir,
             &args,
+            stored.settings.disable_update,
             message,
         )
-        .await?;
+        .await?
+        {
+            broker = BrokerClient::new(&migration_url, broker_token.clone())?;
+            println!("Broker migration applied: {migration_url}");
+        }
         if args.once {
             break;
         }
@@ -481,6 +495,7 @@ async fn handle_message(
         Some(message.message_id),
         true,
         None,
+        None,
         job,
     )
     .await
@@ -495,18 +510,27 @@ async fn handle_v2_message(
     worker_name: &str,
     config_dir: &std::path::Path,
     args: &RunArgs,
+    disable_update: bool,
     message: crate::protocol::TaskAgentMessage,
-) -> Result<()> {
+) -> Result<Option<String>> {
     println!(
         "Received broker message {} type {}.",
         message.message_id, message.message_type
     );
+    if message
+        .message_type
+        .eq_ignore_ascii_case(BROKER_MIGRATION_MESSAGE)
+    {
+        let migration_url = broker_migration_url(&message)?;
+        println!("Received broker migration to {migration_url}.");
+        return Ok(Some(migration_url));
+    }
     if !message
         .message_type
         .eq_ignore_ascii_case(RUNNER_JOB_REQUEST)
     {
         println!("Broker message is not acknowledged because type is not implemented.");
-        return Ok(());
+        return Ok(None);
     }
     let reference: RunnerJobRequestRef =
         serde_json::from_str(&message.body).context("parse RunnerJobRequestRef")?;
@@ -539,6 +563,11 @@ async fn handle_v2_message(
         run_service_url: run_service_url.to_string(),
         billing_owner_id: reference.billing_owner_id,
     };
+    let broker_cancellation = BrokerCancellationContext {
+        broker: broker.clone(),
+        session_id: session_id.to_string(),
+        disable_update,
+    };
     handle_job_request(
         client,
         pool_id,
@@ -550,9 +579,11 @@ async fn handle_v2_message(
         None,
         false,
         Some(run_service_job),
+        Some(broker_cancellation),
         job,
     )
-    .await
+    .await?;
+    Ok(None)
 }
 
 async fn handle_job_request(
@@ -566,6 +597,7 @@ async fn handle_job_request(
     dispatch_message_id: Option<i64>,
     acknowledge_classic_message: bool,
     run_service_job: Option<RunServiceJobContext>,
+    broker_cancellation: Option<BrokerCancellationContext>,
     job: AgentJobRequestMessage,
 ) -> Result<()> {
     println!(
@@ -621,18 +653,29 @@ async fn handle_job_request(
             }
         }
         let canceled = Arc::new(AtomicBool::new(false));
-        let cancellation = dispatch_message_id.map(|message_id| {
-            start_cancellation_poll(
-                client.clone(),
-                pool_id,
-                session_id.to_string(),
-                message_id,
-                disable_update,
+        let cancellation = if let Some(broker_cancellation) = broker_cancellation {
+            Some(start_broker_cancellation_poll(
+                broker_cancellation.broker,
+                broker_cancellation.session_id,
+                broker_cancellation.disable_update,
                 job.job_id.clone(),
                 job_container_name(&job),
                 canceled.clone(),
-            )
-        });
+            ))
+        } else {
+            dispatch_message_id.map(|message_id| {
+                start_cancellation_poll(
+                    client.clone(),
+                    pool_id,
+                    session_id.to_string(),
+                    message_id,
+                    disable_update,
+                    job.job_id.clone(),
+                    job_container_name(&job),
+                    canceled.clone(),
+                )
+            })
+        };
         let config_dir = config_dir.to_path_buf();
         let work_dir = args.work_dir.clone();
         let docker_image = args.docker_image.clone();
@@ -885,10 +928,64 @@ fn start_cancellation_poll(
     })
 }
 
+fn start_broker_cancellation_poll(
+    broker: BrokerClient,
+    session_id: String,
+    disable_update: bool,
+    job_id: String,
+    job_container_name: String,
+    canceled: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let message = match broker
+                .get_runner_message(&session_id, RunnerStatus::Busy, disable_update)
+                .await
+            {
+                Ok(message) => message,
+                Err(error) => {
+                    eprintln!("Broker cancellation poll failed: {error:#}");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+            };
+            let Some(message) = message else {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            };
+            if !is_job_cancellation_for(&message, &job_id) {
+                println!(
+                    "Busy broker runner received unsupported message {} type {}; ignoring while job runs.",
+                    message.message_id, message.message_type
+                );
+                continue;
+            }
+            canceled.store(true, Ordering::SeqCst);
+            kill_job_container(&job_container_name);
+            break;
+        }
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct JobCancelMessage {
     #[serde(default, rename = "JobId", alias = "jobId")]
     job_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BrokerMigrationMessage {
+    #[serde(rename = "BrokerBaseUrl", alias = "brokerBaseUrl")]
+    broker_base_url: String,
+}
+
+fn broker_migration_url(message: &crate::protocol::TaskAgentMessage) -> Result<String> {
+    let migration: BrokerMigrationMessage =
+        serde_json::from_str(&message.body).context("parse BrokerMigration message")?;
+    if migration.broker_base_url.trim().is_empty() {
+        bail!("BrokerMigration message missing BrokerBaseUrl");
+    }
+    Ok(migration.broker_base_url)
 }
 
 fn is_job_cancellation_for(message: &crate::protocol::TaskAgentMessage, job_id: &str) -> bool {
@@ -2004,6 +2101,24 @@ mod tests {
         };
 
         assert!(!is_job_cancellation_for(&message, "job-123"));
+    }
+
+    #[test]
+    fn parses_broker_migration_message_url() {
+        let message = TaskAgentMessage {
+            message_id: 9,
+            message_type: "BrokerMigration".into(),
+            body: serde_json::json!({
+                "BrokerBaseUrl": "https://broker.actions.githubusercontent.com/new/"
+            })
+            .to_string(),
+            iv_base64: None,
+        };
+
+        assert_eq!(
+            broker_migration_url(&message).unwrap(),
+            "https://broker.actions.githubusercontent.com/new/"
+        );
     }
 
     #[test]
