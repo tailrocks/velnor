@@ -2000,6 +2000,8 @@ fn native_upload_artifact(
     let path_input = native_input(action, &action_state, "path");
     let if_no_files_found =
         native_input_or(&action_state, action, "if-no-files-found", "warn").to_ascii_lowercase();
+    let include_hidden_files =
+        input_truthy(&native_input(action, &action_state, "include-hidden-files"));
     let artifact_dir = artifact_store_dir(state)?.join(sanitize_artifact_name(&name));
     fs::remove_dir_all(&artifact_dir).ok();
     fs::create_dir_all(&artifact_dir)
@@ -2008,7 +2010,10 @@ fn native_upload_artifact(
     let mut uploaded = Vec::new();
     for path in artifact_paths(&path_input) {
         for source in resolve_artifact_sources(state, &path)? {
-            copy_artifact_source(&source, &artifact_dir)?;
+            if !include_hidden_files && artifact_source_is_hidden(state, &source) {
+                continue;
+            }
+            copy_artifact_source(&source, &artifact_dir, include_hidden_files)?;
             uploaded.push(source);
         }
     }
@@ -2489,9 +2494,33 @@ fn resolve_host_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> {
     }
 }
 
-fn copy_artifact_source(source: &Path, artifact_dir: &Path) -> Result<()> {
+fn artifact_source_is_hidden(state: &JobExecutionState, source: &Path) -> bool {
+    let relative = state
+        .workspace_host
+        .as_deref()
+        .and_then(|base| source.strip_prefix(base).ok())
+        .or_else(|| {
+            state
+                .temp_host
+                .as_deref()
+                .and_then(|base| source.strip_prefix(base).ok())
+        })
+        .unwrap_or(source);
+    path_has_hidden_component(relative)
+}
+
+fn path_has_hidden_component(path: &Path) -> bool {
+    path.components().any(|component| match component {
+        std::path::Component::Normal(value) => value
+            .to_str()
+            .is_some_and(|name| name.len() > 1 && name.starts_with('.')),
+        _ => false,
+    })
+}
+
+fn copy_artifact_source(source: &Path, artifact_dir: &Path, include_hidden: bool) -> Result<()> {
     if source.is_dir() {
-        copy_dir_contents(source, artifact_dir)
+        copy_dir_contents_filtered(source, artifact_dir, include_hidden)
     } else {
         let file_name = source
             .file_name()
@@ -2535,6 +2564,35 @@ fn copy_dir_contents(source: &Path, destination: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn copy_dir_contents_filtered(
+    source: &Path,
+    destination: &Path,
+    include_hidden: bool,
+) -> Result<()> {
+    for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        if !include_hidden && path.file_name().is_some_and(hidden_file_name) {
+            continue;
+        }
+        let target = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            fs::create_dir_all(&target)
+                .with_context(|| format!("create directory {}", target.display()))?;
+            copy_dir_contents_filtered(&path, &target, include_hidden)?;
+        } else {
+            fs::copy(&path, &target)
+                .with_context(|| format!("copy {} to {}", path.display(), target.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn hidden_file_name(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.len() > 1 && name.starts_with('.'))
 }
 
 fn matching_artifacts(store: &Path, name: &str, pattern: &str) -> Result<Vec<(String, PathBuf)>> {
@@ -7821,6 +7879,65 @@ fi"#
         );
         assert!(!temp
             .join("_velnor_artifacts/local-1/jackin-x86_64-unknown-linux-gnu/ignore.txt")
+            .exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_upload_artifact_excludes_hidden_files_by_default() {
+        let temp = temp_dir();
+        fs::create_dir_all(temp.join("work/dist/.well-known")).unwrap();
+        fs::write(temp.join("work/dist/app.js"), "app\n").unwrap();
+        fs::write(temp.join("work/dist/.env"), "secret\n").unwrap();
+        fs::write(temp.join("work/dist/.well-known/assetlinks.json"), "{}\n").unwrap();
+        let upload = |include_hidden_files: Option<&str>, name: &str| {
+            let mut inputs: BTreeMap<String, String> = [
+                ("name".into(), name.into()),
+                ("path".into(), "dist".into()),
+                ("if-no-files-found".into(), "error".into()),
+            ]
+            .into();
+            if let Some(value) = include_hidden_files {
+                inputs.insert("include-hidden-files".into(), value.into());
+            }
+            vec![ExecutableStep::Native {
+                step_id: format!("upload-{name}"),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::UploadArtifact,
+                    inputs,
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            }]
+        };
+
+        let default_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &upload(None, "default"), &[], &temp)
+            .unwrap();
+        let explicit_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&temp),
+                &upload(Some("true"), "explicit"),
+                &[],
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(default_results[0].exit_code, 0);
+        assert_eq!(explicit_results[0].exit_code, 0);
+        assert!(temp
+            .join("_velnor_artifacts/local-1/default/app.js")
+            .exists());
+        assert!(!temp.join("_velnor_artifacts/local-1/default/.env").exists());
+        assert!(!temp
+            .join("_velnor_artifacts/local-1/default/.well-known")
+            .exists());
+        assert!(temp
+            .join("_velnor_artifacts/local-1/explicit/.env")
+            .exists());
+        assert!(temp
+            .join("_velnor_artifacts/local-1/explicit/.well-known/assetlinks.json")
             .exists());
         fs::remove_dir_all(temp).unwrap();
     }
