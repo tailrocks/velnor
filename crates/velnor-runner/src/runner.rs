@@ -1296,10 +1296,18 @@ fn resolve_checkout_plan_context(
     context_data: &[(String, Value)],
 ) -> CheckoutPlan {
     if let Some(version) = plan.version.as_mut() {
-        *version =
-            crate::executor::render_expressions_with_context(version, base_env, context_data);
+        if !contains_step_output_expression(version) {
+            *version =
+                crate::executor::render_expressions_with_context(version, base_env, context_data);
+        }
     }
     plan
+}
+
+fn contains_step_output_expression(value: &str) -> bool {
+    value
+        .match_indices("steps.")
+        .any(|(index, _)| value[index..].contains(".outputs."))
 }
 
 #[derive(Debug, Clone)]
@@ -2933,6 +2941,31 @@ runs:
 
         assert_eq!(resolved.version.as_deref(), Some("def456"));
         assert!(!resolved.requires_runtime_context());
+    }
+
+    #[test]
+    fn checkout_step_output_ref_survives_eager_context_resolution() {
+        let plan = CheckoutPlan {
+            step_id: "checkout2".into(),
+            clone_url: "https://github.com/jackin-project/jackin.git".into(),
+            version: Some("${{ steps.source.outputs.sha }}".into()),
+            destination: Path::new("/tmp/work").to_path_buf(),
+            token: None,
+            fetch_depth: None,
+            fetch_tags: false,
+            persist_credentials: true,
+            clean: true,
+            condition: None,
+            continue_on_error: false,
+        };
+
+        let resolved = resolve_checkout_plan_context(plan, &[], &[]);
+
+        assert_eq!(
+            resolved.version.as_deref(),
+            Some("${{ steps.source.outputs.sha }}")
+        );
+        assert!(resolved.requires_runtime_context());
     }
 
     #[test]

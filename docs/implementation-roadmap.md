@@ -118,7 +118,7 @@ Goal: support common JavaScript actions.
 
 Deliverables:
 
-- broader `actions/checkout` compatibility: `repository`, `path`, `ref`, `token`, `fetch-depth`, `fetch-tags`, `persist-credentials`, and `clean` inputs are implemented for target shapes; `fetch-depth: 0` fetches full branch/tag refs for target path-filter jobs; checked-out worktrees are added to the mounted-home `safe.directory` config for Docker-side Git commands; persisted git extraheaders are removed after the job; sparse checkout, submodules, and LFS remain open
+- broader `actions/checkout` compatibility: `repository`, `path`, `ref`, `token`, `fetch-depth`, `fetch-tags`, `persist-credentials`, and `clean` inputs are implemented for target shapes; `fetch-depth: 0` fetches full branch/tag refs for target path-filter jobs; checkout refs from earlier step outputs, such as the `jackin` preview `ref: ${{ steps.source.outputs.sha }}`, stay ordered after their producer step and are not eagerly collapsed; checked-out worktrees are added to the mounted-home `safe.directory` config for Docker-side Git commands; persisted git extraheaders are removed after the job; sparse checkout, submodules, and LFS remain open
 - action resolver/downloader for `owner/repo@ref`: repository action download into `_actions` and metadata discovery are implemented
 - action metadata parser for `action.yml`: JavaScript, composite, and Docker `runs.using` shapes are modeled
 - repository action planner for enabled non-checkout `uses:` steps
