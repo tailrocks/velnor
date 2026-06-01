@@ -69,4 +69,6 @@ Side-by-side GitHub Actions vs Pkl vs KCL examples: [docs/research/github-action
 
 GitHub runner protocol contract: [docs/research/github-runner-protocol-contract.md](docs/research/github-runner-protocol-contract.md).
 
+GitHub runner job-message contract: [docs/research/github-runner-job-message-contract-2026-06-01.md](docs/research/github-runner-job-message-contract-2026-06-01.md).
+
 Self-hosted runner implementation blueprint: [docs/research/self-hosted-runner-implementation-blueprint-2026-06-01.md](docs/research/self-hosted-runner-implementation-blueprint-2026-06-01.md).

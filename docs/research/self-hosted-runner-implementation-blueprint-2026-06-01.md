@@ -4,6 +4,11 @@ This document is the implementation-oriented version of the Velnor Phase 0 idea:
 be a Rust self-hosted GitHub runner replacement first, then add Pkl as a typed
 workflow authoring layer later.
 
+Phase 0 is runner compatibility, not workflow parsing. GitHub sends Velnor an
+expanded `AgentJobRequestMessage`, not the original workflow YAML. See
+`docs/research/github-runner-job-message-contract-2026-06-01.md` for the
+runtime payload contract.
+
 The goal is not full GitHub Actions parity. The goal is to run the current
 `.github` trees from:
 
@@ -24,6 +29,9 @@ Phase 0 should look boring to a repository user:
    applying triggers, managing secrets, and rendering the UI.
 4. Velnor receives already-expanded job messages, executes the job in Docker, and
    reports status/logs/outputs back to GitHub.
+
+The target workflow files are evidence for what GitHub will likely send in
+expanded job payloads. They are not files Velnor should parse in Phase 0.
 
 The later Pkl layer should not replace this executor. It should compile into the
 same normalized job plan that the GitHub job-message adapter uses:
