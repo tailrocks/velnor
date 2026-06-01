@@ -951,6 +951,21 @@ def normalize_uses(value: str) -> str:
     return value.split("@", 1)[0]
 
 
+def self_test() -> None:
+    cases = {
+        "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd": "actions/checkout",
+        "docker/setup-buildx-action@v4.1.0": "docker/setup-buildx-action",
+        "jdx/mise-action": "jdx/mise-action",
+        "./.github/actions/aggregate-needs": "./.github/actions/aggregate-needs",
+        "../shared/action@v1": "../shared/action@v1",
+        "docker://alpine:3.20": "docker://alpine:3.20",
+    }
+    for value, expected in cases.items():
+        actual = normalize_uses(value)
+        if actual != expected:
+            raise AssertionError(f"normalize_uses({value!r}) = {actual!r}, want {expected!r}")
+
+
 def collect_step(
     path: Path,
     job_name: str,
@@ -1519,7 +1534,14 @@ def main() -> None:
         action="store_true",
         help="Fail if target repositories use features outside the current MVP contract",
     )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run target audit internal invariants before auditing repositories",
+    )
     args = parser.parse_args()
+    if args.self_test:
+        self_test()
     roots = [root.resolve() for root in args.roots]
     summary = audit(roots)
     print_report(summary)

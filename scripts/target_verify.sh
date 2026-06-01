@@ -20,6 +20,7 @@ fi
 cd "$ROOT"
 
 python3 scripts/target_audit.py --check-target-mvp "$JACKIN_ROOT" "$JAVA_ROOT" >/tmp/velnor-target-audit.txt
+python3 scripts/target_audit.py --self-test "$JACKIN_ROOT" "$JAVA_ROOT" >/tmp/velnor-target-audit-self-test.txt
 python3 scripts/check_runner_reference.py
 
 tests=(
