@@ -144,6 +144,8 @@ GitHub adapter source:
 - job variables, typed env maps, defaults, container resources, service
   resources, repository resources, and `ContextData`
 - V2 typed expression maps normalized into plain key/value maps before planning
+- supported marketplace action families become native invocations without
+  requiring downloaded marketplace metadata
 
 Pkl adapter source:
 
@@ -172,6 +174,12 @@ pub enum ExecutableStep {
         condition: Option<String>,
         continue_on_error: bool,
     },
+    Native {
+        step_id: String,
+        invocation: NativeActionInvocation,
+        condition: Option<String>,
+        continue_on_error: bool,
+    },
     CompositeOutputs {
         step_id: String,
         outputs: BTreeMap<String, String>,
@@ -182,6 +190,11 @@ pub enum ExecutableStep {
 
 This is the right Phase 0 surface. It preserves GitHub-compatible execution
 order, supports post hooks, and is concrete enough for Docker execution.
+`Native` is the preferred Phase 0 representation for supported marketplace
+action families. It carries resolved `with:` inputs and step `env`, but not the
+downloaded marketplace implementation. The GitHub `@ref`/SHA is compatibility
+syntax only for these families; Velnor selects the Rust adapter by action family
+such as `actions/cache`, `jdx/mise-action`, or `docker/bake-action`.
 
 Pkl should not expose this enum one-to-one to users. Pkl should expose a nicer
 typed DSL, then lower helpers into this enum.
@@ -198,8 +211,12 @@ Required responsibilities:
 - derive self repository data from `ContextData.github`/`Variables` if run
   service omits repository resources
 - resolve `actions/checkout` into a native `CheckoutPlan`
-- download repository actions into `_actions/<owner>/<repo>/<ref>/<path>`
-- parse action metadata into JavaScript, Docker, or composite invocations
+- route supported repository actions to `NativeActionInvocation` by action
+  family, ignoring the pinned `@ref` for implementation selection
+- download only non-native repository actions into
+  `_actions/<owner>/<repo>/<ref>/<path>`
+- parse non-native action metadata into JavaScript, Docker, or composite
+  invocations
 - expand local and repository composite actions into ordered executable steps
 - preserve original step order and post-hook reverse order
 - evaluate only the target expression subset needed at runner time
@@ -256,8 +273,9 @@ Lowering result:
 - `Use` with Docker metadata -> `ExecutableStep::Docker`
 - `Use` with composite metadata -> composite start, nested steps, composite
   outputs, composite end
-- `DockerBake` -> either a typed Docker action invocation or a script step that
-  invokes `docker buildx bake`, depending on the selected backend
+- `Use` with a supported native action family -> `ExecutableStep::Native`
+- typed helpers such as `DockerBake`, `Cache`, `UploadArtifact`, and
+  `DownloadArtifact` -> `ExecutableStep::Native`
 
 ## Reporter Contract
 
