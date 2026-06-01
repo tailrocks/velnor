@@ -32,6 +32,7 @@ bash -n \
   scripts/jackin_target_smoke.sh \
   scripts/live_evidence_common.sh \
   scripts/live_host_doctor.sh \
+  scripts/live_evidence_common_test.sh \
   scripts/target_smoke_common.sh \
   scripts/target_verify.sh \
   scripts/workflow_dispatch_common.sh \
@@ -40,6 +41,7 @@ bash -n \
 python3 scripts/target_audit.py --check-target-mvp "$JACKIN_ROOT" "$CHAINARGOS_ROOT" >/tmp/velnor-target-audit.txt
 python3 scripts/target_audit.py --self-test "$JACKIN_ROOT" "$CHAINARGOS_ROOT" >/tmp/velnor-target-audit-self-test.txt
 python3 scripts/check_runner_reference.py
+scripts/live_evidence_common_test.sh
 scripts/workflow_dispatch_common_test.sh
 
 tests=(
@@ -129,4 +131,4 @@ for test_name in "${tests[@]}"; do
 done
 
 echo "target audit written to /tmp/velnor-target-audit.txt"
-echo "target verifier passed shell syntax check, ${#tests[@]} focused checks, and workflow dispatch helper self-test"
+echo "target verifier passed shell syntax check, ${#tests[@]} focused checks, live evidence helper self-test, and workflow dispatch helper self-test"

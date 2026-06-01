@@ -144,6 +144,34 @@ write_local_storage_snapshot() {
   done
 }
 
+write_github_run_snapshot() {
+  local run_snapshot
+
+  echo
+  echo "## GitHub Run"
+  echo
+
+  if run_snapshot="$(gh run view "$RUN_ID" --repo "$LIVE_EVIDENCE_REPO" \
+    --json status,conclusion,jobs,url \
+    --jq '
+      "- url: " + .url,
+      "- status: " + .status,
+      "- conclusion: " + (.conclusion // ""),
+      "",
+      "| job | status | conclusion |",
+      "| --- | --- | --- |",
+      (.jobs[] | "| " + .name + " | " + .status + " | " + (.conclusion // "") + " |")
+    ' 2>&1)"; then
+    printf '%s\n' "$run_snapshot"
+  else
+    echo "GitHub run snapshot unavailable:"
+    echo
+    echo '```text'
+    printf '%s\n' "$run_snapshot"
+    echo '```'
+  fi
+}
+
 write_live_evidence() {
   local phase="$1"
 
@@ -179,20 +207,7 @@ write_live_evidence() {
     echo "- require Docker socket: $REQUIRE_DOCKER_SOCKET"
     echo "- job message dumps: ${DUMP_JOB_MESSAGES:-<disabled>}"
     echo "- captured at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo
-    echo "## GitHub Run"
-    echo
-    gh run view "$RUN_ID" --repo "$LIVE_EVIDENCE_REPO" \
-      --json status,conclusion,jobs,url \
-      --jq '
-        "- url: " + .url,
-        "- status: " + .status,
-        "- conclusion: " + (.conclusion // ""),
-        "",
-        "| job | status | conclusion |",
-        "| --- | --- | --- |",
-        (.jobs[] | "| " + .name + " | " + .status + " | " + (.conclusion // "") + " |")
-      '
+    write_github_run_snapshot
     write_runner_snapshot
     write_artifact_snapshot
     write_step_snapshot
