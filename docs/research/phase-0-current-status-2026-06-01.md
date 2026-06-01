@@ -16,6 +16,9 @@ cargo test -q
 This is not yet completion proof. Completion still requires live GitHub Actions
 UI runs on the two target repositories.
 
+The current requirement checklist is maintained in
+`docs/phase-0-target-checklist.md`.
+
 ## Upstream Runner Facts To Preserve
 
 Reference upstream:

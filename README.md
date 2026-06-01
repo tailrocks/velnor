@@ -107,6 +107,8 @@ work directory.
 
 Phase 0 runner compatibility: [docs/phase-0-github-runner-compat.md](docs/phase-0-github-runner-compat.md).
 
+Phase 0 target checklist: [docs/phase-0-target-checklist.md](docs/phase-0-target-checklist.md).
+
 Implementation roadmap: [docs/implementation-roadmap.md](docs/implementation-roadmap.md).
 
 Public fixture repository plan: [docs/public-fixture-repo-plan.md](docs/public-fixture-repo-plan.md).
