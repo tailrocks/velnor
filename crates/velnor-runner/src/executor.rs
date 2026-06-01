@@ -1692,6 +1692,8 @@ mod tests {
             options: Vec::new(),
             services: Vec::new(),
             node_action_image: String::new(),
+            docker_cli_host_path: None,
+            docker_cli_plugin_host_dir: None,
         }
     }
 

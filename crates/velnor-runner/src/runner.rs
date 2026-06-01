@@ -570,6 +570,8 @@ fn execute_script_job(
         options: job_container_options(job),
         services: service_containers(job),
         node_action_image: node_action_image.to_string(),
+        docker_cli_host_path: host_docker_cli_path(),
+        docker_cli_plugin_host_dir: host_docker_cli_plugin_dir(),
     };
     let mut executor = DockerScriptExecutor::new(command_runner);
     let base_env = job_runtime_env(job);
@@ -687,6 +689,39 @@ fn secret_context_names(variable_name: &str) -> Vec<String> {
     } else {
         vec![variable_name.to_string()]
     }
+}
+
+fn host_docker_cli_path() -> Option<std::path::PathBuf> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    find_executable_on_path("docker")
+}
+
+fn host_docker_cli_plugin_dir() -> Option<std::path::PathBuf> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    if let Some(path) = find_executable_on_path("docker-buildx") {
+        return path.parent().map(std::path::Path::to_path_buf);
+    }
+    [
+        "/usr/local/lib/docker/cli-plugins/docker-buildx",
+        "/usr/local/libexec/docker/cli-plugins/docker-buildx",
+        "/usr/lib/docker/cli-plugins/docker-buildx",
+        "/usr/libexec/docker/cli-plugins/docker-buildx",
+    ]
+    .into_iter()
+    .map(std::path::PathBuf::from)
+    .find(|path| path.is_file())
+    .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+}
+
+fn find_executable_on_path(name: &str) -> Option<std::path::PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths)
+        .map(|dir| dir.join(name))
+        .find(|path| path.is_file())
 }
 
 fn download_repository_actions_recursive<R>(

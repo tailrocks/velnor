@@ -74,7 +74,8 @@ Current code progress:
 - command-file parser supports `NAME=value` and heredoc `NAME<<EOF` syntax
 - Docker job container command builder covers network/container start, `docker exec`, and cleanup command shapes
 - Docker execution uses a shared `/github/home` mount and `HOME=/github/home` across the job, JavaScript action sidecar, and Docker action containers so setup actions can install tools into a home directory visible to later script steps
-- JavaScript actions run in a configurable sidecar image via `--node-action-image`; the default `ghcr.io/catthehacker/ubuntu:act-latest` carries Node and the Docker CLI, which target Docker actions such as `docker/setup-buildx-action`, `docker/login-action`, `docker/build-push-action`, and `docker/bake-action` need when they talk to the mounted Docker socket
+- JavaScript actions run in a short-lived sidecar image selected from `runs.using`; `--node-action-image` can override the image when an operator wants a custom Node/tooling bundle
+- on Linux hosts, Velnor mounts the host Docker CLI and Buildx plugin directory into the job container, JavaScript action sidecars, and Docker action containers when it also mounts `/var/run/docker.sock`; target Docker actions such as `docker/setup-buildx-action`, `docker/login-action`, `docker/build-push-action`, and `docker/bake-action` need this client tooling when they talk to the mounted Docker socket
 - script-step plan writes the script under runner temp, exposes per-step command-file env vars, and collects output/env/path/state/summary files after execution
 - Docker script executor runs the planned lifecycle through an abstract command runner: create network, start container, exec script, collect state, cleanup container/network
 - enabled GitHub script steps can be mapped into internal `ScriptStep` plans for `bash` and `sh`, including `script`, `shell`, `workingDirectory`, and job `defaults.run` shell/working-directory
@@ -186,7 +187,7 @@ Goal: run Docker-heavy target workflows.
 
 Deliverables:
 
-- job container image includes Docker CLI or mounts host Docker CLI
+- job container, JavaScript action sidecars, and Docker action containers mount the host Docker CLI/Buildx plugin on Linux when available
 - mount `/var/run/docker.sock`
 - support Buildx/Bake actions
 - preserve cache env and workspace paths

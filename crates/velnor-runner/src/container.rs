@@ -17,6 +17,8 @@ pub struct JobContainerSpec {
     pub options: Vec<String>,
     pub services: Vec<ServiceContainerSpec>,
     pub node_action_image: String,
+    pub docker_cli_host_path: Option<PathBuf>,
+    pub docker_cli_plugin_host_dir: Option<PathBuf>,
 }
 
 impl JobContainerSpec {
@@ -62,6 +64,7 @@ impl JobContainerSpec {
                 "/var/run/docker.sock:/var/run/docker.sock".into(),
             ]);
         }
+        self.append_docker_cli_mounts(&mut args);
 
         args.extend([
             self.image.clone(),
@@ -135,6 +138,7 @@ impl JobContainerSpec {
                 "/var/run/docker.sock:/var/run/docker.sock".into(),
             ]);
         }
+        self.append_docker_cli_mounts(&mut args);
         for (name, value) in env {
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
@@ -201,6 +205,7 @@ impl JobContainerSpec {
                 "/var/run/docker.sock:/var/run/docker.sock".into(),
             ]);
         }
+        self.append_docker_cli_mounts(&mut args);
         for (name, value) in env {
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
@@ -218,6 +223,24 @@ impl JobContainerSpec {
 
     pub fn remove_network_args(&self) -> Vec<String> {
         vec!["network".into(), "rm".into(), self.network.clone()]
+    }
+
+    fn append_docker_cli_mounts(&self, args: &mut Vec<String>) {
+        if !self.mount_docker_socket {
+            return;
+        }
+        if let Some(path) = &self.docker_cli_host_path {
+            args.extend([
+                "-v".into(),
+                format!("{}:/usr/local/bin/docker:ro", path.display()),
+            ]);
+        }
+        if let Some(path) = &self.docker_cli_plugin_host_dir {
+            args.extend([
+                "-v".into(),
+                format!("{}:/usr/local/lib/docker/cli-plugins:ro", path.display()),
+            ]);
+        }
     }
 }
 
@@ -368,6 +391,8 @@ mod tests {
             options: vec!["--cpus".into(), "2".into()],
             services: Vec::new(),
             node_action_image: "node:24-bookworm".into(),
+            docker_cli_host_path: None,
+            docker_cli_plugin_host_dir: None,
         }
     }
 
@@ -478,6 +503,37 @@ mod tests {
             args.last().unwrap(),
             "export PATH='/github/home/.cargo/bin':'/path/with'\\''quote':\"$PATH\"\nexec node '/__a/action/dist/index.js'"
         );
+    }
+
+    #[test]
+    fn mounts_host_docker_cli_when_socket_is_mounted() {
+        let mut spec = spec();
+        spec.docker_cli_host_path = Some("/usr/bin/docker".into());
+        spec.docker_cli_plugin_host_dir = Some("/usr/libexec/docker/cli-plugins".into());
+
+        let start_args = spec.start_args();
+        assert!(start_args.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
+        assert!(start_args.contains(
+            &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
+        ));
+
+        let node_args = spec.run_node_action_args(
+            "/__w",
+            &[],
+            &[],
+            "node:24-bookworm",
+            "/__a/action/dist/index.js",
+        );
+        assert!(node_args.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
+        assert!(node_args.contains(
+            &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
+        ));
+
+        let docker_action_args = spec.run_docker_action_args("/__w", &[], "alpine:3.20", None, &[]);
+        assert!(docker_action_args.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
+        assert!(docker_action_args.contains(
+            &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
+        ));
     }
 
     #[test]
