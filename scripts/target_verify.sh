@@ -57,6 +57,7 @@ tests=(
   native_upload_artifact_requires_overwrite_for_duplicate_name
   native_upload_artifact_maps_container_tmp_to_host_temp
   native_cache_reports_miss_without_node_sidecar
+  native_cache_fail_on_miss_is_quiet_on_hit
   native_cache_trims_folded_yaml_primary_key
   native_cache_lookup_only_does_not_restore_paths
   native_cache_restore_key_uses_newest_prefix_match

@@ -1789,7 +1789,7 @@ fn native_cache(
         skipped: false,
         failure_ignored: false,
         stdout,
-        stderr: if fail_on_cache_miss {
+        stderr: if fail_on_cache_miss && matched_key.is_none() {
             "Cache not found and fail-on-cache-miss is true\n".to_string()
         } else {
             String::new()
@@ -4814,6 +4814,61 @@ mod tests {
         assert!(results[0].stderr.contains("fail-on-cache-miss"));
 
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_cache_fail_on_miss_is_quiet_on_hit() {
+        let root = temp_dir();
+        let save_temp = root.join("save-job/temp");
+        let restore_temp = root.join("restore-job/temp");
+        fs::create_dir_all(root.join("save-job/home/.cache/rust-script")).unwrap();
+        fs::create_dir_all(root.join("restore-job/home")).unwrap();
+        fs::write(
+            root.join("save-job/home/.cache/rust-script/state.bin"),
+            "cached\n",
+        )
+        .unwrap();
+        let save = vec![ExecutableStep::Native {
+            step_id: "cache".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::Cache,
+                inputs: [
+                    ("path".into(), "~/.cache/rust-script".into()),
+                    ("key".into(), "linux-rust-script-strict".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&save_temp), &save, &[], &save_temp)
+            .unwrap();
+
+        let restore = vec![ExecutableStep::Native {
+            step_id: "cache".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::Cache,
+                inputs: [
+                    ("path".into(), "~/.cache/rust-script".into()),
+                    ("key".into(), "linux-rust-script-strict".into()),
+                    ("fail-on-cache-miss".into(), "true".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        let restore_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&restore_temp), &restore, &[], &restore_temp)
+            .unwrap();
+
+        assert_eq!(restore_results[0].exit_code, 0);
+        assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
+        assert!(restore_results[0].stderr.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
