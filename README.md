@@ -111,6 +111,8 @@ For a remote Docker daemon without a local `/var/run/docker.sock`, set
 `VELNOR_REQUIRE_DOCKER_SOCKET=false` for the fixture smoke run.
 To create a fresh fixture run instead of using the current queued run, set
 `VELNOR_FIXTURE_DISPATCH=true`.
+The smoke script removes the temporary fixture runner on exit by default; set
+`VELNOR_FIXTURE_CLEANUP_RUNNER=false` to keep it registered for debugging.
 
 Target workflow audit and language brainstorming history: [docs/research/config-language-comparison.md](docs/research/config-language-comparison.md).
 

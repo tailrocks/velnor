@@ -14,6 +14,17 @@ WORKFLOW="${VELNOR_FIXTURE_WORKFLOW:-compat.yml}"
 DISPATCH="${VELNOR_FIXTURE_DISPATCH:-false}"
 RUN_ID="${VELNOR_FIXTURE_RUN_ID:-26762850861}"
 JOB_COUNT="${VELNOR_FIXTURE_JOB_COUNT:-2}"
+CLEANUP_RUNNER="${VELNOR_FIXTURE_CLEANUP_RUNNER:-true}"
+REGISTERED_RUNNER=false
+
+cleanup_runner() {
+  if [[ "$REGISTERED_RUNNER" == "true" && "$CLEANUP_RUNNER" == "true" ]]; then
+    echo "==> Removing fixture runner"
+    cargo run --bin velnor-runner -- remove --pat "$GITHUB_TOKEN" || true
+  fi
+}
+
+trap cleanup_runner EXIT
 
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   echo "GITHUB_TOKEN is required to register the fixture self-hosted runner." >&2
@@ -51,6 +62,7 @@ cargo run --bin velnor-runner -- configure \
   --name "$RUNNER_NAME" \
   --labels "$RUNNER_LABEL" \
   --replace
+REGISTERED_RUNNER=true
 
 if [[ "$DISPATCH" == "true" ]]; then
   echo "==> Dispatching fresh fixture workflow $WORKFLOW"
