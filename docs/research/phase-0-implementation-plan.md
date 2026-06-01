@@ -141,13 +141,13 @@ Basic service containers from GitHub container resources are started on the same
 
 If Docker startup fails, Velnor removes any stale job container, service containers, and job network with the same generated names, then retries startup once. This covers crash/restart cases where a previous Velnor process exited before normal cleanup.
 
-Velnor mounts one host-backed home directory at `/github/home` and sets `HOME=/github/home` for the long-running job container, JavaScript action side containers, and Docker action containers. This is required for target setup actions such as `jdx/mise-action` because tools installed under `$HOME` must remain visible to later script steps.
+Velnor mounts one host-backed home directory at `/github/home` and sets `HOME=/github/home` for the long-running job container and native action containers. This is required for target setup actions such as `jdx/mise-action` because tools installed under `$HOME` must remain visible to later script steps.
 
 Current code also treats enabled `actions/checkout` as a native host-side checkout before starting the Docker job container. It uses the self repository resource clone URL, job version/ref, and system access token by default; explicit `repository`, `path`, `ref`, `token`, `fetch-depth`, `fetch-tags`, `persist-credentials`, and `clean` inputs are supported for target shapes such as Jackin's Homebrew tap checkout. `fetch-depth: 0` fetches full branch and tag refs, which target `dorny/paths-filter` jobs expect. Checkout defaults to GitHub's clean behavior with `git reset --hard HEAD` and `git clean -ffdx` after checkout. When credential persistence is enabled, Velnor writes a local git extraheader so later `git push` commands in the same checkout can authenticate, then removes the extraheader after the job. Velnor also writes per-job mounted-home `safe.directory` entries for checked-out worktrees so Git commands inside Docker accept host-created workspaces. Submodules, sparse checkout, and LFS remain later compatibility work.
 
 For target workflows, mount the host Docker socket first. This weakens isolation but is the shortest path to `docker/setup-buildx-action`, `docker/bake-action`, `docker/build-push-action`, and direct `docker buildx`.
 
-Velnor now verifies that the Docker daemon can actually see the bind-mounted temp directory before running user scripts. This matters for remote Docker daemons, Docker Desktop path-sharing gaps, and containerized runner deployments: Docker may accept `-v host:/__t` while the daemon resolves `host` in a different filesystem and the container sees an empty directory. In that case Velnor fails before executing steps, tells the operator to use a local Docker daemon or move `--work-dir`/`--config-dir` to a daemon-visible path, and reports V2 completion with `infrastructureFailureCategory: docker_bind_mount`. The same host temp directory is also mounted at `/tmp` in job, JavaScript-action, and Docker-action containers so target workflows that write artifacts under absolute `/tmp/...` paths can hand those files to native artifact adapters. A shared Velnor sccache directory is mounted at `/var/cache/sccache` to match the `java-monorepo` Rust workflow's host-cache assumption.
+Velnor now verifies that the Docker daemon can actually see the bind-mounted temp directory before running user scripts. This matters for remote Docker daemons, Docker Desktop path-sharing gaps, and containerized runner deployments: Docker may accept `-v host:/__t` while the daemon resolves `host` in a different filesystem and the container sees an empty directory. In that case Velnor fails before executing steps, tells the operator to use a local Docker daemon or move `--work-dir`/`--config-dir` to a daemon-visible path, and reports V2 completion with `infrastructureFailureCategory: docker_bind_mount`. The same host temp directory is also mounted at `/tmp` in job and native action containers so target workflows that write artifacts under absolute `/tmp/...` paths can hand those files to native artifact adapters. A shared Velnor sccache directory is mounted at `/var/cache/sccache` to match the `java-monorepo` Rust workflow's host-cache assumption.
 
 Later isolation options:
 
@@ -208,25 +208,23 @@ Jackin first-pass scope should be Linux jobs only. macOS replacement is explicit
 Implement action support in the order that unlocks target workflows fastest:
 
 1. Script steps: already partially implemented.
-2. Command files and env/path propagation: implemented for parsing and per-step files, with V2 typed job/step env and run defaults normalized and `GITHUB_PATH` entries applied to later script steps and JavaScript action sidecars.
-3. `actions/checkout`: either native plugin first or JavaScript action support first. Native plugin is faster for Phase 0.
-4. Marketplace JavaScript action handler:
-   - download action repo/ref: implemented for repository action probe path
-   - parse `action.yml`: metadata parser and repository action planner are implemented as groundwork
-   - map `with:` to `INPUT_*`: implemented for JavaScript action invocation, including metadata defaults and run-service typed map inputs
-   - map step `env:`: implemented for plain and run-service typed map shapes
-   - run Node entrypoint: implemented for ordered script/JavaScript execution. JavaScript actions run in a short-lived side container with the same workspace/temp/home/actions/tools mounts and job network so arbitrary job images do not need to carry Node. By default Velnor honors the action's declared Node runtime image and mounts host Docker client tooling when available; operators can override it with `--node-action-image`.
-   - run `runs.post` cleanup/save entrypoints: implemented in reverse order with `GITHUB_STATE` to `STATE_*` propagation and target `runs.post-if` condition handling
+2. Command files and env/path propagation: implemented for parsing and per-step files, with V2 typed job/step env and run defaults normalized and `GITHUB_PATH` entries applied to later script steps and native setup/tool adapters.
+3. `actions/checkout`: native adapter implemented for target shapes.
+4. Native marketplace action adapters:
+   - supported target action families are selected by repository family such as `actions/cache` or `docker/login-action`, ignoring the YAML `@ref`/SHA for implementation selection
+   - repository action download and `action.yml` parsing remain available as composite-discovery groundwork, but known target actions do not execute their marketplace JavaScript/TypeScript bundles
+   - map `with:` and step `env:` through normalized V2 typed maps into adapter input maps
+   - model post behavior explicitly for native adapters such as cache/rust-cache instead of running `runs.post` JavaScript
    - provide `GITHUB_*`, `RUNNER_*`, `ACTIONS_*` runtime env: basic job-message extraction, `GITHUB_ACTIONS=true`, target repository owner/ref/workflow/server URL env, GitHub-style `RUNNER_ARCH` values, runner name/environment/workspace/debug, toolcache env via `RUNNER_TOOL_CACHE=/__tool` and `AGENT_TOOLSDIRECTORY=/__tool`, `GITHUB_EVENT_PATH` payload writing, per-action repository/ref/path env, and step injection are implemented; full runner parity remains open
 5. Composite action handler:
    - local `.github/actions/*`: implemented for checked-out self repository actions, including run-service typed map inputs
    - nested `run`: implemented for shell steps with basic input/action-path/workspace interpolation
-   - nested `uses`: implemented for repository JavaScript actions inside local composites
-   - step `if`: implemented for local composite `run` and nested repository JavaScript steps
+   - nested `uses`: implemented for repository actions inside local composites, with target marketplace families routed to native adapters
+   - step `if`: implemented for local composite `run` and nested repository action steps
    - repository marketplace composites: implemented for downloaded `runs.using: composite` actions, including recursive discovery of nested repository `uses`
    - composite step `continue-on-error`: parsed and propagated into expanded steps
    - inputs/outputs: input interpolation, defaults, target `toJSON(needs)` caller input rendering, and metadata `outputs.*.value` materialization are implemented
-6. Cache/artifact runtime endpoints: implemented from `SystemVssConnection` for JavaScript actions, including OIDC, cache service v2, and orchestration id when present
+6. Cache/artifact runtime endpoints: implemented from `SystemVssConnection` for native adapters, including OIDC, cache service v2, and orchestration id when present
    - `ACTIONS_RUNTIME_URL`
    - `ACTIONS_RUNTIME_TOKEN`
    - `ACTIONS_CACHE_URL`
@@ -235,7 +233,7 @@ Implement action support in the order that unlocks target workflows fastest:
    - `runs.using: docker` action planning and execution is implemented for top-level and repository-nested action expansion
    - `docker://` images run directly; local Dockerfile actions are built before execution
    - Docker actions run as short-lived containers on the same job network with workspace/temp/actions/tools mounts and command-file env
-   - job container and JavaScript action sidecars can call host Docker through the mounted socket; the default JavaScript action sidecar includes the Docker CLI
+   - job container and native Docker adapters can call host Docker through the mounted socket and mounted host Docker CLI/Buildx plugin
    - buildx action can inspect/reuse existing builders or create/use new builders
    - GHA cache backend variables pass through
 8. Pages actions for jackin:
@@ -247,8 +245,8 @@ Implement action support in the order that unlocks target workflows fastest:
 GitHub UI compatibility needs reporting early. Minimal order:
 
 1. create/update job timeline record as in-progress: current code sends a best-effort in-progress job record with runner name before Docker execution starts.
-2. create/update step timeline records: current code sends best-effort in-progress task records when executable script, checkout, JavaScript, Docker, pre, and post steps start.
-3. stream or append logs per step: current code captures stdout/stderr after each executed script or JavaScript step, creates completed task timeline records as each step exits, appends masked lines when present, and still reports silent or skipped executable steps.
+2. create/update step timeline records: current code sends best-effort in-progress task records when executable script, checkout, native, Docker, pre, and post steps start.
+3. stream or append logs per step: current code captures stdout/stderr after each executed script or native adapter step, creates completed task timeline records as each step exits, appends masked lines when present, and still reports silent or skipped executable steps.
 4. finish step with success/failure/skipped
 5. finish job with success/failure/cancelled
 6. include job outputs, step results, evaluated environment URL, telemetry for implemented workflow-command cases, billing owner id, and infrastructure failure category in the completion payload
@@ -275,10 +273,10 @@ GitHub already evaluates:
 Velnor still needs runtime step expression behavior from the job message:
 
 - step `if`: implemented for output comparisons, step outcome checks, selected GitHub/runner context values, generic job `ContextData` (`matrix.*`, `needs.*`, `inputs.*`, `vars.*`), synthesized `secrets.*` from GitHub secret variables, grouped simple `&&`/`||`, target-shaped `contains()`, and status functions `always()`, `success()`, `failure()`, and non-cancelled `cancelled()`
-- `steps.<id>.outputs.*`: implemented for direct interpolation in later scripts and JavaScript action env
+- `steps.<id>.outputs.*`: implemented for direct interpolation in later scripts and native adapter env/input maps
 - job outputs: `JobOutputs` from the GitHub job message are evaluated after step execution from final step outputs and sent through the V2 run-service `completejob` payload; V2 typed map shapes are normalized before evaluation
-- env/context expansion in scripts and JavaScript action env: basic `steps.*.outputs.*`, `github.*` including `github.workflow`, `github.ref_name`, and nested `github.event.*`, `runner.*`, `env.*`, `secrets.*`, generic job `ContextData`, target-shaped `&&`/`||` value expressions, equality checks, unary `!`, `contains(...)`, `toJSON(...)`, and workspace-backed `hashFiles(...)` interpolation is implemented
-- `continue-on-error`: implemented for script and JavaScript action steps, including V2 typed wrapper values; failed steps keep failure outcome for later `steps.<id>.outcome` checks, but do not fail the job
+- env/context expansion in scripts and native adapter env/input maps: basic `steps.*.outputs.*`, `github.*` including `github.workflow`, `github.ref_name`, and nested `github.event.*`, `runner.*`, `env.*`, `secrets.*`, generic job `ContextData`, target-shaped `&&`/`||` value expressions, equality checks, unary `!`, `contains(...)`, `toJSON(...)`, and workspace-backed `hashFiles(...)` interpolation is implemented
+- `continue-on-error`: implemented for script and native action steps, including V2 typed wrapper values; failed steps keep failure outcome for later `steps.<id>.outcome` checks, but do not fail the job
 
 Implement only the expression subset that appears in the job message for target workflows.
 

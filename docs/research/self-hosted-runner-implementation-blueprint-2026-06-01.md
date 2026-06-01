@@ -119,8 +119,10 @@ Rules for Velnor:
 - Each job gets a per-job Docker network.
 - Target Linux jobs should always run inside a long-running Docker job
   container, even when the workflow does not declare `container:`.
-- JavaScript actions run in short-lived Node sidecar containers with the same
-  workspace/temp/home/actions/tools mounts and job network.
+- Known target marketplace actions run through Rust-native adapters selected by
+  action family, ignoring the YAML `@ref` for implementation selection.
+  JavaScript action sidecars remain lower-level compatibility groundwork for
+  non-target experiments, not the Phase 0 target execution path.
 - Docker actions run as short-lived containers with GitHub-style static paths:
   `/github/workspace`, `/github/runner_temp`, `/github/file_commands`,
   `/github/home`, and `/github/workflow`.
@@ -158,7 +160,7 @@ Runtime requirements:
 - `defaults.run.working-directory`
 - `actions/setup-python`
 - Rust and Just setup actions
-- cache service env for `actions/cache` and `Swatinem/rust-cache`
+- cache service env for native `actions/cache` and `Swatinem/rust-cache`
 - `dorny/paths-filter` output-driven gating
 - reusable workflow expansion from `kestra-build-publish.yml`, handled by GitHub
 - Docker socket, Docker CLI, and Buildx plugin for setup/build/push/bake actions
@@ -206,8 +208,8 @@ The current code is already aligned with the upstream split:
   shapes
 - `action.rs`: action metadata parsing and repository/composite/Docker action
   planning
-- `executor.rs`: Docker job lifecycle, script steps, JavaScript sidecars, Docker
-  actions, command-file state, runtime env, expression subset
+- `executor.rs`: Docker job lifecycle, script steps, native adapters, Docker
+  action groundwork, command-file state, runtime env, expression subset
 - `container.rs`: Docker command shape for job/action containers
 - `command_files.rs` and `workflow_command.rs`: env/output/path/state/summary
   files and stdout workflow commands
@@ -232,10 +234,9 @@ For the target MVP, a real Velnor job should follow this sequence:
 9. Start long-running job container.
 10. For each enabled step, evaluate the target expression subset immediately
     before execution.
-11. Run script, JavaScript action sidecar, Docker action, or expanded composite
-    in original order.
+11. Run script, native adapter, or expanded composite in original order.
 12. Process command files after every step.
-13. Run JavaScript/Docker post hooks in reverse order with `STATE_*`.
+13. Run native post hooks in reverse order with saved state.
 14. Evaluate job outputs from final step outputs.
 15. Upload readable timeline/feed logs, annotations, step results, and final job
     status.

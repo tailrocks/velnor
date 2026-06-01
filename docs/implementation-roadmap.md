@@ -97,7 +97,7 @@ Current code progress:
 - Docker script executor runs the planned lifecycle through an abstract command runner: create network, start container, exec script, collect state, cleanup container/network
 - if Docker startup fails because a previous run left the same job container/network names behind, Velnor removes stale job resources once and retries startup before failing the job
 - enabled GitHub script steps can be mapped into internal `ScriptStep` plans for `bash` and `sh`, including `script`, `shell`, `workingDirectory`, and job `defaults.run` shell/working-directory
-- `velnor-runner run` executes supported jobs by default in one Docker job container plus JavaScript/Docker action sidecars and finishes success/failure; `--complete-noop` remains available for completion probes and `--dry-run-jobs` leaves received jobs unacknowledged for inspection
+- `velnor-runner run` executes supported jobs by default in one Docker job container plus Rust-native adapters for the target marketplace action families and finishes success/failure; JavaScript/Docker action sidecar support remains only lower-level compatibility groundwork and is not the Phase 0 target path; `--complete-noop` remains available for completion probes and `--dry-run-jobs` leaves received jobs unacknowledged for inspection
 - env written to `GITHUB_ENV` and paths written to `GITHUB_PATH` are propagated to later script steps
 - initial workflow/job env expressions are resolved once when the job execution state is created, matching GitHub worker-side environment evaluation
 - `GITHUB_ENV` and legacy `set-env` mutations cannot override `GITHUB_*` and `RUNNER_*` defaults or `NODE_OPTIONS`; `ACTIONS_*` remains mutable for target runtime-export actions
@@ -125,7 +125,7 @@ Goal: support target marketplace action behavior through Rust-native adapters.
 Deliverables:
 
 - broader `actions/checkout` compatibility: `repository`, `path`, `ref`, `token`, `fetch-depth`, `fetch-tags`, `persist-credentials`, and `clean` inputs are implemented for target shapes; `fetch-depth: 0` fetches full branch/tag refs for target path-filter jobs; checkout refs from earlier step outputs, such as the `jackin` preview `ref: ${{ steps.source.outputs.sha }}`, stay ordered after their producer step and are not eagerly collapsed; checked-out worktrees are added to the mounted-home `safe.directory` config for Docker-side Git commands; persisted git extraheaders are removed after the job; sparse checkout, submodules, and LFS remain open
-- action resolver/downloader for `owner/repo@ref`: repository action download into `_actions` and metadata discovery are implemented
+- action resolver/downloader for `owner/repo@ref`: repository action download into `_actions` and metadata discovery are implemented as composite-discovery groundwork; known target marketplace action families bypass pinned metadata for execution and route to Rust-native adapters
 - action metadata parser for `action.yml`: JavaScript, composite, and Docker `runs.using` shapes are modeled
 - repository action planner for enabled non-checkout `uses:` steps
 - native adapter registry maps the current target action families to adapter kinds; unknown actions can still be modeled from metadata during development, but this is not the product direction
@@ -164,9 +164,9 @@ Deliverables:
 - cached target action metadata verification now uses the same `_actions/<repo>/<ref>/<path>` layout as the runtime downloader, so the direct workflow action inventory and nested composite action closure are checked against the runner's real on-disk action resolution shape
 - cached target composite metadata is also expanded into the same script/repository/output invocation variants used by execution planning, catching unsupported nested composite constructs before live runs
 - target workflow repository action references are assembled into a synthetic GitHub job and passed through Velnor's real repository-action planning and ordered executable-step expansion against cached metadata
-- `continue-on-error`: script and JavaScript action steps can ignore a nonzero exit for job failure while preserving `steps.<id>.outcome == 'failure'`, covering target optional `sccache` setup
+- `continue-on-error`: script and native action steps can ignore a nonzero exit for job failure while preserving `steps.<id>.outcome == 'failure'`, covering target optional `sccache` setup
 - V2 typed `continueOnError` wrapper values are accepted for target soft-fail action steps
-- ordered job execution for script steps and JavaScript actions in original message order is wired, with JavaScript post hooks executed in reverse order; host-side checkout still runs before the Docker container starts
+- ordered job execution for script steps and native adapters in original message order is wired, with native cache/save post hooks modeled explicitly; host-side checkout still runs before the Docker container starts
 
 Exit criteria:
 
@@ -184,8 +184,8 @@ Deliverables:
 - local composite action discovery after checkout: implemented for `./.github/actions/...`
 - composite inputs: basic `${{ inputs.* }}` interpolation into `run`, `env`, and nested `with` exists, including metadata defaults; top-level local composite `with:` values are resolved against job `ContextData` first, including target `toJSON(needs)` aggregator inputs
 - nested `run` steps: local composite `run` steps are expanded into ordered script steps
-- nested `uses` steps: implemented for repository JavaScript actions referenced from local composites
-- composite step conditions: `if:` is parsed, rendered with composite inputs, and propagated to expanded `run` and nested repository JavaScript steps
+- nested `uses` steps: implemented for repository actions referenced from local composites, with target marketplace families routed to the native adapter registry
+- composite step conditions: `if:` is parsed, rendered with composite inputs, and propagated to expanded `run` and nested repository action steps
 - repository composite actions: downloaded marketplace composites now expand into ordered script steps; nested repository actions inside those composites are discovered and downloaded recursively
 - composite run steps receive GitHub-style `GITHUB_ACTION_PATH` pointing at the parent composite action directory, so scripts using `$GITHUB_ACTION_PATH` match runner behavior
 - composite `continue-on-error`: parsed for nested composite steps and applied to expanded script/repository steps
@@ -227,7 +227,7 @@ Goal: run Docker-heavy target workflows.
 
 Deliverables:
 
-- job container, JavaScript action sidecars, and Docker action containers mount the host Docker CLI/Buildx plugin on Linux when available
+- job container and native Docker adapters mount the host Docker CLI/Buildx plugin on Linux when available
 - mount `/var/run/docker.sock`
 - support Buildx/Bake actions
 - preserve cache env and workspace paths
