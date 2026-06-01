@@ -173,6 +173,106 @@ EXPECTED_JOB_ENVIRONMENTS = Counter(
     }
 )
 
+EXPECTED_WORKFLOW_CONCURRENCY = Counter(
+    {
+        (
+            ".github/workflows/ci.yml",
+            "{cancel-in-progress: ${{ github.event_name == 'pull_request' }}, group: ci-${{ github.ref }}}",
+        ): 1,
+        (
+            ".github/workflows/construct.yml",
+            "{cancel-in-progress: ${{ github.event_name == 'pull_request' }}, group: construct-${{ github.ref }}}",
+        ): 1,
+        (
+            ".github/workflows/docs.yml",
+            "{cancel-in-progress: ${{ github.event_name == 'pull_request' }}, group: pages-${{ github.event_name }}-${{ github.ref }}}",
+        ): 1,
+        (
+            ".github/workflows/preview.yml",
+            "{cancel-in-progress: true, group: homebrew-tap-publish}",
+        ): 1,
+        (".github/workflows/release.yml", "{cancel-in-progress: false, group: release}"): 1,
+        (
+            ".github/workflows/renovate-validate.yml",
+            "{cancel-in-progress: ${{ github.event_name == 'pull_request' }}, group: renovate-validate-${{ github.ref }}}",
+        ): 1,
+        (
+            ".github/workflows/renovate.yml",
+            "{cancel-in-progress: true, group: renovate}",
+        ): 1,
+        (
+            ".github/workflows/rust-docker.yml",
+            "{cancel-in-progress: ${{ github.event_name == 'pull_request' }}, group: rust-docker-${{ github.ref }}}",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "{cancel-in-progress: ${{ github.event_name == 'pull_request' }}, group: rust-ci-${{ github.ref }}}",
+        ): 1,
+    }
+)
+
+EXPECTED_JOB_DEFAULTS = Counter(
+    {
+        (
+            ".github/workflows/ansible.yml",
+            "syntax-check",
+            "{run: {shell: bash, working-directory: ./ansible-configs}}",
+        ): 1,
+        (
+            ".github/workflows/kestra-build-image.yml",
+            "build",
+            "{run: {shell: bash, working-directory: ./kestra-docker-containers}}",
+        ): 1,
+    }
+)
+
+EXPECTED_CONTINUE_ON_ERROR = Counter(
+    {
+        (
+            ".github/workflows/ci.yml",
+            "check",
+            "mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696",
+            True,
+        ): 1,
+        (
+            ".github/workflows/ci.yml",
+            "build-validator",
+            "mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696",
+            True,
+        ): 1,
+        (
+            ".github/workflows/preview.yml",
+            "build-preview",
+            "mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696",
+            True,
+        ): 1,
+        (
+            ".github/workflows/preview.yml",
+            "build-jackin-capsule",
+            "mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696",
+            True,
+        ): 1,
+        (
+            ".github/workflows/release.yml",
+            "test",
+            "mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696",
+            True,
+        ): 1,
+        (
+            ".github/workflows/release.yml",
+            "build",
+            "mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696",
+            True,
+        ): 1,
+        (
+            ".github/workflows/release.yml",
+            "build-jackin-capsule",
+            "mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696",
+            True,
+        ): 1,
+    }
+)
+
 
 def load_yaml(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
@@ -555,6 +655,27 @@ def check_target_mvp(summary: dict[str, Any]) -> list[str]:
         errors.append(
             "target MVP job environment drift: "
             f"expected {dict(EXPECTED_JOB_ENVIRONMENTS)}, got {dict(job_environments)}"
+        )
+
+    workflow_concurrency = Counter(summary["workflow_concurrency"])
+    if workflow_concurrency != EXPECTED_WORKFLOW_CONCURRENCY:
+        errors.append(
+            "target MVP workflow concurrency drift: "
+            f"expected {dict(EXPECTED_WORKFLOW_CONCURRENCY)}, got {dict(workflow_concurrency)}"
+        )
+
+    job_defaults = Counter(summary["job_defaults"])
+    if job_defaults != EXPECTED_JOB_DEFAULTS:
+        errors.append(
+            "target MVP job defaults drift: "
+            f"expected {dict(EXPECTED_JOB_DEFAULTS)}, got {dict(job_defaults)}"
+        )
+
+    continue_on_error = Counter(summary["continue_on_error"])
+    if continue_on_error != EXPECTED_CONTINUE_ON_ERROR:
+        errors.append(
+            "target MVP continue-on-error drift: "
+            f"expected {dict(EXPECTED_CONTINUE_ON_ERROR)}, got {dict(continue_on_error)}"
         )
 
     for label, key in [
