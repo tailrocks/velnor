@@ -236,7 +236,7 @@ Implement action support in the order that unlocks target workflows fastest:
    - `docker://` images run directly; local Dockerfile actions are built before execution
    - Docker actions run as short-lived containers on the same job network with workspace/temp/actions/tools mounts and command-file env
    - job container and JavaScript action sidecars can call host Docker through the mounted socket; the default JavaScript action sidecar includes the Docker CLI
-   - buildx action can create/use builders
+   - buildx action can inspect/reuse existing builders or create/use new builders
    - GHA cache backend variables pass through
 8. Pages actions for jackin:
    - `actions/upload-pages-artifact`

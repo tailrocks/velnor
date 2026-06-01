@@ -109,7 +109,7 @@ until a new target workflow needs more.
 | `Swatinem/rust-cache` | `RustCache` | restore/save cache dirs, `shared-key`, `cache-on-failure`, shared workdir cache storage |
 | `crazy-max/ghaction-github-runtime` | `GitHubRuntimeExport` | export runtime/cache/results env values |
 | `renovatebot/github-action` | `Renovate` | run Renovate with target env/token/Docker access |
-| `docker/setup-buildx-action` | `DockerSetupBuildx` | create/select builder and honor target inputs |
+| `docker/setup-buildx-action` | `DockerSetupBuildx` | inspect/reuse or create/select builder and honor target inputs |
 | `docker/login-action` | `DockerLogin` | registry login from resolved credentials through `--password-stdin` |
 | `docker/metadata-action` | `DockerMetadata` | compute target tags/labels outputs |
 | `docker/build-push-action` | `DockerBuildPush` | invoke Buildx for target context/tag/cache/push shapes |

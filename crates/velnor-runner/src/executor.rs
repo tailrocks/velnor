@@ -1041,9 +1041,18 @@ where
             result,
             StepCommandState {
                 env: [
-                    ("MISE_DATA_DIR".to_string(), "/github/home/.local/share/mise".to_string()),
-                    ("MISE_CACHE_DIR".to_string(), "/github/home/.cache/mise".to_string()),
-                    ("MISE_CONFIG_DIR".to_string(), "/github/home/.config/mise".to_string()),
+                    (
+                        "MISE_DATA_DIR".to_string(),
+                        "/github/home/.local/share/mise".to_string(),
+                    ),
+                    (
+                        "MISE_CACHE_DIR".to_string(),
+                        "/github/home/.cache/mise".to_string(),
+                    ),
+                    (
+                        "MISE_CONFIG_DIR".to_string(),
+                        "/github/home/.config/mise".to_string(),
+                    ),
                 ]
                 .into(),
                 path: vec!["/github/home/.local/share/mise/shims".to_string()],
@@ -1189,19 +1198,26 @@ where
         let action_state = state.with_env(state.resolve_env(&action.env));
         let name = native_input_or(&action_state, action, "name", "velnor-builder");
         let driver = native_input_or(&action_state, action, "driver", "docker-container");
-        let mut args = vec![
-            "buildx".to_string(),
-            "create".to_string(),
-            "--name".to_string(),
-            name.clone(),
-            "--driver".to_string(),
-            driver,
-            "--use".to_string(),
-        ];
-        if input_truthy(&native_input_or(&action_state, action, "install", "false")) {
-            args.push("--bootstrap".to_string());
-        }
-        let result = self.runner.run("docker", &args)?;
+        let inspect_args = vec!["buildx".to_string(), "inspect".to_string(), name.clone()];
+        let inspect_result = self.runner.run("docker", &inspect_args)?;
+        let result = if inspect_result.code == 0 {
+            let use_args = vec!["buildx".to_string(), "use".to_string(), name.clone()];
+            self.runner.run("docker", &use_args)?
+        } else {
+            let mut args = vec![
+                "buildx".to_string(),
+                "create".to_string(),
+                "--name".to_string(),
+                name.clone(),
+                "--driver".to_string(),
+                driver,
+                "--use".to_string(),
+            ];
+            if input_truthy(&native_input_or(&action_state, action, "install", "false")) {
+                args.push("--bootstrap".to_string());
+            }
+            self.runner.run("docker", &args)?
+        };
         Ok(native_command_result(
             result,
             StepCommandState {
@@ -4635,7 +4651,11 @@ type=sha,format=long,prefix=,enable=true"
                 continue_on_error: false,
             },
         ];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            codes: vec![0, 0, 1],
+        });
 
         let results = executor
             .execute_ordered_steps_with_context(
@@ -4861,15 +4881,15 @@ type=sha,format=long,prefix=,enable=true"
         assert!(docker_exec_calls
             .iter()
             .any(|args| args.iter().any(|arg| arg.contains("https://mise.run"))));
-        assert!(docker_exec_calls
+        assert!(docker_exec_calls.iter().any(|args| args
             .iter()
-            .any(|args| args.iter().any(|arg| arg.contains("python install \"3.13\""))));
-        assert!(docker_exec_calls
+            .any(|arg| arg.contains("python install \"3.13\""))));
+        assert!(docker_exec_calls.iter().any(|args| args
             .iter()
-            .any(|args| args.iter().any(|arg| arg.contains("https://just.systems/install.sh"))));
-        assert!(docker_exec_calls
+            .any(|arg| arg.contains("https://just.systems/install.sh"))));
+        assert!(docker_exec_calls.iter().any(|args| args
             .iter()
-            .any(|args| args.iter().any(|arg| arg.contains("apt-get install -y --no-install-recommends mold"))));
+            .any(|arg| arg.contains("apt-get install -y --no-install-recommends mold"))));
         assert!(docker_exec_calls.iter().any(|args| args
             .iter()
             .any(|arg| arg.contains("rustup toolchain install stable"))));
@@ -7435,7 +7455,12 @@ fi"#
         }];
 
         DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(&container(&upload_temp), &upload, &runtime_env, &upload_temp)
+            .execute_ordered_steps(
+                &container(&upload_temp),
+                &upload,
+                &runtime_env,
+                &upload_temp,
+            )
             .unwrap();
         let results = DockerScriptExecutor::new(RecordingRunner::default())
             .execute_ordered_steps(
@@ -7827,6 +7852,67 @@ fi"#
         assert!(node_calls[2].contains(&"INPUT_IMAGES=ghcr.io/chainargos/app".into()));
         assert!(node_calls[3].contains(&"INPUT_CONTEXT=.".into()));
         assert!(node_calls[4].contains(&"INPUT_FILES=docker-bake.hcl".into()));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_setup_buildx_reuses_existing_builder() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "buildx".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::DockerSetupBuildx,
+                inputs: [
+                    ("name".into(), "jackin-construct".into()),
+                    ("driver".into(), "docker-container".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results[0].exit_code, 0);
+        assert_eq!(results[0].state.outputs["name"], "jackin-construct");
+        assert_eq!(results[0].state.env["BUILDX_BUILDER"], "jackin-construct");
+        let calls = &executor.runner().calls;
+        let inspect_call = calls
+            .iter()
+            .position(|(program, args)| {
+                program == "docker"
+                    && args
+                        == &[
+                            "buildx".to_string(),
+                            "inspect".to_string(),
+                            "jackin-construct".to_string(),
+                        ]
+            })
+            .unwrap();
+        let use_call = calls
+            .iter()
+            .position(|(program, args)| {
+                program == "docker"
+                    && args
+                        == &[
+                            "buildx".to_string(),
+                            "use".to_string(),
+                            "jackin-construct".to_string(),
+                        ]
+            })
+            .unwrap();
+        assert!(inspect_call < use_call);
+        assert!(!calls
+            .iter()
+            .any(|(_, args)| args.first().is_some_and(|arg| arg == "buildx")
+                && args.get(1).is_some_and(|arg| arg == "create")));
+
         fs::remove_dir_all(temp).unwrap();
     }
 
