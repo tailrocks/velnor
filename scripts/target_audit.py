@@ -83,6 +83,58 @@ EXPECTED_REUSABLE_WORKFLOWS = Counter(
     }
 )
 
+EXPECTED_JOB_RUNS_ON = Counter(
+    {
+        (".github/workflows/ansible.yml", "syntax-check", "hetzner-sentry-ci"): 1,
+        (".github/workflows/ci.yml", "build-validator", "ubuntu-latest"): 1,
+        (".github/workflows/ci.yml", "changes", "ubuntu-latest"): 1,
+        (".github/workflows/ci.yml", "check", "ubuntu-latest"): 1,
+        (".github/workflows/ci.yml", "ci-required", "ubuntu-latest"): 1,
+        (".github/workflows/ci.yml", "msrv", "ubuntu-latest"): 1,
+        (".github/workflows/construct.yml", "build", "${{ matrix.runner }}"): 1,
+        (".github/workflows/construct.yml", "changes", "ubuntu-latest"): 1,
+        (".github/workflows/construct.yml", "construct-required", "ubuntu-latest"): 1,
+        (".github/workflows/construct.yml", "publish-manifest", "ubuntu-24.04"): 1,
+        (".github/workflows/construct.yml", "publish-manifest-rehearsal", "ubuntu-24.04"): 1,
+        (".github/workflows/docs.yml", "changes", "ubuntu-latest"): 1,
+        (".github/workflows/docs.yml", "check-deployed", "ubuntu-latest"): 1,
+        (".github/workflows/docs.yml", "deploy", "ubuntu-latest"): 1,
+        (".github/workflows/docs.yml", "docs-link-check", "ubuntu-latest"): 1,
+        (".github/workflows/docs.yml", "docs-required", "ubuntu-latest"): 1,
+        (".github/workflows/docs.yml", "repo-link-check", "ubuntu-latest"): 1,
+        (".github/workflows/kestra-build-image.yml", "build", "hetzner-sentry-ci"): 1,
+        (".github/workflows/preview.yml", "build-jackin-capsule", "ubuntu-latest"): 1,
+        (".github/workflows/preview.yml", "build-preview", "ubuntu-latest"): 1,
+        (".github/workflows/preview.yml", "publish-preview", "ubuntu-latest"): 1,
+        (".github/workflows/preview.yml", "source-changed", "ubuntu-latest"): 1,
+        (".github/workflows/release.yml", "build", "${{ matrix.os }}"): 1,
+        (".github/workflows/release.yml", "build-jackin-capsule", "ubuntu-latest"): 1,
+        (".github/workflows/release.yml", "check-version", "ubuntu-latest"): 1,
+        (".github/workflows/release.yml", "homebrew", "ubuntu-latest"): 1,
+        (".github/workflows/release.yml", "release", "ubuntu-latest"): 1,
+        (".github/workflows/release.yml", "test", "ubuntu-latest"): 1,
+        (".github/workflows/renovate-validate.yml", "validate", "ubuntu-latest"): 1,
+        (".github/workflows/renovate.yml", "renovate", "hetzner-sentry-ci"): 1,
+        (".github/workflows/renovate.yml", "renovate", "ubuntu-24.04"): 1,
+        (".github/workflows/rust-docker-build.yml", "build", "hetzner-sentry-ci"): 1,
+        (".github/workflows/rust-docker.yml", "changes", "hetzner-sentry-ci"): 1,
+        (".github/workflows/rust-docker.yml", "docker-bake", "hetzner-sentry-ci"): 1,
+        (".github/workflows/rust-docker.yml", "docker-required", "hetzner-sentry-ci"): 1,
+        (".github/workflows/rust.yml", "changes", "hetzner-sentry-ci"): 1,
+        (".github/workflows/rust.yml", "check", "hetzner-sentry-ci"): 1,
+        (".github/workflows/rust.yml", "rust-required", "hetzner-sentry-ci"): 1,
+        (".github/workflows/rust.yml", "test-bitcoin-processor", "hetzner-sentry-ci"): 1,
+        (".github/workflows/rust.yml", "test-blockchain-explorer", "hetzner-sentry-ci"): 1,
+        (".github/workflows/rust.yml", "test-coingecko-pricing", "hetzner-sentry-ci"): 1,
+        (".github/workflows/rust.yml", "test-eth-grpc-server", "hetzner-sentry-ci"): 1,
+        (".github/workflows/rust.yml", "test-eth-processor", "hetzner-sentry-ci"): 1,
+        (".github/workflows/rust.yml", "test-legacy-grpc-server", "hetzner-sentry-ci"): 1,
+        (".github/workflows/rust.yml", "test-tron-grpc-server", "hetzner-sentry-ci"): 1,
+        (".github/workflows/rust.yml", "test-tron-processor", "hetzner-sentry-ci"): 1,
+        (".github/workflows/rust.yml", "warm-sccache", "hetzner-sentry-ci"): 1,
+    }
+)
+
 
 def load_yaml(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
@@ -432,6 +484,13 @@ def check_target_mvp(summary: dict[str, Any]) -> list[str]:
         errors.append(
             "target MVP reusable workflow drift: "
             f"expected {dict(EXPECTED_REUSABLE_WORKFLOWS)}, got {dict(reusable_workflows)}"
+        )
+
+    job_runs_on = Counter(summary["job_runs_on"])
+    if job_runs_on != EXPECTED_JOB_RUNS_ON:
+        errors.append(
+            "target MVP runs-on drift: "
+            f"expected {dict(EXPECTED_JOB_RUNS_ON)}, got {dict(job_runs_on)}"
         )
 
     for label, key in [
