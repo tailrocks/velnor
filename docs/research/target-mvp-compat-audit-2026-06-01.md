@@ -297,6 +297,7 @@ These should stay out of Phase 0 unless a target workflow starts using them or G
 
 After refreshing both target repositories, these Velnor checks pass against the current `.github` trees and cached action metadata:
 
+- `scripts/target_verify.sh`
 - `cargo test -q target_workflow_repository_actions_plan_from_cached_metadata`
 - `cargo test -q fetched_target_workflow_actions_have_metadata`
 - `cargo test -q target_workflow_expressions_use_supported_subset`
