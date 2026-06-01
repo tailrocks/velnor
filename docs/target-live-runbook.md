@@ -114,9 +114,11 @@ scripts/fixture_smoke.sh
 
 The readiness script checks fixture status, fixture feature-surface drift, and
 host Docker readiness without runner registration or workflow dispatch. The
-smoke script runs the local verifier, Docker preflight, fixture runner slot
-registration, one bounded Velnor daemon with `--once` and one internal slot per
-requested fixture job, and a GitHub run status summary. Override the count with
+smoke script runs `cargo test -q`, Docker preflight through the host doctor,
+fixture runner slot registration, one bounded Velnor daemon with `--once` and
+one internal slot per requested fixture job, and a GitHub run status summary.
+Set `VELNOR_RUN_TARGET_VERIFY=true` when you also want the host doctor to run
+`scripts/target_verify.sh` before runner registration. Override the count with
 `VELNOR_FIXTURE_JOB_COUNT` when the fixture shape changes. By default it
 dispatches a fresh `compat.yml` run and waits for the new run id. Set
 `VELNOR_FIXTURE_RUN_ID=<run-id>` to consume an existing run; set
