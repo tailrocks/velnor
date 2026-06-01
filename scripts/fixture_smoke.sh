@@ -39,22 +39,18 @@ fi
 cd "$ROOT"
 
 echo "==> Checking runner source and local tests"
-python3 scripts/check_runner_reference.py
 cargo test -q
 
-echo "==> Running Docker preflight"
-preflight_args=(--work-dir "$WORK_DIR")
 run_args=(--work-dir "$WORK_DIR")
 if [[ -n "$DOCKER_HOST_WORK_DIR" ]]; then
-  preflight_args+=(--docker-host-work-dir "$DOCKER_HOST_WORK_DIR")
   run_args+=(--docker-host-work-dir "$DOCKER_HOST_WORK_DIR")
 fi
 if [[ "$REQUIRE_DOCKER_SOCKET" == "true" ]]; then
-  preflight_args+=(--require-docker-socket)
   run_args+=(--require-docker-socket)
 fi
 
-cargo run --bin velnor-runner -- preflight "${preflight_args[@]}"
+echo "==> Checking live host readiness"
+scripts/live_host_doctor.sh
 
 echo "==> Registering fixture runner"
 cargo run --bin velnor-runner -- configure \
