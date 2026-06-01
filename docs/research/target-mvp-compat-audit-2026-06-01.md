@@ -223,8 +223,9 @@ After refreshing both target repositories, these Velnor checks pass against the 
 - `cargo test -q fetched_target_workflow_actions_have_metadata`
 - `cargo test -q target_workflow_expressions_use_supported_subset`
 - `cargo test -q cached_target_action_metadata_expressions_use_supported_subset`
+- `cargo test -q target_docker_action_inputs_match_current_workflows`
 
-These prove the current target action inventory, target-local composites, and expression subset still fit the runner's planned execution model. They do not prove live completion in GitHub UI.
+These prove the current target action inventory, target-local composites, expression subset, and exact Docker/buildx action input shapes still fit the runner's planned execution model. They do not prove live completion in GitHub UI.
 
 ## Remaining Target MVP Proof
 
@@ -236,4 +237,3 @@ The remaining proof must be live, not just unit-level:
 4. Add labels or temporary retargeting for Linux `jackin` jobs.
 5. Run `jackin` Linux CI/construct/docs paths.
 6. Verify GitHub UI logs, annotations, cache/artifact behavior, job outputs, required aggregator jobs, and final success/failure statuses match the existing GitHub Actions experience.
-

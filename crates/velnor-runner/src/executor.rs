@@ -4490,6 +4490,263 @@ mod tests {
     }
 
     #[test]
+    fn target_docker_action_inputs_match_current_workflows() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::JavaScript {
+                step_id: "buildx-reusable".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/docker_setup-buildx-action/dist/index.js"
+                        .into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/docker_setup-buildx-action".into(),
+                    env: vec![
+                        (
+                            "INPUT_NAME".into(),
+                            "chainargos-${{ inputs.app }}-builder".into(),
+                        ),
+                        ("INPUT_DRIVER".into(), "docker-container".into()),
+                        ("INPUT_CLEANUP".into(), "false".into()),
+                    ],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "buildx-jackin".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/docker_setup-buildx-action/dist/index.js"
+                        .into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/docker_setup-buildx-action".into(),
+                    env: vec![
+                        ("INPUT_NAME".into(), "${{ env.BUILDX_BUILDER }}".into()),
+                        ("INPUT_DRIVER".into(), "docker-container".into()),
+                    ],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "metadata".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/docker_metadata-action/dist/index.cjs"
+                        .into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/docker_metadata-action".into(),
+                    env: vec![
+                        ("INPUT_IMAGES".into(), "${{ inputs.image }}".into()),
+                        (
+                            "INPUT_TAGS".into(),
+                            "type=raw,value=latest,enable=${{ inputs.publish }}\n\
+type=sha,format=long,prefix=,enable=${{ inputs.publish }}\n\
+type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.publish && github.event_name == 'pull_request' }}"
+                                .into(),
+                        ),
+                    ],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::CompositeOutputs {
+                step_id: "meta".into(),
+                outputs: BTreeMap::from([
+                    (
+                        "tags".into(),
+                        "chainargos/rust-bitcoin-processor:pr-42".into(),
+                    ),
+                    (
+                        "labels".into(),
+                        "org.opencontainers.image.source=https://github.com/ChainArgos/java-monorepo"
+                            .into(),
+                    ),
+                ]),
+                condition: None,
+            },
+            ExecutableStep::CompositeOutputs {
+                step_id: "cache".into(),
+                outputs: BTreeMap::from([
+                    ("from".into(), "type=gha,scope=bitcoin-processor-app-pr".into()),
+                    (
+                        "to".into(),
+                        "type=gha,scope=bitcoin-processor-app-pr,mode=max".into(),
+                    ),
+                ]),
+                condition: None,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "build-push".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/docker_build-push-action/dist/index.js"
+                        .into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/docker_build-push-action".into(),
+                    env: vec![
+                        ("INPUT_CONTEXT".into(), ".".into()),
+                        (
+                            "INPUT_FILE".into(),
+                            "backend-rust/${{ inputs.app }}/Dockerfile".into(),
+                        ),
+                        ("INPUT_PLATFORMS".into(), "linux/amd64".into()),
+                        ("INPUT_PUSH".into(), "${{ inputs.publish }}".into()),
+                        ("INPUT_TAGS".into(), "${{ steps.meta.outputs.tags }}".into()),
+                        ("INPUT_LABELS".into(), "${{ steps.meta.outputs.labels }}".into()),
+                        ("INPUT_CACHE-FROM".into(), "${{ steps.cache.outputs.from }}".into()),
+                        ("INPUT_CACHE-TO".into(), "${{ steps.cache.outputs.to }}".into()),
+                    ],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::JavaScript {
+                step_id: "bake".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/docker_bake-action/dist/index.cjs".into(),
+                    post_container_path: None,
+                    post_condition: None,
+                    action_container_path: "/__a/_actions/docker_bake-action".into(),
+                    env: vec![
+                        ("INPUT_FILES".into(), "backend-rust/docker-bake.hcl".into()),
+                        ("INPUT_TARGETS".into(), "${{ needs.changes.outputs.bake-targets }}".into()),
+                        (
+                            "INPUT_SET".into(),
+                            "*.cache-from=type=gha,scope=rust-workspace\n\
+*.cache-to=type=gha,scope=rust-workspace,mode=max\n\
+bitcoin-processor-app.push=${{ (github.event_name == 'push' && needs.changes.outputs.bitcoin-processor == 'true') || (github.event_name == 'workflow_dispatch' && inputs.push) }}"
+                                .into(),
+                        ),
+                    ],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+        ];
+        let mut spec = container(&temp);
+        spec.mount_docker_socket = true;
+        spec.docker_cli_host_path = Some("/usr/bin/docker".into());
+        spec.docker_cli_plugin_host_dir = Some("/usr/libexec/docker/cli-plugins".into());
+        let context = vec![
+            (
+                "inputs".into(),
+                serde_json::json!({
+                    "app": "bitcoin-processor-app",
+                    "image": "chainargos/rust-bitcoin-processor",
+                    "publish": false,
+                    "push": true
+                }),
+            ),
+            (
+                "github".into(),
+                serde_json::json!({ "event": { "pull_request": { "number": 42 } } }),
+            ),
+            (
+                "needs".into(),
+                serde_json::json!({
+                    "changes": {
+                        "outputs": {
+                            "bake-targets": "bitcoin-processor-app",
+                            "bitcoin-processor": "true"
+                        }
+                    }
+                }),
+            ),
+        ];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps_with_context(
+                &spec,
+                &steps,
+                &[
+                    ("GITHUB_EVENT_NAME".into(), "workflow_dispatch".into()),
+                    (
+                        "GITHUB_REPOSITORY".into(),
+                        "ChainArgos/java-monorepo".into(),
+                    ),
+                    ("BUILDX_BUILDER".into(), "jackin-construct".into()),
+                    ("RUNNER_TEMP".into(), "/__t".into()),
+                ],
+                &context,
+                &temp,
+            )
+            .unwrap();
+
+        let node_calls = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:24-bookworm".into())
+            })
+            .map(|(_, args)| args)
+            .collect::<Vec<_>>();
+        assert_eq!(node_calls.len(), 5);
+        for call in &node_calls {
+            assert!(call.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
+            assert!(call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
+            assert!(call.contains(
+                &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
+            ));
+        }
+        assert!(
+            node_calls[0].contains(&"INPUT_NAME=chainargos-bitcoin-processor-app-builder".into())
+        );
+        assert!(node_calls[0].contains(&"INPUT_DRIVER=docker-container".into()));
+        assert!(node_calls[0].contains(&"INPUT_CLEANUP=false".into()));
+        assert!(node_calls[1].contains(&"INPUT_NAME=jackin-construct".into()));
+        assert!(node_calls[2].contains(&"INPUT_IMAGES=chainargos/rust-bitcoin-processor".into()));
+        assert!(node_calls[2].contains(
+            &("INPUT_TAGS=type=raw,value=latest,enable=false\n\
+type=sha,format=long,prefix=,enable=false\n\
+type=raw,value=pr-42,enable=false")
+                .into()
+        ));
+        assert!(node_calls[3]
+            .contains(&"INPUT_FILE=backend-rust/bitcoin-processor-app/Dockerfile".into()));
+        assert!(node_calls[3].contains(&"INPUT_PUSH=false".into()));
+        assert!(
+            node_calls[3].contains(&"INPUT_TAGS=chainargos/rust-bitcoin-processor:pr-42".into())
+        );
+        assert!(node_calls[3].contains(
+            &"INPUT_LABELS=org.opencontainers.image.source=https://github.com/ChainArgos/java-monorepo".into()
+        ));
+        assert!(node_calls[3]
+            .contains(&"INPUT_CACHE-FROM=type=gha,scope=bitcoin-processor-app-pr".into()));
+        assert!(node_calls[3]
+            .contains(&"INPUT_CACHE-TO=type=gha,scope=bitcoin-processor-app-pr,mode=max".into()));
+        assert!(node_calls[4].contains(&"INPUT_FILES=backend-rust/docker-bake.hcl".into()));
+        assert!(node_calls[4].contains(&"INPUT_TARGETS=bitcoin-processor-app".into()));
+        assert!(node_calls[4].contains(
+            &("INPUT_SET=*.cache-from=type=gha,scope=rust-workspace\n\
+*.cache-to=type=gha,scope=rust-workspace,mode=max\n\
+bitcoin-processor-app.push=true")
+                .into()
+        ));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn target_renovate_action_receives_docker_cli_socket_and_env() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
