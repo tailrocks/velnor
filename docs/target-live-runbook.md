@@ -50,6 +50,9 @@ cargo run --bin velnor-runner -- run \
   --once
 ```
 
+`--once` waits until one GitHub job is actually acquired and handled. It does
+not exit just because the broker has no message yet or sends a control message.
+
 Initial recommended runs, in this order:
 
 1. `ansible.yml`: smallest `hetzner-sentry-ci` target, validates checkout, setup-python, defaults.run working directory, and bash script execution.

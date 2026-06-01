@@ -59,11 +59,13 @@ const RUNNER_SHUTDOWN_MESSAGE: &str = "RunnerShutdown";
 const BROKER_POLL_MAX_CONSECUTIVE_ERRORS: u32 = 10;
 const BROKER_POLL_EMPTY_BACKOFF_THRESHOLD: u32 = 50;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum V2MessageAction {
     None,
     BrokerMigration(String),
     RefreshToken,
     Shutdown,
+    JobHandled,
 }
 
 #[derive(Clone)]
@@ -435,14 +437,11 @@ async fn run_v2(
 
         let Some(message) = message else {
             println!("No broker message received.");
-            if args.once {
-                break;
-            }
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         };
 
-        match handle_v2_message(
+        let action = handle_v2_message(
             &broker,
             &run_service,
             session_id,
@@ -453,11 +452,12 @@ async fn run_v2(
             &stored.settings.agent_name,
             message,
         )
-        .await?
-        {
+        .await?;
+
+        match &action {
             V2MessageAction::None => {}
             V2MessageAction::BrokerMigration(migration_url) => {
-                current_broker_url = migration_url;
+                current_broker_url = migration_url.clone();
                 broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
                 println!("Broker migration applied: {current_broker_url}");
             }
@@ -472,8 +472,9 @@ async fn run_v2(
                 println!("GitHub requested runner shutdown.");
                 break;
             }
+            V2MessageAction::JobHandled => {}
         }
-        if args.once {
+        if should_stop_after_message(args.once, &action) {
             break;
         }
     }
@@ -482,6 +483,10 @@ async fn run_v2(
     println!("Deleted broker runner session.");
 
     Ok(())
+}
+
+fn should_stop_after_message(once: bool, action: &V2MessageAction) -> bool {
+    once && matches!(action, V2MessageAction::JobHandled)
 }
 
 async fn poll_broker_message(
@@ -666,7 +671,7 @@ async fn handle_v2_message(
         job,
     )
     .await?;
-    Ok(V2MessageAction::None)
+    Ok(V2MessageAction::JobHandled)
 }
 
 async fn handle_job_request(
@@ -2395,6 +2400,29 @@ mod tests {
             Some(Duration::from_secs(15))
         );
         assert_eq!(state.consecutive_empty_messages, 0);
+    }
+
+    #[test]
+    fn once_mode_stops_only_after_job_handled() {
+        assert!(!should_stop_after_message(
+            false,
+            &V2MessageAction::JobHandled
+        ));
+        assert!(should_stop_after_message(
+            true,
+            &V2MessageAction::JobHandled
+        ));
+        assert!(!should_stop_after_message(true, &V2MessageAction::None));
+        assert!(!should_stop_after_message(
+            true,
+            &V2MessageAction::BrokerMigration(
+                "https://broker.actions.githubusercontent.com/new/".into()
+            )
+        ));
+        assert!(!should_stop_after_message(
+            true,
+            &V2MessageAction::RefreshToken
+        ));
     }
 
     #[test]
