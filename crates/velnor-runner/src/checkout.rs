@@ -6,7 +6,11 @@ use crate::{
     },
 };
 use anyhow::{bail, Context, Result};
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+};
 use url::Url;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,6 +116,39 @@ where
         plan.fetch_depth,
         plan.persist_credentials,
     )
+}
+
+pub fn configure_safe_directory(
+    home_host: &Path,
+    workspace_host: &Path,
+    destination: &Path,
+) -> Result<()> {
+    let Some(safe_directory) = checkout_container_path(workspace_host, destination) else {
+        return Ok(());
+    };
+    fs::create_dir_all(home_host).with_context(|| format!("create {}", home_host.display()))?;
+    let config_path = home_host.join(".gitconfig");
+    let mut config = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&config_path)
+        .with_context(|| format!("open {}", config_path.display()))?;
+    writeln!(config, "[safe]\n\tdirectory = {safe_directory}")
+        .with_context(|| format!("write {}", config_path.display()))?;
+    Ok(())
+}
+
+fn checkout_container_path(workspace_host: &Path, destination: &Path) -> Option<String> {
+    let relative = destination.strip_prefix(workspace_host).ok()?;
+    if relative.as_os_str().is_empty() {
+        return Some("/__w".to_string());
+    }
+    let relative = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    Some(format!("/__w/{relative}"))
 }
 
 pub fn fetch_git_ref<R>(
@@ -701,6 +738,29 @@ mod tests {
         let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
 
         assert!(!plans[0].persist_credentials);
+    }
+
+    #[test]
+    fn writes_safe_directory_for_workspace_checkout() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp = std::env::temp_dir().join(format!(
+            "velnor-checkout-safe-dir-test-{}-{nonce}",
+            std::process::id(),
+        ));
+        let home = temp.join("home");
+        let workspace = temp.join("work");
+
+        configure_safe_directory(&home, &workspace, &workspace).unwrap();
+        configure_safe_directory(&home, &workspace, &workspace.join("homebrew-tap")).unwrap();
+
+        let config = std::fs::read_to_string(home.join(".gitconfig")).unwrap();
+        assert!(config.contains("directory = /__w\n"));
+        assert!(config.contains("directory = /__w/homebrew-tap\n"));
+
+        std::fs::remove_dir_all(temp).ok();
     }
 
     #[test]

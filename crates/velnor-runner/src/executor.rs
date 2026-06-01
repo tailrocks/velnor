@@ -2,7 +2,7 @@
 
 use crate::{
     action::{DockerActionInvocation, JavaScriptActionInvocation},
-    checkout::{execute_checkout, CheckoutPlan},
+    checkout::{configure_safe_directory, execute_checkout, CheckoutPlan},
     container::JobContainerSpec,
     script_step::{ScriptStep, ScriptStepPlan, StepCommandState},
     workflow_command::parse_workflow_commands,
@@ -369,7 +369,9 @@ where
                 }
             }
             let result = (|| match step {
-                ExecutableStep::Checkout(plan) => self.execute_checkout_step(plan, &state),
+                ExecutableStep::Checkout(plan) => {
+                    self.execute_checkout_step(container, plan, &state)
+                }
                 ExecutableStep::Script(step) => {
                     let step = state.resolve_script_step(step);
                     let plan = ScriptStepPlan::prepare_with_path(&step, temp_host, &state.path)?;
@@ -588,6 +590,7 @@ where
 
     fn execute_checkout_step(
         &mut self,
+        container: &JobContainerSpec,
         plan: &CheckoutPlan,
         state: &JobExecutionState,
     ) -> Result<StepExecutionResult> {
@@ -596,6 +599,11 @@ where
             *version = state.resolve_expressions(version);
         }
         execute_checkout(&mut self.runner, &plan)?;
+        configure_safe_directory(
+            &container.home_host,
+            &container.workspace_host,
+            &plan.destination,
+        )?;
         Ok(StepExecutionResult {
             exit_code: 0,
             state: StepCommandState::default(),

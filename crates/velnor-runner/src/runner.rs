@@ -22,7 +22,9 @@ use crate::{
         resolve_local_action, ActionMetadata, ActionRuntime, CompositeActionInvocation,
         LocalActionPlan, RepositoryActionPlan, ResolvedAction,
     },
-    checkout::{checkout_plans, checkout_step_id, execute_checkouts, CheckoutPlan},
+    checkout::{
+        checkout_plans, checkout_step_id, configure_safe_directory, execute_checkouts, CheckoutPlan,
+    },
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     container::{split_container_options, JobContainerSpec, ServiceContainerSpec},
@@ -1062,6 +1064,9 @@ fn execute_script_job(
         .map(|plan| resolve_checkout_plan_context(plan, &base_env, &context_data))
         .collect::<Vec<_>>();
     execute_checkouts(&mut command_runner, &eager_checkout_plans)?;
+    for plan in &eager_checkout_plans {
+        configure_safe_directory(&home, &workspace, &plan.destination)?;
+    }
     let local_action_plans =
         local_action_plans_with_context(&job.steps, &workspace, &context_data)?;
     let local_actions = local_action_plans
