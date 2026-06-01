@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 JACKIN_ROOT="${VELNOR_JACKIN_ROOT:-/tmp/velnor-jackin}"
 CHAINARGOS_ROOT="${VELNOR_CHAINARGOS_ROOT:-/tmp/velnor-chainargos}"
+SKIP_TARGET_FRESHNESS_CHECK="${VELNOR_SKIP_TARGET_FRESHNESS_CHECK:-false}"
 
 if [[ ! -d "$CHAINARGOS_ROOT/.github" && -d /tmp/velnor-java-monorepo/.github ]]; then
   CHAINARGOS_ROOT="/tmp/velnor-java-monorepo"
@@ -22,6 +23,50 @@ if [[ ! -d "$CHAINARGOS_ROOT/.github" ]]; then
 fi
 
 cd "$ROOT"
+
+check_target_checkout_fresh() {
+  local checkout="$1"
+  local label="$2"
+  local upstream remote branch remote_sha local_sha
+
+  if [[ "$SKIP_TARGET_FRESHNESS_CHECK" == "true" ]]; then
+    return
+  fi
+
+  if [[ ! -d "$checkout/.git" ]]; then
+    echo "$label target checkout is not a git checkout: $checkout" >&2
+    echo "set VELNOR_SKIP_TARGET_FRESHNESS_CHECK=true only for deliberate local snapshots" >&2
+    exit 2
+  fi
+
+  upstream="$(git -C "$checkout" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+  if [[ -z "$upstream" || "$upstream" != */* ]]; then
+    echo "$label target checkout has no upstream branch: $checkout" >&2
+    echo "set VELNOR_SKIP_TARGET_FRESHNESS_CHECK=true only for deliberate local snapshots" >&2
+    exit 2
+  fi
+
+  remote="${upstream%%/*}"
+  branch="${upstream#*/}"
+  local_sha="$(git -C "$checkout" rev-parse HEAD)"
+  remote_sha="$(git -C "$checkout" ls-remote "$remote" "refs/heads/$branch" | awk '{print $1}')"
+
+  if [[ -z "$remote_sha" ]]; then
+    echo "$label target checkout upstream not found: $upstream" >&2
+    exit 2
+  fi
+
+  if [[ "$local_sha" != "$remote_sha" ]]; then
+    echo "$label target checkout is stale: $checkout" >&2
+    echo "local:  $local_sha" >&2
+    echo "remote: $remote_sha ($upstream)" >&2
+    echo "update the checkout or set VELNOR_SKIP_TARGET_FRESHNESS_CHECK=true for a deliberate snapshot" >&2
+    exit 1
+  fi
+}
+
+check_target_checkout_fresh "$JACKIN_ROOT" "jackin"
+check_target_checkout_fresh "$CHAINARGOS_ROOT" "ChainArgos"
 
 bash -n \
   scripts/chainargos_rust_target_sequence.sh \

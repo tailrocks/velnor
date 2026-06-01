@@ -34,6 +34,10 @@ scripts/target_verify.sh
 cargo test -q
 ```
 
+The target verifier checks that the local `jackin` and ChainArgos checkouts are
+current with their configured upstream branches. Set
+`VELNOR_SKIP_TARGET_FRESHNESS_CHECK=true` only for a deliberate local snapshot.
+
 Run the Docker host preflight on the same host and with the same work directory that the live runner will use:
 
 ```sh

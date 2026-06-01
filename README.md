@@ -69,6 +69,11 @@ scripts/target_verify.sh
 cargo test -q
 ```
 
+`scripts/target_verify.sh` expects the `jackin` and ChainArgos target checkouts
+to be current with their configured upstream branches. Set
+`VELNOR_SKIP_TARGET_FRESHNESS_CHECK=true` only when intentionally auditing a
+local snapshot.
+
 Live host readiness is checked with:
 
 ```sh
