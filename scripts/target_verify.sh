@@ -33,6 +33,8 @@ tests=(
   target_workflow_repository_actions_plan_from_cached_metadata
   native_repository_actions_ignore_pinned_ref_metadata
   target_workflow_run_preview_gate_matches_jackin_shape
+  recognizes_matching_job_cancellation_message
+  parses_broker_migration_message_url
   target_check_image_output_gates_java_monorepo_build_steps
   applies_job_run_defaults_to_script_steps
   applies_run_service_typed_job_run_defaults
