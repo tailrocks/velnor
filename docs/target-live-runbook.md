@@ -87,6 +87,11 @@ https://github.com/donbeave/velnor-actions-fixture/actions/runs/26762850861
 
 The GitHub-hosted `compat-github` matrix jobs already passed. The Velnor proof
 is that `compat-velnor` consumes the queued jobs and `compare-results` passes.
+Check current fixture status with:
+
+```sh
+scripts/fixture_status.sh
+```
 
 After the existing queued jobs are gone, new fixture runs can be started with:
 

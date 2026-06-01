@@ -93,6 +93,11 @@ https://github.com/donbeave/velnor-actions-fixture/actions/runs/26762850861
 The GitHub-hosted lane has passed. The Velnor lane is the next live proof: once
 Velnor is registered with label `velnor-target-mvp`, it should consume the
 queued fixture jobs and the compare job should verify matching outputs.
+Check the current fixture proof state with:
+
+```sh
+scripts/fixture_status.sh
+```
 
 On a Linux host with a local Docker socket and `GITHUB_TOKEN` set, the fixture
 proof can be run with:
