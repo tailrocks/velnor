@@ -2627,7 +2627,22 @@ async fn remove_one(args: &RemoveArgs, dir: &Path) -> Result<()> {
 }
 
 pub async fn status(args: StatusArgs) -> Result<()> {
-    let dir = config::config_dir(args.config_dir)?;
+    let config_base = config::config_dir(args.config_dir.clone())?;
+    let slot_dirs = daemon_slot_config_dirs(&config_base, args.slots)?;
+    for (slot_index, dir) in slot_dirs.iter().enumerate() {
+        if args.slots > 1 {
+            println!("Daemon slot {}:", slot_index + 1);
+        }
+        status_one(&args, dir)
+            .with_context(|| format!("read daemon slot-{} status", slot_index + 1))?;
+        if slot_index + 1 < slot_dirs.len() {
+            println!();
+        }
+    }
+    Ok(())
+}
+
+fn status_one(args: &StatusArgs, dir: &Path) -> Result<()> {
     let stored = config::load(&dir)?;
     println!("Config dir: {}", dir.display());
     println!("GitHub URL: {}", stored.settings.github_url);

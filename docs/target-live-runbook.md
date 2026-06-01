@@ -168,7 +168,7 @@ Check GitHub repository settings and verify `velnor-target-mvp` is online before
 Also validate the local config before running jobs:
 
 ```sh
-cargo run --bin velnor-runner -- status --check-target-mvp
+cargo run --bin velnor-runner -- status --check-target-mvp --slots 1
 ```
 
 ## Run ChainArgos Rust Target

@@ -283,6 +283,10 @@ pub struct StatusArgs {
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
 
+    /// Number of daemon slot configs to inspect. For --slots > 1, reads <config-dir>/slots/slot-N.
+    #[arg(long, default_value_t = 1)]
+    pub slots: usize,
+
     /// Validate that local config is ready for current target repository x64 Linux jobs.
     #[arg(long)]
     pub check_target_mvp: bool,
