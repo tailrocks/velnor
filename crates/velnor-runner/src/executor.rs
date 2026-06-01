@@ -4818,8 +4818,16 @@ fi"#
                     post_condition: None,
                     action_container_path: "/__a/_actions/actions_upload-artifact".into(),
                     env: vec![
-                        ("INPUT_NAME".into(), "dist".into()),
-                        ("INPUT_PATH".into(), "target/release".into()),
+                        (
+                            "INPUT_NAME".into(),
+                            "construct-digest-${{ matrix.platform }}".into(),
+                        ),
+                        (
+                            "INPUT_PATH".into(),
+                            "${{ env.DIGEST_DIR }}/${{ matrix.platform }}.digest".into(),
+                        ),
+                        ("INPUT_IF-NO-FILES-FOUND".into(), "error".into()),
+                        ("INPUT_RETENTION-DAYS".into(), "1".into()),
                     ],
                 },
                 condition: None,
@@ -4886,7 +4894,16 @@ fi"#
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
         executor
-            .execute_ordered_steps(&container(&temp), &steps, &runtime_env, &temp)
+            .execute_ordered_steps_with_context(
+                &container(&temp),
+                &steps,
+                &runtime_env,
+                &[(
+                    "matrix".into(),
+                    serde_json::json!({ "platform": "linux-amd64" }),
+                )],
+                &temp,
+            )
             .unwrap();
 
         let node_calls = executor
@@ -4910,6 +4927,10 @@ fi"#
         }
         assert!(node_calls[0].contains(&"ACTIONS_CACHE_URL=https://cache.actions".into()));
         assert!(node_calls[0].contains(&"ACTIONS_CACHE_SERVICE_V2=True".into()));
+        assert!(node_calls[1].contains(&"INPUT_NAME=construct-digest-linux-amd64".into()));
+        assert!(node_calls[1].contains(&"INPUT_PATH=/__w/digests/linux-amd64.digest".into()));
+        assert!(node_calls[1].contains(&"INPUT_IF-NO-FILES-FOUND=error".into()));
+        assert!(node_calls[1].contains(&"INPUT_RETENTION-DAYS=1".into()));
         assert!(node_calls[1].contains(&"GITHUB_RETENTION_DAYS=90".into()));
         assert!(node_calls[2].contains(&"INPUT_PATTERN=construct-digest-*".into()));
         assert!(node_calls[2].contains(&"INPUT_PATH=/__w/digests".into()));

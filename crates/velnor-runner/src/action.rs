@@ -2349,6 +2349,75 @@ runs:
     }
 
     #[test]
+    fn builds_target_upload_artifact_invocation_inputs() {
+        let actions_host = Path::new("/tmp/actions");
+        let plan = RepositoryActionPlan {
+            step_id: "upload-platform-digest".into(),
+            repository: "actions/upload-artifact".into(),
+            git_ref: "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a".into(),
+            source_path: None,
+            repository_dir: actions_host
+                .join("_actions/actions_upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+            action_dir: actions_host
+                .join("_actions/actions_upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+            inputs: [
+                (
+                    "name".to_string(),
+                    "construct-digest-${{ matrix.platform }}".to_string(),
+                ),
+                (
+                    "path".to_string(),
+                    "${{ env.DIGEST_DIR }}/${{ matrix.platform }}.digest".to_string(),
+                ),
+                ("if-no-files-found".to_string(), "error".to_string()),
+                ("retention-days".to_string(), "1".to_string()),
+            ]
+            .into(),
+            env: Vec::new(),
+            condition: Some("needs.changes.outputs.is_publish == 'true'".into()),
+            continue_on_error: false,
+        };
+        let metadata = parse_action_metadata(
+            r#"
+runs:
+  using: node24
+  main: dist/upload/index.js
+"#,
+        )
+        .unwrap();
+        let runtime = metadata.runtime().unwrap();
+        let resolved = ResolvedAction {
+            plan,
+            metadata_path: actions_host
+                .join("_actions/actions_upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/action.yml"),
+            metadata,
+            runtime,
+        };
+
+        let invocation = resolved.javascript_invocation(actions_host).unwrap();
+
+        assert_eq!(invocation.node, "node24");
+        assert_eq!(
+            invocation.main_container_path,
+            "/__a/_actions/actions_upload-artifact/043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/dist/upload/index.js"
+        );
+        assert!(invocation.env.contains(&(
+            "INPUT_NAME".into(),
+            "construct-digest-${{ matrix.platform }}".into()
+        )));
+        assert!(invocation.env.contains(&(
+            "INPUT_PATH".into(),
+            "${{ env.DIGEST_DIR }}/${{ matrix.platform }}.digest".into()
+        )));
+        assert!(invocation
+            .env
+            .contains(&("INPUT_IF-NO-FILES-FOUND".into(), "error".into())));
+        assert!(invocation
+            .env
+            .contains(&("INPUT_RETENTION-DAYS".into(), "1".into())));
+    }
+
+    #[test]
     fn builds_docker_action_invocation() {
         let actions_host = Path::new("/tmp/actions");
         let plan = RepositoryActionPlan {
