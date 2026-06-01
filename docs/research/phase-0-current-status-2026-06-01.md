@@ -40,6 +40,11 @@ code (`ActionManager`, DAP files, `ExecutionContext`, `JobExtension`,
 `NodeScriptActionHandler`, and `JobRunner`). That does not change Phase 0's
 V2 broker/run-service implementation contract.
 
+The latest release was rechecked again on 2026-06-01 during scope cleanup.
+`scripts/check_runner_reference.py` still reports `actions/runner` `v2.334.0`
+as current, and `crates/velnor-runner/src/protocol.rs` still advertises
+`actions-runner/2.334.0 (velnor)`.
+
 Implementation facts:
 
 - Hosted GitHub target path is V2 broker/run-service, not classic polling.

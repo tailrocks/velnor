@@ -285,68 +285,20 @@ Velnor still needs runtime step expression behavior from the job message:
 
 Implement only the expression subset that appears in the job message for target workflows.
 
-## Deferred Typed Authoring Brainstorm
+## Configuration-Language Boundary
 
-Typed authoring is not part of current implementation. Phase 0 must keep GitHub
-Actions YAML unchanged and focus on runner compatibility for the target
-repositories.
+Pkl, PQL, KCL, typed authoring, and any Velnor-native workflow language are not
+part of this implementation plan. They are archived brainstorming only.
 
-If typed authoring is revisited after live target proof, it should remain close
-to GitHub Actions so migration is easy. A strict package should model the same
-concepts with typed fields and typed unions:
-
-```pkl
-amends "package://velnor.dev/workflow@1.0.0#/Workflow.pkl"
-
-name = "Rust"
-
-on = new {
-  pullRequest {}
-  push {
-    branches = List("main")
-  }
-  workflowDispatch {
-    inputs {
-      ["packages"] = new StringInput {
-        required = false
-        default = ""
-      }
-    }
-  }
-}
-
-jobs {
-  ["check"] = new Job {
-    runsOn = new SelfHostedRunner {
-      labels = List("hetzner-sentry-ci")
-    }
-
-    steps = List(
-      new UsesStep {
-        uses = "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd"
-      },
-      new UsesStep {
-        uses = "jdx/mise-action@1648a7812b9aeae629881980618f079932869151"
-      },
-      new RunStep {
-        name = "Check"
-        shell = Bash
-        command = "cargo check --workspace --all-targets"
-      },
-    )
-  }
-}
-```
-
-Important future design rule: typed authoring must compile to the same
-normalized plan that the GitHub job-message adapter produces. That keeps one
-executor and one reporter. The plan boundary is defined in
-`docs/research/normalized-plan-contract-2026-06-01.md`.
+Phase 0 has one active input path:
 
 ```text
 GitHub YAML -> GitHub job message -> Velnor normalized plan -> Docker executor
-Typed source -> Velnor compiler    -> Velnor normalized plan -> Docker executor
 ```
+
+Do not add a parser, compiler, package schema, CLI command, scheduler path, or
+runtime path for a Velnor-native language while Phase 0 is focused on existing
+GitHub Actions workflow compatibility.
 
 ## Current Concrete Next Work
 

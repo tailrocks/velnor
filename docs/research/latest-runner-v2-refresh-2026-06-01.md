@@ -10,6 +10,8 @@ Reference source:
 - `main` rechecked on 2026-06-01: `c6a124e18496a6e5d2357415052d1799afc64b63`
 - `main` rechecked again on 2026-06-01 during implementation planning:
   `c6a124e18496a6e5d2357415052d1799afc64b63`
+- latest release rechecked on 2026-06-01 during scope cleanup:
+  `v2.334.0`
 - release page: <https://github.com/actions/runner/releases/tag/v2.334.0>
 
 Drift check:

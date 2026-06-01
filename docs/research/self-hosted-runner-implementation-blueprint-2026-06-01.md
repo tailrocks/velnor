@@ -269,7 +269,7 @@ This priority order keeps the executor source-neutral without making any
 configuration language part of the current plan. PQL, Pkl, KCL, and native
 workflow authoring remain separate archived brainstorming.
 
-## Deferred Typed Authoring Constraint
+## Archived Configuration-Language Constraint
 
 Typed authoring and configuration-language experiments are not the Phase 0
 scheduler and should not be implemented now. Keep related notes in historical
