@@ -40,6 +40,14 @@ or a deliberately controlled diagnostic run.
 Before the real target repositories, use the public fixture:
 
 ```sh
+scripts/fixture_smoke.sh
+```
+
+That script runs the local verifier, Docker preflight, fixture runner
+registration, one Velnor `--once` job, and a GitHub run status summary. The
+manual equivalent is:
+
+```sh
 cargo run --bin velnor-runner -- configure \
   --url https://github.com/donbeave/velnor-actions-fixture \
   --pat "$GITHUB_TOKEN" \

@@ -94,6 +94,13 @@ The GitHub-hosted lane has passed. The Velnor lane is the next live proof: once
 Velnor is registered with label `velnor-target-mvp`, it should consume the
 queued fixture jobs and the compare job should verify matching outputs.
 
+On a Linux host with a local Docker socket and `GITHUB_TOKEN` set, the fixture
+proof can be run with:
+
+```sh
+scripts/fixture_smoke.sh
+```
+
 Target workflow audit and language brainstorming history: [docs/research/config-language-comparison.md](docs/research/config-language-comparison.md).
 
 GitHub runner protocol contract: [docs/research/github-runner-protocol-contract.md](docs/research/github-runner-protocol-contract.md).
