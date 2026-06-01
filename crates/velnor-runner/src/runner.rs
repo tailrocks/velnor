@@ -45,10 +45,7 @@ use crate::{
         TimelineRecord, TimelineRecordFeedLines, TimelineRecordState, RUNNER_JOB_REQUEST,
     },
     runtime_env::job_runtime_env,
-    script_step::{
-        github_script_steps_with_defaults, StepAnnotation, StepAnnotationLevel,
-        StepCommandTelemetry,
-    },
+    script_step::{github_script_steps_with_defaults, StepAnnotation, StepAnnotationLevel},
 };
 
 const JOB_CANCELLATION_MESSAGE: &str = "JobCancellation";
@@ -84,7 +81,7 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
     let dir = config::config_dir(args.config_dir)?;
     let scope = GitHubScope::parse(&args.url)?;
     let agent_name = args.name.unwrap_or_else(default_agent_name);
-    let labels = normalize_labels(args.labels);
+    let labels = normalize_labels(args.labels, args.target_mvp_labels);
     let key_pair = if args.dry_run {
         None
     } else {
@@ -2118,9 +2115,21 @@ pub async fn status(args: StatusArgs) -> Result<()> {
     Ok(())
 }
 
-fn normalize_labels(mut labels: Vec<String>) -> Vec<String> {
+fn normalize_labels(mut labels: Vec<String>, target_mvp_labels: bool) -> Vec<String> {
     if labels.is_empty() {
         labels.push("velnor".to_string());
+    }
+    if target_mvp_labels {
+        labels.extend(
+            [
+                "hetzner-sentry-ci",
+                "ubuntu-latest",
+                "ubuntu-24.04",
+                "velnor-target-mvp",
+            ]
+            .into_iter()
+            .map(ToOwned::to_owned),
+        );
     }
     labels.sort();
     labels.dedup();
@@ -2159,6 +2168,7 @@ mod tests {
         parse_action_metadata, resolve_action, ActionRuntime, LocalActionPlan, RepositoryActionPlan,
     };
     use crate::protocol::TaskAgentMessage;
+    use crate::script_step::StepCommandTelemetry;
     use std::path::Path;
 
     fn run_args(complete_noop: bool, execute_scripts: bool, dry_run_jobs: bool) -> RunArgs {
@@ -2636,6 +2646,25 @@ mod tests {
             Some("https://broker.actions.githubusercontent.com/tenant/")
         );
         assert_eq!(agent_bool_property(&agent, "UseV2Flow"), Some(true));
+    }
+
+    #[test]
+    fn default_labels_keep_velnor_only() {
+        assert_eq!(normalize_labels(Vec::new(), false), vec!["velnor"]);
+    }
+
+    #[test]
+    fn target_mvp_labels_cover_current_linux_target_jobs() {
+        assert_eq!(
+            normalize_labels(vec!["custom".into()], true),
+            vec![
+                "custom",
+                "hetzner-sentry-ci",
+                "ubuntu-24.04",
+                "ubuntu-latest",
+                "velnor-target-mvp"
+            ]
+        );
     }
 
     #[test]

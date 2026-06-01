@@ -241,9 +241,9 @@ These prove the current target action inventory, target-local composites, expres
 
 The remaining proof must be live, not just unit-level:
 
-1. Register Velnor with labels needed by `java-monorepo` first: `hetzner-sentry-ci`.
+1. Register Velnor with labels needed by `java-monorepo` first: `hetzner-sentry-ci`. The CLI `--target-mvp-labels` preset now adds this plus the Linux Jackin labels.
 2. Run one small `java-monorepo` workflow through GitHub UI on Velnor.
 3. Run Docker-heavy `rust-docker.yml` or `rust-docker-build.yml` on a host where Docker bind mounts are visible to the daemon.
-4. Add labels or temporary retargeting for Linux `jackin` jobs.
+4. Add labels or temporary retargeting for Linux `jackin` jobs. `--target-mvp-labels` covers `ubuntu-latest` and `ubuntu-24.04`; macOS labels remain excluded.
 5. Run `jackin` Linux CI/construct/docs paths.
 6. Verify GitHub UI logs, annotations, cache/artifact behavior, job outputs, required aggregator jobs, and final success/failure statuses match the existing GitHub Actions experience.

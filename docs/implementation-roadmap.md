@@ -17,6 +17,7 @@ Goal: prove Velnor can appear as a GitHub self-hosted runner.
 Deliverables:
 
 - `velnor-runner configure --url ... --token ... --labels ...`
+- `velnor-runner configure --target-mvp-labels` opt-in adds the current target Linux labels: `hetzner-sentry-ci`, `ubuntu-latest`, and `ubuntu-24.04`; it intentionally does not claim macOS labels
 - local settings/credential store
 - repo-level runner registration
 - runner appears online in GitHub UI

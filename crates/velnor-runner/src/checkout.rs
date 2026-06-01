@@ -91,7 +91,8 @@ pub fn checkout_plans(
     Ok(plans)
 }
 
-pub fn has_unsupported_enabled_action(steps: &[ActionStep]) -> bool {
+#[cfg(test)]
+fn has_unsupported_enabled_action(steps: &[ActionStep]) -> bool {
     steps.iter().any(|step| {
         step.enabled
             && step.reference_type() != Some(ActionReferenceType::Script)
