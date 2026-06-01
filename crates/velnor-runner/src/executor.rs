@@ -4817,6 +4817,108 @@ mod tests {
         fs::remove_dir_all(temp).unwrap();
     }
 
+    #[test]
+    fn target_rust_cache_receives_runtime_env_and_posts_on_failure() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::JavaScript {
+                step_id: "rust-cache".into(),
+                invocation: JavaScriptActionInvocation {
+                    node: "node24".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
+                    main_container_path: "/__a/_actions/Swatinem_rust-cache/dist/restore/index.js"
+                        .into(),
+                    post_container_path: Some(
+                        "/__a/_actions/Swatinem_rust-cache/dist/save/index.js".into(),
+                    ),
+                    post_condition: Some("success() || env.CACHE_ON_FAILURE == 'true'".into()),
+                    action_container_path: "/__a/_actions/Swatinem_rust-cache".into(),
+                    env: vec![
+                        (
+                            "INPUT_CACHE-DIRECTORIES".into(),
+                            "~/.cache/rust-script".into(),
+                        ),
+                        ("INPUT_SHARED-KEY".into(), "kestra-rust-build-cache".into()),
+                        ("INPUT_CACHE-ON-FAILURE".into(), "true".into()),
+                    ],
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::Script(ScriptStep {
+                id: "enable".into(),
+                script: "echo CACHE_ON_FAILURE=true >> $GITHUB_ENV".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/kestra-docker-containers".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "fail".into(),
+                script: "exit 1".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/kestra-docker-containers".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+        ];
+        let runtime_env = vec![
+            (
+                "GITHUB_REPOSITORY".into(),
+                "ChainArgos/java-monorepo".into(),
+            ),
+            ("GITHUB_WORKSPACE".into(), "/__w".into()),
+            ("RUNNER_TEMP".into(), "/__t".into()),
+            ("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into()),
+            ("ACTIONS_CACHE_URL".into(), "https://cache.actions".into()),
+            ("ACTIONS_CACHE_SERVICE_V2".into(), "True".into()),
+        ];
+        let mut executor = DockerScriptExecutor::new(EnvAndFailureRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &runtime_env, &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[2].exit_code, 1);
+        let node_calls = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:24-bookworm".into())
+            })
+            .map(|(_, args)| args)
+            .collect::<Vec<_>>();
+        assert_eq!(node_calls.len(), 2);
+        for call in &node_calls {
+            assert!(call.contains(&"HOME=/github/home".into()));
+            assert!(call.contains(&"GITHUB_REPOSITORY=ChainArgos/java-monorepo".into()));
+            assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
+            assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
+            assert!(call.contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
+            assert!(call.contains(&"ACTIONS_CACHE_URL=https://cache.actions".into()));
+            assert!(call.contains(&"ACTIONS_CACHE_SERVICE_V2=True".into()));
+        }
+        assert!(node_calls[0].contains(&"INPUT_SHARED-KEY=kestra-rust-build-cache".into()));
+        assert!(node_calls[0].contains(&"INPUT_CACHE-ON-FAILURE=true".into()));
+        assert!(node_calls[1].contains(&"CACHE_ON_FAILURE=true".into()));
+        assert!(node_calls[1].ends_with(&[
+            "node:24-bookworm".into(),
+            "node".into(),
+            "/__a/_actions/Swatinem_rust-cache/dist/save/index.js".into()
+        ]));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
     fn target_expression_context() -> Vec<(String, Value)> {
         vec![
             (
