@@ -45,6 +45,7 @@ trap cleanup_runner EXIT
 velnor_require_positive_int VELNOR_FIXTURE_JOB_COUNT "$JOB_COUNT"
 velnor_require_bool VELNOR_REQUIRE_DOCKER_SOCKET "$REQUIRE_DOCKER_SOCKET"
 velnor_require_bool VELNOR_FIXTURE_CLEANUP_RUNNER "$CLEANUP_RUNNER"
+velnor_require_live_evidence_controls
 
 if [[ -z "$DISPATCH" ]]; then
   if [[ -n "$RUN_ID" ]]; then

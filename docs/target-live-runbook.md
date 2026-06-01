@@ -314,6 +314,8 @@ Velnor. Set
 `VELNOR_LIVE_EVIDENCE_DIR=<path>` to store those records elsewhere. Set
 `VELNOR_LIVE_EVIDENCE_LOG_LINES=<n>` to change the log excerpt size. Set
 `VELNOR_LIVE_EVIDENCE_LOCAL_ENTRIES=<n>` to change the per-store listing size.
+Both evidence count values must be positive integers; smoke scripts validate
+them before runner registration.
 
 Keep sanitized job payloads for failures:
 

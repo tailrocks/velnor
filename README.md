@@ -118,7 +118,8 @@ snapshots from GitHub, bounded local cache/artifact/sccache store snapshots from
 Velnor's shared workdir, and sanitized job-message dump file listings. Override
 that path with `VELNOR_LIVE_EVIDENCE_DIR`; override log excerpt length with
 `VELNOR_LIVE_EVIDENCE_LOG_LINES`; override local store entry count with
-`VELNOR_LIVE_EVIDENCE_LOCAL_ENTRIES`.
+`VELNOR_LIVE_EVIDENCE_LOCAL_ENTRIES`. Both evidence count values must be
+positive integers and are validated before runner registration.
 Set `VELNOR_TARGET_WORKFLOW=<workflow.yml>` on target smoke scripts to dispatch
 that workflow before Velnor waits for target jobs.
 Set `VELNOR_TARGET_REF=<branch-or-sha>` to dispatch from a specific ref.

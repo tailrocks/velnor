@@ -49,6 +49,7 @@ velnor_require_bool VELNOR_REQUIRE_DOCKER_SOCKET "$REQUIRE_DOCKER_SOCKET"
 velnor_require_bool VELNOR_TARGET_CLEANUP_RUNNER "$CLEANUP_RUNNER"
 velnor_require_bool VELNOR_TARGET_WATCH_RUN "$WATCH_RUN"
 velnor_require_bool VELNOR_TARGET_MVP_ARM_LABEL "$TARGET_MVP_ARM_LABEL"
+velnor_require_live_evidence_controls
 
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   echo "GITHUB_TOKEN is required to register the target self-hosted runner." >&2
