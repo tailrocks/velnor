@@ -1726,9 +1726,12 @@ fn native_cache(
     let restore_keys = native_input(action, &action_state, "restore-keys");
     let fail_on_cache_miss =
         input_truthy(&native_input(action, &action_state, "fail-on-cache-miss"));
+    let lookup_only = input_truthy(&native_input(action, &action_state, "lookup-only"));
     let matched_key = find_cache_match(&action_state, &key, &restore_keys)?;
     if let Some(matched_key) = &matched_key {
-        restore_cache_paths(&action_state, matched_key, &path)?;
+        if !lookup_only {
+            restore_cache_paths(&action_state, matched_key, &path)?;
+        }
     }
     let exact_hit = matched_key.as_deref() == Some(key.as_str());
 
@@ -1750,7 +1753,11 @@ fn native_cache(
 
     let mut stdout = String::new();
     if let Some(matched_key) = &matched_key {
-        stdout.push_str(&format!("Cache restored from key: {matched_key}\n"));
+        if lookup_only {
+            stdout.push_str(&format!("Cache lookup found key: {matched_key}\n"));
+        } else {
+            stdout.push_str(&format!("Cache restored from key: {matched_key}\n"));
+        }
     } else {
         stdout.push_str("Cache not found for input keys: ");
         stdout.push_str(&cache_lookup_keys(&key, &restore_keys).join(", "));
@@ -4812,6 +4819,65 @@ mod tests {
         assert!(restore_results[1]
             .stdout
             .contains("Cache hit occurred on primary key"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_cache_lookup_only_does_not_restore_paths() {
+        let root = temp_dir();
+        let save_temp = root.join("save-job/temp");
+        let lookup_temp = root.join("lookup-job/temp");
+        fs::create_dir_all(root.join("save-job/home/.cache/rust-script")).unwrap();
+        fs::create_dir_all(root.join("lookup-job/home")).unwrap();
+        fs::write(
+            root.join("save-job/home/.cache/rust-script/state.bin"),
+            "cached\n",
+        )
+        .unwrap();
+        let save = vec![ExecutableStep::Native {
+            step_id: "cache".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::Cache,
+                inputs: [
+                    ("path".into(), "~/.cache/rust-script".into()),
+                    ("key".into(), "linux-rust-script-lookup".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+
+        DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&save_temp), &save, &[], &save_temp)
+            .unwrap();
+
+        let lookup = vec![ExecutableStep::Native {
+            step_id: "cache".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::Cache,
+                inputs: [
+                    ("path".into(), "~/.cache/rust-script".into()),
+                    ("key".into(), "linux-rust-script-lookup".into()),
+                    ("lookup-only".into(), "true".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        let lookup_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&lookup_temp), &lookup, &[], &lookup_temp)
+            .unwrap();
+
+        assert_eq!(lookup_results[0].exit_code, 0);
+        assert_eq!(lookup_results[0].state.outputs["cache-hit"], "true");
+        assert!(lookup_results[0].stdout.contains("Cache lookup found key"));
+        assert!(!root
+            .join("lookup-job/home/.cache/rust-script/state.bin")
+            .exists());
         fs::remove_dir_all(root).unwrap();
     }
 

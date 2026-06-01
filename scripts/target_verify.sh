@@ -55,6 +55,7 @@ tests=(
   native_upload_artifact_maps_container_tmp_to_host_temp
   native_cache_reports_miss_without_node_sidecar
   native_cache_trims_folded_yaml_primary_key
+  native_cache_lookup_only_does_not_restore_paths
   native_cache_saves_and_restores_from_shared_workdir
   builds_target_upload_artifact_invocation_inputs
   builds_target_download_artifact_invocation_inputs

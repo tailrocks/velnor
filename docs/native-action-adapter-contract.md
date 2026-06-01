@@ -99,7 +99,7 @@ until a new target workflow needs more.
 | Action family | Native adapter | Required behavior |
 | --- | --- | --- |
 | `actions/checkout` | `Checkout` | self checkout, external repo checkout, `path`, `ref`, `token`, `fetch-depth` |
-| `actions/cache` | `Cache` | restore/save paths, key, restore keys, `hashFiles(...)` keys, shared workdir cache storage |
+| `actions/cache` | `Cache` | restore/save paths, key, restore keys, `hashFiles(...)` keys, `fail-on-cache-miss`, `lookup-only` without restoring paths, shared workdir cache storage |
 | `actions/upload-artifact` | `UploadArtifact` | `name`, `path` including target glob patterns, `if-no-files-found`, `include-hidden-files` defaulting to false like the latest action, `overwrite` defaulting to false with duplicate-name failure, `retention-days`, target outputs, deterministic per-run/per-name artifact id, run-scoped workdir storage |
 | `actions/download-artifact` | `DownloadArtifact` | `name`, `pattern`, `path`, `merge-multiple`, same-run cross-job handoff on one Velnor host |
 | `actions/upload-pages-artifact` | `UploadPagesArtifact` | package pages directory and expose artifact handoff |
