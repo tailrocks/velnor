@@ -722,7 +722,18 @@ fn composite_action_invocations_with_path(
         let working_directory_container = step
             .working_directory
             .as_deref()
-            .map(|path| workspace_path(workspace_container, path))
+            .map(|path| {
+                workspace_path(
+                    workspace_container,
+                    &render_composite_scoped_value(
+                        path,
+                        &action_inputs,
+                        action_path,
+                        workspace_container,
+                        &step_ids,
+                    ),
+                )
+            })
             .unwrap_or_else(|| workspace_container.to_string());
         invocations.push(CompositeActionInvocation::Script(ScriptStep {
             id: step_id,
@@ -1530,6 +1541,7 @@ runs:
     - shell: bash
       if: runner.os == 'Linux'
       continue-on-error: true
+      working-directory: ${{ github.action_path }}/fixtures
       run: echo "${{ github.action_path }} ${{ inputs.toolchain }}"
 "#,
         )
@@ -1552,6 +1564,10 @@ runs:
         assert_eq!(step.id, "toolchain-1");
         assert_eq!(step.condition.as_deref(), Some("runner.os == 'Linux'"));
         assert!(step.continue_on_error);
+        assert_eq!(
+            step.working_directory_container,
+            "/__a/_actions/dtolnay_rust-toolchain/stable/fixtures"
+        );
         assert!(step
             .script
             .contains("/__a/_actions/dtolnay_rust-toolchain/stable stable"));
