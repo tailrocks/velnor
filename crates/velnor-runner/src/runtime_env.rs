@@ -119,40 +119,47 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         if let Some(url) = endpoint.url.as_deref() {
             set_env(&mut env, "ACTIONS_RUNTIME_URL", url);
         }
-        if let Some(token) = endpoint.authorization.as_ref().and_then(|authorization| {
-            authorization
-                .parameters
-                .get("AccessToken")
-                .or_else(|| authorization.parameters.get("accessToken"))
-        }) {
+        if let Some(token) = endpoint_access_token(endpoint) {
             set_env(&mut env, "ACTIONS_RUNTIME_TOKEN", token);
         }
-        push_endpoint_data(&mut env, endpoint, "CacheServerUrl", "ACTIONS_CACHE_URL");
         push_endpoint_data(
             &mut env,
             endpoint,
-            "PipelinesServiceUrl",
+            &["CacheServerUrl", "cacheServerUrl", "ACTIONS_CACHE_URL"],
+            "ACTIONS_CACHE_URL",
+        );
+        push_endpoint_data(
+            &mut env,
+            endpoint,
+            &[
+                "PipelinesServiceUrl",
+                "pipelinesServiceUrl",
+                "ACTIONS_RUNTIME_URL",
+            ],
             "ACTIONS_RUNTIME_URL",
         );
         if push_endpoint_data(
             &mut env,
             endpoint,
-            "GenerateIdTokenUrl",
+            &[
+                "GenerateIdTokenUrl",
+                "generateIdTokenUrl",
+                "ACTIONS_ID_TOKEN_REQUEST_URL",
+            ],
             "ACTIONS_ID_TOKEN_REQUEST_URL",
         ) {
-            if let Some(token) = endpoint.authorization.as_ref().and_then(|authorization| {
-                authorization
-                    .parameters
-                    .get("AccessToken")
-                    .or_else(|| authorization.parameters.get("accessToken"))
-            }) {
+            if let Some(token) = endpoint_access_token(endpoint) {
                 set_env(&mut env, "ACTIONS_ID_TOKEN_REQUEST_TOKEN", token);
             }
         }
         push_endpoint_data(
             &mut env,
             endpoint,
-            "ResultsServiceUrl",
+            &[
+                "ResultsServiceUrl",
+                "resultsServiceUrl",
+                "ACTIONS_RESULTS_URL",
+            ],
             "ACTIONS_RESULTS_URL",
         );
     }
@@ -314,19 +321,38 @@ fn repository_owner(repository: &str) -> Option<String> {
 fn push_endpoint_data(
     env: &mut Vec<(String, String)>,
     endpoint: &crate::job_message::ServiceEndpoint,
-    key: &str,
+    keys: &[&str],
     env_name: &str,
 ) -> bool {
-    if let Some(value) = endpoint
-        .data
-        .get(key)
-        .or_else(|| endpoint.data.get(env_name))
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(value) = map_get_any_case(&endpoint.data, keys).filter(|value| !value.is_empty()) {
         set_env(env, env_name, value);
         return true;
     }
     false
+}
+
+fn endpoint_access_token(endpoint: &crate::job_message::ServiceEndpoint) -> Option<&str> {
+    endpoint.authorization.as_ref().and_then(|authorization| {
+        map_get_any_case(
+            &authorization.parameters,
+            &["AccessToken", "accessToken", "ACCESSTOKEN"],
+        )
+    })
+}
+
+fn map_get_any_case<'a>(
+    map: &'a std::collections::BTreeMap<String, String>,
+    keys: &[&str],
+) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| map.get(*key).map(String::as_str))
+        .or_else(|| {
+            map.iter().find_map(|(name, value)| {
+                keys.iter()
+                    .any(|key| name.eq_ignore_ascii_case(key))
+                    .then_some(value.as_str())
+            })
+        })
 }
 
 fn runner_arch() -> &'static str {
@@ -503,5 +529,57 @@ mod tests {
         assert!(env.contains(&("ACTIONS_CACHE_SERVICE_V2".into(), "True".into())));
         assert!(!env.contains(&("ACTIONS_CACHE_SERVICE_V2".into(), "false".into())));
         assert!(env.contains(&("ACTIONS_ORCHESTRATION_ID".into(), "orch-123".into())));
+    }
+
+    #[test]
+    fn reads_runtime_endpoint_values_case_insensitively() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "url": "https://pipelines.actions.githubusercontent.com/fallback",
+                    "authorization": {
+                        "parameters": { "accesstoken": "runtime-token" }
+                    },
+                    "data": {
+                        "cacheServerUrl": "https://cache.actions.example",
+                        "pipelinesserviceurl": "https://pipelines-v2.actions.example",
+                        "generateIdTokenUrl": "https://oidc.actions.example/id-token",
+                        "resultsserviceurl": "https://results.actions.example"
+                    }
+                }]
+            }
+        }))
+        .unwrap();
+
+        let env = job_runtime_env(&job);
+
+        assert!(env.contains(&("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into())));
+        assert!(env.contains(&(
+            "ACTIONS_RUNTIME_URL".into(),
+            "https://pipelines-v2.actions.example".into()
+        )));
+        assert!(env.contains(&(
+            "ACTIONS_CACHE_URL".into(),
+            "https://cache.actions.example".into()
+        )));
+        assert!(env.contains(&(
+            "ACTIONS_RESULTS_URL".into(),
+            "https://results.actions.example".into()
+        )));
+        assert!(env.contains(&(
+            "ACTIONS_ID_TOKEN_REQUEST_URL".into(),
+            "https://oidc.actions.example/id-token".into()
+        )));
+        assert!(env.contains(&(
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN".into(),
+            "runtime-token".into()
+        )));
     }
 }
