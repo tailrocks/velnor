@@ -21,6 +21,7 @@ pub struct CheckoutPlan {
     pub destination: PathBuf,
     pub token: Option<String>,
     pub fetch_depth: Option<u32>,
+    pub fetch_tags: bool,
     pub persist_credentials: bool,
     pub clean: bool,
     pub condition: Option<String>,
@@ -78,6 +79,7 @@ pub fn checkout_plans(
             token: checkout_token(step, job)
                 .or_else(|| system_access_token(job.system_connection())),
             fetch_depth: checkout_fetch_depth(step)?,
+            fetch_tags: checkout_fetch_tags(step),
             persist_credentials: checkout_persist_credentials(step),
             clean: checkout_clean(step),
             condition: step.condition.clone(),
@@ -116,6 +118,7 @@ where
         &plan.destination,
         plan.token.as_deref(),
         plan.fetch_depth,
+        plan.fetch_tags,
         plan.persist_credentials,
         plan.clean,
     )
@@ -161,6 +164,7 @@ pub fn fetch_git_ref<R>(
     destination: &Path,
     token: Option<&str>,
     fetch_depth: Option<u32>,
+    fetch_tags: bool,
     persist_credentials: bool,
     clean: bool,
 ) -> Result<()>
@@ -206,15 +210,27 @@ where
             format!("http.extraheader=AUTHORIZATION: bearer {token}"),
         ]);
     }
-    fetch.extend([
-        "fetch".to_string(),
-        "--no-tags".to_string(),
-        "--prune".to_string(),
-    ]);
-    if let Some(depth) = fetch_depth {
-        fetch.push(format!("--depth={depth}"));
+    fetch.extend(["fetch".to_string(), "--prune".to_string()]);
+    match fetch_depth {
+        Some(depth) => {
+            if fetch_tags {
+                fetch.push("--tags".to_string());
+            } else {
+                fetch.push("--no-tags".to_string());
+            }
+            fetch.push(format!("--depth={depth}"));
+            fetch.extend(["origin".to_string(), git_ref.to_string()]);
+        }
+        None => {
+            fetch.extend([
+                "--tags".to_string(),
+                "origin".to_string(),
+                "+refs/heads/*:refs/remotes/origin/*".to_string(),
+                "+refs/tags/*:refs/tags/*".to_string(),
+                git_ref.to_string(),
+            ]);
+        }
     }
-    fetch.extend(["origin".to_string(), git_ref.to_string()]);
     run_git(runner, &fetch)?;
 
     run_git(
@@ -442,6 +458,14 @@ fn checkout_fetch_depth(step: &ActionStep) -> Result<Option<u32>> {
     }
 }
 
+fn checkout_fetch_tags(step: &ActionStep) -> bool {
+    step.inputs
+        .as_ref()
+        .and_then(|inputs| inputs.get("fetch-tags"))
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
 fn checkout_persist_credentials(step: &ActionStep) -> bool {
     step.inputs
         .as_ref()
@@ -588,6 +612,7 @@ mod tests {
             destination: temp.clone(),
             token: Some("token".into()),
             fetch_depth: Some(1),
+            fetch_tags: false,
             persist_credentials: true,
             clean: true,
             condition: None,
@@ -643,6 +668,7 @@ mod tests {
             destination: temp.clone(),
             token: None,
             fetch_depth: None,
+            fetch_tags: false,
             persist_credentials: true,
             clean: true,
             condition: None,
@@ -658,6 +684,11 @@ mod tests {
             .find(|(_, args)| args.contains(&"fetch".to_string()))
             .unwrap();
         assert!(!fetch.1.iter().any(|arg| arg.starts_with("--depth=")));
+        assert!(fetch
+            .1
+            .contains(&"+refs/heads/*:refs/remotes/origin/*".to_string()));
+        assert!(fetch.1.contains(&"+refs/tags/*:refs/tags/*".to_string()));
+        assert!(fetch.1.contains(&"--tags".to_string()));
 
         std::fs::remove_dir_all(temp).ok();
     }
@@ -709,6 +740,7 @@ mod tests {
         assert_eq!(plans[0].destination, Path::new("/tmp/work/homebrew-tap"));
         assert_eq!(plans[0].token.as_deref(), Some("tap-token"));
         assert_eq!(plans[0].fetch_depth, None);
+        assert!(!plans[0].fetch_tags);
         assert!(plans[0].persist_credentials);
         assert!(plans[0].clean);
     }
@@ -749,6 +781,7 @@ mod tests {
         assert_eq!(plans[0].destination, Path::new("/tmp/work"));
         assert_eq!(plans[0].token.as_deref(), Some("ghs-token"));
         assert_eq!(plans[0].fetch_depth, Some(1));
+        assert!(!plans[0].fetch_tags);
         assert!(plans[0].persist_credentials);
         assert!(plans[0].clean);
     }
@@ -780,7 +813,8 @@ mod tests {
                 "reference": { "type": "Repository", "name": "actions/checkout" },
                 "inputs": {
                     "persist-credentials": "false",
-                    "clean": "false"
+                    "clean": "false",
+                    "fetch-tags": "true"
                 }
             }]
         }))
@@ -788,6 +822,7 @@ mod tests {
 
         let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
 
+        assert!(plans[0].fetch_tags);
         assert!(!plans[0].persist_credentials);
         assert!(!plans[0].clean);
     }

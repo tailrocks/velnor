@@ -2116,6 +2116,7 @@ mod tests {
                 destination: temp.join("workspace"),
                 token: None,
                 fetch_depth: None,
+                fetch_tags: false,
                 persist_credentials: true,
                 clean: true,
                 condition: None,
