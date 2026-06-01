@@ -1019,7 +1019,7 @@ fn render_inputs(
     inputs
         .iter()
         .map(|(name, value)| {
-            let rendered = if value.contains("steps.") {
+            let rendered = if contains_step_output_expression(value) {
                 value.clone()
             } else {
                 render_context_expressions(value, context_data)
@@ -1027,6 +1027,12 @@ fn render_inputs(
             (name.clone(), rendered)
         })
         .collect()
+}
+
+fn contains_step_output_expression(value: &str) -> bool {
+    value
+        .match_indices("steps.")
+        .any(|(index, _)| value[index..].contains(".outputs."))
 }
 
 fn render_composite_value(
@@ -1566,6 +1572,37 @@ runs:
             plans[0].inputs["edit-url"],
             "${{ env.JACKIN_REPO_EDIT_URL }}"
         );
+    }
+
+    #[test]
+    fn renders_non_output_step_literals_in_local_action_inputs() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "local",
+                "reference": {
+                    "type": "Repository",
+                    "name": "./.github/actions/check-deployed-docs"
+                },
+                "inputs": {
+                    "label": "steps are documented for ${{ github.repository }}",
+                    "status": "${{ steps.sccache.outcome }}"
+                }
+            }
+        ]))
+        .unwrap();
+        let context = vec![(
+            "github".to_string(),
+            serde_json::json!({ "repository": "jackin-project/jackin" }),
+        )];
+
+        let plans =
+            local_action_plans_with_context(&steps, Path::new("/tmp/workspace"), &context).unwrap();
+
+        assert_eq!(
+            plans[0].inputs["label"],
+            "steps are documented for jackin-project/jackin"
+        );
+        assert_eq!(plans[0].inputs["status"], "${{ steps.sccache.outcome }}");
     }
 
     #[test]
