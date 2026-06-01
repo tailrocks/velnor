@@ -826,7 +826,9 @@ impl JobExecutionState {
         }
         if !result.state.state.is_empty() {
             self.action_states
-                .insert(step_id.to_string(), result.state.state.clone());
+                .entry(step_id.to_string())
+                .or_default()
+                .extend(result.state.state.clone());
         }
         for (name, value) in &result.state.env {
             self.env.insert(name.clone(), value.clone());
@@ -1634,6 +1636,37 @@ mod tests {
                 }
                 if args.iter().any(|arg| arg == "GITHUB_PATH=/__t/pather_path") {
                     fs::write(self.temp.join("pather_path"), "/github/home/.cargo/bin\n")?;
+                }
+            }
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    struct PhaseStateRunner {
+        calls: Vec<(String, Vec<String>)>,
+        temp: PathBuf,
+    }
+
+    impl CommandRunner for PhaseStateRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            let state_file = args
+                .iter()
+                .any(|arg| arg == "GITHUB_STATE=/__t/wrapped_state")
+                .then(|| self.temp.join("wrapped_state"));
+            if program == "docker" {
+                match (args.last().map(String::as_str), state_file) {
+                    (Some("/__a/_actions/wrapped/dist/pre.js"), Some(path)) => {
+                        fs::write(path, "preKey=pre-value\n")?;
+                    }
+                    (Some("/__a/_actions/wrapped/dist/main.js"), Some(path)) => {
+                        fs::write(path, "mainKey=main-value\n")?;
+                    }
+                    _ => {}
                 }
             }
             Ok(CommandResult {
@@ -3239,6 +3272,49 @@ mod tests {
             "/__a/_actions/cache/dist/restore.js".into()
         ]));
         assert!(node_calls[1].contains(&"STATE_primaryKey=linux-cache".into()));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn javascript_action_state_accumulates_across_pre_and_main_for_post() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::JavaScript {
+            step_id: "wrapped".into(),
+            invocation: JavaScriptActionInvocation {
+                node: "node20".into(),
+                pre_container_path: Some("/__a/_actions/wrapped/dist/pre.js".into()),
+                pre_condition: None,
+                main_container_path: "/__a/_actions/wrapped/dist/main.js".into(),
+                post_container_path: Some("/__a/_actions/wrapped/dist/post.js".into()),
+                post_condition: None,
+                action_container_path: "/__a/_actions/wrapped".into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        let mut executor = DockerScriptExecutor::new(PhaseStateRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        let post_call = executor
+            .runner()
+            .calls
+            .iter()
+            .find(|(_, args)| {
+                args.iter()
+                    .any(|arg| arg == "/__a/_actions/wrapped/dist/post.js")
+            })
+            .unwrap();
+        assert!(post_call.1.contains(&"STATE_preKey=pre-value".into()));
+        assert!(post_call.1.contains(&"STATE_mainKey=main-value".into()));
+
         fs::remove_dir_all(temp).unwrap();
     }
 
