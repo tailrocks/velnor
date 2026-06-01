@@ -73,24 +73,30 @@ fn github_script_step(
         .as_ref()
         .and_then(|value| value.as_object())
         .ok_or_else(|| anyhow::anyhow!("script step {} missing inputs object", index + 1))?;
-    let script = inputs
-        .get("script")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| anyhow::anyhow!("script step {} missing script input", index + 1))?;
-    let shell = inputs
-        .get("shell")
-        .and_then(|value| value.as_str())
+    let script = string_input_field(inputs, &["script", "Script"]).ok_or_else(|| {
+        anyhow::anyhow!(
+            "script step {} missing script input; input keys: {}",
+            index + 1,
+            input_summary(inputs)
+        )
+    })?;
+    let shell = string_input_field(inputs, &["shell", "Shell"])
         .or(defaults.shell.as_deref())
         .map(github_shell)
         .transpose()?
         .unwrap_or(Shell::Bash);
-    let working_directory = inputs
-        .get("workingDirectory")
-        .or_else(|| inputs.get("working-directory"))
-        .and_then(|value| value.as_str())
-        .or(defaults.working_directory.as_deref())
-        .map(|path| workspace_path(workspace_container, path))
-        .unwrap_or_else(|| workspace_container.to_string());
+    let working_directory = string_input_field(
+        inputs,
+        &[
+            "workingDirectory",
+            "working-directory",
+            "WorkingDirectory",
+            "Working-Directory",
+        ],
+    )
+    .or(defaults.working_directory.as_deref())
+    .map(|path| workspace_path(workspace_container, path))
+    .unwrap_or_else(|| workspace_container.to_string());
 
     Ok(ScriptStep {
         id: step_id(step, index),
@@ -151,6 +157,120 @@ fn string_field<'a>(object: &'a serde_json::Map<String, Value>, names: &[&str]) 
     names
         .iter()
         .find_map(|name| object.get(*name).and_then(Value::as_str))
+}
+
+fn string_input_field<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    names: &[&str],
+) -> Option<&'a str> {
+    direct_string_input_field(object, names)
+        .or_else(|| nested_map_string_input_field(object, names))
+}
+
+fn direct_string_input_field<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    names: &[&str],
+) -> Option<&'a str> {
+    names
+        .iter()
+        .find_map(|name| input_value_as_str(object.get(*name)?))
+}
+
+fn nested_map_string_input_field<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    names: &[&str],
+) -> Option<&'a str> {
+    let map = object.get("map").or_else(|| object.get("Map"))?;
+    if let Some(map) = map.as_object() {
+        return string_input_field(map, names);
+    }
+    map.as_array().and_then(|items| {
+        items.iter().find_map(|item| {
+            let item = item.as_object()?;
+            let name = input_name_field(item)?;
+            if !names
+                .iter()
+                .any(|expected| name.eq_ignore_ascii_case(expected))
+            {
+                return None;
+            }
+            item.get("value")
+                .or_else(|| item.get("Value"))
+                .and_then(input_value_as_str)
+        })
+    })
+}
+
+fn input_name_field(object: &serde_json::Map<String, Value>) -> Option<&str> {
+    ["name", "Name", "key", "Key"]
+        .iter()
+        .find_map(|name| object.get(*name).and_then(input_value_as_str))
+}
+
+fn input_value_as_str(value: &Value) -> Option<&str> {
+    value.as_str().or_else(|| {
+        value
+            .as_object()
+            .and_then(|object| string_field(object, &["value", "Value", "lit", "Lit"]))
+    })
+}
+
+fn input_keys(object: &serde_json::Map<String, Value>) -> String {
+    if object.is_empty() {
+        return "none".to_string();
+    }
+    object.keys().cloned().collect::<Vec<_>>().join(", ")
+}
+
+fn input_summary(object: &serde_json::Map<String, Value>) -> String {
+    let mut summary = format!("top=[{}]", input_keys(object));
+    if let Some(map) = object.get("map").or_else(|| object.get("Map")) {
+        if let Some(map) = map.as_object() {
+            summary.push_str(&format!(" map=[{}]", input_keys(map)));
+        } else if let Some(items) = map.as_array() {
+            let shapes = items
+                .iter()
+                .take(3)
+                .filter_map(|item| item.as_object())
+                .map(input_item_summary)
+                .collect::<Vec<_>>()
+                .join(" | ");
+            summary.push_str(&format!(
+                " map_array_len={} map_shapes=[{}]",
+                items.len(),
+                shapes
+            ));
+        } else {
+            summary.push_str(&format!(" map_type={}", json_type(map)));
+        }
+    }
+    summary
+}
+
+fn input_item_summary(object: &serde_json::Map<String, Value>) -> String {
+    let mut parts = vec![input_keys(object)];
+    for name in ["Key", "key", "Value", "value"] {
+        let Some(value) = object.get(name) else {
+            continue;
+        };
+        if let Some(inner) = value.as_object() {
+            parts.push(format!("{name}=[{}]", input_keys(inner)));
+        } else {
+            parts.push(format!("{name}={}", json_type(value)));
+        }
+    }
+    parts.join(" ")
+}
+
+fn json_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 pub(crate) fn step_continue_on_error(step: &ActionStep) -> bool {
@@ -593,6 +713,78 @@ mod tests {
             ]
         );
         assert!(mapped[0].continue_on_error);
+    }
+
+    #[test]
+    fn maps_run_service_capitalized_script_inputs() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "run-1",
+                "reference": { "type": "Script" },
+                "inputs": {
+                    "Script": { "Value": "cargo test" },
+                    "Shell": { "Value": "bash" },
+                    "WorkingDirectory": { "Value": "./crates" }
+                }
+            }
+        ]))
+        .unwrap();
+
+        let mapped = github_script_steps(&steps, "/__w/repo").unwrap();
+
+        assert_eq!(mapped[0].script, "cargo test");
+        assert!(matches!(mapped[0].shell, Shell::Bash));
+        assert_eq!(mapped[0].working_directory_container, "/__w/repo/crates");
+    }
+
+    #[test]
+    fn maps_run_service_nested_input_map() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "run-1",
+                "reference": { "type": "Script" },
+                "inputs": {
+                    "type": "map",
+                    "map": {
+                        "script": "cargo test",
+                        "shell": "bash",
+                        "workingDirectory": "./crates"
+                    }
+                }
+            }
+        ]))
+        .unwrap();
+
+        let mapped = github_script_steps(&steps, "/__w/repo").unwrap();
+
+        assert_eq!(mapped[0].script, "cargo test");
+        assert!(matches!(mapped[0].shell, Shell::Bash));
+        assert_eq!(mapped[0].working_directory_container, "/__w/repo/crates");
+    }
+
+    #[test]
+    fn maps_run_service_input_map_array() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "run-1",
+                "reference": { "type": "Script" },
+                "inputs": {
+                    "type": "map",
+                    "map": [
+                        { "Key": { "lit": "script", "type": 0 }, "Value": { "lit": "cargo test", "type": 0 } },
+                        { "Key": { "lit": "shell", "type": 0 }, "Value": { "lit": "bash", "type": 0 } },
+                        { "Key": { "lit": "workingDirectory", "type": 0 }, "Value": { "lit": "./crates", "type": 0 } }
+                    ]
+                }
+            }
+        ]))
+        .unwrap();
+
+        let mapped = github_script_steps(&steps, "/__w/repo").unwrap();
+
+        assert_eq!(mapped[0].script, "cargo test");
+        assert!(matches!(mapped[0].shell, Shell::Bash));
+        assert_eq!(mapped[0].working_directory_container, "/__w/repo/crates");
     }
 
     #[test]

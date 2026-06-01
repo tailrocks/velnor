@@ -307,7 +307,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     }
 
     let dir = config::config_dir(args.config_dir.clone())?;
-    let stored = config::load(&dir)?;
+    let mut stored = config::load(&dir)?;
     let server_url = stored
         .settings
         .server_url
@@ -325,7 +325,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     if stored.settings.use_v2_flow {
         return run_v2(args, dir, stored, &server_url, pool_id, agent_id, token).await;
     }
-    let client = DistributedTaskClient::new(&server_url, token)?;
+    let client = DistributedTaskClient::new(&server_url, token.clone())?;
     let owner_name = format!("{} (PID: {})", default_agent_name(), std::process::id());
     let session = TaskAgentSession::new(owner_name, agent_id, stored.settings.agent_name.clone());
     let session = client.create_session(pool_id, &session).await?;
@@ -361,6 +361,18 @@ pub async fn run(args: RunArgs) -> Result<()> {
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         };
+        if message
+            .message_type
+            .eq_ignore_ascii_case(BROKER_MIGRATION_MESSAGE)
+        {
+            let migration_url = broker_migration_url(&message)?;
+            println!("Migrating runner session to broker at {migration_url}.");
+            client.delete_session(pool_id, session_id).await?;
+            println!("Deleted classic runner session.");
+            stored.settings.server_url_v2 = Some(migration_url);
+            stored.settings.use_v2_flow = true;
+            return run_v2(args, dir, stored, &server_url, pool_id, agent_id, token).await;
+        }
         last_message_id = Some(message.message_id);
         handle_message(
             &client,
@@ -558,8 +570,14 @@ async fn handle_v2_message(
         .await?;
     let job: AgentJobRequestMessage =
         serde_json::from_value(job_value).context("parse acquired run-service job")?;
+    let job_run_service = job
+        .system_connection()
+        .and_then(system_connection_access_token)
+        .map(RunServiceClient::new)
+        .transpose()?
+        .unwrap_or_else(|| run_service.clone());
     let run_service_job = RunServiceJobContext {
-        client: run_service.clone(),
+        client: job_run_service,
         run_service_url: run_service_url.to_string(),
         billing_owner_id: reference.billing_owner_id,
     };
@@ -819,6 +837,16 @@ fn should_execute_job(args: &RunArgs) -> bool {
     args.execute_scripts || (!args.complete_noop && !args.dry_run_jobs)
 }
 
+fn system_connection_access_token(
+    endpoint: &crate::job_message::ServiceEndpoint,
+) -> Option<String> {
+    endpoint
+        .authorization
+        .as_ref()
+        .and_then(|authorization| authorization.parameters.get("AccessToken"))
+        .cloned()
+}
+
 async fn start_lock_renewal(
     client: DistributedTaskClient,
     pool_id: i64,
@@ -849,14 +877,17 @@ async fn start_run_service_lock_renewal(
     plan_id: String,
     job_id: String,
 ) -> Result<JoinHandle<()>> {
-    let response = client
-        .renew_job(&run_service_url, &plan_id, &job_id)
-        .await
-        .context("initial run-service job lock renewal")?;
-    println!(
-        "Run-service job {} valid until {}.",
-        job_id, response.locked_until
-    );
+    match client.renew_job(&run_service_url, &plan_id, &job_id).await {
+        Ok(response) => {
+            println!(
+                "Run-service job {} valid until {}.",
+                job_id, response.locked_until
+            );
+        }
+        Err(error) => {
+            eprintln!("Initial run-service job lock renewal failed: {error:#}");
+        }
+    }
 
     Ok(tokio::spawn(async move {
         loop {
@@ -1148,6 +1179,15 @@ fn execute_script_job(
         .step_results
         .iter()
         .any(|result| result.exit_code != 0 && !result.failure_ignored);
+    for log in summary.step_logs.iter().filter(|log| log.exit_code != 0) {
+        println!(
+            "Step '{}' failed with exit code {}.",
+            log.step_id, log.exit_code
+        );
+        for line in log.lines.iter().take(20) {
+            println!("  {line}");
+        }
+    }
 
     let result = if failed {
         TaskResult::Failed

@@ -22,8 +22,8 @@ use std::{
 use url::Url;
 use uuid::Uuid;
 
-pub const RUNNER_VERSION: &str = "2.326.0";
-pub const RUNNER_USER_AGENT: &str = "actions-runner/2.326.0 (velnor)";
+pub const RUNNER_VERSION: &str = "2.334.0";
+pub const RUNNER_USER_AGENT: &str = "actions-runner/2.334.0 (velnor)";
 pub const EMPTY_LOCK_TOKEN: &str = "00000000-0000-0000-0000-000000000000";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,7 +231,7 @@ fn build_client_assertion(credentials: &OAuthJwtCredentials) -> Result<String> {
         aud: credentials.authorization_url.clone(),
         jti: Uuid::new_v4().to_string(),
         nbf: now,
-        exp: now + 600,
+        exp: now + 300,
     };
     let header = Header::new(Algorithm::RS256);
     let key = EncodingKey::from_rsa_pem(credentials.private_key_pem.as_bytes())
@@ -452,7 +452,7 @@ impl BrokerClient {
             .await
             .context("send get broker message request")?;
 
-        parse_optional_json_response(response, "get broker message").await
+        parse_optional_task_agent_message_response(response, "get broker message").await
     }
 
     pub async fn acknowledge_runner_request(
@@ -715,7 +715,7 @@ impl DistributedTaskClient {
             .await
             .context("send get message request")?;
 
-        parse_optional_json_response(response, "get message").await
+        parse_optional_task_agent_message_response(response, "get message").await
     }
 
     pub async fn delete_message(
@@ -1101,6 +1101,13 @@ where
     bail!("{action} response was not a list")
 }
 
+fn null_string_default<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 async fn parse_json_response<T>(response: reqwest::Response, action: &str) -> Result<T>
 where
     T: for<'de> Deserialize<'de>,
@@ -1157,6 +1164,35 @@ where
         .with_context(|| format!("parse {action} response"))
 }
 
+async fn parse_optional_task_agent_message_response(
+    response: reqwest::Response,
+    action: &str,
+) -> Result<Option<TaskAgentMessage>> {
+    if response.status() == reqwest::StatusCode::NO_CONTENT {
+        return Ok(None);
+    }
+
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .with_context(|| format!("read {action} response"))?;
+
+    if !status.is_success() {
+        bail!("{action} failed: status={status}, body={text}");
+    }
+
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let value: Value =
+        serde_json::from_str(&text).with_context(|| format!("parse {action} response"))?;
+    serde_json::from_value(value)
+        .map(Some)
+        .with_context(|| format!("parse {action} response"))
+}
+
 async fn parse_empty_response(response: reqwest::Response, action: &str) -> Result<()> {
     let status = response.status();
     if !status.is_success() {
@@ -1195,7 +1231,7 @@ pub struct TaskAgentSession {
     pub session_id: Option<String>,
     #[serde(rename = "ownerName")]
     pub owner_name: String,
-    #[serde(rename = "agent")]
+    #[serde(default, rename = "agent")]
     pub agent: TaskAgentReference,
     #[serde(default, rename = "useFipsEncryption")]
     pub use_fips_encryption: bool,
@@ -1224,7 +1260,7 @@ impl TaskAgentSession {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TaskAgentReference {
     #[serde(rename = "id")]
     pub id: i64,
@@ -1248,11 +1284,15 @@ pub struct TaskAgentSessionKey {
 pub struct TaskAgent {
     #[serde(rename = "id", skip_serializing_if = "Option::is_none")]
     pub id: Option<i64>,
-    #[serde(rename = "name")]
+    #[serde(default, rename = "name", deserialize_with = "null_string_default")]
     pub name: String,
-    #[serde(rename = "version")]
+    #[serde(default, rename = "version", deserialize_with = "null_string_default")]
     pub version: String,
-    #[serde(rename = "osDescription")]
+    #[serde(
+        default,
+        rename = "osDescription",
+        deserialize_with = "null_string_default"
+    )]
     pub os_description: String,
     #[serde(rename = "maxParallelism")]
     pub max_parallelism: i32,
@@ -1330,9 +1370,11 @@ impl AgentLabel {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LabelType {
+    #[serde(alias = "system")]
     System,
+    #[serde(alias = "user")]
     User,
 }
 
@@ -1379,7 +1421,7 @@ pub struct EncryptionKey {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskAgentMessage {
-    #[serde(rename = "messageId")]
+    #[serde(default, rename = "messageId")]
     pub message_id: i64,
     #[serde(rename = "messageType")]
     pub message_type: String,
@@ -1893,6 +1935,106 @@ mod tests {
     }
 
     #[test]
+    fn task_agent_accepts_lowercase_label_types_from_github() {
+        let agent: TaskAgent = serde_json::from_str(
+            r#"{
+                "id": 1,
+                "name": "velnor-1",
+                "version": "2.326.0",
+                "osDescription": "linux",
+                "maxParallelism": 1,
+                "ephemeral": false,
+                "disableUpdate": true,
+                "labels": [
+                    { "name": "self-hosted", "type": "system" },
+                    { "name": "velnor", "type": "user" }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(agent.labels[0].r#type, LabelType::System);
+        assert_eq!(agent.labels[1].r#type, LabelType::User);
+    }
+
+    #[test]
+    fn task_agent_accepts_nullable_strings_from_github_list() {
+        let agents: Vec<TaskAgent> = parse_vss_list(
+            serde_json::json!({
+                "count": 1,
+                "value": [{
+                    "id": 7,
+                    "name": "velnor-1",
+                    "version": null,
+                    "osDescription": null,
+                    "maxParallelism": 1,
+                    "ephemeral": false,
+                    "disableUpdate": true,
+                    "labels": []
+                }]
+            }),
+            "get agents",
+        )
+        .unwrap();
+
+        assert_eq!(agents[0].id, Some(7));
+        assert_eq!(agents[0].version, "");
+        assert_eq!(agents[0].os_description, "");
+    }
+
+    #[test]
+    fn task_agent_message_accepts_broker_migration_without_message_id() {
+        let message: TaskAgentMessage = serde_json::from_str(
+            r#"{
+                "messageType": "BrokerMigration",
+                "body": "{\"brokerBaseUrl\":\"https://broker.actions.githubusercontent.com\"}"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(message.message_id, 0);
+        assert_eq!(message.message_type, "BrokerMigration");
+    }
+
+    #[test]
+    fn broker_session_response_can_omit_agent() {
+        let session: TaskAgentSession = serde_json::from_str(
+            r#"{
+                "sessionId": "session-1",
+                "ownerName": "velnor"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(session.session_id.as_deref(), Some("session-1"));
+        assert_eq!(session.agent.id, 0);
+    }
+
+    #[test]
+    fn oauth_client_assertion_lifetime_fits_github_limit() {
+        let key_pair = RunnerKeyPair::generate().unwrap();
+        let credentials = OAuthJwtCredentials {
+            client_id: "client".into(),
+            authorization_url: "https://vstoken.actions.githubusercontent.com/token".into(),
+            private_key_pem: key_pair.private_key_pem,
+        };
+
+        let assertion = build_client_assertion(&credentials).unwrap();
+        let mut parts = assertion.split('.');
+        let _header = parts.next().unwrap();
+        let claims = parts.next().unwrap();
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(claims)
+            .unwrap();
+        let claims: Value = serde_json::from_slice(&claims).unwrap();
+
+        assert_eq!(
+            claims["exp"].as_u64().unwrap() - claims["nbf"].as_u64().unwrap(),
+            300
+        );
+    }
+
+    #[test]
     fn auth_result_accepts_v2_flag() {
         let auth: GitHubAuthResult = serde_json::from_str(
             r#"{
@@ -1988,7 +2130,7 @@ mod tests {
         let query = message.query().unwrap();
         assert!(query.contains("sessionId=session-1"));
         assert!(query.contains("status=Busy"));
-        assert!(query.contains("runnerVersion=2.326.0"));
+        assert!(query.contains(&format!("runnerVersion={RUNNER_VERSION}")));
         assert!(query.contains("disableUpdate=true"));
         let ack = broker_acknowledge_url(&base, "session-1", RunnerStatus::Online).unwrap();
         assert_eq!(ack.path(), "/tenant/acknowledge");
