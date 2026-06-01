@@ -77,9 +77,10 @@ broker messages, acquires jobs from run-service, renews locks, executes
 supported jobs, and completes them through run-service.
 `daemon` runs the same V2 slot loop concurrently from one Velnor process. If
 `--url` is provided, it requests short-lived runner registration tokens through
-`--pat` or uses `--token`, configures each internal slot, then starts polling.
-With `--slots 1`, it uses the normal config directory. With `--slots N` where
-`N > 1`, slot configs live under `<config-dir>/slots/slot-1`,
+`--pat` or uses `--token`, configures any missing internal slot, then starts
+polling. Existing valid slot configs are reused on restart; pass `--replace` to
+force re-registration. With `--slots 1`, it uses the normal config directory.
+With `--slots N` where `N > 1`, slot configs live under `<config-dir>/slots/slot-1`,
 `<config-dir>/slots/slot-2`, and so on; each slot also receives its own `slot-N`
 child under any explicit work, Docker-host work, or job-message dump directory.
 GitHub sees multiple runner identities/sessions, while the operator runs one

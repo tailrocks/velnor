@@ -439,12 +439,30 @@ async fn configure_daemon_slots(args: &DaemonArgs, config_base: &Path, slots: us
 
     println!("Configuring {slots} Velnor daemon runner slot(s) before polling GitHub.");
     for slot_index in 1..=slots {
+        let slot_config_dir = daemon_slot_config_dir(config_base, slot_index, slots);
+        if !daemon_slot_should_register(&slot_config_dir, args.replace, args.dry_run_registration) {
+            println!(
+                "Using existing daemon {} config at {}.",
+                daemon_slot_name(slot_index),
+                slot_config_dir.display()
+            );
+            continue;
+        }
+
         let configure_args = daemon_slot_configure_args(args, config_base, slot_index, slots)?;
         configure(configure_args)
             .await
             .with_context(|| format!("configure daemon slot-{slot_index}"))?;
     }
     Ok(())
+}
+
+fn daemon_slot_should_register(
+    slot_config_dir: &Path,
+    replace: bool,
+    dry_run_registration: bool,
+) -> bool {
+    replace || dry_run_registration || config::load(slot_config_dir).is_err()
 }
 
 fn validate_daemon_slots(slots: usize) -> Result<usize> {
@@ -2758,7 +2776,11 @@ mod tests {
     };
     use crate::protocol::TaskAgentMessage;
     use crate::script_step::StepCommandTelemetry;
-    use std::path::Path;
+    use std::{
+        fs,
+        path::Path,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     fn run_args(complete_noop: bool, execute_scripts: bool, dry_run_jobs: bool) -> RunArgs {
         RunArgs {
@@ -2855,6 +2877,14 @@ mod tests {
         }
     }
 
+    fn unique_temp_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("velnor-{name}-{}-{nanos}", std::process::id()))
+    }
+
     #[test]
     fn daemon_rejects_zero_slots() {
         let error = validate_daemon_slots(0).unwrap_err().to_string();
@@ -2912,6 +2942,19 @@ mod tests {
         );
         assert!(configure_args.replace);
         assert_eq!(configure_args.pool_name.as_deref(), Some("Default"));
+    }
+
+    #[test]
+    fn daemon_slot_registration_skips_valid_existing_config_unless_replace() {
+        let dir = unique_temp_dir("daemon-slot-config");
+        config::save(&dir, &stored_config()).unwrap();
+
+        assert!(!daemon_slot_should_register(&dir, false, false));
+        assert!(daemon_slot_should_register(&dir, true, false));
+        assert!(daemon_slot_should_register(&dir, false, true));
+
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(daemon_slot_should_register(&dir, false, false));
     }
 
     #[test]
