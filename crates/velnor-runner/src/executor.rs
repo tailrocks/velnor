@@ -4,7 +4,7 @@ use crate::{
     action::{DockerActionInvocation, JavaScriptActionInvocation},
     checkout::{configure_safe_directory, execute_checkout, CheckoutPlan},
     container::JobContainerSpec,
-    script_step::{ScriptStep, ScriptStepPlan, StepCommandState},
+    script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
     workflow_command::parse_workflow_commands,
 };
 use anyhow::{bail, Context, Result};
@@ -99,6 +99,7 @@ pub struct StepLog {
     pub step_id: String,
     pub lines: Vec<String>,
     pub masks: Vec<String>,
+    pub annotations: Vec<StepAnnotation>,
     pub exit_code: i32,
     pub skipped: bool,
     pub failure_ignored: bool,
@@ -1540,6 +1541,7 @@ fn step_log(step_id: &str, result: &StepExecutionResult) -> Option<StepLog> {
         step_id: step_id.to_string(),
         lines,
         masks: result.state.masks.clone(),
+        annotations: result.state.annotations.clone(),
         exit_code: result.exit_code,
         skipped: result.skipped,
         failure_ignored: result.failure_ignored,

@@ -1521,6 +1521,8 @@ pub struct RunServiceCompleteJob {
     pub outputs: BTreeMap<String, RunServiceVariableValue>,
     #[serde(rename = "stepResults", skip_serializing_if = "Vec::is_empty")]
     pub step_results: Vec<RunServiceStepResult>,
+    #[serde(rename = "annotations", skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<RunServiceAnnotation>,
     #[serde(rename = "billingOwnerId", skip_serializing_if = "Option::is_none")]
     pub billing_owner_id: Option<String>,
     #[serde(
@@ -1550,6 +1552,42 @@ pub struct RunServiceStepResult {
     pub conclusion: TaskResult,
     #[serde(rename = "completed_log_lines")]
     pub completed_log_lines: i64,
+    #[serde(rename = "annotations", skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<RunServiceAnnotation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunServiceAnnotation {
+    #[serde(rename = "level")]
+    pub level: RunServiceAnnotationLevel,
+    #[serde(rename = "message")]
+    pub message: String,
+    #[serde(rename = "title", skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(rename = "path", skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(rename = "startLine", skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<i64>,
+    #[serde(rename = "endLine", skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<i64>,
+    #[serde(rename = "startColumn", skip_serializing_if = "Option::is_none")]
+    pub start_column: Option<i64>,
+    #[serde(rename = "endColumn", skip_serializing_if = "Option::is_none")]
+    pub end_column: Option<i64>,
+    #[serde(rename = "stepNumber", skip_serializing_if = "Option::is_none")]
+    pub step_number: Option<i64>,
+    #[serde(rename = "isInfrastructureIssue")]
+    pub is_infrastructure_issue: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub enum RunServiceAnnotationLevel {
+    #[serde(rename = "notice")]
+    Notice,
+    #[serde(rename = "warning")]
+    Warning,
+    #[serde(rename = "failure")]
+    Failure,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2270,7 +2308,20 @@ mod tests {
                 status: TimelineRecordState::Completed,
                 conclusion: TaskResult::Succeeded,
                 completed_log_lines: 2,
+                annotations: vec![RunServiceAnnotation {
+                    level: RunServiceAnnotationLevel::Failure,
+                    message: "bad config".into(),
+                    title: Some("lint".into()),
+                    path: Some("src/main.rs".into()),
+                    start_line: Some(10),
+                    end_line: Some(12),
+                    start_column: Some(2),
+                    end_column: Some(4),
+                    step_number: None,
+                    is_infrastructure_issue: false,
+                }],
             }],
+            annotations: Vec::new(),
             billing_owner_id: Some("42".into()),
             infrastructure_failure_category: Some("runner_bootstrap".into()),
         };
@@ -2289,7 +2340,18 @@ mod tests {
                     "name": "step",
                     "status": "completed",
                     "conclusion": "succeeded",
-                    "completed_log_lines": 2
+                    "completed_log_lines": 2,
+                    "annotations": [{
+                        "level": "failure",
+                        "message": "bad config",
+                        "title": "lint",
+                        "path": "src/main.rs",
+                        "startLine": 10,
+                        "endLine": 12,
+                        "startColumn": 2,
+                        "endColumn": 4,
+                        "isInfrastructureIssue": false
+                    }]
                 }],
                 "billingOwnerId": "42",
                 "infrastructureFailureCategory": "runner_bootstrap"

@@ -537,6 +537,7 @@ impl CommandFileSet {
             summary: fs::read_to_string(&self.summary.host)?,
             masks: Vec::new(),
             log_lines: Vec::new(),
+            annotations: Vec::new(),
             error_count: 0,
             warning_count: 0,
             notice_count: 0,
@@ -569,9 +570,29 @@ pub struct StepCommandState {
     pub summary: String,
     pub masks: Vec<String>,
     pub log_lines: Vec<String>,
+    pub annotations: Vec<StepAnnotation>,
     pub error_count: i32,
     pub warning_count: i32,
     pub notice_count: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepAnnotation {
+    pub level: StepAnnotationLevel,
+    pub message: String,
+    pub title: Option<String>,
+    pub path: Option<String>,
+    pub start_line: Option<i64>,
+    pub end_line: Option<i64>,
+    pub start_column: Option<i64>,
+    pub end_column: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepAnnotationLevel {
+    Notice,
+    Warning,
+    Failure,
 }
 
 impl StepCommandState {
@@ -588,6 +609,7 @@ impl StepCommandState {
         self.state.extend(other.state);
         self.masks.extend(other.masks);
         self.log_lines.extend(other.log_lines);
+        self.annotations.extend(other.annotations);
         self.error_count += other.error_count;
         self.warning_count += other.warning_count;
         self.notice_count += other.notice_count;

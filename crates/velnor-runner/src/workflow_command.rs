@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::script_step::StepCommandState;
+use crate::script_step::{StepAnnotation, StepAnnotationLevel, StepCommandState};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,14 +53,23 @@ pub fn parse_workflow_commands(output: &str) -> StepCommandState {
             "error" => {
                 state.error_count += 1;
                 state.log_lines.push(format_annotation("error", &command));
+                state
+                    .annotations
+                    .push(command_annotation(StepAnnotationLevel::Failure, &command));
             }
             "warning" => {
                 state.warning_count += 1;
                 state.log_lines.push(format_annotation("warning", &command));
+                state
+                    .annotations
+                    .push(command_annotation(StepAnnotationLevel::Warning, &command));
             }
             "notice" => {
                 state.notice_count += 1;
                 state.log_lines.push(format_annotation("notice", &command));
+                state
+                    .annotations
+                    .push(command_annotation(StepAnnotationLevel::Notice, &command));
             }
             "debug" => state.log_lines.push(format!("Debug: {}", command.value)),
             "group" => state.log_lines.push(format!("Group: {}", command.value)),
@@ -69,6 +78,35 @@ pub fn parse_workflow_commands(output: &str) -> StepCommandState {
         }
     }
     state
+}
+
+fn command_annotation(level: StepAnnotationLevel, command: &WorkflowCommand<'_>) -> StepAnnotation {
+    let start_line = annotation_number(&command.properties, "line");
+    StepAnnotation {
+        level,
+        message: command.value.clone(),
+        title: annotation_string(&command.properties, "title"),
+        path: annotation_string(&command.properties, "file"),
+        start_line,
+        end_line: annotation_number(&command.properties, "endLine")
+            .or_else(|| annotation_number(&command.properties, "end_line"))
+            .or(start_line),
+        start_column: annotation_number(&command.properties, "col"),
+        end_column: annotation_number(&command.properties, "endColumn")
+            .or_else(|| annotation_number(&command.properties, "end_column"))
+            .or_else(|| annotation_number(&command.properties, "col")),
+    }
+}
+
+fn annotation_string(properties: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    properties
+        .get(key)
+        .filter(|value| !value.is_empty())
+        .cloned()
+}
+
+fn annotation_number(properties: &BTreeMap<String, String>, key: &str) -> Option<i64> {
+    properties.get(key)?.parse().ok()
 }
 
 fn format_annotation(kind: &str, command: &WorkflowCommand<'_>) -> String {
@@ -177,6 +215,12 @@ mod tests {
         assert_eq!(state.error_count, 1);
         assert_eq!(state.warning_count, 1);
         assert_eq!(state.notice_count, 1);
+        assert_eq!(state.annotations.len(), 3);
+        assert_eq!(state.annotations[0].level, StepAnnotationLevel::Failure);
+        assert_eq!(state.annotations[0].message, "broken");
+        assert_eq!(state.annotations[0].path.as_deref(), Some("src/main.rs"));
+        assert_eq!(state.annotations[0].start_line, Some(7));
+        assert_eq!(state.annotations[0].end_line, Some(7));
         assert_eq!(
             state.log_lines,
             vec![
@@ -230,5 +274,6 @@ mod tests {
             ]
         );
         assert_eq!(state.notice_count, 1);
+        assert_eq!(state.annotations[0].title.as_deref(), Some("sccache stats"));
     }
 }

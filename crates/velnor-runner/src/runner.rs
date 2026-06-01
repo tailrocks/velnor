@@ -36,13 +36,14 @@ use crate::{
     job_message::{ActionReferenceType, AgentJobRequestMessage},
     protocol::{
         AcquireJobOutcome, BrokerClient, DistributedTaskClient, GitHubAuthResult, GitHubScope,
-        OAuthClient, OAuthJwtCredentials, RegistrationClient, RunServiceClient,
-        RunServiceCompleteJob, RunServiceStepResult, RunServiceVariableValue, RunnerEvent,
-        RunnerJobRequestRef, RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool,
-        TaskAgentSession, TaskResult, TimelineRecordState, RUNNER_JOB_REQUEST,
+        OAuthClient, OAuthJwtCredentials, RegistrationClient, RunServiceAnnotation,
+        RunServiceAnnotationLevel, RunServiceClient, RunServiceCompleteJob, RunServiceStepResult,
+        RunServiceVariableValue, RunnerEvent, RunnerJobRequestRef, RunnerKeyPair, RunnerStatus,
+        TaskAgent, TaskAgentPool, TaskAgentSession, TaskResult, TimelineRecordState,
+        RUNNER_JOB_REQUEST,
     },
     runtime_env::job_runtime_env,
-    script_step::github_script_steps_with_defaults,
+    script_step::{github_script_steps_with_defaults, StepAnnotation, StepAnnotationLevel},
 };
 
 const JOB_CANCELLATION_MESSAGE: &str = "JobCancellation";
@@ -1521,6 +1522,7 @@ async fn complete_run_service_job(
             status: TimelineRecordState::Completed,
             conclusion: step_log_result(log),
             completed_log_lines: log.lines.len() as i64,
+            annotations: log.annotations.iter().map(run_service_annotation).collect(),
         })
         .collect();
     let outputs = job_outputs
@@ -1541,6 +1543,7 @@ async fn complete_run_service_job(
         conclusion: result,
         outputs,
         step_results,
+        annotations: Vec::new(),
         billing_owner_id,
         infrastructure_failure_category: None,
     };
@@ -1548,6 +1551,25 @@ async fn complete_run_service_job(
         .complete_job(run_service_url, completion)
         .await
         .context("complete run-service job")
+}
+
+fn run_service_annotation(annotation: &StepAnnotation) -> RunServiceAnnotation {
+    RunServiceAnnotation {
+        level: match annotation.level {
+            StepAnnotationLevel::Notice => RunServiceAnnotationLevel::Notice,
+            StepAnnotationLevel::Warning => RunServiceAnnotationLevel::Warning,
+            StepAnnotationLevel::Failure => RunServiceAnnotationLevel::Failure,
+        },
+        message: annotation.message.clone(),
+        title: annotation.title.clone(),
+        path: annotation.path.clone(),
+        start_line: annotation.start_line,
+        end_line: annotation.end_line,
+        start_column: annotation.start_column,
+        end_column: annotation.end_column,
+        step_number: None,
+        is_infrastructure_issue: false,
+    }
 }
 
 fn sanitize_path_segment(value: &str) -> String {

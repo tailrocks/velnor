@@ -61,7 +61,9 @@ Velnor rule:
 
 - renew and complete V2 jobs with the job-scoped `SystemVssConnection` token, not only the runner OAuth token
 - evaluate job outputs after all steps and before completion
-- upload readable timeline/feed logs before completion, because a locally correct job is not sufficient if GitHub UI does not show usable state
+- upload readable timeline/feed logs and structured step annotations before
+  completion, because a locally correct job is not sufficient if GitHub UI does
+  not show usable state
 - preserve step results for `continue-on-error` and downstream `steps.<id>.outcome` behavior
 
 ## Step Execution
