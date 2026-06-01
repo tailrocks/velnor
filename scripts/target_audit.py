@@ -135,6 +135,44 @@ EXPECTED_JOB_RUNS_ON = Counter(
     }
 )
 
+EXPECTED_WORKFLOW_PERMISSIONS = Counter(
+    {
+        (".github/workflows/ansible.yml", ("contents",)): 1,
+        (".github/workflows/ci.yml", ("contents",)): 1,
+        (".github/workflows/construct.yml", ("contents",)): 1,
+        (".github/workflows/docs.yml", ("contents",)): 1,
+        (".github/workflows/kestra-build-publish.yml", ("contents",)): 1,
+        (".github/workflows/preview.yml", ("contents",)): 1,
+        (".github/workflows/release.yml", ("contents",)): 1,
+        (".github/workflows/renovate-validate.yml", ("contents",)): 1,
+        (".github/workflows/rust-docker-build.yml", ("contents",)): 1,
+        (".github/workflows/rust-docker.yml", ("contents", "pull-requests")): 1,
+        (".github/workflows/rust.yml", ("contents", "pull-requests")): 1,
+    }
+)
+
+EXPECTED_JOB_PERMISSIONS = Counter(
+    {
+        (".github/workflows/construct.yml", "build", ("contents",)): 1,
+        (".github/workflows/construct.yml", "publish-manifest", ("contents",)): 1,
+        (".github/workflows/construct.yml", "publish-manifest-rehearsal", ("contents",)): 1,
+        (".github/workflows/docs.yml", "check-deployed", ("contents",)): 1,
+        (".github/workflows/docs.yml", "deploy", ("contents", "id-token", "pages")): 1,
+        (".github/workflows/preview.yml", "publish-preview", ("contents",)): 1,
+        (".github/workflows/release.yml", "release", ("contents",)): 1,
+    }
+)
+
+EXPECTED_JOB_ENVIRONMENTS = Counter(
+    {
+        (
+            ".github/workflows/docs.yml",
+            "deploy",
+            "{name: github-pages, url: ${{ steps.deployment.outputs.page_url }}}",
+        ): 1,
+    }
+)
+
 
 def load_yaml(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
@@ -491,6 +529,32 @@ def check_target_mvp(summary: dict[str, Any]) -> list[str]:
         errors.append(
             "target MVP runs-on drift: "
             f"expected {dict(EXPECTED_JOB_RUNS_ON)}, got {dict(job_runs_on)}"
+        )
+
+    workflow_permissions = Counter(
+        (path, tuple(permissions)) for path, permissions in summary["workflow_permissions"]
+    )
+    if workflow_permissions != EXPECTED_WORKFLOW_PERMISSIONS:
+        errors.append(
+            "target MVP workflow permission drift: "
+            f"expected {dict(EXPECTED_WORKFLOW_PERMISSIONS)}, got {dict(workflow_permissions)}"
+        )
+
+    job_permissions = Counter(
+        (path, job, tuple(permissions))
+        for path, job, permissions in summary["job_permissions"]
+    )
+    if job_permissions != EXPECTED_JOB_PERMISSIONS:
+        errors.append(
+            "target MVP job permission drift: "
+            f"expected {dict(EXPECTED_JOB_PERMISSIONS)}, got {dict(job_permissions)}"
+        )
+
+    job_environments = Counter(summary["job_environments"])
+    if job_environments != EXPECTED_JOB_ENVIRONMENTS:
+        errors.append(
+            "target MVP job environment drift: "
+            f"expected {dict(EXPECTED_JOB_ENVIRONMENTS)}, got {dict(job_environments)}"
         )
 
     for label, key in [
