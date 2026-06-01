@@ -23,7 +23,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -1898,15 +1898,26 @@ fn find_cache_match(
         .filter(|value| !value.is_empty())
     {
         let mut matches = cache_entries_with_prefix(&store, restore_key)?;
-        matches.sort();
-        if let Some(matched_key) = matches.into_iter().next() {
-            return Ok(Some(matched_key));
+        matches.sort_by(|left, right| {
+            right
+                .created
+                .cmp(&left.created)
+                .then_with(|| left.key.cmp(&right.key))
+        });
+        if let Some(matched) = matches.into_iter().next() {
+            return Ok(Some(matched.key));
         }
     }
     Ok(None)
 }
 
-fn cache_entries_with_prefix(store: &Path, prefix: &str) -> Result<Vec<String>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CacheEntryMatch {
+    key: String,
+    created: u128,
+}
+
+fn cache_entries_with_prefix(store: &Path, prefix: &str) -> Result<Vec<CacheEntryMatch>> {
     let sanitized_prefix = sanitize_artifact_name(prefix);
     let mut matches = Vec::new();
     for entry in fs::read_dir(store).with_context(|| format!("read {}", store.display()))? {
@@ -1916,10 +1927,39 @@ fn cache_entries_with_prefix(store: &Path, prefix: &str) -> Result<Vec<String>> 
         }
         let sanitized_key = entry.file_name().to_string_lossy().to_string();
         if sanitized_key.starts_with(&sanitized_prefix) {
-            matches.push(cache_key_from_metadata(&entry.path()).unwrap_or(sanitized_key));
+            let path = entry.path();
+            matches.push(CacheEntryMatch {
+                key: cache_key_from_metadata(&path).unwrap_or(sanitized_key),
+                created: cache_entry_created(&path),
+            });
         }
     }
     Ok(matches)
+}
+
+fn cache_entry_created(path: &Path) -> u128 {
+    fs::read_to_string(path.join(".velnor-created"))
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .or_else(|| {
+            path.metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(system_time_nanos)
+        })
+        .unwrap_or_default()
+}
+
+fn cache_timestamp() -> String {
+    system_time_nanos(SystemTime::now())
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn system_time_nanos(time: SystemTime) -> Option<u128> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_nanos())
 }
 
 fn restore_cache_paths(state: &JobExecutionState, key: &str, paths: &str) -> Result<()> {
@@ -1965,6 +2005,8 @@ fn save_cache_result(
         .with_context(|| format!("create cache directory {}", cache_dir.display()))?;
     fs::write(cache_dir.join(".velnor-key"), key)
         .with_context(|| format!("write cache metadata {}", cache_dir.display()))?;
+    fs::write(cache_dir.join(".velnor-created"), cache_timestamp())
+        .with_context(|| format!("write cache timestamp {}", cache_dir.display()))?;
 
     let mut saved = 0usize;
     for (index, path) in cache_paths(paths).into_iter().enumerate() {
@@ -4969,6 +5011,55 @@ mod tests {
         assert!(!root
             .join("lookup-job/home/.cache/rust-script/state.bin")
             .exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_cache_restore_key_uses_newest_prefix_match() {
+        let root = temp_dir();
+        let restore_temp = root.join("restore-job/temp");
+        let store = root.join("_velnor_caches");
+        let old_cache = store.join("rust-linux-a-old");
+        let new_cache = store.join("rust-linux-z-new");
+        fs::create_dir_all(old_cache.join("0")).unwrap();
+        fs::create_dir_all(new_cache.join("0")).unwrap();
+        fs::create_dir_all(root.join("restore-job/home")).unwrap();
+        fs::write(old_cache.join(".velnor-key"), "rust-linux-a-old").unwrap();
+        fs::write(old_cache.join(".velnor-created"), "1").unwrap();
+        fs::write(old_cache.join("0/state.bin"), "old\n").unwrap();
+        fs::write(new_cache.join(".velnor-key"), "rust-linux-z-new").unwrap();
+        fs::write(new_cache.join(".velnor-created"), "2").unwrap();
+        fs::write(new_cache.join("0/state.bin"), "new\n").unwrap();
+
+        let restore = vec![ExecutableStep::Native {
+            step_id: "cache".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::Cache,
+                inputs: [
+                    ("path".into(), "~/.cache/rust-script".into()),
+                    ("key".into(), "rust-linux-exact-miss".into()),
+                    ("restore-keys".into(), "rust-linux-\n".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+
+        let restore_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&restore_temp), &restore, &[], &restore_temp)
+            .unwrap();
+
+        assert_eq!(restore_results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(
+            restore_results[0].state.outputs["cache-matched-key"],
+            "rust-linux-z-new"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("restore-job/home/.cache/rust-script/state.bin")).unwrap(),
+            "new\n"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
