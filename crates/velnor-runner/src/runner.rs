@@ -44,6 +44,18 @@ use crate::{
 
 const JOB_CANCELLATION_MESSAGE: &str = "JobCancellation";
 const BROKER_MIGRATION_MESSAGE: &str = "BrokerMigration";
+const FORCE_TOKEN_REFRESH_MESSAGE: &str = "ForceTokenRefresh";
+const AGENT_REFRESH_MESSAGE: &str = "AgentRefresh";
+const RUNNER_REFRESH_MESSAGE: &str = "RunnerRefresh";
+const RUNNER_REFRESH_CONFIG_MESSAGE: &str = "RunnerRefreshConfig";
+const RUNNER_SHUTDOWN_MESSAGE: &str = "RunnerShutdown";
+
+enum V2MessageAction {
+    None,
+    BrokerMigration(String),
+    RefreshToken,
+    Shutdown,
+}
 
 #[derive(Clone)]
 struct RunServiceJobContext {
@@ -342,9 +354,10 @@ async fn run_v2(
     let server_url_v2 = stored.settings.server_url_v2.as_deref().ok_or_else(|| {
         anyhow::anyhow!("runner config enables V2 flow but missing server_url_v2")
     })?;
-    let broker_token = token.clone();
-    let mut broker = BrokerClient::new(server_url_v2, broker_token.clone())?;
-    let run_service = RunServiceClient::new(token.clone())?;
+    let mut broker_token = token.clone();
+    let mut current_broker_url = server_url_v2.to_string();
+    let mut broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
+    let mut run_service = RunServiceClient::new(token.clone())?;
     let owner_name = format!("{} (PID: {})", default_agent_name(), std::process::id());
     let session = TaskAgentSession::new(owner_name, agent_id, stored.settings.agent_name.clone());
     let session = broker.create_session(&session).await?;
@@ -378,10 +391,11 @@ async fn run_v2(
             continue;
         };
 
-        if let Some(migration_url) = handle_v2_message(
+        match handle_v2_message(
             &broker,
             &run_service,
             session_id,
+            &stored,
             &config_dir,
             &args,
             stored.settings.disable_update,
@@ -389,8 +403,23 @@ async fn run_v2(
         )
         .await?
         {
-            broker = BrokerClient::new(&migration_url, broker_token.clone())?;
-            println!("Broker migration applied: {migration_url}");
+            V2MessageAction::None => {}
+            V2MessageAction::BrokerMigration(migration_url) => {
+                current_broker_url = migration_url;
+                broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
+                println!("Broker migration applied: {current_broker_url}");
+            }
+            V2MessageAction::RefreshToken => {
+                let refreshed_token = oauth_access_token(&stored).await?;
+                broker_token = refreshed_token.clone();
+                broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
+                run_service = RunServiceClient::new(refreshed_token)?;
+                println!("Refreshed broker and run-service credentials.");
+            }
+            V2MessageAction::Shutdown => {
+                println!("GitHub requested runner shutdown.");
+                break;
+            }
         }
         if args.once {
             break;
@@ -407,11 +436,12 @@ async fn handle_v2_message(
     broker: &BrokerClient,
     run_service: &RunServiceClient,
     session_id: &str,
+    stored: &StoredRunnerConfig,
     config_dir: &std::path::Path,
     args: &RunArgs,
     disable_update: bool,
     message: crate::protocol::TaskAgentMessage,
-) -> Result<Option<String>> {
+) -> Result<V2MessageAction> {
     println!(
         "Received broker message {} type {}.",
         message.message_id, message.message_type
@@ -422,14 +452,51 @@ async fn handle_v2_message(
     {
         let migration_url = broker_migration_url(&message)?;
         println!("Received broker migration to {migration_url}.");
-        return Ok(Some(migration_url));
+        return Ok(V2MessageAction::BrokerMigration(migration_url));
+    }
+    if message
+        .message_type
+        .eq_ignore_ascii_case(FORCE_TOKEN_REFRESH_MESSAGE)
+    {
+        println!("Received ForceTokenRefresh control message.");
+        return Ok(V2MessageAction::RefreshToken);
+    }
+    if message
+        .message_type
+        .eq_ignore_ascii_case(AGENT_REFRESH_MESSAGE)
+        || message
+            .message_type
+            .eq_ignore_ascii_case(RUNNER_REFRESH_MESSAGE)
+    {
+        println!(
+            "Received runner update message type {}; self-update is disabled in Velnor Phase 0.",
+            message.message_type
+        );
+        return Ok(V2MessageAction::None);
+    }
+    if message
+        .message_type
+        .eq_ignore_ascii_case(RUNNER_REFRESH_CONFIG_MESSAGE)
+    {
+        println!(
+            "Received runner config refresh message; restart the runner to reload hosted GitHub settings. Current runner: {}.",
+            stored.settings.agent_name
+        );
+        return Ok(V2MessageAction::Shutdown);
+    }
+    if message
+        .message_type
+        .eq_ignore_ascii_case(RUNNER_SHUTDOWN_MESSAGE)
+    {
+        println!("Received hosted runner shutdown message.");
+        return Ok(V2MessageAction::Shutdown);
     }
     if !message
         .message_type
         .eq_ignore_ascii_case(RUNNER_JOB_REQUEST)
     {
         println!("Broker message is not acknowledged because type is not implemented.");
-        return Ok(None);
+        return Ok(V2MessageAction::None);
     }
     let reference: RunnerJobRequestRef =
         serde_json::from_str(&message.body).context("parse RunnerJobRequestRef")?;
@@ -475,7 +542,7 @@ async fn handle_v2_message(
                 body
             );
             tokio::time::sleep(Duration::from_secs(2)).await;
-            return Ok(None);
+            return Ok(V2MessageAction::None);
         }
     };
     let job: AgentJobRequestMessage =
@@ -497,7 +564,7 @@ async fn handle_v2_message(
         disable_update,
     };
     handle_job_request(config_dir, args, run_service_job, broker_cancellation, job).await?;
-    Ok(None)
+    Ok(V2MessageAction::None)
 }
 
 async fn handle_job_request(

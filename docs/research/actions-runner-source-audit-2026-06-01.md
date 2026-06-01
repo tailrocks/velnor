@@ -37,6 +37,7 @@ Velnor rule:
 - do not treat classic distributed-task polling as target MVP compatibility
 - do not implement classic distributed-task polling in the normal runner path
 - treat runner update/self-update messages as log-and-ignore or graceful restart for Phase 0
+- refresh broker/run-service clients when GitHub sends `ForceTokenRefresh`
 - treat broker acknowledge as best-effort; failure should not block job execution
 - retry only where upstream retries; skip already-acquired/unprocessable run-service jobs
 

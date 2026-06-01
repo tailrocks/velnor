@@ -91,6 +91,7 @@ Rules for Velnor:
   run-service before execution.
 - Treat broker acknowledge as best-effort.
 - Ignore or gracefully exit for runner refresh/update messages in Phase 0.
+- Refresh broker/run-service credentials when GitHub sends `ForceTokenRefresh`.
 - Poll for cancellation while a job is busy; if a matching cancellation arrives,
   kill the active Docker job container and complete as canceled.
 - Renew the job lock while executing. Without renewal, GitHub can abandon the job

@@ -105,11 +105,15 @@ Implemented in this refresh:
 - broker acknowledge failure is logged and does not abort the job
 - run-service acquire 404/409/422 is recognized as non-retriable, logged, and
   skipped with a short backoff
+- `ForceTokenRefresh` rebuilds broker/run-service clients with a freshly minted
+  OAuth access token
+- runner refresh messages are recognized as self-update control messages and
+  ignored for Phase 0
+- runner config refresh and hosted shutdown messages stop the runner loop so a
+  supervisor can restart or replace the process
 
 Still open for V2 parity:
 
-- token refresh/control-plane restart behavior
-- hosted shutdown behavior
 - richer run-service completion payload: annotations, environment URL,
   telemetry, and infrastructure failure category
 - live proof on the two target repositories

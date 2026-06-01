@@ -91,7 +91,7 @@ Minimum message support:
 
 - run-service job reference messages
 - job cancellation
-- runner refresh/update as log-and-ignore or graceful exit
+- `ForceTokenRefresh` as credential refresh, and runner refresh/update as log-and-ignore or graceful exit
 - broker migration as reconnect-to-broker
 
 ## Job Dispatch Contract
