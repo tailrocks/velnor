@@ -3,7 +3,11 @@ set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 JACKIN_ROOT="${VELNOR_JACKIN_ROOT:-/tmp/velnor-jackin}"
-JAVA_ROOT="${VELNOR_JAVA_MONOREPO_ROOT:-/tmp/velnor-java-monorepo}"
+CHAINARGOS_ROOT="${VELNOR_CHAINARGOS_ROOT:-/tmp/velnor-chainargos}"
+
+if [[ ! -d "$CHAINARGOS_ROOT/.github" && -d /tmp/velnor-java-monorepo/.github ]]; then
+  CHAINARGOS_ROOT="/tmp/velnor-java-monorepo"
+fi
 
 if [[ ! -d "$JACKIN_ROOT/.github" ]]; then
   echo "missing jackin target checkout: $JACKIN_ROOT" >&2
@@ -11,16 +15,16 @@ if [[ ! -d "$JACKIN_ROOT/.github" ]]; then
   exit 2
 fi
 
-if [[ ! -d "$JAVA_ROOT/.github" ]]; then
-  echo "missing java-monorepo target checkout: $JAVA_ROOT" >&2
-  echo "set VELNOR_JAVA_MONOREPO_ROOT to a java-monorepo checkout" >&2
+if [[ ! -d "$CHAINARGOS_ROOT/.github" ]]; then
+  echo "missing ChainArgos target checkout: $CHAINARGOS_ROOT" >&2
+  echo "set VELNOR_CHAINARGOS_ROOT to the ChainArgos monorepo checkout" >&2
   exit 2
 fi
 
 cd "$ROOT"
 
-python3 scripts/target_audit.py --check-target-mvp "$JACKIN_ROOT" "$JAVA_ROOT" >/tmp/velnor-target-audit.txt
-python3 scripts/target_audit.py --self-test "$JACKIN_ROOT" "$JAVA_ROOT" >/tmp/velnor-target-audit-self-test.txt
+python3 scripts/target_audit.py --check-target-mvp "$JACKIN_ROOT" "$CHAINARGOS_ROOT" >/tmp/velnor-target-audit.txt
+python3 scripts/target_audit.py --self-test "$JACKIN_ROOT" "$CHAINARGOS_ROOT" >/tmp/velnor-target-audit-self-test.txt
 python3 scripts/check_runner_reference.py
 
 tests=(

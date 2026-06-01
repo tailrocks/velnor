@@ -155,23 +155,37 @@ Also validate the local config before running jobs:
 cargo run --bin velnor-runner -- status --check-target-mvp
 ```
 
-## Run Java Target
+## Run ChainArgos Rust Target
 
 After the public fixture passes, the first real target smoke can be run with:
 
 ```sh
-scripts/java_target_smoke.sh
+scripts/chainargos_target_smoke.sh
 ```
+
+To run the staged ChainArgos Rust proof path in one command, use:
+
+```sh
+scripts/chainargos_rust_target_sequence.sh
+```
+
+The sequence runs `ansible.yml`, a narrow `rust.yml` dispatch, a narrow
+`rust-docker.yml` dispatch, and `kestra-build-publish.yml` with `gh run watch`
+enabled by default. Tune it with `VELNOR_CHAINARGOS_RUST_PACKAGES`,
+`VELNOR_CHAINARGOS_DOCKER_TARGETS`, `VELNOR_CHAINARGOS_DOCKER_PUSH`,
+`VELNOR_CHAINARGOS_SEQUENCE_INCLUDE_DOCKER`,
+`VELNOR_CHAINARGOS_SEQUENCE_INCLUDE_KESTRA`, and per-workflow job counts such as
+`VELNOR_CHAINARGOS_RUST_JOB_COUNT`.
 
 It runs the live host doctor, registers `ChainArgos/java-monorepo` with the
 target label preset, validates stored V2/label config, and consumes queued jobs
 with repeated `--once` runs. Set `VELNOR_TARGET_CLEANUP_RUNNER=true` to remove
 the registered runner on exit. Sanitized job payloads are written to
-`.velnor-job-dumps/java-target` by default; set `VELNOR_DUMP_JOB_MESSAGES=` to
-disable dumps or point it at another directory. Set
+`.velnor-job-dumps/chainargos-target` by default; set
+`VELNOR_DUMP_JOB_MESSAGES=` to disable dumps or point it at another directory. Set
 `VELNOR_TARGET_WORKFLOW=ansible.yml` to have the script dispatch the first
-recommended Java workflow before waiting for one Velnor job, or leave it unset
-to consume already queued work. Set `VELNOR_TARGET_REF=<branch-or-sha>` when the
+recommended ChainArgos workflow before waiting for one Velnor job, or leave it
+unset to consume already queued work. Set `VELNOR_TARGET_REF=<branch-or-sha>` when the
 workflow should be dispatched from a non-default ref. Set
 `VELNOR_TARGET_INPUTS=packages=bitcoin-processor-app,push=false` for
 `workflow_dispatch` inputs; each comma-separated `key=value` is passed to
@@ -213,8 +227,8 @@ cargo run --bin velnor-runner -- run \
 
 ## Run Jackin Linux Paths
 
-After the Java target passes, the first Jackin Linux target smoke can be run
-with:
+After the ChainArgos Rust target passes, the first Jackin Linux target smoke can
+be run with:
 
 ```sh
 scripts/jackin_target_smoke.sh
@@ -222,7 +236,7 @@ scripts/jackin_target_smoke.sh
 
 It uses the same host readiness, target label preset, V2 config validation,
 sanitized job dumps, optional `VELNOR_TARGET_WORKFLOW=<workflow.yml>` dispatch,
-and repeated `--once` execution shape as `scripts/java_target_smoke.sh`.
+and repeated `--once` execution shape as `scripts/chainargos_target_smoke.sh`.
 Set `VELNOR_TARGET_MVP_ARM_LABEL=true` only on an ARM Linux host to add the
 `ubuntu-24.04-arm` label.
 

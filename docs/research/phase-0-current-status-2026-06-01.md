@@ -113,7 +113,7 @@ Evidence captured on 2026-06-01:
 
 This fixture is not a replacement for target-repo proof. It is the next live
 bridge: first make the queued Velnor fixture jobs pass, then move the same
-runner path to `java-monorepo` and `jackin`.
+runner path to the ChainArgos Rust workflows and `jackin`.
 
 Current local environment finding:
 
@@ -138,7 +138,7 @@ Current local environment finding:
 | Gap | Why it matters | Proof needed |
 | --- | --- | --- |
 | Live fixture Velnor run | GitHub-hosted lanes pass, but Velnor has not yet consumed the queued fixture jobs. | Register Velnor to `donbeave/velnor-actions-fixture` with label `velnor-target-mvp`; run queued `compat-velnor` jobs; verify `compare-results` passes. |
-| Live GitHub UI run on `java-monorepo` | Local unit tests cannot prove GitHub accepts the full live protocol and renders logs/status correctly. | Run `ansible.yml`, then `rust.yml`, then Docker-heavy workflows through a registered Velnor runner. |
+| Live GitHub UI run on ChainArgos Rust workflows | Local unit tests cannot prove GitHub accepts the full live protocol and renders logs/status correctly. | Run `ansible.yml`, then `rust.yml`, then Docker/Buildx-heavy workflows through a registered Velnor runner. |
 | Live GitHub UI run on `jackin` Linux paths | `jackin` has Linux hosted labels plus artifact/pages/homebrew flows that must work without YAML changes for selected Linux jobs. | Register with target x64 labels and run `ci.yml`, `construct.yml`, and `docs.yml` Linux paths. |
 | GitHub artifact/cache service transport | Current artifact/cache handoff is shared-workdir local storage, good for one-host proof but not multi-runner parity. | Either prove target live jobs run on one host with shared workdir or implement service-backed transport before multi-host validation. |
 | MacOS matrix legs | Docker Linux runner cannot truthfully replace `macos-latest`. | Explicitly defer or run those legs on real macOS Velnor workers later. |
@@ -155,7 +155,7 @@ Current local environment finding:
 4. Register `ChainArgos/java-monorepo` with `--target-mvp-labels`.
 5. Run `ansible.yml` with `--once` and capture sanitized job dump on failure.
 6. Fix only failures backed by live payloads or target workflow evidence.
-7. Move to `rust.yml`, then Docker-heavy Java workflows.
+7. Move to `rust.yml`, then Docker/Buildx-heavy Rust workflows.
 8. Register `jackin-project/jackin` with x64 target labels and prove Linux
    `ci.yml`, `construct.yml`, and `docs.yml` paths.
 

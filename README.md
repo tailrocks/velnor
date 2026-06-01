@@ -72,10 +72,16 @@ Live host readiness is checked with:
 scripts/live_host_doctor.sh
 ```
 
-The first real target smoke wrapper is:
+The ChainArgos Rust target smoke wrapper is:
 
 ```sh
-scripts/java_target_smoke.sh
+scripts/chainargos_target_smoke.sh
+```
+
+The staged ChainArgos Rust proof wrapper is:
+
+```sh
+scripts/chainargos_rust_target_sequence.sh
 ```
 
 The first Jackin Linux smoke wrapper is:

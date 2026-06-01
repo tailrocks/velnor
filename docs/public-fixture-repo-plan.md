@@ -166,5 +166,4 @@ Use this sequence:
 - No broad marketplace action compatibility.
 - No macOS replacement from Linux Docker.
 - No hardcoding target workflow/job/step ids in Velnor.
-- No large Java monorepo clone in the fixture.
-
+- No large target monorepo clone in the fixture.
