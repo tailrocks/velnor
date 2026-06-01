@@ -156,7 +156,7 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
         );
     }
     if job.variable_bool("actions_uses_cache_service_v2") == Some(true) {
-        env.push(("ACTIONS_CACHE_SERVICE_V2".to_string(), "true".to_string()));
+        env.push(("ACTIONS_CACHE_SERVICE_V2".to_string(), "True".to_string()));
     }
     if job.variable_bool("actions_set_orchestration_id_env_for_actions") == Some(true) {
         push_var(
@@ -494,7 +494,7 @@ mod tests {
             "ACTIONS_ID_TOKEN_REQUEST_TOKEN".into(),
             "runtime-token".into()
         )));
-        assert!(env.contains(&("ACTIONS_CACHE_SERVICE_V2".into(), "true".into())));
+        assert!(env.contains(&("ACTIONS_CACHE_SERVICE_V2".into(), "True".into())));
         assert!(!env.contains(&("ACTIONS_CACHE_SERVICE_V2".into(), "false".into())));
         assert!(env.contains(&("ACTIONS_ORCHESTRATION_ID".into(), "orch-123".into())));
     }
