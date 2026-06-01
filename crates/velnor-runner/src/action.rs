@@ -1686,6 +1686,70 @@ runs:
     }
 
     #[test]
+    fn target_aggregate_needs_expands_exact_failure_gate() {
+        let plan = LocalActionPlan {
+            step_id: "aggregate".into(),
+            action_dir: Path::new("/tmp/workspace").join(".github/actions/aggregate-needs"),
+            inputs: [
+                (
+                    "needs-json".to_string(),
+                    r#"{"check":{"result":"success"},"build":{"result":"cancelled"}}"#.to_string(),
+                ),
+                ("workflow-label".to_string(), "CI".to_string()),
+            ]
+            .into(),
+        };
+        let metadata = parse_action_metadata(
+            r#"
+inputs:
+  needs-json:
+    required: true
+  workflow-label:
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Aggregate gated job results
+      shell: bash
+      env:
+        NEEDS_RESULT: ${{ inputs.needs-json }}
+        WORKFLOW_LABEL: ${{ inputs.workflow-label }}
+      run: |
+        set -euo pipefail
+        printf '%s\n' "$NEEDS_RESULT"
+        if printf '%s' "$NEEDS_RESULT" | jq -e 'to_entries | map(.value.result) | any(. == "failure" or . == "cancelled")' >/dev/null; then
+          echo "::error::one or more gated ${WORKFLOW_LABEL} jobs failed or were cancelled"
+          exit 1
+        fi
+"#,
+        )
+        .unwrap();
+
+        let steps = composite_script_steps(&plan, &metadata, "/__w").unwrap();
+
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].id, "aggregate-1");
+        assert!(matches!(steps[0].shell, crate::container::Shell::Bash));
+        assert!(steps[0].env.contains(&(
+            "NEEDS_RESULT".into(),
+            r#"{"check":{"result":"success"},"build":{"result":"cancelled"}}"#.into()
+        )));
+        assert!(steps[0]
+            .env
+            .contains(&("WORKFLOW_LABEL".into(), "CI".into())));
+        assert!(steps[0].env.contains(&(
+            "GITHUB_ACTION_PATH".into(),
+            "/__w/.github/actions/aggregate-needs".into()
+        )));
+        assert!(steps[0].script.contains(
+            r#"jq -e 'to_entries | map(.value.result) | any(. == "failure" or . == "cancelled")'"#
+        ));
+        assert!(steps[0].script.contains(
+            "::error::one or more gated ${WORKFLOW_LABEL} jobs failed or were cancelled"
+        ));
+    }
+
+    #[test]
     fn expands_composite_input_defaults() {
         let plan = LocalActionPlan {
             step_id: "docs".into(),
