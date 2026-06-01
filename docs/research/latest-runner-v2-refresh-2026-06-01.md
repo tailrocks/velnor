@@ -62,6 +62,9 @@ Source anchors in `actions/runner` `v2.334.0`:
   a time.
 - Poll broker messages with the runner status that reflects worker state:
   `Online` when idle and `Busy` while a job is running.
+- Retry transient broker message poll failures with bounded backoff, and back
+  off after repeated empty polls, so long live target runs are not killed by a
+  short broker/network interruption.
 - Treat broker acknowledge as best-effort. Acknowledge failure must not prevent
   acquiring or executing the job.
 - For `acquirejob`, treat HTTP 404, 409, and 422 as non-retriable stale or
@@ -121,6 +124,8 @@ proof is:
 Implemented in this refresh:
 
 - broker acknowledge failure is logged and does not abort the job
+- transient broker message poll failures retry with 15s/30s bounded backoff;
+  repeated empty polls trigger a 15s backoff
 - run-service acquire 404/409/422 is recognized as non-retriable, logged, and
   skipped with a short backoff
 - `ForceTokenRefresh` rebuilds broker/run-service clients with a freshly minted

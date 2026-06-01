@@ -56,6 +56,8 @@ const AGENT_REFRESH_MESSAGE: &str = "AgentRefresh";
 const RUNNER_REFRESH_MESSAGE: &str = "RunnerRefresh";
 const RUNNER_REFRESH_CONFIG_MESSAGE: &str = "RunnerRefreshConfig";
 const RUNNER_SHUTDOWN_MESSAGE: &str = "RunnerShutdown";
+const BROKER_POLL_MAX_CONSECUTIVE_ERRORS: u32 = 10;
+const BROKER_POLL_EMPTY_BACKOFF_THRESHOLD: u32 = 50;
 
 enum V2MessageAction {
     None,
@@ -76,6 +78,42 @@ struct BrokerCancellationContext {
     broker: BrokerClient,
     session_id: String,
     disable_update: bool,
+}
+
+#[derive(Default)]
+struct BrokerPollState {
+    consecutive_errors: u32,
+    consecutive_empty_messages: u32,
+}
+
+impl BrokerPollState {
+    fn received_message(&mut self) {
+        self.consecutive_errors = 0;
+        self.consecutive_empty_messages = 0;
+    }
+
+    fn received_empty_message(&mut self) -> Option<Duration> {
+        self.consecutive_errors = 0;
+        self.consecutive_empty_messages += 1;
+        if self.consecutive_empty_messages > BROKER_POLL_EMPTY_BACKOFF_THRESHOLD {
+            self.consecutive_empty_messages = 0;
+            Some(Duration::from_secs(15))
+        } else {
+            None
+        }
+    }
+
+    fn received_error(&mut self) -> Result<Duration> {
+        self.consecutive_errors += 1;
+        if self.consecutive_errors >= BROKER_POLL_MAX_CONSECUTIVE_ERRORS {
+            bail!(
+                "broker polling failed {} consecutive times",
+                self.consecutive_errors
+            );
+        }
+        let seconds = if self.consecutive_errors <= 5 { 15 } else { 30 };
+        Ok(Duration::from_secs(seconds))
+    }
 }
 
 pub async fn configure(args: ConfigureArgs) -> Result<()> {
@@ -376,6 +414,7 @@ async fn run_v2(
         .session_id
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("GitHub broker returned session without sessionId"))?;
+    let mut poll_state = BrokerPollState::default();
 
     println!(
         "Runner '{}' ready via broker with labels: {}",
@@ -385,13 +424,14 @@ async fn run_v2(
     println!("Created broker runner session {session_id}.");
 
     loop {
-        let message = broker
-            .get_runner_message(
-                session_id,
-                RunnerStatus::Online,
-                stored.settings.disable_update,
-            )
-            .await?;
+        let message = poll_broker_message(
+            &broker,
+            session_id,
+            RunnerStatus::Online,
+            stored.settings.disable_update,
+            &mut poll_state,
+        )
+        .await?;
 
         let Some(message) = message else {
             println!("No broker message received.");
@@ -442,6 +482,47 @@ async fn run_v2(
     println!("Deleted broker runner session.");
 
     Ok(())
+}
+
+async fn poll_broker_message(
+    broker: &BrokerClient,
+    session_id: &str,
+    status: RunnerStatus,
+    disable_update: bool,
+    poll_state: &mut BrokerPollState,
+) -> Result<Option<crate::protocol::TaskAgentMessage>> {
+    loop {
+        match broker
+            .get_runner_message(session_id, status, disable_update)
+            .await
+        {
+            Ok(Some(message)) => {
+                poll_state.received_message();
+                return Ok(Some(message));
+            }
+            Ok(None) => {
+                if let Some(delay) = poll_state.received_empty_message() {
+                    println!(
+                        "No broker message after {} consecutive polls; backing off for {}s.",
+                        BROKER_POLL_EMPTY_BACKOFF_THRESHOLD,
+                        delay.as_secs()
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                return Ok(None);
+            }
+            Err(error) => {
+                let delay = poll_state.received_error()?;
+                eprintln!(
+                    "Broker message poll failed ({} consecutive error(s)): {error:#}. Retrying in {}s.",
+                    poll_state.consecutive_errors,
+                    delay.as_secs()
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
 }
 
 async fn handle_v2_message(
@@ -2283,6 +2364,37 @@ mod tests {
         stored.settings.server_url_v2 =
             Some("https://broker.actions.githubusercontent.com/".into());
         assert!(ensure_v2_runner_settings(&stored).is_ok());
+    }
+
+    #[test]
+    fn broker_poll_state_matches_v2_retry_shape() {
+        let mut state = BrokerPollState::default();
+
+        for _ in 0..5 {
+            assert_eq!(state.received_error().unwrap(), Duration::from_secs(15));
+        }
+        for _ in 5..(BROKER_POLL_MAX_CONSECUTIVE_ERRORS - 1) {
+            assert_eq!(state.received_error().unwrap(), Duration::from_secs(30));
+        }
+        assert!(state.received_error().is_err());
+
+        state.received_message();
+        assert_eq!(state.consecutive_errors, 0);
+        assert_eq!(state.consecutive_empty_messages, 0);
+    }
+
+    #[test]
+    fn broker_poll_state_backs_off_after_many_empty_messages() {
+        let mut state = BrokerPollState::default();
+
+        for _ in 0..BROKER_POLL_EMPTY_BACKOFF_THRESHOLD {
+            assert_eq!(state.received_empty_message(), None);
+        }
+        assert_eq!(
+            state.received_empty_message(),
+            Some(Duration::from_secs(15))
+        );
+        assert_eq!(state.consecutive_empty_messages, 0);
     }
 
     #[test]

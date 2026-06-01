@@ -42,7 +42,7 @@ Implementation facts:
 | --- | --- |
 | Latest runner pin | `RUNNER_VERSION = 2.334.0`; `scripts/check_runner_reference.py` checks GitHub latest release and user-agent drift. |
 | V2-only hosted path | `velnor-runner run` requires `UseV2Flow` and `ServerUrlV2`; normal path uses broker session/message plus run-service acquire/renew/complete. |
-| Broker controls | `BrokerMigration`, `ForceTokenRefresh`, runner update/refresh, hosted shutdown, and busy-job cancellation are recognized. |
+| Broker controls | `BrokerMigration`, `ForceTokenRefresh`, runner update/refresh, hosted shutdown, busy-job cancellation, transient broker poll retry, and empty-message backoff are recognized. |
 | V2 job tokens | Run-service renew/complete use the job-scoped `SystemVssConnection` token when available. |
 | Job acquisition | Run-service acquire handles non-retriable `404`, `409`, and `422` as stale/unusable messages. |
 | Docker job isolation | Fresh workspace/temp/home/actions/tools layout, Docker job container, network, host Docker socket/CLI/Buildx mounting, and bind-mount preflight exist. |
