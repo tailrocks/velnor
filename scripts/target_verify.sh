@@ -28,6 +28,7 @@ tests=(
   fetched_target_composite_actions_have_repository_action_closure
   fetched_target_workflow_actions_have_metadata
   target_workflow_expressions_use_supported_subset
+  resolves_job_context_data_expressions_and_conditions
   target_workflow_repository_actions_plan_from_cached_metadata
   native_repository_actions_ignore_pinned_ref_metadata
   target_workflow_run_preview_gate_matches_jackin_shape
