@@ -137,6 +137,8 @@ This mirrors the official runner's container model:
 - it executes steps with `docker exec`
 - service containers share a per-job Docker network
 
+Velnor follows that shape and now performs a bind-mount visibility preflight before user scripts run. If the Docker daemon cannot see the host path used for Velnor's temp/work directories, the job fails early with an operator-facing mount error instead of failing later as a missing `/__t/<step>.sh` script.
+
 Phase 0 difference:
 
 - Velnor should use this Docker isolation even when the GitHub workflow does not specify `container:`.
@@ -337,6 +339,19 @@ Velnor can simplify process boundaries, but should preserve protocol behavior.
 - Prefer pragmatic compatibility over clean abstraction.
 - Build real GitHub integration tests early.
 - Keep unsupported protocol branches explicit rather than pretending to be complete.
+
+Live hosted GitHub compatibility proof from 2026-06-01:
+
+- registration and removal tokens work
+- runner agent registration works
+- classic session creation works
+- hosted GitHub migrates the session to broker V2 with `BrokerMigration`
+- broker session/message poll works
+- run-service job acquisition works
+- run-service completion works for `--complete-noop`
+- real run-service script input payloads are normalized into Velnor script steps
+
+Remaining live proof gaps are Docker execution and full target workflow action coverage. The local development Docker daemon accepted bind mounts but exposed empty directories inside containers, so script execution could not be considered a valid failure of Velnor's step runner.
 
 ## Non-Goals For Phase 0
 

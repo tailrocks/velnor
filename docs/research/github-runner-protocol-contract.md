@@ -1,6 +1,7 @@
 # GitHub Runner Protocol Contract
 
 Reference source: `actions/runner` commit `c6a124e` from `main`, inspected on 2026-05-31.
+Live GitHub smoke data was collected against hosted GitHub on 2026-06-01.
 
 This is the first concrete wire contract Velnor should emulate.
 
@@ -105,7 +106,7 @@ The minimum payload shape Velnor needs:
 ```json
 {
   "name": "velnor-runner",
-  "version": "2.326.0",
+  "version": "2.334.0",
   "osDescription": "linux",
   "maxParallelism": 1,
   "ephemeral": false,
@@ -153,11 +154,12 @@ JWT assertion claims:
   "aud": "<authorizationUrl>",
   "jti": "<uuid>",
   "nbf": 1710000000,
-  "exp": 1710000600
+  "exp": 1710000300
 }
 ```
 
 The access token from this exchange is used as the bearer token for distributed task session/message APIs.
+Hosted GitHub rejects longer runner client assertion lifetimes; Velnor now keeps the JWT lifetime at 5 minutes.
 
 ## Message Loop Calls
 
@@ -198,7 +200,11 @@ POST <run_service_url>/_apis/runtime/runs/{planId}/jobs/{jobId}/renew
 POST <run_service_url>/_apis/runtime/runs/{planId}/jobs/{jobId}/complete
 ```
 
+Live hosted GitHub sends a classic `BrokerMigration` message first for current self-hosted runners. That message may omit `messageId`, so Velnor must not require it. After migration, broker `session` responses may omit the nested `agent` object. Run-service acquired job payloads also encode step inputs as typed expression values, including `inputs = { type, map = [{ Key = { lit }, Value = { lit } }] }`; the script-step adapter must normalize that shape before execution.
+
 The broker can also send control messages while a job is running. Velnor handles `JobCancellation` by killing the active Docker job container and completing the job as canceled. It handles `BrokerMigration` by replacing the broker base URL for later polls.
+
+Run-service `acquirejob` uses the runner OAuth token. After the full job is acquired, renew and complete calls should use the job-scoped `SystemVssConnection` access token from the acquired job payload; using the runner OAuth token can return `401 Not authorized for this job`.
 
 ## Runner Removal
 
@@ -240,4 +246,14 @@ This avoids building Docker execution before Velnor can receive a real job.
 
 The `velnor-runner run` path can exchange stored OAuth credentials and call either the classic session/message APIs or the V2 broker/run-service APIs. Classic jobs finish through `JobCompleted` plus agent request finish; V2 jobs acquire, renew, and complete through run-service.
 
-Remaining proof gap: this still needs a live GitHub run against the target workflows to validate exact production payloads, especially run-service completion details.
+Live proof on 2026-06-01:
+
+- runner registration against hosted GitHub succeeded
+- classic session creation succeeded
+- classic `BrokerMigration` to hosted broker succeeded
+- broker session/message poll succeeded
+- run-service `RunnerJobRequest` acquisition succeeded
+- run-service step input normalization succeeded for real hosted payload shape
+- `--complete-noop` completed a real GitHub job as `success`
+
+Remaining proof gap: normal Docker execution still needs a host/daemon setup where the Docker daemon can see Velnor's bind-mounted work directories. In the current development environment, Docker accepted the bind mount but exposed an empty directory inside the container, causing script paths under `/__t` to be missing. Velnor now has a bind-mount visibility preflight so this fails before user steps with an actionable operator error.

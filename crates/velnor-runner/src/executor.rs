@@ -20,6 +20,8 @@ use std::{
     time::Duration,
 };
 
+const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandResult {
     pub code: i32,
@@ -749,6 +751,38 @@ where
             self.wait_for_service(service)?;
         }
         self.run_docker(&container.start_args())?;
+        if container.verify_bind_mounts {
+            self.verify_bind_mounts(container)?;
+        }
+        Ok(())
+    }
+
+    fn verify_bind_mounts(&mut self, container: &JobContainerSpec) -> Result<()> {
+        let marker = container.temp_host.join(DOCKER_MOUNT_CHECK_FILE);
+        fs::write(&marker, "velnor\n")
+            .with_context(|| format!("write Docker bind-mount marker {}", marker.display()))?;
+
+        let args = container.exec_process_args(
+            "/",
+            &[],
+            &[
+                "sh".to_string(),
+                "-c".to_string(),
+                format!("test -f /__t/{DOCKER_MOUNT_CHECK_FILE}"),
+            ],
+        );
+        let result = self.runner.run("docker", &args)?;
+        fs::remove_file(&marker).ok();
+        if result.code != 0 {
+            bail!(
+                "Docker daemon cannot see Velnor bind-mounted work directories. \
+                 Expected host temp '{}' to appear at '/__t' in container '{}'. \
+                 Use a local Docker daemon or set --work-dir/--config-dir to a path visible to the daemon. stderr: {}",
+                container.temp_host.display(),
+                container.name,
+                result.stderr
+            );
+        }
         Ok(())
     }
 
@@ -1949,7 +1983,45 @@ mod tests {
             node_action_image: String::new(),
             docker_cli_host_path: None,
             docker_cli_plugin_host_dir: None,
+            verify_bind_mounts: false,
         }
+    }
+
+    #[test]
+    fn verifies_docker_bind_mount_visibility_when_enabled() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        spec.verify_bind_mounts = true;
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor.start_job_environment_once(&spec).unwrap();
+
+        let calls = &executor.runner().calls;
+        assert_eq!(calls[2].1[0], "exec");
+        assert!(calls[2]
+            .1
+            .contains(&format!("test -f /__t/{DOCKER_MOUNT_CHECK_FILE}")));
+        assert!(!temp.join(DOCKER_MOUNT_CHECK_FILE).exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn bind_mount_preflight_reports_invisible_daemon_paths() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        spec.verify_bind_mounts = true;
+        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+            calls: Vec::new(),
+            codes: vec![0, 0, 1],
+        });
+
+        let error = executor.start_job_environment_once(&spec).unwrap_err();
+
+        assert!(error.to_string().contains("Docker daemon cannot see"));
+        assert!(!temp.join(DOCKER_MOUNT_CHECK_FILE).exists());
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]

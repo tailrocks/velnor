@@ -10,6 +10,7 @@ Sources inspected on 2026-05-31:
 - https://github.com/actions/runner/blob/main/src/Runner.Listener/JobDispatcher.cs
 - https://github.com/actions/runner/blob/main/src/Runner.Worker/JobRunner.cs
 - https://github.com/actions/runner/blob/main/src/Runner.Worker/ContainerOperationProvider.cs
+- https://github.com/actions/runner/blob/main/src/Runner.Worker/Handlers/StepHost.cs
 - https://github.com/actions/runner/blob/main/src/Runner.Worker/FileCommandManager.cs
 - https://github.com/jackin-project/jackin/tree/main/.github
 - https://github.com/ChainArgos/java-monorepo/tree/main/.github
@@ -76,6 +77,16 @@ Current code keeps one GitHub session open and long-polls this classic message r
 
 Current GitHub can also send broker/run-service messages. Velnor now preserves V2 settings from the registered agent, including `ServerUrlV2` and `UseV2Flow`, and has typed client/request shapes for the official broker `session`, `message`, `acknowledge`, and run-service `acquirejob`, `renewjob`, and `completejob` routes. When `UseV2Flow` is enabled, `velnor-runner run` creates a broker session, polls broker messages, handles `RunnerJobRequest`, optionally acknowledges it, acquires the full job through run-service, renews the job through run-service while Docker executes, and completes the job through run-service. While a V2 Docker job is running, Velnor polls broker messages with busy status and uses matching `JobCancellation` messages to kill the active job container. `BrokerMigration` messages update the broker base URL for subsequent polls.
 
+Live hosted GitHub on 2026-06-01 showed additional production quirks that are now part of the implementation contract:
+
+- registered agents can be returned with lowercase label types and nullable agent strings
+- hosted GitHub rejects runner OAuth client assertions longer than 5 minutes
+- classic `BrokerMigration` can arrive without `messageId`
+- broker session creation can return a session without nested `agent`
+- runner package version must be current enough for the broker; Velnor currently advertises `2.334.0`
+- run-service step inputs are typed expression values, not always direct JSON strings
+- run-service renew/complete should use the acquired job's `SystemVssConnection` token
+
 Minimum message support:
 
 - `PipelineAgentJobRequest`
@@ -136,6 +147,8 @@ Velnor mounts one host-backed home directory at `/github/home` and sets `HOME=/g
 Current code also treats enabled `actions/checkout` as a native host-side checkout before starting the Docker job container. It uses the self repository resource clone URL, job version/ref, and system access token by default; explicit `repository`, `path`, `ref`, `token`, `fetch-depth`, `fetch-tags`, `persist-credentials`, and `clean` inputs are supported for target shapes such as Jackin's Homebrew tap checkout. `fetch-depth: 0` fetches full branch and tag refs, which target `dorny/paths-filter` jobs expect. Checkout defaults to GitHub's clean behavior with `git reset --hard HEAD` and `git clean -ffdx` after checkout. When credential persistence is enabled, Velnor writes a local git extraheader so later `git push` commands in the same checkout can authenticate, then removes the extraheader after the job. Velnor also writes per-job mounted-home `safe.directory` entries for checked-out worktrees so Git commands inside Docker accept host-created workspaces. Submodules, sparse checkout, and LFS remain later compatibility work.
 
 For target workflows, mount the host Docker socket first. This weakens isolation but is the shortest path to `docker/setup-buildx-action`, `docker/bake-action`, `docker/build-push-action`, and direct `docker buildx`.
+
+Velnor now verifies that the Docker daemon can actually see the bind-mounted temp directory before running user scripts. This matters for remote Docker daemons, Docker Desktop path-sharing gaps, and containerized runner deployments: Docker may accept `-v host:/__t` while the daemon resolves `host` in a different filesystem and the container sees an empty directory. In that case Velnor should fail before executing steps and tell the operator to use a local daemon or move `--work-dir`/`--config-dir` to a daemon-visible path.
 
 Later isolation options:
 
@@ -324,9 +337,9 @@ Pkl workflow -> Velnor compiler    -> Velnor normalized plan -> Docker executor
 
 The next useful implementation steps are:
 
-1. Live-test `velnor-runner run --once` and `velnor-runner run --once --complete-noop` against disposable workflows and adjust reporter route details if GitHub rejects them.
-2. Expand remaining job/message expression support beyond the target subset; workflow/job-level `env:`, step-level `env:`, generic `ContextData`, `contains()`, `toJSON()`, and `hashFiles()` are implemented for runner-side script/action execution paths.
-3. Validate `setup-*`, cache, artifact, pages, and Docker actions from target workflows in a live GitHub run.
+1. Run live Docker execution on a host where Docker bind mounts are visible to the daemon, then verify a real script step succeeds and uploads logs.
+2. Re-enable `actions/checkout` in the disposable live smoke once run-service repository resources are confirmed or native checkout learns how to derive missing self-repository metadata from acquired V2 job context.
+3. Validate `setup-*`, cache, artifact, pages, and Docker actions from target workflows in live GitHub runs.
 
 This gets Velnor from "polls one message" to "can complete a simple real GitHub job".
 
@@ -334,4 +347,4 @@ Current code can parse enough `AgentJobRequestMessage` to identify job id/name, 
 
 Current code has classic `jobrequests` client methods for lock renewal and finish-job requests. The normal `velnor-runner run` path executes supported jobs by default and acknowledges/completes them; `--complete-noop` can opt into the completion probe, and `--dry-run-jobs` leaves received jobs unacknowledged for inspection.
 
-Current code models the classic timeline record/feed routes used by the upstream `JobServerQueue`; the no-op completion path still needs a live disposable GitHub test before it should be treated as proven.
+Current code models the classic timeline record/feed routes used by the upstream `JobServerQueue`. The V2 no-op completion path was live-tested successfully against hosted GitHub on 2026-06-01. Normal Docker execution reached the job container path, but this development environment exposed empty bind mounts from Docker, so the next live proof should run on a daemon-visible filesystem.

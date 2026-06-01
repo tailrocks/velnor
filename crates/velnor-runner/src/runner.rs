@@ -1146,6 +1146,7 @@ fn execute_script_job(
         node_action_image: node_action_image.to_string(),
         docker_cli_host_path: host_docker_cli_path(),
         docker_cli_plugin_host_dir: host_docker_cli_plugin_dir(),
+        verify_bind_mounts: true,
     };
     let cleanup_checkout_plans = eager_checkout_plans
         .iter()
