@@ -20,6 +20,7 @@ Out of current scope:
 - no Pkl workflow authoring
 - no Velnor-native workflow language
 - no replacement for GitHub's YAML parser or scheduler
+- no macOS host or runner replacement support
 - no broad GitHub Actions parity beyond the two target repositories
 
 ## Direction
