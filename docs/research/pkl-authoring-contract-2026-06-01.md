@@ -322,16 +322,6 @@ velnor workflow render-github workflow.pkl --out .github/workflows/ci.yml
 velnor workflow plan workflow.pkl --out target/velnor-plan.json
 ```
 
-Current implementation starts with the check command under the runner binary:
-
-```text
-velnor-runner workflow check workflow.pkl
-```
-
-It evaluates through `pkl eval --format json` and validates the first structural
-invariants in Rust. GitHub YAML rendering and Velnor plan output are still the
-next compiler steps.
-
 ## Rust Integration Rule
 
 Start with the official Pkl evaluator boundary:

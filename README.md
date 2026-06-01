@@ -66,15 +66,6 @@ scripts/target_verify.sh
 cargo test -q
 ```
 
-The future Pkl authoring path starts with a conservative evaluator check:
-
-```sh
-cargo run --bin velnor-runner -- workflow check path/to/workflow.pkl
-```
-
-This uses `pkl eval --format json` and runs Velnor's first Rust-side structural
-checks before any render/plan compiler exists.
-
 The remaining Phase 0 proof is live GitHub UI validation on the two target
 repositories from a Linux host whose Docker daemon can see Velnor's bind-mounted
 work directory.
