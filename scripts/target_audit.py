@@ -83,6 +83,30 @@ EXPECTED_REUSABLE_WORKFLOWS = Counter(
     }
 )
 
+EXPECTED_WORKFLOW_TRIGGERS = Counter(
+    {
+        (".github/workflows/ansible.yml", ("pull_request", "push", "workflow_dispatch")): 1,
+        (".github/workflows/ci.yml", ("pull_request", "push", "workflow_dispatch")): 1,
+        (".github/workflows/construct.yml", ("pull_request", "push", "workflow_dispatch")): 1,
+        (
+            ".github/workflows/docs.yml",
+            ("pull_request", "push", "schedule", "workflow_dispatch"),
+        ): 1,
+        (".github/workflows/kestra-build-image.yml", ("workflow_call",)): 1,
+        (".github/workflows/kestra-build-publish.yml", ("push", "workflow_dispatch")): 1,
+        (".github/workflows/preview.yml", ("workflow_dispatch", "workflow_run")): 1,
+        (".github/workflows/release.yml", ("push", "workflow_dispatch")): 1,
+        (".github/workflows/renovate-validate.yml", ("pull_request", "push", "workflow_dispatch")): 1,
+        (
+            ".github/workflows/renovate.yml",
+            ("merge_group", "push", "schedule", "workflow_dispatch"),
+        ): 2,
+        (".github/workflows/rust-docker-build.yml", ("workflow_call",)): 1,
+        (".github/workflows/rust-docker.yml", ("pull_request", "push", "workflow_dispatch")): 1,
+        (".github/workflows/rust.yml", ("pull_request", "push", "workflow_dispatch")): 1,
+    }
+)
+
 EXPECTED_JOB_RUNS_ON = Counter(
     {
         (".github/workflows/ansible.yml", "syntax-check", "hetzner-sentry-ci"): 1,
@@ -622,6 +646,15 @@ def check_target_mvp(summary: dict[str, Any]) -> list[str]:
         errors.append(
             "target MVP reusable workflow drift: "
             f"expected {dict(EXPECTED_REUSABLE_WORKFLOWS)}, got {dict(reusable_workflows)}"
+        )
+
+    workflow_triggers = Counter(
+        (path, tuple(triggers)) for path, triggers in summary["workflow_triggers"]
+    )
+    if workflow_triggers != EXPECTED_WORKFLOW_TRIGGERS:
+        errors.append(
+            "target MVP workflow trigger drift: "
+            f"expected {dict(EXPECTED_WORKFLOW_TRIGGERS)}, got {dict(workflow_triggers)}"
         )
 
     job_runs_on = Counter(summary["job_runs_on"])
