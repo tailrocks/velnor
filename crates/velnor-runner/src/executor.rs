@@ -4438,6 +4438,82 @@ mod tests {
     }
 
     #[test]
+    fn target_renovate_action_receives_docker_cli_socket_and_env() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::JavaScript {
+            step_id: "renovate".into(),
+            invocation: JavaScriptActionInvocation {
+                node: "node24".into(),
+                pre_container_path: None,
+                pre_condition: None,
+                main_container_path: "/__a/_actions/renovatebot_github-action/dist/index.js".into(),
+                post_container_path: None,
+                post_condition: None,
+                action_container_path: "/__a/_actions/renovatebot_github-action".into(),
+                env: vec![
+                    ("INPUT_TOKEN".into(), "${{ secrets.RENOVATE_TOKEN }}".into()),
+                    ("INPUT_RENOVATE-VERSION".into(), "43".into()),
+                    (
+                        "RENOVATE_REPOSITORIES".into(),
+                        "${{ github.repository }}".into(),
+                    ),
+                    ("RENOVATE_ONBOARDING".into(), "false".into()),
+                    ("LOG_LEVEL".into(), "debug".into()),
+                ],
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        let mut spec = container(&temp);
+        spec.mount_docker_socket = true;
+        spec.docker_cli_host_path = Some("/usr/bin/docker".into());
+        let context = vec![(
+            "secrets".into(),
+            serde_json::json!({ "RENOVATE_TOKEN": "renovate-token" }),
+        )];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps_with_context(
+                &spec,
+                &steps,
+                &[(
+                    "GITHUB_REPOSITORY".into(),
+                    "ChainArgos/java-monorepo".into(),
+                )],
+                &context,
+                &temp,
+            )
+            .unwrap();
+
+        let node_call = executor
+            .runner()
+            .calls
+            .iter()
+            .find(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:24-bookworm".into())
+            })
+            .map(|(_, args)| args)
+            .unwrap();
+        assert!(node_call.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
+        assert!(node_call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
+        assert!(node_call.contains(&"INPUT_TOKEN=renovate-token".into()));
+        assert!(node_call.contains(&"INPUT_RENOVATE-VERSION=43".into()));
+        assert!(node_call.contains(&"RENOVATE_REPOSITORIES=ChainArgos/java-monorepo".into()));
+        assert!(node_call.contains(&"RENOVATE_ONBOARDING=false".into()));
+        assert!(node_call.contains(&"LOG_LEVEL=debug".into()));
+        assert!(node_call.contains(&"GITHUB_REPOSITORY=ChainArgos/java-monorepo".into()));
+        assert!(node_call.ends_with(&[
+            "node:24-bookworm".into(),
+            "node".into(),
+            "/__a/_actions/renovatebot_github-action/dist/index.js".into()
+        ]));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn javascript_actions_receive_prior_github_path_entries() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
