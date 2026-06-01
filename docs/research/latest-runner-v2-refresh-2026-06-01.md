@@ -63,6 +63,9 @@ Source anchors in `actions/runner` `v2.334.0`:
 - Retry broker session creation briefly before failing, matching the upstream
   expectation that transient GitHub/network startup errors are not immediately
   fatal.
+- After a broker session exists, delete it best-effort when the runner loop
+  exits, including error exits, to avoid stale session conflicts on the next
+  live smoke run.
 - Poll broker messages with the runner status that reflects worker state:
   `Online` when idle and `Busy` while a job is running.
 - Retry transient broker message poll failures with bounded backoff, and back
@@ -127,6 +130,7 @@ proof is:
 Implemented in this refresh:
 
 - broker session creation retries transient startup failures before giving up
+- broker sessions are deleted best-effort after runner-loop errors
 - broker acknowledge failure is logged and does not abort the job
 - transient broker message poll failures retry with 15s/30s bounded backoff;
   repeated empty polls trigger a 15s backoff

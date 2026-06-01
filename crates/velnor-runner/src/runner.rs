@@ -430,68 +430,79 @@ async fn run_v2(
     );
     println!("Created broker runner session {session_id}.");
 
-    loop {
-        let message = poll_broker_message(
-            &broker,
-            session_id,
-            RunnerStatus::Online,
-            stored.settings.disable_update,
-            &mut poll_state,
-        )
-        .await?;
+    let run_result = async {
+        loop {
+            let message = poll_broker_message(
+                &broker,
+                session_id,
+                RunnerStatus::Online,
+                stored.settings.disable_update,
+                &mut poll_state,
+            )
+            .await?;
 
-        let Some(message) = message else {
-            println!("No broker message received.");
-            fail_if_idle_timeout_elapsed(idle_started, idle_timeout)?;
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            continue;
-        };
+            let Some(message) = message else {
+                println!("No broker message received.");
+                fail_if_idle_timeout_elapsed(idle_started, idle_timeout)?;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            };
 
-        let action = handle_v2_message(
-            &broker,
-            &run_service,
-            session_id,
-            &stored,
-            &config_dir,
-            &args,
-            stored.settings.disable_update,
-            &stored.settings.agent_name,
-            message,
-        )
-        .await?;
+            let action = handle_v2_message(
+                &broker,
+                &run_service,
+                session_id,
+                &stored,
+                &config_dir,
+                &args,
+                stored.settings.disable_update,
+                &stored.settings.agent_name,
+                message,
+            )
+            .await?;
 
-        match &action {
-            V2MessageAction::None => {}
-            V2MessageAction::BrokerMigration(migration_url) => {
-                current_broker_url = migration_url.clone();
-                broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
-                println!("Broker migration applied: {current_broker_url}");
+            match &action {
+                V2MessageAction::None => {}
+                V2MessageAction::BrokerMigration(migration_url) => {
+                    current_broker_url = migration_url.clone();
+                    broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
+                    println!("Broker migration applied: {current_broker_url}");
+                }
+                V2MessageAction::RefreshToken => {
+                    let refreshed_token = oauth_access_token(&stored).await?;
+                    broker_token = refreshed_token.clone();
+                    broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
+                    run_service = RunServiceClient::new(refreshed_token)?;
+                    println!("Refreshed broker and run-service credentials.");
+                }
+                V2MessageAction::Shutdown => {
+                    println!("GitHub requested runner shutdown.");
+                    break;
+                }
+                V2MessageAction::JobHandled => {}
             }
-            V2MessageAction::RefreshToken => {
-                let refreshed_token = oauth_access_token(&stored).await?;
-                broker_token = refreshed_token.clone();
-                broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
-                run_service = RunServiceClient::new(refreshed_token)?;
-                println!("Refreshed broker and run-service credentials.");
-            }
-            V2MessageAction::Shutdown => {
-                println!("GitHub requested runner shutdown.");
+            if should_stop_after_message(args.once, &action) {
                 break;
             }
-            V2MessageAction::JobHandled => {}
+            if !matches!(action, V2MessageAction::JobHandled) {
+                fail_if_idle_timeout_elapsed(idle_started, idle_timeout)?;
+            }
         }
-        if should_stop_after_message(args.once, &action) {
-            break;
+        Ok(())
+    }
+    .await;
+
+    match broker.delete_session().await {
+        Ok(()) => println!("Deleted broker runner session."),
+        Err(error) if run_result.is_ok() => {
+            return Err(error).context("delete broker runner session");
         }
-        if !matches!(action, V2MessageAction::JobHandled) {
-            fail_if_idle_timeout_elapsed(idle_started, idle_timeout)?;
+        Err(error) => {
+            eprintln!("Best-effort broker session delete failed: {error:#}");
         }
     }
 
-    broker.delete_session().await?;
-    println!("Deleted broker runner session.");
-
-    Ok(())
+    run_result
 }
 
 async fn create_broker_session_with_retry(
