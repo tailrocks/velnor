@@ -14,6 +14,8 @@ use anyhow::{bail, Context, Result};
 use globset::{Glob, GlobSetBuilder};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::BTreeMap,
     fs,
@@ -2123,7 +2125,7 @@ fn native_download_artifact(
         };
         fs::create_dir_all(&target)
             .with_context(|| format!("create artifact target {}", target.display()))?;
-        copy_dir_contents(artifact_dir, &target)?;
+        copy_artifact_download_contents(artifact_dir, &target)?;
     }
 
     let mut outputs = BTreeMap::new();
@@ -2591,6 +2593,53 @@ fn copy_dir_contents(source: &Path, destination: &Path) -> Result<()> {
                 .with_context(|| format!("copy {}", source_path.display()))?;
         }
     }
+    Ok(())
+}
+
+fn copy_artifact_download_contents(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination)
+        .with_context(|| format!("create artifact download dir {}", destination.display()))?;
+    normalize_artifact_dir_permissions(destination)?;
+    for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            copy_artifact_download_contents(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            if let Some(parent) = destination_path.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", parent.display()))?;
+                normalize_artifact_dir_permissions(parent)?;
+            }
+            fs::copy(&source_path, &destination_path)
+                .with_context(|| format!("copy {}", source_path.display()))?;
+            normalize_artifact_file_permissions(&destination_path)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn normalize_artifact_file_permissions(path: &Path) -> Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o644))
+        .with_context(|| format!("set artifact file permissions {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn normalize_artifact_file_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn normalize_artifact_dir_permissions(path: &Path) -> Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("set artifact directory permissions {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn normalize_artifact_dir_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -7989,6 +8038,82 @@ fi"#
             "macos\n"
         );
         assert!(!download_temp.join("work/downloaded/linux.txt").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn native_download_artifact_normalizes_permissions() {
+        let root = temp_dir();
+        let upload_temp = root.join("upload-job/temp");
+        let download_temp = root.join("download-job/temp");
+        fs::create_dir_all(upload_temp.join("work/bin")).unwrap();
+        fs::create_dir_all(download_temp.join("work")).unwrap();
+        let script = upload_temp.join("work/bin/tool.sh");
+        fs::write(&script, "#!/usr/bin/env bash\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        let runtime_env = vec![
+            ("GITHUB_RUN_ID".into(), "123456".into()),
+            ("GITHUB_RUN_ATTEMPT".into(), "1".into()),
+            ("GITHUB_WORKSPACE".into(), "/__w".into()),
+        ];
+        let upload = vec![ExecutableStep::Native {
+            step_id: "upload".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::UploadArtifact,
+                inputs: [
+                    ("name".into(), "bin".into()),
+                    ("path".into(), "/__w/bin".into()),
+                    ("if-no-files-found".into(), "error".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&upload_temp),
+                &upload,
+                &runtime_env,
+                &upload_temp,
+            )
+            .unwrap();
+        let download = vec![ExecutableStep::Native {
+            step_id: "download".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::DownloadArtifact,
+                inputs: [
+                    ("name".into(), "bin".into()),
+                    ("path".into(), "/__w/downloaded".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+
+        DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&download_temp),
+                &download,
+                &runtime_env,
+                &download_temp,
+            )
+            .unwrap();
+
+        let downloaded_dir = download_temp.join("work/downloaded");
+        let downloaded_file = downloaded_dir.join("tool.sh");
+        assert_eq!(
+            fs::metadata(&downloaded_dir).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(
+            fs::metadata(&downloaded_file).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
