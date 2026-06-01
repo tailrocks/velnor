@@ -711,6 +711,7 @@ fn ordered_executable_steps(
                                     resolved_actions,
                                     actions_host,
                                     None,
+                                    false,
                                 )?;
                             }
                             CompositeActionInvocation::Outputs(outputs) => {
@@ -754,6 +755,7 @@ fn ordered_executable_steps(
                     resolved_actions,
                     actions_host,
                     None,
+                    false,
                 )?;
             }
             _ => bail!("unsupported enabled step in job"),
@@ -768,19 +770,21 @@ fn append_resolved_action_steps(
     resolved_actions: &[ResolvedAction],
     actions_host: &std::path::Path,
     parent_condition: Option<&str>,
+    parent_continue_on_error: bool,
 ) -> Result<()> {
+    let continue_on_error = parent_continue_on_error || action.plan.continue_on_error;
     match &action.runtime {
         ActionRuntime::JavaScript { .. } => ordered.push(ExecutableStep::JavaScript {
             step_id: action.plan.step_id.clone(),
             invocation: action.javascript_invocation(actions_host)?,
             condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
-            continue_on_error: action.plan.continue_on_error,
+            continue_on_error,
         }),
         ActionRuntime::Docker { .. } => ordered.push(ExecutableStep::Docker {
             step_id: action.plan.step_id.clone(),
             invocation: action.docker_invocation(actions_host)?,
             condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
-            continue_on_error: action.plan.continue_on_error,
+            continue_on_error,
         }),
         ActionRuntime::Composite => {
             let action_condition =
@@ -792,7 +796,7 @@ fn append_resolved_action_steps(
                             action_condition.as_deref(),
                             script.condition.as_deref(),
                         );
-                        script.continue_on_error |= action.plan.continue_on_error;
+                        script.continue_on_error |= continue_on_error;
                         ordered.push(ExecutableStep::Script(script));
                     }
                     CompositeActionInvocation::Repository(plan) => {
@@ -811,6 +815,7 @@ fn append_resolved_action_steps(
                             resolved_actions,
                             actions_host,
                             action_condition.as_deref(),
+                            continue_on_error,
                         )?;
                     }
                     CompositeActionInvocation::Outputs(outputs) => {
@@ -2020,5 +2025,93 @@ runs:
             "${{ steps.pages-upload.outputs.artifact-id }}"
         );
         assert_eq!(condition.as_deref(), Some("runner.os == 'Linux'"));
+    }
+
+    #[test]
+    fn repository_composite_continue_on_error_reaches_nested_actions() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Pages",
+            "requestId": 1,
+            "steps": [{
+                "id": "pages",
+                "reference": {
+                    "type": "Repository",
+                    "name": "actions/upload-pages-artifact",
+                    "ref": "v5"
+                },
+                "continueOnError": true
+            }]
+        }))
+        .unwrap();
+        let actions_host = Path::new("/tmp/actions");
+        let pages_plan = RepositoryActionPlan {
+            step_id: "pages".into(),
+            repository: "actions/upload-pages-artifact".into(),
+            git_ref: "v5".into(),
+            source_path: None,
+            repository_dir: actions_host.join("_actions/actions_upload-pages-artifact/v5"),
+            action_dir: actions_host.join("_actions/actions_upload-pages-artifact/v5"),
+            inputs: BTreeMap::new(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: true,
+        };
+        let pages_metadata = parse_action_metadata(
+            r#"
+runs:
+  using: composite
+  steps:
+    - id: upload
+      uses: actions/upload-artifact@v7
+"#,
+        )
+        .unwrap();
+        let upload_plan = RepositoryActionPlan {
+            step_id: "pages-upload".into(),
+            repository: "actions/upload-artifact".into(),
+            git_ref: "v7".into(),
+            source_path: None,
+            repository_dir: actions_host.join("_actions/actions_upload-artifact/v7"),
+            action_dir: actions_host.join("_actions/actions_upload-artifact/v7"),
+            inputs: BTreeMap::new(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+        };
+        let upload_metadata =
+            parse_action_metadata("runs:\n  using: node20\n  main: dist/upload/index.js\n")
+                .unwrap();
+        let pages = ResolvedAction {
+            plan: pages_plan,
+            metadata_path: actions_host
+                .join("_actions/actions_upload-pages-artifact/v5/action.yml"),
+            runtime: pages_metadata.runtime().unwrap(),
+            metadata: pages_metadata,
+        };
+        let upload = ResolvedAction {
+            plan: upload_plan,
+            metadata_path: actions_host.join("_actions/actions_upload-artifact/v7/action.yml"),
+            runtime: upload_metadata.runtime().unwrap(),
+            metadata: upload_metadata,
+        };
+
+        let ordered =
+            ordered_executable_steps(&job, &[], &[pages, upload], &[], actions_host).unwrap();
+
+        assert_eq!(ordered.len(), 1);
+        let ExecutableStep::JavaScript {
+            step_id,
+            continue_on_error,
+            ..
+        } = &ordered[0]
+        else {
+            panic!("nested upload action should expand to JavaScript step")
+        };
+        assert_eq!(step_id, "pages-upload");
+        assert!(*continue_on_error);
     }
 }
