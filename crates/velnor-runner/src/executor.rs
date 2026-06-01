@@ -6,7 +6,7 @@ use crate::{
         NativeActionInvocation,
     },
     checkout::{configure_safe_directory, execute_checkout, CheckoutPlan},
-    container::JobContainerSpec,
+    container::{sccache_host, JobContainerSpec},
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
     workflow_command::parse_workflow_commands,
 };
@@ -1466,6 +1466,12 @@ where
         fs::create_dir_all(container.temp_host.join("_github_workflow")).with_context(|| {
             format!(
                 "create GitHub workflow directory under {}",
+                container.temp_host.display()
+            )
+        })?;
+        fs::create_dir_all(sccache_host(&container.temp_host)).with_context(|| {
+            format!(
+                "create shared sccache directory for {}",
                 container.temp_host.display()
             )
         })?;
