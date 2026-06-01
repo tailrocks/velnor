@@ -180,11 +180,17 @@ Required evidence:
 
 1. Re-run `scripts/target_verify.sh` and `cargo test -q` before every live
    proof attempt.
-2. On the live Linux host, run `velnor-runner preflight --require-docker-socket`
-   with the same work directory used by the runner.
+2. On the live Linux host, run `scripts/fixture_readiness.sh` with the same
+   work directory intended for the runner. It checks fixture status, fixture
+   feature-surface drift, and Docker host readiness without GitHub mutation.
 3. Run `scripts/fixture_smoke.sh` and capture the generated evidence markdown.
-4. Fix only failures backed by live payload dumps or target workflow drift.
-5. Run `scripts/chainargos_rust_target_sequence.sh`.
-6. Run `scripts/jackin_rust_linux_sequence.sh`.
+4. Fix only failures backed by fixture live payload dumps or target workflow
+   drift.
+5. After fixture evidence is green, ask the user/operator to manually run
+   `scripts/chainargos_rust_target_sequence.sh` with
+   `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`.
+6. After ChainArgos is green, ask the user/operator to manually run
+   `scripts/jackin_rust_linux_sequence.sh` with
+   `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`.
 7. After both target repositories pass in GitHub UI, revisit PQL/Pkl as a typed
    authoring layer over the normalized plan.

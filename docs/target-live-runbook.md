@@ -102,34 +102,27 @@ inside the job container.
 Before the real target repositories, use the public fixture:
 
 ```sh
+scripts/fixture_readiness.sh
 scripts/fixture_smoke.sh
 ```
 
-That script runs the local verifier, Docker preflight, fixture runner
-registration, two Velnor `--once` jobs for the fixture matrix by default, and a
-GitHub run status summary. Override the count with `VELNOR_FIXTURE_JOB_COUNT`
-when the fixture shape changes. By default it dispatches a fresh `compat.yml`
-run and waits for the new run id. Set `VELNOR_FIXTURE_RUN_ID=<run-id>` to consume
-an existing run; set `VELNOR_FIXTURE_DISPATCH=false` only when using an existing
-run id. Set `VELNOR_FIXTURE_REF=<branch-or-sha>` and
+The readiness script checks fixture status, fixture feature-surface drift, and
+host Docker readiness without runner registration or workflow dispatch. The
+smoke script runs the local verifier, Docker preflight, fixture runner slot
+registration, one bounded Velnor daemon with `--once` and one internal slot per
+requested fixture job, and a GitHub run status summary. Override the count with
+`VELNOR_FIXTURE_JOB_COUNT` when the fixture shape changes. By default it
+dispatches a fresh `compat.yml` run and waits for the new run id. Set
+`VELNOR_FIXTURE_RUN_ID=<run-id>` to consume an existing run; set
+`VELNOR_FIXTURE_DISPATCH=false` only when using an existing run id. Set
+`VELNOR_FIXTURE_REF=<branch-or-sha>` and
 `VELNOR_FIXTURE_INPUTS=key=value,other=value` when dispatching fixture workflows
 from a non-default ref or with workflow inputs. Input validation uses the same
 `key=value` rules as target smoke scripts. Fixture workflow values are required
 and must be file names ending in `.yml` or `.yaml`. The script removes the temporary
 fixture runner on exit by default; set
 `VELNOR_FIXTURE_CLEANUP_RUNNER=false` to keep it registered for debugging. The
-manual equivalent is:
-
-```sh
-cargo run --bin velnor-runner -- configure \
-  --url https://github.com/donbeave/velnor-actions-fixture \
-  --pat "$GITHUB_TOKEN" \
-  --name velnor-target-mvp \
-  --labels velnor-target-mvp \
-  --replace
-```
-
-Start Velnor:
+manual daemon equivalent is:
 
 ```sh
 cargo run --bin velnor-runner -- daemon \
@@ -138,7 +131,8 @@ cargo run --bin velnor-runner -- daemon \
   --name velnor-target-mvp \
   --labels velnor-target-mvp \
   --replace \
-  --slots 1 \
+  --slots 2 \
+  --once \
   --work-dir "$PWD/.velnor-work" \
   --require-docker-socket
 ```
@@ -237,20 +231,27 @@ tune per-job wait time; it must be a positive integer. Explicit run IDs such as
 `VELNOR_TARGET_RUN_ID` and `VELNOR_FIXTURE_RUN_ID` must also be positive
 integers.
 
-Start Velnor:
+For manual low-level debugging, one bounded daemon invocation looks like:
 
 ```sh
-cargo run --bin velnor-runner -- run \
+cargo run --bin velnor-runner -- daemon \
+  --url https://github.com/ChainArgos/java-monorepo \
+  --pat "$GITHUB_TOKEN" \
+  --name velnor-target-mvp \
+  --target-mvp-labels \
+  --replace \
+  --slots 1 \
+  --once \
   --work-dir "$PWD/.velnor-work" \
   --require-docker-socket \
-  --once \
   --idle-timeout-seconds 900
 ```
 
-`--once` waits until one GitHub job is actually acquired and handled. It does
-not exit just because the broker has no message yet or sends a control message.
-The idle timeout is optional, but it makes smoke runs fail clearly when labels,
-workflow dispatch, or runner registration are wrong.
+`daemon --once` starts the requested internal runner slot count and each slot
+waits until one GitHub job is actually acquired and handled. It does not exit
+just because the broker has no message yet or sends a control message. The idle
+timeout is optional, but it makes smoke runs fail clearly when labels, workflow
+dispatch, or runner registration are wrong.
 
 Before dispatch, fixture and target smoke scripts check repository self-hosted
 runners and fail if another online runner can match the proof labels. This
@@ -265,10 +266,15 @@ Initial recommended runs, in this order:
 3. `rust-docker.yml` or `rust-docker-build.yml`: validates Docker socket/CLI/Buildx, Docker Hub login, Buildx/Bake, cache env, and Docker action input/output flow. Use `VELNOR_TARGET_INPUTS=push=false` for rehearsal runs.
 4. `kestra-build-publish.yml`: validates GitHub-expanded reusable workflow jobs using `kestra-build-image.yml`; set `VELNOR_TARGET_JOB_COUNT` high enough to drain the selected reusable build jobs.
 
-Run without `--once` after the first smoke job is clean:
+Run without `--once` after the bounded smoke jobs are clean:
 
 ```sh
-cargo run --bin velnor-runner -- run \
+cargo run --bin velnor-runner -- daemon \
+  --url https://github.com/ChainArgos/java-monorepo \
+  --pat "$GITHUB_TOKEN" \
+  --name velnor-target-mvp \
+  --target-mvp-labels \
+  --slots 4 \
   --work-dir "$PWD/.velnor-work" \
   --require-docker-socket
 ```
@@ -284,7 +290,7 @@ scripts/jackin_target_smoke.sh
 
 It uses the same host readiness, target label preset, V2 config validation,
 sanitized job dumps, optional `VELNOR_TARGET_WORKFLOW=<workflow.yml>` dispatch,
-and repeated `--once` execution shape as `scripts/chainargos_target_smoke.sh`.
+and bounded daemon execution shape as `scripts/chainargos_target_smoke.sh`.
 Set `VELNOR_TARGET_MVP_ARM_LABEL=true` only on an ARM Linux host to add the
 `ubuntu-24.04-arm` label. Velnor rejects that label on non-ARM hosts.
 
@@ -361,6 +367,9 @@ cargo run --bin velnor-runner -- run \
   --dump-job-message "$PWD/.velnor-job-dumps" \
   --once
 ```
+
+For normal target proof, prefer the smoke scripts or `daemon --once --slots N`;
+the single-slot `run --once` command is only a low-level diagnostic path.
 
 ## Cleanup
 

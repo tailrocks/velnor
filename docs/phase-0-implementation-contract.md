@@ -187,6 +187,7 @@ cargo test -q
 Live gates prove actual GitHub compatibility:
 
 ```sh
+scripts/fixture_readiness.sh
 scripts/fixture_smoke.sh
 scripts/chainargos_rust_target_sequence.sh
 scripts/jackin_rust_linux_sequence.sh
@@ -201,11 +202,14 @@ declare Phase 0 complete.
 The remaining work is primarily live proof and any fixes discovered from real
 sanitized job payloads:
 
+- public fixture audit/readiness must pass before any runner registration
 - public fixture Velnor lane must pass and compare against GitHub-hosted lane
-- ChainArgos `ansible.yml`, `rust.yml`, `rust-docker.yml`, and reusable Docker
-  image jobs must pass through Velnor in GitHub UI
-- Jackin `ci.yml`, `construct.yml`, and `docs.yml` Linux paths must pass through
-  Velnor in GitHub UI
+- after fixture evidence is green, the user/operator manually validates
+  ChainArgos `ansible.yml`, `rust.yml`, `rust-docker.yml`, and reusable Docker
+  image jobs through Velnor in GitHub UI
+- after fixture evidence is green, the user/operator manually validates Jackin
+  `ci.yml`, `construct.yml`, and `docs.yml` Linux paths through Velnor in
+  GitHub UI
 - GitHub UI logs, annotations, summaries, job outputs, artifacts, cache
   behavior, environment URLs, and final workflow conclusions must be checked
 - real Docker login and Buildx/Bake paths must be exercised with target secrets
