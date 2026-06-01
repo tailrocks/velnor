@@ -1721,7 +1721,7 @@ fn native_cache(
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
     let action_state = state.with_env(state.resolve_env(&action.env));
-    let key = native_input(action, &action_state, "key");
+    let key = native_cache_key(action, &action_state, "key");
     let path = native_input(action, &action_state, "path");
     let restore_keys = native_input(action, &action_state, "restore-keys");
     let fail_on_cache_miss =
@@ -1787,7 +1787,7 @@ fn native_rust_cache(
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
     let action_state = state.with_env(state.resolve_env(&action.env));
-    let shared_key = native_input(action, &action_state, "shared-key");
+    let shared_key = native_cache_key(action, &action_state, "shared-key");
     let cache_directories = native_input(action, &action_state, "cache-directories");
     let cache_on_failure = native_input_or(&action_state, action, "cache-on-failure", "false");
     let matched = find_cache_match(&action_state, &shared_key, "")?;
@@ -1822,7 +1822,7 @@ fn native_cache_save(
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
     let action_state = state.with_env(state.resolve_env(&action.env));
-    let key = native_input(action, &action_state, "key");
+    let key = native_cache_key(action, &action_state, "key");
     let path = native_input(action, &action_state, "path");
     let exact_hit = state
         .outputs
@@ -1838,7 +1838,7 @@ fn native_rust_cache_save(
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
     let action_state = state.with_env(state.resolve_env(&action.env));
-    let key = native_input(action, &action_state, "shared-key");
+    let key = native_cache_key(action, &action_state, "shared-key");
     let path = native_input(action, &action_state, "cache-directories");
     let exact_hit = state
         .outputs
@@ -1854,6 +1854,14 @@ fn cache_lookup_keys(key: &str, restore_keys: &str) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn native_cache_key(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+    name: &str,
+) -> String {
+    native_input(action, state, name).trim().to_string()
 }
 
 fn find_cache_match(
@@ -4593,6 +4601,72 @@ mod tests {
         assert!(results[0].stderr.contains("fail-on-cache-miss"));
 
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_cache_trims_folded_yaml_primary_key() {
+        let root = temp_dir();
+        let save_temp = root.join("save-job/temp");
+        let restore_temp = root.join("restore-job/temp");
+        fs::create_dir_all(root.join("save-job/home/.cache/rust-script")).unwrap();
+        fs::create_dir_all(root.join("restore-job/home")).unwrap();
+        fs::write(
+            root.join("save-job/home/.cache/rust-script/state.bin"),
+            "cached\n",
+        )
+        .unwrap();
+        let folded_key = "rust-script-Linux-deadbeef\n";
+        let save = vec![ExecutableStep::Native {
+            step_id: "cache".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::Cache,
+                inputs: [
+                    ("path".into(), "~/.cache/rust-script".into()),
+                    ("key".into(), folded_key.into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+
+        let save_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&save_temp), &save, &[], &save_temp)
+            .unwrap();
+
+        assert_eq!(
+            save_results[0].state.outputs["cache-primary-key"],
+            "rust-script-Linux-deadbeef"
+        );
+        assert!(root
+            .join("_velnor_caches/rust-script-Linux-deadbeef/0/state.bin")
+            .exists());
+
+        let restore = vec![ExecutableStep::Native {
+            step_id: "cache".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::Cache,
+                inputs: [
+                    ("path".into(), "~/.cache/rust-script".into()),
+                    ("key".into(), "rust-script-Linux-deadbeef".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        let restore_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&restore_temp), &restore, &[], &restore_temp)
+            .unwrap();
+
+        assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(
+            fs::read_to_string(root.join("restore-job/home/.cache/rust-script/state.bin")).unwrap(),
+            "cached\n"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
