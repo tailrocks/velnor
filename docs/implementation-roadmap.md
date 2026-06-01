@@ -138,6 +138,7 @@ Deliverables:
 - run-service typed input/env maps are normalized for job env, run defaults, script steps, native checkout, repository actions, and local composite actions, so V2 payloads still become normal job env, step env, defaults, and `INPUT_*` values for target actions such as cache, paths-filter, Docker actions, and aggregate-needs
 - target expression coverage now checks workflow YAML from the two target repositories, cached marketplace action metadata under `/tmp/velnor-actions`, and target-local composite action metadata under `jackin/.github/actions`, including multiline composite expressions and multi-argument `hashFiles(...)`
 - `continue-on-error`: script and JavaScript action steps can ignore a nonzero exit for job failure while preserving `steps.<id>.outcome == 'failure'`, covering target optional `sccache` setup
+- V2 typed `continueOnError` wrapper values are accepted for target soft-fail action steps
 - ordered job execution for script steps and JavaScript actions in original message order is wired, with JavaScript post hooks executed in reverse order; host-side checkout still runs before the Docker container starts
 
 Exit criteria:

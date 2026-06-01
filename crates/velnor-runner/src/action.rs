@@ -4,7 +4,7 @@ use crate::{
     checkout::fetch_git_ref,
     executor::{render_context_expressions, CommandRunner},
     job_message::{ActionReferenceType, ActionStep},
-    script_step::{step_environment, ScriptStep},
+    script_step::{step_environment, value_truthy, ScriptStep},
 };
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Deserializer};
@@ -1137,10 +1137,16 @@ fn composite_continue_on_error(
     step_ids: &BTreeMap<String, String>,
 ) -> bool {
     step.continue_on_error
-        .as_deref()
+        .as_ref()
         .map(|value| {
-            render_composite_scoped_value(value, inputs, action_path, workspace_container, step_ids)
-                .eq_ignore_ascii_case("true")
+            let rendered = render_composite_scoped_value(
+                value,
+                inputs,
+                action_path,
+                workspace_container,
+                step_ids,
+            );
+            value_truthy(&serde_json::Value::String(rendered))
         })
         .unwrap_or(false)
 }

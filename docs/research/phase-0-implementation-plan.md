@@ -276,7 +276,7 @@ Velnor still needs runtime step expression behavior from the job message:
 - `steps.<id>.outputs.*`: implemented for direct interpolation in later scripts and JavaScript action env
 - job outputs: `JobOutputs` from the GitHub job message are evaluated after step execution from final step outputs and sent through the classic `JobCompleted` plan event or the V2 run-service `completejob` payload
 - env/context expansion in scripts and JavaScript action env: basic `steps.*.outputs.*`, `github.*` including `github.workflow`, `github.ref_name`, and nested `github.event.*`, `runner.*`, `env.*`, `secrets.*`, generic job `ContextData`, target-shaped `&&`/`||` value expressions, equality checks, unary `!`, `contains(...)`, `toJSON(...)`, and workspace-backed `hashFiles(...)` interpolation is implemented
-- `continue-on-error`: implemented for script and JavaScript action steps; failed steps keep failure outcome for later `steps.<id>.outcome` checks, but do not fail the job
+- `continue-on-error`: implemented for script and JavaScript action steps, including V2 typed wrapper values; failed steps keep failure outcome for later `steps.<id>.outcome` checks, but do not fail the job
 
 Implement only the expression subset that appears in the job message for target workflows.
 

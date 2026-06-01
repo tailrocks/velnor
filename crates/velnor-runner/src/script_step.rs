@@ -305,9 +305,20 @@ fn json_type(value: &Value) -> &'static str {
 }
 
 pub(crate) fn step_continue_on_error(step: &ActionStep) -> bool {
-    match step.continue_on_error.as_ref() {
-        Some(serde_json::Value::Bool(value)) => *value,
-        Some(serde_json::Value::String(value)) => value.eq_ignore_ascii_case("true"),
+    step.continue_on_error.as_ref().is_some_and(value_truthy)
+}
+
+pub(crate) fn value_truthy(value: &Value) -> bool {
+    match value {
+        Value::Bool(value) => *value,
+        Value::String(value) => value.eq_ignore_ascii_case("true"),
+        Value::Number(value) => value.as_i64() == Some(1),
+        Value::Object(object) => object
+            .get("value")
+            .or_else(|| object.get("Value"))
+            .or_else(|| object.get("lit"))
+            .or_else(|| object.get("Lit"))
+            .is_some_and(value_truthy),
         _ => false,
     }
 }
@@ -788,6 +799,30 @@ mod tests {
             ]
         );
         assert!(mapped[0].continue_on_error);
+    }
+
+    #[test]
+    fn maps_run_service_typed_continue_on_error() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "soft",
+                "reference": { "type": "Script" },
+                "inputs": { "script": "cargo install sccache" },
+                "continueOnError": { "value": true }
+            },
+            {
+                "id": "strict",
+                "reference": { "type": "Script" },
+                "inputs": { "script": "cargo test" },
+                "continueOnError": { "lit": "false" }
+            }
+        ]))
+        .unwrap();
+
+        let mapped = github_script_steps(&steps, "/__w/repo").unwrap();
+
+        assert!(mapped[0].continue_on_error);
+        assert!(!mapped[1].continue_on_error);
     }
 
     #[test]
