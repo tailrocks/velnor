@@ -85,6 +85,7 @@ Current code progress:
 - enabled GitHub script steps can be mapped into internal `ScriptStep` plans for `bash` and `sh`, including `script`, `shell`, `workingDirectory`, and job `defaults.run` shell/working-directory
 - `velnor-runner run` executes supported jobs by default in one Docker job container plus JavaScript/Docker action sidecars and finishes success/failure; `--complete-noop` remains available for completion probes and `--dry-run-jobs` leaves received jobs unacknowledged for inspection
 - env written to `GITHUB_ENV` and paths written to `GITHUB_PATH` are propagated to later script steps
+- `GITHUB_ENV` and legacy `set-env` mutations cannot override `GITHUB_*` and `RUNNER_*` defaults; `ACTIONS_*` remains mutable for target runtime-export actions
 - paths written to `GITHUB_PATH` are also propagated to later JavaScript action sidecars via a shell PATH prelude, preserving the sidecar image's default PATH while making shared-home tools such as Rust/Cargo shims visible
 - step outputs written to `GITHUB_OUTPUT` are tracked by step id and basic `${{ steps.<id>.outputs.<name> }}` expressions are resolved in later scripts and JavaScript action env
 - job outputs from the job message are evaluated at the end of execution from final step output state, matching the runner-side evaluation point used by GitHub

@@ -321,7 +321,7 @@ impl CommandFileSet {
     fn collect_state(&self) -> Result<StepCommandState> {
         Ok(StepCommandState {
             outputs: commands_to_map(parse_command_file(&self.output.host)?),
-            env: commands_to_map(parse_command_file(&self.env.host)?),
+            env: env_commands_to_map(parse_command_file(&self.env.host)?),
             path: fs::read_to_string(&self.path.host)?
                 .lines()
                 .filter(|line| !line.is_empty())
@@ -369,6 +369,12 @@ pub struct StepCommandState {
 }
 
 impl StepCommandState {
+    pub(crate) fn set_env(&mut self, name: String, value: String) {
+        if !is_blocked_env_mutation(&name) {
+            self.env.insert(name, value);
+        }
+    }
+
     pub fn merge(&mut self, other: StepCommandState) {
         self.outputs.extend(other.outputs);
         self.env.extend(other.env);
@@ -390,6 +396,18 @@ fn commands_to_map(commands: Vec<FileCommand>) -> BTreeMap<String, String> {
         .into_iter()
         .map(|command| (command.name, command.value))
         .collect()
+}
+
+fn env_commands_to_map(commands: Vec<FileCommand>) -> BTreeMap<String, String> {
+    commands
+        .into_iter()
+        .filter(|command| !is_blocked_env_mutation(&command.name))
+        .map(|command| (command.name, command.value))
+        .collect()
+}
+
+fn is_blocked_env_mutation(name: &str) -> bool {
+    name.starts_with("GITHUB_") || name.starts_with("RUNNER_")
 }
 
 fn fix_script(script: &str) -> String {
@@ -475,7 +493,11 @@ mod tests {
             "answer=42\nmulti<<EOF\none\ntwo\nEOF\n",
         )
         .unwrap();
-        fs::write(temp.join("step1_env"), "NAME=value\n").unwrap();
+        fs::write(
+            temp.join("step1_env"),
+            "NAME=value\nGITHUB_REF=evil\nRUNNER_TEMP=/bad\nACTIONS_RUNTIME_URL=https://runtime\n",
+        )
+        .unwrap();
         fs::write(temp.join("step1_path"), "/opt/tool\n\n").unwrap();
         fs::write(temp.join("step1_state"), "cleanup=yes\n").unwrap();
         fs::write(temp.join("step1_summary"), "summary text").unwrap();
@@ -485,6 +507,9 @@ mod tests {
         assert_eq!(state.outputs["answer"], "42");
         assert_eq!(state.outputs["multi"], "one\ntwo");
         assert_eq!(state.env["NAME"], "value");
+        assert_eq!(state.env["ACTIONS_RUNTIME_URL"], "https://runtime");
+        assert!(!state.env.contains_key("GITHUB_REF"));
+        assert!(!state.env.contains_key("RUNNER_TEMP"));
         assert_eq!(state.path, vec!["/opt/tool"]);
         assert_eq!(state.state["cleanup"], "yes");
         assert_eq!(state.summary, "summary text");

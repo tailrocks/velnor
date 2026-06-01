@@ -36,7 +36,7 @@ pub fn parse_workflow_commands(output: &str) -> StepCommandState {
             }
             "set-env" => {
                 if let Some(name) = command.properties.get("name") {
-                    state.env.insert(name.clone(), command.value);
+                    state.set_env(name.clone(), command.value);
                 }
             }
             "add-path" => state.path.push(command.value),
@@ -153,6 +153,9 @@ mod tests {
         let state = parse_workflow_commands(
             "::set-output name=answer::42\n\
              ::set-env name=MODE::release\n\
+             ::set-env name=GITHUB_REF::evil\n\
+             ::set-env name=RUNNER_TEMP::/bad\n\
+             ::set-env name=ACTIONS_RUNTIME_URL::https://runtime\n\
              ::add-path::/opt/tool\n\
              ::save-state name=cleanup::yes\n\
              ::add-mask::top-secret\n\
@@ -163,6 +166,9 @@ mod tests {
 
         assert_eq!(state.outputs["answer"], "42");
         assert_eq!(state.env["MODE"], "release");
+        assert_eq!(state.env["ACTIONS_RUNTIME_URL"], "https://runtime");
+        assert!(!state.env.contains_key("GITHUB_REF"));
+        assert!(!state.env.contains_key("RUNNER_TEMP"));
         assert_eq!(state.path, vec!["/opt/tool"]);
         assert_eq!(state.state["cleanup"], "yes");
         assert_eq!(state.masks, vec!["top-secret"]);
