@@ -128,6 +128,8 @@ Current local environment finding:
 - This blocks live fixture execution in this environment. The live fixture proof
   needs a local Docker socket or a `--work-dir` path mounted into the Docker
   daemon host.
+- Velnor now supports `--docker-host-work-dir` for deployments where the runner
+  process and Docker daemon see the same work directory at different paths.
 
 ## Still Not Proven
 

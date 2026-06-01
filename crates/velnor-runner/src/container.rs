@@ -19,6 +19,7 @@ pub struct JobContainerSpec {
     pub node_action_image: String,
     pub docker_cli_host_path: Option<PathBuf>,
     pub docker_cli_plugin_host_dir: Option<PathBuf>,
+    pub docker_host_work_dir: Option<PathBuf>,
     pub verify_bind_mounts: bool,
 }
 
@@ -38,21 +39,21 @@ impl JobContainerSpec {
             "--workdir".into(),
             "/__w".into(),
             "-v".into(),
-            mount(&self.workspace_host, "/__w"),
+            self.mount_arg(&self.workspace_host, "/__w"),
             "-v".into(),
-            mount(&self.temp_host, "/__t"),
+            self.mount_arg(&self.temp_host, "/__t"),
             "-v".into(),
-            mount(&self.temp_host, "/tmp"),
+            self.mount_arg(&self.temp_host, "/tmp"),
             "-v".into(),
-            mount(&sccache_host(&self.temp_host), "/var/cache/sccache"),
+            self.mount_arg(&sccache_host(&self.temp_host), "/var/cache/sccache"),
             "-v".into(),
-            mount(&self.home_host, "/github/home"),
+            self.mount_arg(&self.home_host, "/github/home"),
             "-v".into(),
-            mount(&workflow_host(&self.temp_host), "/github/workflow"),
+            self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
             "-v".into(),
-            mount(&self.actions_host, "/__a"),
+            self.mount_arg(&self.actions_host, "/__a"),
             "-v".into(),
-            mount(&self.tools_host, "/__tool"),
+            self.mount_arg(&self.tools_host, "/__tool"),
             "-e".into(),
             "HOME=/github/home".into(),
             "-e".into(),
@@ -129,27 +130,27 @@ impl JobContainerSpec {
             "--workdir".into(),
             working_directory.into(),
             "-v".into(),
-            mount(&self.workspace_host, "/__w"),
+            self.mount_arg(&self.workspace_host, "/__w"),
             "-v".into(),
-            mount(&self.workspace_host, "/github/workspace"),
+            self.mount_arg(&self.workspace_host, "/github/workspace"),
             "-v".into(),
-            mount(&self.temp_host, "/__t"),
+            self.mount_arg(&self.temp_host, "/__t"),
             "-v".into(),
-            mount(&self.temp_host, "/tmp"),
+            self.mount_arg(&self.temp_host, "/tmp"),
             "-v".into(),
-            mount(&sccache_host(&self.temp_host), "/var/cache/sccache"),
+            self.mount_arg(&sccache_host(&self.temp_host), "/var/cache/sccache"),
             "-v".into(),
-            mount(&self.temp_host, "/github/runner_temp"),
+            self.mount_arg(&self.temp_host, "/github/runner_temp"),
             "-v".into(),
-            mount(&self.temp_host, "/github/file_commands"),
+            self.mount_arg(&self.temp_host, "/github/file_commands"),
             "-v".into(),
-            mount(&self.home_host, "/github/home"),
+            self.mount_arg(&self.home_host, "/github/home"),
             "-v".into(),
-            mount(&workflow_host(&self.temp_host), "/github/workflow"),
+            self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
             "-v".into(),
-            mount(&self.actions_host, "/__a"),
+            self.mount_arg(&self.actions_host, "/__a"),
             "-v".into(),
-            mount(&self.tools_host, "/__tool"),
+            self.mount_arg(&self.tools_host, "/__tool"),
             "-e".into(),
             "HOME=/github/home".into(),
             "-e".into(),
@@ -191,8 +192,8 @@ impl JobContainerSpec {
             "--tag".into(),
             image.into(),
             "--file".into(),
-            dockerfile_host.display().to_string(),
-            context_host.display().to_string(),
+            self.docker_host_path(dockerfile_host).display().to_string(),
+            self.docker_host_path(context_host).display().to_string(),
         ]
     }
 
@@ -212,27 +213,27 @@ impl JobContainerSpec {
             "--workdir".into(),
             working_directory.into(),
             "-v".into(),
-            mount(&self.workspace_host, "/__w"),
+            self.mount_arg(&self.workspace_host, "/__w"),
             "-v".into(),
-            mount(&self.workspace_host, "/github/workspace"),
+            self.mount_arg(&self.workspace_host, "/github/workspace"),
             "-v".into(),
-            mount(&self.temp_host, "/__t"),
+            self.mount_arg(&self.temp_host, "/__t"),
             "-v".into(),
-            mount(&self.temp_host, "/tmp"),
+            self.mount_arg(&self.temp_host, "/tmp"),
             "-v".into(),
-            mount(&sccache_host(&self.temp_host), "/var/cache/sccache"),
+            self.mount_arg(&sccache_host(&self.temp_host), "/var/cache/sccache"),
             "-v".into(),
-            mount(&self.temp_host, "/github/runner_temp"),
+            self.mount_arg(&self.temp_host, "/github/runner_temp"),
             "-v".into(),
-            mount(&self.temp_host, "/github/file_commands"),
+            self.mount_arg(&self.temp_host, "/github/file_commands"),
             "-v".into(),
-            mount(&self.home_host, "/github/home"),
+            self.mount_arg(&self.home_host, "/github/home"),
             "-v".into(),
-            mount(&workflow_host(&self.temp_host), "/github/workflow"),
+            self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
             "-v".into(),
-            mount(&self.actions_host, "/__a"),
+            self.mount_arg(&self.actions_host, "/__a"),
             "-v".into(),
-            mount(&self.tools_host, "/__tool"),
+            self.mount_arg(&self.tools_host, "/__tool"),
             "-e".into(),
             "HOME=/github/home".into(),
             "-e".into(),
@@ -282,6 +283,28 @@ impl JobContainerSpec {
                 format!("{}:/usr/local/lib/docker/cli-plugins:ro", path.display()),
             ]);
         }
+    }
+
+    fn mount_arg(&self, host_path: &Path, container_path: &str) -> String {
+        mount(&self.docker_host_path(host_path), container_path)
+    }
+
+    fn docker_host_path(&self, host_path: &Path) -> PathBuf {
+        let Some(docker_work_dir) = &self.docker_host_work_dir else {
+            return host_path.to_path_buf();
+        };
+        let Some(local_work_dir) = self.local_work_dir() else {
+            return host_path.to_path_buf();
+        };
+        let Ok(relative) = host_path.strip_prefix(local_work_dir) else {
+            return host_path.to_path_buf();
+        };
+        docker_work_dir.join(relative)
+    }
+
+    fn local_work_dir(&self) -> Option<&Path> {
+        let job_dir = self.temp_host.parent()?;
+        job_dir.parent()
     }
 }
 
@@ -454,6 +477,7 @@ mod tests {
             node_action_image: "node:24-bookworm".into(),
             docker_cli_host_path: None,
             docker_cli_plugin_host_dir: None,
+            docker_host_work_dir: None,
             verify_bind_mounts: false,
         }
     }
@@ -477,6 +501,27 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["--cpus", "2"]));
         assert!(args.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
         assert_eq!(args.last().map(String::as_str), Some("/dev/null"));
+    }
+
+    #[test]
+    fn maps_job_paths_to_docker_host_work_dir() {
+        let mut spec = spec();
+        spec.workspace_host = "/runner/work/job-1/workspace".into();
+        spec.temp_host = "/runner/work/job-1/temp".into();
+        spec.home_host = "/runner/work/job-1/home".into();
+        spec.actions_host = "/runner/work/job-1/actions".into();
+        spec.tools_host = "/runner/work/job-1/tools".into();
+        spec.docker_host_work_dir = Some("/daemon/work".into());
+
+        let args = spec.start_args();
+
+        assert!(args.contains(&"/daemon/work/job-1/workspace:/__w".into()));
+        assert!(args.contains(&"/daemon/work/job-1/temp:/__t".into()));
+        assert!(args.contains(&"/daemon/work/_velnor_sccache:/var/cache/sccache".into()));
+        assert!(args.contains(&"/daemon/work/job-1/home:/github/home".into()));
+        assert!(args.contains(&"/daemon/work/job-1/temp/_github_workflow:/github/workflow".into()));
+        assert!(args.contains(&"/daemon/work/job-1/actions:/__a".into()));
+        assert!(args.contains(&"/daemon/work/job-1/tools:/__tool".into()));
     }
 
     #[test]

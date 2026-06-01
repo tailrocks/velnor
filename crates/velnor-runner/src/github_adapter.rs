@@ -18,6 +18,7 @@ pub struct GitHubJobContainerPaths {
     pub home_host: PathBuf,
     pub actions_host: PathBuf,
     pub tools_host: PathBuf,
+    pub docker_host_work_dir: Option<PathBuf>,
 }
 
 pub fn github_job_container_spec(
@@ -42,6 +43,7 @@ pub fn github_job_container_spec(
         node_action_image: node_action_image.to_string(),
         docker_cli_host_path: host_docker_cli_path(),
         docker_cli_plugin_host_dir: host_docker_cli_plugin_dir(),
+        docker_host_work_dir: paths.docker_host_work_dir,
         verify_bind_mounts: true,
     }
 }
@@ -529,6 +531,7 @@ mod tests {
             node_action_image: "node:24-bookworm".into(),
             docker_cli_host_path: None,
             docker_cli_plugin_host_dir: None,
+            docker_host_work_dir: None,
             verify_bind_mounts: true,
         };
         let plan = github_normalized_job_plan(

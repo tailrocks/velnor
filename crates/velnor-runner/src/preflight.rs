@@ -17,6 +17,7 @@ pub fn preflight(args: PreflightArgs) -> Result<()> {
 
 fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) -> Result<()> {
     let work_dir = preflight_work_dir(args.work_dir)?;
+    let docker_host_work_dir = args.docker_host_work_dir;
     let temp_dir = work_dir.join("preflight").join("temp");
     let workspace_dir = work_dir.join("preflight").join("workspace");
     for path in [&temp_dir, &workspace_dir] {
@@ -41,11 +42,27 @@ fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) ->
     }
 
     verify_job_image_tools(runner, &args.docker_image)?;
-    verify_script_execution(runner, &temp_dir, &workspace_dir, &args.docker_image)?;
-    verify_bind_mount(runner, &temp_dir, &args.docker_image)?;
+    verify_script_execution(
+        runner,
+        &temp_dir,
+        &workspace_dir,
+        &work_dir,
+        docker_host_work_dir.as_deref(),
+        &args.docker_image,
+    )?;
+    verify_bind_mount(
+        runner,
+        &temp_dir,
+        &work_dir,
+        docker_host_work_dir.as_deref(),
+        &args.docker_image,
+    )?;
 
     println!("Docker preflight passed.");
     println!("Work dir: {}", work_dir.display());
+    if let Some(path) = &docker_host_work_dir {
+        println!("Docker host work dir: {}", path.display());
+    }
     println!("Image: {}", args.docker_image);
     Ok(())
 }
@@ -71,6 +88,8 @@ fn verify_script_execution(
     runner: &mut dyn CommandRunner,
     temp_dir: &Path,
     workspace_dir: &Path,
+    work_dir: &Path,
+    docker_host_work_dir: Option<&Path>,
     docker_image: &str,
 ) -> Result<()> {
     let script = temp_dir.join("velnor-preflight.sh");
@@ -90,9 +109,15 @@ fn verify_script_execution(
         "--workdir".to_string(),
         "/__w".to_string(),
         "-v".to_string(),
-        format!("{}:/__t", temp_dir.display()),
+        format!(
+            "{}:/__t",
+            docker_mount_path(temp_dir, work_dir, docker_host_work_dir)?.display()
+        ),
         "-v".to_string(),
-        format!("{}:/__w", workspace_dir.display()),
+        format!(
+            "{}:/__w",
+            docker_mount_path(workspace_dir, work_dir, docker_host_work_dir)?.display()
+        ),
         docker_image.to_string(),
         "bash".to_string(),
         "/__t/velnor-preflight.sh".to_string(),
@@ -211,6 +236,8 @@ fn verify_job_image_tools(runner: &mut dyn CommandRunner, docker_image: &str) ->
 fn verify_bind_mount(
     runner: &mut dyn CommandRunner,
     temp_dir: &Path,
+    work_dir: &Path,
+    docker_host_work_dir: Option<&Path>,
     docker_image: &str,
 ) -> Result<()> {
     let marker = temp_dir.join(DOCKER_MOUNT_CHECK_FILE);
@@ -221,7 +248,10 @@ fn verify_bind_mount(
         "run".to_string(),
         "--rm".to_string(),
         "-v".to_string(),
-        format!("{}:/__t", temp_dir.display()),
+        format!(
+            "{}:/__t",
+            docker_mount_path(temp_dir, work_dir, docker_host_work_dir)?.display()
+        ),
         docker_image.to_string(),
         "sh".to_string(),
         "-c".to_string(),
@@ -239,6 +269,24 @@ fn verify_bind_mount(
         );
     }
     Ok(())
+}
+
+fn docker_mount_path(
+    path: &Path,
+    work_dir: &Path,
+    docker_host_work_dir: Option<&Path>,
+) -> Result<PathBuf> {
+    let Some(host_work_dir) = docker_host_work_dir else {
+        return Ok(path.to_path_buf());
+    };
+    let relative = path.strip_prefix(work_dir).with_context(|| {
+        format!(
+            "path '{}' is not under work dir '{}'",
+            path.display(),
+            work_dir.display()
+        )
+    })?;
+    Ok(host_work_dir.join(relative))
 }
 
 fn bind_mount_error_detail(path: &str, stderr: &str) -> String {
@@ -356,6 +404,7 @@ mod tests {
         let temp = temp_dir();
         let args = PreflightArgs {
             work_dir: Some(temp.clone()),
+            docker_host_work_dir: None,
             docker_image: "ubuntu:24.04".to_string(),
             require_docker_socket: false,
             require_buildx: true,
@@ -413,10 +462,26 @@ mod tests {
     }
 
     #[test]
+    fn docker_mount_path_maps_work_dir_to_docker_host_path() {
+        let temp = temp_dir();
+        let docker_root = PathBuf::from("/daemon/velnor-work");
+
+        let mapped = docker_mount_path(
+            &temp.join("preflight").join("temp"),
+            &temp,
+            Some(&docker_root),
+        )
+        .unwrap();
+
+        assert_eq!(mapped, docker_root.join("preflight").join("temp"));
+    }
+
+    #[test]
     fn preflight_reports_bind_mount_failure() {
         let temp = temp_dir();
         let args = PreflightArgs {
             work_dir: Some(temp.clone()),
+            docker_host_work_dir: None,
             docker_image: "ubuntu:24.04".to_string(),
             require_docker_socket: false,
             require_buildx: false,
@@ -442,6 +507,7 @@ mod tests {
         let temp = temp_dir();
         let args = PreflightArgs {
             work_dir: Some(temp.clone()),
+            docker_host_work_dir: None,
             docker_image: "ubuntu:24.04".to_string(),
             require_docker_socket: false,
             require_buildx: false,
@@ -469,6 +535,7 @@ mod tests {
         let temp = temp_dir();
         let args = PreflightArgs {
             work_dir: Some(temp.clone()),
+            docker_host_work_dir: None,
             docker_image: "minimal:latest".to_string(),
             require_docker_socket: false,
             require_buildx: false,

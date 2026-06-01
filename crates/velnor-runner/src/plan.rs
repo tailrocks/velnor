@@ -110,6 +110,7 @@ mod tests {
             node_action_image: "node:24-bookworm".into(),
             docker_cli_host_path: None,
             docker_cli_plugin_host_dir: None,
+            docker_host_work_dir: None,
             verify_bind_mounts: true,
         }
     }

@@ -9,6 +9,12 @@ This is the remaining Phase 0 proof path. Unit-level target verification is cove
   usually fail unless `--work-dir` points to a path mounted into that daemon,
   because Velnor mounts job scripts, workspace, temp files, artifacts, and cache
   state into job containers.
+- If the runner process and Docker daemon see the same mounted work directory at
+  different paths, pass `--docker-host-work-dir <daemon-visible-path>` or set
+  `VELNOR_DOCKER_HOST_WORK_DIR` when using `scripts/fixture_smoke.sh`.
+- For the fixture smoke workflow only, `VELNOR_REQUIRE_DOCKER_SOCKET=false`
+  skips the local socket preflight when using a remote daemon. Docker-heavy
+  target workflows still need Docker access inside the job container.
 - Git, Docker CLI, and Buildx plugin installed on the host.
 - GitHub PAT in `GITHUB_TOKEN` with permission to register a repository self-hosted runner for the target repo.
 - A persistent Velnor `--work-dir` shared by all jobs in the same validation run; native cache restore/save and artifact upload/download use this shared work directory for single-host handoff until GitHub cache/artifact service transport is implemented.

@@ -105,6 +105,11 @@ The script runs two Velnor `--once` jobs by default because the fixture compat
 workflow has two Velnor matrix jobs. Override with `VELNOR_FIXTURE_JOB_COUNT`
 for a different fixture shape.
 
+If the Docker daemon sees the work directory at a different path than the
+runner process, set `VELNOR_DOCKER_HOST_WORK_DIR` to that daemon-visible path.
+For a remote Docker daemon without a local `/var/run/docker.sock`, set
+`VELNOR_REQUIRE_DOCKER_SOCKET=false` for the fixture smoke run.
+
 Target workflow audit and language brainstorming history: [docs/research/config-language-comparison.md](docs/research/config-language-comparison.md).
 
 GitHub runner protocol contract: [docs/research/github-runner-protocol-contract.md](docs/research/github-runner-protocol-contract.md).

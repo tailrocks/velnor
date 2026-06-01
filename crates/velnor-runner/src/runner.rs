@@ -395,7 +395,12 @@ fn preflight_before_executable_run(args: &RunArgs, config_dir: &Path) -> Result<
     }
 
     crate::preflight::preflight(PreflightArgs {
-        work_dir: Some(args.work_dir.clone().unwrap_or_else(|| config_dir.join("_work"))),
+        work_dir: Some(
+            args.work_dir
+                .clone()
+                .unwrap_or_else(|| config_dir.join("_work")),
+        ),
+        docker_host_work_dir: args.docker_host_work_dir.clone(),
         docker_image: args.docker_image.clone(),
         require_docker_socket: false,
         require_buildx: true,
@@ -873,6 +878,7 @@ async fn handle_job_request(
         let step_logs_publisher = start_step_log_publisher(job.clone(), step_log_receiver);
         let config_dir = config_dir.to_path_buf();
         let work_dir = args.work_dir.clone();
+        let docker_host_work_dir = args.docker_host_work_dir.clone();
         let docker_image = args.docker_image.clone();
         let node_action_image = args.node_action_image.clone();
         let run_service_url = run_service_job.run_service_url.clone();
@@ -883,6 +889,7 @@ async fn handle_job_request(
             execute_script_job(
                 &config_dir,
                 work_dir,
+                docker_host_work_dir,
                 &docker_image,
                 &node_action_image,
                 &run_service_url,
@@ -1325,6 +1332,7 @@ fn kill_job_container(container_name: &str) {
 fn execute_script_job(
     config_dir: &std::path::Path,
     work_dir: Option<PathBuf>,
+    docker_host_work_dir: Option<PathBuf>,
     docker_image: &str,
     node_action_image: &str,
     run_service_url: &str,
@@ -1398,6 +1406,7 @@ fn execute_script_job(
             home_host: home,
             actions_host: actions,
             tools_host: tools,
+            docker_host_work_dir,
         },
         docker_image,
         node_action_image,
@@ -2564,6 +2573,7 @@ mod tests {
             docker_image: "ubuntu:24.04".into(),
             node_action_image: String::new(),
             work_dir: None,
+            docker_host_work_dir: None,
             skip_preflight: false,
         }
     }

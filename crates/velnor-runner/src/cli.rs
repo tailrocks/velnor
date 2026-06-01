@@ -30,6 +30,10 @@ pub struct PreflightArgs {
     #[arg(long)]
     pub work_dir: Option<PathBuf>,
 
+    /// Path where the Docker daemon host sees --work-dir. Use when DOCKER_HOST points at a remote daemon with the work dir mounted at a different path.
+    #[arg(long)]
+    pub docker_host_work_dir: Option<PathBuf>,
+
     /// Docker image used for the bind-mount visibility check.
     #[arg(long, default_value = "ghcr.io/catthehacker/ubuntu:act-latest")]
     pub docker_image: String,
@@ -135,6 +139,10 @@ pub struct RunArgs {
     /// Host work directory for Docker job state. Defaults under the runner config directory.
     #[arg(long)]
     pub work_dir: Option<PathBuf>,
+
+    /// Path where the Docker daemon host sees --work-dir. Use when DOCKER_HOST points at a remote daemon with the work dir mounted at a different path.
+    #[arg(long)]
+    pub docker_host_work_dir: Option<PathBuf>,
 
     /// Skip Docker preflight before polling GitHub for executable jobs.
     #[arg(long)]
