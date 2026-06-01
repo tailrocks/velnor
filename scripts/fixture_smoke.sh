@@ -42,6 +42,10 @@ cleanup_runner() {
 
 trap cleanup_runner EXIT
 
+velnor_require_repo_slug VELNOR_FIXTURE_REPO "$FIXTURE_REPO"
+velnor_require_nonempty VELNOR_RUNNER_NAME "$RUNNER_NAME"
+velnor_require_nonempty VELNOR_RUNNER_LABEL "$RUNNER_LABEL"
+velnor_require_optional_workflow_file VELNOR_FIXTURE_WORKFLOW "$WORKFLOW"
 velnor_require_positive_int VELNOR_FIXTURE_JOB_COUNT "$JOB_COUNT"
 velnor_require_positive_int VELNOR_IDLE_TIMEOUT_SECONDS "$IDLE_TIMEOUT_SECONDS"
 velnor_require_optional_positive_int VELNOR_FIXTURE_RUN_ID "$RUN_ID"

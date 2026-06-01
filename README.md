@@ -122,6 +122,7 @@ that path with `VELNOR_LIVE_EVIDENCE_DIR`; override log excerpt length with
 positive integers and are validated before runner registration.
 Set `VELNOR_TARGET_WORKFLOW=<workflow.yml>` on target smoke scripts to dispatch
 that workflow before Velnor waits for target jobs.
+Workflow values must be file names ending in `.yml` or `.yaml`.
 Set `VELNOR_TARGET_REF=<branch-or-sha>` to dispatch from a specific ref.
 Set `VELNOR_TARGET_INPUTS=key=value,other=value` for workflow dispatch inputs.
 Input keys must match `[A-Za-z_][A-Za-z0-9_-]*`; empty entries and entries
@@ -184,6 +185,7 @@ specific existing run; otherwise the script dispatches a fresh run. Set
 `VELNOR_FIXTURE_INPUTS=key=value,other=value` when dispatching fixture
 workflows from a non-default ref or with workflow inputs. Input validation uses
 the same `key=value` rules as target smoke scripts.
+Fixture workflow values must be file names ending in `.yml` or `.yaml`.
 
 If the Docker daemon sees the work directory at a different path than the
 runner process, set `VELNOR_DOCKER_HOST_WORK_DIR` to that daemon-visible path.

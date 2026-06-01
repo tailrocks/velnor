@@ -106,7 +106,8 @@ an existing run; set `VELNOR_FIXTURE_DISPATCH=false` only when using an existing
 run id. Set `VELNOR_FIXTURE_REF=<branch-or-sha>` and
 `VELNOR_FIXTURE_INPUTS=key=value,other=value` when dispatching fixture workflows
 from a non-default ref or with workflow inputs. Input validation uses the same
-`key=value` rules as target smoke scripts. The script removes the temporary
+`key=value` rules as target smoke scripts. Fixture workflow values must be file
+names ending in `.yml` or `.yaml`. The script removes the temporary
 fixture runner on exit by default; set
 `VELNOR_FIXTURE_CLEANUP_RUNNER=false` to keep it registered for debugging. The
 manual equivalent is:
@@ -199,7 +200,8 @@ the registered runner on exit. Sanitized job payloads are written to
 `VELNOR_DUMP_JOB_MESSAGES=` to disable dumps or point it at another directory. Set
 `VELNOR_TARGET_WORKFLOW=ansible.yml` to have the script dispatch the first
 recommended ChainArgos workflow before waiting for one Velnor job, or leave it
-unset to consume already queued work. Set `VELNOR_TARGET_REF=<branch-or-sha>` when the
+unset to consume already queued work. Workflow values must be file names ending
+in `.yml` or `.yaml`. Set `VELNOR_TARGET_REF=<branch-or-sha>` when the
 workflow should be dispatched from a non-default ref. Set
 `VELNOR_TARGET_INPUTS=packages=bitcoin-processor-app,push=false` for
 `workflow_dispatch` inputs; each comma-separated `key=value` is passed to
