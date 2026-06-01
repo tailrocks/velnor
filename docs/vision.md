@@ -23,6 +23,8 @@ Velnor should keep that model where it works. Phase 0 keeps GitHub YAML exactly 
 ## Future Language Brainstorming
 
 Typed workflow authoring was researched as a future idea, but it is not current implementation work. Phase 0 does not replace YAML, parse workflows, or introduce Pkl.
+The current future-language contract is captured in
+[research/pql-design-contract.md](research/pql-design-contract.md).
 
 YAML is weak as an authoring language:
 

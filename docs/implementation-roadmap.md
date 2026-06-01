@@ -9,6 +9,7 @@ The runner job-message contract is `docs/research/github-runner-job-message-cont
 The normalized plan boundary for GitHub job messages is `docs/research/normalized-plan-contract-2026-06-01.md`.
 The implementation-oriented runner blueprint is `docs/research/self-hosted-runner-implementation-blueprint-2026-06-01.md`.
 The current implementation/proof status is `docs/research/phase-0-current-status-2026-06-01.md`.
+The deferred typed authoring contract is `docs/research/pql-design-contract.md`.
 The target-only MVP contract is `docs/research/target-mvp-compat-audit-2026-06-01.md`; Phase 0 work should be judged against those two repositories' current `.github` trees, not broad GitHub Actions parity.
 The native action adapter boundary is `docs/native-action-adapter-contract.md`;
 Velnor keeps GitHub-compatible YAML, but supported marketplace actions should
