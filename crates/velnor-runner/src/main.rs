@@ -8,6 +8,7 @@ mod executor;
 mod github_adapter;
 mod job_message;
 mod plan;
+mod platform;
 mod preflight;
 mod protocol;
 mod runner;

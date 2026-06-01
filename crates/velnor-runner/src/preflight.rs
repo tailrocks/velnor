@@ -1,6 +1,7 @@
 use crate::{
     cli::PreflightArgs,
     executor::{CommandRunner, ProcessCommandRunner},
+    platform,
 };
 use anyhow::{bail, Context, Result};
 use std::{
@@ -11,6 +12,7 @@ use std::{
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
 
 pub fn preflight(args: PreflightArgs) -> Result<()> {
+    platform::validate_linux_host(std::env::consts::OS)?;
     let mut runner = ProcessCommandRunner;
     preflight_with_runner(args, &mut runner)
 }
