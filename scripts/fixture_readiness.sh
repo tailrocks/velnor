@@ -17,6 +17,13 @@ velnor_require_bool VELNOR_FIXTURE_READINESS_RUN_LOCAL_TESTS "$RUN_LOCAL_TESTS"
 
 cd "$ROOT"
 
+on_readiness_error() {
+  local status=$?
+  echo "fixture readiness failed; run scripts/fixture_report.sh for a non-mutating markdown handoff report" >&2
+  exit "$status"
+}
+trap on_readiness_error ERR
+
 echo "==> Checking fixture proof readiness"
 echo "This script does not register runners or dispatch workflows."
 
