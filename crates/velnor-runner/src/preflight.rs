@@ -443,6 +443,15 @@ mod tests {
         );
         let image_tools_call = &runner.calls[3];
         assert_eq!(image_tools_call.0, "docker");
+        assert_eq!(image_tools_call.1[0], "run");
+        assert_eq!(
+            image_tools_call
+                .1
+                .iter()
+                .filter(|value| value.as_str() == "--rm")
+                .count(),
+            1
+        );
         assert!(image_tools_call.1.contains(
             &"command -v sh >/dev/null && command -v bash >/dev/null && command -v git >/dev/null"
                 .to_string()
