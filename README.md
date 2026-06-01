@@ -73,6 +73,8 @@ Phase 0 runner compatibility: [docs/phase-0-github-runner-compat.md](docs/phase-
 
 Implementation roadmap: [docs/implementation-roadmap.md](docs/implementation-roadmap.md).
 
+Public fixture repository plan: [docs/public-fixture-repo-plan.md](docs/public-fixture-repo-plan.md).
+
 Target workflow audit and language brainstorming history: [docs/research/config-language-comparison.md](docs/research/config-language-comparison.md).
 
 GitHub runner protocol contract: [docs/research/github-runner-protocol-contract.md](docs/research/github-runner-protocol-contract.md).

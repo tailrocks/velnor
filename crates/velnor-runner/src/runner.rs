@@ -1000,11 +1000,32 @@ fn job_dump_path(
     if destination.extension().is_some() {
         return destination.to_path_buf();
     }
-    destination.join(format!(
-        "job-{}-{}.json",
+    destination.join(job_dump_filename(job))
+}
+
+fn job_dump_filename(job: &AgentJobRequestMessage) -> String {
+    let repository = job
+        .variables
+        .get("github.repository")
+        .and_then(|variable| variable.value.as_deref())
+        .unwrap_or("unknown-repo");
+    let run_id = job
+        .variables
+        .get("github.run_id")
+        .and_then(|variable| variable.value.as_deref())
+        .unwrap_or("unknown-run");
+    format!(
+        "job-{}-{}-{}-{}-{}.json",
+        sanitize_path_segment(repository),
+        sanitize_path_segment(run_id),
         job.request_id,
+        sanitize_path_segment(
+            &job.job_name
+                .clone()
+                .unwrap_or_else(|| job.job_display_name.clone())
+        ),
         sanitize_path_segment(&job.job_id)
-    ))
+    )
 }
 
 fn sanitize_job_message_value(value: &mut Value) {
@@ -2733,6 +2754,29 @@ mod tests {
         assert_eq!(
             value["steps"][0]["inputs"]["repository"],
             serde_json::json!("owner/repo")
+        );
+    }
+
+    #[test]
+    fn job_dump_filename_includes_live_run_context() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job/id 123",
+            "jobName": "syntax-check",
+            "jobDisplayName": "Syntax Check",
+            "requestId": 42,
+            "variables": {
+                "github.repository": { "value": "ChainArgos/java-monorepo" },
+                "github.run_id": { "value": "1234567890" }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            job_dump_filename(&job),
+            "job-ChainArgos_java-monorepo-1234567890-42-syntax-check-job_id_123.json"
         );
     }
 
