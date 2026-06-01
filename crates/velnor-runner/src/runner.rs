@@ -23,7 +23,8 @@ use crate::{
         LocalActionPlan, RepositoryActionPlan, ResolvedAction,
     },
     checkout::{
-        checkout_plans, checkout_step_id, configure_safe_directory, execute_checkouts, CheckoutPlan,
+        checkout_plans, checkout_step_id, cleanup_checkout_credentials, configure_safe_directory,
+        execute_checkouts, CheckoutPlan,
     },
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
@@ -1115,15 +1116,31 @@ fn execute_script_job(
         docker_cli_host_path: host_docker_cli_path(),
         docker_cli_plugin_host_dir: host_docker_cli_plugin_dir(),
     };
+    let cleanup_checkout_plans = eager_checkout_plans
+        .iter()
+        .chain(runtime_checkout_plans.iter())
+        .cloned()
+        .collect::<Vec<_>>();
     let mut executor = DockerScriptExecutor::new(command_runner);
-    let summary = executor.execute_ordered_steps_with_job_outputs(
+    let summary_result = executor.execute_ordered_steps_with_job_outputs(
         &container,
         &ordered_steps,
         &base_env,
         &context_data,
         job.job_outputs.as_ref(),
         &temp,
-    )?;
+    );
+    let mut command_runner = executor.into_runner();
+    let cleanup_result = cleanup_checkout_credentials(&mut command_runner, &cleanup_checkout_plans);
+    let summary = match (summary_result, cleanup_result) {
+        (Ok(summary), Ok(())) => summary,
+        (Ok(_), Err(error)) => return Err(error.context("cleanup checkout credentials")),
+        (Err(error), Ok(())) => return Err(error),
+        (Err(error), Err(cleanup_error)) => {
+            eprintln!("Checkout credential cleanup failed after job error: {cleanup_error:#}");
+            return Err(error);
+        }
+    };
     if !summary.job_outputs.is_empty() {
         println!("Evaluated {} job output(s).", summary.job_outputs.len());
     }

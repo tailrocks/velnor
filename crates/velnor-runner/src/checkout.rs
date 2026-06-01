@@ -124,6 +124,43 @@ where
     )
 }
 
+pub fn cleanup_checkout_credentials<R>(runner: &mut R, plans: &[CheckoutPlan]) -> Result<()>
+where
+    R: CommandRunner,
+{
+    for plan in plans {
+        cleanup_checkout_credential(runner, plan)?;
+    }
+    Ok(())
+}
+
+fn cleanup_checkout_credential<R>(runner: &mut R, plan: &CheckoutPlan) -> Result<()>
+where
+    R: CommandRunner,
+{
+    if !plan.persist_credentials || plan.token.is_none() || !plan.destination.join(".git").exists()
+    {
+        return Ok(());
+    }
+    let args = [
+        "-C".to_string(),
+        path_arg(&plan.destination),
+        "config".to_string(),
+        "--local".to_string(),
+        "--unset-all".to_string(),
+        git_extraheader_key(&plan.clone_url),
+    ];
+    let result = runner.run("git", &args)?;
+    if result.code != 0 {
+        eprintln!(
+            "Failed to cleanup checkout credentials in {}: {}",
+            plan.destination.display(),
+            result.stderr.trim()
+        );
+    }
+    Ok(())
+}
+
 pub fn configure_safe_directory(
     home_host: &Path,
     workspace_host: &Path,
@@ -653,6 +690,62 @@ mod tests {
         ])));
 
         std::fs::remove_dir_all(temp).ok();
+    }
+
+    #[test]
+    fn cleanup_unsets_persisted_checkout_credentials() {
+        let temp = std::env::temp_dir().join(format!(
+            "velnor-checkout-cleanup-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(temp.join(".git")).unwrap();
+        let plan = CheckoutPlan {
+            step_id: "checkout".into(),
+            clone_url: "https://github.com/acme/repo.git".into(),
+            version: Some("abc123".into()),
+            destination: temp.clone(),
+            token: Some("token".into()),
+            fetch_depth: Some(1),
+            fetch_tags: false,
+            persist_credentials: true,
+            clean: true,
+            condition: None,
+            continue_on_error: false,
+        };
+        let mut runner = RecordingRunner::default();
+
+        cleanup_checkout_credentials(&mut runner, &[plan]).unwrap();
+
+        assert!(runner.calls.iter().any(|(_, args)| args.ends_with(&[
+            "config".into(),
+            "--local".into(),
+            "--unset-all".into(),
+            "http.https://github.com/.extraheader".into()
+        ])));
+
+        std::fs::remove_dir_all(temp).ok();
+    }
+
+    #[test]
+    fn cleanup_skips_disabled_persistence() {
+        let plan = CheckoutPlan {
+            step_id: "checkout".into(),
+            clone_url: "https://github.com/acme/repo.git".into(),
+            version: Some("abc123".into()),
+            destination: PathBuf::from("/tmp/nonexistent-velnor-cleanup-test"),
+            token: Some("token".into()),
+            fetch_depth: Some(1),
+            fetch_tags: false,
+            persist_credentials: false,
+            clean: true,
+            condition: None,
+            continue_on_error: false,
+        };
+        let mut runner = RecordingRunner::default();
+
+        cleanup_checkout_credentials(&mut runner, &[plan]).unwrap();
+
+        assert!(runner.calls.is_empty());
     }
 
     #[test]

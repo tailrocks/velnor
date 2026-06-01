@@ -184,6 +184,10 @@ where
         Self { runner }
     }
 
+    pub fn into_runner(self) -> R {
+        self.runner
+    }
+
     pub fn runner(&self) -> &R {
         &self.runner
     }
