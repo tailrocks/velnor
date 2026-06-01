@@ -2360,6 +2360,12 @@ fn artifact_glob_base_and_pattern(
             .as_ref()
             .map(|base| (base.clone(), rest.to_string()));
     }
+    if let Some(rest) = path.strip_prefix("/tmp/") {
+        return state
+            .temp_host
+            .as_ref()
+            .map(|base| (base.clone(), rest.to_string()));
+    }
     if Path::new(path).is_absolute() {
         return absolute_glob_base_and_pattern(path);
     }
@@ -2450,6 +2456,12 @@ fn resolve_host_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> {
         return state.temp_host.clone();
     }
     if let Some(rest) = path.strip_prefix("/github/runner_temp/") {
+        return state.temp_host.as_ref().map(|base| base.join(rest));
+    }
+    if path == "/tmp" {
+        return state.temp_host.clone();
+    }
+    if let Some(rest) = path.strip_prefix("/tmp/") {
         return state.temp_host.as_ref().map(|base| base.join(rest));
     }
     let candidate = PathBuf::from(path);
@@ -7653,6 +7665,49 @@ fi"#
         assert!(!temp
             .join("_velnor_artifacts/local-1/jackin-x86_64-unknown-linux-gnu/ignore.txt")
             .exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_upload_artifact_maps_container_tmp_to_host_temp() {
+        let temp = temp_dir();
+        fs::create_dir_all(temp.join("jackin-construct-digests")).unwrap();
+        fs::write(
+            temp.join("jackin-construct-digests/amd64.digest"),
+            "sha256:abc\n",
+        )
+        .unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "upload".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::UploadArtifact,
+                inputs: [
+                    ("name".into(), "construct-digest-amd64".into()),
+                    (
+                        "path".into(),
+                        "/tmp/jackin-construct-digests/amd64.digest".into(),
+                    ),
+                    ("if-no-files-found".into(), "error".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results[0].exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(
+                temp.join("_velnor_artifacts/local-1/construct-digest-amd64/amd64.digest")
+            )
+            .unwrap(),
+            "sha256:abc\n"
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 

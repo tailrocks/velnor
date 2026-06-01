@@ -42,6 +42,8 @@ impl JobContainerSpec {
             "-v".into(),
             mount(&self.temp_host, "/__t"),
             "-v".into(),
+            mount(&self.temp_host, "/tmp"),
+            "-v".into(),
             mount(&self.home_host, "/github/home"),
             "-v".into(),
             mount(&workflow_host(&self.temp_host), "/github/workflow"),
@@ -131,6 +133,8 @@ impl JobContainerSpec {
             "-v".into(),
             mount(&self.temp_host, "/__t"),
             "-v".into(),
+            mount(&self.temp_host, "/tmp"),
+            "-v".into(),
             mount(&self.temp_host, "/github/runner_temp"),
             "-v".into(),
             mount(&self.temp_host, "/github/file_commands"),
@@ -209,6 +213,8 @@ impl JobContainerSpec {
             mount(&self.workspace_host, "/github/workspace"),
             "-v".into(),
             mount(&self.temp_host, "/__t"),
+            "-v".into(),
+            mount(&self.temp_host, "/tmp"),
             "-v".into(),
             mount(&self.temp_host, "/github/runner_temp"),
             "-v".into(),
@@ -438,6 +444,7 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--name", "velnor-job-1"]));
         assert!(args.contains(&"/tmp/work:/__w".into()));
+        assert!(args.contains(&"/tmp/temp:/tmp".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
         assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"HOME=/github/home".into()));
@@ -515,6 +522,7 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["--workdir", "/__w"]));
         assert!(args.contains(&"/tmp/work:/__w".into()));
         assert!(args.contains(&"/tmp/work:/github/workspace".into()));
+        assert!(args.contains(&"/tmp/temp:/tmp".into()));
         assert!(args.contains(&"/tmp/temp:/github/runner_temp".into()));
         assert!(args.contains(&"/tmp/temp:/github/file_commands".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
@@ -613,6 +621,7 @@ mod tests {
             .any(|pair| pair == ["--network", "velnor-net-1"]));
         assert!(args.contains(&"/tmp/work:/__w".into()));
         assert!(args.contains(&"/tmp/work:/github/workspace".into()));
+        assert!(args.contains(&"/tmp/temp:/tmp".into()));
         assert!(args.contains(&"/tmp/temp:/github/runner_temp".into()));
         assert!(args.contains(&"/tmp/temp:/github/file_commands".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
