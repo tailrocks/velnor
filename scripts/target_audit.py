@@ -194,6 +194,102 @@ EXPECTED_JOB_STRATEGY = Counter(
     }
 )
 
+EXPECTED_JOB_ENV = Counter(
+    {
+        (
+            ".github/workflows/ci.yml",
+            "check",
+            "{CARGO_INCREMENTAL: 0, CARGO_TERM_COLOR: always}",
+        ): 1,
+        (
+            ".github/workflows/ci.yml",
+            "msrv",
+            "{CARGO_INCREMENTAL: 0, CARGO_TERM_COLOR: always}",
+        ): 1,
+        (
+            ".github/workflows/ci.yml",
+            "build-validator",
+            "{CARGO_INCREMENTAL: 0, CARGO_TERM_COLOR: always}",
+        ): 1,
+        (".github/workflows/construct.yml", "build", "{BUILDX_BUILDER: jackin-construct}"): 1,
+        (
+            ".github/workflows/preview.yml",
+            "build-preview",
+            "{CARGO_INCREMENTAL: 0, CARGO_TERM_COLOR: always}",
+        ): 1,
+        (
+            ".github/workflows/preview.yml",
+            "build-jackin-capsule",
+            "{CARGO_INCREMENTAL: 0, CARGO_TERM_COLOR: always}",
+        ): 1,
+        (
+            ".github/workflows/release.yml",
+            "test",
+            "{CARGO_INCREMENTAL: 0, CARGO_TERM_COLOR: always}",
+        ): 1,
+        (
+            ".github/workflows/release.yml",
+            "build",
+            "{CARGO_INCREMENTAL: 0, CARGO_TERM_COLOR: always, VERSION: ${{ needs.check-version.outputs.version }}}",
+        ): 1,
+        (
+            ".github/workflows/release.yml",
+            "build-jackin-capsule",
+            "{CARGO_INCREMENTAL: 0, CARGO_TERM_COLOR: always}",
+        ): 1,
+        (
+            ".github/workflows/release.yml",
+            "release",
+            "{VERSION: ${{ needs.check-version.outputs.version }}}",
+        ): 1,
+    }
+)
+
+EXPECTED_JOB_OUTPUTS = Counter(
+    {
+        (
+            ".github/workflows/ci.yml",
+            "changes",
+            "{construct: ${{ steps.dispatch.outputs.construct || steps.filter.outputs.construct }}, rust: ${{ steps.dispatch.outputs.rust || steps.filter.outputs.rust }}}",
+        ): 1,
+        (
+            ".github/workflows/construct.yml",
+            "changes",
+            "{construct: ${{ steps.dispatch.outputs.construct || steps.filter.outputs.construct }}, is_publish: ${{ steps.flags.outputs.is_publish }}}",
+        ): 1,
+        (
+            ".github/workflows/docs.yml",
+            "changes",
+            "{docs: ${{ steps.dispatch.outputs.docs || steps.filter.outputs.docs }}}",
+        ): 1,
+        (
+            ".github/workflows/preview.yml",
+            "source-changed",
+            "{sha: ${{ steps.source.outputs.sha }}, source: ${{ steps.filter.outputs.source }}}",
+        ): 1,
+        (
+            ".github/workflows/release.yml",
+            "check-version",
+            "{version: ${{ steps.version.outputs.version }}}",
+        ): 1,
+        (
+            ".github/workflows/release.yml",
+            "release",
+            "{arm64_linux: ${{ steps.shas.outputs.arm64_linux }}, arm64_macos: ${{ steps.shas.outputs.arm64_macos }}, capsule_arm64_linux: ${{ steps.shas.outputs.capsule_arm64_linux }}, capsule_x86_linux: ${{ steps.shas.outputs.capsule_x86_linux }}, x86_linux: ${{ steps.shas.outputs.x86_linux }}, x86_macos: ${{ steps.shas.outputs.x86_macos }}}",
+        ): 1,
+        (
+            ".github/workflows/rust-docker.yml",
+            "changes",
+            "{bake-targets: ${{ steps.targets.outputs.list }}, bitcoin-processor: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.bitcoin-processor }}, blockchain-explorer: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.blockchain-explorer }}, coingecko-pricing: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.coingecko-pricing }}, eth-grpc-server: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.eth-grpc-server }}, eth-processor: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.eth-processor }}, legacy-grpc-server: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.legacy-grpc-server }}, tron-grpc-server: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.tron-grpc-server }}, tron-processor: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.tron-processor }}}",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "changes",
+            "{bitcoin-processor: ${{ steps.filter.outputs.bitcoin-processor }}, blockchain-explorer: ${{ steps.filter.outputs.blockchain-explorer }}, coingecko-pricing: ${{ steps.filter.outputs.coingecko-pricing }}, eth-grpc-server: ${{ steps.filter.outputs.eth-grpc-server }}, eth-processor: ${{ steps.filter.outputs.eth-processor }}, legacy-grpc-server: ${{ steps.filter.outputs.legacy-grpc-server }}, tron-grpc-server: ${{ steps.filter.outputs.tron-grpc-server }}, tron-processor: ${{ steps.filter.outputs.tron-processor }}}",
+        ): 1,
+    }
+)
+
 EXPECTED_WORKFLOW_PERMISSIONS = Counter(
     {
         (".github/workflows/ansible.yml", ("contents",)): 1,
@@ -783,6 +879,20 @@ def check_target_mvp(summary: dict[str, Any]) -> list[str]:
         errors.append(
             "target MVP job strategy drift: "
             f"expected {dict(EXPECTED_JOB_STRATEGY)}, got {dict(job_strategy)}"
+        )
+
+    job_env = Counter(summary["job_env"])
+    if job_env != EXPECTED_JOB_ENV:
+        errors.append(
+            "target MVP job env drift: "
+            f"expected {dict(EXPECTED_JOB_ENV)}, got {dict(job_env)}"
+        )
+
+    job_outputs = Counter(summary["job_outputs"])
+    if job_outputs != EXPECTED_JOB_OUTPUTS:
+        errors.append(
+            "target MVP job outputs drift: "
+            f"expected {dict(EXPECTED_JOB_OUTPUTS)}, got {dict(job_outputs)}"
         )
 
     workflow_permissions = Counter(
