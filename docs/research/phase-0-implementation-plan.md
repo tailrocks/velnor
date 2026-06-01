@@ -324,15 +324,14 @@ Pkl workflow -> Velnor compiler    -> Velnor normalized plan -> Docker executor
 
 The next useful implementation steps are:
 
-1. Live-test `velnor-runner run --once --complete-noop` and `velnor-runner run --once --execute-scripts` against disposable workflows and adjust reporter route details if GitHub rejects them.
-2. Start renew-job loop before real job execution.
-3. Expand remaining job/message expression support; workflow/job-level `env:`, step-level `env:`, generic `ContextData`, `contains()`, and `toJSON()` are implemented for runner-side script/action execution paths.
-4. Provide full GitHub/runner/action runtime environment for JavaScript actions, then test `setup-*`, cache, and Docker actions from target workflows.
+1. Live-test `velnor-runner run --once` and `velnor-runner run --once --complete-noop` against disposable workflows and adjust reporter route details if GitHub rejects them.
+2. Expand remaining job/message expression support beyond the target subset; workflow/job-level `env:`, step-level `env:`, generic `ContextData`, `contains()`, `toJSON()`, and `hashFiles()` are implemented for runner-side script/action execution paths.
+3. Validate `setup-*`, cache, artifact, pages, and Docker actions from target workflows in a live GitHub run.
 
 This gets Velnor from "polls one message" to "can complete a simple real GitHub job".
 
 Current code can parse enough `AgentJobRequestMessage` to identify job id/name, plan, request id, timeline id, variables, endpoints, repositories, containers, and action steps.
 
-Current code has classic `jobrequests` client methods for lock renewal and finish-job requests. The normal run path does not acknowledge jobs yet, but `velnor-runner run --once --complete-noop` can opt into the completion probe.
+Current code has classic `jobrequests` client methods for lock renewal and finish-job requests. The normal `velnor-runner run` path executes supported jobs by default and acknowledges/completes them; `--complete-noop` can opt into the completion probe, and `--dry-run-jobs` leaves received jobs unacknowledged for inspection.
 
 Current code models the classic timeline record/feed routes used by the upstream `JobServerQueue`; the no-op completion path still needs a live disposable GitHub test before it should be treated as proven.

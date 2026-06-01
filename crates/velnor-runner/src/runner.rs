@@ -623,7 +623,7 @@ async fn handle_job_request(
             system_connection.url.as_deref().unwrap_or("unknown")
         );
     }
-    if args.execute_scripts {
+    if should_execute_job(args) {
         let Some(script_steps) = script_steps else {
             bail!("cannot execute scripts because step mapping failed");
         };
@@ -808,9 +808,15 @@ async fn handle_job_request(
         }
         println!("No-op job completed and message acknowledged.");
     } else {
-        println!("Job is not acknowledged yet; pass --complete-noop to probe completion.");
+        println!(
+            "Dry-run job inspection only; job was not acknowledged. Omit --dry-run-jobs to execute."
+        );
     }
     Ok(())
+}
+
+fn should_execute_job(args: &RunArgs) -> bool {
+    args.execute_scripts || (!args.complete_noop && !args.dry_run_jobs)
 }
 
 async fn start_lock_renewal(
@@ -2078,6 +2084,27 @@ mod tests {
     };
     use crate::protocol::TaskAgentMessage;
     use std::path::Path;
+
+    fn run_args(complete_noop: bool, execute_scripts: bool, dry_run_jobs: bool) -> RunArgs {
+        RunArgs {
+            config_dir: None,
+            once: false,
+            complete_noop,
+            execute_scripts,
+            dry_run_jobs,
+            docker_image: "ubuntu:24.04".into(),
+            node_action_image: String::new(),
+            work_dir: None,
+        }
+    }
+
+    #[test]
+    fn run_executes_jobs_by_default() {
+        assert!(should_execute_job(&run_args(false, false, false)));
+        assert!(should_execute_job(&run_args(false, true, false)));
+        assert!(!should_execute_job(&run_args(true, false, false)));
+        assert!(!should_execute_job(&run_args(false, false, true)));
+    }
 
     #[test]
     fn recognizes_matching_job_cancellation_message() {

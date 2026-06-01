@@ -79,9 +79,13 @@ pub struct RunArgs {
     #[arg(long)]
     pub complete_noop: bool,
 
-    /// Execute supported run steps in Docker, then finish and acknowledge the job.
+    /// Execute supported run steps in Docker, then finish and acknowledge the job. This is the default unless --complete-noop or --dry-run-jobs is set.
     #[arg(long)]
     pub execute_scripts: bool,
+
+    /// Poll and inspect jobs without acknowledging or executing them.
+    #[arg(long)]
+    pub dry_run_jobs: bool,
 
     /// Docker image for --execute-scripts jobs.
     #[arg(long, default_value = "ghcr.io/catthehacker/ubuntu:act-latest")]
