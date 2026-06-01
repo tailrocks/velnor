@@ -973,15 +973,13 @@ where
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
         let version = native_input_or(&action_state, action, "python-version", "3");
-        let result = self.native_shell(
-            container,
-            state,
-            &format!("python{version} --version || python3 --version"),
-        )?;
+        let script = setup_python_script(&version);
+        let result = self.native_shell(container, state, &script)?;
         Ok(native_command_result(
             result,
             StepCommandState {
                 outputs: [("python-version".to_string(), version)].into(),
+                path: vec!["/github/home/.local/bin".to_string()],
                 ..StepCommandState::default()
             },
         ))
@@ -1016,7 +1014,11 @@ where
         _action: &NativeActionInvocation,
         state: &JobExecutionState,
     ) -> Result<StepExecutionResult> {
-        let result = self.native_shell(container, state, "sccache --start-server || true")?;
+        let result = self.native_shell(
+            container,
+            state,
+            "command -v sccache >/dev/null 2>&1 && sccache --start-server",
+        )?;
         Ok(native_command_result(result, StepCommandState::default()))
     }
 
@@ -1516,6 +1518,53 @@ fn rewrite_command_file_env_for_action_container(env: &mut [(String, String)]) {
             }
         }
     }
+}
+
+fn setup_python_script(version: &str) -> String {
+    format!(
+        r#"set -e
+bin="/github/home/.local/bin"
+mkdir -p "$bin"
+if command -v "python{version}" >/dev/null 2>&1; then
+  py="$(command -v "python{version}")"
+elif command -v python3 >/dev/null 2>&1 && python3 - <<'PY'
+import sys
+want = "{version}"
+actual = ".".join(map(str, sys.version_info[:2]))
+sys.exit(0 if actual == want else 1)
+PY
+then
+  py="$(command -v python3)"
+else
+  if ! command -v uv >/dev/null 2>&1; then
+    curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR="$bin" sh
+  fi
+  uv_bin="$(command -v uv || printf '%s/uv' "$bin")"
+  "$uv_bin" python install "{version}"
+  py="$("$uv_bin" python find "{version}")"
+fi
+ln -sf "$py" "$bin/python"
+ln -sf "$py" "$bin/python3"
+ln -sf "$py" "$bin/python{version}"
+if "$py" -m pip --version >/dev/null 2>&1; then
+  cat > "$bin/pip" <<'SH'
+#!/usr/bin/env sh
+exec python -m pip "$@"
+SH
+else
+  if ! command -v uv >/dev/null 2>&1; then
+    curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR="$bin" sh
+  fi
+  uv_bin="$(command -v uv || printf '%s/uv' "$bin")"
+  cat > "$bin/pip" <<SH
+#!/usr/bin/env sh
+exec "$uv_bin" pip "\$@" --python "$py"
+SH
+fi
+chmod +x "$bin/pip"
+"$bin/python" --version
+"#,
+    )
 }
 
 fn native_post_condition(adapter: NativeActionAdapter) -> Option<&'static str> {
@@ -4649,7 +4698,7 @@ type=sha,format=long,prefix=,enable=true"
         assert_eq!(docker_exec_calls.len(), 6);
         assert!(docker_exec_calls
             .iter()
-            .any(|args| args.iter().any(|arg| arg.contains("python3.13 --version"))));
+            .any(|args| args.iter().any(|arg| arg.contains("python install \"3.13\""))));
         assert!(docker_exec_calls.iter().any(|args| args
             .iter()
             .any(|arg| arg.contains("rustup toolchain install stable"))));
