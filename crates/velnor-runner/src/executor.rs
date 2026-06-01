@@ -2108,9 +2108,9 @@ fn native_download_artifact(
     let action_state = state.with_env(state.resolve_env(&action.env));
     let name = native_input(action, &action_state, "name");
     let pattern = native_input(action, &action_state, "pattern");
-    let destination = native_input_or(&action_state, action, "path", ".");
+    let destination_input = native_input_or(&action_state, action, "path", ".");
     let merge_multiple = input_truthy(&native_input(action, &action_state, "merge-multiple"));
-    let destination = resolve_host_path(state, &destination)
+    let destination = resolve_host_path(state, &destination_input)
         .ok_or_else(|| anyhow::anyhow!("download-artifact requires a workspace or temp path"))?;
     fs::create_dir_all(&destination)
         .with_context(|| format!("create artifact download dir {}", destination.display()))?;
@@ -2129,7 +2129,10 @@ fn native_download_artifact(
     }
 
     let mut outputs = BTreeMap::new();
-    outputs.insert("download-path".to_string(), normalize_path(&destination));
+    outputs.insert(
+        "download-path".to_string(),
+        resolve_container_path(state, &destination_input),
+    );
 
     Ok(StepExecutionResult {
         exit_code: if artifacts.is_empty() { 1 } else { 0 },
@@ -2521,6 +2524,39 @@ fn resolve_host_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> {
             .workspace_host
             .as_ref()
             .map(|base| base.join(candidate))
+    }
+}
+
+fn resolve_container_path(state: &JobExecutionState, path: &str) -> String {
+    let path = path.trim();
+    if path.is_empty() || path == "." {
+        return state
+            .env
+            .get("GITHUB_WORKSPACE")
+            .cloned()
+            .unwrap_or_else(|| "/__w".to_string());
+    }
+    if path.starts_with("/__w")
+        || path.starts_with("/github/workspace")
+        || path.starts_with("/__t")
+        || path.starts_with("/github/runner_temp")
+        || path.starts_with("/tmp")
+    {
+        return path.to_string();
+    }
+    if Path::new(path).is_absolute() {
+        path.to_string()
+    } else {
+        let workspace = state
+            .env
+            .get("GITHUB_WORKSPACE")
+            .map(String::as_str)
+            .unwrap_or("/__w");
+        format!(
+            "{}/{}",
+            workspace.trim_end_matches('/'),
+            path.trim_start_matches("./")
+        )
     }
 }
 
@@ -7876,10 +7912,7 @@ fi"#
             results[1].state.outputs["artifact-url"],
             format!("https://results.actions/artifacts/{expected_artifact_id}")
         );
-        assert_eq!(
-            results[2].state.outputs["download-path"],
-            normalize_path(&temp.join("work/digests"))
-        );
+        assert_eq!(results[2].state.outputs["download-path"], "/__w/digests");
         assert_eq!(
             results[3].state.env["ACTIONS_RUNTIME_TOKEN"],
             "runtime-token"
@@ -8038,6 +8071,78 @@ fi"#
             "macos\n"
         );
         assert!(!download_temp.join("work/downloaded/linux.txt").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_download_artifact_reports_container_download_path() {
+        let root = temp_dir();
+        let upload_temp = root.join("upload-job/temp");
+        let download_temp = root.join("download-job/temp");
+        fs::create_dir_all(upload_temp.join("work")).unwrap();
+        fs::create_dir_all(download_temp.join("work")).unwrap();
+        fs::write(upload_temp.join("work/output.txt"), "artifact\n").unwrap();
+        let runtime_env = vec![
+            ("GITHUB_RUN_ID".into(), "123456".into()),
+            ("GITHUB_RUN_ATTEMPT".into(), "1".into()),
+            ("GITHUB_WORKSPACE".into(), "/github/workspace".into()),
+        ];
+        let upload = vec![ExecutableStep::Native {
+            step_id: "upload".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::UploadArtifact,
+                inputs: [
+                    ("name".into(), "output".into()),
+                    ("path".into(), "/github/workspace/output.txt".into()),
+                    ("if-no-files-found".into(), "error".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&upload_temp),
+                &upload,
+                &runtime_env,
+                &upload_temp,
+            )
+            .unwrap();
+        let download = vec![ExecutableStep::Native {
+            step_id: "download".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::DownloadArtifact,
+                inputs: [
+                    ("name".into(), "output".into()),
+                    ("path".into(), "downloads/output".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&download_temp),
+                &download,
+                &runtime_env,
+                &download_temp,
+            )
+            .unwrap();
+
+        assert_eq!(results[0].exit_code, 0);
+        assert_eq!(
+            results[0].state.outputs["download-path"],
+            "/github/workspace/downloads/output"
+        );
+        assert_eq!(
+            fs::read_to_string(download_temp.join("work/downloads/output/output.txt")).unwrap(),
+            "artifact\n"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
