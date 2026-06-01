@@ -406,6 +406,10 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
 
     let config_base = config::config_dir(args.config_dir.clone())?;
     configure_daemon_slots(&args, &config_base, slots).await?;
+    if !daemon_should_poll_after_registration(&args) {
+        println!("Daemon registration dry run complete; skipped polling GitHub for jobs.");
+        return Ok(());
+    }
     let mut slot_tasks = JoinSet::new();
 
     println!(
@@ -466,6 +470,10 @@ fn daemon_slot_should_register(
     dry_run_registration: bool,
 ) -> bool {
     replace || dry_run_registration || config::load(slot_config_dir).is_err()
+}
+
+fn daemon_should_poll_after_registration(args: &DaemonArgs) -> bool {
+    !args.dry_run_registration
 }
 
 fn validate_daemon_slots(slots: usize) -> Result<usize> {
@@ -2994,6 +3002,15 @@ mod tests {
 
         fs::remove_dir_all(&dir).unwrap();
         assert!(daemon_slot_should_register(&dir, false, false));
+    }
+
+    #[test]
+    fn daemon_registration_dry_run_does_not_poll_for_jobs() {
+        let mut args = daemon_args(1);
+        assert!(daemon_should_poll_after_registration(&args));
+
+        args.dry_run_registration = true;
+        assert!(!daemon_should_poll_after_registration(&args));
     }
 
     #[test]
