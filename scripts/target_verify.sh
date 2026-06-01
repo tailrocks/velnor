@@ -88,6 +88,8 @@ bash -n \
   scripts/live_evidence_common.sh \
   scripts/live_host_doctor.sh \
   scripts/live_evidence_common_test.sh \
+  scripts/live_sequence_common.sh \
+  scripts/live_sequence_common_test.sh \
   scripts/target_smoke_common.sh \
   scripts/target_verify.sh \
   scripts/workflow_dispatch_common.sh \
@@ -99,6 +101,7 @@ python3 scripts/check_runner_reference.py
 scripts/fixture_smoke_defaults_test.sh
 scripts/fixture_status_test.sh
 scripts/live_evidence_common_test.sh
+scripts/live_sequence_common_test.sh
 scripts/workflow_dispatch_common_test.sh
 
 tests=(
@@ -188,4 +191,4 @@ for test_name in "${tests[@]}"; do
 done
 
 echo "target audit written to /tmp/velnor-target-audit.txt"
-echo "target verifier passed shell syntax check, ${#tests[@]} focused checks, fixture defaults/status self-tests, live evidence helper self-test, and workflow dispatch helper self-test"
+echo "target verifier passed shell syntax check, ${#tests[@]} focused checks, fixture defaults/status self-tests, live evidence/sequence helper self-tests, and workflow dispatch helper self-test"

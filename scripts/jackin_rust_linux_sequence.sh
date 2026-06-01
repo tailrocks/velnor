@@ -2,10 +2,18 @@
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$ROOT/scripts/live_sequence_common.sh"
 
 WATCH_RUN="${VELNOR_JACKIN_SEQUENCE_WATCH_RUN:-true}"
 INCLUDE_CONSTRUCT="${VELNOR_JACKIN_SEQUENCE_INCLUDE_CONSTRUCT:-true}"
 INCLUDE_DOCS="${VELNOR_JACKIN_SEQUENCE_INCLUDE_DOCS:-true}"
+
+velnor_require_bool VELNOR_JACKIN_SEQUENCE_WATCH_RUN "$WATCH_RUN"
+velnor_require_bool VELNOR_JACKIN_SEQUENCE_INCLUDE_CONSTRUCT "$INCLUDE_CONSTRUCT"
+velnor_require_bool VELNOR_JACKIN_SEQUENCE_INCLUDE_DOCS "$INCLUDE_DOCS"
+velnor_require_positive_int VELNOR_JACKIN_CI_JOB_COUNT "${VELNOR_JACKIN_CI_JOB_COUNT:-5}"
+velnor_require_positive_int VELNOR_JACKIN_CONSTRUCT_JOB_COUNT "${VELNOR_JACKIN_CONSTRUCT_JOB_COUNT:-5}"
+velnor_require_positive_int VELNOR_JACKIN_DOCS_JOB_COUNT "${VELNOR_JACKIN_DOCS_JOB_COUNT:-5}"
 
 run_jackin_smoke() {
   local workflow="$1"

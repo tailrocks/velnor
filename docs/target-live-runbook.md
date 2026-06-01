@@ -186,6 +186,9 @@ enabled by default. Tune it with `VELNOR_CHAINARGOS_RUST_PACKAGES`,
 `VELNOR_CHAINARGOS_SEQUENCE_INCLUDE_DOCKER`,
 `VELNOR_CHAINARGOS_SEQUENCE_INCLUDE_KESTRA`, and per-workflow job counts such as
 `VELNOR_CHAINARGOS_RUST_JOB_COUNT`.
+Boolean controls must be exactly `true` or `false`, and job counts must be
+positive integers; the sequence fails before runner registration on invalid
+values.
 
 It runs the live host doctor, registers `ChainArgos/java-monorepo` with the
 target label preset, validates stored V2/label config, and consumes queued jobs
@@ -262,6 +265,9 @@ The sequence runs `ci.yml`, `construct.yml`, and `docs.yml` with
 `VELNOR_JACKIN_DOCS_JOB_COUNT`, `VELNOR_JACKIN_SEQUENCE_INCLUDE_CONSTRUCT`,
 `VELNOR_JACKIN_SEQUENCE_INCLUDE_DOCS`, and
 `VELNOR_JACKIN_SEQUENCE_WATCH_RUN`.
+Boolean controls must be exactly `true` or `false`, and job counts must be
+positive integers; the sequence fails before runner registration on invalid
+values.
 
 Register the same runner to `jackin-project/jackin` with x64 Linux labels:
 

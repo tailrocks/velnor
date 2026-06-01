@@ -32,6 +32,7 @@ live_evidence_extra_metadata() {
 }
 
 source "$ROOT/scripts/live_evidence_common.sh"
+source "$ROOT/scripts/live_sequence_common.sh"
 source "$ROOT/scripts/workflow_dispatch_common.sh"
 
 cleanup_runner() {
@@ -43,10 +44,11 @@ cleanup_runner() {
 
 trap cleanup_runner EXIT
 
-if ! [[ "$JOB_COUNT" =~ ^[1-9][0-9]*$ ]]; then
-  echo "VELNOR_TARGET_JOB_COUNT must be a positive integer." >&2
-  exit 2
-fi
+velnor_require_positive_int VELNOR_TARGET_JOB_COUNT "$JOB_COUNT"
+velnor_require_bool VELNOR_REQUIRE_DOCKER_SOCKET "$REQUIRE_DOCKER_SOCKET"
+velnor_require_bool VELNOR_TARGET_CLEANUP_RUNNER "$CLEANUP_RUNNER"
+velnor_require_bool VELNOR_TARGET_WATCH_RUN "$WATCH_RUN"
+velnor_require_bool VELNOR_TARGET_MVP_ARM_LABEL "$TARGET_MVP_ARM_LABEL"
 
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   echo "GITHUB_TOKEN is required to register the target self-hosted runner." >&2

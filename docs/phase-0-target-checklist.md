@@ -115,6 +115,7 @@ Drift guards:
 - target labels and `runs-on`
 - triggers, permissions, concurrency, defaults, env, outputs, needs, matrices,
   and conditions used by current target workflows
+- live proof script controls fail fast on invalid boolean flags and job counts
 - unsupported job containers, service containers, job timeouts, job-level
   concurrency, direct `docker://` uses, and unsupported checkout inputs
 
