@@ -290,6 +290,23 @@ EXPECTED_JOB_OUTPUTS = Counter(
     }
 )
 
+EXPECTED_WORKFLOW_ENV = Counter(
+    {
+        (
+            ".github/workflows/construct.yml",
+            "{DIGEST_DIR: /tmp/jackin-construct-digests, REGISTRY_IMAGE: projectjackin/construct}",
+        ): 1,
+        (
+            ".github/workflows/docs.yml",
+            "{DOCS_SITE_URL: https://jackin.tailrocks.com, JACKIN_REPO_BLOB_URL: https://github.com/jackin-project/jackin/blob/main, JACKIN_REPO_EDIT_URL: https://github.com/jackin-project/jackin/edit/main}",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "{CARGO_BUILD_JOBS: 8, CARGO_INCREMENTAL: 0, CARGO_TERM_COLOR: always, RUSTC_WRAPPER: sccache, RUSTFLAGS: -C link-arg=-fuse-ld=mold, SCCACHE_DIR: /var/cache/sccache}",
+        ): 1,
+    }
+)
+
 EXPECTED_WORKFLOW_PERMISSIONS = Counter(
     {
         (".github/workflows/ansible.yml", ("contents",)): 1,
@@ -893,6 +910,13 @@ def check_target_mvp(summary: dict[str, Any]) -> list[str]:
         errors.append(
             "target MVP job outputs drift: "
             f"expected {dict(EXPECTED_JOB_OUTPUTS)}, got {dict(job_outputs)}"
+        )
+
+    workflow_env = Counter(summary["workflow_env"])
+    if workflow_env != EXPECTED_WORKFLOW_ENV:
+        errors.append(
+            "target MVP workflow env drift: "
+            f"expected {dict(EXPECTED_WORKFLOW_ENV)}, got {dict(workflow_env)}"
         )
 
     workflow_permissions = Counter(
