@@ -99,6 +99,7 @@ pub struct JobExecutionSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepLog {
     pub step_id: String,
+    pub order: i32,
     pub lines: Vec<String>,
     pub masks: Vec<String>,
     pub annotations: Vec<StepAnnotation>,
@@ -208,6 +209,7 @@ impl ExecutableStep {
 pub struct DockerScriptExecutor<R> {
     runner: R,
     step_start_sender: Option<UnboundedSender<StepStartEvent>>,
+    step_log_sender: Option<UnboundedSender<StepLog>>,
 }
 
 impl<R> DockerScriptExecutor<R>
@@ -218,11 +220,17 @@ where
         Self {
             runner,
             step_start_sender: None,
+            step_log_sender: None,
         }
     }
 
     pub fn with_step_start_sender(mut self, sender: UnboundedSender<StepStartEvent>) -> Self {
         self.step_start_sender = Some(sender);
+        self
+    }
+
+    pub fn with_step_log_sender(mut self, sender: UnboundedSender<StepLog>) -> Self {
+        self.step_log_sender = Some(sender);
         self
     }
 
@@ -235,14 +243,20 @@ where
     }
 
     fn emit_step_started(&self, step_id: impl Into<String>, order: &mut i32) {
+        *order += 1;
         let Some(sender) = &self.step_start_sender else {
             return;
         };
-        *order += 1;
         let _ = sender.send(StepStartEvent {
             step_id: step_id.into(),
             order: *order,
         });
+    }
+
+    fn emit_step_log(&self, log: &StepLog) {
+        if let Some(sender) = &self.step_log_sender {
+            let _ = sender.send(log.clone());
+        }
     }
 
     pub fn execute_step(
@@ -452,7 +466,10 @@ where
                         if failed && *continue_on_error {
                             result.failure_ignored = true;
                         }
-                        if let Some(log) = step_log(&format!("{step_id}-pre"), &result) {
+                        if let Some(log) =
+                            step_log(&format!("{step_id}-pre"), timeline_order, &result)
+                        {
+                            self.emit_step_log(&log);
                             step_logs.push(log);
                         }
                         state.apply(step_id, &result);
@@ -560,7 +577,8 @@ where
                     if failed && step.continue_on_error() {
                         result.failure_ignored = true;
                     }
-                    if let Some(log) = step_log(&step_id, &result) {
+                    if let Some(log) = step_log(&step_id, timeline_order, &result) {
+                        self.emit_step_log(&log);
                         step_logs.push(log);
                     }
                     state.apply(&step_id, &result);
@@ -595,7 +613,12 @@ where
                     if result.exit_code != 0 && post_action.continue_on_error {
                         result.failure_ignored = true;
                     }
-                    if let Some(log) = step_log(&format!("{}-post", post_action.step_id), &result) {
+                    if let Some(log) = step_log(
+                        &format!("{}-post", post_action.step_id),
+                        timeline_order,
+                        &result,
+                    ) {
+                        self.emit_step_log(&log);
                         step_logs.push(log);
                     }
                     state.apply(&format!("{}-post", post_action.step_id), &result);
@@ -1627,7 +1650,7 @@ fn job_output_expression(value: &Value) -> Option<&str> {
         .and_then(job_output_expression)
 }
 
-fn step_log(step_id: &str, result: &StepExecutionResult) -> Option<StepLog> {
+fn step_log(step_id: &str, order: i32, result: &StepExecutionResult) -> Option<StepLog> {
     let lines = step_log_lines(
         &result.stdout,
         &result.stderr,
@@ -1636,6 +1659,7 @@ fn step_log(step_id: &str, result: &StepExecutionResult) -> Option<StepLog> {
     );
     (!lines.is_empty()).then(|| StepLog {
         step_id: step_id.to_string(),
+        order,
         lines,
         masks: result.state.masks.clone(),
         annotations: result.state.annotations.clone(),
@@ -3384,6 +3408,50 @@ mod tests {
     }
 
     #[test]
+    fn emits_step_logs_with_timeline_order_after_each_step() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "producer".into(),
+                script: "node old-action.js".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "consumer".into(),
+                script: "echo answer=${{ steps.producer.outputs.answer }}".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+        ];
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut executor =
+            DockerScriptExecutor::new(StdoutCommandRunner::default()).with_step_log_sender(sender);
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+        let mut logs = Vec::new();
+        while let Ok(log) = receiver.try_recv() {
+            logs.push(log);
+        }
+
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].step_id, "producer");
+        assert_eq!(logs[0].order, 1);
+        assert_eq!(logs[1].step_id, "consumer");
+        assert_eq!(logs[1].order, 2);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn workflow_commands_from_stdout_update_later_steps() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -3505,7 +3573,7 @@ mod tests {
             stderr: String::new(),
         };
 
-        let log = step_log("sccache", &result).unwrap();
+        let log = step_log("sccache", 1, &result).unwrap();
 
         assert_eq!(
             log.lines,

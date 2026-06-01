@@ -7,6 +7,7 @@ Reference source:
 - `actions/runner` latest release checked: `v2.334.0`
 - tag commit: `f1995ede5d885c997d13d8eca5467c4ce97fe69c`
 - `main` at check time: `c6a124e18496a6e5d2357415052d1799afc64b63`
+- `main` rechecked on 2026-06-01: `c6a124e18496a6e5d2357415052d1799afc64b63`
 - release page: <https://github.com/actions/runner/releases/tag/v2.334.0>
 
 This refresh exists because Velnor intentionally follows the latest hosted
@@ -116,6 +117,7 @@ Implemented in this refresh:
 Still open for V2 parity:
 
 - richer live GitHub UI log/timeline behavior. Velnor now sends in-progress
-  job and step timeline records during execution, then serializes telemetry
-  and infrastructure failure category for implemented cases.
+  job and step timeline records during execution, uploads completed step logs
+  as steps exit, then serializes telemetry and infrastructure failure category
+  for implemented cases.
 - live proof on the two target repositories

@@ -650,6 +650,8 @@ async fn handle_job_request(
         );
         let (step_start_sender, step_start_receiver) = tokio::sync::mpsc::unbounded_channel();
         let step_timeline = start_step_timeline_publisher(job.clone(), step_start_receiver);
+        let (step_log_sender, step_log_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let step_logs_publisher = start_step_log_publisher(job.clone(), step_log_receiver);
         let config_dir = config_dir.to_path_buf();
         let work_dir = args.work_dir.clone();
         let docker_image = args.docker_image.clone();
@@ -669,6 +671,7 @@ async fn handle_job_request(
                 &job_to_execute,
                 &script_steps,
                 Some(step_start_sender),
+                Some(step_log_sender),
             )
         })
         .await
@@ -681,6 +684,13 @@ async fn handle_job_request(
             }
             Ok(_) => {}
             Err(_) => eprintln!("Timed out waiting for best-effort step timeline publisher."),
+        }
+        match tokio::time::timeout(Duration::from_secs(5), step_logs_publisher).await {
+            Ok(Err(error)) if !error.is_cancelled() => {
+                eprintln!("Step log publisher failed: {error:#}");
+            }
+            Ok(_) => {}
+            Err(_) => eprintln!("Timed out waiting for best-effort step log publisher."),
         }
         let job_result = match job_result {
             Ok(mut job_result) => {
@@ -710,6 +720,7 @@ async fn handle_job_request(
                         None,
                         run_service_job.billing_owner_id.clone(),
                         infrastructure_failure_category,
+                        true,
                     )
                     .await?;
                     return Err(error);
@@ -728,6 +739,7 @@ async fn handle_job_request(
             job_result.environment_url,
             run_service_job.billing_owner_id,
             None,
+            false,
         )
         .await?;
         println!(
@@ -745,6 +757,7 @@ async fn handle_job_request(
             None,
             run_service_job.billing_owner_id,
             None,
+            true,
         )
         .await?;
         println!("No-op job completed and message acknowledged.");
@@ -990,6 +1003,22 @@ fn start_step_timeline_publisher(
     })
 }
 
+fn start_step_log_publisher(
+    job: AgentJobRequestMessage,
+    mut receiver: UnboundedReceiver<StepLog>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        while let Some(log) = receiver.recv().await {
+            if let Err(error) = publish_timeline_step_log(&job, &log).await {
+                eprintln!(
+                    "Best-effort timeline step log upload failed for '{}': {error:#}",
+                    log.step_id
+                );
+            }
+        }
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct JobCancelMessage {
     #[serde(default, rename = "JobId", alias = "jobId")]
@@ -1063,6 +1092,7 @@ fn execute_script_job(
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
     step_start_sender: Option<tokio::sync::mpsc::UnboundedSender<StepStartEvent>>,
+    step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
 ) -> Result<ScriptJobResult> {
     let job_dir = job_work_dir(config_dir, work_dir, job);
     let workspace = job_dir.join("workspace");
@@ -1153,6 +1183,9 @@ fn execute_script_job(
     let mut executor = DockerScriptExecutor::new(command_runner);
     if let Some(sender) = step_start_sender {
         executor = executor.with_step_start_sender(sender);
+    }
+    if let Some(sender) = step_log_sender {
+        executor = executor.with_step_log_sender(sender);
     }
     let summary_result = executor.execute_ordered_steps_with_completion(
         &plan.execution.job_container,
@@ -1628,9 +1661,12 @@ async fn complete_run_service_job(
     environment_url: Option<String>,
     billing_owner_id: Option<String>,
     infrastructure_failure_category: Option<String>,
+    publish_completion_timeline_logs: bool,
 ) -> Result<()> {
-    if let Err(error) = publish_timeline_logs(job, &step_logs).await {
-        eprintln!("Best-effort timeline log upload failed: {error:#}");
+    if publish_completion_timeline_logs {
+        if let Err(error) = publish_timeline_logs(job, &step_logs).await {
+            eprintln!("Best-effort timeline log upload failed: {error:#}");
+        }
     }
     let step_results = step_logs
         .iter()
@@ -1782,6 +1818,44 @@ async fn publish_timeline_logs(job: &AgentJobRequestMessage, step_logs: &[StepLo
     Ok(())
 }
 
+async fn publish_timeline_step_log(job: &AgentJobRequestMessage, log: &StepLog) -> Result<()> {
+    let Some(context) = timeline_publish_context(job)? else {
+        return Ok(());
+    };
+    let finish_time = current_time_rfc3339()?;
+    let records = timeline_records_for_step_logs(job, std::slice::from_ref(log), &finish_time);
+    context
+        .client
+        .update_timeline_records(
+            &context.scope_identifier,
+            &context.hub_name,
+            &job.plan.plan_id,
+            &job.timeline.id,
+            records,
+        )
+        .await?;
+
+    let masks = job_secret_mask_values(job)
+        .into_iter()
+        .chain(log.masks.iter().cloned())
+        .collect::<Vec<_>>();
+    let lines = mask_log_lines(&log.lines, &masks);
+    if !lines.is_empty() {
+        context
+            .client
+            .append_timeline_record_feed(
+                &context.scope_identifier,
+                &context.hub_name,
+                &job.plan.plan_id,
+                &job.timeline.id,
+                &log.step_id,
+                TimelineRecordFeedLines::new(log.step_id.clone(), lines, Some(1)),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
 fn timeline_started_record(
     job: &AgentJobRequestMessage,
     runner_name: &str,
@@ -1851,13 +1925,12 @@ fn timeline_records_for_step_logs(
 ) -> Vec<TimelineRecord> {
     step_logs
         .iter()
-        .enumerate()
-        .map(|(index, log)| {
+        .map(|log| {
             TimelineRecord::task_completed(
                 log.step_id.clone(),
                 job.job_id.clone(),
                 log.step_id.clone(),
-                (index + 1) as i32,
+                log.order,
                 finish_time.to_string(),
                 step_log_result(log),
             )
@@ -2219,6 +2292,7 @@ mod tests {
     fn safe_environment_url_skips_masked_values() {
         let log = StepLog {
             step_id: "deploy".into(),
+            order: 1,
             lines: Vec::new(),
             masks: vec!["runtime-secret".into()],
             annotations: Vec::new(),
@@ -2287,6 +2361,7 @@ mod tests {
         .unwrap();
         let log = StepLog {
             step_id: "step-1".into(),
+            order: 7,
             lines: vec!["hello".into()],
             masks: Vec::new(),
             annotations: Vec::new(),
@@ -2304,6 +2379,7 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].id, "step-1");
         assert_eq!(records[0].parent_id.as_deref(), Some("job"));
+        assert_eq!(records[0].order, Some(7));
         assert_eq!(records[0].result, Some(TaskResult::Failed));
         assert_eq!(records[0].error_count, 1);
         assert_eq!(records[0].warning_count, 2);
@@ -2421,6 +2497,7 @@ mod tests {
         .unwrap();
         let log = StepLog {
             step_id: "step-1".into(),
+            order: 1,
             lines: Vec::new(),
             masks: vec!["step-secret".into()],
             annotations: Vec::new(),
