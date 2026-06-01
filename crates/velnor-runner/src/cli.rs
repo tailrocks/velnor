@@ -104,6 +104,10 @@ pub struct RunArgs {
     #[arg(long)]
     pub once: bool,
 
+    /// Fail if no job is acquired within this many seconds. Default is no idle timeout.
+    #[arg(long)]
+    pub idle_timeout_seconds: Option<u64>,
+
     /// Mark a received job as succeeded without executing user steps.
     #[arg(long)]
     pub complete_noop: bool,

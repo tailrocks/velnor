@@ -10,7 +10,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{sync::mpsc::UnboundedReceiver, task::JoinHandle};
 
@@ -417,6 +417,8 @@ async fn run_v2(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("GitHub broker returned session without sessionId"))?;
     let mut poll_state = BrokerPollState::default();
+    let idle_timeout = idle_timeout_duration(args.idle_timeout_seconds)?;
+    let idle_started = Instant::now();
 
     println!(
         "Runner '{}' ready via broker with labels: {}",
@@ -437,6 +439,7 @@ async fn run_v2(
 
         let Some(message) = message else {
             println!("No broker message received.");
+            fail_if_idle_timeout_elapsed(idle_started, idle_timeout)?;
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         };
@@ -477,6 +480,9 @@ async fn run_v2(
         if should_stop_after_message(args.once, &action) {
             break;
         }
+        if !matches!(action, V2MessageAction::JobHandled) {
+            fail_if_idle_timeout_elapsed(idle_started, idle_timeout)?;
+        }
     }
 
     broker.delete_session().await?;
@@ -487,6 +493,26 @@ async fn run_v2(
 
 fn should_stop_after_message(once: bool, action: &V2MessageAction) -> bool {
     once && matches!(action, V2MessageAction::JobHandled)
+}
+
+fn idle_timeout_duration(seconds: Option<u64>) -> Result<Option<Duration>> {
+    match seconds {
+        Some(0) => bail!("--idle-timeout-seconds must be greater than zero"),
+        Some(seconds) => Ok(Some(Duration::from_secs(seconds))),
+        None => Ok(None),
+    }
+}
+
+fn fail_if_idle_timeout_elapsed(started: Instant, timeout: Option<Duration>) -> Result<()> {
+    if idle_timeout_elapsed(started.elapsed(), timeout) {
+        let seconds = timeout.map_or(0, |timeout| timeout.as_secs());
+        bail!("no GitHub job was acquired within idle timeout of {seconds}s");
+    }
+    Ok(())
+}
+
+fn idle_timeout_elapsed(elapsed: Duration, timeout: Option<Duration>) -> bool {
+    timeout.is_some_and(|timeout| elapsed >= timeout)
 }
 
 async fn poll_broker_message(
@@ -2337,6 +2363,7 @@ mod tests {
         RunArgs {
             config_dir: None,
             once: false,
+            idle_timeout_seconds: None,
             complete_noop,
             execute_scripts,
             dry_run_jobs,
@@ -2422,6 +2449,33 @@ mod tests {
         assert!(!should_stop_after_message(
             true,
             &V2MessageAction::RefreshToken
+        ));
+    }
+
+    #[test]
+    fn idle_timeout_duration_rejects_zero() {
+        assert!(idle_timeout_duration(None).unwrap().is_none());
+        assert_eq!(
+            idle_timeout_duration(Some(30)).unwrap(),
+            Some(Duration::from_secs(30))
+        );
+        assert!(idle_timeout_duration(Some(0)).is_err());
+    }
+
+    #[test]
+    fn idle_timeout_elapsed_only_after_threshold() {
+        assert!(!idle_timeout_elapsed(Duration::from_secs(60), None));
+        assert!(!idle_timeout_elapsed(
+            Duration::from_secs(59),
+            Some(Duration::from_secs(60))
+        ));
+        assert!(idle_timeout_elapsed(
+            Duration::from_secs(60),
+            Some(Duration::from_secs(60))
+        ));
+        assert!(idle_timeout_elapsed(
+            Duration::from_secs(61),
+            Some(Duration::from_secs(60))
         ));
     }
 

@@ -47,11 +47,14 @@ Start Velnor:
 ```sh
 cargo run --bin velnor-runner -- run \
   --work-dir "$PWD/.velnor-work" \
-  --once
+  --once \
+  --idle-timeout-seconds 900
 ```
 
 `--once` waits until one GitHub job is actually acquired and handled. It does
 not exit just because the broker has no message yet or sends a control message.
+The idle timeout is optional, but it makes smoke runs fail clearly when labels,
+workflow dispatch, or runner registration are wrong.
 
 Initial recommended runs, in this order:
 
