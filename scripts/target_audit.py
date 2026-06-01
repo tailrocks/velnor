@@ -159,6 +159,41 @@ EXPECTED_JOB_RUNS_ON = Counter(
     }
 )
 
+EXPECTED_JOB_STRATEGY = Counter(
+    {
+        (
+            ".github/workflows/ci.yml",
+            "build-validator",
+            "{matrix: {include: [{target: x86_64-unknown-linux-gnu, zigbuild: true}, {target: aarch64-unknown-linux-gnu, zigbuild: true}]}}",
+        ): 1,
+        (
+            ".github/workflows/construct.yml",
+            "build",
+            "{fail-fast: false, matrix: {include: [{platform: amd64, runner: ubuntu-24.04}, {platform: arm64, runner: ubuntu-24.04-arm}]}}",
+        ): 1,
+        (
+            ".github/workflows/preview.yml",
+            "build-preview",
+            "{matrix: {include: [{target: aarch64-apple-darwin, zigbuild_target: aarch64-apple-darwin}, {target: x86_64-apple-darwin, zigbuild_target: x86_64-apple-darwin}, {target: aarch64-unknown-linux-gnu, zigbuild_target: aarch64-unknown-linux-gnu.2.17}, {target: x86_64-unknown-linux-gnu, zigbuild_target: x86_64-unknown-linux-gnu.2.17}]}}",
+        ): 1,
+        (
+            ".github/workflows/preview.yml",
+            "build-jackin-capsule",
+            "{matrix: {include: [{arch: arm64, target: aarch64-unknown-linux-gnu, zigbuild_target: aarch64-unknown-linux-gnu.2.17}, {arch: amd64, target: x86_64-unknown-linux-gnu, zigbuild_target: x86_64-unknown-linux-gnu.2.17}]}}",
+        ): 1,
+        (
+            ".github/workflows/release.yml",
+            "build",
+            "{matrix: {include: [{os: macos-latest, target: x86_64-apple-darwin}, {os: macos-latest, target: aarch64-apple-darwin}, {os: ubuntu-latest, target: x86_64-unknown-linux-gnu, zigbuild: true}, {os: ubuntu-latest, target: aarch64-unknown-linux-gnu, zigbuild: true}]}}",
+        ): 1,
+        (
+            ".github/workflows/release.yml",
+            "build-jackin-capsule",
+            "{matrix: {include: [{target: aarch64-unknown-linux-gnu, zigbuild_target: aarch64-unknown-linux-gnu.2.17}, {target: x86_64-unknown-linux-gnu, zigbuild_target: x86_64-unknown-linux-gnu.2.17}]}}",
+        ): 1,
+    }
+)
+
 EXPECTED_WORKFLOW_PERMISSIONS = Counter(
     {
         (".github/workflows/ansible.yml", ("contents",)): 1,
@@ -741,6 +776,13 @@ def check_target_mvp(summary: dict[str, Any]) -> list[str]:
         errors.append(
             "target MVP runs-on drift: "
             f"expected {dict(EXPECTED_JOB_RUNS_ON)}, got {dict(job_runs_on)}"
+        )
+
+    job_strategy = Counter(summary["job_strategy"])
+    if job_strategy != EXPECTED_JOB_STRATEGY:
+        errors.append(
+            "target MVP job strategy drift: "
+            f"expected {dict(EXPECTED_JOB_STRATEGY)}, got {dict(job_strategy)}"
         )
 
     workflow_permissions = Counter(
