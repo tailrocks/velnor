@@ -889,6 +889,9 @@ impl JobExecutionState {
         if let Some(name) = expression.trim().strip_prefix("env.") {
             return self.env.get(name).cloned();
         }
+        if expression.trim() == "job.status" {
+            return Some(self.job_status().to_string());
+        }
 
         let env_name = match expression.trim() {
             "github.actor" => "GITHUB_ACTOR",
@@ -934,6 +937,18 @@ impl JobExecutionState {
             _ => return self.resolve_context_data_expression(expression),
         };
         self.env.get(env_name).cloned()
+    }
+
+    fn job_status(&self) -> &'static str {
+        if self
+            .conclusions
+            .values()
+            .any(|outcome| *outcome == StepOutcome::Failure)
+        {
+            "failure"
+        } else {
+            "success"
+        }
     }
 
     fn evaluate_condition(&self, condition: Option<&str>) -> bool {
@@ -2452,6 +2467,8 @@ mod tests {
         assert!(state.evaluate_condition(Some("steps.disabled.outcome != 'success'")));
         assert!(state.evaluate_condition(Some("steps.disabled.conclusion == 'skipped'")));
         assert!(state.evaluate_condition(Some("runner.os == 'Linux'")));
+        assert_eq!(state.resolve_expressions("${{ job.status }}"), "success");
+        assert!(state.evaluate_condition(Some("job.status == 'success'")));
         assert!(state.evaluate_condition(Some("success()")));
         assert!(!state.evaluate_condition(Some("failure()")));
         assert!(!state.evaluate_condition(Some("cancelled()")));
@@ -2473,6 +2490,8 @@ mod tests {
         assert!(state.evaluate_condition(Some("failure()")));
         assert!(state.evaluate_condition(Some("failure() && !cancelled()")));
         assert!(state.evaluate_condition(Some("always() && failure()")));
+        assert_eq!(state.resolve_expressions("${{ job.status }}"), "failure");
+        assert!(state.evaluate_condition(Some("always() && job.status == 'failure'")));
 
         let mut ignored_state = JobExecutionState::default();
         ignored_state.apply(
@@ -2491,6 +2510,10 @@ mod tests {
         assert!(ignored_state.evaluate_condition(Some("steps.ignored.conclusion == 'success'")));
         assert!(ignored_state.evaluate_condition(Some("success()")));
         assert!(!ignored_state.evaluate_condition(Some("failure()")));
+        assert_eq!(
+            ignored_state.resolve_expressions("${{ job.status }}"),
+            "success"
+        );
     }
 
     #[test]
