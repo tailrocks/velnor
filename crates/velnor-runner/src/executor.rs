@@ -3513,6 +3513,86 @@ mod tests {
     }
 
     #[test]
+    fn target_rust_docker_job_outputs_resolve_after_filter_and_targets_steps() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::CompositeOutputs {
+                step_id: "filter".into(),
+                outputs: BTreeMap::from([("bitcoin-processor".into(), "false".into())]),
+                condition: None,
+            },
+            ExecutableStep::CompositeOutputs {
+                step_id: "targets".into(),
+                outputs: BTreeMap::from([("list".into(), "bitcoin-processor-app".into())]),
+                condition: None,
+            },
+        ];
+        let job_outputs = serde_json::json!({
+            "bitcoin-processor": "${{ github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.bitcoin-processor }}",
+            "bake-targets": "${{ steps.targets.outputs.list }}"
+        });
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[("GITHUB_EVENT_NAME".into(), "workflow_dispatch".into())],
+                &[],
+                Some(&job_outputs),
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(summary.job_outputs["bitcoin-processor"], "true");
+        assert_eq!(summary.job_outputs["bake-targets"], "bitcoin-processor-app");
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn target_jackin_dispatch_or_filter_job_output_uses_runtime_fallback() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::CompositeOutputs {
+                step_id: "dispatch".into(),
+                outputs: BTreeMap::new(),
+                condition: None,
+            },
+            ExecutableStep::CompositeOutputs {
+                step_id: "filter".into(),
+                outputs: BTreeMap::from([("docs".into(), "true".into())]),
+                condition: None,
+            },
+        ];
+        let job_outputs = serde_json::json!({
+            "docs": "${{ steps.dispatch.outputs.docs || steps.filter.outputs.docs }}"
+        });
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                Some(&job_outputs),
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(summary.job_outputs["docs"], "true");
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn materializes_composite_outputs_as_outer_step_outputs() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
