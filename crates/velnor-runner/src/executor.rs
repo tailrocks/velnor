@@ -4153,6 +4153,82 @@ fi"#
     }
 
     #[test]
+    fn target_required_job_cancelled_need_condition_fails_and_skips_ok_step() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "check-failed".into(),
+                script: "exit 1".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: Some(
+                    "needs.check.result == 'failure' || needs.check.result == 'cancelled'".into(),
+                ),
+                continue_on_error: false,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "bitcoin-cancelled".into(),
+                script: "exit 1".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: Some(
+                    "needs.test-bitcoin-processor.result == 'failure' || \
+                     needs.test-bitcoin-processor.result == 'cancelled'"
+                        .into(),
+                ),
+                continue_on_error: false,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "ok".into(),
+                script: "echo OK".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+        ];
+        let context = vec![(
+            "needs".into(),
+            serde_json::json!({
+                "check": { "result": "success" },
+                "test-bitcoin-processor": { "result": "cancelled" }
+            }),
+        )];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+            calls: Vec::new(),
+            codes: vec![0, 0, 1],
+        });
+
+        let results = executor
+            .execute_ordered_steps_with_context(&container(&temp), &steps, &[], &context, &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert!(results[0].skipped);
+        assert_eq!(results[1].exit_code, 1);
+        assert!(!results[1].failure_ignored);
+        assert!(results[2].skipped);
+        let exec_scripts = executor
+            .runner()
+            .calls
+            .iter()
+            .filter_map(|(_, args)| {
+                (args.first().is_some_and(|arg| arg == "exec"))
+                    .then(|| args.last().cloned())
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(exec_scripts, vec!["/__t/bitcoin-cancelled.sh"]);
+        assert!(!temp.join("check-failed.sh").exists());
+        assert!(!temp.join("ok.sh").exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn continue_on_error_keeps_failure_outcome_but_runs_later_steps() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
