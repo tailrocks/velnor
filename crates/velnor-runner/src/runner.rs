@@ -1844,6 +1844,7 @@ async fn complete_run_service_job(
         outputs,
         step_results,
         billing_owner_id,
+        infrastructure_failure_category: None,
     };
     client
         .complete_job(run_service_url, completion)

@@ -1443,6 +1443,11 @@ pub struct RunServiceCompleteJob {
     pub step_results: Vec<RunServiceStepResult>,
     #[serde(rename = "billingOwnerId", skip_serializing_if = "Option::is_none")]
     pub billing_owner_id: Option<String>,
+    #[serde(
+        rename = "infrastructureFailureCategory",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub infrastructure_failure_category: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2074,6 +2079,7 @@ mod tests {
                 completed_log_lines: 2,
             }],
             billing_owner_id: Some("42".into()),
+            infrastructure_failure_category: Some("runner_bootstrap".into()),
         };
 
         assert_eq!(
@@ -2092,7 +2098,8 @@ mod tests {
                     "conclusion": "succeeded",
                     "completed_log_lines": 2
                 }],
-                "billingOwnerId": "42"
+                "billingOwnerId": "42",
+                "infrastructureFailureCategory": "runner_bootstrap"
             })
         );
     }
