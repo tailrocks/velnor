@@ -348,6 +348,7 @@ where
                 &plan.repository_dir,
                 None,
                 Some(1),
+                false,
             )?;
         }
         resolved.push(resolve_action(plan)?);

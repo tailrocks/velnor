@@ -7,6 +7,7 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
+use url::Url;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckoutPlan {
@@ -16,6 +17,7 @@ pub struct CheckoutPlan {
     pub destination: PathBuf,
     pub token: Option<String>,
     pub fetch_depth: Option<u32>,
+    pub persist_credentials: bool,
     pub condition: Option<String>,
     pub continue_on_error: bool,
 }
@@ -71,6 +73,7 @@ pub fn checkout_plans(
             token: checkout_token(step, job)
                 .or_else(|| system_access_token(job.system_connection())),
             fetch_depth: checkout_fetch_depth(step)?,
+            persist_credentials: checkout_persist_credentials(step),
             condition: step.condition.clone(),
             continue_on_error: crate::script_step::step_continue_on_error(step),
         });
@@ -107,6 +110,7 @@ where
         &plan.destination,
         plan.token.as_deref(),
         plan.fetch_depth,
+        plan.persist_credentials,
     )
 }
 
@@ -117,6 +121,7 @@ pub fn fetch_git_ref<R>(
     destination: &Path,
     token: Option<&str>,
     fetch_depth: Option<u32>,
+    persist_credentials: bool,
 ) -> Result<()>
 where
     R: CommandRunner,
@@ -179,6 +184,36 @@ where
             "checkout".to_string(),
             "--force".to_string(),
             "FETCH_HEAD".to_string(),
+        ],
+    )?;
+
+    if persist_credentials {
+        if let Some(token) = token {
+            persist_git_credentials(runner, destination, clone_url, token)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn persist_git_credentials<R>(
+    runner: &mut R,
+    destination: &Path,
+    clone_url: &str,
+    token: &str,
+) -> Result<()>
+where
+    R: CommandRunner,
+{
+    run_git(
+        runner,
+        &[
+            "-C".to_string(),
+            path_arg(destination),
+            "config".to_string(),
+            "--local".to_string(),
+            git_extraheader_key(clone_url),
+            format!("AUTHORIZATION: bearer {token}"),
         ],
     )
 }
@@ -344,6 +379,15 @@ fn checkout_fetch_depth(step: &ActionStep) -> Result<Option<u32>> {
     }
 }
 
+fn checkout_persist_credentials(step: &ActionStep) -> bool {
+    step.inputs
+        .as_ref()
+        .and_then(|inputs| inputs.get("persist-credentials"))
+        .and_then(|value| value.as_str())
+        .map(|value| !value.eq_ignore_ascii_case("false"))
+        .unwrap_or(true)
+}
+
 fn checkout_token(step: &ActionStep, job: &AgentJobRequestMessage) -> Option<String> {
     let token = step
         .inputs
@@ -397,10 +441,22 @@ fn path_arg(path: &Path) -> String {
     path.display().to_string()
 }
 
+fn git_extraheader_key(clone_url: &str) -> String {
+    Url::parse(clone_url)
+        .ok()
+        .and_then(|url| {
+            let host = url.host_str()?;
+            Some(format!("http.{}://{host}/.extraheader", url.scheme()))
+        })
+        .unwrap_or_else(|| "http.https://github.com/.extraheader".to_string())
+}
+
 fn format_git_args(args: &[String]) -> String {
     args.iter()
         .map(|arg| {
-            if arg.starts_with("http.extraheader=AUTHORIZATION:") {
+            if arg.starts_with("http.extraheader=AUTHORIZATION:")
+                || arg.starts_with("AUTHORIZATION: bearer ")
+            {
                 "http.extraheader=AUTHORIZATION: ***".to_string()
             } else {
                 arg.clone()
@@ -460,6 +516,7 @@ mod tests {
             destination: temp.clone(),
             token: Some("token".into()),
             fetch_depth: Some(1),
+            persist_credentials: true,
             condition: None,
             continue_on_error: false,
         };
@@ -483,6 +540,10 @@ mod tests {
             "--force".into(),
             "FETCH_HEAD".into()
         ])));
+        assert!(runner.calls.iter().any(|(_, args)| args.ends_with(&[
+            "http.https://github.com/.extraheader".into(),
+            "AUTHORIZATION: bearer token".into()
+        ])));
 
         std::fs::remove_dir_all(temp).ok();
     }
@@ -500,6 +561,7 @@ mod tests {
             destination: temp.clone(),
             token: None,
             fetch_depth: None,
+            persist_credentials: true,
             condition: None,
             continue_on_error: false,
         };
@@ -564,6 +626,7 @@ mod tests {
         assert_eq!(plans[0].destination, Path::new("/tmp/work/homebrew-tap"));
         assert_eq!(plans[0].token.as_deref(), Some("tap-token"));
         assert_eq!(plans[0].fetch_depth, None);
+        assert!(plans[0].persist_credentials);
     }
 
     #[test]
@@ -602,6 +665,42 @@ mod tests {
         assert_eq!(plans[0].destination, Path::new("/tmp/work"));
         assert_eq!(plans[0].token.as_deref(), Some("ghs-token"));
         assert_eq!(plans[0].fetch_depth, Some(1));
+        assert!(plans[0].persist_credentials);
+    }
+
+    #[test]
+    fn checkout_can_disable_credential_persistence() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "CI",
+            "requestId": 1,
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "authorization": {
+                        "parameters": { "AccessToken": "ghs-token" }
+                    }
+                }],
+                "repositories": [{
+                    "alias": "self",
+                    "name": "acme/repo",
+                    "version": "abc123",
+                    "properties": { "cloneUrl": "https://github.com/acme/repo.git" }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" },
+                "inputs": { "persist-credentials": "false" }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert!(!plans[0].persist_credentials);
     }
 
     #[test]
@@ -674,6 +773,21 @@ mod tests {
             "-c".to_string(),
             "http.extraheader=AUTHORIZATION: bearer secret".to_string(),
             "fetch".to_string(),
+        ];
+
+        let formatted = format_git_args(&args);
+
+        assert!(formatted.contains("AUTHORIZATION: ***"));
+        assert!(!formatted.contains("secret"));
+    }
+
+    #[test]
+    fn masks_persisted_checkout_token_in_git_error_args() {
+        let args = vec![
+            "config".to_string(),
+            "--local".to_string(),
+            "http.https://github.com/.extraheader".to_string(),
+            "AUTHORIZATION: bearer secret".to_string(),
         ];
 
         let formatted = format_git_args(&args);

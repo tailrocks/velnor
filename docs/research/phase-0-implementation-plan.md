@@ -133,7 +133,7 @@ If Docker startup fails, Velnor removes any stale job container, service contain
 
 Velnor mounts one host-backed home directory at `/github/home` and sets `HOME=/github/home` for the long-running job container, JavaScript action side containers, and Docker action containers. This is required for target setup actions such as `jdx/mise-action` because tools installed under `$HOME` must remain visible to later script steps.
 
-Current code also treats enabled `actions/checkout` as a native host-side checkout before starting the Docker job container. It uses the self repository resource clone URL, job version/ref, and system access token by default; explicit `repository`, `path`, `ref`, `token`, and `fetch-depth` inputs are supported for target shapes such as Jackin's Homebrew tap checkout. Submodules, sparse checkout, LFS, and full credential cleanup remain later compatibility work.
+Current code also treats enabled `actions/checkout` as a native host-side checkout before starting the Docker job container. It uses the self repository resource clone URL, job version/ref, and system access token by default; explicit `repository`, `path`, `ref`, `token`, `fetch-depth`, and `persist-credentials` inputs are supported for target shapes such as Jackin's Homebrew tap checkout. When credential persistence is enabled, Velnor writes a local git extraheader so later `git push` commands in the same checkout can authenticate. Submodules, sparse checkout, LFS, and full credential cleanup remain later compatibility work.
 
 For target workflows, mount the host Docker socket first. This weakens isolation but is the shortest path to `docker/setup-buildx-action`, `docker/bake-action`, `docker/build-push-action`, and direct `docker buildx`.
 
@@ -240,7 +240,7 @@ GitHub UI compatibility needs reporting early. Minimal order:
 5. finish job with success/failure/cancelled
 6. include job outputs and step results in completion payload
 7. mask secrets in logs before upload. Current code builds masks from GitHub mask hints and secret variables for runner-uploaded feed lines, and stores `add-mask` workflow command values for the later step log uploader.
-8. support annotations from workflow commands. Current code parses state-changing stdout workflow commands (`set-output`, `set-env`, `add-path`, `save-state`) plus `add-mask`, and counts `error`, `warning`, and `notice` commands on timeline records; richer file/line annotation payloads and log grouping remain open.
+8. support annotations from workflow commands. Current code parses state-changing stdout workflow commands (`set-output`, `set-env`, `add-path`, `save-state`) plus `add-mask`, counts `error`, `warning`, and `notice` commands on timeline records, and preserves annotation title/location plus group/debug markers in uploaded step logs. Native GitHub UI folding for groups remains open.
 
 Until reporting exists, Docker step execution can be locally correct but GitHub will not look correct.
 

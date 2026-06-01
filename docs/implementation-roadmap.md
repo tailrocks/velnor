@@ -108,7 +108,7 @@ Goal: support common JavaScript actions.
 
 Deliverables:
 
-- broader `actions/checkout` compatibility: `repository`, `path`, `ref`, `token`, and `fetch-depth` inputs are implemented for target shapes; sparse checkout, submodules, LFS, and credentials cleanup remain open
+- broader `actions/checkout` compatibility: `repository`, `path`, `ref`, `token`, `fetch-depth`, and `persist-credentials` inputs are implemented for target shapes; sparse checkout, submodules, LFS, and credentials cleanup remain open
 - action resolver/downloader for `owner/repo@ref`: repository action download into `_actions` and metadata discovery are implemented
 - action metadata parser for `action.yml`: JavaScript, composite, and Docker `runs.using` shapes are modeled
 - repository action planner for enabled non-checkout `uses:` steps
@@ -129,7 +129,7 @@ Deliverables:
   - action runtime values from `SystemVssConnection` are injected: `ACTIONS_RUNTIME_URL`, `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_CACHE_URL`, `ACTIONS_RESULTS_URL`, OIDC request URL/token, cache service v2, and orchestration id when GitHub sends them
   - broader GitHub runner env parity remains incomplete
 - `secrets.*` expressions are resolved from GitHub secret job variables, including `secrets.GITHUB_TOKEN` from `system.github.token`; GitHub mask hints and secret variables are applied to runner-uploaded feed lines, and `::add-mask::` workflow commands are tracked for later step log masking
-- basic workflow command parsing: state-changing stdout commands are parsed; `error`, `warning`, and `notice` commands are counted on timeline records so GitHub UI can surface target annotations; log grouping is not yet reported to GitHub UI
+- basic workflow command parsing: state-changing stdout commands are parsed; `error`, `warning`, and `notice` commands are counted on timeline records and title/location plus group/debug markers are preserved in uploaded step logs; native GitHub UI group folding is not yet reported
 - runner-side expression contexts: `env.*`, selected `github.*`/`runner.*` including `github.workflow` and `github.ref_name`, nested `github.event.*` from `ContextData`, `steps.*.outputs.*`, `secrets.*`, and generic job `ContextData` lookup such as `matrix.*`, `needs.*`, `inputs.*`, and `vars.*` are supported for script/action env and basic step conditions; `&&`/`||` value expressions, equality checks, unary `!`, `contains()`, `toJSON()`, and workspace-backed `hashFiles(...)` cover target-shaped cases
 - `continue-on-error`: script and JavaScript action steps can ignore a nonzero exit for job failure while preserving `steps.<id>.outcome == 'failure'`, covering target optional `sccache` setup
 - ordered job execution for script steps and JavaScript actions in original message order is wired, with JavaScript post hooks executed in reverse order; host-side checkout still runs before the Docker container starts
