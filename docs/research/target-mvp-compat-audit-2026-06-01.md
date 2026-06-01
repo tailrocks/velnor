@@ -7,6 +7,16 @@ Refreshed target commits on 2026-06-01:
 - `jackin-project/jackin`: `52a457b689940e05ed65015d2a82ff0e22577d2e`
 - `ChainArgos/java-monorepo`: `56491ec5b17702186506217452b58bcf57572079`
 
+Refresh command:
+
+```bash
+python3 scripts/target_audit.py /tmp/velnor-targets/jackin /tmp/velnor-targets/java-monorepo
+```
+
+The helper reports workflow files, action metadata, exact `uses:` inventory,
+explicit shells, job containers, services, local actions, reusable workflows,
+and `continue-on-error` shapes.
+
 ## Scope Rule
 
 If a feature, action option, expression form, shell, service shape, or checkout mode is not used by these `.github` trees, it is not Phase 0 work unless live target execution proves GitHub sends it in the job payload anyway.

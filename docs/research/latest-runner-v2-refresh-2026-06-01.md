@@ -56,8 +56,9 @@ Source anchors in `actions/runner` `v2.334.0`:
 - Use the job-scoped `SystemVssConnection` token from the acquired job message
   for renew/complete when available.
 - Complete V2 jobs through `completejob`, including job outputs, step results,
-  workflow-command annotations, and evaluated environment URL when present.
-  Telemetry remains an implementation gap for full parity.
+  workflow-command annotations, evaluated environment URL when present,
+  telemetry for implemented workflow-command cases, billing owner id, and
+  infrastructure failure category.
 - Treat `ForceTokenRefresh`, runner refresh/update, cancellation, hosted
   shutdown, and broker migration as control-plane messages, not user steps.
 
