@@ -5,6 +5,7 @@ These notes summarize the parts of `github.com/actions/runner` that matter for a
 Source inspected:
 
 - https://github.com/actions/runner
+- latest local refresh during implementation: `c6a124e18496a6e5d2357415052d1799afc64b63`
 
 Key files:
 
@@ -180,6 +181,30 @@ Phase 0 needs:
 - Docker action
 - enough built-in/plugin behavior for checkout/artifact/cache actions to work through normal action packages
 
+## Runtime Context Env
+
+Official worker handlers expose context objects through `IEnvironmentContextData` immediately before executing a step:
+
+- `ScriptHandler`
+- `NodeScriptActionHandler`
+- `ContainerActionHandler`
+
+`GitHubContext.GetRuntimeEnvironmentVariables()` allowlists `github.*` fields and emits matching `GITHUB_*` env vars. `RunnerContext.GetRuntimeEnvironmentVariables()` emits all `runner.*` fields as `RUNNER_*`.
+
+Important step-scoped behavior from `StepsRunner` and `ActionRunner`:
+
+- `StepsRunner` sets `github.action` to `ActionStep.Action.Name` before evaluating and merging step env.
+- `ActionRunner` sets `github.action_repository` and `github.action_ref` for non-self repository actions; local/self actions clear those fields.
+- `CompositeActionHandler` shallow-copies the parent `github` context for embedded steps and sets `github.action_path` to the composite action directory.
+- `CompositeActionHandler` also sets `github.action_status` as expression-only state for embedded composite steps. It is not in the `GitHubContext` env allowlist, so it is not exported as `GITHUB_ACTION_STATUS`.
+
+Velnor implications:
+
+- `GITHUB_ACTION` must be step-scoped for script, JavaScript, Docker, checkout, and composite-output pseudo-steps before condition/env/script rendering.
+- Repository JavaScript/Docker actions still need their action-scoped env overlay for `GITHUB_ACTION_PATH`, `GITHUB_ACTION_REPOSITORY`, and `GITHUB_ACTION_REF`.
+- Composite `run:` steps need `GITHUB_ACTION_PATH` pointing at the parent composite action directory, including repository composites expanded from marketplace actions.
+- `github.action_status` is lower priority for the target repositories because no target workflow/action currently references it, but it is a known composite parity gap.
+
 ## Script Steps
 
 `ScriptHandler`:
@@ -263,6 +288,8 @@ Phase 0 needs:
   - `ACTIONS_RESULTS_URL`
   - `ACTIONS_ID_TOKEN_REQUEST_URL`
   - `ACTIONS_ID_TOKEN_REQUEST_TOKEN`
+- sets `ACTIONS_CACHE_SERVICE_V2=True` when the `actions_uses_cache_service_v2` variable is true
+- optionally sets `ACTIONS_ORCHESTRATION_ID` when the orchestration feature flag is enabled
 - executes bundled runner Node binary
 
 For Velnor:

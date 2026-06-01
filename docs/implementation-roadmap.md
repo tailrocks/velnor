@@ -218,6 +218,13 @@ Initial targets:
 - `ChainArgos/java-monorepo/.github/workflows/kestra-build-publish.yml`
 - selected Linux-only `jackin-project/jackin` workflows
 
+Fresh target action inventory from the target `.github` trees on 2026-06-01:
+
+- high-frequency: `actions/checkout` 46, `jdx/mise-action` 13, `actions/cache` 13, `mozilla-actions/sccache-action` 7, `actions/upload-artifact` 6, `dorny/paths-filter` 5, `rui314/setup-mold` 5, `docker/setup-buildx-action` 5, `docker/login-action` 5
+- important lower-frequency: `actions/download-artifact` 3, `crazy-max/ghaction-github-runtime` 2, local `aggregate-needs` 3, local `check-deployed-docs` 2
+- release/pages/docker-specific: `actions/upload-pages-artifact`, `actions/deploy-pages`, `docker/metadata-action`, `docker/build-push-action`, `docker/bake-action`
+- reusable workflow job references exist in `java-monorepo` (`./.github/workflows/kestra-build-image.yml`), but GitHub expands those before a runner receives individual job messages, so Phase 0 should not parse workflow-level `jobs.<id>.uses`
+
 Deferred:
 
 - macOS `jackin` builds
