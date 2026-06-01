@@ -108,6 +108,60 @@ pub enum ActionRuntime {
     Docker { image: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeActionAdapter {
+    Checkout,
+    Cache,
+    UploadArtifact,
+    DownloadArtifact,
+    UploadPagesArtifact,
+    DeployPages,
+    SetupPython,
+    PathsFilter,
+    Mise,
+    Sccache,
+    SetupMold,
+    SetupJust,
+    RustToolchain,
+    CargoInstall,
+    RustCache,
+    GitHubRuntimeExport,
+    Renovate,
+    DockerSetupBuildx,
+    DockerLogin,
+    DockerMetadata,
+    DockerBuildPush,
+    DockerBake,
+}
+
+pub fn native_action_adapter(repository: &str) -> Option<NativeActionAdapter> {
+    match repository.to_ascii_lowercase().as_str() {
+        "actions/checkout" => Some(NativeActionAdapter::Checkout),
+        "actions/cache" => Some(NativeActionAdapter::Cache),
+        "actions/upload-artifact" => Some(NativeActionAdapter::UploadArtifact),
+        "actions/download-artifact" => Some(NativeActionAdapter::DownloadArtifact),
+        "actions/upload-pages-artifact" => Some(NativeActionAdapter::UploadPagesArtifact),
+        "actions/deploy-pages" => Some(NativeActionAdapter::DeployPages),
+        "actions/setup-python" => Some(NativeActionAdapter::SetupPython),
+        "dorny/paths-filter" => Some(NativeActionAdapter::PathsFilter),
+        "jdx/mise-action" => Some(NativeActionAdapter::Mise),
+        "mozilla-actions/sccache-action" => Some(NativeActionAdapter::Sccache),
+        "rui314/setup-mold" => Some(NativeActionAdapter::SetupMold),
+        "extractions/setup-just" => Some(NativeActionAdapter::SetupJust),
+        "dtolnay/rust-toolchain" => Some(NativeActionAdapter::RustToolchain),
+        "baptiste0928/cargo-install" => Some(NativeActionAdapter::CargoInstall),
+        "swatinem/rust-cache" => Some(NativeActionAdapter::RustCache),
+        "crazy-max/ghaction-github-runtime" => Some(NativeActionAdapter::GitHubRuntimeExport),
+        "renovatebot/github-action" => Some(NativeActionAdapter::Renovate),
+        "docker/setup-buildx-action" => Some(NativeActionAdapter::DockerSetupBuildx),
+        "docker/login-action" => Some(NativeActionAdapter::DockerLogin),
+        "docker/metadata-action" => Some(NativeActionAdapter::DockerMetadata),
+        "docker/build-push-action" => Some(NativeActionAdapter::DockerBuildPush),
+        "docker/bake-action" => Some(NativeActionAdapter::DockerBake),
+        _ => None,
+    }
+}
+
 impl ActionMetadata {
     pub fn runtime(&self) -> Result<ActionRuntime> {
         let using = self.runs.using.to_ascii_lowercase();
@@ -2792,6 +2846,51 @@ runs:
             "missing fetched target action metadata:\n{}",
             missing.join("\n")
         );
+    }
+
+    #[test]
+    fn target_marketplace_actions_map_to_native_adapters() {
+        let adapters = [
+            ("actions/checkout", NativeActionAdapter::Checkout),
+            ("actions/cache", NativeActionAdapter::Cache),
+            ("actions/upload-artifact", NativeActionAdapter::UploadArtifact),
+            ("actions/download-artifact", NativeActionAdapter::DownloadArtifact),
+            (
+                "actions/upload-pages-artifact",
+                NativeActionAdapter::UploadPagesArtifact,
+            ),
+            ("actions/deploy-pages", NativeActionAdapter::DeployPages),
+            ("actions/setup-python", NativeActionAdapter::SetupPython),
+            ("dorny/paths-filter", NativeActionAdapter::PathsFilter),
+            ("jdx/mise-action", NativeActionAdapter::Mise),
+            ("mozilla-actions/sccache-action", NativeActionAdapter::Sccache),
+            ("rui314/setup-mold", NativeActionAdapter::SetupMold),
+            ("extractions/setup-just", NativeActionAdapter::SetupJust),
+            ("dtolnay/rust-toolchain", NativeActionAdapter::RustToolchain),
+            ("baptiste0928/cargo-install", NativeActionAdapter::CargoInstall),
+            ("Swatinem/rust-cache", NativeActionAdapter::RustCache),
+            (
+                "crazy-max/ghaction-github-runtime",
+                NativeActionAdapter::GitHubRuntimeExport,
+            ),
+            ("renovatebot/github-action", NativeActionAdapter::Renovate),
+            (
+                "docker/setup-buildx-action",
+                NativeActionAdapter::DockerSetupBuildx,
+            ),
+            ("docker/login-action", NativeActionAdapter::DockerLogin),
+            ("docker/metadata-action", NativeActionAdapter::DockerMetadata),
+            (
+                "docker/build-push-action",
+                NativeActionAdapter::DockerBuildPush,
+            ),
+            ("docker/bake-action", NativeActionAdapter::DockerBake),
+        ];
+
+        for (repository, adapter) in adapters {
+            assert_eq!(native_action_adapter(repository), Some(adapter));
+        }
+        assert_eq!(native_action_adapter("owner/unknown-action"), None);
     }
 
     fn action_metadata_files(root: &Path) -> Vec<PathBuf> {

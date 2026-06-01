@@ -9,6 +9,10 @@ The runner job-message contract is `docs/research/github-runner-job-message-cont
 The normalized plan boundary for both GitHub job messages and future Pkl workflows is `docs/research/normalized-plan-contract-2026-06-01.md`.
 The implementation-oriented runner blueprint is `docs/research/self-hosted-runner-implementation-blueprint-2026-06-01.md`.
 The target-only MVP contract is `docs/research/target-mvp-compat-audit-2026-06-01.md`; Phase 0 work should be judged against those two repositories' current `.github` trees, not broad GitHub Actions parity.
+The native action adapter boundary is `docs/native-action-adapter-contract.md`;
+Velnor keeps GitHub-compatible YAML, but supported marketplace actions should
+resolve to Rust-native adapters instead of executing their JavaScript or
+TypeScript bundles.
 
 ## Milestone 0: Protocol Spike
 

@@ -67,14 +67,20 @@ Velnor must implement enough of the runner side:
 - execute assigned jobs
 - report logs/timeline/results
 - run shell steps
-- run JavaScript actions
+- route supported marketplace action references to Rust-native adapters
 - run composite actions
-- run Docker/container actions
+- run Docker/container behavior through Velnor-owned Rust adapters for supported target actions
 - support local actions from `.github/actions/*`
 - support action command files such as `GITHUB_OUTPUT`
 - support environment/context variables expected by actions
 - support artifacts/cache by passing GitHub-provided runtime endpoints and tokens
 - isolate every job in Docker
+
+Velnor must not hardcode target workflow files, job ids, or step ids in the
+runtime. The two target repositories define the first capability set, but each
+capability should be implemented as reusable runner behavior or a reusable
+native action adapter. The native adapter boundary is documented in
+`docs/native-action-adapter-contract.md`.
 
 ## Target Repositories
 
@@ -228,6 +234,10 @@ From the target repositories, Phase 0 must support:
 - Docker Buildx/Bake
 
 Some of these are mostly implemented by actions themselves. Velnor's job is to provide the environment those actions expect.
+
+For Velnor's intended architecture, "actions themselves" means Rust-native
+compatibility adapters for the observed action references and input shapes, not
+executing the original marketplace JavaScript or TypeScript bundles.
 
 ## Target Action Inventory
 

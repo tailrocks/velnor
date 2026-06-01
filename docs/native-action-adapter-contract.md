@@ -1,0 +1,129 @@
+# Native Action Adapter Contract
+
+Status: Phase 0 direction
+
+Velnor keeps GitHub Actions YAML as the compatibility input, but it must not treat
+marketplace action source code as the implementation. The runner accepts the same
+`uses:` syntax and the same `with:` inputs used by the target repositories, then
+routes supported actions to Rust-native adapters.
+
+This keeps the migration path close to GitHub Actions while preserving the long
+term Velnor direction: deterministic, typed, Rust-owned execution instead of
+running arbitrary JavaScript or TypeScript action bundles.
+
+## Boundary
+
+GitHub still owns these pieces when Velnor is registered as a self-hosted runner:
+
+- event trigger matching
+- workflow YAML parsing
+- matrix expansion
+- reusable workflow expansion
+- job DAG scheduling
+- permission/token creation
+- job message delivery
+
+Velnor owns runner-side execution:
+
+- Docker job isolation
+- script step execution
+- expression resolution needed at runner execution time
+- command files and workflow commands
+- log/timeline/result upload
+- native behavior for supported `uses:` actions
+
+The runtime must never hardcode a workflow file, job id, or step id from
+`jackin` or `java-monorepo`. Target-specific snapshots in `scripts/target_audit.py`
+are only drift alarms: they tell us when the target repos start using a new
+feature class that Velnor does not support yet.
+
+## Adapter Shape
+
+A native adapter is selected by action reference, not by workflow location:
+
+```text
+uses: actions/cache@<sha>
+with:
+  path: ...
+  key: ...
+  restore-keys: ...
+
+        |
+        v
+
+NativeAction::Cache {
+  path,
+  key,
+  restore_keys,
+  runtime_endpoint,
+  runtime_token,
+}
+```
+
+The adapter receives already-resolved runner contexts where GitHub would resolve
+them for that step:
+
+- `github`, `runner`, `env`, `matrix`, `needs`, `inputs`, `vars`, `secrets`
+- previous `steps.<id>.outputs.*`
+- command-file state from earlier steps
+- GitHub runtime endpoints and tokens from the job message
+
+The adapter returns the same observable step result GitHub users expect:
+
+- exit status
+- stdout/stderr log lines
+- outputs
+- env/path/state/summary mutations
+- annotations/masks/groups/debug lines
+- post-step work, if the action has cleanup behavior
+
+## Phase 0 Adapter Inventory
+
+These adapters are required because the two target repositories use them now.
+The implementation should cover only the input shapes observed in those repos
+until a new target workflow needs more.
+
+| Action reference family | Native adapter | Required behavior |
+| --- | --- | --- |
+| `actions/checkout` | `Checkout` | self checkout, external repo checkout, `path`, `ref`, `token`, `fetch-depth` |
+| `actions/cache` | `Cache` | restore/save paths, key, restore keys, `hashFiles(...)` keys |
+| `actions/upload-artifact` | `UploadArtifact` | `name`, `path`, `if-no-files-found`, `retention-days` |
+| `actions/download-artifact` | `DownloadArtifact` | `pattern`, `path`, `merge-multiple` |
+| `actions/upload-pages-artifact` | `UploadPagesArtifact` | package pages directory and expose artifact handoff |
+| `actions/deploy-pages` | `DeployPages` | OIDC/runtime env, deployment output `page_url` |
+| `actions/setup-python` | `SetupPython` | install/select requested Python, update tool cache and `GITHUB_PATH` |
+| `dorny/paths-filter` | `PathsFilter` | evaluate target multiline filters for push, PR, workflow dispatch |
+| `jdx/mise-action` | `Mise` | install requested tools, use shared home, update `GITHUB_PATH` |
+| `mozilla-actions/sccache-action` | `Sccache` | configure env/path/cache, support optional failure and post behavior |
+| `rui314/setup-mold` | `SetupMold` | install/link mold for later Rust builds |
+| `extractions/setup-just` | `SetupJust` | install just binary for later scripts |
+| `dtolnay/rust-toolchain` | `RustToolchain` | install/select stable Rust toolchain |
+| `baptiste0928/cargo-install` | `CargoInstall` | install crate with `locked` support |
+| `Swatinem/rust-cache` | `RustCache` | restore/save cache dirs, `shared-key`, `cache-on-failure` |
+| `crazy-max/ghaction-github-runtime` | `GitHubRuntimeExport` | export runtime/cache/results env values |
+| `renovatebot/github-action` | `Renovate` | run Renovate with target env/token/Docker access |
+| `docker/setup-buildx-action` | `DockerSetupBuildx` | create/select builder and honor target inputs |
+| `docker/login-action` | `DockerLogin` | registry login from resolved credentials |
+| `docker/metadata-action` | `DockerMetadata` | compute target tags/labels outputs |
+| `docker/build-push-action` | `DockerBuildPush` | invoke Buildx for target context/tag/cache/push shapes |
+| `docker/bake-action` | `DockerBake` | invoke Buildx Bake for target file/target/push/cache shapes |
+
+Local composite actions remain first-class workflow code. Velnor should parse
+their metadata and expand their nested `run` and `uses` steps, but nested
+marketplace `uses` steps still route through this same native adapter registry.
+
+## Not Supported By Phase 0
+
+These are intentionally outside the first target contract:
+
+- arbitrary marketplace JavaScript execution
+- arbitrary marketplace Docker action execution
+- Node runtime installation for action bundles
+- broad `actions/checkout` features such as submodules, sparse checkout, or LFS
+- service containers unless a target workflow starts using them
+- job containers from workflow YAML unless a target workflow starts using them
+- macOS runner replacement inside Linux Docker
+
+If a target repo adds one of these, the audit should fail first. Then Velnor
+should add the feature as a reusable capability, not as a workflow-specific case.
+

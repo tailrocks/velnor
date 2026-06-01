@@ -14,14 +14,15 @@ python3 scripts/target_audit.py /tmp/velnor-targets/jackin /tmp/velnor-targets/j
 ```
 
 The helper reports workflow files, action metadata, exact `uses:` inventory,
-explicit shells, triggers, permissions, concurrency, `runs-on`, defaults,
-environments, job timeouts, job containers, services, local actions, reusable
-workflows, and `continue-on-error` shapes. It accepts either repository roots or
-their `.github` directories.
+explicit shells, triggers, workflow/job env, job `if`, `needs`, strategy,
+outputs, permissions, concurrency, `runs-on`, defaults, environments, job
+timeouts, job containers, services, local actions, reusable workflows, and
+`continue-on-error` shapes. It accepts either repository roots or their `.github`
+directories.
 
 ## Scope Rule
 
-If a feature, action option, expression form, shell, service shape, or checkout mode is not used by these `.github` trees, it is not Phase 0 work unless live target execution proves GitHub sends it in the job payload anyway.
+If a feature, action option, expression form, shell, service shape, or checkout mode is not used by these `.github` trees, it is not Phase 0 work unless live target execution proves GitHub sends it in the job payload anyway. This is a capability boundary, not runtime workflow hardcoding: Velnor should implement reusable feature classes and Rust-native action adapters that happen to cover these target workflows first.
 
 The MVP is successful when the target workflows can run on a Velnor self-hosted runner with the same observable behavior as GitHub-hosted/self-hosted Actions for these repos: same step ordering, same conditions, same outputs/env propagation, same cache/artifact/runtime env, same Docker/buildx behavior, and same success/failure status in the GitHub UI.
 

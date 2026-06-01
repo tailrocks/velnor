@@ -402,9 +402,15 @@ def audit(roots: list[Path]) -> dict[str, Any]:
     services: list[tuple[str, str, list[str]]] = []
     continue_on_error: list[tuple[str, str, str, Any]] = []
     workflow_triggers: list[tuple[str, list[str]]] = []
+    workflow_env: list[tuple[str, str]] = []
     workflow_permissions: list[tuple[str, list[str]]] = []
     workflow_concurrency: list[tuple[str, str]] = []
     job_runs_on: list[tuple[str, str, str]] = []
+    job_ifs: list[tuple[str, str, str]] = []
+    job_needs: list[tuple[str, str, str]] = []
+    job_strategy: list[tuple[str, str, str]] = []
+    job_env: list[tuple[str, str, str]] = []
+    job_outputs: list[tuple[str, str, str]] = []
     job_permissions: list[tuple[str, str, list[str]]] = []
     job_concurrency: list[tuple[str, str, str]] = []
     job_defaults: list[tuple[str, str, str]] = []
@@ -436,6 +442,8 @@ def audit(roots: list[Path]) -> dict[str, Any]:
 
             workflow_files.append(display_path)
             workflow_triggers.append((display_path, list_keys(data.get("on") or data.get(True))))
+            if "env" in data:
+                workflow_env.append((display_path, compact_value(data["env"])))
             if "permissions" in data:
                 workflow_permissions.append((display_path, list_keys(data["permissions"])))
             if "concurrency" in data:
@@ -451,6 +459,20 @@ def audit(roots: list[Path]) -> dict[str, Any]:
                 if "runs-on" in job:
                     job_runs_on.append(
                         (display_path, job_name_str, compact_value(job["runs-on"]))
+                    )
+                if "if" in job:
+                    job_ifs.append((display_path, job_name_str, str(job["if"])))
+                if "needs" in job:
+                    job_needs.append((display_path, job_name_str, compact_value(job["needs"])))
+                if "strategy" in job:
+                    job_strategy.append(
+                        (display_path, job_name_str, compact_value(job["strategy"]))
+                    )
+                if "env" in job:
+                    job_env.append((display_path, job_name_str, compact_value(job["env"])))
+                if "outputs" in job:
+                    job_outputs.append(
+                        (display_path, job_name_str, compact_value(job["outputs"]))
                     )
                 if "permissions" in job:
                     job_permissions.append(
@@ -505,9 +527,15 @@ def audit(roots: list[Path]) -> dict[str, Any]:
         "services": services,
         "continue_on_error": continue_on_error,
         "workflow_triggers": workflow_triggers,
+        "workflow_env": workflow_env,
         "workflow_permissions": workflow_permissions,
         "workflow_concurrency": workflow_concurrency,
         "job_runs_on": job_runs_on,
+        "job_ifs": job_ifs,
+        "job_needs": job_needs,
+        "job_strategy": job_strategy,
+        "job_env": job_env,
+        "job_outputs": job_outputs,
         "job_permissions": job_permissions,
         "job_concurrency": job_concurrency,
         "job_defaults": job_defaults,
@@ -538,6 +566,13 @@ def print_report(summary: dict[str, Any]) -> None:
     for path, triggers in summary["workflow_triggers"]:
         print(f"- {path}: {', '.join(triggers)}")
 
+    print("\nWorkflow env:")
+    if summary["workflow_env"]:
+        for path, value in summary["workflow_env"]:
+            print(f"- {path}: {value}")
+    else:
+        print("- none")
+
     print("\nWorkflow permissions:")
     if summary["workflow_permissions"]:
         for path, permissions in summary["workflow_permissions"]:
@@ -555,6 +590,41 @@ def print_report(summary: dict[str, Any]) -> None:
     print("\nRuns-on:")
     for path, job, value in summary["job_runs_on"]:
         print(f"- {path} :: {job} :: {value}")
+
+    print("\nJob if:")
+    if summary["job_ifs"]:
+        for path, job, value in summary["job_ifs"]:
+            print(f"- {path} :: {job} :: {value}")
+    else:
+        print("- none")
+
+    print("\nJob needs:")
+    if summary["job_needs"]:
+        for path, job, value in summary["job_needs"]:
+            print(f"- {path} :: {job} :: {value}")
+    else:
+        print("- none")
+
+    print("\nJob strategy:")
+    if summary["job_strategy"]:
+        for path, job, value in summary["job_strategy"]:
+            print(f"- {path} :: {job} :: {value}")
+    else:
+        print("- none")
+
+    print("\nJob env:")
+    if summary["job_env"]:
+        for path, job, value in summary["job_env"]:
+            print(f"- {path} :: {job} :: {value}")
+    else:
+        print("- none")
+
+    print("\nJob outputs:")
+    if summary["job_outputs"]:
+        for path, job, value in summary["job_outputs"]:
+            print(f"- {path} :: {job} :: {value}")
+    else:
+        print("- none")
 
     print("\nJob permissions:")
     if summary["job_permissions"]:
