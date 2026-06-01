@@ -63,6 +63,26 @@ EXPECTED_ACTION_FILES = {
     (".github/actions/check-deployed-docs/action.yml", "composite"),
 }
 
+EXPECTED_REUSABLE_WORKFLOWS = Counter(
+    {
+        (
+            ".github/workflows/kestra-build-publish.yml",
+            "docker-jvm-base",
+            "./.github/workflows/kestra-build-image.yml",
+        ): 1,
+        (
+            ".github/workflows/kestra-build-publish.yml",
+            "docker-kestra-backup",
+            "./.github/workflows/kestra-build-image.yml",
+        ): 1,
+        (
+            ".github/workflows/kestra-build-publish.yml",
+            "docker-kestra-playwright",
+            "./.github/workflows/kestra-build-image.yml",
+        ): 1,
+    }
+)
+
 
 def load_yaml(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
@@ -405,6 +425,13 @@ def check_target_mvp(summary: dict[str, Any]) -> list[str]:
         errors.append(
             "target MVP local action metadata drift: "
             f"expected {sorted(EXPECTED_ACTION_FILES)}, got {sorted(action_files)}"
+        )
+
+    reusable_workflows = Counter(summary["reusable_workflows"])
+    if reusable_workflows != EXPECTED_REUSABLE_WORKFLOWS:
+        errors.append(
+            "target MVP reusable workflow drift: "
+            f"expected {dict(EXPECTED_REUSABLE_WORKFLOWS)}, got {dict(reusable_workflows)}"
         )
 
     for label, key in [
