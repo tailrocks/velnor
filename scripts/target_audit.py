@@ -663,6 +663,264 @@ EXPECTED_CONTINUE_ON_ERROR = Counter(
     }
 )
 
+EXPECTED_STEP_IF = Counter(
+    {
+        (
+            ".github/workflows/ci.yml",
+            "changes",
+            "Force rust=true construct=true on workflow_dispatch",
+            "github.event_name == 'workflow_dispatch'",
+        ): 1,
+        (
+            ".github/workflows/ci.yml",
+            "changes",
+            "dorny/paths-filter",
+            "github.event_name != 'workflow_dispatch'",
+        ): 1,
+        (
+            ".github/workflows/ci.yml",
+            "check",
+            "Enable sccache",
+            "steps.sccache.outcome == 'success'",
+        ): 1,
+        (
+            ".github/workflows/ci.yml",
+            "check",
+            "docker/setup-buildx-action",
+            "needs.changes.outputs.construct == 'true'",
+        ): 1,
+        (
+            ".github/workflows/ci.yml",
+            "check",
+            "crazy-max/ghaction-github-runtime",
+            "needs.changes.outputs.construct == 'true'",
+        ): 1,
+        (
+            ".github/workflows/ci.yml",
+            "check",
+            "Build construct image for E2E",
+            "needs.changes.outputs.construct == 'true'",
+        ): 1,
+        (
+            ".github/workflows/ci.yml",
+            "build-validator",
+            "Enable sccache",
+            "steps.sccache.outcome == 'success'",
+        ): 1,
+        (
+            ".github/workflows/construct.yml",
+            "changes",
+            "Force construct=true on workflow_dispatch",
+            "github.event_name == 'workflow_dispatch'",
+        ): 1,
+        (
+            ".github/workflows/construct.yml",
+            "changes",
+            "dorny/paths-filter",
+            "github.event_name != 'workflow_dispatch'",
+        ): 1,
+        (
+            ".github/workflows/construct.yml",
+            "build",
+            "docker/login-action",
+            "needs.changes.outputs.is_publish == 'true'",
+        ): 1,
+        (
+            ".github/workflows/construct.yml",
+            "build",
+            "crazy-max/ghaction-github-runtime",
+            "needs.changes.outputs.is_publish != 'true'",
+        ): 1,
+        (
+            ".github/workflows/construct.yml",
+            "build",
+            "Build ${{ matrix.platform }} without push",
+            "needs.changes.outputs.is_publish != 'true'",
+        ): 1,
+        (
+            ".github/workflows/construct.yml",
+            "build",
+            "Push ${{ matrix.platform }} image by digest",
+            "needs.changes.outputs.is_publish == 'true'",
+        ): 1,
+        (
+            ".github/workflows/construct.yml",
+            "build",
+            "actions/upload-artifact",
+            "needs.changes.outputs.is_publish == 'true'",
+        ): 1,
+        (
+            ".github/workflows/docs.yml",
+            "changes",
+            "Force docs=true on workflow_dispatch",
+            "github.event_name == 'workflow_dispatch'",
+        ): 1,
+        (
+            ".github/workflows/docs.yml",
+            "changes",
+            "dorny/paths-filter",
+            "github.event_name != 'workflow_dispatch'",
+        ): 1,
+        (
+            ".github/workflows/docs.yml",
+            "docs-link-check",
+            "actions/upload-pages-artifact",
+            "github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')",
+        ): 1,
+        (
+            ".github/workflows/preview.yml",
+            "build-preview",
+            "Enable sccache",
+            "steps.sccache.outcome == 'success'",
+        ): 1,
+        (
+            ".github/workflows/preview.yml",
+            "build-preview",
+            "actions/cache",
+            "contains(matrix.target, 'apple')",
+        ): 1,
+        (
+            ".github/workflows/preview.yml",
+            "build-preview",
+            "Download macOS SDK",
+            "contains(matrix.target, 'apple') && steps.sdk-cache.outputs.cache-hit != 'true'",
+        ): 1,
+        (
+            ".github/workflows/preview.yml",
+            "build-preview",
+            "Set macOS SDKROOT",
+            "contains(matrix.target, 'apple')",
+        ): 1,
+        (
+            ".github/workflows/preview.yml",
+            "build-jackin-capsule",
+            "Enable sccache",
+            "steps.sccache.outcome == 'success'",
+        ): 1,
+        (
+            ".github/workflows/preview.yml",
+            "publish-preview",
+            "Verify source SHA is on main",
+            "github.event_name == 'workflow_run'",
+        ): 1,
+        (
+            ".github/workflows/release.yml",
+            "check-version",
+            "Require main for manual releases",
+            "github.event_name == 'workflow_dispatch'",
+        ): 1,
+        (
+            ".github/workflows/release.yml",
+            "test",
+            "Enable sccache",
+            "steps.sccache.outcome == 'success'",
+        ): 1,
+        (
+            ".github/workflows/release.yml",
+            "build",
+            "Enable sccache",
+            "steps.sccache.outcome == 'success'",
+        ): 1,
+        (
+            ".github/workflows/release.yml",
+            "build",
+            "rui314/setup-mold",
+            "runner.os == 'Linux'",
+        ): 1,
+        (".github/workflows/release.yml", "build", "jdx/mise-action", "matrix.zigbuild"): 1,
+        (
+            ".github/workflows/release.yml",
+            "build-jackin-capsule",
+            "Enable sccache",
+            "steps.sccache.outcome == 'success'",
+        ): 1,
+        (
+            ".github/workflows/release.yml",
+            "release",
+            "Create tag",
+            "github.event_name == 'workflow_dispatch'",
+        ): 1,
+        (
+            ".github/workflows/kestra-build-image.yml",
+            "build",
+            "docker/login-action",
+            "steps.check-image.outputs.exists == 'false'",
+        ): 1,
+        (
+            ".github/workflows/kestra-build-image.yml",
+            "build",
+            "docker/setup-buildx-action",
+            "steps.check-image.outputs.exists == 'false'",
+        ): 1,
+        (
+            ".github/workflows/kestra-build-image.yml",
+            "build",
+            "Build Docker image",
+            "steps.check-image.outputs.exists == 'false'",
+        ): 1,
+        (
+            ".github/workflows/rust-docker.yml",
+            "docker-required",
+            "Fail if bake failed",
+            "needs.docker-bake.result == 'failure' || needs.docker-bake.result == 'cancelled'",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "rust-required",
+            "Fail if format or lint failed",
+            "needs.check.result == 'failure' || needs.check.result == 'cancelled'",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "rust-required",
+            "Fail if bitcoin-processor tests failed",
+            "needs.test-bitcoin-processor.result == 'failure' || needs.test-bitcoin-processor.result == 'cancelled'",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "rust-required",
+            "Fail if eth-processor tests failed",
+            "needs.test-eth-processor.result == 'failure' || needs.test-eth-processor.result == 'cancelled'",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "rust-required",
+            "Fail if coingecko-pricing tests failed",
+            "needs.test-coingecko-pricing.result == 'failure' || needs.test-coingecko-pricing.result == 'cancelled'",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "rust-required",
+            "Fail if tron-processor tests failed",
+            "needs.test-tron-processor.result == 'failure' || needs.test-tron-processor.result == 'cancelled'",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "rust-required",
+            "Fail if blockchain-explorer tests failed",
+            "needs.test-blockchain-explorer.result == 'failure' || needs.test-blockchain-explorer.result == 'cancelled'",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "rust-required",
+            "Fail if eth-grpc-server tests failed",
+            "needs.test-eth-grpc-server.result == 'failure' || needs.test-eth-grpc-server.result == 'cancelled'",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "rust-required",
+            "Fail if tron-grpc-server tests failed",
+            "needs.test-tron-grpc-server.result == 'failure' || needs.test-tron-grpc-server.result == 'cancelled'",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "rust-required",
+            "Fail if legacy-grpc-server tests failed",
+            "needs.test-legacy-grpc-server.result == 'failure' || needs.test-legacy-grpc-server.result == 'cancelled'",
+        ): 1,
+    }
+)
+
 
 def load_yaml(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
@@ -702,8 +960,12 @@ def collect_step(
     local_uses: list[tuple[str, str, str]],
     shells: set[str],
     continue_on_error: list[tuple[str, str, str, Any]],
+    step_ifs: list[tuple[str, str, str, str]],
     unsupported_checkout_inputs: list[tuple[str, str, str, Any]],
 ) -> None:
+    label = str(step.get("uses") or step.get("name") or step.get("id") or "run")
+    if "uses" in step:
+        label = normalize_uses(label)
     if "uses" in step:
         value = str(step["uses"])
         normalized = normalize_uses(value)
@@ -721,12 +983,11 @@ def collect_step(
     if "shell" in step:
         shells.add(str(step["shell"]))
     if "continue-on-error" in step:
-        label = str(step.get("uses") or step.get("name") or step.get("id") or "run")
-        if "uses" in step:
-            label = normalize_uses(label)
         continue_on_error.append(
             (short_path(path, roots), job_name, label, step["continue-on-error"])
         )
+    if "if" in step:
+        step_ifs.append((short_path(path, roots), job_name, label, str(step["if"])))
 
 
 def list_keys(value: Any) -> list[str]:
@@ -776,6 +1037,7 @@ def audit(roots: list[Path]) -> dict[str, Any]:
     containers: list[tuple[str, str, Any]] = []
     services: list[tuple[str, str, list[str]]] = []
     continue_on_error: list[tuple[str, str, str, Any]] = []
+    step_ifs: list[tuple[str, str, str, str]] = []
     workflow_triggers: list[tuple[str, list[str]]] = []
     workflow_env: list[tuple[str, str]] = []
     workflow_permissions: list[tuple[str, list[str]]] = []
@@ -811,6 +1073,7 @@ def audit(roots: list[Path]) -> dict[str, Any]:
                             local_uses,
                             shells,
                             continue_on_error,
+                            step_ifs,
                             unsupported_checkout_inputs,
                         )
                 continue
@@ -888,6 +1151,7 @@ def audit(roots: list[Path]) -> dict[str, Any]:
                             local_uses,
                             shells,
                             continue_on_error,
+                            step_ifs,
                             unsupported_checkout_inputs,
                         )
 
@@ -901,6 +1165,7 @@ def audit(roots: list[Path]) -> dict[str, Any]:
         "containers": containers,
         "services": services,
         "continue_on_error": continue_on_error,
+        "step_ifs": step_ifs,
         "workflow_triggers": workflow_triggers,
         "workflow_env": workflow_env,
         "workflow_permissions": workflow_permissions,
@@ -1062,6 +1327,10 @@ def print_report(summary: dict[str, Any]) -> None:
     for path, job, label, value in summary["continue_on_error"]:
         print(f"- {path} :: {job} :: {label} = {value}")
 
+    print("\nStep if:")
+    for path, job, label, value in summary["step_ifs"]:
+        print(f"- {path} :: {job} :: {label} = {value}")
+
     print("\nUnsupported checkout inputs:")
     if summary["unsupported_checkout_inputs"]:
         for path, job, name, value in summary["unsupported_checkout_inputs"]:
@@ -1196,6 +1465,13 @@ def check_target_mvp(summary: dict[str, Any]) -> list[str]:
         errors.append(
             "target MVP continue-on-error drift: "
             f"expected {dict(EXPECTED_CONTINUE_ON_ERROR)}, got {dict(continue_on_error)}"
+        )
+
+    step_ifs = Counter(summary["step_ifs"])
+    if step_ifs != EXPECTED_STEP_IF:
+        errors.append(
+            "target MVP step if drift: "
+            f"expected {dict(EXPECTED_STEP_IF)}, got {dict(step_ifs)}"
         )
 
     for label, key in [
