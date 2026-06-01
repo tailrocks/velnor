@@ -11,6 +11,34 @@ from typing import Any
 import yaml
 
 
+EXPECTED_TARGET_USES = {
+    "actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae",
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    "actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128",
+    "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+    "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    "actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9",
+    "baptiste0928/cargo-install@f204293d9709061b7bc1756fec3ec4e2cd57dec0",
+    "crazy-max/ghaction-github-runtime@04d248b84655b509d8c44dc1d6f990c879747487",
+    "docker/bake-action@6614cfa25eff9a0b2b2697efb0b6159e7680d584",
+    "docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf",
+    "docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee",
+    "docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9",
+    "docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5",
+    "dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d",
+    "dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8",
+    "extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3",
+    "jdx/mise-action@1648a7812b9aeae629881980618f079932869151",
+    "mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696",
+    "renovatebot/github-action@693b9ef15eec82123529a37c782242f091365961",
+    "rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444",
+    "Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32",
+    "./.github/actions/aggregate-needs",
+    "./.github/actions/check-deployed-docs",
+}
+
+
 def load_yaml(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
@@ -359,6 +387,10 @@ def check_target_mvp(summary: dict[str, Any]) -> list[str]:
     ]
     if direct_docker_uses:
         errors.append(f"target MVP does not support direct docker:// uses: {direct_docker_uses}")
+
+    unexpected_uses = sorted(set(summary["uses"]) - EXPECTED_TARGET_USES)
+    if unexpected_uses:
+        errors.append(f"target MVP action inventory drift: {unexpected_uses}")
 
     return errors
 
