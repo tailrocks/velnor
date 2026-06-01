@@ -863,6 +863,13 @@ where
                 Ok(native_github_runtime_export(action, state))
             }
             NativeActionAdapter::PathsFilter => self.native_paths_filter(action, state),
+            NativeActionAdapter::DockerSetupBuildx => {
+                self.native_docker_setup_buildx(action, state)
+            }
+            NativeActionAdapter::DockerLogin => self.native_docker_login(action, state),
+            NativeActionAdapter::DockerMetadata => Ok(native_docker_metadata(action, state)),
+            NativeActionAdapter::DockerBuildPush => self.native_docker_build_push(action, state),
+            NativeActionAdapter::DockerBake => self.native_docker_bake(action, state),
             _ => {
                 bail!(
                     "native action adapter {:?} for step '{}' is declared but not implemented yet",
@@ -871,6 +878,149 @@ where
                 )
             }
         }
+    }
+
+    fn native_docker_setup_buildx(
+        &mut self,
+        action: &NativeActionInvocation,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        let action_state = state.with_env(state.resolve_env(&action.env));
+        let name = native_input_or(&action_state, action, "name", "velnor-builder");
+        let driver = native_input_or(&action_state, action, "driver", "docker-container");
+        let mut args = vec![
+            "buildx".to_string(),
+            "create".to_string(),
+            "--name".to_string(),
+            name.clone(),
+            "--driver".to_string(),
+            driver,
+            "--use".to_string(),
+        ];
+        if input_truthy(&native_input_or(&action_state, action, "install", "false")) {
+            args.push("--bootstrap".to_string());
+        }
+        let result = self.runner.run("docker", &args)?;
+        Ok(native_command_result(
+            result,
+            StepCommandState {
+                outputs: [
+                    ("name".to_string(), name.clone()),
+                    (
+                        "driver".to_string(),
+                        native_input_or(&action_state, action, "driver", "docker-container"),
+                    ),
+                    (
+                        "platforms".to_string(),
+                        "linux/amd64,linux/arm64".to_string(),
+                    ),
+                ]
+                .into(),
+                env: [("BUILDX_BUILDER".to_string(), name)].into(),
+                ..StepCommandState::default()
+            },
+        ))
+    }
+
+    fn native_docker_login(
+        &mut self,
+        action: &NativeActionInvocation,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        let action_state = state.with_env(state.resolve_env(&action.env));
+        let registry = native_input_or(
+            &action_state,
+            action,
+            "registry",
+            "https://index.docker.io/v1/",
+        );
+        let username = native_input(action, &action_state, "username");
+        let password = native_input(action, &action_state, "password");
+        let args = vec![
+            "login".to_string(),
+            registry,
+            "--username".to_string(),
+            username,
+            "--password".to_string(),
+            password,
+        ];
+        Ok(native_command_result(
+            self.runner.run("docker", &args)?,
+            StepCommandState::default(),
+        ))
+    }
+
+    fn native_docker_build_push(
+        &mut self,
+        action: &NativeActionInvocation,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        let action_state = state.with_env(state.resolve_env(&action.env));
+        let context = native_input_or(&action_state, action, "context", ".");
+        let mut args = vec!["buildx".to_string(), "build".to_string()];
+        push_arg(
+            &mut args,
+            "--file",
+            &native_input(action, &action_state, "file"),
+        );
+        push_arg(
+            &mut args,
+            "--platform",
+            &native_input(action, &action_state, "platforms"),
+        );
+        for tag in input_values(&native_input(action, &action_state, "tags")) {
+            push_arg(&mut args, "--tag", &tag);
+        }
+        for label in input_values(&native_input(action, &action_state, "labels")) {
+            push_arg(&mut args, "--label", &label);
+        }
+        for cache in input_values(&native_input(action, &action_state, "cache-from")) {
+            push_arg(&mut args, "--cache-from", &cache);
+        }
+        for cache in input_values(&native_input(action, &action_state, "cache-to")) {
+            push_arg(&mut args, "--cache-to", &cache);
+        }
+        if input_truthy(&native_input(action, &action_state, "push")) {
+            args.push("--push".to_string());
+        } else {
+            args.push("--load".to_string());
+        }
+        args.push(host_context_path(&action_state, &context));
+        Ok(native_command_result(
+            self.runner.run("docker", &args)?,
+            StepCommandState::default(),
+        ))
+    }
+
+    fn native_docker_bake(
+        &mut self,
+        action: &NativeActionInvocation,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        let action_state = state.with_env(state.resolve_env(&action.env));
+        let mut args = vec!["buildx".to_string(), "bake".to_string()];
+        for file in input_values(&native_input(action, &action_state, "files")) {
+            push_arg(
+                &mut args,
+                "--file",
+                &host_context_path(&action_state, &file),
+            );
+        }
+        for set in input_values(&native_input(action, &action_state, "set")) {
+            push_arg(&mut args, "--set", &set);
+        }
+        if input_truthy(&native_input(action, &action_state, "push")) {
+            args.push("--push".to_string());
+        }
+        args.extend(input_values(&native_input(
+            action,
+            &action_state,
+            "targets",
+        )));
+        Ok(native_command_result(
+            self.runner.run("docker", &args)?,
+            StepCommandState::default(),
+        ))
     }
 
     fn native_paths_filter(
@@ -1348,6 +1498,39 @@ fn native_deploy_pages(
     }
 }
 
+fn native_docker_metadata(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> StepExecutionResult {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let images = input_values(&native_input(action, &action_state, "images"));
+    let tags_input = native_input(action, &action_state, "tags");
+    let mut tags = Vec::new();
+    for image in &images {
+        for tag in docker_metadata_tags(&action_state, &tags_input) {
+            tags.push(format!("{image}:{tag}"));
+        }
+    }
+    let labels = docker_metadata_labels(&action_state).join("\n");
+    let tags = tags.join("\n");
+    StepExecutionResult {
+        exit_code: 0,
+        state: StepCommandState {
+            outputs: [
+                ("tags".to_string(), tags.clone()),
+                ("labels".to_string(), labels.clone()),
+                ("json".to_string(), docker_metadata_json(&tags, &labels)),
+            ]
+            .into(),
+            ..StepCommandState::default()
+        },
+        skipped: false,
+        failure_ignored: false,
+        stdout: format!("Generated Docker metadata\n{tags}\n{labels}\n"),
+        stderr: String::new(),
+    }
+}
+
 fn native_github_runtime_export(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
@@ -1565,6 +1748,121 @@ fn pages_url_for_repository(repository: &str) -> String {
         return String::new();
     };
     format!("https://{owner}.github.io/{repo}/")
+}
+
+fn native_command_result(result: CommandResult, state: StepCommandState) -> StepExecutionResult {
+    StepExecutionResult {
+        exit_code: result.code,
+        state,
+        skipped: false,
+        failure_ignored: false,
+        stdout: result.stdout,
+        stderr: result.stderr,
+    }
+}
+
+fn push_arg(args: &mut Vec<String>, name: &str, value: &str) {
+    if !value.trim().is_empty() {
+        args.push(name.to_string());
+        args.push(value.to_string());
+    }
+}
+
+fn input_values(value: &str) -> Vec<String> {
+    value
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn host_context_path(state: &JobExecutionState, value: &str) -> String {
+    resolve_host_path(state, value)
+        .unwrap_or_else(|| PathBuf::from(value))
+        .display()
+        .to_string()
+}
+
+fn docker_metadata_tags(state: &JobExecutionState, input: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    for line in input.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let fields = docker_metadata_fields(line);
+        if fields
+            .get("enable")
+            .is_some_and(|value| !input_truthy(value))
+        {
+            continue;
+        }
+        match fields.get("type").map(String::as_str) {
+            Some("raw") => {
+                if let Some(value) = fields.get("value").filter(|value| !value.is_empty()) {
+                    tags.push(value.clone());
+                }
+            }
+            Some("sha") => {
+                let sha = state
+                    .env
+                    .get("GITHUB_SHA")
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string());
+                let prefix = fields
+                    .get("prefix")
+                    .cloned()
+                    .unwrap_or_else(|| "sha-".to_string());
+                let value = if fields.get("format").is_some_and(|value| value == "long") {
+                    sha
+                } else {
+                    sha.chars().take(7).collect()
+                };
+                tags.push(format!("{prefix}{value}"));
+            }
+            _ => {}
+        }
+    }
+    if tags.is_empty() {
+        let sha = state
+            .env
+            .get("GITHUB_SHA")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        tags.push(format!("sha-{}", sha.chars().take(7).collect::<String>()));
+    }
+    tags
+}
+
+fn docker_metadata_fields(line: &str) -> BTreeMap<String, String> {
+    line.split(',')
+        .filter_map(|field| field.split_once('='))
+        .map(|(name, value)| (name.trim().to_string(), value.trim().to_string()))
+        .collect()
+}
+
+fn docker_metadata_labels(state: &JobExecutionState) -> Vec<String> {
+    let repository = state
+        .env
+        .get("GITHUB_REPOSITORY")
+        .cloned()
+        .unwrap_or_default();
+    let server = state
+        .env
+        .get("GITHUB_SERVER_URL")
+        .cloned()
+        .unwrap_or_else(|| "https://github.com".to_string());
+    let source = if repository.is_empty() {
+        server
+    } else {
+        format!("{}/{}", server.trim_end_matches('/'), repository)
+    };
+    vec![format!("org.opencontainers.image.source={source}")]
+}
+
+fn docker_metadata_json(tags: &str, labels: &str) -> String {
+    serde_json::json!({
+        "tags": tags.lines().collect::<Vec<_>>(),
+        "labels": labels.lines().collect::<Vec<_>>(),
+    })
+    .to_string()
 }
 
 fn parse_paths_filter_rules(filters: &str) -> Result<Vec<(String, Vec<String>)>> {
@@ -3400,6 +3698,200 @@ mod tests {
         assert_eq!(results[0].exit_code, 1);
         assert_eq!(results[0].state.outputs["cache-hit"], "false");
         assert!(results[0].stderr.contains("fail-on-cache-miss"));
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_docker_adapters_invoke_docker_cli_without_node_sidecars() {
+        let temp = temp_dir();
+        fs::create_dir_all(temp.join("work/backend-rust/bitcoin-processor-app")).unwrap();
+        fs::write(
+            temp.join("work/backend-rust/bitcoin-processor-app/Dockerfile"),
+            "FROM scratch\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.join("work/backend-rust/docker-bake.hcl"),
+            "target \"app\" {}\n",
+        )
+        .unwrap();
+        let steps = vec![
+            ExecutableStep::Native {
+                step_id: "buildx".into(),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::DockerSetupBuildx,
+                    inputs: [
+                        ("name".into(), "velnor-builder".into()),
+                        ("driver".into(), "docker-container".into()),
+                        ("install".into(), "true".into()),
+                    ]
+                    .into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::Native {
+                step_id: "login".into(),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::DockerLogin,
+                    inputs: [
+                        ("username".into(), "docker-user".into()),
+                        ("password".into(), "${{ secrets.DOCKER_TOKEN }}".into()),
+                    ]
+                    .into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::Native {
+                step_id: "meta".into(),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::DockerMetadata,
+                    inputs: [
+                        ("images".into(), "chainargos/rust-bitcoin-processor".into()),
+                        (
+                            "tags".into(),
+                            "type=raw,value=latest,enable=false\n\
+type=sha,format=long,prefix=,enable=true"
+                                .into(),
+                        ),
+                    ]
+                    .into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::Native {
+                step_id: "build-push".into(),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::DockerBuildPush,
+                    inputs: [
+                        ("context".into(), ".".into()),
+                        (
+                            "file".into(),
+                            "backend-rust/bitcoin-processor-app/Dockerfile".into(),
+                        ),
+                        ("platforms".into(), "linux/amd64".into()),
+                        ("push".into(), "false".into()),
+                        ("tags".into(), "${{ steps.meta.outputs.tags }}".into()),
+                        ("labels".into(), "${{ steps.meta.outputs.labels }}".into()),
+                        (
+                            "cache-from".into(),
+                            "type=gha,scope=bitcoin-processor-app-pr".into(),
+                        ),
+                        (
+                            "cache-to".into(),
+                            "type=gha,scope=bitcoin-processor-app-pr,mode=max".into(),
+                        ),
+                    ]
+                    .into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::Native {
+                step_id: "bake".into(),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::DockerBake,
+                    inputs: [
+                        ("files".into(), "backend-rust/docker-bake.hcl".into()),
+                        ("targets".into(), "bitcoin-processor-app".into()),
+                        (
+                            "set".into(),
+                            "*.cache-from=type=gha,scope=rust-workspace\n\
+*.cache-to=type=gha,scope=rust-workspace,mode=max"
+                                .into(),
+                        ),
+                    ]
+                    .into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+        ];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        let results = executor
+            .execute_ordered_steps_with_context(
+                &container(&temp),
+                &steps,
+                &[
+                    (
+                        "GITHUB_REPOSITORY".into(),
+                        "ChainArgos/java-monorepo".into(),
+                    ),
+                    ("GITHUB_SERVER_URL".into(), "https://github.com".into()),
+                    ("GITHUB_SHA".into(), "abcdef1234567890".into()),
+                ],
+                &[(
+                    "secrets".into(),
+                    serde_json::json!({ "DOCKER_TOKEN": "docker-token" }),
+                )],
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 5);
+        assert_eq!(
+            results[2].state.outputs["tags"],
+            "chainargos/rust-bitcoin-processor:abcdef1234567890"
+        );
+        assert!(results[2].state.outputs["labels"].contains(
+            "org.opencontainers.image.source=https://github.com/ChainArgos/java-monorepo"
+        ));
+        let calls = &executor.runner().calls;
+        assert!(calls.iter().any(|(program, args)| {
+            program == "docker"
+                && args.starts_with(&[
+                    "buildx".into(),
+                    "create".into(),
+                    "--name".into(),
+                    "velnor-builder".into(),
+                ])
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "docker"
+                && args
+                    == &[
+                        "login".to_string(),
+                        "https://index.docker.io/v1/".to_string(),
+                        "--username".to_string(),
+                        "docker-user".to_string(),
+                        "--password".to_string(),
+                        "docker-token".to_string(),
+                    ]
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "docker"
+                && args.first().is_some_and(|arg| arg == "buildx")
+                && args.get(1).is_some_and(|arg| arg == "build")
+                && args.contains(&"--load".into())
+                && args.contains(&"--tag".into())
+                && args.contains(&"chainargos/rust-bitcoin-processor:abcdef1234567890".into())
+                && args.contains(&"type=gha,scope=bitcoin-processor-app-pr,mode=max".into())
+        }));
+        assert!(calls.iter().any(|(program, args)| {
+            program == "docker"
+                && args.first().is_some_and(|arg| arg == "buildx")
+                && args.get(1).is_some_and(|arg| arg == "bake")
+                && args.contains(&"--set".into())
+                && args.contains(&"*.cache-to=type=gha,scope=rust-workspace,mode=max".into())
+                && args.contains(&"bitcoin-processor-app".into())
+        }));
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(_, args)| args.first().is_some_and(|arg| arg == "run")
+                    && args.iter().any(|arg| arg.starts_with("node:")))
+                .count(),
+            0
+        );
 
         fs::remove_dir_all(temp).unwrap();
     }
