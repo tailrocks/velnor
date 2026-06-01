@@ -338,7 +338,7 @@ Pkl workflow -> Velnor compiler    -> Velnor normalized plan -> Docker executor
 The next useful implementation steps are:
 
 1. Run live Docker execution on a host where Docker bind mounts are visible to the daemon, then verify a real script step succeeds and uploads logs.
-2. Re-enable `actions/checkout` in the disposable live smoke once run-service repository resources are confirmed or native checkout learns how to derive missing self-repository metadata from acquired V2 job context.
+2. Re-enable `actions/checkout` in the disposable live smoke. Native checkout can now derive self repository metadata from `github.*` variables/context when V2 acquired jobs omit repository resources, and it can read V2 typed input maps for checkout inputs.
 3. Validate `setup-*`, cache, artifact, pages, and Docker actions from target workflows in live GitHub runs.
 
 This gets Velnor from "polls one message" to "can complete a simple real GitHub job".

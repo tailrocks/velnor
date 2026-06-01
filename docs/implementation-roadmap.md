@@ -224,8 +224,11 @@ Initial targets:
 
 Fresh target action inventory from the target `.github` trees on 2026-06-01:
 
+- `jackin-project/jackin` at `52a457b689940e05ed65015d2a82ff0e22577d2e`
+- `ChainArgos/java-monorepo` at `56491ec5b17702186506217452b58bcf57572079`
 - high-frequency: `actions/checkout` 46, `jdx/mise-action` 13, `actions/cache` 13, `mozilla-actions/sccache-action` 7, `actions/upload-artifact` 6, `dorny/paths-filter` 5, `rui314/setup-mold` 5, `docker/setup-buildx-action` 5, `docker/login-action` 5
 - important lower-frequency: `actions/download-artifact` 3, `crazy-max/ghaction-github-runtime` 2, local `aggregate-needs` 3, local `check-deployed-docs` 2
+- one-off target actions: `actions/setup-python`, `baptiste0928/cargo-install`, `dtolnay/rust-toolchain`, `Swatinem/rust-cache`
 - release/pages/docker-specific: `actions/upload-pages-artifact`, `actions/deploy-pages`, `docker/metadata-action`, `docker/build-push-action`, `docker/bake-action`
 - reusable workflow job references exist in `java-monorepo` (`./.github/workflows/kestra-build-image.yml`), but GitHub expands those before a runner receives individual job messages, so Phase 0 should not parse workflow-level `jobs.<id>.uses`
 

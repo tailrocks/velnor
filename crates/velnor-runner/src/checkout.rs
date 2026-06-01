@@ -6,7 +6,9 @@ use crate::{
     },
 };
 use anyhow::{bail, Context, Result};
+use serde_json::{Map, Value};
 use std::{
+    collections::BTreeMap,
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -50,9 +52,9 @@ pub fn checkout_plans(
             continue;
         }
 
-        let self_repository = self_repository(&job.resources.repositories)?;
+        let self_repository = self_repository(job)?;
         let checkout_repository = checkout_repository(step);
-        let clone_url = checkout_clone_url(checkout_repository.as_deref(), self_repository)?;
+        let clone_url = checkout_clone_url(checkout_repository.as_deref(), &self_repository)?;
         let destination = workspace_host.join(checkout_path(step)?);
         plans.push(CheckoutPlan {
             step_id: checkout_step_id(step, index),
@@ -386,20 +388,45 @@ fn contains_step_context_expression(value: &str) -> bool {
     value.contains("${{") && value.contains("steps.")
 }
 
-fn self_repository(repositories: &[RepositoryResource]) -> Result<&RepositoryResource> {
-    repositories
+fn self_repository(job: &AgentJobRequestMessage) -> Result<RepositoryResource> {
+    if let Some(repository) = job
+        .resources
+        .repositories
         .iter()
         .find(|repository| repository.alias.as_deref() == Some("self"))
-        .or_else(|| repositories.first())
-        .ok_or_else(|| anyhow::anyhow!("job has no repository resources"))
+        .or_else(|| job.resources.repositories.first())
+    {
+        return Ok(repository.clone());
+    }
+
+    let name = job_string(job, "github.repository")
+        .filter(|name| is_repository_name(name))
+        .ok_or_else(|| {
+            anyhow::anyhow!("job has no repository resources and no github.repository context")
+        })?;
+    let server_url = job_string(job, "github.server_url").unwrap_or("https://github.com");
+    let clone_url = format!(
+        "{}/{}.git",
+        server_url.trim_end_matches('/'),
+        name.trim_start_matches('/')
+    );
+    let mut properties = BTreeMap::new();
+    properties.insert("cloneUrl".to_string(), clone_url);
+    Ok(RepositoryResource {
+        alias: Some("self".to_string()),
+        name: Some(name.to_string()),
+        git_ref: job_string(job, "github.ref").map(ToOwned::to_owned),
+        version: job_string(job, "github.sha").map(ToOwned::to_owned),
+        url: None,
+        properties,
+    })
 }
 
 fn checkout_path(step: &ActionStep) -> Result<PathBuf> {
     let path = step
         .inputs
         .as_ref()
-        .and_then(|inputs| inputs.get("path"))
-        .and_then(|path| path.as_str())
+        .and_then(|inputs| input_string(inputs, &["path", "Path"]))
         .unwrap_or(".");
     if path.starts_with('/') || path.contains("..") {
         bail!("unsupported checkout path '{path}'")
@@ -410,8 +437,7 @@ fn checkout_path(step: &ActionStep) -> Result<PathBuf> {
 fn checkout_ref(step: &ActionStep) -> Option<String> {
     step.inputs
         .as_ref()
-        .and_then(|inputs| inputs.get("ref"))
-        .and_then(|value| value.as_str())
+        .and_then(|inputs| input_string(inputs, &["ref", "Ref"]))
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
 }
@@ -419,8 +445,7 @@ fn checkout_ref(step: &ActionStep) -> Option<String> {
 fn checkout_repository(step: &ActionStep) -> Option<String> {
     step.inputs
         .as_ref()
-        .and_then(|inputs| inputs.get("repository"))
-        .and_then(|value| value.as_str())
+        .and_then(|inputs| input_string(inputs, &["repository", "Repository"]))
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
 }
@@ -478,11 +503,11 @@ fn checkout_fetch_depth(step: &ActionStep) -> Result<Option<u32>> {
     let Some(value) = step
         .inputs
         .as_ref()
-        .and_then(|inputs| inputs.get("fetch-depth"))
+        .and_then(|inputs| input_string(inputs, &["fetch-depth", "fetchDepth", "FetchDepth"]))
     else {
         return Ok(Some(1));
     };
-    let Some(value) = value.as_str().filter(|value| !value.is_empty()) else {
+    let Some(value) = Some(value).filter(|value| !value.is_empty()) else {
         return Ok(Some(1));
     };
     let depth = value
@@ -498,16 +523,23 @@ fn checkout_fetch_depth(step: &ActionStep) -> Result<Option<u32>> {
 fn checkout_fetch_tags(step: &ActionStep) -> bool {
     step.inputs
         .as_ref()
-        .and_then(|inputs| inputs.get("fetch-tags"))
-        .and_then(|value| value.as_str())
+        .and_then(|inputs| input_string(inputs, &["fetch-tags", "fetchTags", "FetchTags"]))
         .is_some_and(|value| value.eq_ignore_ascii_case("true"))
 }
 
 fn checkout_persist_credentials(step: &ActionStep) -> bool {
     step.inputs
         .as_ref()
-        .and_then(|inputs| inputs.get("persist-credentials"))
-        .and_then(|value| value.as_str())
+        .and_then(|inputs| {
+            input_string(
+                inputs,
+                &[
+                    "persist-credentials",
+                    "persistCredentials",
+                    "PersistCredentials",
+                ],
+            )
+        })
         .map(|value| !value.eq_ignore_ascii_case("false"))
         .unwrap_or(true)
 }
@@ -515,8 +547,7 @@ fn checkout_persist_credentials(step: &ActionStep) -> bool {
 fn checkout_clean(step: &ActionStep) -> bool {
     step.inputs
         .as_ref()
-        .and_then(|inputs| inputs.get("clean"))
-        .and_then(|value| value.as_str())
+        .and_then(|inputs| input_string(inputs, &["clean", "Clean"]))
         .map(|value| !value.eq_ignore_ascii_case("false"))
         .unwrap_or(true)
 }
@@ -525,8 +556,7 @@ fn checkout_token(step: &ActionStep, job: &AgentJobRequestMessage) -> Option<Str
     let token = step
         .inputs
         .as_ref()
-        .and_then(|inputs| inputs.get("token"))
-        .and_then(|value| value.as_str())
+        .and_then(|inputs| input_string(inputs, &["token", "Token"]))
         .filter(|value| !value.is_empty())?;
     resolve_token_expression(token, job)
 }
@@ -568,6 +598,70 @@ fn system_access_token(endpoint: Option<&ServiceEndpoint>) -> Option<String> {
                 .or_else(|| authorization.parameters.get("accessToken"))
         })
         .cloned()
+}
+
+fn input_string<'a>(value: &'a Value, names: &[&str]) -> Option<&'a str> {
+    let object = value.as_object()?;
+    direct_input_string(object, names).or_else(|| nested_map_input_string(object, names))
+}
+
+fn direct_input_string<'a>(object: &'a Map<String, Value>, names: &[&str]) -> Option<&'a str> {
+    names
+        .iter()
+        .find_map(|name| object.get(*name).and_then(input_value_as_str))
+}
+
+fn nested_map_input_string<'a>(object: &'a Map<String, Value>, names: &[&str]) -> Option<&'a str> {
+    let map = object.get("map").or_else(|| object.get("Map"))?;
+    if let Some(map) = map.as_object() {
+        return direct_input_string(map, names);
+    }
+    map.as_array().and_then(|items| {
+        items.iter().find_map(|item| {
+            let item = item.as_object()?;
+            let name = input_name_field(item)?;
+            if !names
+                .iter()
+                .any(|expected| name.eq_ignore_ascii_case(expected))
+            {
+                return None;
+            }
+            item.get("value")
+                .or_else(|| item.get("Value"))
+                .and_then(input_value_as_str)
+        })
+    })
+}
+
+fn input_name_field(object: &Map<String, Value>) -> Option<&str> {
+    ["name", "Name", "key", "Key"]
+        .iter()
+        .find_map(|name| object.get(*name).and_then(input_value_as_str))
+}
+
+fn input_value_as_str(value: &Value) -> Option<&str> {
+    value.as_str().or_else(|| {
+        value
+            .as_object()
+            .and_then(|object| direct_input_string(object, &["value", "Value", "lit", "Lit"]))
+    })
+}
+
+fn job_string<'a>(job: &'a AgentJobRequestMessage, name: &str) -> Option<&'a str> {
+    job.variables
+        .get(name)
+        .and_then(|value| value.value.as_deref())
+        .or_else(|| context_string(&job.context_data, name))
+}
+
+fn context_string<'a>(context_data: &'a BTreeMap<String, Value>, path: &str) -> Option<&'a str> {
+    let mut parts = path.split('.');
+    let root = parts.next()?;
+    let mut value = context_data.get(root)?;
+    for part in parts {
+        value = value.as_object()?.get(part)?;
+    }
+    value.as_str()
 }
 
 fn path_arg(path: &Path) -> String {
@@ -877,6 +971,90 @@ mod tests {
         assert!(!plans[0].fetch_tags);
         assert!(plans[0].persist_credentials);
         assert!(plans[0].clean);
+    }
+
+    #[test]
+    fn plans_self_checkout_from_github_context_without_repository_resources() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "CI",
+            "requestId": 1,
+            "variables": {
+                "github.repository": { "value": "acme/repo" },
+                "github.sha": { "value": "abc123" },
+                "github.ref": { "value": "refs/heads/main" },
+                "github.server_url": { "value": "https://github.com" }
+            },
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "authorization": {
+                        "parameters": { "AccessToken": "ghs-token" }
+                    }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans[0].clone_url, "https://github.com/acme/repo.git");
+        assert_eq!(plans[0].version.as_deref(), Some("abc123"));
+        assert_eq!(plans[0].token.as_deref(), Some("ghs-token"));
+    }
+
+    #[test]
+    fn plans_checkout_from_run_service_typed_inputs() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "CI",
+            "requestId": 1,
+            "variables": {
+                "github.repository": { "value": "acme/repo" },
+                "github.sha": { "value": "abc123" },
+                "secrets.HOMEBREW_TAP_TOKEN": { "value": "tap-token", "isSecret": true }
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" },
+                "inputs": {
+                    "type": "map",
+                    "map": [
+                        { "Key": { "lit": "repository", "type": 0 }, "Value": { "lit": "acme/homebrew-tap", "type": 0 } },
+                        { "Key": { "lit": "ref", "type": 0 }, "Value": { "lit": "main", "type": 0 } },
+                        { "Key": { "lit": "path", "type": 0 }, "Value": { "lit": "homebrew-tap", "type": 0 } },
+                        { "Key": { "lit": "token", "type": 0 }, "Value": { "lit": "${{ secrets.HOMEBREW_TAP_TOKEN }}", "type": 0 } },
+                        { "Key": { "lit": "fetch-depth", "type": 0 }, "Value": { "lit": "0", "type": 0 } },
+                        { "Key": { "lit": "persist-credentials", "type": 0 }, "Value": { "lit": "false", "type": 0 } },
+                        { "Key": { "lit": "clean", "type": 0 }, "Value": { "lit": "false", "type": 0 } },
+                        { "Key": { "lit": "fetch-tags", "type": 0 }, "Value": { "lit": "true", "type": 0 } }
+                    ]
+                }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(
+            plans[0].clone_url,
+            "https://github.com/acme/homebrew-tap.git"
+        );
+        assert_eq!(plans[0].version.as_deref(), Some("main"));
+        assert_eq!(plans[0].destination, Path::new("/tmp/work/homebrew-tap"));
+        assert_eq!(plans[0].token.as_deref(), Some("tap-token"));
+        assert_eq!(plans[0].fetch_depth, None);
+        assert!(plans[0].fetch_tags);
+        assert!(!plans[0].persist_credentials);
+        assert!(!plans[0].clean);
     }
 
     #[test]
