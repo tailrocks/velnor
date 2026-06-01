@@ -307,6 +307,138 @@ EXPECTED_WORKFLOW_ENV = Counter(
     }
 )
 
+EXPECTED_JOB_IF = Counter(
+    {
+        (".github/workflows/ci.yml", "check", "needs.changes.outputs.rust == 'true'"): 1,
+        (".github/workflows/ci.yml", "msrv", "needs.changes.outputs.rust == 'true'"): 1,
+        (
+            ".github/workflows/ci.yml",
+            "build-validator",
+            "(github.event_name == 'push' &&\n github.ref == 'refs/heads/main' &&\n needs.changes.outputs.rust == 'true') ||\ngithub.event_name == 'workflow_dispatch'",
+        ): 1,
+        (".github/workflows/ci.yml", "ci-required", "always()"): 1,
+        (
+            ".github/workflows/construct.yml",
+            "build",
+            "needs.changes.outputs.construct == 'true'",
+        ): 1,
+        (
+            ".github/workflows/construct.yml",
+            "publish-manifest",
+            "needs.changes.outputs.is_publish == 'true' && needs.changes.outputs.construct == 'true'",
+        ): 1,
+        (
+            ".github/workflows/construct.yml",
+            "publish-manifest-rehearsal",
+            "needs.changes.outputs.construct == 'true' && needs.changes.outputs.is_publish != 'true'",
+        ): 1,
+        (".github/workflows/construct.yml", "construct-required", "always()"): 1,
+        (".github/workflows/docs.yml", "changes", "github.event_name != 'schedule'"): 1,
+        (
+            ".github/workflows/docs.yml",
+            "repo-link-check",
+            "github.event_name != 'schedule'",
+        ): 1,
+        (
+            ".github/workflows/docs.yml",
+            "docs-link-check",
+            "needs.changes.outputs.docs == 'true'",
+        ): 1,
+        (
+            ".github/workflows/docs.yml",
+            "deploy",
+            "github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')",
+        ): 1,
+        (
+            ".github/workflows/docs.yml",
+            "check-deployed",
+            "github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')",
+        ): 1,
+        (
+            ".github/workflows/docs.yml",
+            "docs-required",
+            "always() && github.event_name != 'schedule'",
+        ): 1,
+        (
+            ".github/workflows/preview.yml",
+            "source-changed",
+            "(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_run' &&\n github.event.workflow_run.conclusion == 'success' &&\n github.event.workflow_run.event == 'push' &&\n github.event.workflow_run.head_repository.full_name == github.repository &&\n github.event.workflow_run.head_branch == 'main')",
+        ): 1,
+        (
+            ".github/workflows/preview.yml",
+            "build-preview",
+            "needs.source-changed.outputs.source == 'true'",
+        ): 1,
+        (
+            ".github/workflows/preview.yml",
+            "build-jackin-capsule",
+            "needs.source-changed.outputs.source == 'true'",
+        ): 1,
+        (
+            ".github/workflows/preview.yml",
+            "publish-preview",
+            "needs.source-changed.outputs.source == 'true'",
+        ): 1,
+        (
+            ".github/workflows/release.yml",
+            "homebrew",
+            "needs.release.result == 'success'",
+        ): 1,
+        (
+            ".github/workflows/rust-docker.yml",
+            "docker-bake",
+            "needs.changes.outputs.bake-targets != ''",
+        ): 1,
+        (".github/workflows/rust-docker.yml", "docker-required", "always()"): 1,
+        (
+            ".github/workflows/rust.yml",
+            "warm-sccache",
+            "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "test-bitcoin-processor",
+            "needs.changes.outputs.bitcoin-processor == 'true' || (github.event_name == 'workflow_dispatch' && (inputs.packages == '' || contains(inputs.packages, 'bitcoin-processor-app')))",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "test-eth-processor",
+            "needs.changes.outputs.eth-processor == 'true' || (github.event_name == 'workflow_dispatch' && (inputs.packages == '' || contains(inputs.packages, 'eth-processor-app')))",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "test-coingecko-pricing",
+            "needs.changes.outputs.coingecko-pricing == 'true' || (github.event_name == 'workflow_dispatch' && (inputs.packages == '' || contains(inputs.packages, 'coingecko-pricing-app')))",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "test-tron-processor",
+            "needs.changes.outputs.tron-processor == 'true' || (github.event_name == 'workflow_dispatch' && (inputs.packages == '' || contains(inputs.packages, 'tron-processor-app')))",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "test-blockchain-explorer",
+            "needs.changes.outputs.blockchain-explorer == 'true' || (github.event_name == 'workflow_dispatch' && (inputs.packages == '' || contains(inputs.packages, 'blockchain-explorer')))",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "test-eth-grpc-server",
+            "needs.changes.outputs.eth-grpc-server == 'true' || (github.event_name == 'workflow_dispatch' && (inputs.packages == '' || contains(inputs.packages, 'eth-grpc-server')))",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "test-tron-grpc-server",
+            "needs.changes.outputs.tron-grpc-server == 'true' || (github.event_name == 'workflow_dispatch' && (inputs.packages == '' || contains(inputs.packages, 'tron-grpc-server')))",
+        ): 1,
+        (
+            ".github/workflows/rust.yml",
+            "test-legacy-grpc-server",
+            "needs.changes.outputs.legacy-grpc-server == 'true' || (github.event_name == 'workflow_dispatch' && (inputs.packages == '' || contains(inputs.packages, 'legacy-grpc-server')))",
+        ): 1,
+        (".github/workflows/rust.yml", "rust-required", "always()"): 1,
+    }
+)
+
 EXPECTED_JOB_NEEDS = Counter(
     {
         (".github/workflows/ci.yml", "check", "changes"): 1,
@@ -1003,6 +1135,13 @@ def check_target_mvp(summary: dict[str, Any]) -> list[str]:
         errors.append(
             "target MVP workflow env drift: "
             f"expected {dict(EXPECTED_WORKFLOW_ENV)}, got {dict(workflow_env)}"
+        )
+
+    job_ifs = Counter(summary["job_ifs"])
+    if job_ifs != EXPECTED_JOB_IF:
+        errors.append(
+            "target MVP job if drift: "
+            f"expected {dict(EXPECTED_JOB_IF)}, got {dict(job_ifs)}"
         )
 
     job_needs = Counter(summary["job_needs"])
