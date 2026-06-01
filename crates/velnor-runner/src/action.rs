@@ -1848,4 +1848,56 @@ runs:
             .env
             .contains(&("LOG_LEVEL".into(), "debug".into())));
     }
+
+    #[test]
+    fn parses_fetched_target_action_metadata() {
+        let roots = [
+            Path::new("/tmp/velnor-actions"),
+            Path::new("/tmp/velnor-targets/jackin/.github/actions"),
+        ];
+        if roots.iter().all(|root| !root.exists()) {
+            return;
+        }
+
+        let mut parsed = 0;
+        for root in roots.into_iter().filter(|root| root.exists()) {
+            for path in action_metadata_files(root) {
+                let contents = fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+                let metadata = parse_action_metadata(&contents)
+                    .unwrap_or_else(|error| panic!("parse {}: {error:#}", path.display()));
+                metadata
+                    .runtime()
+                    .unwrap_or_else(|error| panic!("runtime {}: {error:#}", path.display()));
+                parsed += 1;
+            }
+        }
+
+        assert!(parsed >= 20, "expected fetched target action metadata");
+    }
+
+    fn action_metadata_files(root: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        collect_action_metadata_files(root, &mut files);
+        files.sort();
+        files
+    }
+
+    fn collect_action_metadata_files(dir: &Path, files: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_action_metadata_files(&path, files);
+            } else if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| matches!(name, "action.yml" | "action.yaml"))
+            {
+                files.push(path);
+            }
+        }
+    }
 }
