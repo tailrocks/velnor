@@ -248,7 +248,7 @@ GitHub UI compatibility needs reporting early. Minimal order:
 
 1. create/update job timeline record as in-progress: current code sends a best-effort in-progress job record with runner name before Docker execution starts.
 2. create/update step timeline records: current code sends best-effort in-progress task records when executable script, checkout, JavaScript, Docker, pre, and post steps start.
-3. stream or append logs per step: current code captures stdout/stderr after each executed script or JavaScript step, creates completed task timeline records, and appends masked lines as each step exits.
+3. stream or append logs per step: current code captures stdout/stderr after each executed script or JavaScript step, creates completed task timeline records as each step exits, appends masked lines when present, and still reports silent or skipped executable steps.
 4. finish step with success/failure/skipped
 5. finish job with success/failure/cancelled
 6. include job outputs, step results, evaluated environment URL, telemetry for implemented workflow-command cases, billing owner id, and infrastructure failure category in the completion payload

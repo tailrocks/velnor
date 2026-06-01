@@ -421,6 +421,9 @@ where
             let step_id = step.id().to_string();
             let step_state = state.with_step_action(&step_id);
             if !step_state.evaluate_condition(step.condition()) {
+                if step.reports_timeline_start() {
+                    self.emit_step_started(step_id.clone(), &mut timeline_order);
+                }
                 let result = StepExecutionResult {
                     exit_code: 0,
                     state: StepCommandState::default(),
@@ -429,6 +432,11 @@ where
                     stdout: String::new(),
                     stderr: String::new(),
                 };
+                if step.reports_timeline_start() {
+                    let log = step_log(&step_id, timeline_order, &result);
+                    self.emit_step_log(&log);
+                    step_logs.push(log);
+                }
                 state.apply(&step_id, &result);
                 results.push(result);
                 continue;
@@ -466,12 +474,9 @@ where
                         if failed && *continue_on_error {
                             result.failure_ignored = true;
                         }
-                        if let Some(log) =
-                            step_log(&format!("{step_id}-pre"), timeline_order, &result)
-                        {
-                            self.emit_step_log(&log);
-                            step_logs.push(log);
-                        }
+                        let log = step_log(&format!("{step_id}-pre"), timeline_order, &result);
+                        self.emit_step_log(&log);
+                        step_logs.push(log);
                         state.apply(step_id, &result);
                         results.push(result);
                         if failed {
@@ -577,7 +582,8 @@ where
                     if failed && step.continue_on_error() {
                         result.failure_ignored = true;
                     }
-                    if let Some(log) = step_log(&step_id, timeline_order, &result) {
+                    if step.reports_timeline_start() {
+                        let log = step_log(&step_id, timeline_order, &result);
                         self.emit_step_log(&log);
                         step_logs.push(log);
                     }
@@ -613,14 +619,13 @@ where
                     if result.exit_code != 0 && post_action.continue_on_error {
                         result.failure_ignored = true;
                     }
-                    if let Some(log) = step_log(
+                    let log = step_log(
                         &format!("{}-post", post_action.step_id),
                         timeline_order,
                         &result,
-                    ) {
-                        self.emit_step_log(&log);
-                        step_logs.push(log);
-                    }
+                    );
+                    self.emit_step_log(&log);
+                    step_logs.push(log);
                     state.apply(&format!("{}-post", post_action.step_id), &result);
                     results.push(result);
                 }
@@ -1650,14 +1655,14 @@ fn job_output_expression(value: &Value) -> Option<&str> {
         .and_then(job_output_expression)
 }
 
-fn step_log(step_id: &str, order: i32, result: &StepExecutionResult) -> Option<StepLog> {
+fn step_log(step_id: &str, order: i32, result: &StepExecutionResult) -> StepLog {
     let lines = step_log_lines(
         &result.stdout,
         &result.stderr,
         &result.state.log_lines,
         &result.state.summary,
     );
-    (!lines.is_empty()).then(|| StepLog {
+    StepLog {
         step_id: step_id.to_string(),
         order,
         lines,
@@ -1670,7 +1675,7 @@ fn step_log(step_id: &str, order: i32, result: &StepExecutionResult) -> Option<S
         error_count: result.state.error_count,
         warning_count: result.state.warning_count,
         notice_count: result.state.notice_count,
-    })
+    }
 }
 
 fn step_log_lines(
@@ -2200,6 +2205,22 @@ mod tests {
             Ok(CommandResult {
                 code: 0,
                 stdout,
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct SilentCommandRunner {
+        calls: Vec<(String, Vec<String>)>,
+    }
+
+    impl CommandRunner for SilentCommandRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
                 stderr: String::new(),
             })
         }
@@ -3452,6 +3473,56 @@ mod tests {
     }
 
     #[test]
+    fn reports_silent_and_skipped_steps_for_completion() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "silent".into(),
+                script: "true".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "skipped".into(),
+                script: "echo unreachable".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: Some("${{ false }}".into()),
+                continue_on_error: false,
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(SilentCommandRunner::default());
+
+        let summary = executor
+            .execute_ordered_steps_with_job_outputs(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(summary.step_results.len(), 2);
+        assert_eq!(summary.step_logs.len(), 2);
+        assert_eq!(summary.step_logs[0].step_id, "silent");
+        assert_eq!(summary.step_logs[0].order, 1);
+        assert!(summary.step_logs[0].lines.is_empty());
+        assert!(!summary.step_logs[0].skipped);
+        assert_eq!(summary.step_logs[1].step_id, "skipped");
+        assert_eq!(summary.step_logs[1].order, 2);
+        assert!(summary.step_logs[1].lines.is_empty());
+        assert!(summary.step_logs[1].skipped);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn workflow_commands_from_stdout_update_later_steps() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -3573,7 +3644,7 @@ mod tests {
             stderr: String::new(),
         };
 
-        let log = step_log("sccache", 1, &result).unwrap();
+        let log = step_log("sccache", 1, &result);
 
         assert_eq!(
             log.lines,

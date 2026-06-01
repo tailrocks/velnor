@@ -98,7 +98,7 @@ Current code progress:
 - step outputs written to `GITHUB_OUTPUT` are tracked by step id and basic `${{ steps.<id>.outputs.<name> }}` expressions are resolved in later scripts and JavaScript action env
 - job outputs from the job message are evaluated at the end of execution from final step output state, matching the runner-side evaluation point used by GitHub; run-service typed map payloads are normalized before expression evaluation
 - evaluated job outputs are sent in the V2 run-service `completejob` payload
-- before Docker execution starts, Velnor publishes a best-effort in-progress GitHub job timeline record with the runner name; while Docker execution runs, Velnor publishes best-effort in-progress task records as executable steps start, then uploads completed task records and masked stdout/stderr feed lines as executable steps exit
+- before Docker execution starts, Velnor publishes a best-effort in-progress GitHub job timeline record with the runner name; while Docker execution runs, Velnor publishes best-effort in-progress task records as executable steps start, then uploads completed task records and masked stdout/stderr feed lines as executable steps exit; silent and skipped executable steps still produce completion records and run-service step results
 - stdout workflow commands are parsed for legacy/state-changing commands: `set-output`, `set-env`, `add-path`, and `save-state`
 - basic `${{ github.* }}` and `${{ runner.* }}` context expressions are resolved from runtime env in later scripts and JavaScript action env
 - basic step `if` evaluation is implemented for output comparisons, step outcome checks, `runner.os`, `github.event_name`, `github.ref`, status functions, and simple `&&`/`||`
