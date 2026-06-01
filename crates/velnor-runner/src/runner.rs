@@ -58,6 +58,8 @@ const RUNNER_REFRESH_CONFIG_MESSAGE: &str = "RunnerRefreshConfig";
 const RUNNER_SHUTDOWN_MESSAGE: &str = "RunnerShutdown";
 const BROKER_POLL_MAX_CONSECUTIVE_ERRORS: u32 = 10;
 const BROKER_POLL_EMPTY_BACKOFF_THRESHOLD: u32 = 50;
+const BROKER_SESSION_CREATE_MAX_ATTEMPTS: u32 = 5;
+const BROKER_SESSION_CREATE_RETRY_SECONDS: u64 = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum V2MessageAction {
@@ -411,7 +413,7 @@ async fn run_v2(
     let mut run_service = RunServiceClient::new(token.clone())?;
     let owner_name = format!("{} (PID: {})", default_agent_name(), std::process::id());
     let session = TaskAgentSession::new(owner_name, agent_id, stored.settings.agent_name.clone());
-    let session = broker.create_session(&session).await?;
+    let session = create_broker_session_with_retry(&broker, &session).await?;
     let session_id = session
         .session_id
         .as_deref()
@@ -489,6 +491,36 @@ async fn run_v2(
     println!("Deleted broker runner session.");
 
     Ok(())
+}
+
+async fn create_broker_session_with_retry(
+    broker: &BrokerClient,
+    session: &TaskAgentSession,
+) -> Result<TaskAgentSession> {
+    let mut attempt = 1;
+    loop {
+        match broker.create_session(session).await {
+            Ok(session) => return Ok(session),
+            Err(error) if attempt < BROKER_SESSION_CREATE_MAX_ATTEMPTS => {
+                let delay = broker_session_create_retry_delay(attempt);
+                eprintln!(
+                    "Broker session create failed on attempt {attempt}/{}: {error:#}. Retrying in {}s.",
+                    BROKER_SESSION_CREATE_MAX_ATTEMPTS,
+                    delay.as_secs()
+                );
+                attempt += 1;
+                tokio::time::sleep(delay).await;
+            }
+            Err(error) => {
+                return Err(error).context("create broker runner session");
+            }
+        }
+    }
+}
+
+fn broker_session_create_retry_delay(attempt: u32) -> Duration {
+    let multiplier = attempt.clamp(1, 3) as u64;
+    Duration::from_secs(BROKER_SESSION_CREATE_RETRY_SECONDS * multiplier)
 }
 
 fn should_stop_after_message(once: bool, action: &V2MessageAction) -> bool {
@@ -2480,6 +2512,22 @@ mod tests {
         state.received_message();
         assert_eq!(state.consecutive_errors, 0);
         assert_eq!(state.consecutive_empty_messages, 0);
+    }
+
+    #[test]
+    fn broker_session_create_retry_delay_is_bounded() {
+        assert_eq!(
+            broker_session_create_retry_delay(1),
+            Duration::from_secs(BROKER_SESSION_CREATE_RETRY_SECONDS)
+        );
+        assert_eq!(
+            broker_session_create_retry_delay(2),
+            Duration::from_secs(BROKER_SESSION_CREATE_RETRY_SECONDS * 2)
+        );
+        assert_eq!(
+            broker_session_create_retry_delay(4),
+            Duration::from_secs(BROKER_SESSION_CREATE_RETRY_SECONDS * 3)
+        );
     }
 
     #[test]

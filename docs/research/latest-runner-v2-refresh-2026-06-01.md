@@ -60,6 +60,9 @@ Source anchors in `actions/runner` `v2.334.0`:
   GitHub targets.
 - Create one broker session per runner process and run one active GitHub job at
   a time.
+- Retry broker session creation briefly before failing, matching the upstream
+  expectation that transient GitHub/network startup errors are not immediately
+  fatal.
 - Poll broker messages with the runner status that reflects worker state:
   `Online` when idle and `Busy` while a job is running.
 - Retry transient broker message poll failures with bounded backoff, and back
@@ -123,6 +126,7 @@ proof is:
 
 Implemented in this refresh:
 
+- broker session creation retries transient startup failures before giving up
 - broker acknowledge failure is logged and does not abort the job
 - transient broker message poll failures retry with 15s/30s bounded backoff;
   repeated empty polls trigger a 15s backoff
