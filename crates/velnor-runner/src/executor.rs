@@ -2108,6 +2108,12 @@ mod tests {
                         "page_url=https://jackin-project.github.io/jackin/\n",
                     )?;
                 }
+                if has_container_env_path(args, "GITHUB_OUTPUT", "sitemap_output") {
+                    fs::write(
+                        self.temp.join("sitemap_output"),
+                        "url=https://jackin-project.github.io/jackin/sitemap.xml\n",
+                    )?;
+                }
                 if has_container_env_path(args, "GITHUB_STATE", "cache_state") {
                     fs::write(self.temp.join("cache_state"), "primaryKey=linux-cache\n")?;
                 }
@@ -3366,6 +3372,90 @@ mod tests {
             fs::read_to_string(temp.join("sitemap.sh")).unwrap(),
             "echo \"url=${PAGE_URL%/}/sitemap.xml\" >> \"$GITHUB_OUTPUT\"\n"
         );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn target_check_deployed_docs_runtime_inputs_resolve_after_sitemap_step() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "deployment".into(),
+                script: "echo deploy".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "sitemap".into(),
+                script: r#"echo "url=${PAGE_URL%/}/sitemap.xml" >> "$GITHUB_OUTPUT""#.into(),
+                shell: Shell::Bash,
+                working_directory_container: "/__w/repo".into(),
+                env: vec![(
+                    "PAGE_URL".into(),
+                    "${{ steps.deployment.outputs.page_url }}".into(),
+                )],
+                condition: None,
+                continue_on_error: false,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "check-deployed-1".into(),
+                script: r#"lychee --dump "${{ inputs.sitemap-url }}""#.into(),
+                shell: Shell::Bash,
+                working_directory_container: "/__w/repo".into(),
+                env: vec![
+                    (
+                        "SITEMAP_URL".into(),
+                        "${{ steps.sitemap.outputs.url }}".into(),
+                    ),
+                    ("EDIT_URL".into(), "${{ env.JACKIN_REPO_EDIT_URL }}".into()),
+                    ("BLOB_URL".into(), "${{ env.JACKIN_REPO_BLOB_URL }}".into()),
+                ],
+                condition: None,
+                continue_on_error: false,
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        executor
+            .execute_ordered_steps(
+                &container(&temp),
+                &steps,
+                &[
+                    (
+                        "JACKIN_REPO_EDIT_URL".into(),
+                        "https://github.com/jackin-project/jackin/edit/main".into(),
+                    ),
+                    (
+                        "JACKIN_REPO_BLOB_URL".into(),
+                        "https://github.com/jackin-project/jackin/blob/main".into(),
+                    ),
+                ],
+                &temp,
+            )
+            .unwrap();
+
+        let check_exec = executor
+            .runner()
+            .calls
+            .iter()
+            .find(|(_program, args)| args.iter().any(|arg| arg.ends_with("/check-deployed-1.sh")))
+            .expect("check-deployed script should be executed");
+        assert!(check_exec
+            .1
+            .contains(&("SITEMAP_URL=https://jackin-project.github.io/jackin/sitemap.xml".into())));
+        assert!(check_exec
+            .1
+            .contains(&("EDIT_URL=https://github.com/jackin-project/jackin/edit/main".into())));
+        assert!(check_exec
+            .1
+            .contains(&("BLOB_URL=https://github.com/jackin-project/jackin/blob/main".into())));
         fs::remove_dir_all(temp).unwrap();
     }
 
