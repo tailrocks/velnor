@@ -107,6 +107,12 @@ pub struct StepLog {
 
 #[derive(Debug, Clone)]
 pub enum ExecutableStep {
+    CompositeStart {
+        step_id: String,
+    },
+    CompositeEnd {
+        step_id: String,
+    },
     Checkout(CheckoutPlan),
     Script(ScriptStep),
     JavaScript {
@@ -139,6 +145,8 @@ struct PostJavaScriptAction {
 impl ExecutableStep {
     fn id(&self) -> &str {
         match self {
+            ExecutableStep::CompositeStart { step_id } => step_id,
+            ExecutableStep::CompositeEnd { step_id } => step_id,
             ExecutableStep::Checkout(plan) => &plan.step_id,
             ExecutableStep::Script(step) => &step.id,
             ExecutableStep::JavaScript { step_id, .. } => step_id,
@@ -149,6 +157,8 @@ impl ExecutableStep {
 
     fn condition(&self) -> Option<&str> {
         match self {
+            ExecutableStep::CompositeStart { .. } => None,
+            ExecutableStep::CompositeEnd { .. } => None,
             ExecutableStep::Checkout(plan) => plan.condition.as_deref(),
             ExecutableStep::Script(step) => step.condition.as_deref(),
             ExecutableStep::JavaScript { condition, .. } => condition.as_deref(),
@@ -159,6 +169,8 @@ impl ExecutableStep {
 
     fn continue_on_error(&self) -> bool {
         match self {
+            ExecutableStep::CompositeStart { .. } => false,
+            ExecutableStep::CompositeEnd { .. } => false,
             ExecutableStep::Checkout(plan) => plan.continue_on_error,
             ExecutableStep::Script(step) => step.continue_on_error,
             ExecutableStep::JavaScript {
@@ -315,6 +327,17 @@ where
         let mut step_error = None;
         let mut post_actions = Vec::new();
         for step in steps {
+            match step {
+                ExecutableStep::CompositeStart { step_id } => {
+                    state.push_composite(step_id);
+                    continue;
+                }
+                ExecutableStep::CompositeEnd { step_id } => {
+                    state.pop_composite(step_id);
+                    continue;
+                }
+                _ => {}
+            }
             let step_id = step.id().to_string();
             let step_state = state.with_step_action(&step_id);
             if !step_state.evaluate_condition(step.condition()) {
@@ -375,6 +398,9 @@ where
             }
             let step_state = state.with_step_action(&step_id);
             let result = (|| match step {
+                ExecutableStep::CompositeStart { .. } | ExecutableStep::CompositeEnd { .. } => {
+                    unreachable!("composite boundary steps are handled before execution")
+                }
                 ExecutableStep::Checkout(plan) => {
                     self.execute_checkout_step(container, plan, &step_state)
                 }
@@ -776,6 +802,7 @@ struct JobExecutionState {
     conclusions: BTreeMap<String, StepOutcome>,
     path: Vec<String>,
     masks: Vec<String>,
+    composite_stack: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -827,6 +854,7 @@ impl JobExecutionState {
             conclusions: BTreeMap::new(),
             path: Vec::new(),
             masks: Vec::new(),
+            composite_stack: Vec::new(),
         };
         state.env = state
             .env
@@ -857,11 +885,26 @@ impl JobExecutionState {
             conclusions: self.conclusions.clone(),
             path: self.path.clone(),
             masks: self.masks.clone(),
+            composite_stack: self.composite_stack.clone(),
         };
         state
             .env
             .insert("GITHUB_ACTION".to_string(), step_id.to_string());
         state
+    }
+
+    fn push_composite(&mut self, step_id: &str) {
+        self.composite_stack.push(step_id.to_string());
+    }
+
+    fn pop_composite(&mut self, step_id: &str) {
+        if self
+            .composite_stack
+            .last()
+            .is_some_and(|scope| scope == step_id)
+        {
+            self.composite_stack.pop();
+        }
     }
 
     fn apply(&mut self, step_id: &str, result: &StepExecutionResult) {
@@ -1059,7 +1102,7 @@ impl JobExecutionState {
             return Some(self.job_status().to_string());
         }
         if expression.trim() == "github.action_status" {
-            return Some(self.job_status().to_string());
+            return Some(self.action_status().to_string());
         }
 
         let env_name = match expression.trim() {
@@ -1117,6 +1160,22 @@ impl JobExecutionState {
             .values()
             .any(|outcome| *outcome == StepOutcome::Failure)
         {
+            "failure"
+        } else {
+            "success"
+        }
+    }
+
+    fn action_status(&self) -> &'static str {
+        let Some(scope) = self.composite_stack.last() else {
+            return self.job_status();
+        };
+        if self.conclusions.iter().any(|(step_id, outcome)| {
+            *outcome == StepOutcome::Failure
+                && step_id
+                    .strip_prefix(scope)
+                    .is_some_and(|suffix| suffix.starts_with('-'))
+        }) {
             "failure"
         } else {
             "success"
@@ -3211,6 +3270,51 @@ mod tests {
         assert_eq!(
             ignored_state.resolve_expressions("${{ job.status }}"),
             "success"
+        );
+    }
+
+    #[test]
+    fn github_action_status_uses_current_composite_scope() {
+        let mut state = JobExecutionState::default();
+        state.apply(
+            "top-level-failure",
+            &StepExecutionResult {
+                exit_code: 1,
+                skipped: false,
+                failure_ignored: false,
+                state: StepCommandState::default(),
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        state.push_composite("composite");
+
+        assert_eq!(state.resolve_expressions("${{ job.status }}"), "failure");
+        assert_eq!(
+            state.resolve_expressions("${{ github.action_status }}"),
+            "success"
+        );
+
+        state.apply(
+            "composite-child",
+            &StepExecutionResult {
+                exit_code: 1,
+                skipped: false,
+                failure_ignored: false,
+                state: StepCommandState::default(),
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+
+        assert_eq!(
+            state.resolve_expressions("${{ github.action_status }}"),
+            "failure"
+        );
+        state.pop_composite("composite");
+        assert_eq!(
+            state.resolve_expressions("${{ github.action_status }}"),
+            "failure"
         );
     }
 

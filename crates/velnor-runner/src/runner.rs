@@ -1357,6 +1357,9 @@ fn ordered_executable_steps(
                         .ok_or_else(|| anyhow::anyhow!("local action mapping count mismatch"))?;
                     let parent_condition = step.condition.as_deref();
                     let parent_continue_on_error = crate::script_step::step_continue_on_error(step);
+                    ordered.push(ExecutableStep::CompositeStart {
+                        step_id: plan.step_id.clone(),
+                    });
                     for invocation in
                         composite_action_invocations(plan, metadata, "/__w", actions_host)?
                     {
@@ -1397,6 +1400,9 @@ fn ordered_executable_steps(
                             }
                         }
                     }
+                    ordered.push(ExecutableStep::CompositeEnd {
+                        step_id: plan.step_id.clone(),
+                    });
                     continue;
                 }
                 let Some(reference) = step.reference.as_ref() else {
@@ -1469,6 +1475,9 @@ fn append_resolved_action_steps(
         ActionRuntime::Composite => {
             let action_condition =
                 combine_conditions(parent_condition, action.plan.condition.as_deref());
+            ordered.push(ExecutableStep::CompositeStart {
+                step_id: action.plan.step_id.clone(),
+            });
             for invocation in action.composite_invocations("/__w", actions_host)? {
                 match invocation {
                     CompositeActionInvocation::Script(mut script) => {
@@ -1507,6 +1516,9 @@ fn append_resolved_action_steps(
                     }
                 }
             }
+            ordered.push(ExecutableStep::CompositeEnd {
+                step_id: action.plan.step_id.clone(),
+            });
         }
     }
     Ok(())
@@ -2505,9 +2517,13 @@ runs:
         )
         .unwrap();
 
-        assert_eq!(ordered.len(), 2);
+        assert_eq!(ordered.len(), 4);
         assert!(matches!(ordered[0], ExecutableStep::Script(_)));
-        let ExecutableStep::Script(step) = &ordered[1] else {
+        assert!(matches!(
+            &ordered[1],
+            ExecutableStep::CompositeStart { step_id } if step_id == "aggregate"
+        ));
+        let ExecutableStep::Script(step) = &ordered[2] else {
             panic!("local composite should expand to script step")
         };
         assert_eq!(step.id, "aggregate-1");
@@ -2517,6 +2533,10 @@ runs:
             Some("${{ (always()) && (github.event_name != 'schedule') }}")
         );
         assert!(step.continue_on_error);
+        assert!(matches!(
+            &ordered[3],
+            ExecutableStep::CompositeEnd { step_id } if step_id == "aggregate"
+        ));
     }
 
     #[test]
@@ -2707,14 +2727,18 @@ runs:
         )
         .unwrap();
 
-        assert_eq!(ordered.len(), 1);
+        assert_eq!(ordered.len(), 3);
+        assert!(matches!(
+            &ordered[0],
+            ExecutableStep::CompositeStart { step_id } if step_id == "docs"
+        ));
         let ExecutableStep::JavaScript {
             step_id,
             invocation,
             condition,
             continue_on_error,
             ..
-        } = &ordered[0]
+        } = &ordered[1]
         else {
             panic!("nested repository action should expand to JavaScript step")
         };
@@ -2724,6 +2748,10 @@ runs:
             .contains(&("INPUT_GITHUB_TOKEN".into(), "ghs_token".into())));
         assert_eq!(condition.as_deref(), Some("github.event_name == 'push'"));
         assert!(*continue_on_error);
+        assert!(matches!(
+            &ordered[2],
+            ExecutableStep::CompositeEnd { step_id } if step_id == "docs"
+        ));
     }
 
     #[test]
@@ -2781,8 +2809,12 @@ runs:
         let ordered =
             ordered_executable_steps(&job, &[], &[resolved], &[], actions_host, &[]).unwrap();
 
-        assert_eq!(ordered.len(), 1);
-        let ExecutableStep::Script(step) = &ordered[0] else {
+        assert_eq!(ordered.len(), 3);
+        assert!(matches!(
+            &ordered[0],
+            ExecutableStep::CompositeStart { step_id } if step_id == "rust"
+        ));
+        let ExecutableStep::Script(step) = &ordered[1] else {
             panic!("repository composite should expand to script step")
         };
         assert_eq!(step.id, "rust-1");
@@ -2791,6 +2823,10 @@ runs:
             Some("${{ (runner.os == 'Linux') && (runner.os != 'Windows') }}")
         );
         assert!(step.script.contains("echo \"stable\""));
+        assert!(matches!(
+            &ordered[2],
+            ExecutableStep::CompositeEnd { step_id } if step_id == "rust"
+        ));
     }
 
     #[test]
@@ -2999,8 +3035,12 @@ runs:
         let ordered =
             ordered_executable_steps(&job, &[], &[resolved], &[], actions_host, &[]).unwrap();
 
-        assert_eq!(ordered.len(), 2);
-        let ExecutableStep::Script(step) = &ordered[0] else {
+        assert_eq!(ordered.len(), 4);
+        assert!(matches!(
+            &ordered[0],
+            ExecutableStep::CompositeStart { step_id } if step_id == "pages"
+        ));
+        let ExecutableStep::Script(step) = &ordered[1] else {
             panic!("first composite step should be script")
         };
         assert_eq!(step.id, "pages-upload");
@@ -3008,7 +3048,7 @@ runs:
             step_id,
             outputs,
             condition,
-        } = &ordered[1]
+        } = &ordered[2]
         else {
             panic!("second composite step should materialize outputs")
         };
@@ -3018,6 +3058,10 @@ runs:
             "${{ steps.pages-upload.outputs.artifact-id }}"
         );
         assert_eq!(condition.as_deref(), Some("runner.os == 'Linux'"));
+        assert!(matches!(
+            &ordered[3],
+            ExecutableStep::CompositeEnd { step_id } if step_id == "pages"
+        ));
     }
 
     #[test]
@@ -3095,16 +3139,24 @@ runs:
         let ordered =
             ordered_executable_steps(&job, &[], &[pages, upload], &[], actions_host, &[]).unwrap();
 
-        assert_eq!(ordered.len(), 1);
+        assert_eq!(ordered.len(), 3);
+        assert!(matches!(
+            &ordered[0],
+            ExecutableStep::CompositeStart { step_id } if step_id == "pages"
+        ));
         let ExecutableStep::JavaScript {
             step_id,
             continue_on_error,
             ..
-        } = &ordered[0]
+        } = &ordered[1]
         else {
             panic!("nested upload action should expand to JavaScript step")
         };
         assert_eq!(step_id, "pages-upload");
         assert!(*continue_on_error);
+        assert!(matches!(
+            &ordered[2],
+            ExecutableStep::CompositeEnd { step_id } if step_id == "pages"
+        ));
     }
 }

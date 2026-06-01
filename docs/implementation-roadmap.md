@@ -128,7 +128,7 @@ Deliverables:
   - `github.event` from job `ContextData` is written to `/__t/_github_workflow/event.json` and exposed through `GITHUB_EVENT_PATH`
   - repository JavaScript actions receive per-action `GITHUB_ACTION`, `GITHUB_ACTION_PATH`, `GITHUB_ACTION_REPOSITORY`, and `GITHUB_ACTION_REF`
   - all executable steps receive step-scoped `GITHUB_ACTION` before condition, env, and script expression rendering
-  - `github.action_status` is expression-resolvable from current job status as an approximation for composite-action status; exact nested composite scoping remains open
+  - `github.action_status` is expression-resolvable for composite action steps from the current composite scope, while top-level steps fall back to current job status
   - basic `RUNNER_*` variables are injected for the Docker runner environment, including GitHub-style `RUNNER_ARCH` values such as `X64`/`ARM64`, `RUNNER_NAME`, `RUNNER_WORKSPACE`, `RUNNER_ENVIRONMENT=self-hosted`, `RUNNER_TOOL_CACHE=/__tool`, matching `AGENT_TOOLSDIRECTORY=/__tool` for toolcache actions, and `RUNNER_DEBUG=1` when `ACTIONS_STEP_DEBUG=true`
   - action runtime values from `SystemVssConnection` are injected: `ACTIONS_RUNTIME_URL`, `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_CACHE_URL`, `ACTIONS_RESULTS_URL`, OIDC request URL/token, cache service v2, and orchestration id when GitHub sends them
   - broader GitHub runner env parity remains incomplete
