@@ -11,11 +11,14 @@ use crate::{
         resolve_local_action, ActionMetadata, ActionRuntime, CompositeActionInvocation,
         LocalActionPlan, RepositoryActionPlan, ResolvedAction,
     },
-    checkout::{checkout_plans, execute_checkouts},
+    checkout::{checkout_plans, checkout_step_id, execute_checkouts, CheckoutPlan},
     cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     container::{split_container_options, JobContainerSpec, ServiceContainerSpec},
-    executor::{DockerScriptExecutor, ExecutableStep, ProcessCommandRunner, StepLog},
+    executor::{
+        render_context_expressions, DockerScriptExecutor, ExecutableStep, ProcessCommandRunner,
+        StepLog,
+    },
     job_message::{ActionReferenceType, AgentJobRequestMessage, PIPELINE_AGENT_JOB_REQUEST},
     protocol::{
         DistributedTaskClient, GitHubAuthResult, GitHubScope, JobCompletedEvent, OAuthClient,
@@ -489,10 +492,17 @@ fn execute_script_job(
     for path in [&workspace, &temp, &home, &actions, &tools] {
         fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
     }
+    let context_data = job_context_data(job);
     let mut command_runner = ProcessCommandRunner;
     let checkout_plans = checkout_plans(job, &workspace)?;
-    execute_checkouts(&mut command_runner, &checkout_plans)?;
-    let context_data = job_context_data(job);
+    let (runtime_checkout_plans, eager_checkout_plans): (Vec<_>, Vec<_>) = checkout_plans
+        .into_iter()
+        .partition(CheckoutPlan::requires_runtime_context);
+    let eager_checkout_plans = eager_checkout_plans
+        .into_iter()
+        .map(|plan| resolve_checkout_plan_context(plan, &context_data))
+        .collect::<Vec<_>>();
+    execute_checkouts(&mut command_runner, &eager_checkout_plans)?;
     let local_action_plans =
         local_action_plans_with_context(&job.steps, &workspace, &context_data)?;
     let local_actions = local_action_plans
@@ -521,6 +531,7 @@ fn execute_script_job(
         &resolved_actions,
         &local_actions,
         &actions,
+        &runtime_checkout_plans,
     )?;
 
     let container = JobContainerSpec {
@@ -566,6 +577,16 @@ fn execute_script_job(
         outputs: summary.job_outputs,
         step_logs: summary.step_logs,
     })
+}
+
+fn resolve_checkout_plan_context(
+    mut plan: CheckoutPlan,
+    context_data: &[(String, Value)],
+) -> CheckoutPlan {
+    if let Some(version) = plan.version.as_mut() {
+        *version = render_context_expressions(version, context_data);
+    }
+    plan
 }
 
 #[derive(Debug, Clone)]
@@ -671,11 +692,17 @@ fn ordered_executable_steps(
     resolved_actions: &[ResolvedAction],
     local_actions: &[(LocalActionPlan, ActionMetadata)],
     actions_host: &std::path::Path,
+    runtime_checkout_plans: &[CheckoutPlan],
 ) -> Result<Vec<ExecutableStep>> {
     let mut ordered = Vec::new();
     let mut script_iter = script_steps.iter();
     let mut local_iter = local_actions.iter();
-    for step in job.steps.iter().filter(|step| step.enabled) {
+    for (step_index, step) in job
+        .steps
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| step.enabled)
+    {
         match step.reference_type() {
             Some(ActionReferenceType::Script) => {
                 let script = script_iter
@@ -739,6 +766,12 @@ fn ordered_executable_steps(
                     continue;
                 };
                 if repository.eq_ignore_ascii_case("actions/checkout") {
+                    if let Some(plan) = runtime_checkout_plans
+                        .iter()
+                        .find(|plan| plan.step_id == checkout_step_id(step, step_index))
+                    {
+                        ordered.push(ExecutableStep::Checkout(plan.clone()));
+                    }
                     continue;
                 }
                 let git_ref = reference.git_ref.as_deref().ok_or_else(|| {
@@ -1652,6 +1685,7 @@ runs:
             &[],
             &[(local_plan, metadata)],
             Path::new("/tmp/actions"),
+            &[],
         )
         .unwrap();
 
@@ -1667,6 +1701,97 @@ runs:
             Some("${{ (always()) && (github.event_name != 'schedule') }}")
         );
         assert!(step.continue_on_error);
+    }
+
+    #[test]
+    fn ordered_steps_keep_runtime_checkout_after_producer_step() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Preview",
+            "requestId": 1,
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "jackin-project/jackin",
+                    "version": "abc123",
+                    "properties": { "cloneUrl": "https://github.com/jackin-project/jackin.git" }
+                }]
+            },
+            "steps": [
+                {
+                    "id": "source",
+                    "reference": { "type": "Script" },
+                    "inputs": { "script": "echo sha=def456 >> \"$GITHUB_OUTPUT\"" }
+                },
+                {
+                    "reference": { "type": "Repository", "name": "actions/checkout" },
+                    "inputs": {
+                        "ref": "${{ steps.source.outputs.sha }}",
+                        "fetch-depth": "0"
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+        let script_steps = crate::script_step::github_script_steps(&job.steps, "/__w").unwrap();
+        let runtime_checkout_plans = checkout_plans(&job, Path::new("/tmp/work"))
+            .unwrap()
+            .into_iter()
+            .filter(CheckoutPlan::requires_runtime_context)
+            .collect::<Vec<_>>();
+
+        let ordered = ordered_executable_steps(
+            &job,
+            &script_steps,
+            &[],
+            &[],
+            Path::new("/tmp/actions"),
+            &runtime_checkout_plans,
+        )
+        .unwrap();
+
+        assert_eq!(ordered.len(), 2);
+        assert!(matches!(ordered[0], ExecutableStep::Script(_)));
+        let ExecutableStep::Checkout(plan) = &ordered[1] else {
+            panic!("runtime checkout should remain ordered after its producer step")
+        };
+        assert_eq!(plan.step_id, "checkout2");
+        assert_eq!(
+            plan.version.as_deref(),
+            Some("${{ steps.source.outputs.sha }}")
+        );
+    }
+
+    #[test]
+    fn eager_checkout_resolves_ref_from_job_context() {
+        let plan = CheckoutPlan {
+            step_id: "checkout".into(),
+            clone_url: "https://github.com/jackin-project/jackin.git".into(),
+            version: Some("${{ needs.source-changed.outputs.sha }}".into()),
+            destination: Path::new("/tmp/work").to_path_buf(),
+            token: None,
+            fetch_depth: None,
+            condition: None,
+            continue_on_error: false,
+        };
+        let context_data = vec![(
+            "needs".to_string(),
+            serde_json::json!({
+                "source-changed": {
+                    "outputs": {
+                        "sha": "def456"
+                    }
+                }
+            }),
+        )];
+
+        let resolved = resolve_checkout_plan_context(plan, &context_data);
+
+        assert_eq!(resolved.version.as_deref(), Some("def456"));
+        assert!(!resolved.requires_runtime_context());
     }
 
     #[test]
@@ -1736,6 +1861,7 @@ runs:
             &[resolved],
             &[(local_plan, local_metadata)],
             Path::new("/tmp/actions"),
+            &[],
         )
         .unwrap();
 
@@ -1810,7 +1936,8 @@ runs:
             metadata,
         };
 
-        let ordered = ordered_executable_steps(&job, &[], &[resolved], &[], actions_host).unwrap();
+        let ordered =
+            ordered_executable_steps(&job, &[], &[resolved], &[], actions_host, &[]).unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Script(step) = &ordered[0] else {
@@ -1888,7 +2015,8 @@ runs:
             },
         ];
 
-        let ordered = ordered_executable_steps(&job, &[], &resolved, &[], actions_host).unwrap();
+        let ordered =
+            ordered_executable_steps(&job, &[], &resolved, &[], actions_host, &[]).unwrap();
 
         let ExecutableStep::JavaScript { invocation, .. } = &ordered[0] else {
             panic!("repository action should expand to JavaScript step")
@@ -1954,7 +2082,8 @@ runs:
             metadata,
         };
 
-        let ordered = ordered_executable_steps(&job, &[], &[resolved], &[], actions_host).unwrap();
+        let ordered =
+            ordered_executable_steps(&job, &[], &[resolved], &[], actions_host, &[]).unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Docker {
@@ -2025,7 +2154,8 @@ runs:
             metadata,
         };
 
-        let ordered = ordered_executable_steps(&job, &[], &[resolved], &[], actions_host).unwrap();
+        let ordered =
+            ordered_executable_steps(&job, &[], &[resolved], &[], actions_host, &[]).unwrap();
 
         assert_eq!(ordered.len(), 2);
         let ExecutableStep::Script(step) = &ordered[0] else {
@@ -2121,7 +2251,7 @@ runs:
         };
 
         let ordered =
-            ordered_executable_steps(&job, &[], &[pages, upload], &[], actions_host).unwrap();
+            ordered_executable_steps(&job, &[], &[pages, upload], &[], actions_host, &[]).unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::JavaScript {

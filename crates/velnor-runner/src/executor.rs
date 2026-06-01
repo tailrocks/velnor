@@ -2,6 +2,7 @@
 
 use crate::{
     action::{DockerActionInvocation, JavaScriptActionInvocation},
+    checkout::{execute_checkout, CheckoutPlan},
     container::JobContainerSpec,
     script_step::{ScriptStep, ScriptStepPlan, StepCommandState},
     workflow_command::parse_workflow_commands,
@@ -98,6 +99,7 @@ pub struct StepLog {
 
 #[derive(Debug, Clone)]
 pub enum ExecutableStep {
+    Checkout(CheckoutPlan),
     Script(ScriptStep),
     JavaScript {
         step_id: String,
@@ -129,6 +131,7 @@ struct PostJavaScriptAction {
 impl ExecutableStep {
     fn id(&self) -> &str {
         match self {
+            ExecutableStep::Checkout(plan) => &plan.step_id,
             ExecutableStep::Script(step) => &step.id,
             ExecutableStep::JavaScript { step_id, .. } => step_id,
             ExecutableStep::Docker { step_id, .. } => step_id,
@@ -138,6 +141,7 @@ impl ExecutableStep {
 
     fn condition(&self) -> Option<&str> {
         match self {
+            ExecutableStep::Checkout(plan) => plan.condition.as_deref(),
             ExecutableStep::Script(step) => step.condition.as_deref(),
             ExecutableStep::JavaScript { condition, .. } => condition.as_deref(),
             ExecutableStep::Docker { condition, .. } => condition.as_deref(),
@@ -147,6 +151,7 @@ impl ExecutableStep {
 
     fn continue_on_error(&self) -> bool {
         match self {
+            ExecutableStep::Checkout(plan) => plan.continue_on_error,
             ExecutableStep::Script(step) => step.continue_on_error,
             ExecutableStep::JavaScript {
                 continue_on_error, ..
@@ -323,6 +328,7 @@ where
                 continue;
             }
             let result = (|| match step {
+                ExecutableStep::Checkout(plan) => self.execute_checkout_step(plan, &state),
                 ExecutableStep::Script(step) => {
                     let step = state.resolve_script_step(step);
                     let plan = ScriptStepPlan::prepare_with_path(&step, temp_host, &state.path)?;
@@ -535,6 +541,26 @@ where
             failure_ignored: false,
             stdout: step_result.stdout,
             stderr: step_result.stderr,
+        })
+    }
+
+    fn execute_checkout_step(
+        &mut self,
+        plan: &CheckoutPlan,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        let mut plan = plan.clone();
+        if let Some(version) = plan.version.as_mut() {
+            *version = state.resolve_expressions(version);
+        }
+        execute_checkout(&mut self.runner, &plan)?;
+        Ok(StepExecutionResult {
+            exit_code: 0,
+            state: StepCommandState::default(),
+            skipped: false,
+            failure_ignored: false,
+            stdout: String::new(),
+            stderr: String::new(),
         })
     }
 
@@ -1491,6 +1517,30 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct CheckoutOutputRunner {
+        calls: Vec<(String, Vec<String>)>,
+    }
+
+    impl CommandRunner for CheckoutOutputRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            let stdout = if program == "docker"
+                && args.first().is_some_and(|arg| arg == "exec")
+                && args.iter().any(|arg| arg == "/__t/source.sh")
+            {
+                "::set-output name=sha::def456\n".to_string()
+            } else {
+                String::new()
+            };
+            Ok(CommandResult {
+                code: 0,
+                stdout,
+                stderr: String::new(),
+            })
+        }
+    }
+
     struct OutputWritingRunner {
         calls: Vec<(String, Vec<String>)>,
         temp: PathBuf,
@@ -1810,6 +1860,52 @@ mod tests {
             state.resolve_expressions("keep=${{ github.ref }}"),
             "keep=${{ github.ref }}"
         );
+    }
+
+    #[test]
+    fn runtime_checkout_resolves_ref_from_prior_step_output() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "source".into(),
+                script: "echo source".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+            ExecutableStep::Checkout(CheckoutPlan {
+                step_id: "checkout2".into(),
+                clone_url: "https://github.com/jackin-project/jackin.git".into(),
+                version: Some("${{ steps.source.outputs.sha }}".into()),
+                destination: temp.join("workspace"),
+                token: None,
+                fetch_depth: None,
+                condition: None,
+                continue_on_error: false,
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(CheckoutOutputRunner::default());
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        let fetch = executor
+            .runner()
+            .calls
+            .iter()
+            .find(|(program, args)| program == "git" && args.contains(&"fetch".to_string()))
+            .unwrap();
+        assert!(fetch.1.contains(&"def456".to_string()));
+        assert!(!fetch
+            .1
+            .iter()
+            .any(|arg| arg.contains("steps.source.outputs.sha")));
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]

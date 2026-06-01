@@ -10,11 +10,26 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckoutPlan {
+    pub step_id: String,
     pub clone_url: String,
     pub version: Option<String>,
     pub destination: PathBuf,
     pub token: Option<String>,
     pub fetch_depth: Option<u32>,
+    pub condition: Option<String>,
+    pub continue_on_error: bool,
+}
+
+impl CheckoutPlan {
+    pub fn requires_runtime_context(&self) -> bool {
+        self.version
+            .as_deref()
+            .is_some_and(contains_step_context_expression)
+            || self
+                .condition
+                .as_deref()
+                .is_some_and(contains_step_context_expression)
+    }
 }
 
 pub fn checkout_plans(
@@ -22,7 +37,7 @@ pub fn checkout_plans(
     workspace_host: &Path,
 ) -> Result<Vec<CheckoutPlan>> {
     let mut plans = Vec::new();
-    for step in &job.steps {
+    for (index, step) in job.steps.iter().enumerate() {
         if !step.enabled || !is_checkout_step(step) {
             continue;
         }
@@ -32,6 +47,7 @@ pub fn checkout_plans(
         let clone_url = checkout_clone_url(checkout_repository.as_deref(), self_repository)?;
         let destination = workspace_host.join(checkout_path(step)?);
         plans.push(CheckoutPlan {
+            step_id: checkout_step_id(step, index),
             clone_url,
             version: checkout_ref(step).or_else(|| {
                 checkout_repository
@@ -55,6 +71,8 @@ pub fn checkout_plans(
             token: checkout_token(step, job)
                 .or_else(|| system_access_token(job.system_connection())),
             fetch_depth: checkout_fetch_depth(step)?,
+            condition: step.condition.clone(),
+            continue_on_error: crate::script_step::step_continue_on_error(step),
         });
     }
     Ok(plans)
@@ -78,7 +96,7 @@ where
     Ok(())
 }
 
-fn execute_checkout<R>(runner: &mut R, plan: &CheckoutPlan) -> Result<()>
+pub fn execute_checkout<R>(runner: &mut R, plan: &CheckoutPlan) -> Result<()>
 where
     R: CommandRunner,
 {
@@ -188,6 +206,33 @@ fn is_checkout_step(step: &ActionStep) -> bool {
             .as_ref()
             .and_then(|reference| reference.name.as_deref())
             .is_some_and(|name| name.eq_ignore_ascii_case("actions/checkout"))
+}
+
+pub(crate) fn checkout_step_id(step: &ActionStep, index: usize) -> String {
+    step.id
+        .as_deref()
+        .or(step.context_name.as_deref())
+        .or(step.name.as_deref())
+        .map(sanitize_segment)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("checkout{}", index + 1))
+}
+
+fn sanitize_segment(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn contains_step_context_expression(value: &str) -> bool {
+    value.contains("${{") && value.contains("steps.")
 }
 
 fn self_repository(repositories: &[RepositoryResource]) -> Result<&RepositoryResource> {
@@ -409,11 +454,14 @@ mod tests {
         let temp =
             std::env::temp_dir().join(format!("velnor-checkout-test-{}", std::process::id()));
         let plan = CheckoutPlan {
+            step_id: "checkout".into(),
             clone_url: "https://github.com/acme/repo.git".into(),
             version: Some("abc123".into()),
             destination: temp.clone(),
             token: Some("token".into()),
             fetch_depth: Some(1),
+            condition: None,
+            continue_on_error: false,
         };
         let mut runner = RecordingRunner::default();
 
@@ -446,11 +494,14 @@ mod tests {
             std::process::id()
         ));
         let plan = CheckoutPlan {
+            step_id: "checkout".into(),
             clone_url: "https://github.com/acme/repo.git".into(),
             version: Some("main".into()),
             destination: temp.clone(),
             token: None,
             fetch_depth: None,
+            condition: None,
+            continue_on_error: false,
         };
         let mut runner = RecordingRunner::default();
 
@@ -551,6 +602,52 @@ mod tests {
         assert_eq!(plans[0].destination, Path::new("/tmp/work"));
         assert_eq!(plans[0].token.as_deref(), Some("ghs-token"));
         assert_eq!(plans[0].fetch_depth, Some(1));
+    }
+
+    #[test]
+    fn checkout_ref_from_previous_step_requires_runtime_context() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Preview",
+            "requestId": 1,
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "jackin-project/jackin",
+                    "version": "abc123",
+                    "properties": { "cloneUrl": "https://github.com/jackin-project/jackin.git" }
+                }]
+            },
+            "steps": [
+                {
+                    "id": "source",
+                    "reference": { "type": "Script" },
+                    "inputs": { "script": "echo sha=def456 >> \"$GITHUB_OUTPUT\"" }
+                },
+                {
+                    "reference": { "type": "Repository", "name": "actions/checkout" },
+                    "inputs": {
+                        "ref": "${{ steps.source.outputs.sha }}",
+                        "fetch-depth": "0"
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].step_id, "checkout2");
+        assert_eq!(
+            plans[0].version.as_deref(),
+            Some("${{ steps.source.outputs.sha }}")
+        );
+        assert!(plans[0].requires_runtime_context());
+        assert_eq!(plans[0].fetch_depth, None);
     }
 
     #[test]
