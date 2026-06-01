@@ -12,6 +12,8 @@ REQUIRE_DOCKER_SOCKET="${VELNOR_REQUIRE_DOCKER_SOCKET:-true}"
 IDLE_TIMEOUT_SECONDS="${VELNOR_IDLE_TIMEOUT_SECONDS:-900}"
 WORKFLOW="${VELNOR_FIXTURE_WORKFLOW:-compat.yml}"
 DISPATCH="${VELNOR_FIXTURE_DISPATCH:-false}"
+FIXTURE_REF="${VELNOR_FIXTURE_REF:-}"
+FIXTURE_INPUTS="${VELNOR_FIXTURE_INPUTS:-}"
 RUN_ID="${VELNOR_FIXTURE_RUN_ID:-26762850861}"
 JOB_COUNT="${VELNOR_FIXTURE_JOB_COUNT:-2}"
 CLEANUP_RUNNER="${VELNOR_FIXTURE_CLEANUP_RUNNER:-true}"
@@ -26,6 +28,11 @@ cleanup_runner() {
 }
 
 trap cleanup_runner EXIT
+
+if ! [[ "$JOB_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "VELNOR_FIXTURE_JOB_COUNT must be a positive integer." >&2
+  exit 2
+fi
 
 if [[ -z "${GITHUB_TOKEN:-}" ]]; then
   echo "GITHUB_TOKEN is required to register the fixture self-hosted runner." >&2
@@ -67,10 +74,24 @@ REGISTERED_RUNNER=true
 
 if [[ "$DISPATCH" == "true" ]]; then
   echo "==> Dispatching fresh fixture workflow $WORKFLOW"
-  gh workflow run "$WORKFLOW" --repo "$FIXTURE_REPO"
+  workflow_run_args=("$WORKFLOW" --repo "$FIXTURE_REPO")
+  if [[ -n "$FIXTURE_REF" ]]; then
+    workflow_run_args+=(--ref "$FIXTURE_REF")
+  fi
+  if [[ -n "$FIXTURE_INPUTS" ]]; then
+    IFS=',' read -r -a fixture_inputs <<<"$FIXTURE_INPUTS"
+    for input in "${fixture_inputs[@]}"; do
+      workflow_run_args+=(-f "$input")
+    done
+  fi
+  gh workflow run "${workflow_run_args[@]}"
   echo "==> Waiting for dispatched run to appear"
   for _ in $(seq 1 30); do
-    RUN_ID="$(gh run list --repo "$FIXTURE_REPO" --workflow "$WORKFLOW" --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // ""')"
+    run_list_args=(--repo "$FIXTURE_REPO" --workflow "$WORKFLOW" --event workflow_dispatch --limit 1 --json databaseId)
+    if [[ -n "$FIXTURE_REF" ]]; then
+      run_list_args+=(--branch "$FIXTURE_REF")
+    fi
+    RUN_ID="$(gh run list "${run_list_args[@]}" --jq '.[0].databaseId // ""')"
     if [[ -n "$RUN_ID" ]]; then
       break
     fi

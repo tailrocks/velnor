@@ -135,7 +135,9 @@ scripts/fixture_smoke.sh
 
 The script runs two Velnor `--once` jobs by default because the fixture compat
 workflow has two Velnor matrix jobs. Override with `VELNOR_FIXTURE_JOB_COUNT`
-for a different fixture shape.
+for a different fixture shape. Set `VELNOR_FIXTURE_REF=<branch-or-sha>` and
+`VELNOR_FIXTURE_INPUTS=key=value,other=value` when dispatching fixture
+workflows from a non-default ref or with workflow inputs.
 
 If the Docker daemon sees the work directory at a different path than the
 runner process, set `VELNOR_DOCKER_HOST_WORK_DIR` to that daemon-visible path.
