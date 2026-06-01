@@ -3306,6 +3306,19 @@ runs:
             ordered.len() >= plans.len(),
             "expected target action inventory to produce executable steps"
         );
+        let sidecar_steps = ordered
+            .iter()
+            .filter(|step| {
+                matches!(
+                    step,
+                    ExecutableStep::JavaScript { .. } | ExecutableStep::Docker { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            sidecar_steps.is_empty(),
+            "target repository action inventory must route through native adapters, got {sidecar_steps:#?}"
+        );
     }
 
     #[test]
