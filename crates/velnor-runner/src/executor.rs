@@ -854,6 +854,7 @@ where
             NativeActionAdapter::GitHubRuntimeExport => {
                 Ok(native_github_runtime_export(action, state))
             }
+            NativeActionAdapter::PathsFilter => self.native_paths_filter(action, state),
             _ => {
                 bail!(
                     "native action adapter {:?} for step '{}' is declared but not implemented yet",
@@ -862,6 +863,102 @@ where
                 )
             }
         }
+    }
+
+    fn native_paths_filter(
+        &mut self,
+        action: &NativeActionInvocation,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        let filters = parse_paths_filter_rules(
+            action
+                .inputs
+                .get("filters")
+                .map(|value| state.resolve_expressions(value))
+                .as_deref()
+                .unwrap_or_default(),
+        )?;
+        let changed_files = self.changed_files_for_paths_filter(state)?;
+        let mut outputs = BTreeMap::new();
+        let mut matched_names = Vec::new();
+
+        for (name, patterns) in filters {
+            let globs = build_globs(&patterns)
+                .with_context(|| format!("build paths-filter globs for '{name}'"))?;
+            let matches = changed_files
+                .iter()
+                .filter(|file| globs.is_match(file.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            let matched = !matches.is_empty();
+            if matched {
+                matched_names.push(name.clone());
+            }
+            outputs.insert(name.clone(), matched.to_string());
+            outputs.insert(format!("{name}_count"), matches.len().to_string());
+            outputs.insert(format!("{name}_files"), matches.join("\n"));
+        }
+        outputs.insert(
+            "changes".to_string(),
+            serde_json::to_string(&matched_names).context("serialize paths-filter changes")?,
+        );
+
+        Ok(StepExecutionResult {
+            exit_code: 0,
+            state: StepCommandState {
+                outputs,
+                ..StepCommandState::default()
+            },
+            skipped: false,
+            failure_ignored: false,
+            stdout: changed_files
+                .iter()
+                .map(|file| format!("changed: {file}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            stderr: String::new(),
+        })
+    }
+
+    fn changed_files_for_paths_filter(&mut self, state: &JobExecutionState) -> Result<Vec<String>> {
+        let workspace = state
+            .workspace_host
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("paths-filter requires a workspace"))?;
+        let base = paths_filter_base_ref(state);
+        let head = paths_filter_head_ref(state);
+        let mut args = vec![
+            "-C".to_string(),
+            workspace.display().to_string(),
+            "diff".to_string(),
+            "--name-only".to_string(),
+        ];
+        args.push(match (base.as_deref(), head.as_deref()) {
+            (Some(base), Some(head)) if !base.is_empty() && !head.is_empty() => {
+                format!("{base}..{head}")
+            }
+            (Some(base), _) if !base.is_empty() => format!("{base}..HEAD"),
+            _ => "HEAD".to_string(),
+        });
+        let result = self.runner.run("git", &args)?;
+        if result.code != 0 {
+            bail!(
+                "git {} failed with code {}: {}",
+                args.join(" "),
+                result.code,
+                result.stderr
+            );
+        }
+        let mut files = result
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        files.sort();
+        files.dedup();
+        Ok(files)
     }
 
     fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
@@ -1038,6 +1135,59 @@ fn native_github_runtime_export(
         stdout,
         stderr: String::new(),
     }
+}
+
+fn parse_paths_filter_rules(filters: &str) -> Result<Vec<(String, Vec<String>)>> {
+    let value = serde_yaml::from_str::<serde_yaml::Value>(filters).context("parse filters")?;
+    let Some(mapping) = value.as_mapping() else {
+        bail!("paths-filter filters input must be a YAML mapping")
+    };
+    let mut rules = Vec::new();
+    for (name, patterns) in mapping {
+        let name = name
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("paths-filter name must be a string"))?
+            .to_string();
+        let patterns = paths_filter_patterns(patterns)
+            .with_context(|| format!("parse paths-filter patterns for '{name}'"))?;
+        rules.push((name, patterns));
+    }
+    Ok(rules)
+}
+
+fn paths_filter_patterns(value: &serde_yaml::Value) -> Result<Vec<String>> {
+    match value {
+        serde_yaml::Value::Sequence(sequence) => sequence
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .ok_or_else(|| anyhow::anyhow!("paths-filter pattern must be a string"))
+            })
+            .collect(),
+        serde_yaml::Value::String(value) => Ok(vec![value.clone()]),
+        _ => bail!("paths-filter patterns must be a string or string list"),
+    }
+}
+
+fn paths_filter_base_ref(state: &JobExecutionState) -> Option<String> {
+    state
+        .resolve_context_data_expression("github.event.pull_request.base.sha")
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            state
+                .resolve_context_data_expression("github.event.before")
+                .filter(|value| !value.is_empty())
+        })
+        .or_else(|| state.env.get("GITHUB_BASE_REF").cloned())
+}
+
+fn paths_filter_head_ref(state: &JobExecutionState) -> Option<String> {
+    state
+        .resolve_context_data_expression("github.event.pull_request.head.sha")
+        .filter(|value| !value.is_empty())
+        .or_else(|| state.env.get("GITHUB_SHA").cloned())
 }
 
 #[derive(Debug, Default)]
@@ -2089,6 +2239,27 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct GitDiffRunner {
+        calls: Vec<(String, Vec<String>)>,
+        stdout: String,
+    }
+
+    impl CommandRunner for GitDiffRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: 0,
+                stdout: if program == "git" {
+                    self.stdout.clone()
+                } else {
+                    String::new()
+                },
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[derive(Default)]
     struct FailingPostRunner {
         calls: Vec<(String, Vec<String>)>,
     }
@@ -2597,6 +2768,79 @@ mod tests {
         assert!(results[0]
             .stdout
             .contains("ACTIONS_RUNTIME_TOKEN=runtime-token"));
+        assert_eq!(
+            executor
+                .runner()
+                .calls
+                .iter()
+                .filter(|(_, args)| args.first().is_some_and(|arg| arg == "run")
+                    && args.iter().any(|arg| arg.starts_with("node:")))
+                .count(),
+            0
+        );
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_paths_filter_outputs_target_shapes() {
+        let temp = temp_dir();
+        fs::create_dir_all(temp.join("work")).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "filter".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::PathsFilter,
+                inputs: [(
+                    "filters".into(),
+                    "construct:\n  - 'docker/construct/**'\n  - '.github/workflows/construct.yml'\ndocs:\n  - 'docs/**'\n".into(),
+                )]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        let mut executor = DockerScriptExecutor::new(GitDiffRunner {
+            calls: Vec::new(),
+            stdout: "docker/construct/Dockerfile\ndocs/index.md\nREADME.md\n".into(),
+        });
+
+        let results = executor
+            .execute_ordered_steps_with_context(
+                &container(&temp),
+                &steps,
+                &[("GITHUB_SHA".into(), "head-sha".into())],
+                &[(
+                    "github".into(),
+                    serde_json::json!({
+                        "event": {
+                            "pull_request": {
+                                "base": { "sha": "base-sha" },
+                                "head": { "sha": "head-sha" }
+                            }
+                        }
+                    }),
+                )],
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].state.outputs["construct"], "true");
+        assert_eq!(results[0].state.outputs["construct_count"], "1");
+        assert_eq!(
+            results[0].state.outputs["construct_files"],
+            "docker/construct/Dockerfile"
+        );
+        assert_eq!(results[0].state.outputs["docs"], "true");
+        assert_eq!(
+            results[0].state.outputs["changes"],
+            "[\"construct\",\"docs\"]"
+        );
+        assert!(results[0].stdout.contains("changed: README.md"));
+        assert!(executor.runner().calls.iter().any(|(program, args)| {
+            program == "git" && args.contains(&"base-sha..head-sha".into())
+        }));
         assert_eq!(
             executor
                 .runner()
