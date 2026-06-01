@@ -993,15 +993,19 @@ where
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
         let install = input_truthy(&native_input_or(&action_state, action, "install", "true"));
-        let script = if install {
-            "mise install".to_string()
-        } else {
-            "command -v mise >/dev/null 2>&1 || true".to_string()
-        };
+        let install_args = native_input(action, &action_state, "install_args");
+        let working_directory = native_input(action, &action_state, "working_directory");
+        let script = setup_mise_script(install, &install_args, &working_directory);
         let result = self.native_shell(container, state, &script)?;
         Ok(native_command_result(
             result,
             StepCommandState {
+                env: [
+                    ("MISE_DATA_DIR".to_string(), "/github/home/.local/share/mise".to_string()),
+                    ("MISE_CACHE_DIR".to_string(), "/github/home/.cache/mise".to_string()),
+                    ("MISE_CONFIG_DIR".to_string(), "/github/home/.config/mise".to_string()),
+                ]
+                .into(),
                 path: vec!["/github/home/.local/share/mise/shims".to_string()],
                 ..StepCommandState::default()
             },
@@ -1028,7 +1032,7 @@ where
         _action: &NativeActionInvocation,
         state: &JobExecutionState,
     ) -> Result<StepExecutionResult> {
-        let result = self.native_shell(container, state, "mold --version || true")?;
+        let result = self.native_shell(container, state, &setup_mold_script())?;
         Ok(native_command_result(result, StepCommandState::default()))
     }
 
@@ -1038,8 +1042,14 @@ where
         _action: &NativeActionInvocation,
         state: &JobExecutionState,
     ) -> Result<StepExecutionResult> {
-        let result = self.native_shell(container, state, "just --version || true")?;
-        Ok(native_command_result(result, StepCommandState::default()))
+        let result = self.native_shell(container, state, &setup_just_script())?;
+        Ok(native_command_result(
+            result,
+            StepCommandState {
+                path: vec!["/github/home/.local/bin".to_string()],
+                ..StepCommandState::default()
+            },
+        ))
     }
 
     fn native_rust_toolchain(
@@ -1565,6 +1575,76 @@ chmod +x "$bin/pip"
 "$bin/python" --version
 "#,
     )
+}
+
+fn setup_mise_script(install: bool, install_args: &str, working_directory: &str) -> String {
+    let install_args = shell_single_quote(install_args);
+    let working_directory = shell_single_quote(working_directory);
+    let install_flag = if install { "1" } else { "" };
+    format!(
+        r#"set -e
+bin="/github/home/.local/bin"
+mise_home="/github/home/.local/share/mise"
+mkdir -p "$bin" "$mise_home/shims" "/github/home/.cache/mise" "/github/home/.config/mise"
+if ! command -v mise >/dev/null 2>&1; then
+  curl -fsSL https://mise.run | MISE_INSTALL_PATH="$bin/mise" sh
+fi
+export PATH="$bin:$mise_home/shims:$PATH"
+export MISE_DATA_DIR="$mise_home"
+export MISE_CACHE_DIR="/github/home/.cache/mise"
+export MISE_CONFIG_DIR="/github/home/.config/mise"
+install_args={install_args}
+working_directory={working_directory}
+if [ -n "$working_directory" ]; then
+  cd "$working_directory"
+fi
+if [ -n "{install_flag}" ]; then
+  if [ -n "$install_args" ]; then
+    mise install $install_args
+  else
+    mise install
+  fi
+else
+  command -v mise >/dev/null 2>&1
+fi
+mise --version
+"#,
+    )
+}
+
+fn setup_mold_script() -> String {
+    r#"set -e
+if command -v mold >/dev/null 2>&1; then
+  mold --version
+  exit 0
+fi
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y --no-install-recommends mold
+else
+  echo "mold is not installed and apt-get is unavailable" >&2
+  exit 1
+fi
+mold --version
+"#
+    .to_string()
+}
+
+fn setup_just_script() -> String {
+    r#"set -e
+bin="/github/home/.local/bin"
+mkdir -p "$bin"
+if ! command -v just >/dev/null 2>&1; then
+  curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to "$bin"
+fi
+export PATH="$bin:$PATH"
+just --version
+"#
+    .to_string()
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn native_post_condition(adapter: NativeActionAdapter) -> Option<&'static str> {
@@ -4616,6 +4696,16 @@ type=sha,format=long,prefix=,enable=true"
                 continue_on_error: false,
             },
             ExecutableStep::Native {
+                step_id: "setup-mold".into(),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::SetupMold,
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::Native {
                 step_id: "cargo-install".into(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::CargoInstall,
@@ -4673,7 +4763,7 @@ type=sha,format=long,prefix=,enable=true"
             )
             .unwrap();
 
-        assert_eq!(results.len(), 8);
+        assert_eq!(results.len(), 9);
         assert!(results[0]
             .state
             .path
@@ -4684,8 +4774,12 @@ type=sha,format=long,prefix=,enable=true"
             .state
             .path
             .contains(&"/github/home/.cargo/bin".into()));
-        assert_eq!(results[6].state.outputs["cache-hit"], "false");
-        assert_eq!(results[6].state.env["CACHE_ON_FAILURE"], "true");
+        assert!(results[3]
+            .state
+            .path
+            .contains(&"/github/home/.local/bin".into()));
+        assert_eq!(results[7].state.outputs["cache-hit"], "false");
+        assert_eq!(results[7].state.env["CACHE_ON_FAILURE"], "true");
         let docker_exec_calls = executor
             .runner()
             .calls
@@ -4695,10 +4789,19 @@ type=sha,format=long,prefix=,enable=true"
             })
             .map(|(_, args)| args)
             .collect::<Vec<_>>();
-        assert_eq!(docker_exec_calls.len(), 6);
+        assert_eq!(docker_exec_calls.len(), 7);
+        assert!(docker_exec_calls
+            .iter()
+            .any(|args| args.iter().any(|arg| arg.contains("https://mise.run"))));
         assert!(docker_exec_calls
             .iter()
             .any(|args| args.iter().any(|arg| arg.contains("python install \"3.13\""))));
+        assert!(docker_exec_calls
+            .iter()
+            .any(|args| args.iter().any(|arg| arg.contains("https://just.systems/install.sh"))));
+        assert!(docker_exec_calls
+            .iter()
+            .any(|args| args.iter().any(|arg| arg.contains("apt-get install -y --no-install-recommends mold"))));
         assert!(docker_exec_calls.iter().any(|args| args
             .iter()
             .any(|arg| arg.contains("rustup toolchain install stable"))));

@@ -100,10 +100,10 @@ until a new target workflow needs more.
 | `actions/deploy-pages` | `DeployPages` | pages artifact name and deployment output `page_url` |
 | `actions/setup-python` | `SetupPython` | install/select requested Python, expose `python`/`pip`, update tool cache and `GITHUB_PATH` |
 | `dorny/paths-filter` | `PathsFilter` | evaluate target multiline filters for push, PR, workflow dispatch |
-| `jdx/mise-action` | `Mise` | install requested tools, use shared home, update `GITHUB_PATH` |
+| `jdx/mise-action` | `Mise` | install mise when missing, install requested tools, use shared home, update `GITHUB_PATH` |
 | `mozilla-actions/sccache-action` | `Sccache` | configure env/path/cache, fail honestly when `sccache` is unavailable so target `continue-on-error` gates work |
 | `rui314/setup-mold` | `SetupMold` | install/link mold for later Rust builds |
-| `extractions/setup-just` | `SetupJust` | install just binary for later scripts |
+| `extractions/setup-just` | `SetupJust` | install just binary for later scripts, update `GITHUB_PATH` |
 | `dtolnay/rust-toolchain` | `RustToolchain` | install/select stable Rust toolchain |
 | `baptiste0928/cargo-install` | `CargoInstall` | install crate with `locked` support |
 | `Swatinem/rust-cache` | `RustCache` | restore/save cache dirs, `shared-key`, `cache-on-failure`, shared workdir cache storage |
