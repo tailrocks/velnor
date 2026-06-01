@@ -161,4 +161,8 @@ pub struct StatusArgs {
     /// Store configuration under this directory.
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
+
+    /// Validate that local config is ready for current target repository x64 Linux jobs.
+    #[arg(long)]
+    pub check_target_mvp: bool,
 }

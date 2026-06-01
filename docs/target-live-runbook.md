@@ -39,6 +39,11 @@ cargo run --bin velnor-runner -- configure \
 ```
 
 Check GitHub repository settings and verify `velnor-target-mvp` is online before dispatching workflows.
+Also validate the local config before running jobs:
+
+```sh
+cargo run --bin velnor-runner -- status --check-target-mvp
+```
 
 ## Run Java Target
 

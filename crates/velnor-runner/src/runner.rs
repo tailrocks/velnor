@@ -2279,6 +2279,26 @@ pub async fn status(args: StatusArgs) -> Result<()> {
     println!("Config dir: {}", dir.display());
     println!("GitHub URL: {}", stored.settings.github_url);
     println!("Runner name: {}", stored.settings.agent_name);
+    println!(
+        "Agent id: {}",
+        stored
+            .settings
+            .agent_id
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    );
+    println!(
+        "Pool: {}",
+        stored.settings.pool_name.as_deref().unwrap_or("unknown")
+    );
+    println!(
+        "Pool id: {}",
+        stored
+            .settings
+            .pool_id
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    );
     println!("Labels: {}", stored.settings.labels.join(","));
     println!("Use V2 flow: {}", stored.settings.use_v2_flow);
     println!(
@@ -2293,7 +2313,59 @@ pub async fn status(args: StatusArgs) -> Result<()> {
             "no"
         }
     );
+    if args.check_target_mvp {
+        validate_target_mvp_status(&stored)?;
+        println!("Target MVP status: ready for x64 Linux target jobs.");
+    }
     Ok(())
+}
+
+fn validate_target_mvp_status(stored: &StoredRunnerConfig) -> Result<()> {
+    let mut missing = Vec::new();
+    if !stored.settings.use_v2_flow {
+        missing.push("UseV2Flow is false".to_string());
+    }
+    if stored.settings.server_url_v2.is_none() {
+        missing.push("ServerUrlV2 is missing".to_string());
+    }
+    if stored.settings.pool_id.is_none() {
+        missing.push("pool id is missing".to_string());
+    }
+    if stored.settings.agent_id.is_none() {
+        missing.push("agent id is missing".to_string());
+    }
+    if stored.credentials.is_none() {
+        missing.push("runner credentials are missing".to_string());
+    }
+
+    for label in target_mvp_required_x64_labels() {
+        if !stored
+            .settings
+            .labels
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(label))
+        {
+            missing.push(format!("label '{label}' is missing"));
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "target MVP runner config is not ready: {}",
+            missing.join("; ")
+        )
+    }
+}
+
+fn target_mvp_required_x64_labels() -> &'static [&'static str] {
+    &[
+        "hetzner-sentry-ci",
+        "ubuntu-24.04",
+        "ubuntu-latest",
+        "velnor-target-mvp",
+    ]
 }
 
 fn normalize_labels(
@@ -2306,14 +2378,9 @@ fn normalize_labels(
     }
     if target_mvp_labels {
         labels.extend(
-            [
-                "hetzner-sentry-ci",
-                "ubuntu-latest",
-                "ubuntu-24.04",
-                "velnor-target-mvp",
-            ]
-            .into_iter()
-            .map(ToOwned::to_owned),
+            target_mvp_required_x64_labels()
+                .iter()
+                .map(|label| label.to_string()),
         );
     }
     if target_mvp_arm_label {
@@ -2935,6 +3002,27 @@ mod tests {
                 "velnor-target-mvp"
             ]
         );
+    }
+
+    #[test]
+    fn target_mvp_status_requires_v2_credentials_ids_and_labels() {
+        let mut stored = stored_config();
+        stored.credentials = Some(StoredCredentials {
+            scheme: CredentialScheme::OAuthAccessToken,
+            data: serde_json::json!({ "token": "runner-token" }),
+        });
+        stored.settings.labels = normalize_labels(Vec::new(), true, false);
+
+        assert!(validate_target_mvp_status(&stored).is_ok());
+
+        stored.settings.labels = vec!["velnor".into()];
+        let error = validate_target_mvp_status(&stored).unwrap_err().to_string();
+        assert!(error.contains("label 'hetzner-sentry-ci' is missing"));
+
+        stored.settings.labels = normalize_labels(Vec::new(), true, false);
+        stored.settings.use_v2_flow = false;
+        let error = validate_target_mvp_status(&stored).unwrap_err().to_string();
+        assert!(error.contains("UseV2Flow is false"));
     }
 
     #[test]
