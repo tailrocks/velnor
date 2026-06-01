@@ -9,7 +9,7 @@ use crate::{
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Deserializer};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -338,15 +338,18 @@ where
     R: CommandRunner,
 {
     let mut resolved = Vec::new();
+    let mut fetched = BTreeSet::new();
     for plan in plans {
-        fetch_git_ref(
-            runner,
-            &repository_clone_url(&plan.repository),
-            &plan.git_ref,
-            &plan.repository_dir,
-            None,
-            Some(1),
-        )?;
+        if fetched.insert((plan.repository.clone(), plan.git_ref.clone())) {
+            fetch_git_ref(
+                runner,
+                &repository_clone_url(&plan.repository),
+                &plan.git_ref,
+                &plan.repository_dir,
+                None,
+                Some(1),
+            )?;
+        }
         resolved.push(resolve_action(plan)?);
     }
     Ok(resolved)
@@ -1156,6 +1159,23 @@ fn sanitize_segment(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::CommandResult;
+
+    #[derive(Default)]
+    struct RecordingRunner {
+        calls: Vec<(String, Vec<String>)>,
+    }
+
+    impl CommandRunner for RecordingRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
 
     #[test]
     fn parses_javascript_action_metadata() {
@@ -1738,6 +1758,67 @@ runs:
         assert_eq!(plans[0].repository, "actions/upload-artifact");
         assert_eq!(plans[0].git_ref, "v7");
         assert_eq!(plans[0].inputs["path"], "site");
+    }
+
+    #[test]
+    fn downloads_same_repository_ref_once_for_multiple_action_paths() {
+        let actions_host = std::env::temp_dir().join(format!(
+            "velnor-action-path-fetch-test-{}",
+            std::process::id()
+        ));
+        let repository_dir = actions_host.join("_actions/actions_cache/v5");
+        let restore_dir = repository_dir.join("restore");
+        let save_dir = repository_dir.join("save");
+        fs::create_dir_all(&restore_dir).unwrap();
+        fs::create_dir_all(&save_dir).unwrap();
+        fs::write(
+            restore_dir.join("action.yml"),
+            "runs:\n  using: node20\n  main: dist/restore.js\n",
+        )
+        .unwrap();
+        fs::write(
+            save_dir.join("action.yml"),
+            "runs:\n  using: node20\n  main: dist/save.js\n",
+        )
+        .unwrap();
+        let plans = vec![
+            RepositoryActionPlan {
+                step_id: "cache-restore".into(),
+                repository: "actions/cache".into(),
+                git_ref: "v5".into(),
+                source_path: Some("restore".into()),
+                repository_dir: repository_dir.clone(),
+                action_dir: restore_dir,
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            },
+            RepositoryActionPlan {
+                step_id: "cache-save".into(),
+                repository: "actions/cache".into(),
+                git_ref: "v5".into(),
+                source_path: Some("save".into()),
+                repository_dir,
+                action_dir: save_dir,
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            },
+        ];
+        let mut runner = RecordingRunner::default();
+
+        let resolved = download_repository_actions(&mut runner, &plans).unwrap();
+
+        let fetches = runner
+            .calls
+            .iter()
+            .filter(|(program, args)| program == "git" && args.contains(&"fetch".to_string()))
+            .count();
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(fetches, 1);
+        std::fs::remove_dir_all(actions_host).ok();
     }
 
     #[test]
