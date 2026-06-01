@@ -144,7 +144,7 @@ Deliverables:
   - `github.action_status` is expression-resolvable for composite action steps from the current composite scope, while top-level steps fall back to current job status
   - basic `RUNNER_*` variables are injected for the Docker runner environment, including GitHub-style `RUNNER_ARCH` values such as `X64`/`ARM64`, `RUNNER_NAME`, `RUNNER_WORKSPACE`, `RUNNER_ENVIRONMENT=self-hosted`, `RUNNER_TOOL_CACHE=/__tool`, matching `AGENT_TOOLSDIRECTORY=/__tool` for toolcache actions, and `RUNNER_DEBUG=1` when `ACTIONS_STEP_DEBUG=true`
   - action runtime values from `SystemVssConnection` are injected: `ACTIONS_RUNTIME_URL`, `ACTIONS_RUNTIME_TOKEN`, `ACTIONS_CACHE_URL`, `ACTIONS_RESULTS_URL`, OIDC request URL/token, cache service v2, and orchestration id when GitHub sends them
-  - target-shaped cache, artifact, and runtime-export execution is covered by executor tests: `actions/cache`, `actions/upload-artifact`, `actions/download-artifact`, `actions/deploy-pages`, and `crazy-max/ghaction-github-runtime` now run through native adapters for the target input shapes; upload/download currently use Velnor temp-backed artifact storage, so cross-job GitHub artifact service upload remains open for live parity
+  - target-shaped cache, artifact, and runtime-export execution is covered by executor tests: `actions/cache`, `actions/upload-artifact`, `actions/download-artifact`, `actions/deploy-pages`, and `crazy-max/ghaction-github-runtime` now run through native adapters for the target input shapes; upload/download currently use Velnor run-scoped artifact storage under the shared work directory, so cross-job handoff works on one Velnor host while GitHub artifact service upload remains open for multi-runner live parity
   - target-shaped Docker action behavior is covered by executor tests: `docker/setup-buildx-action`, `docker/login-action`, `docker/metadata-action`, `docker/build-push-action`, and `docker/bake-action` now have native adapter coverage that invokes Velnor-owned Docker CLI commands without Node sidecars; older sidecar shape tests remain only as low-level runtime coverage
   - broader GitHub runner env parity remains incomplete
 - `secrets.*` expressions are resolved from GitHub secret job variables, including `secrets.GITHUB_TOKEN` from `system.github.token`; GitHub mask hints and secret variables are applied to runner-uploaded feed lines, and `::add-mask::` workflow commands are tracked for later step log masking
@@ -208,7 +208,7 @@ Deliverables:
 - ensure mounted paths match action expectations
 - resolve target cache keys that use `${{ hashFiles(...) }}` against the checked-out workspace
 - support native `actions/cache` miss behavior, outputs, state, and `fail-on-cache-miss`
-- support native upload/download artifact actions for same-run handoff; add GitHub artifact service transport for cross-job live parity
+- support native upload/download artifact actions through run-scoped workdir storage for same-run cross-job handoff on one Velnor host; add GitHub artifact service transport for multi-runner live parity
 
 Exit criteria:
 

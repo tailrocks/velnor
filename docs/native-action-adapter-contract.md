@@ -94,8 +94,8 @@ until a new target workflow needs more.
 | --- | --- | --- |
 | `actions/checkout` | `Checkout` | self checkout, external repo checkout, `path`, `ref`, `token`, `fetch-depth` |
 | `actions/cache` | `Cache` | restore/save paths, key, restore keys, `hashFiles(...)` keys |
-| `actions/upload-artifact` | `UploadArtifact` | `name`, `path`, `if-no-files-found`, `retention-days`, target outputs |
-| `actions/download-artifact` | `DownloadArtifact` | `name`, `pattern`, `path`, `merge-multiple` |
+| `actions/upload-artifact` | `UploadArtifact` | `name`, `path`, `if-no-files-found`, `retention-days`, target outputs, run-scoped workdir storage |
+| `actions/download-artifact` | `DownloadArtifact` | `name`, `pattern`, `path`, `merge-multiple`, same-run cross-job handoff on one Velnor host |
 | `actions/upload-pages-artifact` | `UploadPagesArtifact` | package pages directory and expose artifact handoff |
 | `actions/deploy-pages` | `DeployPages` | pages artifact name and deployment output `page_url` |
 | `actions/setup-python` | `SetupPython` | install/select requested Python, update tool cache and `GITHUB_PATH` |

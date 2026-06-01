@@ -1795,7 +1795,32 @@ fn artifact_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
         .temp_host
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("artifact actions require a temp directory"))?;
-    Ok(temp.join("_velnor_artifacts"))
+    let run_key = artifact_run_key(state);
+    let run_root = if temp.file_name().is_some_and(|name| name == "temp") {
+        temp.parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| temp.to_path_buf())
+    } else {
+        temp.to_path_buf()
+    };
+    Ok(run_root.join("_velnor_artifacts").join(run_key))
+}
+
+fn artifact_run_key(state: &JobExecutionState) -> String {
+    let run_id = state
+        .env
+        .get("GITHUB_RUN_ID")
+        .filter(|value| !value.is_empty())
+        .map(String::as_str)
+        .unwrap_or("local");
+    let attempt = state
+        .env
+        .get("GITHUB_RUN_ATTEMPT")
+        .filter(|value| !value.is_empty())
+        .map(String::as_str)
+        .unwrap_or("1");
+    sanitize_artifact_name(&format!("{run_id}-{attempt}"))
 }
 
 fn artifact_paths(paths: &str) -> Vec<String> {
@@ -6737,6 +6762,78 @@ fi"#
             "runtime-token"
         );
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_artifacts_are_shared_across_jobs_in_same_run_workdir() {
+        let root = temp_dir();
+        let upload_temp = root.join("upload-job/temp");
+        let download_temp = root.join("download-job/temp");
+        fs::create_dir_all(upload_temp.join("work/digests")).unwrap();
+        fs::create_dir_all(download_temp.join("work")).unwrap();
+        fs::write(
+            upload_temp.join("work/digests/linux-amd64.digest"),
+            "sha256:abc\n",
+        )
+        .unwrap();
+        let runtime_env = vec![
+            ("GITHUB_RUN_ID".into(), "123456".into()),
+            ("GITHUB_RUN_ATTEMPT".into(), "1".into()),
+            ("GITHUB_WORKSPACE".into(), "/__w".into()),
+            ("RUNNER_TEMP".into(), "/__t".into()),
+        ];
+        let upload = vec![ExecutableStep::Native {
+            step_id: "upload".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::UploadArtifact,
+                inputs: [
+                    ("name".into(), "construct-digest-linux-amd64".into()),
+                    ("path".into(), "/__w/digests/linux-amd64.digest".into()),
+                    ("if-no-files-found".into(), "error".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        let download = vec![ExecutableStep::Native {
+            step_id: "download".into(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::DownloadArtifact,
+                inputs: [
+                    ("pattern".into(), "construct-digest-*".into()),
+                    ("path".into(), "/__w/downloaded".into()),
+                    ("merge-multiple".into(), "true".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+
+        DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&upload_temp), &upload, &runtime_env, &upload_temp)
+            .unwrap();
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&download_temp),
+                &download,
+                &runtime_env,
+                &download_temp,
+            )
+            .unwrap();
+
+        assert_eq!(results[0].exit_code, 0);
+        assert_eq!(
+            fs::read_to_string(download_temp.join("work/downloaded/linux-amd64.digest")).unwrap(),
+            "sha256:abc\n"
+        );
+        assert!(root
+            .join("_velnor_artifacts/123456-1/construct-digest-linux-amd64/linux-amd64.digest")
+            .exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
