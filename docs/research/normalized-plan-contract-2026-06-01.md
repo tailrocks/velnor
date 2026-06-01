@@ -278,7 +278,8 @@ The reporter then performs source-specific completion:
 
 The current runner already sends V2 `completejob` with conclusion, outputs, and
 step results, workflow-command annotations, and evaluated environment URL.
-Still-open GitHub parity fields are telemetry, infrastructure failure category,
+Known Docker environment/bootstrap failures are marked with
+`infrastructureFailureCategory`. Still-open GitHub parity fields are telemetry
 and richer UI log/timeline behavior.
 
 ## Pkl Package Shape

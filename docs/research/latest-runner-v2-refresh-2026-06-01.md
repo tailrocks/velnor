@@ -114,6 +114,6 @@ Implemented in this refresh:
 
 Still open for V2 parity:
 
-- richer run-service completion payload: telemetry and infrastructure failure
-  category
+- richer run-service completion payload: telemetry. Infrastructure failure
+  category is sent for known Docker environment/bootstrap failures.
 - live proof on the two target repositories

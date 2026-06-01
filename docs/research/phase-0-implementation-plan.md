@@ -147,7 +147,7 @@ Current code also treats enabled `actions/checkout` as a native host-side checko
 
 For target workflows, mount the host Docker socket first. This weakens isolation but is the shortest path to `docker/setup-buildx-action`, `docker/bake-action`, `docker/build-push-action`, and direct `docker buildx`.
 
-Velnor now verifies that the Docker daemon can actually see the bind-mounted temp directory before running user scripts. This matters for remote Docker daemons, Docker Desktop path-sharing gaps, and containerized runner deployments: Docker may accept `-v host:/__t` while the daemon resolves `host` in a different filesystem and the container sees an empty directory. In that case Velnor should fail before executing steps and tell the operator to use a local daemon or move `--work-dir`/`--config-dir` to a daemon-visible path.
+Velnor now verifies that the Docker daemon can actually see the bind-mounted temp directory before running user scripts. This matters for remote Docker daemons, Docker Desktop path-sharing gaps, and containerized runner deployments: Docker may accept `-v host:/__t` while the daemon resolves `host` in a different filesystem and the container sees an empty directory. In that case Velnor fails before executing steps, tells the operator to use a local Docker daemon or move `--work-dir`/`--config-dir` to a daemon-visible path, and reports V2 completion with `infrastructureFailureCategory: docker_bind_mount`.
 
 Later isolation options:
 
@@ -254,6 +254,7 @@ GitHub UI compatibility needs reporting early. Minimal order:
 6. include job outputs, step results, and evaluated environment URL in completion payload
 7. mask secrets in logs before upload. Current code builds masks from GitHub mask hints and secret variables for runner-uploaded feed lines, and stores `add-mask` workflow command values for the later step log uploader.
 8. support annotations from workflow commands. Current code parses state-changing stdout workflow commands (`set-output`, `set-env`, `add-path`, `save-state`) plus `add-mask`, counts `error`, `warning`, and `notice` commands on timeline records, preserves annotation title/location plus group/debug markers in uploaded step logs, and sends structured run-service step annotations. Native GitHub UI folding for groups remains open.
+9. classify runner infrastructure failures separately from user step failures. Current code reports known Docker bind-mount and Docker environment/bootstrap failures with `infrastructureFailureCategory`.
 
 Until reporting exists, Docker step execution can be locally correct but GitHub will not look correct.
 

@@ -669,6 +669,8 @@ async fn handle_job_request(
                         step_logs: Vec::new(),
                     }
                 } else {
+                    let infrastructure_failure_category =
+                        infrastructure_failure_category(&error).map(ToOwned::to_owned);
                     complete_run_service_job(
                         &run_service_job.client,
                         &run_service_job.run_service_url,
@@ -678,6 +680,7 @@ async fn handle_job_request(
                         Vec::new(),
                         None,
                         run_service_job.billing_owner_id.clone(),
+                        infrastructure_failure_category,
                     )
                     .await?;
                     return Err(error);
@@ -695,6 +698,7 @@ async fn handle_job_request(
             step_logs,
             job_result.environment_url,
             run_service_job.billing_owner_id,
+            None,
         )
         .await?;
         println!(
@@ -711,6 +715,7 @@ async fn handle_job_request(
             Vec::new(),
             None,
             run_service_job.billing_owner_id,
+            None,
         )
         .await?;
         println!("No-op job completed and message acknowledged.");
@@ -1573,6 +1578,7 @@ async fn complete_run_service_job(
     step_logs: Vec<StepLog>,
     environment_url: Option<String>,
     billing_owner_id: Option<String>,
+    infrastructure_failure_category: Option<String>,
 ) -> Result<()> {
     let step_results = step_logs
         .iter()
@@ -1606,12 +1612,28 @@ async fn complete_run_service_job(
         annotations: Vec::new(),
         environment_url,
         billing_owner_id,
-        infrastructure_failure_category: None,
+        infrastructure_failure_category,
     };
     client
         .complete_job(run_service_url, completion)
         .await
         .context("complete run-service job")
+}
+
+fn infrastructure_failure_category(error: &anyhow::Error) -> Option<&'static str> {
+    let messages = error.chain().map(ToString::to_string).collect::<Vec<_>>();
+    if messages.iter().any(|message| {
+        message.contains("Docker daemon cannot see Velnor bind-mounted work directories")
+    }) {
+        return Some("docker_bind_mount");
+    }
+    if messages
+        .iter()
+        .any(|message| message.contains("Docker job environment start failed"))
+    {
+        return Some("docker_environment");
+    }
+    None
 }
 
 fn run_service_annotation(annotation: &StepAnnotation) -> RunServiceAnnotation {
@@ -1958,6 +1980,28 @@ mod tests {
             &[log],
         )
         .is_none());
+    }
+
+    #[test]
+    fn classifies_docker_infrastructure_failures() {
+        let bind_mount = anyhow::anyhow!(
+            "Docker daemon cannot see Velnor bind-mounted work directories. Use a local Docker daemon"
+        );
+        let docker_start =
+            anyhow::anyhow!("docker run failed").context("Docker job environment start failed");
+
+        assert_eq!(
+            infrastructure_failure_category(&bind_mount),
+            Some("docker_bind_mount")
+        );
+        assert_eq!(
+            infrastructure_failure_category(&docker_start),
+            Some("docker_environment")
+        );
+        assert_eq!(
+            infrastructure_failure_category(&anyhow::anyhow!("user script failed")),
+            None
+        );
     }
 
     fn stored_config() -> StoredRunnerConfig {
