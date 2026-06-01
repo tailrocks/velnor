@@ -2294,6 +2294,77 @@ runs:
     }
 
     #[test]
+    fn fetched_target_composite_actions_expand_to_supported_invocations() {
+        let actions_root = Path::new("/tmp/velnor-actions");
+        let roots = [
+            actions_root,
+            Path::new("/tmp/velnor-targets/jackin/.github/actions"),
+        ];
+        if roots.iter().all(|root| !root.exists()) {
+            return;
+        }
+
+        let mut checked = 0;
+        for root in roots.into_iter().filter(|root| root.exists()) {
+            for path in action_metadata_files(root) {
+                let contents = fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+                let metadata = parse_action_metadata(&contents)
+                    .unwrap_or_else(|error| panic!("parse {}: {error:#}", path.display()));
+                if metadata.runtime().unwrap() != ActionRuntime::Composite {
+                    continue;
+                }
+                checked += 1;
+                let invocations = if path.starts_with(actions_root) {
+                    let action_dir = path.parent().unwrap().to_path_buf();
+                    ResolvedAction {
+                        plan: RepositoryActionPlan {
+                            step_id: format!("composite-{checked}"),
+                            repository: "target/composite".into(),
+                            git_ref: "test".into(),
+                            source_path: None,
+                            repository_dir: action_dir.clone(),
+                            action_dir,
+                            inputs: BTreeMap::new(),
+                            env: Vec::new(),
+                            condition: None,
+                            continue_on_error: false,
+                        },
+                        metadata_path: path.clone(),
+                        runtime: metadata.runtime().unwrap(),
+                        metadata,
+                    }
+                    .composite_invocations("/__w", actions_root)
+                    .unwrap_or_else(|error| {
+                        panic!("expand fetched composite {}: {error:#}", path.display())
+                    })
+                } else {
+                    let action_dir = path.parent().unwrap().to_path_buf();
+                    let plan = LocalActionPlan {
+                        step_id: format!("local-composite-{checked}"),
+                        action_dir,
+                        inputs: BTreeMap::new(),
+                    };
+                    composite_action_invocations(&plan, &metadata, "/__w", actions_root)
+                        .unwrap_or_else(|error| {
+                            panic!("expand local composite {}: {error:#}", path.display())
+                        })
+                };
+                assert!(
+                    !invocations.is_empty(),
+                    "expected composite {} to expand to invocations",
+                    path.display()
+                );
+            }
+        }
+
+        assert!(
+            checked >= 8,
+            "expected target composite actions to be expanded"
+        );
+    }
+
+    #[test]
     fn fetched_target_workflow_actions_have_metadata() {
         let actions_root = Path::new("/tmp/velnor-actions");
         let workflow_roots = [
