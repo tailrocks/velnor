@@ -68,4 +68,26 @@ VELNOR_LIVE_EVIDENCE_LOCAL_ENTRIES=abc
 assert_fails "bad local entries" velnor_require_live_evidence_controls
 unset VELNOR_LIVE_EVIDENCE_LOCAL_ENTRIES
 
+gh() {
+  if [[ "$1 $2" == "api repos/owner/repo/actions/runners" ]]; then
+    printf 'velnor-target-mvp\tonline\tself-hosted,velnor-target-mvp\n'
+    printf 'other-runner\tonline\tself-hosted,velnor-target-mvp\n'
+    printf 'offline-runner\toffline\tself-hosted,velnor-target-mvp\n'
+    return 0
+  fi
+  echo "unexpected gh call: $*" >&2
+  return 2
+}
+
+assert_fails "matching online runner" \
+  velnor_fail_if_other_online_runners_match_labels owner/repo velnor-target-mvp velnor-target-mvp
+
+assert_passes "nonmatching label" \
+  velnor_fail_if_other_online_runners_match_labels owner/repo velnor-target-mvp hetzner-sentry-ci
+
+VELNOR_ALLOW_OTHER_MATCHING_RUNNERS=true
+assert_passes "matching runner override" \
+  velnor_fail_if_other_online_runners_match_labels owner/repo velnor-target-mvp velnor-target-mvp
+unset VELNOR_ALLOW_OTHER_MATCHING_RUNNERS
+
 echo "live sequence helper self-test passed"

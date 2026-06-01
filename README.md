@@ -135,6 +135,10 @@ Set `VELNOR_IDLE_TIMEOUT_SECONDS=<n>` to tune per-job wait time; it must be a
 positive integer. Explicit run IDs must also be positive integers.
 Set `VELNOR_TARGET_MVP_ARM_LABEL=true` only on ARM Linux target smoke hosts; the
 live scripts and runner reject the ARM label on non-ARM hosts.
+Smoke scripts fail before dispatch if another online self-hosted runner can
+match the proof labels, because Phase 0 cache/artifact proof assumes one Velnor
+host. Set `VELNOR_ALLOW_OTHER_MATCHING_RUNNERS=true` only for a deliberate
+non-exclusive run.
 
 The remaining Phase 0 proof is live GitHub UI validation on the two target
 repositories from a Linux host whose Docker daemon can see Velnor's bind-mounted

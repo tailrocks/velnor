@@ -231,6 +231,12 @@ not exit just because the broker has no message yet or sends a control message.
 The idle timeout is optional, but it makes smoke runs fail clearly when labels,
 workflow dispatch, or runner registration are wrong.
 
+Before dispatch, fixture and target smoke scripts check repository self-hosted
+runners and fail if another online runner can match the proof labels. This
+keeps Phase 0 cache/artifact evidence tied to one Velnor host. Set
+`VELNOR_ALLOW_OTHER_MATCHING_RUNNERS=true` only for a deliberate non-exclusive
+run.
+
 Initial recommended runs, in this order:
 
 1. `ansible.yml`: smallest `hetzner-sentry-ci` target; validates checkout, setup-python, defaults.run working directory, and bash script execution. Use `VELNOR_TARGET_JOB_COUNT=1`.

@@ -10,6 +10,7 @@ WORK_DIR="${VELNOR_WORK_DIR:-$ROOT/.velnor-work}"
 DOCKER_HOST_WORK_DIR="${VELNOR_DOCKER_HOST_WORK_DIR:-}"
 REQUIRE_DOCKER_SOCKET="${VELNOR_REQUIRE_DOCKER_SOCKET:-true}"
 IDLE_TIMEOUT_SECONDS="${VELNOR_IDLE_TIMEOUT_SECONDS:-900}"
+ALLOW_OTHER_MATCHING_RUNNERS="${VELNOR_ALLOW_OTHER_MATCHING_RUNNERS:-false}"
 WORKFLOW="${VELNOR_FIXTURE_WORKFLOW:-compat.yml}"
 DISPATCH="${VELNOR_FIXTURE_DISPATCH:-}"
 FIXTURE_REF="${VELNOR_FIXTURE_REF:-}"
@@ -51,6 +52,7 @@ velnor_require_positive_int VELNOR_IDLE_TIMEOUT_SECONDS "$IDLE_TIMEOUT_SECONDS"
 velnor_require_optional_positive_int VELNOR_FIXTURE_RUN_ID "$RUN_ID"
 velnor_require_bool VELNOR_REQUIRE_DOCKER_SOCKET "$REQUIRE_DOCKER_SOCKET"
 velnor_require_bool VELNOR_FIXTURE_CLEANUP_RUNNER "$CLEANUP_RUNNER"
+velnor_require_bool VELNOR_ALLOW_OTHER_MATCHING_RUNNERS "$ALLOW_OTHER_MATCHING_RUNNERS"
 velnor_require_live_evidence_controls
 validate_workflow_dispatch_inputs "$FIXTURE_INPUTS"
 
@@ -106,6 +108,9 @@ cargo run --bin velnor-runner -- configure \
   --labels "$RUNNER_LABEL" \
   --replace
 REGISTERED_RUNNER=true
+
+echo "==> Checking fixture runner label exclusivity"
+velnor_fail_if_other_online_runners_match_labels "$FIXTURE_REPO" "$RUNNER_NAME" "$RUNNER_LABEL"
 
 if [[ "$DISPATCH" == "true" ]]; then
   echo "==> Dispatching fresh fixture workflow $WORKFLOW"

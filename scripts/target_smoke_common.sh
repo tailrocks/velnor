@@ -9,6 +9,7 @@ WORK_DIR="${VELNOR_WORK_DIR:-$ROOT/.velnor-work}"
 DOCKER_HOST_WORK_DIR="${VELNOR_DOCKER_HOST_WORK_DIR:-}"
 REQUIRE_DOCKER_SOCKET="${VELNOR_REQUIRE_DOCKER_SOCKET:-true}"
 IDLE_TIMEOUT_SECONDS="${VELNOR_IDLE_TIMEOUT_SECONDS:-900}"
+ALLOW_OTHER_MATCHING_RUNNERS="${VELNOR_ALLOW_OTHER_MATCHING_RUNNERS:-false}"
 CLEANUP_RUNNER="${VELNOR_TARGET_CLEANUP_RUNNER:-false}"
 DUMP_JOB_MESSAGES="${VELNOR_DUMP_JOB_MESSAGES:-$ROOT/.velnor-job-dumps/target}"
 JOB_COUNT="${VELNOR_TARGET_JOB_COUNT:-1}"
@@ -54,6 +55,7 @@ velnor_require_bool VELNOR_REQUIRE_DOCKER_SOCKET "$REQUIRE_DOCKER_SOCKET"
 velnor_require_bool VELNOR_TARGET_CLEANUP_RUNNER "$CLEANUP_RUNNER"
 velnor_require_bool VELNOR_TARGET_WATCH_RUN "$WATCH_RUN"
 velnor_require_bool VELNOR_TARGET_MVP_ARM_LABEL "$TARGET_MVP_ARM_LABEL"
+velnor_require_bool VELNOR_ALLOW_OTHER_MATCHING_RUNNERS "$ALLOW_OTHER_MATCHING_RUNNERS"
 velnor_require_live_evidence_controls
 validate_workflow_dispatch_inputs "$TARGET_INPUTS"
 
@@ -103,6 +105,13 @@ REGISTERED_RUNNER=true
 
 echo "==> Checking target MVP runner config"
 cargo run --bin velnor-runner -- status --check-target-mvp
+
+echo "==> Checking target runner label exclusivity"
+target_scheduling_labels=(hetzner-sentry-ci ubuntu-latest ubuntu-24.04)
+if [[ "$TARGET_MVP_ARM_LABEL" == "true" ]]; then
+  target_scheduling_labels+=(ubuntu-24.04-arm)
+fi
+velnor_fail_if_other_online_runners_match_labels "$TARGET_REPO" "$RUNNER_NAME" "${target_scheduling_labels[@]}"
 
 if [[ -n "$WORKFLOW" ]]; then
   echo "==> Dispatching target workflow $WORKFLOW"

@@ -74,3 +74,45 @@ velnor_require_live_evidence_controls() {
   velnor_require_positive_int VELNOR_LIVE_EVIDENCE_LOG_LINES "$log_lines" || return $?
   velnor_require_positive_int VELNOR_LIVE_EVIDENCE_LOCAL_ENTRIES "$local_entries" || return $?
 }
+
+velnor_fail_if_other_online_runners_match_labels() {
+  local repo="$1"
+  local expected_name="$2"
+  shift 2
+  local labels=("$@")
+  local runner_rows name status label_csv label other_matches=()
+
+  if [[ "${VELNOR_ALLOW_OTHER_MATCHING_RUNNERS:-false}" == "true" ]]; then
+    echo "Skipping matching runner exclusivity check because VELNOR_ALLOW_OTHER_MATCHING_RUNNERS=true."
+    return 0
+  fi
+
+  if [[ "${#labels[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  if ! runner_rows="$(gh api "repos/$repo/actions/runners" --paginate \
+    --jq '.runners[] | [.name, .status, ([.labels[].name] | join(","))] | @tsv')"; then
+    echo "failed to list self-hosted runners for $repo; cannot verify exclusive live proof labels" >&2
+    return 2
+  fi
+
+  while IFS=$'\t' read -r name status label_csv; do
+    [[ -n "$name" ]] || continue
+    [[ "$status" == "online" ]] || continue
+    [[ "$name" != "$expected_name" ]] || continue
+
+    for label in "${labels[@]}"; do
+      if [[ ",$label_csv," == *",$label,"* ]]; then
+        other_matches+=("$name ($label)")
+      fi
+    done
+  done <<<"$runner_rows"
+
+  if [[ "${#other_matches[@]}" -gt 0 ]]; then
+    echo "other online self-hosted runners can match this live proof:" >&2
+    printf '  %s\n' "${other_matches[@]}" >&2
+    echo "stop/remove them or set VELNOR_ALLOW_OTHER_MATCHING_RUNNERS=true for a deliberate non-exclusive run" >&2
+    return 2
+  fi
+}
