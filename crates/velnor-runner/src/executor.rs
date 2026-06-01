@@ -3548,7 +3548,7 @@ impl JobExecutionState {
             return false;
         }
         if let Some(value) = self.resolve_condition_value(expression) {
-            return value == "true" || value == "success";
+            return expression_truthy(&value);
         }
         true
     }
@@ -4000,7 +4000,10 @@ fn strip_expression(condition: &str) -> &str {
 
 fn expression_truthy(value: &str) -> bool {
     let value = value.trim();
-    !(value.is_empty() || value == "false" || value == "0" || value == "null")
+    !(value.is_empty()
+        || value.eq_ignore_ascii_case("false")
+        || value == "0"
+        || value.eq_ignore_ascii_case("null"))
 }
 
 fn github_string_eq(left: &str, right: &str) -> bool {
@@ -6104,6 +6107,9 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             "missing-input="
         );
         assert!(state.evaluate_condition(Some("matrix.zigbuild")));
+        assert!(state.evaluate_condition(Some("matrix.target")));
+        assert!(!state.evaluate_condition(Some("inputs.publish")));
+        assert!(!state.evaluate_condition(Some("secrets.MISSING_TOKEN")));
         assert!(state.evaluate_condition(Some("contains(matrix.target, 'apple')")));
         assert!(state.evaluate_condition(Some("needs.test-bitcoin-processor.result == 'failure'")));
         assert!(state.evaluate_condition(Some(
@@ -6119,6 +6125,17 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert!(
             state.evaluate_condition(Some("(github.event_name == 'workflow_dispatch') == true"))
         );
+
+        let false_state = JobExecutionState::new_with_context(
+            &[],
+            &[(
+                "matrix".into(),
+                serde_json::json!({
+                    "zigbuild": false
+                }),
+            )],
+        );
+        assert!(!false_state.evaluate_condition(Some("matrix.zigbuild")));
     }
 
     #[test]
