@@ -316,7 +316,8 @@ where
         let mut post_actions = Vec::new();
         for step in steps {
             let step_id = step.id().to_string();
-            if !state.evaluate_condition(step.condition()) {
+            let step_state = state.with_step_action(&step_id);
+            if !step_state.evaluate_condition(step.condition()) {
                 let result = StepExecutionResult {
                     exit_code: 0,
                     state: StepCommandState::default(),
@@ -338,7 +339,7 @@ where
             } = step
             {
                 if let Some(pre_container_path) = invocation.pre_container_path.as_deref() {
-                    if state.evaluate_post_condition(invocation.pre_condition.as_deref()) {
+                    if step_state.evaluate_post_condition(invocation.pre_condition.as_deref()) {
                         if invocation.post_container_path.is_some() {
                             post_actions.push(PostJavaScriptAction {
                                 step_id: step_id.clone(),
@@ -353,9 +354,9 @@ where
                             step_id,
                             invocation,
                             pre_container_path,
-                            &state.action_state_env(step_id),
+                            &step_state.action_state_env(step_id),
                             temp_host,
-                            &state,
+                            &step_state,
                         )?;
                         let failed = result.exit_code != 0;
                         if failed && *continue_on_error {
@@ -372,14 +373,16 @@ where
                     }
                 }
             }
+            let step_state = state.with_step_action(&step_id);
             let result = (|| match step {
                 ExecutableStep::Checkout(plan) => {
-                    self.execute_checkout_step(container, plan, &state)
+                    self.execute_checkout_step(container, plan, &step_state)
                 }
                 ExecutableStep::Script(step) => {
-                    let step = state.resolve_script_step(step);
-                    let plan = ScriptStepPlan::prepare_with_path(&step, temp_host, &state.path)?;
-                    let mut env = state.step_env(&[]);
+                    let step = step_state.resolve_script_step(step);
+                    let plan =
+                        ScriptStepPlan::prepare_with_path(&step, temp_host, &step_state.path)?;
+                    let mut env = step_state.step_env(&[]);
                     env.extend(step.env.iter().cloned());
                     env.extend(plan.env.iter().cloned());
                     let exec_args = container.exec_script_args(
@@ -412,21 +415,25 @@ where
                     step_id,
                     invocation,
                     &invocation.main_container_path,
-                    &state.action_state_env(step_id),
+                    &step_state.action_state_env(step_id),
                     temp_host,
-                    &state,
+                    &step_state,
                 ),
                 ExecutableStep::Docker {
                     step_id,
                     invocation,
                     ..
                 } => self.execute_docker_action_in_started_container(
-                    container, step_id, invocation, temp_host, &state,
+                    container,
+                    step_id,
+                    invocation,
+                    temp_host,
+                    &step_state,
                 ),
                 ExecutableStep::CompositeOutputs { outputs, .. } => Ok(StepExecutionResult {
                     exit_code: 0,
                     state: StepCommandState {
-                        outputs: state.evaluate_named_outputs(outputs),
+                        outputs: step_state.evaluate_named_outputs(outputs),
                         ..StepCommandState::default()
                     },
                     skipped: false,
@@ -831,6 +838,24 @@ impl JobExecutionState {
             .collect();
         env.extend(command_file_env.iter().cloned());
         env
+    }
+
+    fn with_step_action(&self, step_id: &str) -> Self {
+        let mut state = Self {
+            env: self.env.clone(),
+            context_data: self.context_data.clone(),
+            workspace_host: self.workspace_host.clone(),
+            outputs: self.outputs.clone(),
+            action_states: self.action_states.clone(),
+            outcomes: self.outcomes.clone(),
+            conclusions: self.conclusions.clone(),
+            path: self.path.clone(),
+            masks: self.masks.clone(),
+        };
+        state
+            .env
+            .insert("GITHUB_ACTION".to_string(), step_id.to_string());
+        state
     }
 
     fn apply(&mut self, step_id: &str, result: &StepExecutionResult) {
@@ -1835,6 +1860,10 @@ mod tests {
         std::env::temp_dir().join(format!("velnor-executor-test-{nonce}-{sequence}"))
     }
 
+    fn host_temp_script_path(container_path: &str, temp: &Path) -> PathBuf {
+        temp.join(container_path.trim_start_matches("/__t/"))
+    }
+
     fn container(temp: &Path) -> JobContainerSpec {
         JobContainerSpec {
             name: "job".into(),
@@ -2490,6 +2519,38 @@ mod tests {
         let exec_args = &executor.runner().calls[2].1;
         assert!(exec_args.contains(&"MODE=release".into()));
         assert!(exec_args.contains(&"TOKEN=ghs_token".into()));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn script_steps_receive_github_action_context() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Script(ScriptStep {
+            id: "build".into(),
+            script: "echo ${{ github.action }}".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: vec![("ACTION_NAME".into(), "${{ github.action }}".into())],
+            condition: Some("${{ github.action == 'build' }}".into()),
+            continue_on_error: false,
+        })];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        let exec_args = &executor.runner().calls[2].1;
+        assert!(exec_args.contains(&"GITHUB_ACTION=build".into()));
+        assert!(exec_args.contains(&"ACTION_NAME=build".into()));
+        let script_path = exec_args
+            .iter()
+            .position(|arg| arg.ends_with(".sh"))
+            .and_then(|index| exec_args.get(index))
+            .expect("script path should be present");
+        let script = fs::read_to_string(host_temp_script_path(script_path, &temp)).unwrap();
+        assert_eq!(script, "echo build\n");
         fs::remove_dir_all(temp).unwrap();
     }
 
