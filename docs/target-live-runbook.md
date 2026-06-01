@@ -168,7 +168,8 @@ registered runner on exit. Sanitized job payloads are written to
 disable dumps or point it at another directory. Set
 `VELNOR_TARGET_WORKFLOW=ansible.yml` to have the script dispatch the first
 recommended Java workflow before waiting for one Velnor job, or leave it unset
-to consume already queued work.
+to consume already queued work. Set `VELNOR_TARGET_REF=<branch-or-sha>` when the
+workflow should be dispatched from a non-default ref.
 
 Start Velnor:
 

@@ -12,6 +12,7 @@ IDLE_TIMEOUT_SECONDS="${VELNOR_IDLE_TIMEOUT_SECONDS:-900}"
 CLEANUP_RUNNER="${VELNOR_TARGET_CLEANUP_RUNNER:-false}"
 DUMP_JOB_MESSAGES="${VELNOR_DUMP_JOB_MESSAGES:-$ROOT/.velnor-job-dumps/target}"
 WORKFLOW="${VELNOR_TARGET_WORKFLOW:-}"
+TARGET_REF="${VELNOR_TARGET_REF:-}"
 RUN_ID="${VELNOR_TARGET_RUN_ID:-}"
 TARGET_LABEL="${VELNOR_TARGET_LABEL:-target}"
 TARGET_MVP_ARM_LABEL="${VELNOR_TARGET_MVP_ARM_LABEL:-false}"
@@ -75,10 +76,18 @@ cargo run --bin velnor-runner -- status --check-target-mvp
 
 if [[ -n "$WORKFLOW" ]]; then
   echo "==> Dispatching target workflow $WORKFLOW"
-  gh workflow run "$WORKFLOW" --repo "$TARGET_REPO"
+  workflow_run_args=("$WORKFLOW" --repo "$TARGET_REPO")
+  if [[ -n "$TARGET_REF" ]]; then
+    workflow_run_args+=(--ref "$TARGET_REF")
+  fi
+  gh workflow run "${workflow_run_args[@]}"
   echo "==> Waiting for dispatched run to appear"
   for _ in $(seq 1 30); do
-    RUN_ID="$(gh run list --repo "$TARGET_REPO" --workflow "$WORKFLOW" --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId // ""')"
+    run_list_args=(--repo "$TARGET_REPO" --workflow "$WORKFLOW" --event workflow_dispatch --limit 1 --json databaseId)
+    if [[ -n "$TARGET_REF" ]]; then
+      run_list_args+=(--branch "$TARGET_REF")
+    fi
+    RUN_ID="$(gh run list "${run_list_args[@]}" --jq '.[0].databaseId // ""')"
     if [[ -n "$RUN_ID" ]]; then
       break
     fi
