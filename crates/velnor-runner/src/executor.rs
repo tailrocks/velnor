@@ -817,7 +817,7 @@ impl JobExecutionState {
         context_data: &[(String, Value)],
         workspace_host: Option<PathBuf>,
     ) -> Self {
-        Self {
+        let mut state = Self {
             env: base_env.iter().cloned().collect(),
             context_data: context_data.iter().cloned().collect(),
             workspace_host,
@@ -827,7 +827,13 @@ impl JobExecutionState {
             conclusions: BTreeMap::new(),
             path: Vec::new(),
             masks: Vec::new(),
-        }
+        };
+        state.env = state
+            .env
+            .iter()
+            .map(|(name, value)| (name.clone(), state.resolve_expressions(value)))
+            .collect();
+        state
     }
 
     fn step_env(&self, command_file_env: &[(String, String)]) -> Vec<(String, String)> {
@@ -2528,6 +2534,21 @@ mod tests {
     }
 
     #[test]
+    fn initial_environment_expressions_are_resolved() {
+        let state = JobExecutionState::new(&[
+            ("GITHUB_TOKEN".into(), "ghs_token".into()),
+            ("GITHUB_SHA".into(), "abc123".into()),
+            ("OUTER".into(), "${{ github.token }}".into()),
+            ("REVISION".into(), "rev-${{ github.sha }}".into()),
+        ]);
+
+        let env = state.step_env(&[]);
+
+        assert!(env.contains(&("OUTER".into(), "ghs_token".into())));
+        assert!(env.contains(&("REVISION".into(), "rev-abc123".into())));
+    }
+
+    #[test]
     fn script_steps_receive_github_action_context() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -2561,35 +2582,28 @@ mod tests {
 
     #[test]
     fn script_step_environment_is_not_resolved_twice() {
-        let temp = temp_dir();
-        fs::create_dir_all(&temp).unwrap();
-        let steps = vec![ExecutableStep::Script(ScriptStep {
-            id: "env-step".into(),
-            script: "echo env".into(),
-            shell: Shell::Sh,
-            working_directory_container: "/__w/repo".into(),
-            env: vec![("GENERATED".into(), "${{ env.OUTER }}".into())],
-            condition: None,
-            continue_on_error: false,
-        })];
-        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut state = JobExecutionState::new(&[("GITHUB_TOKEN".into(), "ghs_token".into())]);
+        state.apply(
+            "producer",
+            &StepExecutionResult {
+                exit_code: 0,
+                skipped: false,
+                failure_ignored: false,
+                state: StepCommandState {
+                    env: [("OUTER".into(), "${{ github.token }}".into())].into(),
+                    ..StepCommandState::default()
+                },
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
 
-        executor
-            .execute_ordered_steps(
-                &container(&temp),
-                &steps,
-                &[
-                    ("GITHUB_TOKEN".into(), "ghs_token".into()),
-                    ("OUTER".into(), "${{ github.token }}".into()),
-                ],
-                &temp,
-            )
-            .unwrap();
+        let resolved = state.resolve_env(&[("GENERATED".into(), "${{ env.OUTER }}".into())]);
 
-        let exec_args = &executor.runner().calls[2].1;
-        assert!(exec_args.contains(&"GENERATED=${{ github.token }}".into()));
-        assert!(!exec_args.contains(&"GENERATED=ghs_token".into()));
-        fs::remove_dir_all(temp).unwrap();
+        assert_eq!(
+            resolved,
+            vec![("GENERATED".into(), "${{ github.token }}".into())]
+        );
     }
 
     #[test]
