@@ -93,4 +93,14 @@ if ! grep -q "Fix the failing section above" "$report"; then
   exit 1
 fi
 
+if ! grep -q "Docker readiness guidance" "$report"; then
+  echo "fixture report did not include Docker readiness guidance" >&2
+  exit 1
+fi
+
+if ! grep -q "VELNOR_REQUIRE_DOCKER_SOCKET=false" "$report"; then
+  echo "fixture report did not mention fixture-only socket override" >&2
+  exit 1
+fi
+
 echo "fixture report self-test passed"
