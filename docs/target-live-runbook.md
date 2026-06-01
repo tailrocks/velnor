@@ -296,6 +296,10 @@ For each run, record:
 - job outputs used by downstream jobs
 - required aggregator job status and final workflow status
 
+The smoke scripts write a Markdown evidence file under `.velnor-live-evidence`
+by default after Velnor consumes jobs and after a watched run completes or
+fails. Set `VELNOR_LIVE_EVIDENCE_DIR=<path>` to store those records elsewhere.
+
 Keep sanitized job payloads for failures:
 
 ```sh

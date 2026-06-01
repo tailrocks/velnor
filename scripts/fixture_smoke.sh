@@ -18,7 +18,65 @@ RUN_ID="${VELNOR_FIXTURE_RUN_ID:-26762850861}"
 JOB_COUNT="${VELNOR_FIXTURE_JOB_COUNT:-2}"
 CLEANUP_RUNNER="${VELNOR_FIXTURE_CLEANUP_RUNNER:-true}"
 DUMP_JOB_MESSAGES="${VELNOR_DUMP_JOB_MESSAGES:-$ROOT/.velnor-job-dumps/fixture}"
+LIVE_EVIDENCE_DIR="${VELNOR_LIVE_EVIDENCE_DIR:-$ROOT/.velnor-live-evidence}"
 REGISTERED_RUNNER=false
+
+sanitize_filename() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+write_live_evidence() {
+  local phase="$1"
+
+  if [[ -z "$RUN_ID" ]]; then
+    return
+  fi
+
+  mkdir -p "$LIVE_EVIDENCE_DIR"
+
+  local safe_repo safe_workflow evidence_file
+  safe_repo="$(sanitize_filename "$FIXTURE_REPO")"
+  safe_workflow="$(sanitize_filename "$WORKFLOW")"
+  evidence_file="$LIVE_EVIDENCE_DIR/${safe_repo}-${safe_workflow}-${RUN_ID}.md"
+
+  {
+    echo "# Velnor Fixture Live Evidence"
+    echo
+    echo "- phase: $phase"
+    echo "- repository: $FIXTURE_REPO"
+    echo "- run id: $RUN_ID"
+    echo "- workflow: $WORKFLOW"
+    echo "- ref: ${FIXTURE_REF:-<default>}"
+    echo "- inputs: ${FIXTURE_INPUTS:-<none>}"
+    echo "- runner name: $RUNNER_NAME"
+    echo "- runner label: $RUNNER_LABEL"
+    echo "- job count requested: $JOB_COUNT"
+    echo "- Velnor commit: $(git rev-parse HEAD)"
+    echo "- host: $(uname -s)/$(uname -m)"
+    echo "- work dir: $WORK_DIR"
+    echo "- Docker host work dir: ${DOCKER_HOST_WORK_DIR:-<same as work dir>}"
+    echo "- Docker host: ${DOCKER_HOST:-<local default>}"
+    echo "- require Docker socket: $REQUIRE_DOCKER_SOCKET"
+    echo "- job message dumps: ${DUMP_JOB_MESSAGES:-<disabled>}"
+    echo "- captured at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo
+    echo "## GitHub Run"
+    echo
+    gh run view "$RUN_ID" --repo "$FIXTURE_REPO" \
+      --json status,conclusion,jobs,url \
+      --jq '
+        "- url: " + .url,
+        "- status: " + .status,
+        "- conclusion: " + (.conclusion // ""),
+        "",
+        "| job | status | conclusion |",
+        "| --- | --- | --- |",
+        (.jobs[] | "| " + .name + " | " + .status + " | " + (.conclusion // "") + " |")
+      '
+  } >"$evidence_file"
+
+  echo "==> Wrote live evidence $evidence_file"
+}
 
 cleanup_runner() {
   if [[ "$REGISTERED_RUNNER" == "true" && "$CLEANUP_RUNNER" == "true" ]]; then
@@ -121,6 +179,13 @@ echo "==> Fixture run after Velnor"
 gh run view "$RUN_ID" --repo "$FIXTURE_REPO" \
   --json status,conclusion,jobs,url \
   --jq '.url, (.jobs[] | [.name,.status,(.conclusion // "")] | @tsv)'
+write_live_evidence "after-velnor"
 
 echo "==> Waiting briefly for compare-results"
-gh run watch "$RUN_ID" --repo "$FIXTURE_REPO" --exit-status
+if gh run watch "$RUN_ID" --repo "$FIXTURE_REPO" --exit-status; then
+  write_live_evidence "completed"
+else
+  watch_status=$?
+  write_live_evidence "completed-with-failure"
+  exit "$watch_status"
+fi

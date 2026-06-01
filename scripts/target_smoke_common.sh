@@ -11,6 +11,7 @@ REQUIRE_DOCKER_SOCKET="${VELNOR_REQUIRE_DOCKER_SOCKET:-true}"
 IDLE_TIMEOUT_SECONDS="${VELNOR_IDLE_TIMEOUT_SECONDS:-900}"
 CLEANUP_RUNNER="${VELNOR_TARGET_CLEANUP_RUNNER:-false}"
 DUMP_JOB_MESSAGES="${VELNOR_DUMP_JOB_MESSAGES:-$ROOT/.velnor-job-dumps/target}"
+LIVE_EVIDENCE_DIR="${VELNOR_LIVE_EVIDENCE_DIR:-$ROOT/.velnor-live-evidence}"
 JOB_COUNT="${VELNOR_TARGET_JOB_COUNT:-1}"
 WORKFLOW="${VELNOR_TARGET_WORKFLOW:-}"
 TARGET_REF="${VELNOR_TARGET_REF:-}"
@@ -20,6 +21,65 @@ WATCH_RUN="${VELNOR_TARGET_WATCH_RUN:-false}"
 TARGET_LABEL="${VELNOR_TARGET_LABEL:-target}"
 TARGET_MVP_ARM_LABEL="${VELNOR_TARGET_MVP_ARM_LABEL:-false}"
 REGISTERED_RUNNER=false
+
+sanitize_filename() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+write_live_evidence() {
+  local phase="$1"
+
+  if [[ -z "$RUN_ID" ]]; then
+    return
+  fi
+
+  mkdir -p "$LIVE_EVIDENCE_DIR"
+
+  local workflow_name="${WORKFLOW:-existing-run}"
+  local safe_repo safe_workflow evidence_file
+  safe_repo="$(sanitize_filename "$TARGET_REPO")"
+  safe_workflow="$(sanitize_filename "$workflow_name")"
+  evidence_file="$LIVE_EVIDENCE_DIR/${safe_repo}-${safe_workflow}-${RUN_ID}.md"
+
+  {
+    echo "# Velnor Target Live Evidence"
+    echo
+    echo "- phase: $phase"
+    echo "- target label: $TARGET_LABEL"
+    echo "- repository: $TARGET_REPO"
+    echo "- run id: $RUN_ID"
+    echo "- workflow: ${WORKFLOW:-<existing run>}"
+    echo "- ref: ${TARGET_REF:-<default>}"
+    echo "- inputs: ${TARGET_INPUTS:-<none>}"
+    echo "- runner name: $RUNNER_NAME"
+    echo "- target MVP ARM label: $TARGET_MVP_ARM_LABEL"
+    echo "- job count requested: $JOB_COUNT"
+    echo "- Velnor commit: $(git rev-parse HEAD)"
+    echo "- host: $(uname -s)/$(uname -m)"
+    echo "- work dir: $WORK_DIR"
+    echo "- Docker host work dir: ${DOCKER_HOST_WORK_DIR:-<same as work dir>}"
+    echo "- Docker host: ${DOCKER_HOST:-<local default>}"
+    echo "- require Docker socket: $REQUIRE_DOCKER_SOCKET"
+    echo "- job message dumps: ${DUMP_JOB_MESSAGES:-<disabled>}"
+    echo "- captured at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo
+    echo "## GitHub Run"
+    echo
+    gh run view "$RUN_ID" --repo "$TARGET_REPO" \
+      --json status,conclusion,jobs,url \
+      --jq '
+        "- url: " + .url,
+        "- status: " + .status,
+        "- conclusion: " + (.conclusion // ""),
+        "",
+        "| job | status | conclusion |",
+        "| --- | --- | --- |",
+        (.jobs[] | "| " + .name + " | " + .status + " | " + (.conclusion // "") + " |")
+      '
+  } >"$evidence_file"
+
+  echo "==> Wrote live evidence $evidence_file"
+}
 
 cleanup_runner() {
   if [[ "$REGISTERED_RUNNER" == "true" && "$CLEANUP_RUNNER" == "true" ]]; then
@@ -134,9 +194,16 @@ if [[ -n "$RUN_ID" ]]; then
   gh run view "$RUN_ID" --repo "$TARGET_REPO" \
     --json status,conclusion,jobs,url \
     --jq '.url, (.jobs[] | [.name,.status,(.conclusion // "")] | @tsv)'
+  write_live_evidence "after-velnor"
   if [[ "$WATCH_RUN" == "true" ]]; then
     echo "==> Waiting for target run completion"
-    gh run watch "$RUN_ID" --repo "$TARGET_REPO" --exit-status
+    if gh run watch "$RUN_ID" --repo "$TARGET_REPO" --exit-status; then
+      write_live_evidence "completed"
+    else
+      watch_status=$?
+      write_live_evidence "completed-with-failure"
+      exit "$watch_status"
+    fi
   fi
 fi
 

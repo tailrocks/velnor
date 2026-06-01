@@ -9,4 +9,5 @@ target/
 coverage/
 .velnor-work/
 .velnor-job-dumps/
+.velnor-live-evidence/
 target-job-payloads/
