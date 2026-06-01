@@ -25,6 +25,7 @@ Live proof gates:
 ```sh
 scripts/fixture_smoke.sh
 scripts/chainargos_rust_target_sequence.sh
+scripts/jackin_rust_linux_sequence.sh
 scripts/jackin_target_smoke.sh
 ```
 
@@ -168,6 +169,7 @@ Implemented locally:
 
 Still needs live proof:
 
+- `scripts/jackin_rust_linux_sequence.sh` on a Docker-visible Linux host
 - `ci.yml` changes, check, msrv, validator, and required jobs
 - `construct.yml` non-publish rehearsal path first, publish path later
 - Docker Buildx direct shell commands in the job container

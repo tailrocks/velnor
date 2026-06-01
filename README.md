@@ -90,6 +90,12 @@ The first Jackin Linux smoke wrapper is:
 scripts/jackin_target_smoke.sh
 ```
 
+The staged Jackin Rust/Linux proof wrapper is:
+
+```sh
+scripts/jackin_rust_linux_sequence.sh
+```
+
 Smoke scripts write sanitized job payloads under `.velnor-job-dumps` by default.
 Set `VELNOR_TARGET_WORKFLOW=<workflow.yml>` on target smoke scripts to dispatch
 that workflow before Velnor waits for target jobs.

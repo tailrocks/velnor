@@ -243,6 +243,19 @@ and repeated `--once` execution shape as `scripts/chainargos_target_smoke.sh`.
 Set `VELNOR_TARGET_MVP_ARM_LABEL=true` only on an ARM Linux host to add the
 `ubuntu-24.04-arm` label.
 
+To run the staged Jackin Rust/Linux proof path in one command, use:
+
+```sh
+scripts/jackin_rust_linux_sequence.sh
+```
+
+The sequence runs `ci.yml`, `construct.yml`, and `docs.yml` with
+`gh run watch` enabled by default. Tune it with
+`VELNOR_JACKIN_CI_JOB_COUNT`, `VELNOR_JACKIN_CONSTRUCT_JOB_COUNT`,
+`VELNOR_JACKIN_DOCS_JOB_COUNT`, `VELNOR_JACKIN_SEQUENCE_INCLUDE_CONSTRUCT`,
+`VELNOR_JACKIN_SEQUENCE_INCLUDE_DOCS`, and
+`VELNOR_JACKIN_SEQUENCE_WATCH_RUN`.
+
 Register the same runner to `jackin-project/jackin` with x64 Linux labels:
 
 ```sh
