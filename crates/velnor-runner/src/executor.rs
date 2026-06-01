@@ -2002,8 +2002,23 @@ fn native_upload_artifact(
         native_input_or(&action_state, action, "if-no-files-found", "warn").to_ascii_lowercase();
     let include_hidden_files =
         input_truthy(&native_input(action, &action_state, "include-hidden-files"));
+    let overwrite = input_truthy(&native_input(action, &action_state, "overwrite"));
     let artifact_dir = artifact_store_dir(state)?.join(sanitize_artifact_name(&name));
-    fs::remove_dir_all(&artifact_dir).ok();
+    if artifact_dir.exists() {
+        if !overwrite {
+            return Ok(StepExecutionResult {
+                exit_code: 1,
+                state: StepCommandState::default(),
+                skipped: false,
+                failure_ignored: false,
+                stdout: String::new(),
+                stderr: format!(
+                    "Artifact '{name}' already exists in this run. Set overwrite to true to replace it.\n"
+                ),
+            });
+        }
+        fs::remove_dir_all(&artifact_dir).ok();
+    }
     fs::create_dir_all(&artifact_dir)
         .with_context(|| format!("create artifact directory {}", artifact_dir.display()))?;
 
@@ -7939,6 +7954,68 @@ fi"#
         assert!(temp
             .join("_velnor_artifacts/local-1/explicit/.well-known/assetlinks.json")
             .exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_upload_artifact_requires_overwrite_for_duplicate_name() {
+        let temp = temp_dir();
+        fs::create_dir_all(temp.join("work")).unwrap();
+        fs::write(temp.join("work/first.txt"), "first\n").unwrap();
+        fs::write(temp.join("work/second.txt"), "second\n").unwrap();
+        let upload = |path: &str, overwrite: Option<&str>| {
+            let mut inputs: BTreeMap<String, String> = [
+                ("name".into(), "duplicate".into()),
+                ("path".into(), path.into()),
+                ("if-no-files-found".into(), "error".into()),
+            ]
+            .into();
+            if let Some(value) = overwrite {
+                inputs.insert("overwrite".into(), value.into());
+            }
+            vec![ExecutableStep::Native {
+                step_id: format!("upload-{}", path.replace('.', "-")),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::UploadArtifact,
+                    inputs,
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            }]
+        };
+
+        let first_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &upload("first.txt", None), &[], &temp)
+            .unwrap();
+        let duplicate_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &upload("second.txt", None), &[], &temp)
+            .unwrap();
+
+        assert_eq!(first_results[0].exit_code, 0);
+        assert_eq!(duplicate_results[0].exit_code, 1);
+        assert!(duplicate_results[0].stderr.contains("already exists"));
+        assert_eq!(
+            fs::read_to_string(temp.join("_velnor_artifacts/local-1/duplicate/first.txt")).unwrap(),
+            "first\n"
+        );
+        let overwrite_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&temp),
+                &upload("second.txt", Some("true")),
+                &[],
+                &temp,
+            )
+            .unwrap();
+        assert_eq!(overwrite_results[0].exit_code, 0);
+        assert!(!temp
+            .join("_velnor_artifacts/local-1/duplicate/first.txt")
+            .exists());
+        assert_eq!(
+            fs::read_to_string(temp.join("_velnor_artifacts/local-1/duplicate/second.txt"))
+                .unwrap(),
+            "second\n"
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 

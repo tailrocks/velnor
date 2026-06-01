@@ -51,6 +51,7 @@ tests=(
   native_artifacts_are_shared_across_jobs_in_same_run_workdir
   native_upload_artifact_expands_target_release_globs
   native_upload_artifact_excludes_hidden_files_by_default
+  native_upload_artifact_requires_overwrite_for_duplicate_name
   native_upload_artifact_maps_container_tmp_to_host_temp
   native_cache_reports_miss_without_node_sidecar
   native_cache_trims_folded_yaml_primary_key
