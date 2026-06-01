@@ -248,7 +248,7 @@ GitHub UI compatibility needs reporting early. Minimal order:
 
 1. create/update job timeline record as in-progress
 2. create/update step timeline records
-3. stream or append logs per step: current code captures stdout/stderr after each executed script or JavaScript step, creates completed task timeline records, and appends masked lines to those records after the job container run.
+3. stream or append logs per step: current code captures stdout/stderr after each executed script or JavaScript step, creates completed task timeline records, and appends masked lines to those records before `completejob`.
 4. finish step with success/failure/skipped
 5. finish job with success/failure/cancelled
 6. include job outputs, step results, and evaluated environment URL in completion payload
@@ -256,7 +256,8 @@ GitHub UI compatibility needs reporting early. Minimal order:
 8. support annotations from workflow commands. Current code parses state-changing stdout workflow commands (`set-output`, `set-env`, `add-path`, `save-state`) plus `add-mask`, counts `error`, `warning`, and `notice` commands on timeline records, preserves annotation title/location plus group/debug markers in uploaded step logs, and sends structured run-service step annotations. Native GitHub UI folding for groups remains open.
 9. classify runner infrastructure failures separately from user step failures. Current code reports known Docker bind-mount and Docker environment/bootstrap failures with `infrastructureFailureCategory`.
 
-Until reporting exists, Docker step execution can be locally correct but GitHub will not look correct.
+Remaining reporting gaps are live validation against hosted GitHub, richer in-progress
+timeline updates, and native group-folding UI behavior.
 
 ## Expression Boundary
 

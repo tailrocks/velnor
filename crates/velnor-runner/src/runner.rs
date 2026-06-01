@@ -39,8 +39,8 @@ use crate::{
         OAuthClient, OAuthJwtCredentials, RegistrationClient, RunServiceAnnotation,
         RunServiceAnnotationLevel, RunServiceClient, RunServiceCompleteJob, RunServiceStepResult,
         RunServiceVariableValue, RunnerEvent, RunnerJobRequestRef, RunnerKeyPair, RunnerStatus,
-        TaskAgent, TaskAgentPool, TaskAgentSession, TaskResult, TimelineRecordState,
-        RUNNER_JOB_REQUEST,
+        TaskAgent, TaskAgentPool, TaskAgentSession, TaskResult, TimelineRecord,
+        TimelineRecordFeedLines, TimelineRecordState, RUNNER_JOB_REQUEST,
     },
     runtime_env::job_runtime_env,
     script_step::{github_script_steps_with_defaults, StepAnnotation, StepAnnotationLevel},
@@ -1580,6 +1580,9 @@ async fn complete_run_service_job(
     billing_owner_id: Option<String>,
     infrastructure_failure_category: Option<String>,
 ) -> Result<()> {
+    if let Err(error) = publish_timeline_logs(job, &step_logs).await {
+        eprintln!("Best-effort timeline log upload failed: {error:#}");
+    }
     let step_results = step_logs
         .iter()
         .map(|log| RunServiceStepResult {
@@ -1618,6 +1621,125 @@ async fn complete_run_service_job(
         .complete_job(run_service_url, completion)
         .await
         .context("complete run-service job")
+}
+
+async fn publish_timeline_logs(job: &AgentJobRequestMessage, step_logs: &[StepLog]) -> Result<()> {
+    if step_logs.is_empty() {
+        return Ok(());
+    }
+    let Some(context) = timeline_publish_context(job)? else {
+        return Ok(());
+    };
+    let finish_time = current_time_rfc3339()?;
+    let records = timeline_records_for_step_logs(job, step_logs, &finish_time);
+    context
+        .client
+        .update_timeline_records(
+            &context.scope_identifier,
+            &context.hub_name,
+            &job.plan.plan_id,
+            &job.timeline.id,
+            records,
+        )
+        .await?;
+    for log in step_logs {
+        let masks = job_secret_mask_values(job)
+            .into_iter()
+            .chain(log.masks.iter().cloned())
+            .collect::<Vec<_>>();
+        let lines = mask_log_lines(&log.lines, &masks);
+        if lines.is_empty() {
+            continue;
+        }
+        context
+            .client
+            .append_timeline_record_feed(
+                &context.scope_identifier,
+                &context.hub_name,
+                &job.plan.plan_id,
+                &job.timeline.id,
+                &log.step_id,
+                TimelineRecordFeedLines::new(log.step_id.clone(), lines, Some(1)),
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+struct TimelinePublishContext {
+    client: DistributedTaskClient,
+    scope_identifier: String,
+    hub_name: String,
+}
+
+fn timeline_publish_context(
+    job: &AgentJobRequestMessage,
+) -> Result<Option<TimelinePublishContext>> {
+    let Some(scope_identifier) = job.plan.scope_identifier.clone() else {
+        return Ok(None);
+    };
+    let Some(system_connection) = job.system_connection() else {
+        return Ok(None);
+    };
+    let Some(server_url) = system_connection.url.as_deref() else {
+        return Ok(None);
+    };
+    let Some(token) = system_connection_access_token(system_connection) else {
+        return Ok(None);
+    };
+    Ok(Some(TimelinePublishContext {
+        client: DistributedTaskClient::new(server_url, token)?,
+        scope_identifier,
+        hub_name: job
+            .plan
+            .plan_type
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .unwrap_or("Build")
+            .to_ascii_lowercase(),
+    }))
+}
+
+fn timeline_records_for_step_logs(
+    job: &AgentJobRequestMessage,
+    step_logs: &[StepLog],
+    finish_time: &str,
+) -> Vec<TimelineRecord> {
+    step_logs
+        .iter()
+        .enumerate()
+        .map(|(index, log)| {
+            TimelineRecord::task_completed(
+                log.step_id.clone(),
+                job.job_id.clone(),
+                log.step_id.clone(),
+                (index + 1) as i32,
+                finish_time.to_string(),
+                step_log_result(log),
+            )
+            .with_issue_counts(log.error_count, log.warning_count, log.notice_count)
+        })
+        .collect()
+}
+
+fn mask_log_lines(lines: &[String], masks: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| {
+            masks
+                .iter()
+                .filter(|mask| !mask.is_empty())
+                .fold(line.clone(), |line, mask| line.replace(mask, "***"))
+        })
+        .collect()
+}
+
+fn current_time_rfc3339() -> Result<String> {
+    use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .context("format current time")
 }
 
 fn infrastructure_failure_category(error: &anyhow::Error) -> Option<&'static str> {
@@ -2002,6 +2124,89 @@ mod tests {
             infrastructure_failure_category(&anyhow::anyhow!("user script failed")),
             None
         );
+    }
+
+    #[test]
+    fn timeline_records_include_step_issue_counts() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": {
+                "planId": "plan",
+                "planType": "Build",
+                "scopeIdentifier": "scope"
+            },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1
+        }))
+        .unwrap();
+        let log = StepLog {
+            step_id: "step-1".into(),
+            lines: vec!["hello".into()],
+            masks: Vec::new(),
+            annotations: Vec::new(),
+            exit_code: 1,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 1,
+            warning_count: 2,
+            notice_count: 3,
+        };
+
+        let records = timeline_records_for_step_logs(&job, &[log], "2026-06-01T00:00:00Z");
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "step-1");
+        assert_eq!(records[0].parent_id.as_deref(), Some("job"));
+        assert_eq!(records[0].result, Some(TaskResult::Failed));
+        assert_eq!(records[0].error_count, 1);
+        assert_eq!(records[0].warning_count, 2);
+        assert_eq!(records[0].notice_count, 3);
+    }
+
+    #[test]
+    fn masks_timeline_feed_lines() {
+        let lines = vec![
+            "token=secret-value".to_string(),
+            "ordinary line".to_string(),
+        ];
+
+        assert_eq!(
+            mask_log_lines(&lines, &["secret-value".into()]),
+            vec!["token=***".to_string(), "ordinary line".to_string()]
+        );
+    }
+
+    #[test]
+    fn timeline_publish_context_uses_system_connection() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": {
+                "planId": "plan",
+                "planType": "Build",
+                "scopeIdentifier": "scope"
+            },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "url": "https://pipelines.actions.githubusercontent.com/abc",
+                    "authorization": {
+                        "parameters": { "AccessToken": "job-token" }
+                    }
+                }]
+            }
+        }))
+        .unwrap();
+
+        let context = timeline_publish_context(&job).unwrap().unwrap();
+
+        assert_eq!(context.scope_identifier, "scope");
+        assert_eq!(context.hub_name, "build");
     }
 
     fn stored_config() -> StoredRunnerConfig {
