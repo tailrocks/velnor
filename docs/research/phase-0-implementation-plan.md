@@ -66,24 +66,22 @@ CreateAgentSessionAsync(poolId, session)
 loop:
   GetAgentMessageAsync(poolId, sessionId, lastMessageId, status, runnerVersion, os, arch, disableUpdate)
   decrypt body if session encryption key is present
-  if message is PipelineAgentJobRequest:
+  if message is RunnerJobRequest:
     parse AgentJobRequestMessage
-    DeleteAgentMessageAsync(poolId, messageId, sessionId)
+    acknowledge broker runner request when requested
+    acquire full job from run-service
     dispatch job
   if message is JobCancelMessage:
     cancel running job
 DeleteAgentSessionAsync(poolId, sessionId)
 ```
 
-Current code keeps one GitHub session open and long-polls this classic message route until stopped. `run --once` preserves the probe behavior by exiting after one message/no-message poll. While a Docker job is executing, Velnor starts a busy-status cancellation poll from the dispatched job message id; matching `JobCancellation` messages are acknowledged, the active job container is killed, and final completion is reported as canceled.
-
-Current GitHub can also send broker/run-service messages. Velnor now preserves V2 settings from the registered agent, including `ServerUrlV2` and `UseV2Flow`, and has typed client/request shapes for the official broker `session`, `message`, `acknowledge`, and run-service `acquirejob`, `renewjob`, and `completejob` routes. When `UseV2Flow` is enabled, `velnor-runner run` creates a broker session, polls broker messages, handles `RunnerJobRequest`, optionally acknowledges it, acquires the full job through run-service, renews the job through run-service while Docker executes, and completes the job through run-service. While a V2 Docker job is running, Velnor polls broker messages with busy status and uses matching `JobCancellation` messages to kill the active job container. `BrokerMigration` messages update the broker base URL for subsequent polls.
+Velnor preserves V2 settings from the registered agent, including `ServerUrlV2` and `UseV2Flow`, and has typed client/request shapes for the official broker `session`, `message`, `acknowledge`, and run-service `acquirejob`, `renewjob`, and `completejob` routes. `velnor-runner run` requires those V2 settings, creates a broker session, polls broker messages, handles `RunnerJobRequest`, optionally acknowledges it, acquires the full job through run-service, renews the job through run-service while Docker executes, and completes the job through run-service. While a Docker job is running, Velnor polls broker messages with busy status and uses matching `JobCancellation` messages to kill the active job container. `BrokerMigration` messages update the broker base URL for subsequent polls.
 
 Live hosted GitHub on 2026-06-01 showed additional production quirks that are now part of the implementation contract:
 
 - registered agents can be returned with lowercase label types and nullable agent strings
 - hosted GitHub rejects runner OAuth client assertions longer than 5 minutes
-- classic `BrokerMigration` can arrive without `messageId`
 - broker session creation can return a session without nested `agent`
 - runner package version must be current enough for the broker; Velnor currently advertises `2.334.0`
 - run-service step inputs are typed expression values, not always direct JSON strings
@@ -91,8 +89,7 @@ Live hosted GitHub on 2026-06-01 showed additional production quirks that are no
 
 Minimum message support:
 
-- `PipelineAgentJobRequest`
-- run-service job reference messages if V2 is enabled
+- run-service job reference messages
 - job cancellation
 - runner refresh/update as log-and-ignore or graceful exit
 - broker migration as reconnect-to-broker
@@ -276,7 +273,7 @@ Velnor still needs runtime step expression behavior from the job message:
 
 - step `if`: implemented for output comparisons, step outcome checks, selected GitHub/runner context values, generic job `ContextData` (`matrix.*`, `needs.*`, `inputs.*`, `vars.*`), synthesized `secrets.*` from GitHub secret variables, grouped simple `&&`/`||`, target-shaped `contains()`, and status functions `always()`, `success()`, `failure()`, and non-cancelled `cancelled()`
 - `steps.<id>.outputs.*`: implemented for direct interpolation in later scripts and JavaScript action env
-- job outputs: `JobOutputs` from the GitHub job message are evaluated after step execution from final step outputs and sent through the classic `JobCompleted` plan event or the V2 run-service `completejob` payload; classic object and V2 typed map shapes are both normalized before evaluation
+- job outputs: `JobOutputs` from the GitHub job message are evaluated after step execution from final step outputs and sent through the V2 run-service `completejob` payload; V2 typed map shapes are normalized before evaluation
 - env/context expansion in scripts and JavaScript action env: basic `steps.*.outputs.*`, `github.*` including `github.workflow`, `github.ref_name`, and nested `github.event.*`, `runner.*`, `env.*`, `secrets.*`, generic job `ContextData`, target-shaped `&&`/`||` value expressions, equality checks, unary `!`, `contains(...)`, `toJSON(...)`, and workspace-backed `hashFiles(...)` interpolation is implemented
 - `continue-on-error`: implemented for script and JavaScript action steps, including V2 typed wrapper values; failed steps keep failure outcome for later `steps.<id>.outcome` checks, but do not fail the job
 
@@ -348,6 +345,6 @@ This gets Velnor from "polls one message" to "can complete a simple real GitHub 
 
 Current code can parse enough `AgentJobRequestMessage` to identify job id/name, plan, request id, timeline id, variables, endpoints, repositories, containers, and action steps.
 
-Current code has classic `jobrequests` client methods for lock renewal and finish-job requests. The normal `velnor-runner run` path executes supported jobs by default and acknowledges/completes them; `--complete-noop` can opt into the completion probe, and `--dry-run-jobs` leaves received jobs unacknowledged for inspection.
+Current code requires V2 broker/run-service settings. The normal `velnor-runner run` path executes supported jobs by default and acknowledges/completes them; `--complete-noop` can opt into the completion probe, and `--dry-run-jobs` leaves received jobs unacknowledged for inspection.
 
-Current code models the classic timeline record/feed routes used by the upstream `JobServerQueue`. The V2 no-op completion path was live-tested successfully against hosted GitHub on 2026-06-01. Normal Docker execution reached the job container path, but this development environment exposed empty bind mounts from Docker, so the next live proof should run on a daemon-visible filesystem.
+The V2 no-op completion path was live-tested successfully against hosted GitHub on 2026-06-01. Normal Docker execution reached the job container path, but this development environment exposed empty bind mounts from Docker, so the next live proof should run on a daemon-visible filesystem.

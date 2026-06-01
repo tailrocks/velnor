@@ -204,11 +204,11 @@ POST <run_service_url>/_apis/runtime/runs/{planId}/jobs/{jobId}/complete
 
 For hosted GitHub, Velnor targets broker/run-service V2 only. In the current upstream runner (`c6a124e`), the listener chooses `BrokerMessageListener` whenever `RunnerSettings.UseV2Flow` is set. GitHub can enforce this during configuration by returning agent properties such as `ServerUrlV2` and `UseV2Flow`.
 
-Classic distributed-task polling is legacy for this project. Velnor should not optimize for it and should not treat it as target MVP compatibility. If an old registration does not provide `UseV2Flow` and `ServerUrlV2`, the normal `run` path should fail and ask the operator to reconfigure against the latest hosted GitHub registration flow.
+Classic distributed-task polling is legacy for this project. Velnor does not implement it in the normal runner path. If a registration does not provide `UseV2Flow` and `ServerUrlV2`, `velnor-runner run` fails and asks the operator to reconfigure against the latest hosted GitHub registration flow.
 
 Target MVP live proof must use V2 broker session/message polling, run-service `acquirejob`, run-service `renewjob`, and run-service `completejob`.
 
-Live hosted GitHub sends a classic `BrokerMigration` message first for current self-hosted runners when the runner starts on the classic listener path. That message may omit `messageId`, so Velnor must not require it. After migration, broker `session` responses may omit the nested `agent` object. Run-service acquired job payloads can omit repository resources that classic `actions/checkout` planning normally uses, so native checkout should derive the self repository from `github.repository`, `github.sha`, `github.ref`, and `github.server_url` when needed. Run-service acquired job payloads also encode job environment, run defaults, step inputs, step environment, and job outputs as typed expression values, including `inputs = { type, map = [{ Key = { lit }, Value = { lit } }] }`; script, checkout, repository action, local composite action, and completion-output adapters must normalize that shape before execution or final output evaluation.
+Broker `session` responses may omit the nested `agent` object. Run-service acquired job payloads can omit repository resources that `actions/checkout` planning normally uses, so native checkout should derive the self repository from `github.repository`, `github.sha`, `github.ref`, and `github.server_url` when needed. Run-service acquired job payloads also encode job environment, run defaults, step inputs, step environment, and job outputs as typed expression values, including `inputs = { type, map = [{ Key = { lit }, Value = { lit } }] }`; script, checkout, repository action, local composite action, and completion-output adapters must normalize that shape before execution or final output evaluation.
 
 The broker can also send control messages while a job is running. Velnor handles `JobCancellation` by killing the active Docker job container and completing the job as canceled. It handles `BrokerMigration` by replacing the broker base URL for later polls.
 
@@ -252,13 +252,11 @@ This avoids building Docker execution before Velnor can receive a real job.
 
 ## Current Implementation Status
 
-The `velnor-runner run` path can exchange stored OAuth credentials and call either the classic session/message APIs or the V2 broker/run-service APIs. Classic jobs finish through `JobCompleted` plus agent request finish; V2 jobs acquire, renew, and complete through run-service.
+The `velnor-runner run` path exchanges stored OAuth credentials and uses V2 broker/run-service APIs only. Jobs acquire, renew, and complete through run-service.
 
 Live proof on 2026-06-01:
 
 - runner registration against hosted GitHub succeeded
-- classic session creation succeeded
-- classic `BrokerMigration` to hosted broker succeeded
 - broker session/message poll succeeded
 - run-service `RunnerJobRequest` acquisition succeeded
 - run-service step input normalization succeeded for real hosted payload shape

@@ -85,9 +85,7 @@ Rules for Velnor:
 
 - Create one runner session, then long-poll for messages.
 - Require broker/run-service V2 for hosted GitHub target runs.
-- Do not treat classic distributed-task messages as target MVP compatibility.
-- Keep classic code only as internal debug/migration reference until it can be
-  deleted.
+- Do not implement classic distributed-task messages in the normal runner path.
 - Treat `BrokerMigration` as a control-plane redirect to broker polling.
 - Treat `RunnerJobRequest` as a job reference that must be acquired from
   run-service before execution.
@@ -97,8 +95,7 @@ Rules for Velnor:
   kill the active Docker job container and complete as canceled.
 - Renew the job lock while executing. Without renewal, GitHub can abandon the job
   while Velnor is still running containers.
-- Complete V2 jobs through run-service `completejob`; complete classic jobs
-  through the classic timeline/job-completed path.
+- Complete jobs through run-service `completejob`.
 
 ### Worker Side
 
@@ -220,9 +217,9 @@ plan came from GitHub YAML or future Pkl.
 For the target MVP, a real Velnor job should follow this sequence:
 
 1. Register runner with target labels, especially `hetzner-sentry-ci`.
-2. Create classic or broker session.
-3. Poll for `PipelineAgentJobRequest` or V2 `RunnerJobRequest`.
-4. If V2, best-effort acknowledge, then acquire full job message.
+2. Create broker session.
+3. Poll for V2 `RunnerJobRequest`.
+4. Best-effort acknowledge, then acquire full job message.
 5. Normalize typed run-service maps into normal job env, inputs, defaults, and
    job outputs.
 6. Native-checkout target `actions/checkout` steps before container startup.
@@ -238,7 +235,7 @@ For the target MVP, a real Velnor job should follow this sequence:
 14. Evaluate job outputs from final step outputs.
 15. Upload readable timeline/feed logs, annotations, step results, and final job
     status.
-16. Complete classic or V2 job with the correct conclusion.
+16. Complete V2 job with the correct conclusion.
 17. Cleanup containers, network, checkout credentials, and temp dirs.
 
 ## Pkl Design Constraint

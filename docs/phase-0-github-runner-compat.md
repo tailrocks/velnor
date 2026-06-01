@@ -63,7 +63,7 @@ Velnor must implement enough of the runner side:
 - long-poll for job messages
 - acknowledge/delete messages
 - renew running job locks
-- support both classic distributed-task jobs and the newer broker/run-service job flow
+- support the hosted GitHub broker/run-service V2 job flow
 - execute assigned jobs
 - report logs/timeline/results
 - run shell steps
@@ -344,8 +344,6 @@ Live hosted GitHub compatibility proof from 2026-06-01:
 
 - registration and removal tokens work
 - runner agent registration works
-- classic session creation works
-- hosted GitHub migrates the session to broker V2 with `BrokerMigration`
 - broker session/message poll works
 - run-service job acquisition works
 - run-service completion works for `--complete-noop`

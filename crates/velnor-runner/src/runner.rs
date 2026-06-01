@@ -30,14 +30,13 @@ use crate::{
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     container::{split_container_options, JobContainerSpec, ServiceContainerSpec},
     executor::{DockerScriptExecutor, ExecutableStep, ProcessCommandRunner, StepLog},
-    job_message::{ActionReferenceType, AgentJobRequestMessage, PIPELINE_AGENT_JOB_REQUEST},
+    job_message::{ActionReferenceType, AgentJobRequestMessage},
     protocol::{
-        BrokerClient, DistributedTaskClient, GitHubAuthResult, GitHubScope, JobCompletedEvent,
-        OAuthClient, OAuthJwtCredentials, RegistrationClient, RunServiceClient,
-        RunServiceCompleteJob, RunServiceStepResult, RunServiceVariableValue, RunnerEvent,
-        RunnerJobRequestRef, RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool,
-        TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines, TimelineRecordState,
-        RUNNER_JOB_REQUEST,
+        BrokerClient, DistributedTaskClient, GitHubAuthResult, GitHubScope, OAuthClient,
+        OAuthJwtCredentials, RegistrationClient, RunServiceClient, RunServiceCompleteJob,
+        RunServiceStepResult, RunServiceVariableValue, RunnerEvent, RunnerJobRequestRef,
+        RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool, TaskAgentSession, TaskResult,
+        TimelineRecordState, RUNNER_JOB_REQUEST,
     },
     runtime_env::job_runtime_env,
     script_step::github_script_steps_with_defaults,
@@ -315,22 +314,13 @@ pub async fn run(args: RunArgs) -> Result<()> {
 
     let dir = config::config_dir(args.config_dir.clone())?;
     let stored = config::load(&dir)?;
-    let server_url = stored
-        .settings
-        .server_url
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("runner is not registered: missing server_url"))?;
-    let pool_id = stored
-        .settings
-        .pool_id
-        .ok_or_else(|| anyhow::anyhow!("runner is not registered: missing pool_id"))?;
     let agent_id = stored
         .settings
         .agent_id
         .ok_or_else(|| anyhow::anyhow!("runner is not registered: missing agent_id"))?;
     let token = oauth_access_token(&stored).await?;
     ensure_v2_runner_settings(&stored)?;
-    return run_v2(args, dir, stored, &server_url, pool_id, agent_id, token).await;
+    run_v2(args, dir, stored, agent_id, token).await
 }
 
 fn ensure_v2_runner_settings(stored: &StoredRunnerConfig) -> Result<()> {
@@ -342,93 +332,10 @@ fn ensure_v2_runner_settings(stored: &StoredRunnerConfig) -> Result<()> {
     )
 }
 
-#[allow(dead_code)]
-async fn run_classic_migration_probe(
-    args: RunArgs,
-    dir: PathBuf,
-    mut stored: StoredRunnerConfig,
-    server_url: &str,
-    pool_id: i64,
-    agent_id: i64,
-    token: String,
-) -> Result<()> {
-    let client = DistributedTaskClient::new(&server_url, token.clone())?;
-    let owner_name = format!("{} (PID: {})", default_agent_name(), std::process::id());
-    let session = TaskAgentSession::new(owner_name, agent_id, stored.settings.agent_name.clone());
-    let session = client.create_session(pool_id, &session).await?;
-    let session_id = session
-        .session_id
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("GitHub returned session without sessionId"))?;
-
-    println!(
-        "Runner '{}' ready with labels: {}",
-        stored.settings.agent_name,
-        stored.settings.labels.join(",")
-    );
-    println!("Created runner session {session_id}.");
-
-    let mut last_message_id = None;
-    loop {
-        let message = client
-            .get_message(
-                pool_id,
-                session_id,
-                last_message_id,
-                RunnerStatus::Online,
-                stored.settings.disable_update,
-            )
-            .await?;
-
-        let Some(message) = message else {
-            println!("No message received.");
-            if args.once {
-                break;
-            }
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            continue;
-        };
-        if message
-            .message_type
-            .eq_ignore_ascii_case(BROKER_MIGRATION_MESSAGE)
-        {
-            let migration_url = broker_migration_url(&message)?;
-            println!("Migrating runner session to broker at {migration_url}.");
-            client.delete_session(pool_id, session_id).await?;
-            println!("Deleted classic runner session.");
-            stored.settings.server_url_v2 = Some(migration_url);
-            stored.settings.use_v2_flow = true;
-            return run_v2(args, dir, stored, server_url, pool_id, agent_id, token).await;
-        }
-        last_message_id = Some(message.message_id);
-        handle_message(
-            &client,
-            pool_id,
-            session_id,
-            &stored.settings.agent_name,
-            &dir,
-            &args,
-            stored.settings.disable_update,
-            message,
-        )
-        .await?;
-        if args.once {
-            break;
-        }
-    }
-
-    client.delete_session(pool_id, session_id).await?;
-    println!("Deleted runner session.");
-
-    Ok(())
-}
-
 async fn run_v2(
     args: RunArgs,
     config_dir: PathBuf,
     stored: StoredRunnerConfig,
-    server_url: &str,
-    pool_id: i64,
     agent_id: i64,
     token: String,
 ) -> Result<()> {
@@ -438,7 +345,6 @@ async fn run_v2(
     let broker_token = token.clone();
     let mut broker = BrokerClient::new(server_url_v2, broker_token.clone())?;
     let run_service = RunServiceClient::new(token.clone())?;
-    let task_client = DistributedTaskClient::new(server_url, token)?;
     let owner_name = format!("{} (PID: {})", default_agent_name(), std::process::id());
     let session = TaskAgentSession::new(owner_name, agent_id, stored.settings.agent_name.clone());
     let session = broker.create_session(&session).await?;
@@ -475,10 +381,7 @@ async fn run_v2(
         if let Some(migration_url) = handle_v2_message(
             &broker,
             &run_service,
-            &task_client,
-            pool_id,
             session_id,
-            &stored.settings.agent_name,
             &config_dir,
             &args,
             stored.settings.disable_update,
@@ -500,53 +403,10 @@ async fn run_v2(
     Ok(())
 }
 
-async fn handle_message(
-    client: &DistributedTaskClient,
-    pool_id: i64,
-    session_id: &str,
-    worker_name: &str,
-    config_dir: &std::path::Path,
-    args: &RunArgs,
-    disable_update: bool,
-    message: crate::protocol::TaskAgentMessage,
-) -> Result<()> {
-    println!(
-        "Received message {} type {}.",
-        message.message_id, message.message_type
-    );
-    if !message
-        .message_type
-        .eq_ignore_ascii_case(PIPELINE_AGENT_JOB_REQUEST)
-    {
-        println!("Message is not acknowledged because type is not implemented.");
-        return Ok(());
-    }
-
-    let job = AgentJobRequestMessage::parse_json(&message.body)?;
-    handle_job_request(
-        client,
-        pool_id,
-        session_id,
-        worker_name,
-        config_dir,
-        args,
-        disable_update,
-        Some(message.message_id),
-        true,
-        None,
-        None,
-        job,
-    )
-    .await
-}
-
 async fn handle_v2_message(
     broker: &BrokerClient,
     run_service: &RunServiceClient,
-    client: &DistributedTaskClient,
-    pool_id: i64,
     session_id: &str,
-    worker_name: &str,
     config_dir: &std::path::Path,
     args: &RunArgs,
     disable_update: bool,
@@ -613,36 +473,15 @@ async fn handle_v2_message(
         session_id: session_id.to_string(),
         disable_update,
     };
-    handle_job_request(
-        client,
-        pool_id,
-        session_id,
-        worker_name,
-        config_dir,
-        args,
-        false,
-        None,
-        false,
-        Some(run_service_job),
-        Some(broker_cancellation),
-        job,
-    )
-    .await?;
+    handle_job_request(config_dir, args, run_service_job, broker_cancellation, job).await?;
     Ok(None)
 }
 
 async fn handle_job_request(
-    client: &DistributedTaskClient,
-    pool_id: i64,
-    session_id: &str,
-    worker_name: &str,
     config_dir: &std::path::Path,
     args: &RunArgs,
-    disable_update: bool,
-    dispatch_message_id: Option<i64>,
-    acknowledge_classic_message: bool,
-    run_service_job: Option<RunServiceJobContext>,
-    broker_cancellation: Option<BrokerCancellationContext>,
+    run_service_job: RunServiceJobContext,
+    broker_cancellation: BrokerCancellationContext,
     job: AgentJobRequestMessage,
 ) -> Result<()> {
     println!(
@@ -680,55 +519,22 @@ async fn handle_job_request(
         let Some(script_steps) = script_steps else {
             bail!("cannot execute scripts because step mapping failed");
         };
-        let renewal = if let Some(run_service_job) = &run_service_job {
-            start_run_service_lock_renewal(
-                run_service_job.client.clone(),
-                run_service_job.run_service_url.clone(),
-                job.plan.plan_id.clone(),
-                job.job_id.clone(),
-            )
-            .await?
-        } else {
-            start_lock_renewal(
-                client.clone(),
-                pool_id,
-                job.request_id,
-                job.plan.plan_id.clone(),
-            )
-            .await?
-        };
-        if acknowledge_classic_message {
-            if let Some(message_id) = dispatch_message_id {
-                client
-                    .delete_message(pool_id, message_id, session_id)
-                    .await
-                    .context("acknowledge dispatched job message")?;
-            }
-        }
+        let renewal = start_run_service_lock_renewal(
+            run_service_job.client.clone(),
+            run_service_job.run_service_url.clone(),
+            job.plan.plan_id.clone(),
+            job.job_id.clone(),
+        )
+        .await?;
         let canceled = Arc::new(AtomicBool::new(false));
-        let cancellation = if let Some(broker_cancellation) = broker_cancellation {
-            Some(start_broker_cancellation_poll(
-                broker_cancellation.broker,
-                broker_cancellation.session_id,
-                broker_cancellation.disable_update,
-                job.job_id.clone(),
-                job_container_name(&job),
-                canceled.clone(),
-            ))
-        } else {
-            dispatch_message_id.map(|message_id| {
-                start_cancellation_poll(
-                    client.clone(),
-                    pool_id,
-                    session_id.to_string(),
-                    message_id,
-                    disable_update,
-                    job.job_id.clone(),
-                    job_container_name(&job),
-                    canceled.clone(),
-                )
-            })
-        };
+        let cancellation = start_broker_cancellation_poll(
+            broker_cancellation.broker,
+            broker_cancellation.session_id,
+            broker_cancellation.disable_update,
+            job.job_id.clone(),
+            job_container_name(&job),
+            canceled.clone(),
+        );
         let config_dir = config_dir.to_path_buf();
         let work_dir = args.work_dir.clone();
         let docker_image = args.docker_image.clone();
@@ -747,9 +553,7 @@ async fn handle_job_request(
         })
         .await
         .context("join Docker job execution task")?;
-        if let Some(cancellation) = cancellation {
-            cancellation.abort();
-        }
+        cancellation.abort();
         renewal.abort();
         let job_result = match job_result {
             Ok(mut job_result) => {
@@ -766,99 +570,47 @@ async fn handle_job_request(
                         step_logs: Vec::new(),
                     }
                 } else {
-                    let feed_line =
-                        format!("Velnor failed while executing supported Docker job: {error:#}");
-                    if let Some(run_service_job) = &run_service_job {
-                        complete_run_service_job(
-                            &run_service_job.client,
-                            &run_service_job.run_service_url,
-                            &job,
-                            TaskResult::Failed,
-                            BTreeMap::new(),
-                            Vec::new(),
-                            run_service_job.billing_owner_id.clone(),
-                        )
-                        .await?;
-                    } else {
-                        complete_job(
-                            client,
-                            pool_id,
-                            worker_name,
-                            &job,
-                            TaskResult::Failed,
-                            BTreeMap::new(),
-                            Vec::new(),
-                            feed_line,
-                        )
-                        .await?;
-                    }
+                    complete_run_service_job(
+                        &run_service_job.client,
+                        &run_service_job.run_service_url,
+                        &job,
+                        TaskResult::Failed,
+                        BTreeMap::new(),
+                        Vec::new(),
+                        run_service_job.billing_owner_id.clone(),
+                    )
+                    .await?;
                     return Err(error);
                 }
             }
         };
         let outputs = job_result.outputs;
         let step_logs = job_result.step_logs;
-        if let Some(run_service_job) = run_service_job {
-            complete_run_service_job(
-                &run_service_job.client,
-                &run_service_job.run_service_url,
-                &job,
-                job_result.result,
-                outputs,
-                step_logs,
-                run_service_job.billing_owner_id,
-            )
-            .await?;
-        } else {
-            complete_job(
-                client,
-                pool_id,
-                worker_name,
-                &job,
-                job_result.result,
-                outputs,
-                step_logs,
-                "Velnor executed supported run and JavaScript action steps in Docker.".to_string(),
-            )
-            .await?;
-        }
+        complete_run_service_job(
+            &run_service_job.client,
+            &run_service_job.run_service_url,
+            &job,
+            job_result.result,
+            outputs,
+            step_logs,
+            run_service_job.billing_owner_id,
+        )
+        .await?;
         println!(
             "Job completed with result {:?} and message acknowledged.",
             job_result.result
         );
     } else if args.complete_noop {
-        if acknowledge_classic_message {
-            if let Some(message_id) = dispatch_message_id {
-                client
-                    .delete_message(pool_id, message_id, session_id)
-                    .await
-                    .context("acknowledge no-op job message")?;
-            }
-        }
-        if let Some(run_service_job) = run_service_job {
-            complete_run_service_job(
-                &run_service_job.client,
-                &run_service_job.run_service_url,
-                &job,
-                TaskResult::Succeeded,
-                BTreeMap::new(),
-                Vec::new(),
-                run_service_job.billing_owner_id,
-            )
-            .await?;
-        } else {
-            complete_job(
-                client,
-                pool_id,
-                worker_name,
-                &job,
-                TaskResult::Succeeded,
-                BTreeMap::new(),
-                Vec::new(),
-                "Velnor no-op completion probe: user steps were not executed.".to_string(),
-            )
-            .await?;
-        }
+        complete_run_service_job(
+            &run_service_job.client,
+            &run_service_job.run_service_url,
+            &job,
+            TaskResult::Succeeded,
+            BTreeMap::new(),
+            Vec::new(),
+            run_service_job.billing_owner_id,
+        )
+        .await?;
         println!("No-op job completed and message acknowledged.");
     } else {
         println!(
@@ -1021,30 +773,6 @@ fn system_connection_access_token(
         .cloned()
 }
 
-async fn start_lock_renewal(
-    client: DistributedTaskClient,
-    pool_id: i64,
-    request_id: i64,
-    plan_id: String,
-) -> Result<JoinHandle<()>> {
-    client
-        .renew_agent_request(pool_id, request_id, Some(&plan_id))
-        .await
-        .context("initial job lock renewal")?;
-
-    Ok(tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
-            if let Err(error) = client
-                .renew_agent_request(pool_id, request_id, Some(&plan_id))
-                .await
-            {
-                eprintln!("Job lock renewal failed: {error:#}");
-            }
-        }
-    }))
-}
-
 async fn start_run_service_lock_renewal(
     client: RunServiceClient,
     run_service_url: String,
@@ -1079,64 +807,6 @@ async fn start_run_service_lock_renewal(
             }
         }
     }))
-}
-
-fn start_cancellation_poll(
-    client: DistributedTaskClient,
-    pool_id: i64,
-    session_id: String,
-    initial_last_message_id: i64,
-    disable_update: bool,
-    job_id: String,
-    job_container_name: String,
-    canceled: Arc<AtomicBool>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut last_message_id = Some(initial_last_message_id);
-        loop {
-            let message = match client
-                .get_message(
-                    pool_id,
-                    &session_id,
-                    last_message_id,
-                    RunnerStatus::Busy,
-                    disable_update,
-                )
-                .await
-            {
-                Ok(message) => message,
-                Err(error) => {
-                    eprintln!("Cancellation poll failed: {error:#}");
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    continue;
-                }
-            };
-            let Some(message) = message else {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                continue;
-            };
-            last_message_id = Some(message.message_id);
-            if !is_job_cancellation_for(&message, &job_id) {
-                println!(
-                    "Busy runner received unsupported message {} type {}; leaving it for main loop.",
-                    message.message_id, message.message_type
-                );
-                continue;
-            }
-            canceled.store(true, Ordering::SeqCst);
-            if let Err(error) = client
-                .delete_message(pool_id, message.message_id, &session_id)
-                .await
-            {
-                eprintln!(
-                    "Failed to acknowledge cancellation message {}: {error:#}",
-                    message.message_id
-                );
-            }
-            kill_job_container(&job_container_name);
-            break;
-        }
-    })
 }
 
 fn start_broker_cancellation_poll(
@@ -1940,126 +1610,6 @@ fn scalar_env_value(value: &Value) -> String {
     }
 }
 
-async fn complete_job(
-    client: &DistributedTaskClient,
-    pool_id: i64,
-    worker_name: &str,
-    job: &AgentJobRequestMessage,
-    result: TaskResult,
-    job_outputs: BTreeMap<String, String>,
-    step_logs: Vec<StepLog>,
-    feed_line: String,
-) -> Result<()> {
-    let scope_identifier = job
-        .plan
-        .scope_identifier
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("job plan missing scopeIdentifier"))?;
-    let hub_name = job.plan.plan_type.as_deref().unwrap_or("build");
-    let start_time = utc_now_rfc3339()?;
-    let (error_count, warning_count, notice_count) = step_issue_counts(&step_logs);
-    let record = TimelineRecord::job_pending(
-        job.job_id.clone(),
-        job.job_display_name.clone(),
-        job.job_name.clone(),
-        worker_name,
-    )
-    .with_issue_counts(error_count, warning_count, notice_count)
-    .in_progress(start_time);
-
-    client
-        .renew_agent_request(pool_id, job.request_id, Some(&job.plan.plan_id))
-        .await?;
-    client
-        .update_timeline_records(
-            scope_identifier,
-            hub_name,
-            &job.plan.plan_id,
-            &job.timeline.id,
-            vec![record.clone()],
-        )
-        .await?;
-    let job_masks = job_mask_values(job);
-    client
-        .append_timeline_record_feed(
-            scope_identifier,
-            hub_name,
-            &job.plan.plan_id,
-            &job.timeline.id,
-            &job.job_id,
-            TimelineRecordFeedLines::new(
-                job.job_id.clone(),
-                vec![mask_text(&feed_line, &job_masks)],
-                Some(1),
-            ),
-        )
-        .await?;
-    for (index, step_log) in step_logs.into_iter().enumerate() {
-        let masks = combined_masks(&job_masks, &step_log.masks);
-        let step_id = step_log.step_id.clone();
-        let finish_time = utc_now_rfc3339()?;
-        client
-            .update_timeline_records(
-                scope_identifier,
-                hub_name,
-                &job.plan.plan_id,
-                &job.timeline.id,
-                vec![TimelineRecord::task_completed(
-                    step_id.clone(),
-                    job.job_id.clone(),
-                    step_id.clone(),
-                    (index + 1) as i32,
-                    finish_time,
-                    step_log_result(&step_log),
-                )
-                .with_issue_counts(
-                    step_log.error_count,
-                    step_log.warning_count,
-                    step_log.notice_count,
-                )],
-            )
-            .await?;
-        client
-            .append_timeline_record_feed(
-                scope_identifier,
-                hub_name,
-                &job.plan.plan_id,
-                &job.timeline.id,
-                &step_id,
-                TimelineRecordFeedLines::new(
-                    step_id.clone(),
-                    mask_lines(&step_log.lines, &masks),
-                    Some(1),
-                ),
-            )
-            .await?;
-    }
-
-    let finish_time = utc_now_rfc3339()?;
-    client
-        .update_timeline_records(
-            scope_identifier,
-            hub_name,
-            &job.plan.plan_id,
-            &job.timeline.id,
-            vec![record.completed(finish_time.clone(), result)],
-        )
-        .await?;
-    client
-        .raise_job_completed_event(
-            scope_identifier,
-            hub_name,
-            &job.plan.plan_id,
-            &JobCompletedEvent::new(job.request_id, job.job_id.clone(), result, job_outputs),
-        )
-        .await?;
-    client
-        .finish_agent_request(pool_id, job.request_id, finish_time, result)
-        .await?;
-
-    Ok(())
-}
-
 async fn complete_run_service_job(
     client: &RunServiceClient,
     run_service_url: &str,
@@ -2127,65 +1677,6 @@ fn step_log_result(step_log: &StepLog) -> TaskResult {
     } else {
         TaskResult::Failed
     }
-}
-
-fn step_issue_counts(step_logs: &[StepLog]) -> (i32, i32, i32) {
-    step_logs.iter().fold((0, 0, 0), |counts, step| {
-        (
-            counts.0 + step.error_count,
-            counts.1 + step.warning_count,
-            counts.2 + step.notice_count,
-        )
-    })
-}
-
-fn job_mask_values(job: &AgentJobRequestMessage) -> Vec<String> {
-    let mut values = Vec::new();
-    values.extend(
-        job.mask
-            .iter()
-            .filter_map(|mask| mask.value.as_deref())
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-    );
-    values.extend(
-        job.variables
-            .values()
-            .filter(|variable| variable.is_secret)
-            .filter_map(|variable| variable.value.as_deref())
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned),
-    );
-    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
-    values.dedup();
-    values
-}
-
-fn mask_text(value: &str, masks: &[String]) -> String {
-    masks
-        .iter()
-        .filter(|mask| !mask.is_empty())
-        .fold(value.to_string(), |masked, mask| {
-            masked.replace(mask, "***")
-        })
-}
-
-fn mask_lines(lines: &[String], masks: &[String]) -> Vec<String> {
-    lines.iter().map(|line| mask_text(line, masks)).collect()
-}
-
-fn combined_masks(base: &[String], extra: &[String]) -> Vec<String> {
-    let mut masks = base.to_vec();
-    masks.extend(extra.iter().filter(|mask| !mask.is_empty()).cloned());
-    masks.sort_by_key(|value| std::cmp::Reverse(value.len()));
-    masks.dedup();
-    masks
-}
-
-fn utc_now_rfc3339() -> Result<String> {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .context("format UTC timestamp")
 }
 
 async fn oauth_access_token(stored: &StoredRunnerConfig) -> Result<String> {
@@ -2578,36 +2069,6 @@ mod tests {
                 .unwrap();
 
         assert_eq!(plans[0].inputs["github-token"], "ghs_token");
-    }
-
-    #[test]
-    fn job_mask_values_include_mask_hints_and_secret_variables() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
-            "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
-            "jobDisplayName": "Mask",
-            "requestId": 1,
-            "mask": [
-                { "type": "Variable", "value": "hint-secret" }
-            ],
-            "variables": {
-                "system.github.token": { "value": "ghs_token", "isSecret": true },
-                "PUBLIC_VALUE": { "value": "visible", "isSecret": false }
-            }
-        }))
-        .unwrap();
-
-        let masks = job_mask_values(&job);
-
-        assert!(masks.contains(&"hint-secret".to_string()));
-        assert!(masks.contains(&"ghs_token".to_string()));
-        assert!(!masks.contains(&"visible".to_string()));
-        assert_eq!(
-            mask_text("hint-secret ghs_token visible", &masks),
-            "*** *** visible"
-        );
     }
 
     #[test]

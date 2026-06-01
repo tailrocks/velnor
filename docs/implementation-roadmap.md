@@ -36,10 +36,10 @@ Goal: receive one job and mark it completed.
 Deliverables:
 
 - deserialize enough `AgentJobRequestMessage`
-- renew job request lock: client method implemented for classic `jobrequests` route; script execution starts with an initial renewal and keeps a background renewal loop alive while user code runs
-- report timeline/log output for a no-op job: opt-in `run --complete-noop` probe is implemented for classic timeline/feed routes
+- renew job request lock: run-service lock renewal starts before script execution and keeps a background renewal loop alive while user code runs
+- report completion output for a no-op job: opt-in `run --complete-noop` probe completes through run-service
 - finish job request with success/failure: opt-in `run --complete-noop` probe finishes success
-- handle cancellation message: classic `JobCancellation` messages are recognized while a Docker job is running, acknowledged, and used to kill the active job container so the job can finish as canceled; V2 broker cancellation messages are also polled while the Docker job runs and kill the active job container
+- handle cancellation message: V2 broker cancellation messages are polled while the Docker job runs and kill the active job container
 - V2 broker migration messages are recognized while a Docker job is running and update the broker base URL for later polls
 
 Exit criteria:
@@ -94,8 +94,8 @@ Current code progress:
 - `GITHUB_ENV` and legacy `set-env` mutations cannot override `GITHUB_*` and `RUNNER_*` defaults or `NODE_OPTIONS`; `ACTIONS_*` remains mutable for target runtime-export actions
 - paths written to `GITHUB_PATH` are also propagated to later JavaScript action sidecars via a shell PATH prelude, preserving the sidecar image's default PATH while making shared-home tools such as Rust/Cargo shims visible
 - step outputs written to `GITHUB_OUTPUT` are tracked by step id and basic `${{ steps.<id>.outputs.<name> }}` expressions are resolved in later scripts and JavaScript action env
-- job outputs from the job message are evaluated at the end of execution from final step output state, matching the runner-side evaluation point used by GitHub; classic object and run-service typed map payloads are both normalized before expression evaluation
-- evaluated job outputs are sent in a classic `JobCompleted` plan event before the agent request is finished
+- job outputs from the job message are evaluated at the end of execution from final step output state, matching the runner-side evaluation point used by GitHub; run-service typed map payloads are normalized before expression evaluation
+- evaluated job outputs are sent in the V2 run-service `completejob` payload
 - stdout/stderr from executed script and JavaScript steps is captured and uploaded to GitHub timeline task records after execution, with GitHub/job/add-mask masks applied
 - stdout workflow commands are parsed for legacy/state-changing commands: `set-output`, `set-env`, `add-path`, and `save-state`
 - basic `${{ github.* }}` and `${{ runner.* }}` context expressions are resolved from runtime env in later scripts and JavaScript action env

@@ -22,25 +22,9 @@ Upstream reference:
 Hosted GitHub V2 is the target for Velnor. The normal runner path should require
 `UseV2Flow` and `ServerUrlV2` from registration and should fail fast if they are
 missing. Classic polling is legacy for this project; it can exist as internal
-debug/migration reference code, but it is not target MVP compatibility.
+source reference only, not target MVP compatibility.
 
 New target compatibility work must be validated through broker/run-service V2.
-
-Classic path:
-
-```text
-Velnor registers as TaskAgent
-  -> creates distributed-task runner session
-  -> long-polls session messages
-  -> receives TaskAgentMessage {
-       messageType: "PipelineAgentJobRequest",
-       body: AgentJobRequestMessage JSON
-     }
-  -> deletes/acknowledges the message after dispatch
-  -> renews job lock while running
-  -> uploads timeline/logs/results
-  -> finishes job request
-```
 
 Broker/run-service V2 path:
 
@@ -66,7 +50,7 @@ The important invariant: both paths eventually produce an
 
 `AgentJobRequestMessage` is already an expanded job. It contains:
 
-- `MessageType`: job request type, classic or run-service shaped
+- `MessageType`: V2 run-service job request type
 - `Plan`: orchestration plan id, group, artifact info
 - `Timeline`: timeline id/change id for UI reporting
 - `JobId`, `JobName`, `JobDisplayName`
@@ -195,7 +179,7 @@ expanded payload features:
 - `Inputs` in direct object and run-service typed map forms
 - `Environment` in direct object and run-service typed map forms
 - `ContinueOnError` in boolean and typed wrapper forms
-- `JobOutputs` in classic and V2 typed forms
+- `JobOutputs` in V2 typed forms
 - `ContextData.github`, `github.event`, `inputs`, `needs`, `matrix`, `vars`
 - `Variables` for GitHub runtime env, system token, cache/runtime/results URLs,
   OIDC, feature flags, and secret masking

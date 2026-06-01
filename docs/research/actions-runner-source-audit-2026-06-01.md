@@ -31,7 +31,7 @@ Velnor rule:
 - keep one active GitHub job per registered runner process
 - require V2 broker/run-service for the normal hosted-GitHub path
 - do not treat classic distributed-task polling as target MVP compatibility
-- keep any classic code only as internal debug/migration reference until it can be deleted
+- do not implement classic distributed-task polling in the normal runner path
 - treat runner update/self-update messages as log-and-ignore or graceful restart for Phase 0
 - treat broker acknowledge as best-effort; failure should not block job execution
 - retry only where upstream retries; skip already-acquired/unprocessable run-service jobs
