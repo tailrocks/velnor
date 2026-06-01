@@ -54,9 +54,10 @@ cargo run --bin velnor-runner -- remove --pat "$GITHUB_TOKEN"
 `configure` validates runner scope URLs, can request a short-lived GitHub runner
 token from `--pat`, exchanges that runner token for tenant credentials, and can
 add/replace a runner agent in the selected pool. `run` exchanges stored OAuth
-runner credentials, requires GitHub's current V2 broker settings, creates a
-broker session, polls broker messages, acquires jobs from run-service, renews
-locks, executes supported jobs, and completes them through run-service.
+runner credentials, requires GitHub's current V2 broker settings, runs Docker
+preflight before polling for executable jobs, creates a broker session, polls
+broker messages, acquires jobs from run-service, renews locks, executes
+supported jobs, and completes them through run-service.
 
 Local target coverage is checked with:
 

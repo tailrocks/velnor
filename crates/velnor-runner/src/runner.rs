@@ -4,7 +4,7 @@ use serde_json::{json, Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -27,7 +27,7 @@ use crate::{
         checkout_plans, checkout_step_id, cleanup_checkout_credentials, configure_safe_directory,
         execute_checkouts, CheckoutPlan,
     },
-    cli::{ConfigureArgs, RemoveArgs, RunArgs, StatusArgs},
+    cli::{ConfigureArgs, PreflightArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     executor::{
         DockerScriptExecutor, ExecutableStep, ProcessCommandRunner, StepLog, StepStartEvent,
@@ -378,6 +378,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     }
 
     let dir = config::config_dir(args.config_dir.clone())?;
+    preflight_before_executable_run(&args, &dir)?;
     let stored = config::load(&dir)?;
     let agent_id = stored
         .settings
@@ -386,6 +387,20 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let token = oauth_access_token(&stored).await?;
     ensure_v2_runner_settings(&stored)?;
     run_v2(args, dir, stored, agent_id, token).await
+}
+
+fn preflight_before_executable_run(args: &RunArgs, config_dir: &Path) -> Result<()> {
+    if !should_execute_job(args) || args.skip_preflight {
+        return Ok(());
+    }
+
+    crate::preflight::preflight(PreflightArgs {
+        work_dir: Some(args.work_dir.clone().unwrap_or_else(|| config_dir.join("_work"))),
+        docker_image: args.docker_image.clone(),
+        require_docker_socket: false,
+        require_buildx: true,
+    })
+    .context("Docker preflight failed before polling GitHub for jobs")
 }
 
 fn ensure_v2_runner_settings(stored: &StoredRunnerConfig) -> Result<()> {
@@ -2549,6 +2564,7 @@ mod tests {
             docker_image: "ubuntu:24.04".into(),
             node_action_image: String::new(),
             work_dir: None,
+            skip_preflight: false,
         }
     }
 

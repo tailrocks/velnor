@@ -135,6 +135,10 @@ pub struct RunArgs {
     /// Host work directory for Docker job state. Defaults under the runner config directory.
     #[arg(long)]
     pub work_dir: Option<PathBuf>,
+
+    /// Skip Docker preflight before polling GitHub for executable jobs.
+    #[arg(long)]
+    pub skip_preflight: bool,
 }
 
 #[derive(Debug, Args)]

@@ -29,6 +29,12 @@ cargo run --bin velnor-runner -- preflight \
 
 This verifies host Git, Docker daemon access, Buildx, `/var/run/docker.sock`, Docker CLI/Buildx usability inside the job image, required job-image tools, execution of a temp script from `/__t` with `/__w` workdir, and whether the daemon can see Velnor's bind-mounted work directory.
 
+`velnor-runner run` also performs Docker preflight by default before it polls
+GitHub for executable jobs. This is deliberate: a runner should not acquire a
+queued GitHub job until the local Docker environment can run the mounted job
+workspace. Use `--skip-preflight` only for `--complete-noop`, `--dry-run-jobs`,
+or a deliberately controlled diagnostic run.
+
 ## Run Public Fixture First
 
 Before the real target repositories, use the public fixture:
