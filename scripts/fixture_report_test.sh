@@ -49,6 +49,8 @@ expected_values=(
   "docker_host:"
   "docker_host_work_dir:"
   "require_docker_socket:"
+  "run_target_verify:"
+  "check_target_mvp_config:"
   "status ok"
   "audit ok"
   "doctor ok"

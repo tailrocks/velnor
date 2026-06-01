@@ -56,6 +56,8 @@ run_report_section() {
   echo "- docker_host: ${DOCKER_HOST:-<local>}"
   echo "- docker_host_work_dir: ${VELNOR_DOCKER_HOST_WORK_DIR:-<same as velnor_work_dir>}"
   echo "- require_docker_socket: ${VELNOR_REQUIRE_DOCKER_SOCKET:-true}"
+  echo "- run_target_verify: ${VELNOR_RUN_TARGET_VERIFY:-false}"
+  echo "- check_target_mvp_config: ${VELNOR_CHECK_TARGET_MVP_CONFIG:-false}"
   echo
 } >"$REPORT_PATH"
 
