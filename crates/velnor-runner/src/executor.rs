@@ -2102,6 +2102,12 @@ mod tests {
                         "page_url=https://jackin-project.github.io/jackin/\n",
                     )?;
                 }
+                if has_container_env_path(args, "GITHUB_OUTPUT", "deployment_output") {
+                    fs::write(
+                        self.temp.join("deployment_output"),
+                        "page_url=https://jackin-project.github.io/jackin/\n",
+                    )?;
+                }
                 if has_container_env_path(args, "GITHUB_STATE", "cache_state") {
                     fs::write(self.temp.join("cache_state"), "primaryKey=linux-cache\n")?;
                 }
@@ -3271,11 +3277,11 @@ mod tests {
     }
 
     #[test]
-    fn evaluates_environment_url_from_final_step_state() {
+    fn target_docs_environment_url_uses_deployment_step_output() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::Script(ScriptStep {
-            id: "deploy-pages".into(),
+            id: "deployment".into(),
             script: "echo page_url=https://example.com/docs/ >> $GITHUB_OUTPUT".into(),
             shell: Shell::Sh,
             working_directory_container: "/__w/repo".into(),
@@ -3285,7 +3291,7 @@ mod tests {
         })];
         let environment_url = serde_json::json!({
             "type": "String",
-            "value": "${{ steps.deploy-pages.outputs.page_url }}"
+            "value": "${{ steps.deployment.outputs.page_url }}"
         });
         let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
             calls: Vec::new(),
