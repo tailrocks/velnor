@@ -380,7 +380,7 @@ where
                     let step = state.resolve_script_step(step);
                     let plan = ScriptStepPlan::prepare_with_path(&step, temp_host, &state.path)?;
                     let mut env = state.step_env(&[]);
-                    env.extend(state.resolve_env(&step.env));
+                    env.extend(step.env.iter().cloned());
                     env.extend(plan.env.iter().cloned());
                     let exec_args = container.exec_script_args(
                         &plan.script_container_path,
@@ -2490,6 +2490,39 @@ mod tests {
         let exec_args = &executor.runner().calls[2].1;
         assert!(exec_args.contains(&"MODE=release".into()));
         assert!(exec_args.contains(&"TOKEN=ghs_token".into()));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn script_step_environment_is_not_resolved_twice() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Script(ScriptStep {
+            id: "env-step".into(),
+            script: "echo env".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: vec![("GENERATED".into(), "${{ env.OUTER }}".into())],
+            condition: None,
+            continue_on_error: false,
+        })];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps(
+                &container(&temp),
+                &steps,
+                &[
+                    ("GITHUB_TOKEN".into(), "ghs_token".into()),
+                    ("OUTER".into(), "${{ github.token }}".into()),
+                ],
+                &temp,
+            )
+            .unwrap();
+
+        let exec_args = &executor.runner().calls[2].1;
+        assert!(exec_args.contains(&"GENERATED=${{ github.token }}".into()));
+        assert!(!exec_args.contains(&"GENERATED=ghs_token".into()));
         fs::remove_dir_all(temp).unwrap();
     }
 
