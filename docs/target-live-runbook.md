@@ -55,6 +55,14 @@ The same host readiness checks can be run with:
 scripts/live_host_doctor.sh
 ```
 
+Before attempting the fixture smoke, run the fixture readiness gate. It checks
+the current fixture workflow status and live host readiness, but does not
+register runners or dispatch workflows:
+
+```sh
+scripts/fixture_readiness.sh
+```
+
 Set `VELNOR_RUN_TARGET_VERIFY=true` to include the target workflow verifier, and
 set `VELNOR_CHECK_TARGET_MVP_CONFIG=true` after runner registration to validate
 the stored target labels, V2 settings, ids, and credentials.

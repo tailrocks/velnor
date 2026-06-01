@@ -112,6 +112,13 @@ Live host readiness is checked with:
 scripts/live_host_doctor.sh
 ```
 
+Fixture proof readiness can be checked without registering a runner or
+dispatching a workflow:
+
+```sh
+scripts/fixture_readiness.sh
+```
+
 The live proof scripts are Linux-only as well; they fail before runner
 registration on non-Linux hosts, and reject `VELNOR_TARGET_MVP_ARM_LABEL=true`
 unless the host is ARM Linux.
@@ -213,6 +220,7 @@ On a Linux host with a local Docker socket and `GITHUB_TOKEN` set, the fixture
 proof can be run with:
 
 ```sh
+scripts/fixture_readiness.sh
 scripts/fixture_smoke.sh
 ```
 

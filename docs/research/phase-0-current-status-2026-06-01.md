@@ -130,6 +130,9 @@ Current local environment finding:
 - The active agent environment has `DOCKER_HOST=tcp://jk-php3ngrs-thearchitect-dind:2376`.
 - `scripts/live_host_doctor.sh` with the default socket requirement fails before
   registration because `/var/run/docker.sock` does not exist on this host.
+- `scripts/fixture_readiness.sh` confirms the same safe stopping point: fixture
+  GitHub-hosted jobs are complete, Velnor fixture jobs are queued, and host
+  readiness fails before any runner registration or workflow dispatch.
 - `VELNOR_REQUIRE_DOCKER_SOCKET=false scripts/live_host_doctor.sh` reaches the
   bind-mount visibility preflight, then fails because the remote Docker daemon
   cannot see `/Users/donbeave/Projects/velnor-project/velnor/.velnor-work`.
@@ -161,8 +164,10 @@ Current local environment finding:
 ## Next Best Proof Path
 
 1. Run `scripts/target_verify.sh` and `cargo test -q`.
-2. Run `velnor-runner preflight` on the live Linux host and intended workdir.
-3. On a host that passes preflight, run `scripts/fixture_smoke.sh`. This
+2. Run `scripts/fixture_readiness.sh` on the live Linux host and intended
+   workdir. It checks fixture status and live host readiness without registering
+   a runner or dispatching workflows.
+3. On a host that passes readiness, run `scripts/fixture_smoke.sh`. This
    registers `donbeave/velnor-actions-fixture` with label `velnor-target-mvp`,
    runs the queued fixture jobs through `daemon --once --slots N`, and confirms
    `compare-results` passes.
