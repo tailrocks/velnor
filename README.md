@@ -68,3 +68,5 @@ Pkl vs KCL language comparison: [docs/research/pkl-vs-kcl.md](docs/research/pkl-
 Side-by-side GitHub Actions vs Pkl vs KCL examples: [docs/research/github-actions-vs-pkl-vs-kcl.md](docs/research/github-actions-vs-pkl-vs-kcl.md).
 
 GitHub runner protocol contract: [docs/research/github-runner-protocol-contract.md](docs/research/github-runner-protocol-contract.md).
+
+Self-hosted runner implementation blueprint: [docs/research/self-hosted-runner-implementation-blueprint-2026-06-01.md](docs/research/self-hosted-runner-implementation-blueprint-2026-06-01.md).
