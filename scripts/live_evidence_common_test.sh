@@ -52,6 +52,16 @@ if ! grep -q "Sanitized Job Message Dumps" "$evidence_file"; then
   exit 1
 fi
 
+if ! grep -q "Velnor Source Snapshot" "$evidence_file"; then
+  echo "evidence file did not include Velnor source snapshot" >&2
+  exit 1
+fi
+
+if ! grep -q "dirty files:" "$evidence_file"; then
+  echo "evidence file did not include Velnor dirty-file count" >&2
+  exit 1
+fi
+
 if ! grep -q "job-123.json" "$evidence_file"; then
   echo "evidence file did not list sanitized job message dump files" >&2
   exit 1

@@ -171,6 +171,27 @@ write_job_dump_snapshot() {
   echo '```'
 }
 
+write_source_snapshot() {
+  local commit branch dirty_count
+
+  commit="$(git rev-parse HEAD 2>/dev/null || printf '<unavailable>')"
+  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf '<unavailable>')"
+  dirty_count="$(git status --short 2>/dev/null | wc -l | tr -d ' ' || printf 'unknown')"
+
+  echo
+  echo "## Velnor Source Snapshot"
+  echo
+  echo "- commit: $commit"
+  echo "- branch: $branch"
+  echo "- dirty files: ${dirty_count:-0}"
+  echo
+  if [[ "${dirty_count:-0}" != "0" && "${dirty_count:-0}" != "unknown" ]]; then
+    echo '```text'
+    git status --short 2>/dev/null | head -n "$LIVE_EVIDENCE_LOCAL_ENTRIES"
+    echo '```'
+  fi
+}
+
 write_github_run_snapshot() {
   local run_snapshot
 
@@ -239,7 +260,6 @@ write_live_evidence() {
     echo "- runner name: $RUNNER_NAME"
     live_evidence_extra_metadata
     echo "- job count requested: $JOB_COUNT"
-    echo "- Velnor commit: $(git rev-parse HEAD)"
     echo "- host: $(uname -s)/$(uname -m)"
     echo "- work dir: $WORK_DIR"
     echo "- Docker host work dir: ${DOCKER_HOST_WORK_DIR:-<same as work dir>}"
@@ -247,6 +267,7 @@ write_live_evidence() {
     echo "- require Docker socket: $REQUIRE_DOCKER_SOCKET"
     echo "- job message dumps: ${DUMP_JOB_MESSAGES:-<disabled>}"
     echo "- captured at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    write_source_snapshot
     write_github_run_snapshot
     write_runner_snapshot
     write_artifact_snapshot

@@ -47,6 +47,9 @@ run_report_section() {
   echo "This report does not register runners or dispatch workflows."
   echo
   echo "- generated_at_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "- velnor_commit: $(git rev-parse HEAD 2>/dev/null || printf '<unavailable>')"
+  echo "- velnor_branch: $(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf '<unavailable>')"
+  echo "- velnor_dirty_files: $(git status --short 2>/dev/null | wc -l | tr -d ' ' || printf 'unknown')"
   echo "- fixture_repo: ${VELNOR_FIXTURE_REPO:-donbeave/velnor-actions-fixture}"
   echo "- fixture_workflow: ${VELNOR_FIXTURE_WORKFLOW:-compat.yml}"
   echo "- docker_host: ${DOCKER_HOST:-<local>}"
