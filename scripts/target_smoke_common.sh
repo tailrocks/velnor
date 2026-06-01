@@ -11,6 +11,7 @@ REQUIRE_DOCKER_SOCKET="${VELNOR_REQUIRE_DOCKER_SOCKET:-true}"
 IDLE_TIMEOUT_SECONDS="${VELNOR_IDLE_TIMEOUT_SECONDS:-900}"
 CLEANUP_RUNNER="${VELNOR_TARGET_CLEANUP_RUNNER:-false}"
 DUMP_JOB_MESSAGES="${VELNOR_DUMP_JOB_MESSAGES:-$ROOT/.velnor-job-dumps/target}"
+JOB_COUNT="${VELNOR_TARGET_JOB_COUNT:-1}"
 WORKFLOW="${VELNOR_TARGET_WORKFLOW:-}"
 TARGET_REF="${VELNOR_TARGET_REF:-}"
 TARGET_INPUTS="${VELNOR_TARGET_INPUTS:-}"
@@ -106,11 +107,14 @@ if [[ -n "$WORKFLOW" ]]; then
   fi
 fi
 
-echo "==> Running one $TARGET_LABEL target job"
-cargo run --bin velnor-runner -- run \
-  "${run_args[@]}" \
-  --once \
-  --idle-timeout-seconds "$IDLE_TIMEOUT_SECONDS"
+echo "==> Running $JOB_COUNT $TARGET_LABEL target job(s)"
+for job_index in $(seq 1 "$JOB_COUNT"); do
+  echo "==> Velnor $TARGET_LABEL target job $job_index/$JOB_COUNT"
+  cargo run --bin velnor-runner -- run \
+    "${run_args[@]}" \
+    --once \
+    --idle-timeout-seconds "$IDLE_TIMEOUT_SECONDS"
+done
 
 if [[ -n "$RUN_ID" ]]; then
   echo "==> Target run after Velnor"

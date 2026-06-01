@@ -172,7 +172,9 @@ to consume already queued work. Set `VELNOR_TARGET_REF=<branch-or-sha>` when the
 workflow should be dispatched from a non-default ref. Set
 `VELNOR_TARGET_INPUTS=packages=bitcoin-processor-app,push=false` for
 `workflow_dispatch` inputs; each comma-separated `key=value` is passed to
-`gh workflow run -f`.
+`gh workflow run -f`. Set `VELNOR_TARGET_JOB_COUNT=<n>` when validating a
+workflow that queues multiple Velnor jobs and should be consumed by one smoke
+script invocation.
 
 Start Velnor:
 

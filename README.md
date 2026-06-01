@@ -86,9 +86,11 @@ scripts/jackin_target_smoke.sh
 
 Smoke scripts write sanitized job payloads under `.velnor-job-dumps` by default.
 Set `VELNOR_TARGET_WORKFLOW=<workflow.yml>` on target smoke scripts to dispatch
-that workflow before Velnor waits for one job.
+that workflow before Velnor waits for target jobs.
 Set `VELNOR_TARGET_REF=<branch-or-sha>` to dispatch from a specific ref.
 Set `VELNOR_TARGET_INPUTS=key=value,other=value` for workflow dispatch inputs.
+Set `VELNOR_TARGET_JOB_COUNT=<n>` when the target workflow needs Velnor to
+consume more than one queued job.
 Set `VELNOR_TARGET_MVP_ARM_LABEL=true` only on ARM Linux target smoke hosts.
 
 The remaining Phase 0 proof is live GitHub UI validation on the two target
