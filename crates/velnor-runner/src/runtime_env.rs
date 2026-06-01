@@ -204,7 +204,7 @@ fn environment_token_pairs(value: &Value) -> Vec<(String, String)> {
 
 fn environment_object_pairs(object: &Map<String, Value>) -> Vec<(String, String)> {
     if let (Some(name), Some(value)) = (object.get("name"), object.get("value")) {
-        if let Some(name) = name.as_str() {
+        if let Some(name) = environment_name(name) {
             return vec![(name.to_string(), environment_value(value))];
         }
     }
@@ -232,7 +232,7 @@ fn environment_pair_value(value: &Value) -> Vec<(String, String)> {
                     .or_else(|| object.get("Key")),
                 object.get("value").or_else(|| object.get("Value")),
             ) {
-                if let Some(key) = key.as_str() {
+                if let Some(key) = environment_name(key) {
                     return vec![(key.to_string(), environment_value(value))];
                 }
             }
@@ -240,10 +240,24 @@ fn environment_pair_value(value: &Value) -> Vec<(String, String)> {
         }
         Value::Array(pair) if pair.len() == 2 => pair[0]
             .as_str()
+            .or_else(|| environment_name(&pair[0]))
             .map(|key| vec![(key.to_string(), environment_value(&pair[1]))])
             .unwrap_or_default(),
         _ => Vec::new(),
     }
+}
+
+fn environment_name(value: &Value) -> Option<&str> {
+    value.as_str().or_else(|| {
+        value.as_object().and_then(|object| {
+            object
+                .get("value")
+                .or_else(|| object.get("Value"))
+                .or_else(|| object.get("lit"))
+                .or_else(|| object.get("Lit"))
+                .and_then(environment_name)
+        })
+    })
 }
 
 fn environment_value(value: &Value) -> String {
@@ -252,6 +266,13 @@ fn environment_value(value: &Value) -> String {
         Value::String(value) => value.clone(),
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
+        Value::Object(object) => object
+            .get("value")
+            .or_else(|| object.get("Value"))
+            .or_else(|| object.get("lit"))
+            .or_else(|| object.get("Lit"))
+            .map(environment_value)
+            .unwrap_or_default(),
         _ => String::new(),
     }
 }
@@ -581,5 +602,34 @@ mod tests {
             "ACTIONS_ID_TOKEN_REQUEST_TOKEN".into(),
             "runtime-token".into()
         )));
+    }
+
+    #[test]
+    fn reads_run_service_typed_job_environment_maps() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "environmentVariables": [{
+                "type": "map",
+                "map": [
+                    { "Key": { "lit": "CARGO_TERM_COLOR" }, "Value": { "lit": "always" } },
+                    { "Key": { "lit": "CARGO_INCREMENTAL" }, "Value": { "value": 0 } },
+                    { "Key": { "lit": "RENOVATE_ONBOARDING" }, "Value": { "value": false } },
+                    { "Key": { "lit": "GITHUB_REF" }, "Value": { "lit": "refs/heads/evil" } }
+                ]
+            }]
+        }))
+        .unwrap();
+
+        let env = job_runtime_env(&job);
+
+        assert!(env.contains(&("CARGO_TERM_COLOR".into(), "always".into())));
+        assert!(env.contains(&("CARGO_INCREMENTAL".into(), "0".into())));
+        assert!(env.contains(&("RENOVATE_ONBOARDING".into(), "false".into())));
+        assert!(!env.contains(&("GITHUB_REF".into(), "refs/heads/evil".into())));
     }
 }
