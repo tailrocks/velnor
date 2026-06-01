@@ -9,7 +9,9 @@ The implementation checklist is tracked in
 
 - Linux host where the Docker daemon can see Velnor's bind-mounted work directory.
   `velnor-runner configure`, `velnor-runner run`, and `velnor-runner preflight`
-  fail immediately on non-Linux hosts.
+  fail immediately on non-Linux hosts. The live proof scripts call
+  `scripts/live_host_doctor.sh`, which also fails before runner registration on
+  non-Linux hosts.
 - A local Docker socket is preferred. Remote `DOCKER_HOST=tcp://...` daemons
   usually fail unless `--work-dir` points to a path mounted into that daemon,
   because Velnor mounts job scripts, workspace, temp files, artifacts, and cache
@@ -22,6 +24,8 @@ The implementation checklist is tracked in
   target workflows still need Docker access inside the job container.
 - Git, Docker CLI, and Buildx plugin installed on the host.
 - GitHub PAT in `GITHUB_TOKEN` with permission to register a repository self-hosted runner for the target repo.
+- Set `VELNOR_TARGET_MVP_ARM_LABEL=true` only on ARM Linux hosts; the live proof
+  scripts reject that label on non-ARM hosts before registration.
 - A persistent Velnor `--work-dir` shared by all jobs in the same validation run; native cache restore/save and artifact upload/download use this shared work directory for single-host handoff until GitHub cache/artifact service transport is implemented.
 - Current target verifier passes locally:
 

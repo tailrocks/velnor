@@ -7,8 +7,26 @@ DOCKER_HOST_WORK_DIR="${VELNOR_DOCKER_HOST_WORK_DIR:-}"
 REQUIRE_DOCKER_SOCKET="${VELNOR_REQUIRE_DOCKER_SOCKET:-true}"
 CHECK_TARGET_MVP_CONFIG="${VELNOR_CHECK_TARGET_MVP_CONFIG:-false}"
 RUN_TARGET_VERIFY="${VELNOR_RUN_TARGET_VERIFY:-false}"
+TARGET_MVP_ARM_LABEL="${VELNOR_TARGET_MVP_ARM_LABEL:-false}"
 
 cd "$ROOT"
+
+host_os="$(uname -s)"
+if [[ "$host_os" != "Linux" ]]; then
+  echo "unsupported host OS '$host_os'; Velnor live proof scripts are Linux-only" >&2
+  exit 2
+fi
+
+if [[ "$TARGET_MVP_ARM_LABEL" == "true" ]]; then
+  host_arch="$(uname -m)"
+  case "$host_arch" in
+    aarch64|arm64) ;;
+    *)
+      echo "unsupported ARM runner label on host architecture '$host_arch'; only set VELNOR_TARGET_MVP_ARM_LABEL=true on an ARM Linux host" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 echo "==> Checking required host tools"
 for tool in git docker cargo; do

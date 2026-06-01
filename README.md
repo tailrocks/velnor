@@ -74,6 +74,10 @@ Live host readiness is checked with:
 scripts/live_host_doctor.sh
 ```
 
+The live proof scripts are Linux-only as well; they fail before runner
+registration on non-Linux hosts, and reject `VELNOR_TARGET_MVP_ARM_LABEL=true`
+unless the host is ARM Linux.
+
 The ChainArgos Rust target smoke wrapper is:
 
 ```sh
@@ -108,7 +112,7 @@ consume more than one queued job.
 Set `VELNOR_TARGET_WATCH_RUN=true` to wait for the GitHub workflow run to finish
 after the selected Velnor jobs are consumed.
 Set `VELNOR_TARGET_MVP_ARM_LABEL=true` only on ARM Linux target smoke hosts; the
-runner rejects the ARM label on non-ARM hosts.
+live scripts and runner reject the ARM label on non-ARM hosts.
 
 The remaining Phase 0 proof is live GitHub UI validation on the two target
 repositories from a Linux host whose Docker daemon can see Velnor's bind-mounted
