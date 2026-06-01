@@ -921,6 +921,50 @@ EXPECTED_STEP_IF = Counter(
     }
 )
 
+EXPECTED_UNSUPPORTED_LINUX_ONLY_SIGNALS = Counter(
+    {
+        (
+            "job_strategy",
+            ".github/workflows/preview.yml",
+            "build-preview",
+            "{matrix: {include: [{target: aarch64-apple-darwin, zigbuild_target: aarch64-apple-darwin}, {target: x86_64-apple-darwin, zigbuild_target: x86_64-apple-darwin}, {target: aarch64-unknown-linux-gnu, zigbuild_target: aarch64-unknown-linux-gnu.2.17}, {target: x86_64-unknown-linux-gnu, zigbuild_target: x86_64-unknown-linux-gnu.2.17}]}}",
+        ): 1,
+        (
+            "job_strategy",
+            ".github/workflows/release.yml",
+            "build",
+            "{matrix: {include: [{os: macos-latest, target: x86_64-apple-darwin}, {os: macos-latest, target: aarch64-apple-darwin}, {os: ubuntu-latest, target: x86_64-unknown-linux-gnu, zigbuild: true}, {os: ubuntu-latest, target: aarch64-unknown-linux-gnu, zigbuild: true}]}}",
+        ): 1,
+        (
+            "job_outputs",
+            ".github/workflows/release.yml",
+            "release",
+            "{arm64_linux: ${{ steps.shas.outputs.arm64_linux }}, arm64_macos: ${{ steps.shas.outputs.arm64_macos }}, capsule_arm64_linux: ${{ steps.shas.outputs.capsule_arm64_linux }}, capsule_x86_linux: ${{ steps.shas.outputs.capsule_x86_linux }}, x86_linux: ${{ steps.shas.outputs.x86_linux }}, x86_macos: ${{ steps.shas.outputs.x86_macos }}}",
+        ): 1,
+        (
+            "step_if",
+            ".github/workflows/preview.yml",
+            "build-preview",
+            "actions/cache",
+            "contains(matrix.target, 'apple')",
+        ): 1,
+        (
+            "step_if",
+            ".github/workflows/preview.yml",
+            "build-preview",
+            "Download macOS SDK",
+            "contains(matrix.target, 'apple') && steps.sdk-cache.outputs.cache-hit != 'true'",
+        ): 1,
+        (
+            "step_if",
+            ".github/workflows/preview.yml",
+            "build-preview",
+            "Set macOS SDKROOT",
+            "contains(matrix.target, 'apple')",
+        ): 1,
+    }
+)
+
 
 def load_yaml(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
@@ -1042,6 +1086,16 @@ def input_enabled(value: Any) -> bool:
     return True
 
 
+def is_linux_only_unsupported_value(*parts: Any) -> bool:
+    normalized = " ".join(str(part) for part in parts).lower()
+    return (
+        "macos" in normalized
+        or "darwin" in normalized
+        or "macos sdk" in normalized
+        or "contains(matrix.target, 'apple')" in normalized
+    )
+
+
 def audit(roots: list[Path]) -> dict[str, Any]:
     workflow_files: list[str] = []
     action_files: list[tuple[str, str]] = []
@@ -1069,6 +1123,7 @@ def audit(roots: list[Path]) -> dict[str, Any]:
     job_environments: list[tuple[str, str, str]] = []
     job_timeouts: list[tuple[str, str, Any]] = []
     unsupported_checkout_inputs: list[tuple[str, str, str, Any]] = []
+    unsupported_linux_only_signals: list[tuple[Any, ...]] = []
 
     for root in roots:
         for path in iter_yaml_files(root):
@@ -1110,23 +1165,34 @@ def audit(roots: list[Path]) -> dict[str, Any]:
                     continue
                 job_name_str = str(job_name)
                 if "runs-on" in job:
-                    job_runs_on.append(
-                        (display_path, job_name_str, compact_value(job["runs-on"]))
-                    )
+                    value = compact_value(job["runs-on"])
+                    job_runs_on.append((display_path, job_name_str, value))
+                    if is_linux_only_unsupported_value(value):
+                        unsupported_linux_only_signals.append(
+                            ("runs_on", display_path, job_name_str, value)
+                        )
                 if "if" in job:
                     job_ifs.append((display_path, job_name_str, str(job["if"])))
                 if "needs" in job:
                     job_needs.append((display_path, job_name_str, compact_value(job["needs"])))
                 if "strategy" in job:
+                    value = compact_value(job["strategy"])
                     job_strategy.append(
-                        (display_path, job_name_str, compact_value(job["strategy"]))
+                        (display_path, job_name_str, value)
                     )
+                    if is_linux_only_unsupported_value(value):
+                        unsupported_linux_only_signals.append(
+                            ("job_strategy", display_path, job_name_str, value)
+                        )
                 if "env" in job:
                     job_env.append((display_path, job_name_str, compact_value(job["env"])))
                 if "outputs" in job:
-                    job_outputs.append(
-                        (display_path, job_name_str, compact_value(job["outputs"]))
-                    )
+                    value = compact_value(job["outputs"])
+                    job_outputs.append((display_path, job_name_str, value))
+                    if is_linux_only_unsupported_value(value):
+                        unsupported_linux_only_signals.append(
+                            ("job_outputs", display_path, job_name_str, value)
+                        )
                 if "permissions" in job:
                     job_permissions.append(
                         (display_path, job_name_str, list_keys(job["permissions"]))
@@ -1157,6 +1223,7 @@ def audit(roots: list[Path]) -> dict[str, Any]:
                         shells.add(str(run_defaults["shell"]))
                 for step in job.get("steps") or []:
                     if isinstance(step, dict):
+                        before = len(step_ifs)
                         collect_step(
                             path,
                             str(job_name),
@@ -1169,6 +1236,12 @@ def audit(roots: list[Path]) -> dict[str, Any]:
                             step_ifs,
                             unsupported_checkout_inputs,
                         )
+                        for step_if in step_ifs[before:]:
+                            _, _, label, value = step_if
+                            if is_linux_only_unsupported_value(label, value):
+                                unsupported_linux_only_signals.append(
+                                    ("step_if", display_path, job_name_str, label, value)
+                                )
 
     return {
         "workflow_files": workflow_files,
@@ -1197,6 +1270,7 @@ def audit(roots: list[Path]) -> dict[str, Any]:
         "job_environments": job_environments,
         "job_timeouts": job_timeouts,
         "unsupported_checkout_inputs": unsupported_checkout_inputs,
+        "unsupported_linux_only_signals": unsupported_linux_only_signals,
     }
 
 
@@ -1353,6 +1427,13 @@ def print_report(summary: dict[str, Any]) -> None:
     else:
         print("- none")
 
+    print("\nUnsupported Linux-only signals:")
+    if summary["unsupported_linux_only_signals"]:
+        for item in summary["unsupported_linux_only_signals"]:
+            print("- " + " :: ".join(str(part) for part in item))
+    else:
+        print("- none")
+
 
 def check_target_mvp(summary: dict[str, Any]) -> list[str]:
     errors: list[str] = []
@@ -1487,6 +1568,13 @@ def check_target_mvp(summary: dict[str, Any]) -> list[str]:
         errors.append(
             "target MVP step if drift: "
             f"expected {dict(EXPECTED_STEP_IF)}, got {dict(step_ifs)}"
+        )
+
+    unsupported_linux_only = Counter(summary["unsupported_linux_only_signals"])
+    if unsupported_linux_only != EXPECTED_UNSUPPORTED_LINUX_ONLY_SIGNALS:
+        errors.append(
+            "target MVP unsupported Linux-only signal drift: "
+            f"expected {dict(EXPECTED_UNSUPPORTED_LINUX_ONLY_SIGNALS)}, got {dict(unsupported_linux_only)}"
         )
 
     for label, key in [
