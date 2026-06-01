@@ -17,7 +17,7 @@ The first implementation target:
 
 Out of current scope:
 
-- no Pkl workflow authoring
+- no Pkl, PQL, KCL, or Velnor-native workflow authoring
 - no Velnor-native workflow language
 - no replacement for GitHub's YAML parser or scheduler
 - no macOS support in Velnor at all; Phase 0 runs Linux jobs only

@@ -15,7 +15,8 @@ The scope is intentionally narrow:
 - Velnor starts from the expanded `AgentJobRequestMessage`
 - Velnor supports only Linux target jobs
 - macOS runner replacement is not a Velnor target
-- PQL/Pkl/KCL authoring remains future design work, not Phase 0 implementation
+- PQL/Pkl/KCL authoring is archived brainstorming only, not Phase 0
+  implementation and not a current requirement
 - target proof is limited to the `.github` trees in `jackin-project/jackin` and
   `ChainArgos/java-monorepo`, with `java-monorepo` treated as a Rust/Docker
   workflow target despite its repository name
@@ -173,8 +174,8 @@ Required evidence:
   may be drift alarms; runtime behavior must stay reusable.
 - Do not add macOS support or macOS labels. A Linux Docker runner cannot
   truthfully replace `macos-latest`.
-- Do not build PQL/Pkl now. Future typed authoring should compile into the same
-  normalized plan that the GitHub job-message adapter uses.
+- Do not build PQL, Pkl, KCL, or any native workflow language now. They are not
+  needed for the current goal.
 - Do not treat local green tests as completion. Completion requires live GitHub
   UI runs on the two target repositories.
 
@@ -193,9 +194,8 @@ The current research points to this build contract:
   workflow YAML does not request a job container.
 - supported marketplace action families should be implemented as Rust adapters,
   not by executing the marketplace JavaScript/TypeScript bundles.
-- future PQL/Pkl authoring should compile to the same normalized plan. It is a
-  typed authoring layer, not a replacement for the Phase 0 GitHub runner
-  protocol implementation.
+- configuration-language research is separate archived brainstorming, not a
+  replacement for the Phase 0 GitHub runner protocol implementation.
 
 ## Next Engineering Sequence
 
@@ -213,5 +213,5 @@ The current research points to this build contract:
 6. After ChainArgos is green, ask the user/operator to manually run
    `scripts/jackin_rust_linux_sequence.sh` with
    `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`.
-7. After both target repositories pass in GitHub UI, revisit PQL/Pkl as a typed
-   authoring layer over the normalized plan.
+7. After both target repositories pass in GitHub UI, decide separately whether
+   any archived configuration-language brainstorming should be reopened.

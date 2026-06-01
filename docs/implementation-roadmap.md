@@ -10,7 +10,6 @@ The normalized plan boundary for GitHub job messages is `docs/research/normalize
 The implementation-oriented runner blueprint is `docs/research/self-hosted-runner-implementation-blueprint-2026-06-01.md`.
 The implementation gap audit is `docs/research/phase-0-implementation-gap-audit-2026-06-01.md`.
 The current implementation/proof status is `docs/research/phase-0-current-status-2026-06-01.md`.
-The deferred typed authoring contract is `docs/research/pql-design-contract.md`.
 The target-only MVP contract is `docs/research/target-mvp-compat-audit-2026-06-01.md`; Phase 0 work should be judged against those two repositories' current `.github` trees, not broad GitHub Actions parity.
 The native action adapter boundary is `docs/native-action-adapter-contract.md`;
 Velnor keeps GitHub-compatible YAML, but supported marketplace actions should
@@ -339,14 +338,19 @@ Exit criteria:
 - target workflows complete on Velnor in GitHub UI.
 - branch protection can point at Velnor-backed checks.
 
-## Out Of Current Scope: Typed Authoring Layer
+## Out Of Current Scope: Configuration Languages
 
-Typed workflow authoring is deferred brainstorming. Do not implement Pkl, KCL, or any Velnor-native workflow language until the target GitHub Actions compatibility goal is proven with live GitHub UI runs.
+Pkl, KCL, PQL, and any Velnor-native workflow language are not part of the
+current implementation plan. They are archived brainstorming only. Do not
+implement a parser, compiler, package, CLI, scheduler, or runtime path for any
+of them while Phase 0 is focused on GitHub Actions runner compatibility.
 
 Current non-goals:
 
 - no Pkl CLI command
 - no Pkl package
+- no PQL package or schema
+- no KCL package or schema
 - no workflow renderer/compiler
 - no replacement for GitHub's YAML parser
 - no Velnor-native scheduler before Phase 0 target proof

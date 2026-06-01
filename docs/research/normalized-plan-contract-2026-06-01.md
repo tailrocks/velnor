@@ -10,30 +10,25 @@ The contract matters for two reasons:
 
 - Phase 0 GitHub compatibility should keep executing GitHub-expanded
   `AgentJobRequestMessage` payloads.
-- Any future typed authoring layer must compile to the same plan, not to a
-  second executor or a different workflow model.
+- The executor boundary should stay source-neutral, but non-GitHub workflow
+  sources are not current work.
 
 ```text
 GitHub YAML -> GitHub scheduler -> AgentJobRequestMessage -> GitHub adapter
-Typed source -> future compiler  -> typed workflow model   -> future adapter
 
-GitHub adapter \
-                -> NormalizedJobPlan -> Docker executor -> reporter
-Future adapter /
+GitHub adapter -> NormalizedJobPlan -> Docker executor -> reporter
 ```
 
 ## Contract Rule
 
-The Docker executor and reporter must not care whether a job came from GitHub
-YAML or a future typed source.
+The Docker executor and reporter must not depend on raw GitHub wire payloads.
+The current source is GitHub-expanded job messages only.
 
 All source-specific behavior belongs before `NormalizedJobPlan`:
 
 - GitHub wire decoding
 - V2 typed expression-value map normalization
-- future typed source evaluation and schema validation
 - GitHub Actions YAML compatibility shims
-- future Velnor-native scheduling
 
 Everything after `NormalizedJobPlan` is runtime behavior:
 
@@ -136,8 +131,9 @@ pub struct JobExecutionPlan {
 Current implementation has these pieces split across `github_adapter.rs`,
 `runner.rs`, `script_step.rs`, `container.rs`, and `executor.rs`. GitHub-owned
 job container and service-container planning now lives in `github_adapter.rs`.
-The first `plan.rs` surface makes the target shape explicit so a Pkl compiler
-can produce the same runtime shape.
+The first `plan.rs` surface makes the target shape explicit for the GitHub job
+message adapter and keeps the Docker executor from depending directly on GitHub
+wire payloads.
 
 GitHub adapter source:
 
@@ -146,11 +142,6 @@ GitHub adapter source:
 - V2 typed expression maps normalized into plain key/value maps before planning
 - supported marketplace action families become native invocations without
   requiring downloaded marketplace metadata
-
-Future typed adapter source:
-
-- typed workflow/job/env/defaults/container/services fields
-- generated GitHub-like context data only where scripts/actions expect it
 
 ### ExecutableStep
 
@@ -196,9 +187,6 @@ downloaded marketplace implementation. The GitHub `@ref`/SHA is compatibility
 syntax only for these families; Velnor selects the Rust adapter by action family
 such as `actions/cache`, `jdx/mise-action`, or `docker/bake-action`.
 
-Pkl should not expose this enum one-to-one to users. Pkl should expose a nicer
-typed DSL, then lower helpers into this enum.
-
 ## GitHub Adapter Responsibilities
 
 The GitHub adapter converts one acquired `AgentJobRequestMessage` into
@@ -232,41 +220,22 @@ Non-responsibilities:
 
 GitHub already performs those before assigning a job to the runner.
 
-## Future Typed Adapter Responsibilities
+## Future Adapter Responsibilities
 
-Any future typed adapter should convert evaluated typed workflow definitions
-into the same `NormalizedJobPlan`. This is not current Phase 0 work.
+Any future adapter would need to convert evaluated source definitions into the
+same `NormalizedJobPlan`. This is not current Phase 0 work and is not a current
+requirement.
 
 Required responsibilities:
 
-- enforce strict schema validation before execution
+- enforce strict validation before execution
 - reject unknown workflow/job/step fields
 - validate job ids, `needs`, output references, runner labels, permissions, and
   typed helper inputs
-- lower typed helper primitives to normal steps
+- lower source-level helper primitives to normal steps
 - produce either GitHub-compatible YAML or a Velnor-native plan
 
-Future helper examples:
-
-```pkl
-steps = List(
-  Checkout { fetchDepth = 0 },
-  Use {
-    action = "jdx/mise-action"
-    ref = "1648a7812b9aeae629881980618f079932869151"
-    with {
-      ["install_args"] = "rust"
-    }
-  },
-  DockerBake {
-    files = List("docker-bake.hcl")
-    targets = List("image")
-    push = new Expression("github.ref == 'refs/heads/main'")
-  },
-)
-```
-
-Lowering result:
+Hypothetical lowering result:
 
 - `Checkout` -> `ExecutableStep::Checkout`
 - `Use` with JavaScript metadata -> `ExecutableStep::JavaScript`
@@ -274,7 +243,7 @@ Lowering result:
 - `Use` with composite metadata -> composite start, nested steps, composite
   outputs, composite end
 - `Use` with a supported native action family -> `ExecutableStep::Native`
-- typed helpers such as `DockerBake`, `Cache`, `UploadArtifact`, and
+- helpers such as `DockerBake`, `Cache`, `UploadArtifact`, and
   `DownloadArtifact` -> `ExecutableStep::Native`
 
 ## Reporter Contract
@@ -305,32 +274,6 @@ still produce completion records and run-service step results. Still-open
 GitHub parity work is true line-by-line streaming during long-running steps and
 live validation.
 
-## Deferred Typed Package Shape
-
-If typed authoring is revisited, the strict package should mirror GitHub Actions
-concepts, but with typed unions and domain helpers.
-
-Initial core package modules:
-
-- `Workflow.pkl`: top-level workflow object
-- `Trigger.pkl`: push, pull request, schedule, workflow dispatch, workflow call
-- `Job.pkl`: runner, needs, env, defaults, permissions, services, steps, outputs
-- `Step.pkl`: `Run`, `Use`, `Checkout`, `UploadArtifact`, `DownloadArtifact`,
-  `Cache`, `DockerBuild`, `DockerBake`
-- `Runner.pkl`: hosted-like label sets, self-hosted label sets, platform
-  constraints
-- `Permissions.pkl`: typed GitHub-compatible permissions
-- `Expression.pkl`: explicit escape hatch for GitHub/Velnor expressions
-- `Actions.pkl`: typed catalog wrappers for common actions used by target repos
-
-Design rule for AI agents:
-
-- common cases should use typed helper classes
-- raw `Use` and raw `Expression` remain available but visibly explicit
-- unknown keys are rejected
-- stringly Docker/cache/artifact configuration should be replaced by typed
-  fields where Velnor owns the primitive
-
 ## Migration Strategy
 
 1. Keep Phase 0 on GitHub YAML and self-hosted runner compatibility.
@@ -341,11 +284,6 @@ Design rule for AI agents:
    passed container, environment, context, and step slices.
 4. Split GitHub run-service reporting into a reporter that consumes
    `NormalizedJobSummary`.
-5. Defer typed workflow proofs until after live GitHub target compatibility.
-
-If typed authoring is revisited, the first workflow to migrate should be a Linux
-`java-monorepo` workflow, not `jackin` release, because `java-monorepo` already
-targets the self-hosted label and avoids macOS matrix legs.
 
 ## Current Gap List
 
@@ -354,6 +292,6 @@ targets the self-hosted label and avoids macOS matrix legs.
 - some GitHub planning is still inside `runner.rs`, especially checkout/action
   resolution.
 - reporting is coupled to `runner.rs` instead of a report-target interface.
-- typed authoring is intentionally deferred; no package skeleton should exist
+- configuration-language work is intentionally not active; no package skeleton should exist
   under the repository now.
 - live GitHub UI proof for target workflows is still missing.

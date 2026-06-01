@@ -1,8 +1,9 @@
 # Self-Hosted Runner Implementation Blueprint
 
 This document is the implementation-oriented version of the Velnor Phase 0 idea:
-be a Rust self-hosted GitHub runner replacement first. Typed workflow authoring
-is deferred brainstorming and is not current implementation work.
+be a Rust self-hosted GitHub runner replacement first. Pkl, PQL, KCL, and any
+Velnor-native workflow language are archived brainstorming only and are not
+current implementation work.
 
 Phase 0 is runner compatibility, not workflow parsing. GitHub sends Velnor an
 expanded `AgentJobRequestMessage`, not the original workflow YAML. See
@@ -33,17 +34,14 @@ Phase 0 should look boring to a repository user:
 The target workflow files are evidence for what GitHub will likely send in
 expanded job payloads. They are not files Velnor should parse in Phase 0.
 
-If typed authoring is revisited later, it should not replace this executor. It
-should compile into the same normalized job plan that the GitHub job-message
-adapter uses:
+The current architecture is:
 
 ```text
 GitHub YAML -> GitHub job message -> Velnor normalized plan -> Docker executor -> reporter
-Typed source -> Velnor compiler    -> Velnor normalized plan -> Docker executor -> reporter
 ```
 
-That keeps Phase 0 useful immediately and prevents any future typed language
-from forking the execution engine.
+That keeps Phase 0 focused on GitHub runner compatibility instead of
+configuration-language design.
 
 The normalized plan boundary is specified in
 `docs/research/normalized-plan-contract-2026-06-01.md`.
@@ -267,72 +265,15 @@ as a porting checklist. The current priority order is:
    validation. The fixture is where agent-owned live debugging happens; real
    ChainArgos and Jackin runs are manual operator validation only.
 
-This priority order gives PQL a clean future path: a typed compiler can lower
-into the same normalized plan as GitHub job messages, but it must not fork the
-executor, Docker model, native adapter behavior, or reporting model.
+This priority order keeps the executor source-neutral without making any
+configuration language part of the current plan. PQL, Pkl, KCL, and native
+workflow authoring remain separate archived brainstorming.
 
 ## Deferred Typed Authoring Constraint
 
-Typed authoring is not the Phase 0 scheduler and should not be implemented now.
-If revisited later, it should stay close to GitHub Actions vocabulary but remove
-YAML ambiguity through types.
-
-The first useful typed package should model:
-
-- `Workflow`
-- typed event triggers
-- typed workflow inputs
-- `Job`
-- typed runner labels
-- `RunStep`
-- `UsesStep`
-- typed cache/artifact/pages/Docker helper primitives
-- constrained identifiers and non-empty command strings
-
-Example direction, not current work:
-
-```pkl
-amends "package://velnor.dev/workflow@1.0.0#/Workflow.pkl"
-
-name = "Rust Docker"
-
-on = new {
-  pullRequest {}
-  workflowDispatch {
-    inputs {
-      ["push"] = new BooleanInput { default = false }
-    }
-  }
-}
-
-jobs {
-  ["docker-bake"] = new Job {
-    runsOn = new SelfHostedRunner {
-      labels = List("hetzner-sentry-ci")
-    }
-
-    steps = List(
-      new UsesStep {
-        uses = "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd"
-      },
-      new DockerBuildx {
-        name = "chainargos-builder"
-        driver = "docker-container"
-      },
-      new DockerBake {
-        files = List("backend-rust/docker-bake.hcl")
-        targets = List("bitcoin-processor-app")
-        cacheScope = "rust-workspace"
-        push = false
-      }
-    )
-  }
-}
-```
-
-A future compiler should lower helper primitives like `DockerBake` into the
-same normalized executable steps that the GitHub job-message adapter produces
-today.
+Typed authoring and configuration-language experiments are not the Phase 0
+scheduler and should not be implemented now. Keep related notes in historical
+research files only.
 
 ## Remaining Proof Path
 

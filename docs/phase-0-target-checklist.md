@@ -219,11 +219,13 @@ Docker isolation options:
 - current MVP uses Docker-outside-of-Docker via host socket
 - DinD/rootless Docker mode is not implemented
 
-Future typed authoring:
+Configuration-language brainstorming:
 
-- Pkl/PQL-style typed workflows remain future work
-- when added, typed authoring should compile to the same normalized plan used by
-  the GitHub job-message adapter
+- Pkl, PQL, KCL, and Velnor-native workflow languages are not required for
+  Phase 0
+- do not implement parser/compiler/runtime work for any of them now
+- archived research notes may be revisited only after GitHub Actions runner
+  compatibility is proven with live target workflows
 
 ## Next Execution Order
 

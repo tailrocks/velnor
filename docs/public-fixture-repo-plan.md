@@ -172,7 +172,7 @@ so accidental execution fails before runner registration or workflow dispatch.
 
 ## Out Of Scope
 
-- No Pkl/PQL implementation.
+- No Pkl/PQL/KCL or Velnor-native workflow-language implementation.
 - No broad marketplace action compatibility.
 - No macOS replacement.
 - No hardcoding target workflow/job/step ids in Velnor.

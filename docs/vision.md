@@ -22,9 +22,10 @@ Velnor should keep that model where it works. Phase 0 keeps GitHub YAML exactly 
 
 ## Future Language Brainstorming
 
-Typed workflow authoring was researched as a future idea, but it is not current implementation work. Phase 0 does not replace YAML, parse workflows, or introduce Pkl.
-The current future-language contract is captured in
-[research/pql-design-contract.md](research/pql-design-contract.md).
+Typed workflow authoring was researched as a future idea, but it is not current
+implementation work. Phase 0 does not replace YAML, parse workflows, introduce
+Pkl/PQL/KCL, or define a Velnor-native workflow language. Existing research
+notes are historical brainstorming only, not an implementation plan.
 
 YAML is weak as an authoring language:
 
@@ -170,23 +171,22 @@ This keeps the marketplace idea, but avoids making JavaScript the default extens
 
 GitHub Actions is flexible because it lets users escape into YAML expressions, shell, JavaScript, Docker, and marketplace actions.
 
-If typed authoring is revisited later, Velnor should be flexible because users
-compose typed workflow primitives and only escape into scripts at execution
-boundaries. This is not current Phase 0 work.
+Configuration-language ideas remain archived brainstorming. The active design
+principle is simpler: keep GitHub Actions YAML unchanged and move execution
+into the Rust runner.
 
 ## Non-Goals
 
 - Do not build a YAML transpiler in Phase 0.
 - Do not require JavaScript for custom workflow logic.
 - Do not hide runtime behavior behind untyped string interpolation.
-- Do not make future typed-workflow users learn a completely different CI model
-  from GitHub Actions.
+- Do not introduce a Velnor-native workflow language in Phase 0.
 
 ## Open Questions
 
 - Should Velnor support importing existing GitHub Actions directly?
 - Should `Use` support OCI-based actions only, or also GitHub-style repositories?
-- If typed authoring is revisited, should evaluation happen on the control plane
-  only, or can runners evaluate local modules?
+- Should configuration-language research ever be reopened after live target
+  compatibility is proven?
 - How much of GitHub Actions expression syntax should be preserved?
 - Should the first release target local execution, self-hosted server, or GitHub app integration?
