@@ -1560,6 +1560,15 @@ fn append_resolved_action_steps(
     parent_continue_on_error: bool,
 ) -> Result<()> {
     let continue_on_error = parent_continue_on_error || action.plan.continue_on_error;
+    if let Some(invocation) = action.native_invocation() {
+        ordered.push(ExecutableStep::Native {
+            step_id: action.plan.step_id.clone(),
+            invocation,
+            condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
+            continue_on_error,
+        });
+        return Ok(());
+    }
     match &action.runtime {
         ActionRuntime::JavaScript { .. } => ordered.push(ExecutableStep::JavaScript {
             step_id: action.plan.step_id.clone(),
@@ -3067,7 +3076,7 @@ runs:
             &ordered[0],
             ExecutableStep::CompositeStart { step_id } if step_id == "docs"
         ));
-        let ExecutableStep::JavaScript {
+        let ExecutableStep::Native {
             step_id,
             invocation,
             condition,
@@ -3075,12 +3084,11 @@ runs:
             ..
         } = &ordered[1]
         else {
-            panic!("nested repository action should expand to JavaScript step")
+            panic!("nested repository action should expand to native adapter step")
         };
         assert_eq!(step_id, "docs-1");
-        assert!(invocation
-            .env
-            .contains(&("INPUT_GITHUB_TOKEN".into(), "ghs_token".into())));
+        assert_eq!(invocation.adapter, crate::action::NativeActionAdapter::Mise);
+        assert_eq!(invocation.inputs["github_token"], "ghs_token");
         assert_eq!(condition.as_deref(), Some("github.event_name == 'push'"));
         assert!(*continue_on_error);
         assert!(matches!(
@@ -3144,24 +3152,23 @@ runs:
         let ordered =
             ordered_executable_steps(&job, &[], &[resolved], &[], actions_host, &[]).unwrap();
 
-        assert_eq!(ordered.len(), 3);
-        assert!(matches!(
-            &ordered[0],
-            ExecutableStep::CompositeStart { step_id } if step_id == "rust"
-        ));
-        let ExecutableStep::Script(step) = &ordered[1] else {
-            panic!("repository composite should expand to script step")
+        assert_eq!(ordered.len(), 1);
+        let ExecutableStep::Native {
+            step_id,
+            invocation,
+            condition,
+            ..
+        } = &ordered[0]
+        else {
+            panic!("target repository action should expand to native adapter step")
         };
-        assert_eq!(step.id, "rust-1");
+        assert_eq!(step_id, "rust");
         assert_eq!(
-            step.condition.as_deref(),
-            Some("${{ (runner.os == 'Linux') && (runner.os != 'Windows') }}")
+            invocation.adapter,
+            crate::action::NativeActionAdapter::RustToolchain
         );
-        assert!(step.script.contains("echo \"stable\""));
-        assert!(matches!(
-            &ordered[2],
-            ExecutableStep::CompositeEnd { step_id } if step_id == "rust"
-        ));
+        assert_eq!(invocation.inputs["toolchain"], "stable");
+        assert_eq!(condition.as_deref(), Some("runner.os == 'Linux'"));
     }
 
     #[test]
@@ -3360,17 +3367,23 @@ runs:
             ordered_executable_steps(&job, &[], &[resolved], &[], actions_host, &[]).unwrap();
 
         assert_eq!(ordered.len(), 1);
-        let ExecutableStep::Docker {
+        let ExecutableStep::Native {
             step_id,
             invocation,
             ..
         } = &ordered[0]
         else {
-            panic!("repository Docker action should expand to Docker step")
+            panic!("target repository Docker action should expand to native adapter step")
         };
         assert_eq!(step_id, "renovate");
-        assert_eq!(invocation.image, "alpine:3.20");
-        assert_eq!(invocation.args, vec!["ghcr.io/renovatebot/renovate"]);
+        assert_eq!(
+            invocation.adapter,
+            crate::action::NativeActionAdapter::Renovate
+        );
+        assert_eq!(
+            invocation.inputs["renovate-image"],
+            "ghcr.io/renovatebot/renovate"
+        );
     }
 
     #[test]
@@ -3431,33 +3444,22 @@ runs:
         let ordered =
             ordered_executable_steps(&job, &[], &[resolved], &[], actions_host, &[]).unwrap();
 
-        assert_eq!(ordered.len(), 4);
-        assert!(matches!(
-            &ordered[0],
-            ExecutableStep::CompositeStart { step_id } if step_id == "pages"
-        ));
-        let ExecutableStep::Script(step) = &ordered[1] else {
-            panic!("first composite step should be script")
-        };
-        assert_eq!(step.id, "pages-upload");
-        let ExecutableStep::CompositeOutputs {
+        assert_eq!(ordered.len(), 1);
+        let ExecutableStep::Native {
             step_id,
-            outputs,
+            invocation,
             condition,
-        } = &ordered[2]
+            ..
+        } = &ordered[0]
         else {
-            panic!("second composite step should materialize outputs")
+            panic!("target repository composite should route to native adapter step")
         };
         assert_eq!(step_id, "pages");
         assert_eq!(
-            outputs["artifact-id"],
-            "${{ steps.pages-upload.outputs.artifact-id }}"
+            invocation.adapter,
+            crate::action::NativeActionAdapter::UploadPagesArtifact
         );
         assert_eq!(condition.as_deref(), Some("runner.os == 'Linux'"));
-        assert!(matches!(
-            &ordered[3],
-            ExecutableStep::CompositeEnd { step_id } if step_id == "pages"
-        ));
     }
 
     #[test]
@@ -3535,25 +3537,22 @@ runs:
         let ordered =
             ordered_executable_steps(&job, &[], &[pages, upload], &[], actions_host, &[]).unwrap();
 
-        assert_eq!(ordered.len(), 3);
-        assert!(matches!(
-            &ordered[0],
-            ExecutableStep::CompositeStart { step_id } if step_id == "pages"
-        ));
-        let ExecutableStep::JavaScript {
+        assert_eq!(ordered.len(), 1);
+        let ExecutableStep::Native {
             step_id,
+            invocation,
             continue_on_error,
             ..
-        } = &ordered[1]
+        } = &ordered[0]
         else {
-            panic!("nested upload action should expand to JavaScript step")
+            panic!("target composite action should route to native adapter step")
         };
-        assert_eq!(step_id, "pages-upload");
+        assert_eq!(step_id, "pages");
+        assert_eq!(
+            invocation.adapter,
+            crate::action::NativeActionAdapter::UploadPagesArtifact
+        );
         assert!(*continue_on_error);
-        assert!(matches!(
-            &ordered[2],
-            ExecutableStep::CompositeEnd { step_id } if step_id == "pages"
-        ));
     }
 
     #[derive(Clone)]

@@ -87,10 +87,10 @@ Current code progress:
 - command-file parser supports `NAME=value` and heredoc `NAME<<EOF` syntax
 - Docker job container command builder covers network/container start, `docker exec`, and cleanup command shapes
 - default Docker job image is `ghcr.io/catthehacker/ubuntu:act-latest`, giving target workflows a hosted-runner-like Ubuntu base with common CI tools; `--docker-image` can still override it
-- Docker execution uses a shared `/github/home` mount and `HOME=/github/home` across the job, JavaScript action sidecar, and Docker action containers so setup actions can install tools into a home directory visible to later script steps
-- Docker execution mounts the GitHub workflow directory at `/github/workflow` across the job, JavaScript action sidecar, and Docker action containers; `GITHUB_EVENT_PATH` points at `/github/workflow/event.json`
-- JavaScript actions run in a short-lived sidecar image selected from `runs.using`; `--node-action-image` can override the image when an operator wants a custom Node/tooling bundle
-- on Linux hosts, Velnor mounts the host Docker CLI and Buildx plugin directory into the job container, JavaScript action sidecars, and Docker action containers when it also mounts `/var/run/docker.sock`; target Docker actions such as `docker/setup-buildx-action`, `docker/login-action`, `docker/build-push-action`, and `docker/bake-action` need this client tooling when they talk to the mounted Docker socket
+- Docker execution uses a shared `/github/home` mount and `HOME=/github/home` across the job and native action containers so setup adapters can install tools into a home directory visible to later script steps
+- Docker execution mounts the GitHub workflow directory at `/github/workflow` across the job and native action containers; `GITHUB_EVENT_PATH` points at `/github/workflow/event.json`
+- the ordered planner now routes known target marketplace action families to `ExecutableStep::Native` before considering any metadata runtime fallback; unimplemented native adapters fail explicitly instead of silently executing marketplace JavaScript
+- on Linux hosts, Velnor mounts the host Docker CLI and Buildx plugin directory into the job container and native Docker adapters when it also mounts `/var/run/docker.sock`; target Docker adapters such as `docker/setup-buildx-action`, `docker/login-action`, `docker/build-push-action`, and `docker/bake-action` need this client tooling when they talk to the mounted Docker socket
 - script-step plan writes the script under runner temp, exposes per-step command-file env vars, and collects output/env/path/state/summary files after execution
 - Docker script executor runs the planned lifecycle through an abstract command runner: create network, start container, exec script, collect state, cleanup container/network
 - if Docker startup fails because a previous run left the same job container/network names behind, Velnor removes stale job resources once and retries startup before failing the job
@@ -99,13 +99,13 @@ Current code progress:
 - env written to `GITHUB_ENV` and paths written to `GITHUB_PATH` are propagated to later script steps
 - initial workflow/job env expressions are resolved once when the job execution state is created, matching GitHub worker-side environment evaluation
 - `GITHUB_ENV` and legacy `set-env` mutations cannot override `GITHUB_*` and `RUNNER_*` defaults or `NODE_OPTIONS`; `ACTIONS_*` remains mutable for target runtime-export actions
-- paths written to `GITHUB_PATH` are also propagated to later JavaScript action sidecars via a shell PATH prelude, preserving the sidecar image's default PATH while making shared-home tools such as Rust/Cargo shims visible
-- step outputs written to `GITHUB_OUTPUT` are tracked by step id and basic `${{ steps.<id>.outputs.<name> }}` expressions are resolved in later scripts and JavaScript action env
+- paths written to `GITHUB_PATH` are propagated to later script steps and must be exposed to native setup/tool/cache adapters
+- step outputs written to `GITHUB_OUTPUT` are tracked by step id and basic `${{ steps.<id>.outputs.<name> }}` expressions are resolved in later scripts and native adapter inputs/env
 - job outputs from the job message are evaluated at the end of execution from final step output state, matching the runner-side evaluation point used by GitHub; run-service typed map payloads are normalized before expression evaluation; target-shaped coverage includes `java-monorepo` `rust-docker` outputs such as `github.event_name == 'workflow_dispatch' && 'true' || steps.filter.outputs.bitcoin-processor` and `steps.targets.outputs.list`, plus Jackin `steps.dispatch.outputs.docs || steps.filter.outputs.docs`
 - evaluated job outputs are sent in the V2 run-service `completejob` payload
 - before Docker execution starts, Velnor publishes a best-effort in-progress GitHub job timeline record with the runner name; while Docker execution runs, Velnor publishes best-effort in-progress task records as executable steps start, then uploads completed task records and masked stdout/stderr feed lines as executable steps exit; silent and skipped executable steps still produce completion records and run-service step results
 - stdout workflow commands are parsed for legacy/state-changing commands: `set-output`, `set-env`, `add-path`, and `save-state`
-- basic `${{ github.* }}` and `${{ runner.* }}` context expressions are resolved from runtime env in later scripts and JavaScript action env
+- basic `${{ github.* }}` and `${{ runner.* }}` context expressions are resolved from runtime env in later scripts and native adapter inputs/env
 - basic step `if` evaluation is implemented for output comparisons, step outcome checks, `runner.os`, `github.event_name`, `github.ref`, status functions, and simple `&&`/`||`; target coverage includes Java `steps.check-image.outputs.exists == 'false'` gates over Docker login, Buildx setup, and build script steps
 - native `actions/checkout` support is wired before Docker execution through host `git init/fetch/checkout`; self and explicit `repository:` checkouts are supported, including target `path`, `ref`, `token`, and `fetch-depth` inputs
 
@@ -116,9 +116,9 @@ Exit criteria:
 - env written to `GITHUB_ENV` flows to later step.
 - non-zero exit code fails step/job.
 
-## Milestone 3: Checkout And JavaScript Actions
+## Milestone 3: Native Action Adapters
 
-Goal: support common JavaScript actions.
+Goal: support target marketplace action behavior through Rust-native adapters.
 
 Deliverables:
 
@@ -126,13 +126,13 @@ Deliverables:
 - action resolver/downloader for `owner/repo@ref`: repository action download into `_actions` and metadata discovery are implemented
 - action metadata parser for `action.yml`: JavaScript, composite, and Docker `runs.using` shapes are modeled
 - repository action planner for enabled non-checkout `uses:` steps
-- Node action handler: JavaScript action invocation and Docker `node <main>` executor shape are implemented and wired into the ordered Docker execution path
-- JavaScript actions run in a short-lived Node side container selected from `runs.using` with the same workspace/temp/actions/tools mounts and job network, so job images do not need to provide Node; `--node-action-image` can override this when an operator supplies a custom image that already contains the required Node runtime and tools such as Docker CLI
-- JavaScript post hooks: `runs.post` is resolved, respects target `runs.post-if` conditions such as `success()`, executes in reverse order after main steps, and receives `STATE_*` values saved through `GITHUB_STATE`
-- Docker action handler: `runs.using: docker` actions are planned and run as short-lived Docker containers on the job network; `docker://` images are used directly, and local Dockerfile actions are built before execution
-- JavaScript action sidecars and Docker action containers use GitHub's static action-container paths for workspace/temp and command-file aliases: `/github/workspace`, `/github/runner_temp`, and `/github/file_commands`, while keeping Velnor's shared `/__w` and `/__t` mounts available
-- `INPUT_*` environment variables: planned action inputs and metadata defaults are converted to `INPUT_*` for JavaScript invocation
-- step `env:` from GitHub job messages is parsed for script and JavaScript action steps, with basic expression resolution at execution time
+- native adapter registry maps the current target action families to adapter kinds; unknown actions can still be modeled from metadata during development, but this is not the product direction
+- native adapter executor: implement adapter-specific Rust code for cache, artifact, setup/tool, paths-filter, pages, Docker/Buildx, Renovate, and runtime export behavior
+- native post hooks: adapters with cleanup/save behavior must model post execution explicitly and receive `GITHUB_STATE` values saved during main execution
+- native Docker adapters should run short-lived Docker commands/containers on the job network when the behavior needs Docker, but Velnor owns the implementation and does not execute marketplace action bundles
+- action container paths for native adapters should match GitHub expectations where scripts/tools inspect them: `/github/workspace`, `/github/runner_temp`, and `/github/file_commands`, while keeping Velnor's shared `/__w` and `/__t` mounts available
+- planned action inputs and metadata defaults are passed to native adapters as typed input maps; adapters may synthesize `INPUT_*` only when a child process requires GitHub-compatible env
+- step `env:` from GitHub job messages is parsed for script and native action steps, with basic expression resolution at execution time
 - workflow/job `env:` from GitHub job messages is overlaid into the runtime environment; protected `GITHUB_*`/`RUNNER_*` defaults are not overwritten
 - runtime env:
   - basic `GITHUB_*` variables are extracted from the job message and injected into script and JavaScript steps, including `GITHUB_ACTIONS=true`

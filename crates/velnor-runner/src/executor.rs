@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crate::{
-    action::{DockerActionInvocation, JavaScriptActionInvocation},
+    action::{DockerActionInvocation, JavaScriptActionInvocation, NativeActionInvocation},
     checkout::{configure_safe_directory, execute_checkout, CheckoutPlan},
     container::JobContainerSpec,
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
@@ -134,6 +134,12 @@ pub enum ExecutableStep {
         condition: Option<String>,
         continue_on_error: bool,
     },
+    Native {
+        step_id: String,
+        invocation: NativeActionInvocation,
+        condition: Option<String>,
+        continue_on_error: bool,
+    },
     CompositeOutputs {
         step_id: String,
         outputs: BTreeMap<String, String>,
@@ -164,6 +170,7 @@ impl ExecutableStep {
             ExecutableStep::Script(step) => &step.id,
             ExecutableStep::JavaScript { step_id, .. } => step_id,
             ExecutableStep::Docker { step_id, .. } => step_id,
+            ExecutableStep::Native { step_id, .. } => step_id,
             ExecutableStep::CompositeOutputs { step_id, .. } => step_id,
         }
     }
@@ -176,6 +183,7 @@ impl ExecutableStep {
             ExecutableStep::Script(step) => step.condition.as_deref(),
             ExecutableStep::JavaScript { condition, .. } => condition.as_deref(),
             ExecutableStep::Docker { condition, .. } => condition.as_deref(),
+            ExecutableStep::Native { condition, .. } => condition.as_deref(),
             ExecutableStep::CompositeOutputs { condition, .. } => condition.as_deref(),
         }
     }
@@ -190,6 +198,9 @@ impl ExecutableStep {
                 continue_on_error, ..
             } => *continue_on_error,
             ExecutableStep::Docker {
+                continue_on_error, ..
+            } => *continue_on_error,
+            ExecutableStep::Native {
                 continue_on_error, ..
             } => *continue_on_error,
             ExecutableStep::CompositeOutputs { .. } => false,
@@ -548,6 +559,11 @@ where
                     temp_host,
                     &step_state,
                 ),
+                ExecutableStep::Native {
+                    step_id,
+                    invocation,
+                    ..
+                } => self.execute_native_action_in_started_container(step_id, invocation),
                 ExecutableStep::CompositeOutputs { outputs, .. } => Ok(StepExecutionResult {
                     exit_code: 0,
                     state: StepCommandState {
@@ -819,6 +835,18 @@ where
             stdout: step_result.stdout,
             stderr: step_result.stderr,
         })
+    }
+
+    fn execute_native_action_in_started_container(
+        &mut self,
+        step_id: &str,
+        action: &NativeActionInvocation,
+    ) -> Result<StepExecutionResult> {
+        bail!(
+            "native action adapter {:?} for step '{}' is declared but not implemented yet",
+            action.adapter,
+            step_id
+        )
     }
 
     fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {

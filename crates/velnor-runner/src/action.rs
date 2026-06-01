@@ -466,7 +466,22 @@ pub struct DockerActionInvocation {
     pub args: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeActionInvocation {
+    pub adapter: NativeActionAdapter,
+    pub inputs: BTreeMap<String, String>,
+    pub env: Vec<(String, String)>,
+}
+
 impl ResolvedAction {
+    pub fn native_invocation(&self) -> Option<NativeActionInvocation> {
+        native_action_adapter(&self.plan.repository).map(|adapter| NativeActionInvocation {
+            adapter,
+            inputs: self.plan.inputs.clone(),
+            env: self.plan.env.clone(),
+        })
+    }
+
     pub fn javascript_invocation(&self, actions_host: &Path) -> Result<JavaScriptActionInvocation> {
         let ActionRuntime::JavaScript { node, main } = &self.runtime else {
             bail!(
@@ -2853,8 +2868,14 @@ runs:
         let adapters = [
             ("actions/checkout", NativeActionAdapter::Checkout),
             ("actions/cache", NativeActionAdapter::Cache),
-            ("actions/upload-artifact", NativeActionAdapter::UploadArtifact),
-            ("actions/download-artifact", NativeActionAdapter::DownloadArtifact),
+            (
+                "actions/upload-artifact",
+                NativeActionAdapter::UploadArtifact,
+            ),
+            (
+                "actions/download-artifact",
+                NativeActionAdapter::DownloadArtifact,
+            ),
             (
                 "actions/upload-pages-artifact",
                 NativeActionAdapter::UploadPagesArtifact,
@@ -2863,11 +2884,17 @@ runs:
             ("actions/setup-python", NativeActionAdapter::SetupPython),
             ("dorny/paths-filter", NativeActionAdapter::PathsFilter),
             ("jdx/mise-action", NativeActionAdapter::Mise),
-            ("mozilla-actions/sccache-action", NativeActionAdapter::Sccache),
+            (
+                "mozilla-actions/sccache-action",
+                NativeActionAdapter::Sccache,
+            ),
             ("rui314/setup-mold", NativeActionAdapter::SetupMold),
             ("extractions/setup-just", NativeActionAdapter::SetupJust),
             ("dtolnay/rust-toolchain", NativeActionAdapter::RustToolchain),
-            ("baptiste0928/cargo-install", NativeActionAdapter::CargoInstall),
+            (
+                "baptiste0928/cargo-install",
+                NativeActionAdapter::CargoInstall,
+            ),
             ("Swatinem/rust-cache", NativeActionAdapter::RustCache),
             (
                 "crazy-max/ghaction-github-runtime",
@@ -2879,7 +2906,10 @@ runs:
                 NativeActionAdapter::DockerSetupBuildx,
             ),
             ("docker/login-action", NativeActionAdapter::DockerLogin),
-            ("docker/metadata-action", NativeActionAdapter::DockerMetadata),
+            (
+                "docker/metadata-action",
+                NativeActionAdapter::DockerMetadata,
+            ),
             (
                 "docker/build-push-action",
                 NativeActionAdapter::DockerBuildPush,

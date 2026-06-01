@@ -229,8 +229,8 @@ From the target repositories, Phase 0 must support:
 - cache restore/save
 - GitHub Pages deploy actions
 - local composite actions
-- marketplace JavaScript actions
-- marketplace Docker actions
+- marketplace action behavior through Rust-native adapters for the observed action families
+- Docker Buildx/Bake action behavior through Rust-native adapters
 - Docker Buildx/Bake
 
 Some of these are mostly implemented by actions themselves. Velnor's job is to provide the environment those actions expect.
@@ -302,9 +302,9 @@ velnor-runner
   actions
     download/resolve action
     action.yml parser
-    JavaScript action handler
+    native action adapter registry
+    native action adapters
     composite action handler
-    Docker action handler
   container
     job container
     service containers
