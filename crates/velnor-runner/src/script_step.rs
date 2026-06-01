@@ -282,16 +282,53 @@ pub(crate) fn step_continue_on_error(step: &ActionStep) -> bool {
 }
 
 pub(crate) fn step_environment(step: &ActionStep) -> Result<Vec<(String, String)>> {
-    let Some(environment) = step.environment.as_ref() else {
+    environment_pairs(step.environment.as_ref())
+}
+
+fn environment_pairs(environment: Option<&Value>) -> Result<Vec<(String, String)>> {
+    let Some(environment) = environment else {
         return Ok(Vec::new());
     };
-    let object = environment
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("step environment must be an object"))?;
-    object
-        .iter()
-        .map(|(name, value)| Ok((name.clone(), environment_value(value))))
-        .collect()
+    match environment {
+        Value::Object(object) => {
+            if object.get("type").or_else(|| object.get("Type")).is_some()
+                && object.get("map").or_else(|| object.get("Map")).is_some()
+            {
+                return environment_pairs(object.get("map").or_else(|| object.get("Map")));
+            }
+            Ok(object
+                .iter()
+                .filter(|(name, _)| !name.eq_ignore_ascii_case("type"))
+                .map(|(name, value)| (name.clone(), environment_value(value)))
+                .collect())
+        }
+        Value::Array(items) => Ok(items.iter().filter_map(environment_pair_value).collect()),
+        _ => bail!("step environment must be an object"),
+    }
+}
+
+fn environment_pair_value(value: &Value) -> Option<(String, String)> {
+    match value {
+        Value::Object(object) => {
+            let name = object
+                .get("key")
+                .or_else(|| object.get("Key"))
+                .or_else(|| object.get("name"))
+                .or_else(|| object.get("Name"))
+                .and_then(input_value_as_str)?;
+            let value = object
+                .get("value")
+                .or_else(|| object.get("Value"))
+                .map(environment_value)
+                .unwrap_or_default();
+            Some((name.to_string(), value))
+        }
+        Value::Array(pair) if pair.len() == 2 => {
+            let name = input_value_as_str(&pair[0])?;
+            Some((name.to_string(), environment_value(&pair[1])))
+        }
+        _ => None,
+    }
 }
 
 fn environment_value(value: &Value) -> String {
@@ -300,6 +337,13 @@ fn environment_value(value: &Value) -> String {
         Value::String(value) => value.clone(),
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
+        Value::Object(object) => object
+            .get("value")
+            .or_else(|| object.get("Value"))
+            .or_else(|| object.get("lit"))
+            .or_else(|| object.get("Lit"))
+            .map(environment_value)
+            .unwrap_or_default(),
         _ => String::new(),
     }
 }
@@ -785,6 +829,44 @@ mod tests {
         assert_eq!(mapped[0].script, "cargo test");
         assert!(matches!(mapped[0].shell, Shell::Bash));
         assert_eq!(mapped[0].working_directory_container, "/__w/repo/crates");
+    }
+
+    #[test]
+    fn maps_run_service_typed_step_environment() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "run-1",
+                "reference": { "type": "Script" },
+                "inputs": {
+                    "type": "map",
+                    "map": [
+                        { "Key": { "lit": "script" }, "Value": { "lit": "cargo test" } }
+                    ]
+                },
+                "environment": {
+                    "type": "map",
+                    "map": [
+                        { "Key": { "lit": "CARGO_TERM_COLOR" }, "Value": { "lit": "always" } },
+                        { "Key": { "lit": "CARGO_INCREMENTAL" }, "Value": { "value": 0 } },
+                        { "Key": { "lit": "RENOVATE_ONBOARDING" }, "Value": { "value": false } },
+                        { "Key": { "lit": "TOKEN" }, "Value": { "lit": "${{ github.token }}" } }
+                    ]
+                }
+            }
+        ]))
+        .unwrap();
+
+        let mapped = github_script_steps(&steps, "/__w/repo").unwrap();
+
+        assert_eq!(
+            mapped[0].env,
+            vec![
+                ("CARGO_TERM_COLOR".into(), "always".into()),
+                ("CARGO_INCREMENTAL".into(), "0".into()),
+                ("RENOVATE_ONBOARDING".into(), "false".into()),
+                ("TOKEN".into(), "${{ github.token }}".into()),
+            ]
+        );
     }
 
     #[test]

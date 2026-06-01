@@ -215,6 +215,7 @@ Implement action support in the order that unlocks target workflows fastest:
    - download action repo/ref: implemented for repository action probe path
    - parse `action.yml`: metadata parser and repository action planner are implemented as groundwork
    - map `with:` to `INPUT_*`: implemented for JavaScript action invocation, including metadata defaults and run-service typed map inputs
+   - map step `env:`: implemented for plain and run-service typed map shapes
    - run Node entrypoint: implemented for ordered script/JavaScript execution. JavaScript actions run in a short-lived side container with the same workspace/temp/home/actions/tools mounts and job network so arbitrary job images do not need to carry Node. By default Velnor honors the action's declared Node runtime image and mounts host Docker client tooling when available; operators can override it with `--node-action-image`.
    - run `runs.post` cleanup/save entrypoints: implemented in reverse order with `GITHUB_STATE` to `STATE_*` propagation and target `runs.post-if` condition handling
    - provide `GITHUB_*`, `RUNNER_*`, `ACTIONS_*` runtime env: basic job-message extraction, `GITHUB_ACTIONS=true`, target repository owner/ref/workflow/server URL env, GitHub-style `RUNNER_ARCH` values, runner name/environment/workspace/debug, toolcache env via `RUNNER_TOOL_CACHE=/__tool` and `AGENT_TOOLSDIRECTORY=/__tool`, `GITHUB_EVENT_PATH` payload writing, per-action repository/ref/path env, and step injection are implemented; full runner parity remains open
