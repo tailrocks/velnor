@@ -56,6 +56,8 @@ pub struct ActionRuns {
     pub main: Option<String>,
     #[serde(default)]
     pub pre: Option<String>,
+    #[serde(default, rename = "pre-if", alias = "preIf")]
+    pub pre_if: Option<String>,
     #[serde(default)]
     pub post: Option<String>,
     #[serde(default, rename = "post-if", alias = "postIf")]
@@ -384,6 +386,8 @@ pub fn resolve_local_action(plan: &LocalActionPlan) -> Result<ActionMetadata> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaScriptActionInvocation {
     pub node: String,
+    pub pre_container_path: Option<String>,
+    pub pre_condition: Option<String>,
     pub main_container_path: String,
     pub post_container_path: Option<String>,
     pub post_condition: Option<String>,
@@ -413,6 +417,12 @@ impl ResolvedAction {
         let action_container_path = container_path(actions_host, &self.plan.action_dir)?;
         let main_container_path =
             format!("{}/{}", action_container_path, main.trim_start_matches('/'));
+        let pre_container_path = self
+            .metadata
+            .runs
+            .pre
+            .as_ref()
+            .map(|pre| format!("{}/{}", action_container_path, pre.trim_start_matches('/')));
         let post_container_path = self
             .metadata
             .runs
@@ -446,6 +456,8 @@ impl ResolvedAction {
 
         Ok(JavaScriptActionInvocation {
             node: node.clone(),
+            pre_container_path,
+            pre_condition: self.metadata.runs.pre_if.clone(),
             main_container_path,
             post_container_path,
             post_condition: self.metadata.runs.post_if.clone(),
@@ -1768,7 +1780,7 @@ runs:
             continue_on_error: false,
         };
         let metadata = parse_action_metadata(
-            "runs:\n  using: node20\n  main: dist/index.js\n  post: dist/cleanup.js\n  post-if: success()\n",
+            "runs:\n  using: node20\n  pre: dist/setup.js\n  pre-if: always()\n  main: dist/index.js\n  post: dist/cleanup.js\n  post-if: success()\n",
         )
         .unwrap();
         let runtime = metadata.runtime().unwrap();
@@ -1782,6 +1794,11 @@ runs:
         let invocation = resolved.javascript_invocation(actions_host).unwrap();
 
         assert_eq!(invocation.node, "node20");
+        assert_eq!(
+            invocation.pre_container_path.as_deref(),
+            Some("/__a/_actions/actions_setup-node/v4/dist/setup.js")
+        );
+        assert_eq!(invocation.pre_condition.as_deref(), Some("always()"));
         assert_eq!(
             invocation.main_container_path,
             "/__a/_actions/actions_setup-node/v4/dist/index.js"

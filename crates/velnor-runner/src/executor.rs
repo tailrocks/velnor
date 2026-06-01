@@ -327,6 +327,39 @@ where
                 results.push(result);
                 continue;
             }
+            if let ExecutableStep::JavaScript {
+                step_id,
+                invocation,
+                continue_on_error,
+                ..
+            } = step
+            {
+                if let Some(pre_container_path) = invocation.pre_container_path.as_deref() {
+                    if state.evaluate_post_condition(invocation.pre_condition.as_deref()) {
+                        let mut result = self.execute_javascript_action_in_started_container(
+                            container,
+                            step_id,
+                            invocation,
+                            pre_container_path,
+                            &state.action_state_env(step_id),
+                            temp_host,
+                            &state,
+                        )?;
+                        let failed = result.exit_code != 0;
+                        if failed && *continue_on_error {
+                            result.failure_ignored = true;
+                        }
+                        if let Some(log) = step_log(&format!("{step_id}-pre"), &result) {
+                            step_logs.push(log);
+                        }
+                        state.apply(step_id, &result);
+                        results.push(result);
+                        if failed {
+                            continue;
+                        }
+                    }
+                }
+            }
             let result = (|| match step {
                 ExecutableStep::Checkout(plan) => self.execute_checkout_step(plan, &state),
                 ExecutableStep::Script(step) => {
@@ -362,7 +395,7 @@ where
                     step_id,
                     invocation,
                     &invocation.main_container_path,
-                    &[],
+                    &state.action_state_env(step_id),
                     temp_host,
                     &state,
                 ),
@@ -2415,6 +2448,8 @@ mod tests {
             step_id: "cache".into(),
             invocation: JavaScriptActionInvocation {
                 node: "node20".into(),
+                pre_container_path: None,
+                pre_condition: None,
                 main_container_path: "/__a/_actions/cache/dist/restore.js".into(),
                 post_container_path: None,
                 post_condition: None,
@@ -2495,6 +2530,8 @@ mod tests {
                 step_id: "sccache".into(),
                 invocation: JavaScriptActionInvocation {
                     node: "node20".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
                     main_container_path: "/__a/_actions/sccache/dist/index.js".into(),
                     post_container_path: None,
                     post_condition: None,
@@ -2694,6 +2731,8 @@ mod tests {
         fs::create_dir_all(&temp).unwrap();
         let action = JavaScriptActionInvocation {
             node: "node20".into(),
+            pre_container_path: None,
+            pre_condition: None,
             main_container_path: "/__a/_actions/acme_action/v1/dist/index.js".into(),
             post_container_path: None,
             post_condition: None,
@@ -2832,6 +2871,8 @@ mod tests {
                 step_id: "action1".into(),
                 invocation: JavaScriptActionInvocation {
                     node: "node20".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
                     main_container_path: "/__a/_actions/acme_action/v1/dist/index.js".into(),
                     post_container_path: None,
                     post_condition: None,
@@ -2906,6 +2947,8 @@ mod tests {
                 step_id: "cargo-install".into(),
                 invocation: JavaScriptActionInvocation {
                     node: "node20".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
                     main_container_path: "/__a/_actions/cargo-install/dist/index.js".into(),
                     post_container_path: None,
                     post_condition: None,
@@ -2953,6 +2996,8 @@ mod tests {
                 step_id: "cache".into(),
                 invocation: JavaScriptActionInvocation {
                     node: "node20".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
                     main_container_path: "/__a/_actions/cache/dist/restore.js".into(),
                     post_container_path: Some("/__a/_actions/cache/dist/save.js".into()),
                     post_condition: None,
@@ -2966,6 +3011,8 @@ mod tests {
                 step_id: "login".into(),
                 invocation: JavaScriptActionInvocation {
                     node: "node20".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
                     main_container_path: "/__a/_actions/docker_login/dist/main.js".into(),
                     post_container_path: Some("/__a/_actions/docker_login/dist/post.js".into()),
                     post_condition: None,
@@ -3021,6 +3068,59 @@ mod tests {
     }
 
     #[test]
+    fn executes_javascript_pre_action_before_main() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::JavaScript {
+            step_id: "cache".into(),
+            invocation: JavaScriptActionInvocation {
+                node: "node20".into(),
+                pre_container_path: Some("/__a/_actions/cache/dist/pre.js".into()),
+                pre_condition: Some("always()".into()),
+                main_container_path: "/__a/_actions/cache/dist/restore.js".into(),
+                post_container_path: None,
+                post_condition: None,
+                action_container_path: "/__a/_actions/cache".into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
+            calls: Vec::new(),
+            temp: temp.clone(),
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        let node_calls = executor
+            .runner()
+            .calls
+            .iter()
+            .filter(|(_, args)| {
+                args.first().is_some_and(|arg| arg == "run")
+                    && args.contains(&"node:20-bookworm".into())
+            })
+            .map(|(_, args)| args)
+            .collect::<Vec<_>>();
+        assert!(node_calls[0].ends_with(&[
+            "node:20-bookworm".into(),
+            "node".into(),
+            "/__a/_actions/cache/dist/pre.js".into()
+        ]));
+        assert!(node_calls[1].ends_with(&[
+            "node:20-bookworm".into(),
+            "node".into(),
+            "/__a/_actions/cache/dist/restore.js".into()
+        ]));
+        assert!(node_calls[1].contains(&"STATE_primaryKey=linux-cache".into()));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn skips_javascript_post_action_when_post_if_is_false() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -3029,6 +3129,8 @@ mod tests {
                 step_id: "cache".into(),
                 invocation: JavaScriptActionInvocation {
                     node: "node20".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
                     main_container_path: "/__a/_actions/cache/dist/restore.js".into(),
                     post_container_path: Some("/__a/_actions/cache/dist/save.js".into()),
                     post_condition: Some("success()".into()),
@@ -3080,6 +3182,8 @@ mod tests {
             step_id: "sccache".into(),
             invocation: JavaScriptActionInvocation {
                 node: "node20".into(),
+                pre_container_path: None,
+                pre_condition: None,
                 main_container_path: "/__a/_actions/sccache/dist/setup/index.js".into(),
                 post_container_path: Some("/__a/_actions/sccache/dist/show_stats/index.js".into()),
                 post_condition: None,
@@ -3112,6 +3216,8 @@ mod tests {
                 step_id: "rust-cache".into(),
                 invocation: JavaScriptActionInvocation {
                     node: "node20".into(),
+                    pre_container_path: None,
+                    pre_condition: None,
                     main_container_path: "/__a/_actions/rust-cache/dist/restore/index.js".into(),
                     post_container_path: Some("/__a/_actions/rust-cache/dist/save/index.js".into()),
                     post_condition: Some("success() || env.CACHE_ON_FAILURE == 'true'".into()),
