@@ -935,14 +935,51 @@ fn action_dir(
 }
 
 fn string_inputs(step: &ActionStep) -> Result<BTreeMap<String, String>> {
-    let Some(inputs) = step.inputs.as_ref().and_then(|value| value.as_object()) else {
+    string_input_map(step.inputs.as_ref())
+}
+
+fn string_input_map(value: Option<&serde_json::Value>) -> Result<BTreeMap<String, String>> {
+    let Some(value) = value else {
         return Ok(BTreeMap::new());
     };
-    let mut result = BTreeMap::new();
-    for (name, value) in inputs {
-        result.insert(name.clone(), input_value(value));
+    match value {
+        serde_json::Value::Object(object) => {
+            if object.get("type").or_else(|| object.get("Type")).is_some()
+                && object.get("map").or_else(|| object.get("Map")).is_some()
+            {
+                return string_input_map(object.get("map").or_else(|| object.get("Map")));
+            }
+            Ok(object
+                .iter()
+                .filter(|(name, _)| !name.eq_ignore_ascii_case("type"))
+                .map(|(name, value)| (name.clone(), input_value(value)))
+                .collect())
+        }
+        serde_json::Value::Array(items) => {
+            let mut result = BTreeMap::new();
+            for item in items {
+                if let Some((name, value)) = input_pair(item) {
+                    result.insert(name.to_string(), input_value(value));
+                }
+            }
+            Ok(result)
+        }
+        _ => Ok(BTreeMap::new()),
     }
-    Ok(result)
+}
+
+fn input_pair(value: &serde_json::Value) -> Option<(&str, &serde_json::Value)> {
+    match value {
+        serde_json::Value::Object(object) => {
+            let key = object.get("Key").or_else(|| object.get("key"))?;
+            let value = object.get("Value").or_else(|| object.get("value"))?;
+            Some((input_value_as_str(key)?, value))
+        }
+        serde_json::Value::Array(pair) if pair.len() == 2 => {
+            Some((input_value_as_str(&pair[0])?, &pair[1]))
+        }
+        _ => None,
+    }
 }
 
 fn input_value(value: &serde_json::Value) -> String {
@@ -951,7 +988,27 @@ fn input_value(value: &serde_json::Value) -> String {
         serde_json::Value::String(value) => value.clone(),
         serde_json::Value::Bool(value) => value.to_string(),
         serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::Object(object) => object
+            .get("value")
+            .or_else(|| object.get("Value"))
+            .or_else(|| object.get("lit"))
+            .or_else(|| object.get("Lit"))
+            .map(input_value)
+            .unwrap_or_default(),
         _ => String::new(),
+    }
+}
+
+fn input_value_as_str(value: &serde_json::Value) -> Option<&str> {
+    match value {
+        serde_json::Value::String(value) => Some(value),
+        serde_json::Value::Object(object) => object
+            .get("value")
+            .or_else(|| object.get("Value"))
+            .or_else(|| object.get("lit"))
+            .or_else(|| object.get("Lit"))
+            .and_then(input_value_as_str),
+        _ => None,
     }
 }
 
@@ -1332,6 +1389,41 @@ runs:
     }
 
     #[test]
+    fn builds_repository_action_plan_from_run_service_typed_inputs() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "cache",
+                "reference": {
+                    "type": "Repository",
+                    "name": "actions/cache",
+                    "ref": "v5"
+                },
+                "inputs": {
+                    "type": "map",
+                    "map": [
+                        { "Key": { "lit": "path" }, "Value": { "lit": "~/.cargo/registry" } },
+                        { "Key": { "lit": "key" }, "Value": { "lit": "cargo-${{ hashFiles('**/Cargo.lock') }}" } },
+                        { "Key": { "lit": "fail-on-cache-miss" }, "Value": { "lit": "false" } },
+                        { "Key": { "lit": "lookup-only" }, "Value": { "value": true } }
+                    ]
+                }
+            }
+        ]))
+        .unwrap();
+
+        let plans = repository_action_plans(&steps, Path::new("/tmp/actions")).unwrap();
+
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].inputs["path"], "~/.cargo/registry");
+        assert_eq!(
+            plans[0].inputs["key"],
+            "cargo-${{ hashFiles('**/Cargo.lock') }}"
+        );
+        assert_eq!(plans[0].inputs["fail-on-cache-miss"], "false");
+        assert_eq!(plans[0].inputs["lookup-only"], "true");
+    }
+
+    #[test]
     fn builds_local_action_plan() {
         let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
             {
@@ -1360,6 +1452,40 @@ runs:
         assert_eq!(
             plans[0].action_dir,
             Path::new("/tmp/workspace").join(".github/actions/aggregate-needs")
+        );
+        assert_eq!(plans[0].inputs["workflow-label"], "CI");
+    }
+
+    #[test]
+    fn builds_local_action_plan_from_run_service_typed_inputs() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "aggregate",
+                "reference": {
+                    "type": "Repository",
+                    "name": "./.github/actions/aggregate-needs"
+                },
+                "inputs": {
+                    "type": "map",
+                    "map": [
+                        { "Key": { "lit": "needs-json" }, "Value": { "lit": "${{ toJSON(needs) }}" } },
+                        { "Key": { "lit": "workflow-label" }, "Value": { "lit": "CI" } }
+                    ]
+                }
+            }
+        ]))
+        .unwrap();
+        let context = vec![(
+            "needs".to_string(),
+            serde_json::json!({ "check": { "result": "success" } }),
+        )];
+
+        let plans =
+            local_action_plans_with_context(&steps, Path::new("/tmp/workspace"), &context).unwrap();
+
+        assert_eq!(
+            plans[0].inputs["needs-json"],
+            r#"{"check":{"result":"success"}}"#
         );
         assert_eq!(plans[0].inputs["workflow-label"], "CI");
     }
