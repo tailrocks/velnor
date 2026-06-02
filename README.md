@@ -221,6 +221,8 @@ Phase 0 implementation contract: [docs/phase-0-implementation-contract.md](docs/
 
 Phase 0 target checklist: [docs/phase-0-target-checklist.md](docs/phase-0-target-checklist.md).
 
+Phase 0 detailed handoff: [docs/phase-0-detailed-handoff-2026-06-02.md](docs/phase-0-detailed-handoff-2026-06-02.md).
+
 Implementation roadmap: [docs/implementation-roadmap.md](docs/implementation-roadmap.md).
 
 Public fixture repository plan: [docs/public-fixture-repo-plan.md](docs/public-fixture-repo-plan.md).
