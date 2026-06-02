@@ -1,12 +1,18 @@
-# Velnor Product Roadmap
+# Velnor Roadmap
 
 Status: draft for user review.
 
-This document is the shared product and engineering map for Velnor. It separates
-the goal from current implementation state so the next code work can be judged
-against one clear target.
+This document is the implementation roadmap for Velnor. It lists what must be
+implemented, what is still missing, and how work is verified.
 
-## Product Goal
+The high-level product vision lives in [vision.md](vision.md). This roadmap is
+the source of truth for current implementation work.
+
+Older Phase 0 notes, handoffs, and research snapshots live under
+`docs/archive`. They are useful history, but this roadmap is the source of truth
+when archived docs disagree with current product direction.
+
+## Implementation Goal
 
 Velnor is a GitHub Actions-compatible runner daemon with a Rust runtime.
 

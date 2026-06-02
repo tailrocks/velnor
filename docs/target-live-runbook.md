@@ -2,8 +2,7 @@
 
 This is the remaining Phase 0 proof path. Unit-level target verification is covered by `scripts/target_verify.sh`; completion requires real GitHub UI runs from the two target repositories.
 
-The implementation checklist is tracked in
-[docs/phase-0-target-checklist.md](phase-0-target-checklist.md).
+The implementation checklist is tracked in [roadmap.md](roadmap.md).
 
 ## Prerequisites
 

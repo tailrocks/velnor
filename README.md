@@ -29,16 +29,15 @@ Out of current scope:
 - no broad GitHub Actions parity beyond the two target repositories
 
 Any Pkl, PQL, KCL, CUE, Jsonnet, Starlark, Nickel, Dhall, or Nix material under
-`docs/research/` is archived brainstorming only. It is not a requirement, not a
-current design target, and not an implementation plan. It must stay separate
-from Phase 0 runner compatibility work.
+`docs/archive/research/` is archived brainstorming only. It is not a
+requirement, not a current design target, and not an implementation plan. It
+must stay separate from Phase 0 runner compatibility work.
 
 ## Direction
 
-See [docs/vision.md](docs/vision.md).
-
-Runner setup decision: [docs/github-runner-v2-jit-decision.md](docs/github-runner-v2-jit-decision.md).
-Product roadmap: [docs/velnor-product-roadmap.md](docs/velnor-product-roadmap.md).
+Vision: [docs/vision.md](docs/vision.md).
+Roadmap: [docs/roadmap.md](docs/roadmap.md).
+Docs index: [docs/README.md](docs/README.md).
 
 ## Current Runner State
 
@@ -295,17 +294,13 @@ The remaining Phase 0 proof is live GitHub UI validation on the two target
 repositories from a Linux host whose Docker daemon can see Velnor's bind-mounted
 work directory.
 
-Phase 0 runner compatibility: [docs/phase-0-github-runner-compat.md](docs/phase-0-github-runner-compat.md).
+Active docs:
 
-Phase 0 implementation contract: [docs/phase-0-implementation-contract.md](docs/phase-0-implementation-contract.md).
-
-Phase 0 target checklist: [docs/phase-0-target-checklist.md](docs/phase-0-target-checklist.md).
-
-Phase 0 detailed handoff: [docs/phase-0-detailed-handoff-2026-06-02.md](docs/phase-0-detailed-handoff-2026-06-02.md).
-
-Implementation roadmap: [docs/implementation-roadmap.md](docs/implementation-roadmap.md).
-
-Public fixture repository plan: [docs/public-fixture-repo-plan.md](docs/public-fixture-repo-plan.md).
+- [docs/README.md](docs/README.md)
+- [docs/roadmap.md](docs/roadmap.md)
+- [docs/target-live-runbook.md](docs/target-live-runbook.md)
+- [docs/native-action-adapter-contract.md](docs/native-action-adapter-contract.md)
+- [docs/rust-automation-policy.md](docs/rust-automation-policy.md)
 
 ## Proof-Of-Concept Test Repository
 
@@ -363,16 +358,5 @@ with `VELNOR_FIXTURE_RUN_ID=<run-id>`.
 The smoke script removes the temporary fixture runner on exit by default; set
 `VELNOR_FIXTURE_CLEANUP_RUNNER=false` to keep it registered for debugging.
 
-Target workflow audit and language brainstorming history: [docs/research/config-language-comparison.md](docs/research/config-language-comparison.md).
-
-GitHub runner protocol contract: [docs/research/github-runner-protocol-contract.md](docs/research/github-runner-protocol-contract.md).
-
-GitHub runner job-message contract: [docs/research/github-runner-job-message-contract-2026-06-01.md](docs/research/github-runner-job-message-contract-2026-06-01.md).
-
-Self-hosted runner implementation blueprint: [docs/research/self-hosted-runner-implementation-blueprint-2026-06-01.md](docs/research/self-hosted-runner-implementation-blueprint-2026-06-01.md).
-
-Implementation gap audit: [docs/research/phase-0-implementation-gap-audit-2026-06-01.md](docs/research/phase-0-implementation-gap-audit-2026-06-01.md).
-
-Phase 0 current status and live proof gaps: [docs/research/phase-0-current-status-2026-06-01.md](docs/research/phase-0-current-status-2026-06-01.md).
-
-Target live validation runbook: [docs/target-live-runbook.md](docs/target-live-runbook.md).
+Archived background lives under [docs/archive](docs/archive). It is kept for
+traceability, not as the active roadmap.
