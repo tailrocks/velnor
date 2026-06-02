@@ -47,9 +47,8 @@ Velnor must support the common Rust GitHub Actions shape used by both projects:
 - run `cargo fmt`, `cargo clippy`, `cargo check`, `cargo test`, and
   `cargo nextest`
 - support `rustup component add` and target installation
-- support `mise` as the main tool installer for Jackin
-- support `dtolnay/rust-toolchain`, `setup-just`, `cargo-install`, and
-  `Swatinem/rust-cache` for ChainArgos shapes
+- support `mise` as the main tool installer for all target projects
+- support `cargo-install` and `Swatinem/rust-cache` for ChainArgos shapes
 - support `sccache` setup and soft-fail gates
 - support cargo registry/git cache restore/save keyed by `hashFiles`
 - support command files: `GITHUB_ENV`, `GITHUB_OUTPUT`, `GITHUB_PATH`,
@@ -125,8 +124,6 @@ local/composite behavior for Phase 0:
 - `actions/deploy-pages`
 - `dorny/paths-filter`
 - `jdx/mise-action`
-- `dtolnay/rust-toolchain`
-- `extractions/setup-just`
 - `baptiste0928/cargo-install`
 - `Swatinem/rust-cache`
 - `mozilla-actions/sccache-action`
@@ -525,6 +522,13 @@ Performance evidence to collect:
 - remove `NativeActionAdapter::SetupPython` variant from `action.rs`
 - remove `native_setup_python` implementation from `executor.rs`
 - remove all `SetupPython` test fixtures and match arms
+- remove `NativeActionAdapter::RustToolchain` and `NativeActionAdapter::SetupJust`
+  variants from `action.rs`
+- remove `native_rust_toolchain`, `native_setup_just`, and `setup_just_script`
+  implementations from `executor.rs`
+- remove all `RustToolchain` and `SetupJust` test fixtures and match arms in
+  `action.rs` and `runner.rs`
+- remove orphaned reference entries from `velnor-tools/src/main.rs`
 - rule: when a target workflow removes an action entirely, its Velnor native
   adapter must be removed in the same pass; no dead adapter code
 
