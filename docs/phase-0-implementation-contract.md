@@ -18,13 +18,15 @@ Velnor should be drop-in compatible for the workflows currently used by:
 - `ChainArgos/java-monorepo`, limited to its Rust, Docker, Buildx, cache,
   artifact, Renovate, and related workflow paths
 
-Velnor runner execution is Linux-only. There is no Velnor macOS support in
-Phase 0: no macOS host support, no macOS runner replacement, and no
+Velnor job execution is Linux-container-only. The Velnor daemon process should
+be able to run on macOS or Linux, but assigned jobs still run inside Linux
+Docker containers. There is no Velnor macOS runner replacement and no
 macOS/Darwin runner labels. If a target workflow contains macOS matrix legs,
-those legs are outside Velnor's supported execution surface. The
-`velnor-runner configure`, `velnor-runner run`, and `velnor-runner preflight`
-commands enforce this by rejecting non-Linux hosts. The `ubuntu-24.04-arm`
-label is accepted only on ARM Linux hosts.
+those legs are outside Velnor's supported execution surface. Current code still
+rejects non-Linux process hosts in `velnor-runner configure`, `velnor-runner
+run`, and `velnor-runner preflight`; that is an implementation gap, not the
+product target. The `ubuntu-24.04-arm` label is accepted only when Docker can
+truthfully provide ARM Linux containers.
 
 The supported unit is not a hardcoded workflow file. The supported unit is the
 runner-side behavior those workflows require: labels, job-message fields,

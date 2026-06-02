@@ -24,7 +24,8 @@ Out of current scope:
 - no config-language parser, compiler, evaluator, binding, package, schema, or
   runtime integration work
 - no replacement for GitHub's YAML parser or scheduler
-- no macOS support in Velnor at all; Phase 0 runs Linux jobs only
+- no macOS job execution or macOS runner-label support; Phase 0 runs Linux jobs
+  inside Docker containers
 - no broad GitHub Actions parity beyond the two target repositories
 
 Any Pkl, PQL, KCL, CUE, Jsonnet, Starlark, Nickel, Dhall, or Nix material under
@@ -37,6 +38,7 @@ from Phase 0 runner compatibility work.
 See [docs/vision.md](docs/vision.md).
 
 Runner setup decision: [docs/github-runner-v2-jit-decision.md](docs/github-runner-v2-jit-decision.md).
+Product roadmap: [docs/velnor-product-roadmap.md](docs/velnor-product-roadmap.md).
 
 ## Current Runner State
 
@@ -58,14 +60,15 @@ isolated Docker container per job concurrently. The daemon does not reuse one
 GitHub runner identity across concurrent jobs; each slot owns a separate JIT
 runner identity and broker session. The current `run --once` path remains the
 single-slot compatibility/proof path.
-`configure`, `run`, and `preflight` are Linux-only commands; Velnor refuses
-non-Linux process environments instead of pretending to satisfy Linux runner
-labels elsewhere. Running the Velnor daemon inside a Linux Docker container is
-supported, including from Docker Desktop on macOS, as long as the container can
-reach the Docker daemon and the daemon can see Velnor's bind-mounted work
-directory. Native macOS process execution is not supported. Velnor also refuses
-macOS/Darwin runner labels. Any macOS legs in existing target workflows are
-outside Velnor's execution surface.
+Product target: Velnor daemon can run on macOS or Linux, but assigned jobs run
+inside Linux Docker containers. Velnor refuses macOS/Darwin runner labels and
+does not claim macOS job capability. Current code still rejects non-Linux
+process hosts in `configure`, `run`, and `preflight`; that guard must be changed
+as part of the macOS-host support work. Running the Velnor daemon inside a
+Linux Docker container is also supported, including from Docker Desktop on
+macOS, as long as the container can reach the Docker daemon and the daemon can
+see Velnor's bind-mounted work directory. Any macOS legs in existing target
+workflows are outside Velnor's execution surface.
 
 ```sh
 cargo run --bin velnor-runner -- configure \

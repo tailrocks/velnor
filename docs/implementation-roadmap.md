@@ -3,6 +3,8 @@
 This roadmap is ordered for the real first goal: run existing GitHub Actions YAML on a Rust Velnor self-hosted runner replacement.
 
 Detailed Phase 0 implementation research lives in `docs/research/phase-0-implementation-plan.md`.
+The product roadmap is `docs/velnor-product-roadmap.md`; use it as the shared
+goal document when code and older research disagree.
 The current upstream source audit is `docs/research/actions-runner-source-audit-2026-06-01.md`.
 The latest runner V2 refresh is `docs/research/latest-runner-v2-refresh-2026-06-01.md`; use `cargo run -q -p velnor-tools -- check-runner-reference` before live validation to detect upstream `actions/runner` release drift.
 The runner job-message contract is `docs/research/github-runner-job-message-contract-2026-06-01.md`; Velnor receives expanded `AgentJobRequestMessage` payloads, not raw workflow YAML, and the normal hosted-GitHub path targets broker/run-service V2 only.
@@ -10,7 +12,7 @@ The normalized plan boundary for GitHub job messages is `docs/research/normalize
 The implementation-oriented runner blueprint is `docs/research/self-hosted-runner-implementation-blueprint-2026-06-01.md`.
 The implementation gap audit is `docs/research/phase-0-implementation-gap-audit-2026-06-01.md`.
 The current implementation/proof status is `docs/research/phase-0-current-status-2026-06-01.md`.
-The target-only MVP contract is `docs/research/target-mvp-compat-audit-2026-06-01.md`; Phase 0 work should be judged against those two repositories' current `.github` trees, not broad GitHub Actions parity.
+The target-only MVP contract is `docs/research/target-mvp-compat-audit-2026-06-01.md`; Phase 0 work should be judged against those two repositories' current `.github` trees, not broad GitHub Actions parity. Both first targets are Rust CI/CD targets for Velnor's purposes, including `ChainArgos/java-monorepo`; the repository name does not make Java support a Phase 0 requirement.
 The native action adapter boundary is `docs/native-action-adapter-contract.md`;
 Velnor keeps GitHub-compatible YAML, but supported marketplace actions should
 resolve to Rust-native adapters instead of executing their JavaScript or
@@ -25,7 +27,9 @@ Deliverables:
 - Velnor creates runner identities through GitHub's JIT configuration API
   (`generate-jitconfig`) and decodes `encoded_jit_config`
 - `velnor-runner configure --target-mvp-labels` opt-in adds the current target x64 Linux labels: `hetzner-sentry-ci`, `ubuntu-latest`, and `ubuntu-24.04`; it never claims macOS labels, rejects macOS/Darwin labels, and claims ARM only when `--target-mvp-arm-label` is also passed on an ARM Linux host
-- `velnor-runner configure`, `run`, and `preflight` reject non-Linux hosts because the Phase 0 runner execution model is Linux-only
+- Velnor rejects macOS/Darwin runner labels because Phase 0 job execution is
+  Linux Docker containers only; the daemon process itself should be able to run
+  on macOS when Docker preflight proves Linux container execution works
 - local settings/credential store
 - repo-level JIT runner configuration
 - runner appears online in GitHub UI
@@ -35,6 +39,8 @@ Deliverables:
 - log raw message metadata for assigned job
 - private GitHub runner protocol dependency accepted as a Phase 0 implementation cost
 - no classic registration-token fallback and no classic distributed-task polling
+- native macOS daemon host support is implemented without claiming macOS runner
+  jobs
 
 Exit criteria:
 
