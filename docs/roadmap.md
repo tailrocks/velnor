@@ -1,7 +1,5 @@
 # Velnor Roadmap
 
-Status: draft for user review.
-
 This document is the implementation roadmap for Velnor. It lists what must be
 implemented, what is still missing, and how work is verified.
 
@@ -66,8 +64,8 @@ Velnor must support the common Rust GitHub Actions shape used by both projects:
 
 Despite the repository name, ChainArgos Phase 0 target is Rust-heavy:
 
-- `ansible.yml`: checkout, setup-python, bash defaults, and basic command
-  execution
+- `ansible.yml`: checkout, mise (Python via mise.toml), bash defaults, and
+  basic command execution
 - `rust.yml`: path filters, `mise`, Rust formatting/linting/tests, package
   workflow-dispatch inputs, sccache, required jobs, and job outputs
 - `rust-docker.yml`: Docker login, Buildx/Bake, Docker cache/runtime env,
@@ -125,7 +123,6 @@ local/composite behavior for Phase 0:
 - `actions/download-artifact`
 - `actions/upload-pages-artifact`
 - `actions/deploy-pages`
-- `actions/setup-python`
 - `dorny/paths-filter`
 - `jdx/mise-action`
 - `dtolnay/rust-toolchain`
@@ -523,7 +520,15 @@ Performance evidence to collect:
 - store `ephemeral=true`
 - store runner id for exact cleanup
 
-### 2. Remove classic registration product code
+### 2. Remove orphaned native adapters
+
+- remove `NativeActionAdapter::SetupPython` variant from `action.rs`
+- remove `native_setup_python` implementation from `executor.rs`
+- remove all `SetupPython` test fixtures and match arms
+- rule: when a target workflow removes an action entirely, its Velnor native
+  adapter must be removed in the same pass; no dead adapter code
+
+### 3. Remove classic registration product code
 
 - remove registration-token setup from normal CLI path
 - remove `actions/runner-registration` from normal setup
@@ -536,7 +541,7 @@ Open naming choice:
 - keep `configure` as command name but make it JIT-only
 - or add explicit `jit-configure` and deprecate/remove old `configure`
 
-### 3. Make macOS daemon host valid
+### 4. Make macOS daemon host valid
 
 - replace process-host Linux rejection with capability validation
 - keep macOS/Darwin runner label rejection
@@ -545,7 +550,7 @@ Open naming choice:
 - ensure path mapping instructions and errors are precise
 - run Linux-only Rust tests in container where process OS matters
 
-### 4. Implement daemon slot recycling
+### 5. Implement daemon slot recycling
 
 - one JIT runner config per slot
 - after job handled, discard slot config and create next JIT config
@@ -553,7 +558,7 @@ Open naming choice:
 - exact cleanup for failed/unstarted Velnor-created runner ids
 - no cleanup of unrelated GitHub runners
 
-### 5. Update scripts to JIT semantics
+### 6. Update scripts to JIT semantics
 
 - fixture smoke uses JIT-only setup
 - remove-token language disappears from user-facing script errors
@@ -561,7 +566,7 @@ Open naming choice:
 - smoke cleanup deletes exact Velnor-created JIT runner ids when needed
 - live scripts support macOS daemon host only when Docker preflight passes
 
-### 6. Run public fixture proof
+### 7. Run public fixture proof
 
 - build `velnor/job-ubuntu:24.04`
 - run readiness
@@ -570,7 +575,7 @@ Open naming choice:
 - verify Velnor lanes pass and compare-results passes
 - collect evidence markdown
 
-### 7. Produce manual target-testing handoff
+### 8. Produce manual target-testing handoff
 
 - summarize Sentry fixture evidence
 - state that Velnor is ready for manual target repository testing
