@@ -504,10 +504,7 @@ fn daemon_preflight_args(
             if !should_execute_job(&run_args) || run_args.skip_preflight {
                 Ok(None)
             } else {
-                let config_dir = run_args
-                    .config_dir
-                    .as_deref()
-                    .unwrap_or(config_base);
+                let config_dir = run_args.config_dir.as_deref().unwrap_or(config_base);
                 Ok(Some(preflight_args_for_run(&run_args, config_dir)))
             }
         })
@@ -3772,8 +3769,8 @@ mod tests {
 
     #[tokio::test]
     async fn idle_job_cancellation_is_control_message_not_unsupported_job() {
-        let broker = BrokerClient::new("https://broker.actions.githubusercontent.com/", "token")
-            .unwrap();
+        let broker =
+            BrokerClient::new("https://broker.actions.githubusercontent.com/", "token").unwrap();
         let run_service = RunServiceClient::new("token").unwrap();
         let stored = stored_config();
         let message = TaskAgentMessage {

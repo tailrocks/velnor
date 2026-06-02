@@ -137,8 +137,13 @@ scripts/fixture_report.sh
 The fixture repository feature surface can be audited directly with:
 
 ```sh
-scripts/fixture_audit.py
+cargo run -q -p velnor-tools -- fixture-audit
 ```
+
+Repository automation policy: new committed automation should be Rust. Prefer
+`velnor-tools` subcommands over adding shell or Python scripts. Existing shell
+and Python automation is being migrated incrementally; Python runner-reference
+and fixture-audit checks have already moved to `velnor-tools`.
 
 The live proof scripts are Linux-only as well; they fail before runner
 registration on non-Linux hosts, and reject `VELNOR_TARGET_MVP_ARM_LABEL=true`

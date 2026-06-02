@@ -69,7 +69,8 @@ cargo test -q
 
 These gates currently cover:
 
-- latest runner version drift through `scripts/check_runner_reference.py`
+- latest runner version drift through
+  `cargo run -q -p velnor-tools -- check-runner-reference`
 - V2 broker/run-service registration, polling, acquire, renew, completion, and
   key control messages
 - Linux host enforcement, macOS/Darwin label rejection, and ARM label validation

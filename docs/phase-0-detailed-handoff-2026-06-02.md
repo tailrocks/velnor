@@ -56,7 +56,8 @@ Current local gate evidence from this audit:
   fixture self-tests, live helper self-tests, smoke failure evidence checks, and
   workflow dispatch helper checks.
 - `cargo test -q` passed with 289 unit tests and 1 integration test.
-- `scripts/check_runner_reference.py`, through the verifier, reported
+- `cargo run -q -p velnor-tools -- check-runner-reference`, through the
+  verifier, reported
   `actions/runner v2.334.0` as current.
 
 ## What Is Done
@@ -445,8 +446,8 @@ Latest recorded evidence:
 - `scripts/target_verify.sh` passed with 80 focused Rust checks and script
   self-tests.
 - `cargo test -q` passed with 289 unit tests and 1 integration test.
-- `scripts/check_runner_reference.py` reported `actions/runner v2.334.0` as
-  current.
+- `cargo run -q -p velnor-tools -- check-runner-reference` reported
+  `actions/runner v2.334.0` as current.
 
 ### Target Verifier Coverage
 

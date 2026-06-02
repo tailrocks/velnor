@@ -17,7 +17,7 @@ Reference source:
 Drift check:
 
 ```sh
-scripts/check_runner_reference.py
+cargo run -q -p velnor-tools -- check-runner-reference
 ```
 
 This compares the pinned release above with GitHub's latest `actions/runner`
@@ -97,7 +97,7 @@ and what should prove it.
 
 | Upstream source | Behavior to copy | Velnor owner | Proof |
 | --- | --- | --- | --- |
-| `Runner.cs` selects `BrokerMessageListener` when `UseV2Flow` is true. | Hosted GitHub target path is V2 broker/run-service only. | `protocol.rs`, `runner.rs` | `scripts/check_runner_reference.py`, protocol tests, live fixture job acquisition. |
+| `Runner.cs` selects `BrokerMessageListener` when `UseV2Flow` is true. | Hosted GitHub target path is V2 broker/run-service only. | `protocol.rs`, `runner.rs` | `cargo run -q -p velnor-tools -- check-runner-reference`, protocol tests, live fixture job acquisition. |
 | `BrokerMessageListener.cs` requires `ServerUrlV2`, creates a broker session, and polls with session id, runner status, version, OS, architecture, and update flag. | Velnor must require V2 settings and report `Online`/`Busy` per internal slot. | `protocol.rs`, `runner.rs` | runner config tests, broker poll-state tests, live fixture evidence. |
 | `Runner.cs` treats run-service messages as `RunnerJobRequestRef` and best-effort acknowledges before acquire. | Broker messages are references, not workflow YAML; acknowledge failure must not block execution. | `runner.rs` | acquire/ack tests, sanitized job-message dumps. |
 | `RunServiceHttpClient.cs` sends `acquirejob`, `renewjob`, and `completejob`. | Use run-service for acquire, renewal, and completion; use job-scoped credentials when available. | `protocol.rs`, `runner.rs` | renew/complete tests and GitHub UI final status. |

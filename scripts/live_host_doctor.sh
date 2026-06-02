@@ -60,7 +60,7 @@ if [[ "$RUN_TARGET_VERIFY" == "true" ]]; then
 fi
 
 echo "==> Checking actions/runner reference"
-python3 scripts/check_runner_reference.py
+cargo run -q -p velnor-tools -- check-runner-reference
 
 echo "==> Running Docker preflight"
 preflight_args=(--work-dir "$WORK_DIR")

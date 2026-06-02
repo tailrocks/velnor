@@ -6,7 +6,7 @@ CHECK_STATUS="${VELNOR_FIXTURE_READINESS_CHECK_STATUS:-true}"
 CHECK_AUDIT="${VELNOR_FIXTURE_READINESS_CHECK_AUDIT:-true}"
 RUN_LOCAL_TESTS="${VELNOR_FIXTURE_READINESS_RUN_LOCAL_TESTS:-false}"
 FIXTURE_STATUS_SCRIPT="${VELNOR_FIXTURE_STATUS_SCRIPT:-scripts/fixture_status.sh}"
-FIXTURE_AUDIT_SCRIPT="${VELNOR_FIXTURE_AUDIT_SCRIPT:-scripts/fixture_audit.py}"
+FIXTURE_AUDIT_SCRIPT="${VELNOR_FIXTURE_AUDIT_SCRIPT:-cargo run -q -p velnor-tools -- fixture-audit}"
 LIVE_HOST_DOCTOR_SCRIPT="${VELNOR_LIVE_HOST_DOCTOR_SCRIPT:-scripts/live_host_doctor.sh}"
 
 source "$ROOT/scripts/live_sequence_common.sh"
@@ -34,7 +34,7 @@ fi
 
 if [[ "$CHECK_AUDIT" == "true" ]]; then
   echo "==> Auditing fixture feature surface"
-  "$FIXTURE_AUDIT_SCRIPT"
+  eval "$FIXTURE_AUDIT_SCRIPT"
 fi
 
 if [[ "$RUN_LOCAL_TESTS" == "true" ]]; then

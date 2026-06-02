@@ -5,7 +5,7 @@ ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 REPORT_DIR="${VELNOR_FIXTURE_REPORT_DIR:-$ROOT/.velnor-live-evidence}"
 REPORT_PATH="${VELNOR_FIXTURE_REPORT_PATH:-}"
 FIXTURE_STATUS_SCRIPT="${VELNOR_FIXTURE_STATUS_SCRIPT:-scripts/fixture_status.sh}"
-FIXTURE_AUDIT_SCRIPT="${VELNOR_FIXTURE_AUDIT_SCRIPT:-scripts/fixture_audit.py}"
+FIXTURE_AUDIT_SCRIPT="${VELNOR_FIXTURE_AUDIT_SCRIPT:-cargo run -q -p velnor-tools -- fixture-audit}"
 LIVE_HOST_DOCTOR_SCRIPT="${VELNOR_LIVE_HOST_DOCTOR_SCRIPT:-scripts/live_host_doctor.sh}"
 
 cd "$ROOT"
@@ -63,7 +63,7 @@ run_report_section() {
 
 overall=0
 run_report_section "Fixture Workflow Status" "$FIXTURE_STATUS_SCRIPT" || overall=1
-run_report_section "Fixture Feature Audit" "$FIXTURE_AUDIT_SCRIPT" || overall=1
+run_report_section "Fixture Feature Audit" bash -lc "$FIXTURE_AUDIT_SCRIPT" || overall=1
 run_report_section "Live Host Readiness" "$LIVE_HOST_DOCTOR_SCRIPT" || overall=1
 
 {

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT="$ROOT/scripts/fixture_audit.py"
+FIXTURE_AUDIT=(cargo run -q -p velnor-tools -- fixture-audit)
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
@@ -57,10 +57,10 @@ EOF
 printf 'runs:\n  using: composite\n' >"$tmp_dir/.github/actions/aggregate-needs/action.yml"
 printf 'runs:\n  using: composite\n' >"$tmp_dir/.github/actions/check-fixture-output/action.yml"
 
-"$SCRIPT" --fixture-root "$tmp_dir" >/dev/null
+"${FIXTURE_AUDIT[@]}" --fixture-root "$tmp_dir" >/dev/null
 
 rm "$tmp_dir/.github/workflows/docker.yml"
-if "$SCRIPT" --fixture-root "$tmp_dir" >/dev/null 2>&1; then
+if "${FIXTURE_AUDIT[@]}" --fixture-root "$tmp_dir" >/dev/null 2>&1; then
   echo "fixture audit should fail when required workflow is missing" >&2
   exit 1
 fi

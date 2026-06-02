@@ -103,7 +103,7 @@ bash -n \
 
 python3 scripts/target_audit.py --check-target-mvp "$JACKIN_ROOT" "$CHAINARGOS_ROOT" >/tmp/velnor-target-audit.txt
 python3 scripts/target_audit.py --self-test "$JACKIN_ROOT" "$CHAINARGOS_ROOT" >/tmp/velnor-target-audit-self-test.txt
-python3 scripts/check_runner_reference.py
+cargo run -q -p velnor-tools -- check-runner-reference
 scripts/fixture_audit_test.sh
 scripts/fixture_readiness_test.sh
 scripts/fixture_report_test.sh

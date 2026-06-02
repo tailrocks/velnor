@@ -27,7 +27,7 @@ Reference upstream:
 - `actions/runner` release commit: `f1995ede5d885c997d13d8eca5467c4ce97fe69c`
 - `actions/runner` `main` rechecked on 2026-06-01:
   `c6a124e18496a6e5d2357415052d1799afc64b63`
-- Velnor drift check: `scripts/check_runner_reference.py`
+- Velnor drift check: `cargo run -q -p velnor-tools -- check-runner-reference`
 - source audit: `docs/research/actions-runner-source-audit-2026-06-01.md`
 - latest V2 refresh: `docs/research/latest-runner-v2-refresh-2026-06-01.md`
 - implementation gap audit:
@@ -41,8 +41,9 @@ code (`ActionManager`, DAP files, `ExecutionContext`, `JobExtension`,
 V2 broker/run-service implementation contract.
 
 The latest release was rechecked again on 2026-06-01 during scope cleanup.
-`scripts/check_runner_reference.py` still reports `actions/runner` `v2.334.0`
-as current, and `crates/velnor-runner/src/protocol.rs` still advertises
+`cargo run -q -p velnor-tools -- check-runner-reference` still reports
+`actions/runner` `v2.334.0` as current, and
+`crates/velnor-runner/src/protocol.rs` still advertises
 `actions-runner/2.334.0 (velnor)`.
 
 Latest local verifier evidence:
@@ -54,8 +55,8 @@ Latest local verifier evidence:
   workflow dispatch helper self-test.
 - `cargo test -q` passed on 2026-06-01 with 289 unit tests and 1 integration
   test.
-- `scripts/check_runner_reference.py` reported `actions/runner` `v2.334.0` as
-  current during that verifier run.
+- `cargo run -q -p velnor-tools -- check-runner-reference` reported
+  `actions/runner` `v2.334.0` as current during that verifier run.
 
 Implementation facts:
 
@@ -75,7 +76,7 @@ Implementation facts:
 
 | Area | Current evidence |
 | --- | --- |
-| Latest runner pin | `RUNNER_VERSION = 2.334.0`; `scripts/check_runner_reference.py` checks GitHub latest release and user-agent drift. |
+| Latest runner pin | `RUNNER_VERSION = 2.334.0`; `cargo run -q -p velnor-tools -- check-runner-reference` checks GitHub latest release and user-agent drift. |
 | V2-only hosted path | `velnor-runner run` requires `UseV2Flow` and `ServerUrlV2`; normal path uses broker session/message plus run-service acquire/renew/complete, with bounded broker session startup retry and best-effort session deletion on runner-loop errors. |
 | Run safety preflight | `velnor-runner run` performs Docker preflight before polling GitHub for executable jobs, preserving target workdir, daemon-visible workdir, Buildx, and Docker socket requirements before acquiring a queued job. |
 | Broker controls | `BrokerMigration`, `ForceTokenRefresh`, runner update/refresh, hosted shutdown, busy-job cancellation, transient broker poll retry, and empty-message backoff are recognized. |
@@ -136,7 +137,8 @@ Evidence captured on 2026-06-01:
 - `scripts/fixture_status.sh` still shows `compat-velnor (app-a)` and
   `compat-velnor (app-b)` queued until a Velnor self-hosted runner with label
   `velnor-target-mvp` is registered.
-- `scripts/fixture_audit.py` passes against `donbeave/velnor-actions-fixture@main`,
+- `cargo run -q -p velnor-tools -- fixture-audit` passes against
+  `donbeave/velnor-actions-fixture@main`,
   checking the current `compat.yml`, `docker.yml`, and local composite action
   metadata expected by the fixture proof.
 
