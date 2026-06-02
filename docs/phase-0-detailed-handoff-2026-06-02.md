@@ -17,11 +17,14 @@ matrix expansion, secrets, permissions, scheduling, and UI.
 ## Current State
 
 The local implementation is ready for live fixture testing, but Phase 0 is not
-complete.
+complete. In this document, "supported" means "implemented and covered by local
+target-shaped checks." It does not mean the feature has already passed through a
+live GitHub run on Velnor.
 
 Current proof state:
 
-- local verifier gates pass
+- local verifier gates pass for the current implementation; the last code
+  commit under test was `11dc891`
 - the public fixture repository exists and GitHub-hosted fixture lanes passed
 - Velnor fixture lanes are still queued, waiting for a usable Velnor runner
 - this workstation cannot run the fixture proof because Docker is remote and
@@ -46,6 +49,15 @@ Latest generated readiness report:
   `ad354fdc83bb434bb27434e56a2117fa4aab2724`
 - blocker: missing local Docker socket while `DOCKER_HOST` points at
   `tcp://jk-php3ngrs-thearchitect-dind:2376`
+
+Current local gate evidence from this audit:
+
+- `scripts/target_verify.sh` passed with 80 focused Rust checks, target audit,
+  fixture self-tests, live helper self-tests, smoke failure evidence checks, and
+  workflow dispatch helper checks.
+- `cargo test -q` passed with 289 unit tests and 1 integration test.
+- `scripts/check_runner_reference.py`, through the verifier, reported
+  `actions/runner v2.334.0` as current.
 
 ## What Is Done
 
@@ -129,6 +141,12 @@ Current Docker model:
 - not DinD
 - not rootless Docker
 - not a containerized daemon per job
+
+Security note:
+
+- Mounting `/var/run/docker.sock` gives the job container effective control of
+  the host Docker daemon. Phase 0 uses Docker containers for repeatable job
+  environments and cleanup, not for strong tenant isolation.
 
 ### GitHub Job Execution
 
@@ -307,7 +325,7 @@ Supported because target repositories use it:
 - Docker/Buildx/Bake workflows through host Docker socket
 - cache/artifact handoff on one Velnor host
 
-### Supported Target Workflows
+### Target Workflows In The Current Audit
 
 ChainArgos target workflows:
 
@@ -328,6 +346,16 @@ Jackin target workflows:
 - Linux paths from `release.yml`
 - `renovate.yml`
 - `renovate-validate.yml`
+
+Accuracy note:
+
+- These workflows are covered by the current target audit and native adapter
+  inventory. They are not all live-proven yet.
+- The first live target proof should focus on the Rust/Docker/Linux paths. The
+  Renovate workflows are locally covered, but can remain a later manual target
+  proof unless the user explicitly asks to run them.
+- Jackin `preview.yml` and `release.yml` are Linux-only follow-up paths after
+  `ci.yml`, `construct.yml`, and `docs.yml` are clean.
 
 ### Supported Fixture Surface
 
@@ -354,6 +382,14 @@ Fixture feature coverage:
   - `GITHUB_PATH`
   - `GITHUB_STEP_SUMMARY`
 - Docker Buildx setup/build workflow
+
+Fixture accuracy note:
+
+- `compat.yml` is the first fixture proof and already has GitHub-hosted lanes
+  passing.
+- The fixture Docker workflow is a separate required proof before relying on
+  target Docker/Buildx workflows. It has not passed on Velnor yet because the
+  current host cannot provide `/var/run/docker.sock` to job containers.
 
 ## What Is Not Supported In Phase 0
 
@@ -386,6 +422,12 @@ Expected audit exclusions:
 - target audit still lists macOS/apple matrix signals from Jackin
 - `scripts/target_verify.sh` accepts those signals because macOS is outside
   Phase 0
+
+Potentially confusing implementation detail:
+
+- Lower-level container structs include service-container support, but target
+  workflow `services:` is still treated as unsupported Phase 0 surface because
+  the selected target workflows do not require it.
 
 ## What Is Already Tested
 
@@ -481,8 +523,33 @@ Not yet proven:
 
 - Velnor consuming queued fixture jobs
 - fixture compare job passing after Velnor lanes complete
+- fixture Docker workflow passing on Velnor
+- target secrets and registry credentials working inside Velnor job containers
+- GitHub UI parity for Velnor logs, annotations, summaries, job outputs, and
+  final conclusions
 
 ## What Still Needs Testing
+
+### What The File Previously Understated
+
+The implementation is close to live fixture testing, but the following points
+must stay explicit:
+
+- Local tests prove target-shaped behavior, not GitHub UI parity.
+- The current readiness report is blocker evidence, not a green live proof.
+- The fixture `compat.yml` proof and the fixture Docker workflow proof are two
+  separate gates.
+- Docker socket mounting is powerful and should be treated as trusted-runner
+  infrastructure, not a secure sandbox boundary.
+- Cache/artifact behavior is local shared-workdir behavior. It is enough for
+  same-host Phase 0 proof, but it is not GitHub service-backed cache/artifact
+  parity.
+- Target repository smoke scripts are manual-operator scripts. Agents must not
+  set `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`.
+- Target audits rely on fresh local target checkouts. Use
+  `scripts/target_verify.sh`, not only raw workflow inspection.
+- GitHub's runner protocol can drift. Re-run `scripts/target_verify.sh` and its
+  runner-reference check before each serious live proof attempt.
 
 ### Required Live Fixture Tests
 
@@ -498,6 +565,13 @@ Need to prove:
   tested
 - fixture compare job passes
 - GitHub UI logs and conclusions are readable
+
+Required fixture order:
+
+1. `compat.yml`: prove basic GitHub/Velnor comparison lanes and command-file,
+   matrix, cache, artifact, and composite behavior.
+2. Fixture Docker workflow: prove Docker socket, Docker CLI, Buildx plugin, and
+   container-to-host Docker behavior before target Docker workflows.
 
 ### Required ChainArgos Tests
 
@@ -649,7 +723,7 @@ Then inspect:
 .velnor-live-evidence/fixture-readiness-report.md
 ```
 
-### Step 4: Run Public Fixture Smoke
+### Step 4: Run Public Fixture Compat Smoke
 
 On a host that passed readiness:
 
@@ -688,16 +762,33 @@ Expected:
 - evidence markdown is written
 - job dumps are sanitized
 
-### Step 5: Stop Agent-Owned Execution
+### Step 5: Run Public Fixture Docker Smoke
 
-After fixture proof is green:
+After `compat.yml` is green, run the fixture Docker workflow on the same
+Docker-visible Linux host. The exact workflow name and job count should be
+confirmed from the fixture workflow before dispatch.
+
+Expected:
+
+- Docker socket is visible inside the Velnor job container
+- Docker CLI works inside the Velnor job container
+- Docker Buildx works inside the Velnor job container
+- Docker build output matches the GitHub-hosted fixture lane expectation
+- GitHub UI logs and conclusions remain readable
+
+Do not treat target Docker/Buildx workflows as ready until this fixture Docker
+proof is green.
+
+### Step 6: Stop Agent-Owned Execution
+
+After fixture compat and Docker proofs are green:
 
 - report readiness for manual target validation
 - do not register Velnor against ChainArgos or Jackin automatically
 - do not dispatch real target workflows automatically
 - do not set `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`
 
-### Step 6: Manual ChainArgos Sequence
+### Step 7: Manual ChainArgos Sequence
 
 User/operator runs:
 
@@ -732,7 +823,7 @@ VELNOR_CHAINARGOS_DOCKER_PUSH=false \
 scripts/chainargos_rust_target_sequence.sh
 ```
 
-### Step 7: Manual Jackin Sequence
+### Step 8: Manual Jackin Sequence
 
 User/operator runs:
 
@@ -767,7 +858,7 @@ VELNOR_TARGET_JOB_COUNT=5 \
 scripts/jackin_target_smoke.sh
 ```
 
-### Step 8: Fix Only Evidence-Backed Failures
+### Step 9: Fix Only Evidence-Backed Failures
 
 When live failures happen, use:
 
@@ -817,27 +908,28 @@ because Docker/Buildx workflows would fail inside job containers.
 
    Fix host readiness before continuing.
 
-4. If readiness passes, run:
+4. If readiness passes, run fixture compat smoke:
 
    ```sh
    scripts/fixture_smoke.sh
    ```
 
-5. Verify fixture evidence:
+5. Verify fixture compat evidence:
 
    ```sh
    scripts/fixture_status.sh
    ls -1 .velnor-live-evidence
    ```
 
-6. If fixture fails, fix only evidence-backed issues.
-7. If fixture passes, report ready for manual ChainArgos validation.
-8. User/operator manually runs ChainArgos sequence with
+6. Run fixture Docker smoke on the same Docker-visible host.
+7. If either fixture proof fails, fix only evidence-backed issues.
+8. If both fixture proofs pass, report ready for manual ChainArgos validation.
+9. User/operator manually runs ChainArgos sequence with
    `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`.
-9. Fix only evidence-backed target failures.
-10. User/operator manually runs Jackin sequence with
+10. Fix only evidence-backed target failures.
+11. User/operator manually runs Jackin sequence with
     `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`.
-11. If both target sequences pass in GitHub UI, record final evidence and then
+12. If both target sequences pass in GitHub UI, record final evidence and then
     Phase 0 can be considered proven for these repositories.
 
 ## Completion Criteria
@@ -846,6 +938,7 @@ Phase 0 is complete only when all of the following are true:
 
 - public fixture Velnor lanes pass
 - fixture compare job passes
+- fixture Docker workflow passes on Velnor
 - ChainArgos selected Rust/Docker workflows pass on Velnor in GitHub UI
 - Jackin selected Linux workflows pass on Velnor in GitHub UI
 - logs are readable in GitHub UI
