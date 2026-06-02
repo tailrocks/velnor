@@ -333,8 +333,8 @@ Live proof stages:
 
 1. public fixture readiness
 2. public fixture smoke through Velnor JIT/V2
-3. ChainArgos target proof, user/operator owned
-4. Jackin Linux target proof, user/operator owned
+3. Sentry fixture proof with comparison evidence
+4. readiness handoff for user/operator-owned target testing
 
 Completion requires GitHub Actions UI evidence:
 
@@ -415,8 +415,8 @@ Future fixture expansion should cover:
 
 ### 3. Real Server Verification
 
-Goal: prove Velnor works on the real runner host before target repository
-validation.
+Goal: prove Velnor works on the real runner host and is ready for operator-led
+target repository validation.
 
 Server access:
 
@@ -430,17 +430,32 @@ On the server:
 - build or pull `velnor/job-ubuntu:24.04`
 - run Velnor preflight
 - run public fixture smoke through V2 JIT
+- compare fixture outputs, artifacts, logs, conclusions, and timing against the
+  GitHub-hosted lane
 - collect GitHub run URLs and evidence
 - confirm no unrelated containers are stopped, deleted, pruned, or modified
 
-Only after the fixture is green on the real server should target repository
-validation start.
+Only after the fixture is green on Sentry, behavior is equivalent, and evidence
+is collected should Velnor be marked ready for manual target repository testing.
 
-### 4. Target Repository Verification
+### 4. Manual Target Repository Handoff
 
-Goal: prove Jackin and ChainArgos Rust workflows are drop-in compatible.
+Target repositories are not part of the automated roadmap execution. They are
+manual validation surfaces owned by the user/operator.
 
-Order:
+When Sentry and fixture verification pass, Velnor should produce a readiness
+notice for operators:
+
+```text
+Velnor is ready for manual target repository testing.
+Fixture verification passed on Sentry.
+Behavior matched the GitHub-hosted comparison lane for required logs, outputs,
+artifacts, cache behavior, conclusions, and timing evidence.
+Please run the target repository validation steps below and send feedback with
+GitHub run URLs, failures, logs, artifacts, and timing notes.
+```
+
+Recommended manual order:
 
 1. ChainArgos Rust workflow set
 2. ChainArgos Docker/Buildx workflow set
@@ -449,8 +464,9 @@ Order:
 5. Jackin `docs.yml`
 6. later Jackin Linux release/preview paths
 
-User/operator owns target repository execution. Agent must not set
-`VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`.
+User/operator owns all target repository execution. Agent must not set
+`VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`, dispatch target workflows, or claim
+target validation complete without operator evidence.
 
 Acceptance rule:
 
@@ -554,18 +570,23 @@ Open naming choice:
 - verify Velnor lanes pass and compare-results passes
 - collect evidence markdown
 
-### 7. Run target proofs with operator control
+### 7. Produce manual target-testing handoff
 
-- user/operator runs ChainArgos sequence after fixture green
-- user/operator runs Jackin Linux sequence after ChainArgos green
-- agent does not set `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`
+- summarize Sentry fixture evidence
+- state that Velnor is ready for manual target repository testing
+- provide exact commands and expected evidence for user/operator-run ChainArgos
+  and Jackin validation
+- request feedback with GitHub run URLs, failures, logs, artifacts, and timing
+  notes
+- agent does not set `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`, dispatch target
+  workflows, or perform target validation itself
 
 ## Open Questions For User
 
 1. CLI naming: should `configure` remain and become JIT-only, or should Velnor
    expose a clearer `jit-configure` command?
 2. macOS host support: should Velnor officially support native macOS daemon
-   process from Phase 0, or mark it required before target proof?
+   process from Phase 0, or mark it required before manual target testing?
 3. Runner labels: should Velnor allow `ubuntu-latest`/`ubuntu-24.04` on macOS
    daemon hosts when Docker provides Linux containers?
 4. ARM: should ARM label support require host CPU ARM, Docker platform ARM, or

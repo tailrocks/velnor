@@ -380,7 +380,7 @@ cargo run --bin velnor-runner -- run \
   --once
 ```
 
-For normal target proof, prefer the smoke scripts or `daemon --once --slots N`;
+For manual target testing, prefer the smoke scripts or `daemon --once --slots N`;
 the single-slot `run --once` command is only a low-level diagnostic path.
 
 ## Cleanup
