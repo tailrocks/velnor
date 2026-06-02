@@ -154,22 +154,11 @@ fn verify_container_docker_client(
     docker_image: &str,
     require_buildx: bool,
 ) -> Result<()> {
-    let docker_cli = find_executable_on_path("docker")
-        .ok_or_else(|| anyhow::anyhow!("host Docker CLI not found on PATH"))?;
-    let plugin_dir = host_docker_cli_plugin_dir();
-    if plugin_dir.is_none() && require_buildx {
-        bail!("host Docker Buildx plugin directory not found");
-    }
-    let args = container_docker_client_args(
-        docker_image,
-        &docker_cli,
-        plugin_dir.as_deref(),
-        require_buildx,
-    );
+    let args = container_docker_client_args(docker_image, require_buildx);
     let result = runner.run("docker", &args)?;
     if result.code != 0 {
         bail!(
-            "Docker CLI/Buildx is not usable inside job image '{}'. stderr: {}",
+            "Docker CLI/Buildx is not usable inside job image '{}'. Use Velnor's Ubuntu job image or provide a --docker-image with Docker CLI and Buildx installed. stderr: {}",
             docker_image,
             result.stderr
         );
@@ -177,29 +166,13 @@ fn verify_container_docker_client(
     Ok(())
 }
 
-fn container_docker_client_args(
-    docker_image: &str,
-    docker_cli: &Path,
-    plugin_dir: Option<&Path>,
-    require_buildx: bool,
-) -> Vec<String> {
+fn container_docker_client_args(docker_image: &str, require_buildx: bool) -> Vec<String> {
     let mut args = vec![
         "run".to_string(),
         "--rm".to_string(),
         "-v".to_string(),
         "/var/run/docker.sock:/var/run/docker.sock".to_string(),
-        "-v".to_string(),
-        format!("{}:/usr/local/bin/docker:ro", docker_cli.display()),
     ];
-    if let Some(plugin_dir) = plugin_dir {
-        args.extend([
-            "-v".to_string(),
-            format!(
-                "{}:/usr/local/lib/docker/cli-plugins:ro",
-                plugin_dir.display()
-            ),
-        ]);
-    }
     args.extend([
         docker_image.to_string(),
         "sh".to_string(),
@@ -323,29 +296,6 @@ fn preflight_work_dir(work_dir: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-fn host_docker_cli_plugin_dir() -> Option<PathBuf> {
-    if let Some(path) = find_executable_on_path("docker-buildx") {
-        return path.parent().map(Path::to_path_buf);
-    }
-    [
-        "/usr/local/lib/docker/cli-plugins/docker-buildx",
-        "/usr/local/libexec/docker/cli-plugins/docker-buildx",
-        "/usr/lib/docker/cli-plugins/docker-buildx",
-        "/usr/libexec/docker/cli-plugins/docker-buildx",
-    ]
-    .into_iter()
-    .map(PathBuf::from)
-    .find(|path| path.is_file())
-    .and_then(|path| path.parent().map(Path::to_path_buf))
-}
-
-fn find_executable_on_path(name: &str) -> Option<PathBuf> {
-    let paths = std::env::var_os("PATH")?;
-    std::env::split_paths(&paths)
-        .map(|dir| dir.join(name))
-        .find(|path| path.is_file())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,17 +348,12 @@ mod tests {
     }
 
     #[test]
-    fn docker_client_args_mount_socket_cli_and_buildx_plugins() {
-        let docker = Path::new("/usr/bin/docker");
-        let plugin_dir = Some(Path::new("/usr/libexec/docker/cli-plugins"));
-
-        let args = container_docker_client_args("ubuntu:24.04", docker, plugin_dir, true);
+    fn docker_client_args_require_cli_inside_job_image() {
+        let args = container_docker_client_args("ubuntu:24.04", true);
 
         assert!(args.contains(&"/var/run/docker.sock:/var/run/docker.sock".to_string()));
-        assert!(args.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".to_string()));
-        assert!(args.contains(
-            &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".to_string()
-        ));
+        assert!(!args.iter().any(|arg| arg.contains("/usr/local/bin/docker")));
+        assert!(!args.iter().any(|arg| arg.contains("cli-plugins")));
         assert!(args.contains(&"docker version && docker buildx version".to_string()));
     }
 

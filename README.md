@@ -11,7 +11,8 @@ The user experience should feel close to GitHub Actions: workflows, triggers, jo
 The first implementation target:
 
 - existing `.github/workflows/*.yml` files keep working
-- Velnor registers as a GitHub self-hosted runner replacement
+- Velnor appears to GitHub as a self-hosted runner replacement through the
+  current V2 just-in-time runner path
 - jobs run inside Docker-isolated environments
 - the initial scope is the workflows used by `jackin-project/jackin` and `ChainArgos/java-monorepo`
 
@@ -35,22 +36,36 @@ from Phase 0 runner compatibility work.
 
 See [docs/vision.md](docs/vision.md).
 
+Runner setup decision: [docs/github-runner-v2-jit-decision.md](docs/github-runner-v2-jit-decision.md).
+
 ## Current Runner State
 
-The first Rust crate is `velnor-runner`. It can register as a GitHub
-self-hosted runner, requires the current V2 broker/run-service flow, and runs
-supported target jobs in Docker with Rust-native adapters for the marketplace
-actions used by the target repositories.
+The first Rust crate is `velnor-runner`. Velnor targets GitHub's current V2
+broker/run-service flow only. The supported setup path is GitHub's public
+just-in-time runner configuration API, which returns an `encoded_jit_config`
+with `UseV2Flow=true` and `ServerUrlV2`.
+
+Classic runner registration-token setup is not a Velnor product path. Hosted
+GitHub can return classic-only settings through that path, and Velnor should
+not chase that route or implement classic distributed-task polling as a fallback.
+If a setup path does not provide V2 settings, it is unsupported.
+
+Velnor runs supported target jobs in Docker with Rust-native adapters for the
+marketplace actions used by the target repositories.
 The product target is a daemon that manages multiple internal GitHub runner
 slots, so one Velnor process can acquire multiple GitHub jobs and spawn one
 isolated Docker container per job concurrently. The daemon does not reuse one
-GitHub runner identity across concurrent jobs; each slot owns a separate runner
-registration and broker session. The current `run --once` path remains the
+GitHub runner identity across concurrent jobs; each slot owns a separate JIT
+runner identity and broker session. The current `run --once` path remains the
 single-slot compatibility/proof path.
 `configure`, `run`, and `preflight` are Linux-only commands; Velnor refuses
-non-Linux hosts instead of pretending to satisfy Linux runner labels elsewhere.
-It also refuses macOS/Darwin runner labels. Any macOS legs in existing target
-workflows are outside Velnor's execution surface.
+non-Linux process environments instead of pretending to satisfy Linux runner
+labels elsewhere. Running the Velnor daemon inside a Linux Docker container is
+supported, including from Docker Desktop on macOS, as long as the container can
+reach the Docker daemon and the daemon can see Velnor's bind-mounted work
+directory. Native macOS process execution is not supported. Velnor also refuses
+macOS/Darwin runner labels. Any macOS legs in existing target workflows are
+outside Velnor's execution surface.
 
 ```sh
 cargo run --bin velnor-runner -- configure \
@@ -77,20 +92,26 @@ cargo run --bin velnor-runner -- run
 cargo run --bin velnor-runner -- remove --pat "$GITHUB_TOKEN" --slots 2
 ```
 
-`configure` validates runner scope URLs, can request a short-lived GitHub runner
-token from `--pat`, exchanges that runner token for tenant credentials, and can
-add/replace a runner agent in the selected pool. `run` exchanges stored OAuth
-runner credentials, requires GitHub's current V2 broker settings, runs Docker
-preflight before polling for executable jobs, creates a broker session, polls
-broker messages, acquires jobs from run-service, renews locks, executes
-supported jobs, and completes them through run-service.
-`daemon` runs the same V2 slot loop concurrently from one Velnor process. If
-`--url` is provided, it requests short-lived runner registration tokens through
-`--pat` or uses `--token`, configures any missing internal slot, then starts
-polling. Existing valid slot configs are reused on restart; pass `--replace` to
-force re-registration. `--dry-run-registration` validates and writes dry-run
-slot payloads, then exits before polling because dry-run configs do not contain
-usable runner credentials. With `--slots 1`, it uses the normal config
+Current commands still include legacy configuration flags while the code moves
+to the JIT-only setup path. Product behavior is now defined as:
+
+- Velnor uses `POST /repos/{owner}/{repo}/actions/runners/generate-jitconfig`
+  for repository targets, or the matching organization/enterprise JIT endpoint.
+- Velnor decodes `encoded_jit_config`, stores the ephemeral runner identity,
+  OAuth credentials, `UseV2Flow`, and `ServerUrlV2`, then starts the broker
+  session.
+- Each daemon slot gets its own JIT runner config. JIT runners are ephemeral, so
+  long-running daemon mode must recycle a slot by creating a new JIT runner
+  config after a job completes or a slot becomes unusable.
+- Classic distributed-task polling and classic registration-token fallback are
+  intentionally unsupported.
+
+`run` exchanges stored OAuth runner credentials, requires GitHub's current V2
+broker settings, runs Docker preflight before polling for executable jobs,
+creates a broker session, polls broker messages, acquires jobs from run-service,
+renews locks, executes supported jobs, and completes them through run-service.
+`daemon` runs the same V2 slot loop concurrently from one Velnor process. With
+`--slots 1`, it uses the normal config
 directory. With `--slots N` where `N > 1`, slot configs live under `<config-dir>/slots/slot-1`,
 `<config-dir>/slots/slot-2`, and so on; each slot also receives its own `slot-N`
 child under any explicit work, Docker-host work, or job-message dump directory.
@@ -148,6 +169,57 @@ and fixture-audit checks have already moved to `velnor-tools`.
 The live proof scripts are Linux-only as well; they fail before runner
 registration on non-Linux hosts, and reject `VELNOR_TARGET_MVP_ARM_LABEL=true`
 unless the host is ARM Linux.
+
+To run Velnor itself from Docker on a macOS workstation, build the project-owned
+Ubuntu job image and the Velnor daemon image, then pass both the
+container-visible work directory and the Docker-daemon-visible host work
+directory:
+
+```sh
+docker build -f docker/job-ubuntu.Dockerfile -t velnor/job-ubuntu:24.04 .
+docker build -t velnor-runner:local .
+mkdir -p "$PWD/.velnor-work" "$PWD/.velnor-config" "$PWD/.velnor-job-dumps"
+
+docker run --rm \
+  --name velnor-local-preflight \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v "$PWD/.velnor-work:/work/.velnor-work" \
+  -v "$PWD/.velnor-config:/config" \
+  -v "$PWD/.velnor-job-dumps:/work/.velnor-job-dumps" \
+  velnor-runner:local preflight \
+    --work-dir /work/.velnor-work \
+    --docker-host-work-dir "$PWD/.velnor-work" \
+    --require-docker-socket
+```
+
+The same path mapping is required for `daemon` and `run`:
+
+```sh
+docker run --rm \
+  --name velnor-fixture-daemon \
+  -e GITHUB_TOKEN \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v "$PWD/.velnor-work:/work/.velnor-work" \
+  -v "$PWD/.velnor-config:/config" \
+  -v "$PWD/.velnor-job-dumps:/work/.velnor-job-dumps" \
+  velnor-runner:local daemon \
+    --url https://github.com/donbeave/velnor-actions-fixture \
+    --pat "$GITHUB_TOKEN" \
+    --name velnor-target-mvp \
+    --labels velnor-target-mvp \
+    --replace \
+    --slots 2 \
+    --once \
+    --config-dir /config \
+    --work-dir /work/.velnor-work \
+    --docker-host-work-dir "$PWD/.velnor-work" \
+    --dump-job-message /work/.velnor-job-dumps/fixture \
+    --require-docker-socket
+```
+
+Those commands create only explicitly named `velnor-*` proof containers and
+job-specific `velnor-job-*` / `velnor-net-*` resources. They do not prune,
+remove, or stop unrelated Docker containers.
 
 The ChainArgos Rust target smoke wrapper is:
 
@@ -277,10 +349,12 @@ runner process, set `VELNOR_DOCKER_HOST_WORK_DIR` to that daemon-visible path.
 For a remote Docker daemon without a local `/var/run/docker.sock`, set
 `VELNOR_REQUIRE_DOCKER_SOCKET=false` for the fixture smoke run.
 For target jobs, Velnor runs the job in a Docker container and mounts
-`/var/run/docker.sock` plus the host Docker/Buildx client into that container
-when the socket is present. This is the Phase 0 Docker-outside-of-Docker model:
-workflow steps inside the job container can run `docker`/`docker buildx`, and
-service containers share the per-job Docker network with GitHub-style aliases.
+`/var/run/docker.sock` into that container when the socket is present. The
+default `velnor/job-ubuntu:24.04` image is built from official `ubuntu:24.04`
+and contains the Docker CLI and Buildx plugin, so workflow steps inside the job
+container can run `docker`/`docker buildx` without relying on host binary
+mounts. Service containers share the per-job Docker network with GitHub-style
+aliases.
 To force reuse of an existing run, set `VELNOR_FIXTURE_DISPATCH=false` together
 with `VELNOR_FIXTURE_RUN_ID=<run-id>`.
 The smoke script removes the temporary fixture runner on exit by default; set

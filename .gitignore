@@ -8,6 +8,7 @@ build/
 target/
 coverage/
 .velnor-work/
+.velnor-config/
 .velnor-job-dumps/
 .velnor-live-evidence/
 target-job-payloads/

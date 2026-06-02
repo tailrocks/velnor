@@ -7,7 +7,31 @@ This is the first concrete wire contract Velnor should emulate.
 
 GitHub does not document this protocol as a stable public API. Velnor still intentionally depends on it in Phase 0: the project goal is drop-in self-hosted runner compatibility, and that requires speaking the same registration, broker, run-service, and job-completion contracts as the official runner. Protocol drift should be handled with live compatibility tests and narrow contract fixtures.
 
-## Scope URLs
+## Velnor Product Scope
+
+Velnor uses GitHub runner V2 only. The supported setup path is GitHub's
+just-in-time runner configuration endpoint:
+
+```text
+POST https://api.github.com/repos/OWNER/REPO/actions/runners/generate-jitconfig
+POST https://api.github.com/orgs/ORG/actions/runners/generate-jitconfig
+POST https://api.github.com/enterprises/NAME/actions/runners/generate-jitconfig
+```
+
+The response contains `encoded_jit_config`. Velnor decodes that config and
+expects runner settings with `UseV2Flow=true` and `ServerUrlV2`. That is the
+only accepted hosted GitHub setup result.
+
+Classic registration-token setup is not a product path. Hosted GitHub can
+return classic-only tenant credentials through `actions/runner-registration`;
+that path does not satisfy Velnor's goal. Velnor should fail if setup does not
+yield V2 settings, not implement classic distributed-task polling.
+
+For GitHub Enterprise Server, REST API URLs use `/api/v3`; that is unrelated to
+runner V2. Runner V2 means broker/run-service settings (`UseV2Flow` and
+`ServerUrlV2`), not REST API version 3.
+
+## Legacy Scope URLs
 
 For hosted GitHub, the runner maps configured URLs to API URLs like this:
 
@@ -204,7 +228,7 @@ POST <run_service_url>/_apis/runtime/runs/{planId}/jobs/{jobId}/complete
 
 For hosted GitHub, Velnor targets broker/run-service V2 only. In the current upstream runner (`c6a124e`), the listener chooses `BrokerMessageListener` whenever `RunnerSettings.UseV2Flow` is set. GitHub can enforce this during configuration by returning agent properties such as `ServerUrlV2` and `UseV2Flow`.
 
-Classic distributed-task polling is legacy for this project. Velnor does not implement it in the normal runner path. If a registration does not provide `UseV2Flow` and `ServerUrlV2`, `velnor-runner run` fails and asks the operator to reconfigure against the latest hosted GitHub registration flow.
+Classic distributed-task polling is legacy for this project. Velnor does not implement it in the normal runner path. If setup does not provide `UseV2Flow` and `ServerUrlV2`, `velnor-runner run` fails and the operator must use the JIT configuration path.
 
 Target MVP live proof must use V2 broker session/message polling, run-service `acquirejob`, run-service `renewjob`, and run-service `completejob`.
 
@@ -216,7 +240,12 @@ Run-service `acquirejob` uses the runner OAuth token. After the full job is acqu
 
 ## Runner Removal
 
-Remote unregister mirrors registration:
+JIT runners are ephemeral and should normally disappear after one handled job.
+If Velnor creates a JIT runner but never reaches job execution, cleanup should
+delete that exact runner id through the public self-hosted runner API. Cleanup
+must never remove unrelated runners.
+
+Legacy remote unregister mirrors classic registration:
 
 ```text
 POST https://api.github.com/repos/OWNER/REPO/actions/runners/remove-token

@@ -6,7 +6,7 @@ Status: active implementation
 
 Velnor's first phase is not Pkl, PQL, KCL, or Velnor-native workflow authoring.
 
-Phase 0 is a Rust implementation of a GitHub self-hosted runner-compatible agent. Existing repositories keep their current `.github/workflows/*.yml` files and local `.github/actions/*` actions. The user installs/registers Velnor as a self-hosted runner, gives it the same labels used by current workflows, and GitHub schedules existing jobs to it.
+Phase 0 is a Rust implementation of a GitHub self-hosted runner-compatible agent. Existing repositories keep their current `.github/workflows/*.yml` files and local `.github/actions/*` actions. The user runs Velnor as a self-hosted runner replacement, Velnor creates just-in-time GitHub runner identities with the same labels used by current workflows, and GitHub schedules existing jobs to those runner slots.
 
 Configuration-language work remains archived brainstorming. It is not part of
 Phase 0.
@@ -39,7 +39,7 @@ job container + actions + scripts
 
 ## What GitHub Still Owns In Phase 0
 
-Because Velnor registers as a self-hosted runner, GitHub still owns:
+Because Velnor appears as self-hosted runner slots, GitHub still owns:
 
 - event triggers
 - YAML parsing
@@ -59,7 +59,7 @@ This is good. It means Phase 0 does not need to parse GitHub workflow YAML or im
 
 Velnor must implement enough of the runner side:
 
-- register/unregister runner with GitHub
+- create and remove just-in-time runner identities with GitHub
 - maintain runner session
 - long-poll for job messages
 - acknowledge/delete messages
@@ -297,8 +297,8 @@ Phase 0 Velnor runner should have these modules:
 ```text
 velnor-runner
   config
-    register
-    unregister
+    jit configure
+    remove
     credential store
   protocol
     session create/delete
@@ -335,20 +335,20 @@ The official `actions/runner` source is the best reference. The protocol is not 
 
 For Velnor, this is an acceptable constraint. The project intentionally targets compatibility with the private GitHub runner protocol, starting with the behavior needed by the target repositories.
 
-The official runner flow:
+Velnor's product flow:
 
-1. Configure runner using a registration token.
-2. Register or replace an agent with labels and public key.
-3. Store runner settings and OAuth credential data.
-4. Create an agent session.
-5. Long-poll for `TaskAgentMessage`.
-6. Decrypt message if session encryption is enabled.
-7. Dispatch `AgentJobRequestMessage` to a worker process.
-8. Renew job lock every 60 seconds while running.
-9. Run job steps.
-10. Report logs/timeline through job server.
-11. Finish job request with result.
-12. Delete/ack message and continue polling.
+1. Request GitHub JIT runner configuration with runner name, runner group, labels, and work folder.
+2. Decode `encoded_jit_config`.
+3. Require `UseV2Flow=true` and `ServerUrlV2`.
+4. Store ephemeral runner settings and OAuth credential data.
+5. Create a V2 broker session.
+6. Long-poll broker messages.
+7. Acknowledge and acquire run-service job references.
+8. Dispatch acquired job payloads to the Docker worker.
+9. Renew job lock while running.
+10. Run job steps.
+11. Report logs/timeline through job server.
+12. Complete job through run-service, then recycle the ephemeral slot.
 
 Velnor can simplify process boundaries, but should preserve protocol behavior.
 
@@ -363,8 +363,8 @@ Velnor can simplify process boundaries, but should preserve protocol behavior.
 
 Live hosted GitHub compatibility proof from 2026-06-01:
 
-- registration and removal tokens work
-- runner agent registration works
+- JIT configuration returns V2 settings for hosted GitHub repo targets
+- registration-token flow can be classic-only and is not a Velnor product path
 - broker session/message poll works
 - run-service job acquisition works
 - run-service completion works for `--complete-noop`
@@ -396,7 +396,7 @@ as a valid failure of the Velnor step runner.
 
 Phase 0 is successful when:
 
-1. Velnor registers as a self-hosted runner in GitHub.
+1. Velnor creates a JIT self-hosted runner slot in GitHub.
 2. GitHub assigns a real job from one target repository to Velnor.
 3. Velnor runs the job in a Docker-isolated environment.
 4. Logs appear in the GitHub Actions UI.

@@ -41,8 +41,8 @@ pub fn github_job_container_spec(
         options: job_container_options(job),
         services: service_containers(job),
         node_action_image: node_action_image.to_string(),
-        docker_cli_host_path: host_docker_cli_path(),
-        docker_cli_plugin_host_dir: host_docker_cli_plugin_dir(),
+        docker_cli_host_path: None,
+        docker_cli_plugin_host_dir: None,
         docker_host_work_dir: paths.docker_host_work_dir,
         verify_bind_mounts: true,
     }

@@ -16,28 +16,31 @@ Velnor keeps GitHub-compatible YAML, but supported marketplace actions should
 resolve to Rust-native adapters instead of executing their JavaScript or
 TypeScript bundles.
 
-## Milestone 0: Protocol Spike
+## Milestone 0: V2 JIT Protocol Spike
 
 Goal: prove Velnor can appear as a GitHub self-hosted runner.
 
 Deliverables:
 
-- `velnor-runner configure --url ... --token ... --labels ...`
+- Velnor creates runner identities through GitHub's JIT configuration API
+  (`generate-jitconfig`) and decodes `encoded_jit_config`
 - `velnor-runner configure --target-mvp-labels` opt-in adds the current target x64 Linux labels: `hetzner-sentry-ci`, `ubuntu-latest`, and `ubuntu-24.04`; it never claims macOS labels, rejects macOS/Darwin labels, and claims ARM only when `--target-mvp-arm-label` is also passed on an ARM Linux host
 - `velnor-runner configure`, `run`, and `preflight` reject non-Linux hosts because the Phase 0 runner execution model is Linux-only
 - local settings/credential store
-- repo-level runner registration
+- repo-level JIT runner configuration
 - runner appears online in GitHub UI
 - session create/delete
-- message long-poll loop: `run --once` exits after one poll/job; default `run` keeps polling the existing GitHub message route in one session
+- V2 broker message long-poll loop: `run --once` exits after one handled job;
+  default `run` keeps polling the broker route in one session
 - log raw message metadata for assigned job
 - private GitHub runner protocol dependency accepted as a Phase 0 implementation cost
+- no classic registration-token fallback and no classic distributed-task polling
 
 Exit criteria:
 
-- Velnor registers in a disposable GitHub repo.
+- Velnor creates a JIT runner in a disposable GitHub repo.
 - A workflow with `runs-on: velnor` is assigned to Velnor.
-- Velnor receives a real job message.
+- Velnor receives a real V2 broker/run-service job message.
 
 ## Milestone 0.5: Daemon Slot Scheduler
 
@@ -52,7 +55,7 @@ Design:
   stopped
 - each slot has its own GitHub runner identity, broker session, work directory,
   temp directory, cancellation path, and job lock-renewal loop
-- the daemon owns slot registration/refresh as product behavior; manually
+- the daemon owns slot JIT creation/refresh as product behavior; manually
   preconfiguring slot directories is acceptable only as an intermediate
   implementation step
 - the daemon supervises all slots and restarts unhealthy idle slots without
@@ -67,8 +70,8 @@ Design:
 
 Exit criteria:
 
-- one `velnor-runner daemon --slots 2` invocation registers or refreshes two
-  internal runner slots for a repository.
+- one `velnor-runner daemon --slots 2` invocation creates or refreshes two
+  internal JIT runner slots for a repository.
 - two queued GitHub jobs can be acquired by the same Velnor daemon at the same
   time.
 - each job runs in a distinct Docker container and reports independent logs,
@@ -151,13 +154,13 @@ Current code progress:
 - runner can parse the outer `AgentJobRequestMessage` subset from GitHub job messages: plan/timeline ids, request/job ids, variables, endpoints, repositories, containers, and action steps
 - command-file parser supports `NAME=value` and heredoc `NAME<<EOF` syntax
 - Docker job container command builder covers network/container start, `docker exec`, and cleanup command shapes
-- default Docker job image is `ghcr.io/catthehacker/ubuntu:act-latest`, giving target workflows a hosted-runner-like Ubuntu base with common CI tools; `--docker-image` can still override it
+- default Docker job image is `velnor/job-ubuntu:24.04`, built from official `ubuntu:24.04` with common CI tools plus Docker CLI/Buildx; `--docker-image` can still override it
 - Docker execution uses a shared `/github/home` mount and `HOME=/github/home` across the job and native action containers so setup adapters can install tools into a home directory visible to later script steps
 - Docker execution mounts the same host temp directory at `/__t`, `/github/runner_temp`, `/github/file_commands`, and `/tmp` for job/action containers so target workflows that use absolute `/tmp/...` artifact paths still share files with native adapters
 - Docker execution mounts a shared Velnor sccache directory at `/var/cache/sccache`, matching the `java-monorepo` Rust workflow's cache assumptions across job containers
 - Docker execution mounts the GitHub workflow directory at `/github/workflow` across the job and native action containers; `GITHUB_EVENT_PATH` points at `/github/workflow/event.json`
 - the ordered planner now routes known target marketplace action families to `ExecutableStep::Native` before considering any metadata runtime fallback; unimplemented native adapters fail explicitly instead of silently executing marketplace JavaScript
-- on Linux hosts, Velnor mounts the host Docker CLI and Buildx plugin directory into the job container and native Docker adapters when it also mounts `/var/run/docker.sock`; target Docker adapters such as `docker/setup-buildx-action`, `docker/login-action`, `docker/build-push-action`, and `docker/bake-action` need this client tooling when they talk to the mounted Docker socket
+- the default Ubuntu job image carries Docker CLI and Buildx, so Velnor mounts only `/var/run/docker.sock` for Docker-outside-of-Docker execution; target Docker adapters such as `docker/setup-buildx-action`, `docker/login-action`, `docker/build-push-action`, and `docker/bake-action` use this image-provided client tooling when they talk to the mounted Docker socket
 - script-step plan writes the script under runner temp, exposes per-step command-file env vars, and collects output/env/path/state/summary files after execution
 - Docker script executor runs the planned lifecycle through an abstract command runner: create network, start container, exec script, collect state, cleanup container/network
 - if Docker startup fails because a previous run left the same job container/network names behind, Velnor removes stale job resources once and retries startup before failing the job

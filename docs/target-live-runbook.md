@@ -7,11 +7,13 @@ The implementation checklist is tracked in
 
 ## Prerequisites
 
-- Linux host where the Docker daemon can see Velnor's bind-mounted work directory.
-  `velnor-runner configure`, `velnor-runner run`, and `velnor-runner preflight`
-  fail immediately on non-Linux hosts. The live proof scripts call
-  `scripts/live_host_doctor.sh`, which also fails before runner registration on
-  non-Linux hosts.
+- Linux process environment where the Docker daemon can see Velnor's
+  bind-mounted work directory. `velnor-runner configure`, `velnor-runner run`,
+  and `velnor-runner preflight` fail immediately outside Linux. Running Velnor
+  itself inside a Linux Docker container is valid, including from a macOS
+  workstation, if `/var/run/docker.sock` is mounted and
+  `--docker-host-work-dir` points at the host path visible to the Docker
+  daemon.
 - A local Docker socket is preferred. Remote `DOCKER_HOST=tcp://...` daemons
   usually fail unless `--work-dir` points to a path mounted into that daemon,
   because Velnor mounts job scripts, workspace, temp files, artifacts, and cache
@@ -90,10 +92,8 @@ The Phase 0 model is Docker-outside-of-Docker:
 
 - Velnor mounts the host Docker socket at `/var/run/docker.sock` inside the job
   container.
-- Velnor mounts the host Docker CLI at `/usr/local/bin/docker` when it can find
-  it.
-- Velnor mounts the host Docker CLI plugin directory at
-  `/usr/local/lib/docker/cli-plugins` when it can find Buildx.
+- The default `velnor/job-ubuntu:24.04` job image is built from official
+  `ubuntu:24.04` and includes Docker CLI plus Buildx.
 - Native Docker adapters and any shell steps that run `docker ...` or
   `docker buildx ...` talk to the host daemon through that socket.
 

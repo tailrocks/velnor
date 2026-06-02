@@ -62,24 +62,27 @@ Velnor can use one Rust process with internal async tasks, but should preserve t
 - worker/job executor
 - reporting queue
 
-## Registration
+## Velnor Setup
 
-Registration uses a GitHub registration token.
+Velnor setup uses GitHub's JIT runner configuration API, not the classic runner
+registration-token path.
 
-The official runner:
+Velnor:
 
-1. Gets a runner registration token from GitHub API.
-2. Calls `actions/runner-registration` to get tenant credentials.
-3. Registers or replaces a `TaskAgent`.
+1. Calls the repository, organization, or enterprise `generate-jitconfig`
+   endpoint.
+2. Decodes `encoded_jit_config`.
+3. Requires `UseV2Flow=true` and `ServerUrlV2`.
 4. Saves:
    - server URL
+   - V2 broker URL
    - pool ID/name
    - agent ID/name
    - labels
    - OAuth credential data
-   - optional V2 broker URL/flow settings
+   - ephemeral runner settings
 
-Relevant APIs from source:
+Classic official-runner APIs remain source reference only:
 
 - `GetRunnerTokenAsync`
 - `GetTenantCredential`
@@ -89,10 +92,9 @@ Relevant APIs from source:
 
 For Velnor:
 
-- first support repo-level runner registration
+- support repo-level JIT runner configuration first
 - support labels
-- support replace mode
-- support remove/unregister
+- support exact cleanup for Velnor-created runner ids
 - store settings in a local file
 - support OAuth credential flow
 - require V2 broker/run-service flow for hosted GitHub target runs

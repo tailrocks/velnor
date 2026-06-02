@@ -37,7 +37,7 @@ pub struct PreflightArgs {
     pub docker_host_work_dir: Option<PathBuf>,
 
     /// Docker image used for the bind-mount visibility check.
-    #[arg(long, default_value = "ghcr.io/catthehacker/ubuntu:act-latest")]
+    #[arg(long, default_value = "velnor/job-ubuntu:24.04")]
     pub docker_image: String,
 
     /// Require /var/run/docker.sock to exist on the host.
@@ -131,7 +131,7 @@ pub struct RunArgs {
     pub dump_job_message: Option<PathBuf>,
 
     /// Docker image for --execute-scripts jobs.
-    #[arg(long, default_value = "ghcr.io/catthehacker/ubuntu:act-latest")]
+    #[arg(long, default_value = "velnor/job-ubuntu:24.04")]
     pub docker_image: String,
 
     /// Override Docker image used to run JavaScript actions. By default Velnor uses the action's declared Node runtime image.
@@ -234,7 +234,7 @@ pub struct DaemonArgs {
     pub dump_job_message: Option<PathBuf>,
 
     /// Docker image for executable jobs.
-    #[arg(long, default_value = "ghcr.io/catthehacker/ubuntu:act-latest")]
+    #[arg(long, default_value = "velnor/job-ubuntu:24.04")]
     pub docker_image: String,
 
     /// Override Docker image used to run JavaScript actions. By default Velnor uses the action's declared Node runtime image.

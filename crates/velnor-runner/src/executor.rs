@@ -4495,8 +4495,8 @@ mod tests {
     #[test]
     fn selects_node_action_image_from_runtime() {
         assert_eq!(
-            node_action_image("node24", "ghcr.io/catthehacker/ubuntu:act-latest"),
-            "ghcr.io/catthehacker/ubuntu:act-latest"
+            node_action_image("node24", "velnor/job-ubuntu:24.04"),
+            "velnor/job-ubuntu:24.04"
         );
         assert_eq!(node_action_image("node20", ""), "node:20-bookworm");
         assert_eq!(node_action_image("node24", ""), "node:24-bookworm");

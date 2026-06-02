@@ -46,8 +46,8 @@ Velnor follows the latest hosted GitHub self-hosted runner path from
 
 Required protocol behavior:
 
-- register with GitHub using a repository runner token or a PAT that can request
-  one
+- create GitHub runner identities through the public JIT configuration API:
+  `generate-jitconfig` for repository, organization, or enterprise targets
 - expose a one-binary operator experience: `velnor-runner daemon --slots N`
   should be enough to keep a host connected to GitHub and continuously accepting
   work after initial configuration
@@ -55,10 +55,10 @@ Required protocol behavior:
   one Velnor daemon can supervise multiple runner identities, but each identity
   still owns exactly one broker session and one active job at a time
 - refuse unsupported host/label combinations before registration
-- exchange the runner token through `actions/runner-registration`
-- add or replace a `TaskAgent` with the configured labels
-- store OAuth runner credentials, pool id, agent id, `UseV2Flow`, and
-  `ServerUrlV2`
+- decode `encoded_jit_config` and store the ephemeral runner identity, OAuth
+  runner credentials, pool id, agent id, `UseV2Flow`, and `ServerUrlV2`
+- create one JIT runner config per daemon slot and recycle slots after handled
+  jobs because JIT runners are ephemeral
 - mint short-lived OAuth access tokens from the stored runner credentials
 - require broker/run-service V2 for hosted GitHub targets
 - create a broker session and poll broker messages
@@ -70,8 +70,10 @@ Required protocol behavior:
 - handle cancellation, broker migration, token refresh, refresh/update, and
   hosted-shutdown messages as control-plane events
 
-Classic distributed-task message polling is reference material only. It is not a
-normal Phase 0 execution path.
+Classic runner registration and classic distributed-task message polling are
+reference material only. They are not Phase 0 product paths. If GitHub setup
+does not provide `UseV2Flow=true` and `ServerUrlV2`, Velnor must fail setup/run
+instead of falling back to classic.
 
 ## Execution Model
 
