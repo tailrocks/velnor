@@ -28,10 +28,9 @@ Out of current scope:
   inside Docker containers
 - no broad GitHub Actions parity beyond the two target repositories
 
-Any Pkl, PQL, KCL, CUE, Jsonnet, Starlark, Nickel, Dhall, or Nix material under
-`docs/archive/research/` is archived brainstorming only. It is not a
-requirement, not a current design target, and not an implementation plan. It
-must stay separate from Phase 0 runner compatibility work.
+Pkl, PQL, KCL, CUE, Jsonnet, Starlark, Nickel, Dhall, and Nix workflow-language
+research is not active Phase 0 work. It is not a requirement, not a current
+design target, and not an implementation plan.
 
 ## Direction
 
@@ -357,6 +356,3 @@ To force reuse of an existing run, set `VELNOR_FIXTURE_DISPATCH=false` together
 with `VELNOR_FIXTURE_RUN_ID=<run-id>`.
 The smoke script removes the temporary fixture runner on exit by default; set
 `VELNOR_FIXTURE_CLEANUP_RUNNER=false` to keep it registered for debugging.
-
-Archived background lives under [docs/archive](docs/archive). It is kept for
-traceability, not as the active roadmap.

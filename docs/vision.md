@@ -35,8 +35,8 @@ GitHub UI.
 - no macOS job execution or macOS runner-label support
 
 Typed workflow authoring and new language ideas may be revisited after the
-runner compatibility goal is proven. Until then, they remain archived research,
-not active product direction.
+runner compatibility goal is proven. Until then, they are not active product
+direction.
 
 ## Roadmap
 

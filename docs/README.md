@@ -15,11 +15,3 @@ Start here:
 - [Runner V2 reference](reference/latest-runner-v2-refresh-2026-06-01.md):
   current upstream `actions/runner` V2 source pin used by
   `velnor-tools check-runner-reference`.
-
-Archive:
-
-- [archive/phase-0](archive/phase-0): older Phase 0 snapshots, handoffs, and
-  planning docs kept for traceability.
-- [archive/research](archive/research): historical research and language
-  brainstorming. These files are not active requirements unless the product
-  roadmap links them as current evidence.

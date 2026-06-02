@@ -8,10 +8,6 @@ implemented, what is still missing, and how work is verified.
 The high-level product vision lives in [vision.md](vision.md). This roadmap is
 the source of truth for current implementation work.
 
-Older Phase 0 notes, handoffs, and research snapshots live under
-`docs/archive`. They are useful history, but this roadmap is the source of truth
-when archived docs disagree with current product direction.
-
 ## Implementation Goal
 
 Velnor is a GitHub Actions-compatible runner daemon with a Rust runtime.
@@ -350,6 +346,150 @@ Completion requires GitHub Actions UI evidence:
 - artifacts/cache behavior works for target jobs
 - Docker/Buildx paths work
 - no unsupported feature drift in target workflow scans
+
+## Testing Plan
+
+Velnor testing has three layers.
+
+### 1. Local Machine Verification
+
+Goal: prove the binary, Docker job image, planner, native adapters, and local
+executor behavior work before touching real GitHub jobs.
+
+Required checks:
+
+```sh
+cargo fmt --check
+cargo test -q
+cargo run -q -p velnor-tools -- check-runner-reference
+docker build -f docker/job-ubuntu.Dockerfile -t velnor/job-ubuntu:24.04 .
+docker build -t velnor-runner:local .
+```
+
+Local Docker checks must not stop, remove, or prune unrelated containers. Any
+temporary container must use an explicit `velnor-*` name and `--rm`.
+
+Local fixture project:
+
+- create or maintain a small Rust fixture repository
+- include multiple Rust crates
+- run fmt, clippy, tests, and nextest-shaped commands
+- use `actions/cache`-style Cargo cache keys
+- use sccache-like env and wrapper behavior
+- use `GITHUB_ENV`, `GITHUB_OUTPUT`, `GITHUB_PATH`, and summaries
+- upload and download artifacts between jobs
+- run Docker/Buildx steps from inside the Linux job container
+- include a rebuild path so repeat runs prove cache behavior and incremental
+  speed
+
+This fixture must model the Rust CI behavior from Jackin and ChainArgos without
+requiring their full repositories.
+
+### 2. Public GitHub Fixture Verification
+
+Goal: prove GitHub can schedule real jobs to Velnor and GitHub UI receives
+correct status, logs, outputs, cache/artifact behavior, and conclusions.
+
+Required path:
+
+1. run non-mutating fixture readiness
+2. create V2 JIT runner slots
+3. run fixture GitHub-hosted lanes
+4. run equivalent Velnor lanes
+5. compare artifacts/outputs between GitHub-hosted and Velnor lanes
+6. inspect GitHub UI logs, annotations, summaries, and conclusions
+
+Current fixture repo:
+
+- `donbeave/velnor-actions-fixture`
+
+Future fixture expansion should cover:
+
+- Cargo cache restore/save
+- repeat rebuild speed
+- sccache behavior
+- Buildx Docker builds
+- artifact fan-in/fan-out
+- path filter outputs
+- required aggregate job logic
+
+### 3. Real Server Verification
+
+Goal: prove Velnor works on the real runner host before target repository
+validation.
+
+Server access:
+
+```sh
+ssh sentry
+```
+
+On the server:
+
+- verify Docker daemon and Velnor workdir visibility
+- build or pull `velnor/job-ubuntu:24.04`
+- run Velnor preflight
+- run public fixture smoke through V2 JIT
+- collect GitHub run URLs and evidence
+- confirm no unrelated containers are stopped, deleted, pruned, or modified
+
+Only after the fixture is green on the real server should target repository
+validation start.
+
+### 4. Target Repository Verification
+
+Goal: prove Jackin and ChainArgos Rust workflows are drop-in compatible.
+
+Order:
+
+1. ChainArgos Rust workflow set
+2. ChainArgos Docker/Buildx workflow set
+3. Jackin `ci.yml`
+4. Jackin `construct.yml`
+5. Jackin `docs.yml`
+6. later Jackin Linux release/preview paths
+
+User/operator owns target repository execution. Agent must not set
+`VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`.
+
+Acceptance rule:
+
+- contributing user should not notice the runner change
+- same workflow YAML
+- same required checks
+- same output/artifact/cache behavior needed by target jobs
+- faster or at least no worse queue-to-result latency after warm caches
+
+## Performance Plan
+
+Performance is a first-class goal. Velnor exists to make Rust CI as fast and
+reactive as possible while staying compatible with the target GitHub Actions
+usage.
+
+Performance targets:
+
+- minimize time from GitHub job assignment to first log line
+- keep daemon slots warm and ready
+- avoid unnecessary process/container startup work
+- use project-owned Ubuntu job image with required tools preinstalled
+- keep Cargo registry/git cache hot
+- support sccache and shared cache directories
+- avoid marketplace JavaScript action startup for known target actions
+- use Rust-native adapters for setup, cache, artifact, Docker, and Pages paths
+- recycle JIT runner slots quickly after job completion
+- expose clear timing evidence in fixture and target runs
+
+Performance evidence to collect:
+
+- queue wait time
+- JIT setup time
+- broker session setup time
+- container startup time
+- first step start time
+- total job runtime
+- warm-cache rebuild runtime
+- cache hit/miss state
+- Docker Buildx cache hit/miss state
 
 ## Implementation Roadmap
 
