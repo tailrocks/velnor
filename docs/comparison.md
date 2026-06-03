@@ -1,7 +1,7 @@
 # Velnor vs GitHub-hosted Runner — UI Output Comparison
 
 Evidence and analysis for the **GitHub UI Experience Parity** goal
-(`../prompts/github-ui-parity.md`). Mission context: `../docs/mission.md` — the
+(`../prompts/github-ui-parity.md`). Mission context: `mission.md` — the
 output must be **equal-or-better, never less informative**, and Velnor controls
 its own log stream so it can be nicer than GitHub.
 
@@ -16,7 +16,7 @@ Same fixture workflow, two lanes of one run:
 
 Run: `26872768024` · repo: `donbeave/velnor-actions-fixture`.
 
-Raw render captured: `.velnor-compare/velnor-job.html` (Velnor lane). Re-capture
+Raw render captured: `../.velnor-compare/velnor-job.html` (Velnor lane). Re-capture
 both lanes fresh when iterating.
 
 ## Preferred extraction method: the GitHub API (not HTML scraping)

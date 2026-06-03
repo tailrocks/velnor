@@ -5,6 +5,15 @@
 > evidence** that shows Velnor is faster than the GitHub-hosted lane on warm
 > caches — that speed/cost advantage is the point of self-hosting.
 
+> **Direction (source of truth):** [`../docs/`](../docs/) —
+> [vision](../docs/vision.md), [roadmap/plan](../docs/roadmap.md),
+> [runner usage](../docs/runner-usage.md). If this prompt and the docs disagree,
+> the docs win.
+>
+> **Run order: 3 of 3** (see [`README.md`](README.md)). Run last — after *Target
+> workflow coverage* (#1) and *GitHub UI parity* (#2). This is the Phase 0 gate
+> that proves the previous two green end-to-end with evidence.
+
 ## Objective
 
 Drive `donbeave/velnor-actions-fixture` to a **fully green Velnor proof**: GitHub
