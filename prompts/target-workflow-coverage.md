@@ -34,15 +34,34 @@ instead of executing marketplace JS — for performance and control.
 
 ## Ground truth
 
+- **Action registry (pins + source links):**
+  [`docs/reference/target-action-registry.md`](../docs/reference/target-action-registry.md)
+  — the authoritative list of every in-scope action, the **version we focus
+  on**, and a direct link to that version's upstream source. Before you
+  implement or change any adapter, open the registry row, follow its
+  **Source @ version** link, and read the real upstream TypeScript /
+  composite / Docker behavior. *The source at the pinned tag is the contract* —
+  do not guess from docs or memory.
+- **Always track latest.** The registry records both Focus and latest for each
+  action. Re-verify on every coverage pass; when upstream ships a newer version
+  the targets adopt, bump the Focus pin, update the source link, read the diff,
+  and re-audit the adapter. Stale pins are a bug.
+- **Scope is consumer-driven.** Analyze only the features the two consumer repos
+  actually use — **Jackin** (`jackin-project/jackin`) and **ChainArgos**
+  (`ChainArgos/java-monorepo`). Their workflows decide which inputs/outputs
+  matter; a feature in upstream but in neither consumer is out of focus. This is
+  the "that's the only thing that should work that way" filter.
 - Action contract: [`docs/native-action-adapter-contract.md`](../docs/native-action-adapter-contract.md).
 - Behavior truth: <https://github.com/actions/runner> and each action's upstream
-  repository.
+  repository (at the pinned tag — see the registry).
 - The fixture exercises these families; the fixture is the contract.
 
 ## In scope
 
 The target action families (per roadmap) and their native adapters / supporting
-features:
+features. **Each is pinned with a source link in the
+[action registry](../docs/reference/target-action-registry.md) — verify against
+that before implementing.**
 
 - `actions/checkout`, `actions/cache`, `actions/upload-artifact`,
   `actions/download-artifact`, `actions/upload-pages-artifact`,
