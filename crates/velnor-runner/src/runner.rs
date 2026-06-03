@@ -1925,16 +1925,16 @@ fn execute_script_job(
         let _ = sender.send(StepStartEvent {
             step_id: setup_step_id.clone(),
             display_name: "Set up job".to_string(),
-            order: 0,
+            order: 1,
         });
     }
     if let Some(sender) = &step_log_sender {
         let _ = sender.send(StepLog {
             step_id: setup_step_id,
             display_name: "Set up job".to_string(),
-            order: 0,
+            order: 1,
             lines: vec![
-                format!("Current runner version: '{}'", crate::protocol::RUNNER_USER_AGENT),
+                format!("Current runner version: '{}'", crate::protocol::VELNOR_RUNNER_NAME),
             ],
             masks: Vec::new(),
             annotations: Vec::new(),
@@ -1957,7 +1957,7 @@ fn execute_script_job(
         .into_iter()
         .map(|plan| resolve_checkout_plan_context(plan, &base_env, &context_data))
         .collect::<Vec<_>>();
-    let mut checkout_order: i32 = 0;
+    let mut checkout_order: i32 = 1;
     for plan in &eager_checkout_plans {
         checkout_order += 1;
         // Emit step events so GitHub shows the checkout step in the job's step list.

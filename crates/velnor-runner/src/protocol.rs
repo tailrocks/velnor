@@ -25,6 +25,8 @@ use uuid::Uuid;
 
 pub const RUNNER_VERSION: &str = "2.334.0";
 pub const RUNNER_USER_AGENT: &str = "actions-runner/2.334.0 (velnor)";
+/// Display name shown in "Set up job" log and GitHub UI.
+pub const VELNOR_RUNNER_NAME: &str = "Velnor Runner/0.10.1-dev";
 pub const EMPTY_LOCK_TOKEN: &str = "00000000-0000-0000-0000-000000000000";
 
 #[derive(Debug, Clone, PartialEq, Eq)]

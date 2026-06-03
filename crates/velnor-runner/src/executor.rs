@@ -597,8 +597,9 @@ where
                             });
                             post_registered = true;
                         }
+                        let pre_step_id = uuid::Uuid::new_v4().to_string();
                         self.emit_step_started(
-                            format!("{step_id}-pre"),
+                            pre_step_id.clone(),
                             step.display_name(),
                             &mut timeline_order,
                         );
@@ -615,7 +616,7 @@ where
                         if failed && *continue_on_error {
                             result.failure_ignored = true;
                         }
-                        let log = step_log_with_name(&format!("{step_id}-pre"), step.display_name(), timeline_order, &result);
+                        let log = step_log_with_name(&pre_step_id, step.display_name(), timeline_order, &result);
                         self.emit_step_log(&log);
                         step_logs.push(log);
                         state.apply(step_id, &result);
@@ -768,7 +769,7 @@ where
             if !state.evaluate_post_condition(post_action.condition.as_deref()) {
                 continue;
             }
-            let post_step_id = format!("{}-post", post_action.step_id);
+            let post_step_id = uuid::Uuid::new_v4().to_string();
             self.emit_step_started(
                 post_step_id.clone(),
                 { let n = post_action.display_name.strip_prefix("Run ").unwrap_or(&post_action.display_name); format!("Post Run {n}") },
@@ -803,14 +804,15 @@ where
             if !state.evaluate_post_condition(post_action.condition.as_deref()) {
                 continue;
             }
+            let js_post_step_id = uuid::Uuid::new_v4().to_string();
             self.emit_step_started(
-                format!("{}-post", post_action.step_id),
+                js_post_step_id.clone(),
                 { let n = post_action.display_name.strip_prefix("Run ").unwrap_or(&post_action.display_name); format!("Post Run {n}") },
                 &mut timeline_order,
             );
             let result = self.execute_javascript_action_in_started_container(
                 container,
-                &format!("{}-post", post_action.step_id),
+                &js_post_step_id,
                 &post_action.invocation,
                 post_action
                     .invocation
@@ -828,14 +830,14 @@ where
                     }
                     let post_name_js = { let n = post_action.display_name.strip_prefix("Run ").unwrap_or(&post_action.display_name); format!("Post Run {n}") };
                     let log = step_log_with_name(
-                        &format!("{}-post", post_action.step_id),
+                        &js_post_step_id,
                         &post_name_js,
                         timeline_order,
                         &result,
                     );
                     self.emit_step_log(&log);
                     step_logs.push(log);
-                    state.apply(&format!("{}-post", post_action.step_id), &result);
+                    state.apply(&js_post_step_id, &result);
                     results.push(result);
                 }
                 Err(error) => {
