@@ -2244,19 +2244,31 @@ pub trait GitHubRunnerProtocol {
 /// Matches the GitHub Actions `TimelineRecordFeedLinesWrapper` wire format.
 #[derive(Debug, Clone, Serialize)]
 pub struct FeedLines {
-    // GitHub Results Service expects camelCase field names.
+    // Field order and names match exactly what GitHub's actions/runner sends.
+    // See TimelineRecordFeedLinesWrapper in the runner source.
+    pub count: usize,
     pub value: Vec<String>,
     #[serde(rename = "stepId")]
     pub step_id: String,
     #[serde(rename = "startLine", skip_serializing_if = "Option::is_none")]
     pub start_line: Option<i64>,
+    // planId/jobId needed for routing in the Results Service.
+    #[serde(rename = "planId", skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    #[serde(rename = "jobId", skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
 }
 
 /// WebSocket client for streaming live console output to the GitHub Results Service.
 /// Connects to `FeedStreamUrl` from the `SystemVssConnection` endpoint data.
+///
+/// GitHub Actions V2 runner maintains ONE persistent WebSocket connection per job.
+/// All step log lines flow through this single connection tagged by stepId.
 pub struct FeedStreamClient {
     url: String,
     token: String,
+    plan_id: Option<String>,
+    job_id: Option<String>,
 }
 
 impl FeedStreamClient {
@@ -2264,11 +2276,18 @@ impl FeedStreamClient {
         Self {
             url: feed_stream_url.into(),
             token: token.into(),
+            plan_id: None,
+            job_id: None,
         }
     }
 
+    pub fn with_context(mut self, plan_id: &str, job_id: &str) -> Self {
+        self.plan_id = Some(plan_id.to_string());
+        self.job_id = Some(job_id.to_string());
+        self
+    }
+
     /// Try to create a FeedStreamClient from the SystemVssConnection endpoint data.
-    /// Returns None if the endpoint doesn't have the required FeedStreamUrl or AccessToken.
     pub fn from_endpoint_data(data: &BTreeMap<String, String>, token: &str) -> Option<Self> {
         let url = data.get("FeedStreamUrl")?.clone();
         if url.is_empty() || token.is_empty() {
@@ -2277,28 +2296,24 @@ impl FeedStreamClient {
         Some(Self::new(url, token))
     }
 
-    /// Send a batch of log lines for a step over the WebSocket feed.
-    /// Opens a new connection per call, chunks JSON into ≤1 KB text frames.
-    pub async fn append_log_lines(
+    /// Open a persistent WebSocket connection for the job's entire log stream.
+    /// The official GitHub runner keeps this connection open for the whole job.
+    pub async fn connect(
         &self,
-        step_id: &str,
-        lines: Vec<String>,
-        start_line: Option<i64>,
-    ) -> Result<()> {
-        use futures_util::SinkExt;
-        use tokio_tungstenite::{connect_async, tungstenite::Message};
-
-        let feed = FeedLines {
-            value: lines,
-            step_id: step_id.to_string(),
-            start_line,
+    ) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>
+    {
+        use tokio_tungstenite::connect_async;
+        // Append plan_id and job_id as query parameters so the Results Service
+        // can route the connection to the correct run's blob storage.
+        let conn_url = if let (Some(plan_id), Some(job_id)) = (&self.plan_id, &self.job_id) {
+            let sep = if self.url.contains('?') { '&' } else { '?' };
+            format!("{}{sep}planId={plan_id}&jobId={job_id}", self.url)
+        } else {
+            self.url.clone()
         };
-        let json = serde_json::to_string(&feed)?;
-        let bytes = json.into_bytes();
-
         let request = tokio_tungstenite::tungstenite::http::Request::builder()
             .method("GET")
-            .uri(&self.url)
+            .uri(&conn_url)
             .header("Host", ws_host(&self.url))
             .header("Authorization", format!("Bearer {}", self.token))
             .header("User-Agent", RUNNER_USER_AGENT)
@@ -2311,29 +2326,51 @@ impl FeedStreamClient {
             )
             .body(())
             .context("build WebSocket request")?;
-
-        let (mut ws, _) = connect_async(request)
+        let (ws, _) = connect_async(request)
             .await
             .context("connect to feed stream WebSocket")?;
+        Ok(ws)
+    }
 
-        // Send as single text frame (the JSON fits comfortably in one frame).
-        ws.send(Message::Text(
-            String::from_utf8_lossy(&bytes).into_owned().into(),
-        ))
-        .await
-        .context("send WebSocket frame")?;
+    /// Send log lines for a step over an existing persistent WebSocket connection.
+    /// Matches the official GitHub runner: 1KB text chunks, count field required.
+    pub async fn send_log_lines(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        step_id: &str,
+        lines: Vec<String>,
+        start_line: Option<i64>,
+        plan_id: Option<&str>,
+        _job_id: Option<&str>,
+    ) -> Result<()> {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+        let count = lines.len();
+        let feed = FeedLines {
+            count,
+            value: lines,
+            step_id: step_id.to_string(),
+            start_line,
+            plan_id: plan_id.map(|s| s.to_string()),
+            job_id: _job_id.map(|s| s.to_string()),
+        };
+        let json = serde_json::to_string(&feed)?;
+        ws.send(Message::Text(json.into()))
+            .await
+            .context("send WebSocket log lines")?;
+        Ok(())
+    }
 
-        // Drain any server messages and wait for close handshake.
-        use futures_util::StreamExt;
-        while let Ok(Some(msg)) = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            ws.next(),
-        ).await {
-            match msg {
-                Ok(Message::Close(_)) | Err(_) => break,
-                _ => {}
-            }
-        }
+    /// Legacy per-call method. Prefer connect() + send_log_lines() for jobs.
+    pub async fn append_log_lines(
+        &self,
+        step_id: &str,
+        lines: Vec<String>,
+        start_line: Option<i64>,
+    ) -> Result<()> {
+        let mut ws = self.connect().await?;
+        Self::send_log_lines(&mut ws, step_id, lines, start_line, None, None).await?;
         ws.close(None).await.ok();
         Ok(())
     }
@@ -2449,6 +2486,108 @@ impl TwirpResultsClient {
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             bail!("WorkflowStepsUpdate failed: status={status}, body={body}");
+        }
+        Ok(())
+    }
+
+    /// Upload step log content to Results Service blob storage.
+    ///
+    /// Flow (matches official runner `UploadResultsStepLogAsync`):
+    ///   1. Get a signed blob URL from `GetStepLogsSignedBlobURL`
+    ///   2. PUT the log content to that URL as `text/plain`
+    ///   3. Finalise with `CreateStepLogsMetadata`
+    pub async fn upload_step_log(
+        &self,
+        plan_id: &str,
+        job_id: &str,
+        step_id: &str,
+        lines: &[String],
+    ) -> Result<()> {
+        const RECEIVER: &str = "twirp/results.services.receiver.Receiver";
+
+        // 1. Get signed upload URL.
+        let url = format!("{}/{RECEIVER}/GetStepLogsSignedBlobURL", self.results_service_url);
+        #[derive(serde::Serialize)]
+        struct GetUrlReq<'a> {
+            workflow_run_backend_id: &'a str,
+            workflow_job_run_backend_id: &'a str,
+            step_backend_id: &'a str,
+        }
+        #[derive(serde::Deserialize)]
+        struct GetUrlResp {
+            logs_url: Option<String>,
+        }
+        let resp: GetUrlResp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&GetUrlReq {
+                workflow_run_backend_id: plan_id,
+                workflow_job_run_backend_id: job_id,
+                step_backend_id: step_id,
+            })
+            .send()
+            .await
+            .context("GetStepLogsSignedBlobURL request")?
+            .json()
+            .await
+            .context("GetStepLogsSignedBlobURL parse")?;
+
+        let logs_url = resp.logs_url.filter(|u| !u.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("GetStepLogsSignedBlobURL returned empty URL"))?;
+
+        // 2. Upload log content (single block – firstBlock && finalize path).
+        let content: Vec<u8> = lines.iter().flat_map(|l| format!("{l}\n").into_bytes()).collect();
+        let line_count = lines.len() as i64;
+        let content_len = content.len();
+        let put_resp = self
+            .http
+            .put(&logs_url)
+            .header("Content-Type", "text/plain")
+            .header("Content-Length", content_len.to_string())
+            .header("x-ms-blob-type", "BlockBlob")
+            .body(content)
+            .send()
+            .await
+            .context("step log PUT")?;
+        let put_status = put_resp.status();
+        if !put_status.is_success() {
+            let body = put_resp.text().await.unwrap_or_default();
+            bail!("step log PUT failed: status={put_status}, body={body}");
+        }
+
+        // 3. Finalize with metadata.
+        let url = format!("{}/{RECEIVER}/CreateStepLogsMetadata", self.results_service_url);
+        #[derive(serde::Serialize)]
+        struct MetaReq<'a> {
+            workflow_run_backend_id: &'a str,
+            workflow_job_run_backend_id: &'a str,
+            step_backend_id: &'a str,
+            uploaded_at: String,
+            line_count: i64,
+        }
+        let ts = {
+            use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+            OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+        };
+        let meta_resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&MetaReq {
+                workflow_run_backend_id: plan_id,
+                workflow_job_run_backend_id: job_id,
+                step_backend_id: step_id,
+                uploaded_at: ts,
+                line_count,
+            })
+            .send()
+            .await
+            .context("CreateStepLogsMetadata request")?;
+        let meta_status = meta_resp.status();
+        if !meta_status.is_success() {
+            let body = meta_resp.text().await.unwrap_or_default();
+            bail!("CreateStepLogsMetadata failed: status={meta_status}, body={body}");
         }
         Ok(())
     }

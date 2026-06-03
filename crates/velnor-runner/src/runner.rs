@@ -1683,6 +1683,8 @@ fn start_step_log_publisher(
     job: AgentJobRequestMessage,
     mut receiver: UnboundedReceiver<StepLog>,
 ) -> JoinHandle<()> {
+    let plan_id_for_feed = job.plan.plan_id.clone();
+    let job_id_for_feed = job.job_id.clone();
     let feed_client = job.system_connection().and_then(|ep| {
         let token = ep
             .authorization
@@ -1691,6 +1693,7 @@ fn start_step_log_publisher(
             .cloned()
             .unwrap_or_default();
         crate::protocol::FeedStreamClient::from_endpoint_data(&ep.data, &token)
+            .map(|c| c.with_context(&plan_id_for_feed, &job_id_for_feed))
     });
 
     let twirp_client = job
@@ -1712,6 +1715,26 @@ fn start_step_log_publisher(
     tokio::spawn(async move {
         let mut line_counter: i64 = 1;
         let mut change_order: i64 = 1000; // Offset from start-event change_orders
+
+        // Open ONE persistent WebSocket connection for the entire job (matching the
+        // official GitHub runner which keeps a single connection open per job).
+        let mut ws_conn = if let Some(client) = &feed_client {
+            eprintln!("[feed] Connecting to WebSocket feed...");
+            match client.connect().await {
+                Ok(ws) => {
+                    eprintln!("[feed] WebSocket connected.");
+                    Some(ws)
+                }
+                Err(e) => {
+                    eprintln!("Best-effort WebSocket feed connect failed: {e:#}");
+                    None
+                }
+            }
+        } else {
+            eprintln!("[feed] No feed client (FeedStreamUrl missing).");
+            None
+        };
+
         while let Some(log) = receiver.recv().await {
             let masks = job_secret_mask_values(&job);
             let lines: Vec<String> = log
@@ -1721,21 +1744,23 @@ fn start_step_log_publisher(
                 .collect();
             let line_count = lines.len() as i64;
 
-            if let Some(client) = &feed_client {
+            if let Some(ws) = ws_conn.as_mut() {
                 if !lines.is_empty() {
-                    // Prefix each line with ISO 8601 timestamp (GitHub runner format).
+                    eprintln!("[feed] Sending {} lines for step {}", lines.len(), &log.step_id[..8]);
                     let ts = unix_now_iso8601();
                     let timestamped: Vec<String> = lines.iter()
                         .map(|l| format!("{ts} {l}"))
                         .collect();
-                    if let Err(e) = client
-                        .append_log_lines(&log.step_id, timestamped, Some(line_counter))
-                        .await
-                    {
+                    if let Err(e) = crate::protocol::FeedStreamClient::send_log_lines(
+                        ws, &log.step_id, timestamped, Some(line_counter),
+                        Some(&plan_id), Some(&job_id),
+                    ).await {
                         eprintln!(
-                            "Best-effort WebSocket feed failed for '{}': {e:#}",
+                            "Best-effort WebSocket feed send failed for '{}': {e:#}",
                             log.step_id
                         );
+                        // Drop broken connection; remaining logs go without live feed.
+                        ws_conn = None;
                     }
                 }
             }
@@ -1769,6 +1794,19 @@ fn start_step_log_publisher(
                     );
                 }
                 change_order += 1;
+
+                // Upload step log blob to Results Service (populates data-log-url in GitHub UI).
+                if !lines.is_empty() {
+                    if let Err(e) = client
+                        .upload_step_log(&plan_id, &job_id, &log.step_id, &lines)
+                        .await
+                    {
+                        eprintln!(
+                            "Best-effort Results Service log upload failed for '{}': {e:#}",
+                            log.step_id
+                        );
+                    }
+                }
             }
 
             if let Err(error) = publish_timeline_step_log(&job, &log).await {
@@ -1777,6 +1815,10 @@ fn start_step_log_publisher(
                     log.step_id
                 );
             }
+        }
+        // Close persistent WebSocket after all logs sent.
+        if let Some(mut ws) = ws_conn {
+            ws.close(None).await.ok();
         }
     })
 }
@@ -1878,7 +1920,7 @@ fn execute_script_job(
     }
     let context_data = job_context_data(job);
     // Synthetic "Set up job" step matching GitHub-hosted runner output.
-    let setup_step_id = format!("{}-setup", job.job_id);
+    let setup_step_id = uuid::Uuid::new_v4().to_string();
     if let Some(sender) = &step_start_sender {
         let _ = sender.send(StepStartEvent {
             step_id: setup_step_id.clone(),
@@ -1891,7 +1933,9 @@ fn execute_script_job(
             step_id: setup_step_id,
             display_name: "Set up job".to_string(),
             order: 0,
-            lines: Vec::new(),
+            lines: vec![
+                format!("Current runner version: '{}'", crate::protocol::RUNNER_USER_AGENT),
+            ],
             masks: Vec::new(),
             annotations: Vec::new(),
             telemetry: Vec::new(),
@@ -2078,7 +2122,7 @@ fn execute_script_job(
     let mut post_order = summary.step_logs.iter().map(|l| l.order).max().unwrap_or(0);
     for plan in &cleanup_checkout_plans {
         post_order += 1;
-        let post_step_id = format!("{}-post", plan.step_id);
+        let post_step_id = uuid::Uuid::new_v4().to_string();
         let post_name = {
             let n = plan.display_name.strip_prefix("Run ").unwrap_or(&plan.display_name);
             format!("Post Run {n}")
@@ -2110,7 +2154,7 @@ fn execute_script_job(
     }
 
     // Synthetic "Complete job" step matching GitHub-hosted runner output.
-    let complete_step_id = format!("{}-complete", job.job_id);
+    let complete_step_id = uuid::Uuid::new_v4().to_string();
     let complete_order = post_order + 1;
     if let Some(sender) = &post_step_start_sender {
         let _ = sender.send(StepStartEvent {
