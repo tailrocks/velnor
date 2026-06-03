@@ -6,7 +6,7 @@ discovered sub-tasks inline, record evidence at the end.
 
 Source of truth for any protocol/UI ambiguity: <https://github.com/actions/runner>
 (`src/Runner.Worker`, `src/Runner.Common`, results-service / live-logs).
-Comparison evidence: [`../.velnor-compare/comparison.md`](../.velnor-compare/comparison.md).
+Comparison evidence: [`../docs/comparison.md`](../docs/comparison.md).
 
 Primary files:
 `crates/velnor-runner/src/protocol.rs`, `runner.rs`, `executor.rs`,
@@ -22,12 +22,12 @@ built and where Velnor falls short, then improve.
 
 - [ ] Extract both lanes via the **GitHub API** (more accurate than HTML
   scraping) — job/step metadata and raw log archives. See the commands in
-  [`comparison.md`](../.velnor-compare/comparison.md). Prefer a Rust
+  [`comparison.md`](../docs/comparison.md). Prefer a Rust
   `velnor-tools` subcommand that fetches + diffs the two jobs (mission:
   Rust-first automation, repeatable comparison).
 - [ ] Also save the rendered HTML of both lanes under `.velnor-compare/` for the
   visual affordances (groups, colors, padding).
-- [ ] Update / extend [`../.velnor-compare/comparison.md`](../.velnor-compare/comparison.md)
+- [ ] Update / extend [`../docs/comparison.md`](../docs/comparison.md)
   with a step-by-step diff: for each step, note expandability, presence of log,
   timestamps, grouping, color, padding, and content richness.
 - [ ] Catalogue every UI affordance GitHub uses and whether Velnor emits it:
@@ -186,7 +186,7 @@ Observed: empty in Velnor; GitHub has cleanup content.
   render.
 - [ ] Diff Velnor vs GitHub-hosted render; confirm §1–§12 resolved and the
   result is **not less informative** than GitHub anywhere.
-- [ ] Update `.velnor-compare/comparison.md` with before/after and write
+- [ ] Update `../docs/comparison.md` with before/after and write
   evidence under `.velnor-live-evidence/`.
 
 ## 14. Definition of done

@@ -1,11 +1,23 @@
 # Velnor Docs
 
+This folder is the **source of truth** for Velnor's direction. Prompts in
+[`../prompts/`](../prompts/) and all other documentation defer to it. When the
+vision, plan, or roadmap changes, update the relevant file here (and record the
+direction change in [`../AGENTS.md`](../AGENTS.md)) so nothing goes stale.
+
 Start here:
 
-- [Vision](vision.md): high-level product goal.
-- [Roadmap](roadmap.md): source of truth for what must be implemented, target
-  Rust projects, V2/JIT-only protocol, macOS daemon host support, Linux Docker
-  jobs, verification order, and next implementation work.
+- [Mission](mission.md): what Velnor optimizes for — fastest, Rust-first, nicer
+  output, cheaper. The four pillars every prompt serves.
+- [Vision](vision.md): high-level product goal and Phase 0 scope.
+- [Roadmap](roadmap.md): the plan — source of truth for what must be
+  implemented, target Rust projects, V2/JIT-only protocol, macOS daemon host
+  support, Linux Docker jobs, verification order, and next implementation work.
+- [UI comparison](comparison.md): Velnor vs GitHub-hosted runner output, the
+  observed divergences, and the GitHub-API extraction method behind the UI
+  parity work.
+- [Runner usage](runner-usage.md): operator commands to configure, run, and
+  prove the runner locally, in Docker, and against the fixture.
 - [Target live runbook](target-live-runbook.md): operator commands for fixture
   and target validation.
 - [Native action adapter contract](native-action-adapter-contract.md): contract

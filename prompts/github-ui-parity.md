@@ -6,6 +6,15 @@
 > Velnor's speed/cost/Rust advantages *visible* in the log (cache hits, sccache
 > stats, parallelism, time saved), not just match GitHub.
 
+> **Direction (source of truth):** [`../docs/`](../docs/) —
+> [vision](../docs/vision.md), [roadmap/plan](../docs/roadmap.md),
+> [UI comparison](../docs/comparison.md). If this prompt and the docs disagree,
+> the docs win.
+>
+> **Run order: 2 of 3** (see [`README.md`](README.md)). Run after *Target
+> workflow coverage* (#1) — jobs must execute correctly before their output can
+> be made faithful. Precedes *Fixture proof completion* (#3).
+
 ## Objective
 
 Make a Velnor-executed job's GitHub Actions UI **as good as — or better than —
@@ -51,8 +60,8 @@ run `26872768024`) are the reference:
 - Velnor lane — job `79252067855`
 
 The detailed, observed divergences and the comparison method are recorded in
-[`../.velnor-compare/comparison.md`](../.velnor-compare/comparison.md). When a
-behavior is ambiguous, consult the official runner:
+[`../docs/comparison.md`](../docs/comparison.md) (raw render under
+`../.velnor-compare/`). When a behavior is ambiguous, consult the official runner:
 <https://github.com/actions/runner> (`src/Runner.Worker`, `src/Runner.Common`,
 results-service / live-logs).
 

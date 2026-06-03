@@ -86,3 +86,19 @@ This is mandatory for: expression types (lit/expr/format), input structures, con
 Always use Rust for scripting as much as possible. Prefer Rust for verification helpers, repository automation, data parsing, audits, and repeatable maintenance tasks because Rust gives more predictable behavior and this repository already has Rust tooling pre-set up.
 
 Rarely use Python or shell. Use them only when the task cannot reasonably be done properly in Rust, or when the existing interface is necessarily a shell entrypoint that delegates substantive work to Rust.
+
+## HARD RULE: Keep direction docs and prompts consistent
+
+`docs/` is the single source of truth for direction: [docs/mission.md](docs/mission.md), [docs/vision.md](docs/vision.md), [docs/roadmap.md](docs/roadmap.md) (the plan), and [docs/comparison.md](docs/comparison.md). The goal prompts in `prompts/` and the rest of the repository defer to it.
+
+Whenever a discussion or change affects the **vision, plan, or roadmap**:
+
+1. Update the relevant file in `docs/` first.
+2. Record the direction change here in `AGENTS.md` (so the decision is captured where every agent reads it).
+3. Reconcile any affected `prompts/*.md` / `prompts/*.checklist.md` and the `prompts/README.md` run sequence so they do not go stale.
+
+Never let a prompt, README, or doc describe a direction that the current vision/plan/roadmap no longer holds. A new prompt must start from up-to-date `docs/`, not from outdated assumptions. If a prompt and `docs/` disagree, `docs/` wins — fix the prompt.
+
+### Direction change log
+
+- 2026-06-03: Established `docs/` as the source of truth; added `docs/mission.md` (fastest, Rust-first, nicer output, cheaper) and `docs/comparison.md` (GitHub-vs-Velnor UI output). Added the `prompts/` goal-prompt system with a fixed run sequence (1: target workflow coverage, 2: GitHub UI parity, 3: fixture proof). Simplified root `README.md`; moved operator commands to `docs/runner-usage.md`.

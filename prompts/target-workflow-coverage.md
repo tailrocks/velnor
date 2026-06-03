@@ -6,6 +6,15 @@
 > aggressive cargo/sccache/rust-cache tactics), and be cheaper + faster than the
 > marketplace JS they replace.
 
+> **Direction (source of truth):** [`../docs/`](../docs/) —
+> [vision](../docs/vision.md), [roadmap/plan](../docs/roadmap.md),
+> [native action adapter contract](../docs/native-action-adapter-contract.md).
+> If this prompt and the docs disagree, the docs win.
+>
+> **Run order: 1 of 3** (see [`README.md`](README.md)). Run first — this is the
+> foundation. Jobs must execute correctly before *GitHub UI parity* (#2) and
+> *Fixture proof completion* (#3) can build on them.
+
 ## Objective
 
 Ensure Velnor's Rust-native action adapters and runtime features **fully cover
