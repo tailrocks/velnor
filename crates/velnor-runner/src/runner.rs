@@ -28,7 +28,7 @@ use crate::{
     },
     checkout::{
         checkout_plans, checkout_step_id, cleanup_checkout_credentials, configure_safe_directory,
-        execute_checkouts, CheckoutPlan,
+        CheckoutPlan,
     },
     cli::{ConfigureArgs, DaemonArgs, PreflightArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
@@ -1746,15 +1746,24 @@ fn start_step_log_publisher(
 
             if let Some(ws) = ws_conn.as_mut() {
                 if !lines.is_empty() {
-                    eprintln!("[feed] Sending {} lines for step {}", lines.len(), &log.step_id[..8]);
+                    eprintln!(
+                        "[feed] Sending {} lines for step {}",
+                        lines.len(),
+                        &log.step_id[..8]
+                    );
                     let ts = unix_now_iso8601();
-                    let timestamped: Vec<String> = lines.iter()
-                        .map(|l| format!("{ts} {l}"))
-                        .collect();
+                    let timestamped: Vec<String> =
+                        lines.iter().map(|l| format!("{ts} {l}")).collect();
                     if let Err(e) = crate::protocol::FeedStreamClient::send_log_lines(
-                        ws, &log.step_id, timestamped, Some(line_counter),
-                        Some(&plan_id), Some(&job_id),
-                    ).await {
+                        ws,
+                        &log.step_id,
+                        timestamped,
+                        Some(line_counter),
+                        Some(&plan_id),
+                        Some(&job_id),
+                    )
+                    .await
+                    {
                         eprintln!(
                             "Best-effort WebSocket feed send failed for '{}': {e:#}",
                             log.step_id
@@ -1778,7 +1787,11 @@ fn start_step_log_publisher(
                 let step = crate::protocol::TwirpStep {
                     external_id: log.step_id.clone(),
                     number: log.order as usize,
-                    name: if log.display_name.is_empty() { log.step_id.clone() } else { log.display_name.clone() },
+                    name: if log.display_name.is_empty() {
+                        log.step_id.clone()
+                    } else {
+                        log.display_name.clone()
+                    },
                     status: crate::protocol::StepStatus::Completed as u8,
                     started_at: None,
                     completed_at: Some(unix_now_iso8601()),
@@ -1796,15 +1809,32 @@ fn start_step_log_publisher(
                 change_order += 1;
 
                 // Upload step log blob to Results Service (populates data-log-url in GitHub UI).
-                if !lines.is_empty() {
+                // Upload for every non-skipped step — even empty — so it is expandable.
+                // Add RFC3339 timestamps so the "Show timestamps" toggle works.
+                if !log.skipped {
+                    let ts = unix_now_iso8601();
+                    let timestamped: Vec<String> =
+                        lines.iter().map(|l| format!("{ts} {l}")).collect();
                     if let Err(e) = client
-                        .upload_step_log(&plan_id, &job_id, &log.step_id, &lines)
+                        .upload_step_log(&plan_id, &job_id, &log.step_id, &timestamped)
                         .await
                     {
                         eprintln!(
                             "Best-effort Results Service log upload failed for '{}': {e:#}",
                             log.step_id
                         );
+                    }
+                    // Upload GITHUB_STEP_SUMMARY content so it renders in the Summary tab.
+                    if !log.summary.is_empty() {
+                        if let Err(e) = client
+                            .upload_step_summary(&plan_id, &job_id, &log.step_id, &log.summary)
+                            .await
+                        {
+                            eprintln!(
+                                "Best-effort step summary upload failed for '{}': {e:#}",
+                                log.step_id
+                            );
+                        }
                     }
                 }
             }
@@ -1933,9 +1963,7 @@ fn execute_script_job(
             step_id: setup_step_id,
             display_name: "Set up job".to_string(),
             order: 1,
-            lines: vec![
-                format!("Current runner version: '{}'", crate::protocol::velnor_runner_display()),
-            ],
+            lines: setup_job_lines(job, docker_image),
             masks: Vec::new(),
             annotations: Vec::new(),
             telemetry: Vec::new(),
@@ -1945,6 +1973,7 @@ fn execute_script_job(
             error_count: 0,
             warning_count: 0,
             notice_count: 0,
+            summary: String::new(),
         });
     }
     let mut command_runner = ProcessCommandRunner;
@@ -1974,11 +2003,12 @@ fn execute_script_job(
             eprintln!("Checkout failed: {e:#}");
         }
         if let Some(sender) = &step_log_sender {
+            let checkout_lines = checkout_step_lines(plan, exit_code);
             let _ = sender.send(StepLog {
                 step_id: plan.step_id.clone(),
                 display_name: plan.display_name.clone(),
                 order: checkout_order,
-                lines: Vec::new(),
+                lines: checkout_lines,
                 masks: Vec::new(),
                 annotations: Vec::new(),
                 telemetry: Vec::new(),
@@ -1988,6 +2018,7 @@ fn execute_script_job(
                 error_count: if exit_code != 0 { 1 } else { 0 },
                 warning_count: 0,
                 notice_count: 0,
+                summary: String::new(),
             });
         }
         checkout_result?;
@@ -2060,8 +2091,7 @@ fn execute_script_job(
     // Keep clones for synthetic steps after executor (senders are moved into executor below).
     let post_step_start_sender = step_start_sender.clone();
     let post_step_log_sender = step_log_sender.clone();
-    let mut executor = DockerScriptExecutor::new(command_runner)
-        .with_initial_order(checkout_order);
+    let mut executor = DockerScriptExecutor::new(command_runner).with_initial_order(checkout_order);
     if let Some(sender) = step_start_sender {
         executor = executor.with_step_start_sender(sender);
     }
@@ -2124,7 +2154,10 @@ fn execute_script_job(
         post_order += 1;
         let post_step_id = uuid::Uuid::new_v4().to_string();
         let post_name = {
-            let n = plan.display_name.strip_prefix("Run ").unwrap_or(&plan.display_name);
+            let n = plan
+                .display_name
+                .strip_prefix("Run ")
+                .unwrap_or(&plan.display_name);
             format!("Post Run {n}")
         };
         if let Some(sender) = &post_step_start_sender {
@@ -2149,6 +2182,7 @@ fn execute_script_job(
                 error_count: 0,
                 warning_count: 0,
                 notice_count: 0,
+                summary: String::new(),
             });
         }
     }
@@ -2168,7 +2202,7 @@ fn execute_script_job(
             step_id: complete_step_id,
             display_name: "Complete job".to_string(),
             order: complete_order,
-            lines: Vec::new(),
+            lines: complete_job_lines(),
             masks: Vec::new(),
             annotations: Vec::new(),
             telemetry: Vec::new(),
@@ -2178,6 +2212,7 @@ fn execute_script_job(
             error_count: 0,
             warning_count: 0,
             notice_count: 0,
+            summary: String::new(),
         });
     }
     Ok(ScriptJobResult {
@@ -2724,6 +2759,122 @@ fn unix_now_iso8601() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
+/// Build the "Set up job" log lines — mirrors the GitHub-hosted runner's
+/// provisioning block. Uses `::group::` sections so they collapse in the UI.
+fn setup_job_lines(job: &AgentJobRequestMessage, docker_image: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    lines.push(format!(
+        "Current runner version: '{}'",
+        crate::protocol::velnor_runner_display()
+    ));
+
+    // Operating System (fixed: Velnor jobs always run in Ubuntu 24.04).
+    lines.push("##[group]Operating System".to_string());
+    lines.push("Ubuntu".to_string());
+    lines.push("24.04.2".to_string());
+    lines.push("LTS".to_string());
+    lines.push("##[endgroup]".to_string());
+
+    // Runner Image.
+    lines.push("##[group]Runner Image".to_string());
+    lines.push(format!("Image: {docker_image}"));
+    lines.push("##[endgroup]".to_string());
+
+    // GITHUB_TOKEN Permissions (best-effort from context data).
+    let permissions = job
+        .context_data
+        .get("github")
+        .and_then(|g| g.get("token"))
+        .and_then(|t| t.get("permissions"))
+        .and_then(|p| p.as_object());
+    if let Some(perms) = permissions {
+        lines.push("##[group]GITHUB_TOKEN Permissions".to_string());
+        for (scope, level) in perms {
+            let display = level
+                .as_str()
+                .unwrap_or_else(|| level.as_str().unwrap_or("read"));
+            lines.push(format!("  {scope}: {display}"));
+        }
+        lines.push("##[endgroup]".to_string());
+    } else {
+        lines.push("Secret source: Actions".to_string());
+    }
+
+    lines.push("Prepare workflow directory".to_string());
+
+    // Enumerate repository actions used by the job (non-local uses).
+    let repo_actions: Vec<_> = job
+        .steps
+        .iter()
+        .filter_map(|step| {
+            let reference = step.reference.as_ref()?;
+            if reference.r#type != Some(ActionReferenceType::Repository) {
+                return None;
+            }
+            let name = reference.name.as_deref()?;
+            // Skip local composite actions (start with '.')
+            if name.starts_with('.') {
+                return None;
+            }
+            Some((name, reference.git_ref.as_deref().unwrap_or("latest")))
+        })
+        .collect();
+
+    if !repo_actions.is_empty() {
+        lines.push("##[group]Prepare all required actions".to_string());
+        lines.push("Getting action download info".to_string());
+        for (name, git_ref) in repo_actions {
+            lines.push(format!("  Download action repository '{name}@{git_ref}'"));
+        }
+        lines.push("##[endgroup]".to_string());
+    }
+
+    lines.push(format!("Complete job name: {}", job.job_display_name));
+    lines
+}
+
+/// Build log lines for a checkout step from the checkout plan.
+fn checkout_step_lines(plan: &CheckoutPlan, exit_code: i32) -> Vec<String> {
+    let mut lines = Vec::new();
+    // Show the repo being checked out (mask auth from URL for display).
+    let display_url = plan
+        .clone_url
+        .split('@')
+        .last()
+        .unwrap_or(&plan.clone_url)
+        .trim_end_matches('/');
+    lines.push(format!("Syncing repository: {display_url}"));
+    if let Some(ref ver) = plan.version {
+        lines.push(format!("Setting up ref '{ver}'"));
+    }
+    if let Some(depth) = plan.fetch_depth {
+        if depth > 0 {
+            lines.push(format!("Fetch depth: {depth}"));
+        }
+    }
+    lines.push(format!("Repository path: {}", plan.destination.display()));
+    if exit_code == 0 {
+        lines.push("Checkout completed successfully".to_string());
+    } else {
+        lines.push("::error::Checkout failed".to_string());
+    }
+    lines
+}
+
+/// Build the "Complete job" log lines — summarise Velnor cleanup work.
+fn complete_job_lines() -> Vec<String> {
+    vec![
+        "##[group]Post-job cleanup".to_string(),
+        "Stop job container".to_string(),
+        "Remove per-job network".to_string(),
+        "Clean work directory".to_string(),
+        "Recycle runner slot".to_string(),
+        "##[endgroup]".to_string(),
+        "Finishing: Complete job".to_string(),
+    ]
+}
+
 fn action_step_display_name(step: &crate::job_message::ActionStep) -> String {
     let explicit = step
         .display_name
@@ -2794,13 +2945,17 @@ async fn complete_run_service_job(
         })
         .collect();
     let telemetry = run_service_telemetry(job, &step_logs);
+    let annotations: Vec<RunServiceAnnotation> = step_logs
+        .iter()
+        .flat_map(|log| log.annotations.iter().map(run_service_annotation))
+        .collect();
     let completion = RunServiceCompleteJob {
         plan_id: job.plan.plan_id.clone(),
         job_id: job.job_id.clone(),
         conclusion: result,
         outputs,
         step_results,
-        annotations: Vec::new(),
+        annotations,
         telemetry,
         environment_url,
         billing_owner_id,
@@ -4005,6 +4160,7 @@ mod tests {
             error_count: 0,
             warning_count: 0,
             notice_count: 0,
+            summary: String::new(),
         };
 
         assert_eq!(
@@ -4075,6 +4231,7 @@ mod tests {
             error_count: 1,
             warning_count: 2,
             notice_count: 3,
+            summary: String::new(),
         };
 
         let records = timeline_records_for_step_logs(&job, &[log], "2026-06-01T00:00:00Z");
@@ -4216,6 +4373,7 @@ mod tests {
             error_count: 0,
             warning_count: 0,
             notice_count: 0,
+            summary: String::new(),
         };
         let duplicate_log = StepLog {
             telemetry: vec![StepCommandTelemetry {
@@ -5463,5 +5621,91 @@ runs:
         let plain = serde_json::json!({"repository": "org/repo", "sha": "abc123"});
         let result = expand_broker_context_value(plain.clone());
         assert_eq!(result, plain);
+    }
+
+    #[test]
+    fn setup_job_lines_contains_version_and_image() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanType": "Build", "ScopeIdentifier": "s", "PlanId": "p", "Version": 1 },
+            "Timeline": { "Id": "t" },
+            "JobId": "j",
+            "JobDisplayName": "build (app-a)",
+            "RequestId": 1
+        }))
+        .unwrap();
+        let lines = setup_job_lines(&job, "velnor/job-ubuntu:24.04");
+        let joined = lines.join("\n");
+        assert!(joined.contains("Current runner version:"));
+        assert!(joined.contains("velnor/job-ubuntu:24.04"));
+        assert!(joined.contains("Complete job name: build (app-a)"));
+        assert!(joined.contains("##[group]Operating System"));
+        assert!(joined.contains("##[endgroup]"));
+        assert!(joined.contains("Prepare workflow directory"));
+    }
+
+    #[test]
+    fn setup_job_lines_lists_repository_actions() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanType": "Build", "ScopeIdentifier": "s", "PlanId": "p", "Version": 1 },
+            "Timeline": { "Id": "t" },
+            "JobId": "j",
+            "JobDisplayName": "CI",
+            "RequestId": 1,
+            "Steps": [
+                {
+                    "Reference": {
+                        "Type": "Repository",
+                        "Name": "actions/checkout",
+                        "Ref": "v6"
+                    }
+                },
+                {
+                    "Reference": {
+                        "Type": "Script"
+                    }
+                }
+            ]
+        }))
+        .unwrap();
+        let lines = setup_job_lines(&job, "velnor/job-ubuntu:24.04");
+        let joined = lines.join("\n");
+        assert!(joined.contains("actions/checkout@v6"));
+        assert!(joined.contains("##[group]Prepare all required actions"));
+    }
+
+    #[test]
+    fn complete_job_lines_has_cleanup_content() {
+        let lines = complete_job_lines();
+        let joined = lines.join("\n");
+        assert!(joined.contains("##[group]Post-job cleanup"));
+        assert!(joined.contains("Stop job container"));
+        assert!(joined.contains("Finishing: Complete job"));
+    }
+
+    #[test]
+    fn checkout_step_lines_success_contains_key_info() {
+        use crate::checkout::CheckoutPlan;
+        let plan = CheckoutPlan {
+            step_id: "checkout".into(),
+            display_name: "Checkout".into(),
+            clone_url: "https://github.com/org/repo.git".into(),
+            version: Some("main".into()),
+            destination: std::path::PathBuf::from("/workspace/repo"),
+            token: None,
+            fetch_depth: Some(1),
+            fetch_tags: false,
+            persist_credentials: true,
+            clean: true,
+            condition: None,
+            continue_on_error: false,
+        };
+        let lines = checkout_step_lines(&plan, 0);
+        let joined = lines.join("\n");
+        assert!(joined.contains("github.com/org/repo.git"));
+        assert!(joined.contains("main"));
+        assert!(joined.contains("Fetch depth: 1"));
+        assert!(joined.contains("Checkout completed successfully"));
     }
 }

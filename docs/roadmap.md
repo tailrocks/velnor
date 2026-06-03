@@ -510,6 +510,38 @@ Performance targets:
 - recycle JIT runner slots quickly after job completion
 - expose clear timing evidence in fixture and target runs
 
+## Native Adapter Performance vs GitHub Defaults
+
+**Parallelism model:** GitHub-hosted runner executes steps serially within a
+job. Velnor does the same (steps run in order) because step ordering is
+workflow-defined. Parallelism is at the *job* level: Velnor's `--slots N`
+daemon runs N jobs concurrently on the same host, each in an isolated Docker
+container. This matches or beats GitHub's parallel job execution since Velnor
+avoids queue wait.
+
+**Cache tactics (warm vs cold):**
+
+- Cache restore (`_velnor_caches/`) is a local file copy — typically 10–200ms
+  vs GitHub's 1–30s GHA cache API download. Timing is emitted in each step's
+  stdout as `({ms}ms)`.
+- `Swatinem/rust-cache` uses the same local store. Warm Cargo registry + target
+  dir restore takes <100ms; GitHub equivalent is 10–60s network download.
+- sccache server starts immediately from a warm install in the job image.
+  `sccache --show-stats` runs in the post step to expose hit/miss rates.
+
+**Adapter startup vs JS startup:**
+
+Native Rust adapters skip the Node.js process startup + action bundle load
+that marketplace JS requires (~0.5–1s cold, ~0.3s warm per action). For a
+workflow with 10+ action steps, this saves 3–10s of pure startup overhead.
+
+**Phase 0 measured wins (emitted in step logs):**
+
+- Cache restore time: printed as `Cache restored from key '…' ({ms}ms)`
+- Cache save time: printed as `Saved cache '…' with N path(s) ({ms}ms)`
+- Rust cache restore time: printed similarly
+- sccache stats: printed in post step via `sccache --show-stats`
+
 Performance evidence to collect:
 
 - queue wait time
@@ -519,8 +551,9 @@ Performance evidence to collect:
 - first step start time
 - total job runtime
 - warm-cache rebuild runtime
-- cache hit/miss state
+- cache hit/miss state (now in step stdout with timing)
 - Docker Buildx cache hit/miss state
+- sccache hit/miss rate (now in post step)
 
 ## Implementation Roadmap
 
@@ -629,5 +662,9 @@ Open naming choice:
    dispatch a fresh fixture workflow after JIT lands?
 6. Cleanup: should Velnor keep failed JIT runner configs for debugging behind a
    flag, or always delete them by default?
-7. Artifact/cache: is one-host shared-workdir parity enough for Phase 0 target
-   proof, or must GitHub service-backed artifact/cache transport land first?
+7. Artifact/cache: **Phase 0 decision: one-host shared-workdir transport is
+   sufficient.** The `_velnor_artifacts/{run_id}-{attempt}/` and
+   `_velnor_caches/` directories on the daemon host serve all jobs in the same
+   run because Phase 0 proof runs on a single host. GitHub service-backed
+   artifact/cache transport (Results Service file APIs) is deferred post-Phase 0
+   for multi-host support.

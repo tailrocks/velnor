@@ -58,15 +58,29 @@ pub fn checkout_plans(
         let checkout_repository = checkout_repository(step);
         let clone_url = checkout_clone_url(checkout_repository.as_deref(), &self_repository)?;
         let destination = workspace_host.join(checkout_path(step)?);
-        let reference_name = step.reference.as_ref().and_then(|r| r.name.as_deref()).unwrap_or("");
-        let reference_ref = step.reference.as_ref().and_then(|r| r.git_ref.as_deref()).unwrap_or("");
-        let display_name = step.display_name.as_deref()
+        let reference_name = step
+            .reference
+            .as_ref()
+            .and_then(|r| r.name.as_deref())
+            .unwrap_or("");
+        let reference_ref = step
+            .reference
+            .as_ref()
+            .and_then(|r| r.git_ref.as_deref())
+            .unwrap_or("");
+        let display_name = step
+            .display_name
+            .as_deref()
             .filter(|n| !n.is_empty() && !n.starts_with("__"))
             .map(|n| n.to_string())
             .unwrap_or_else(|| {
-                if reference_name.is_empty() { String::new() }
-                else if reference_ref.is_empty() { format!("Run {reference_name}") }
-                else { format!("Run {reference_name}@{reference_ref}") }
+                if reference_name.is_empty() {
+                    String::new()
+                } else if reference_ref.is_empty() {
+                    format!("Run {reference_name}")
+                } else {
+                    format!("Run {reference_name}@{reference_ref}")
+                }
             });
         plans.push(CheckoutPlan {
             step_id: checkout_step_id(step, index),
@@ -119,16 +133,6 @@ fn has_unsupported_enabled_action(steps: &[ActionStep]) -> bool {
             && step.reference_type() != Some(ActionReferenceType::Script)
             && !is_checkout_step(step)
     })
-}
-
-pub fn execute_checkouts<R>(runner: &mut R, plans: &[CheckoutPlan]) -> Result<()>
-where
-    R: CommandRunner,
-{
-    for plan in plans {
-        execute_checkout(runner, plan)?;
-    }
-    Ok(())
 }
 
 pub fn execute_checkout<R>(runner: &mut R, plan: &CheckoutPlan) -> Result<()>

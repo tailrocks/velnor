@@ -23,11 +23,19 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::mpsc::UnboundedSender;
 
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
+
+// ANSI color helpers for Velnor-authored adapter output.
+// GitHub's UI renders these as colored spans (ansifg-* classes).
+const ANSI_GREEN: &str = "\x1b[32m";
+const ANSI_YELLOW: &str = "\x1b[33m";
+const ANSI_CYAN: &str = "\x1b[36m";
+const ANSI_BOLD: &str = "\x1b[1m";
+const ANSI_RESET: &str = "\x1b[0m";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandResult {
@@ -189,6 +197,9 @@ pub struct StepLog {
     pub error_count: i32,
     pub warning_count: i32,
     pub notice_count: i32,
+    /// GITHUB_STEP_SUMMARY content for this step (empty when none).
+    /// Uploaded separately to the Results Service summary endpoint.
+    pub summary: String,
 }
 
 #[derive(Debug, Clone)]
@@ -313,7 +324,13 @@ impl ExecutableStep {
         match self {
             ExecutableStep::CompositeStart { step_id } => step_id,
             ExecutableStep::CompositeEnd { step_id } => step_id,
-            ExecutableStep::Checkout(plan) => if plan.display_name.is_empty() { &plan.step_id } else { &plan.display_name },
+            ExecutableStep::Checkout(plan) => {
+                if plan.display_name.is_empty() {
+                    &plan.step_id
+                } else {
+                    &plan.display_name
+                }
+            }
             ExecutableStep::Script(step) => &step.display_name,
             ExecutableStep::JavaScript { display_name, .. } => display_name,
             ExecutableStep::Docker { display_name, .. } => display_name,
@@ -569,7 +586,8 @@ where
                     stderr: String::new(),
                 };
                 if step.reports_timeline_start() {
-                    let log = step_log_with_name(&step_id, step.display_name(), timeline_order, &result);
+                    let log =
+                        step_log_with_name(&step_id, step.display_name(), timeline_order, &result);
                     self.emit_step_log(&log);
                     step_logs.push(log);
                 }
@@ -616,7 +634,12 @@ where
                         if failed && *continue_on_error {
                             result.failure_ignored = true;
                         }
-                        let log = step_log_with_name(&pre_step_id, step.display_name(), timeline_order, &result);
+                        let log = step_log_with_name(
+                            &pre_step_id,
+                            step.display_name(),
+                            timeline_order,
+                            &result,
+                        );
                         self.emit_step_log(&log);
                         step_logs.push(log);
                         state.apply(step_id, &result);
@@ -752,7 +775,12 @@ where
                         result.failure_ignored = true;
                     }
                     if step.reports_timeline_start() {
-                        let log = step_log_with_name(&step_id, step.display_name(), timeline_order, &result);
+                        let log = step_log_with_name(
+                            &step_id,
+                            step.display_name(),
+                            timeline_order,
+                            &result,
+                        );
                         self.emit_step_log(&log);
                         step_logs.push(log);
                     }
@@ -772,7 +800,13 @@ where
             let post_step_id = uuid::Uuid::new_v4().to_string();
             self.emit_step_started(
                 post_step_id.clone(),
-                { let n = post_action.display_name.strip_prefix("Run ").unwrap_or(&post_action.display_name); format!("Post Run {n}") },
+                {
+                    let n = post_action
+                        .display_name
+                        .strip_prefix("Run ")
+                        .unwrap_or(&post_action.display_name);
+                    format!("Post Run {n}")
+                },
                 &mut timeline_order,
             );
             let result = self.execute_native_post_action(
@@ -786,8 +820,15 @@ where
                     if result.exit_code != 0 && post_action.continue_on_error {
                         result.failure_ignored = true;
                     }
-                    let post_name = { let n = post_action.display_name.strip_prefix("Run ").unwrap_or(&post_action.display_name); format!("Post Run {n}") };
-                    let log = step_log_with_name(&post_step_id, &post_name, timeline_order, &result);
+                    let post_name = {
+                        let n = post_action
+                            .display_name
+                            .strip_prefix("Run ")
+                            .unwrap_or(&post_action.display_name);
+                        format!("Post Run {n}")
+                    };
+                    let log =
+                        step_log_with_name(&post_step_id, &post_name, timeline_order, &result);
                     self.emit_step_log(&log);
                     step_logs.push(log);
                     state.apply(&post_step_id, &result);
@@ -807,7 +848,13 @@ where
             let js_post_step_id = uuid::Uuid::new_v4().to_string();
             self.emit_step_started(
                 js_post_step_id.clone(),
-                { let n = post_action.display_name.strip_prefix("Run ").unwrap_or(&post_action.display_name); format!("Post Run {n}") },
+                {
+                    let n = post_action
+                        .display_name
+                        .strip_prefix("Run ")
+                        .unwrap_or(&post_action.display_name);
+                    format!("Post Run {n}")
+                },
                 &mut timeline_order,
             );
             let result = self.execute_javascript_action_in_started_container(
@@ -828,7 +875,13 @@ where
                     if result.exit_code != 0 && post_action.continue_on_error {
                         result.failure_ignored = true;
                     }
-                    let post_name_js = { let n = post_action.display_name.strip_prefix("Run ").unwrap_or(&post_action.display_name); format!("Post Run {n}") };
+                    let post_name_js = {
+                        let n = post_action
+                            .display_name
+                            .strip_prefix("Run ")
+                            .unwrap_or(&post_action.display_name);
+                        format!("Post Run {n}")
+                    };
                     let log = step_log_with_name(
                         &js_post_step_id,
                         &post_name_js,
@@ -1084,15 +1137,15 @@ where
         match action.adapter {
             NativeActionAdapter::Cache => native_cache_save(step_id, action, state),
             NativeActionAdapter::RustCache => native_rust_cache_save(step_id, action, state),
-            // Sccache post: stop the server (soft-fail if not running).
-            NativeActionAdapter::Sccache => Ok(StepExecutionResult {
-                exit_code: 0,
-                state: StepCommandState::default(),
-                skipped: false,
-                failure_ignored: false,
-                stdout: String::new(),
-                stderr: String::new(),
-            }),
+            // Sccache post: show stats then stop server. Soft-fail if not running.
+            NativeActionAdapter::Sccache => {
+                let result = self.native_shell(
+                    _container,
+                    state,
+                    "sccache --show-stats 2>/dev/null || true; sccache --stop-server 2>/dev/null || true",
+                )?;
+                Ok(native_command_result(result, StepCommandState::default()))
+            }
             _ => bail!(
                 "native action adapter {:?} for step '{}' does not have a post action",
                 action.adapter,
@@ -1117,14 +1170,8 @@ where
             result,
             StepCommandState {
                 env: [
-                    (
-                        "MISE_DATA_DIR".to_string(),
-                        "/opt/mise".to_string(),
-                    ),
-                    (
-                        "MISE_CACHE_DIR".to_string(),
-                        "/opt/mise/cache".to_string(),
-                    ),
+                    ("MISE_DATA_DIR".to_string(), "/opt/mise".to_string()),
+                    ("MISE_CACHE_DIR".to_string(), "/opt/mise/cache".to_string()),
                     (
                         "MISE_CONFIG_DIR".to_string(),
                         "/opt/mise/config".to_string(),
@@ -1196,7 +1243,8 @@ where
         // Use HOME=/root so mise can locate its global config (written to /root at image
         // build time). RUSTUP_HOME and CARGO_HOME are set explicitly to separate the
         // toolchain store from the per-job artifact cache.
-        let container_default_path = "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+        let container_default_path =
+            "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
         let path_entries: Vec<&str> = state
             .path
             .iter()
@@ -1700,18 +1748,33 @@ mise --version
 
 fn setup_mold_script() -> String {
     r#"set -e
-if command -v mold >/dev/null 2>&1; then
-  mold --version
-  exit 0
-fi
-if command -v apt-get >/dev/null 2>&1; then
-  apt-get update
-  apt-get install -y --no-install-recommends mold
-else
-  echo "mold is not installed and apt-get is unavailable" >&2
-  exit 1
+if ! command -v mold >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y --no-install-recommends mold
+  else
+    echo "mold is not installed and apt-get is unavailable" >&2
+    exit 1
+  fi
 fi
 mold --version
+# Wire mold as the Cargo linker (mirrors rui314/setup-mold upstream behavior).
+CARGO_CFG="${CARGO_HOME:-$HOME/.cargo}/config.toml"
+mkdir -p "$(dirname "$CARGO_CFG")"
+if ! grep -qF '[target.x86_64-unknown-linux-gnu]' "$CARGO_CFG" 2>/dev/null; then
+  cat >> "$CARGO_CFG" <<'MOLDEOF'
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+MOLDEOF
+fi
+if ! grep -qF '[target.aarch64-unknown-linux-gnu]' "$CARGO_CFG" 2>/dev/null; then
+  cat >> "$CARGO_CFG" <<'MOLDEOF'
+[target.aarch64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+MOLDEOF
+fi
 "#
     .to_string()
 }
@@ -1763,12 +1826,14 @@ fn native_cache(
     let fail_on_cache_miss =
         input_truthy(&native_input(action, &action_state, "fail-on-cache-miss"));
     let lookup_only = input_truthy(&native_input(action, &action_state, "lookup-only"));
+    let t0 = Instant::now();
     let matched_key = find_cache_match(&action_state, &key, &restore_keys)?;
     if let Some(matched_key) = &matched_key {
         if !lookup_only {
             restore_cache_paths(&action_state, matched_key, &path)?;
         }
     }
+    let restore_ms = t0.elapsed().as_millis();
     let exact_hit = matched_key.as_deref() == Some(key.as_str());
 
     let mut outputs = BTreeMap::new();
@@ -1796,17 +1861,21 @@ fn native_cache(
     let mut stdout = String::new();
     if let Some(matched_key) = &matched_key {
         if lookup_only {
-            stdout.push_str(&format!("Cache lookup found key: {matched_key}\n"));
+            stdout.push_str(&format!(
+                "{ANSI_GREEN}Cache lookup found key: {matched_key}{ANSI_RESET}\n"
+            ));
         } else {
-            stdout.push_str(&format!("Cache restored from key: {matched_key}\n"));
+            stdout.push_str(&format!(
+                "{ANSI_GREEN}Cache restored from key: {matched_key}{ANSI_RESET} ({restore_ms}ms)\n"
+            ));
         }
     } else {
-        stdout.push_str("Cache not found for input keys: ");
+        stdout.push_str(&format!("{ANSI_YELLOW}Cache not found for input keys: "));
         stdout.push_str(&cache_lookup_keys(&key, &restore_keys).join(", "));
-        stdout.push('\n');
+        stdout.push_str(&format!("{ANSI_RESET}\n"));
     }
     if !path.is_empty() {
-        stdout.push_str(&format!("Cache path: {path}\n"));
+        stdout.push_str(&format!("{ANSI_CYAN}Cache path: {path}{ANSI_RESET}\n"));
     }
 
     Ok(StepExecutionResult {
@@ -1839,10 +1908,12 @@ fn native_rust_cache(
     let shared_key = native_cache_key(action, &action_state, "shared-key");
     let cache_directories = native_input(action, &action_state, "cache-directories");
     let cache_on_failure = native_input_or(&action_state, action, "cache-on-failure", "false");
+    let t0 = Instant::now();
     let matched = find_cache_match(&action_state, &shared_key, "")?;
     if let Some(matched_key) = &matched {
         restore_cache_paths(&action_state, matched_key, &cache_directories)?;
     }
+    let restore_ms = t0.elapsed().as_millis();
     let mut outputs = BTreeMap::new();
     outputs.insert("cache-hit".to_string(), matched.is_some().to_string());
     if !shared_key.is_empty() {
@@ -1858,8 +1929,16 @@ fn native_rust_cache(
         skipped: false,
         failure_ignored: false,
         stdout: matched.map_or_else(
-            || format!("Rust cache miss for shared key '{shared_key}'\n"),
-            |key| format!("Rust cache restored from shared key '{key}'\n"),
+            || {
+                format!(
+                    "{ANSI_YELLOW}Rust cache miss for shared key '{shared_key}'{ANSI_RESET}\n"
+                )
+            },
+            |key| {
+                format!(
+                    "{ANSI_GREEN}Rust cache restored from shared key '{key}'{ANSI_RESET} ({restore_ms}ms)\n"
+                )
+            },
         ),
         stderr: String::new(),
     })
@@ -2033,6 +2112,7 @@ fn save_cache_result(
             "",
         ));
     }
+    let t0 = Instant::now();
     let cache_dir = cache_store_dir(state)?.join(sanitize_artifact_name(key));
     fs::remove_dir_all(&cache_dir).ok();
     fs::create_dir_all(&cache_dir)
@@ -2056,6 +2136,7 @@ fn save_cache_result(
         copy_cache_source(&source, &target)?;
         saved += 1;
     }
+    let save_ms = t0.elapsed().as_millis();
     if saved == 0 {
         fs::remove_dir_all(&cache_dir).ok();
         return Ok(cache_save_step_result(
@@ -2066,7 +2147,9 @@ fn save_cache_result(
     }
     Ok(cache_save_step_result(
         0,
-        &format!("Saved cache '{key}' with {saved} path(s)\n"),
+        &format!(
+            "{ANSI_GREEN}Saved cache '{key}' with {saved} path(s){ANSI_RESET} ({save_ms}ms)\n"
+        ),
         "",
     ))
 }
@@ -2294,7 +2377,9 @@ fn native_docker_metadata(
         },
         skipped: false,
         failure_ignored: false,
-        stdout: format!("Generated Docker metadata\n{tags}\n{labels}\n"),
+        stdout: format!(
+            "{ANSI_CYAN}{ANSI_BOLD}Generated Docker metadata{ANSI_RESET}\n{tags}\n{labels}\n"
+        ),
         stderr: String::new(),
     }
 }
@@ -2926,6 +3011,38 @@ fn docker_metadata_tags(state: &JobExecutionState, input: &str) -> Vec<String> {
                 };
                 tags.push(format!("{prefix}{value}"));
             }
+            Some("ref") => {
+                let event = fields.get("event").map(String::as_str).unwrap_or("");
+                match event {
+                    "branch" => {
+                        let git_ref = state.env.get("GITHUB_REF").cloned().unwrap_or_default();
+                        if let Some(branch) = git_ref.strip_prefix("refs/heads/") {
+                            let tag = docker_sanitize_tag(branch);
+                            if !tag.is_empty() {
+                                tags.push(tag);
+                            }
+                        }
+                    }
+                    "tag" => {
+                        let git_ref = state.env.get("GITHUB_REF").cloned().unwrap_or_default();
+                        if let Some(tag_name) = git_ref.strip_prefix("refs/tags/") {
+                            let tag = docker_sanitize_tag(tag_name);
+                            if !tag.is_empty() {
+                                tags.push(tag);
+                            }
+                        }
+                    }
+                    "pr" => {
+                        if let Some(pr_number) = state
+                            .resolve_context_data_expression("github.event.pull_request.number")
+                            .filter(|v| !v.is_empty())
+                        {
+                            tags.push(format!("pr-{pr_number}"));
+                        }
+                    }
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }
@@ -2945,6 +3062,23 @@ fn docker_metadata_fields(line: &str) -> BTreeMap<String, String> {
         .filter_map(|field| field.split_once('='))
         .map(|(name, value)| (name.trim().to_string(), value.trim().to_string()))
         .collect()
+}
+
+fn docker_sanitize_tag(name: &str) -> String {
+    // Docker tag chars: [a-zA-Z0-9_.-]; replace others with '-'; max 128 chars.
+    // Leading '.' or '-' are invalid — strip them.
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_start_matches(['.', '-']);
+    trimmed.chars().take(128).collect()
 }
 
 fn docker_metadata_labels(state: &JobExecutionState) -> Vec<String> {
@@ -3761,6 +3895,7 @@ fn step_log_with_name(
         error_count: result.state.error_count,
         warning_count: result.state.warning_count,
         notice_count: result.state.notice_count,
+        summary: result.state.summary.clone(),
     }
 }
 
@@ -4280,10 +4415,7 @@ mod tests {
                     fs::write(self.temp.join("pather_path"), "/root/.cargo/bin\n")?;
                 }
                 if has_container_env_path(args, "GITHUB_PATH", "mise_path") {
-                    fs::write(
-                        self.temp.join("mise_path"),
-                        "/opt/mise/shims\n",
-                    )?;
+                    fs::write(self.temp.join("mise_path"), "/opt/mise/shims\n")?;
                 }
                 if has_container_env_path(args, "GITHUB_ENV", "toolchain_env") {
                     fs::write(
@@ -4292,10 +4424,7 @@ mod tests {
                     )?;
                 }
                 if has_container_env_path(args, "GITHUB_PATH", "toolchain_path") {
-                    fs::write(
-                        self.temp.join("toolchain_path"),
-                        "/root/.cargo/bin\n",
-                    )?;
+                    fs::write(self.temp.join("toolchain_path"), "/root/.cargo/bin\n")?;
                 }
             }
             Ok(CommandResult {
@@ -5576,6 +5705,59 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     }
 
     #[test]
+    fn native_docker_metadata_ref_branch_generates_branch_tag() {
+        let state = JobExecutionState::new_with_context(
+            &[
+                ("GITHUB_REF".into(), "refs/heads/main".into()),
+                ("GITHUB_SHA".into(), "abcdef1234567890".into()),
+                ("GITHUB_REPOSITORY".into(), "org/repo".into()),
+            ],
+            &[],
+        );
+        let action = NativeActionInvocation {
+            adapter: NativeActionAdapter::DockerMetadata,
+            inputs: [
+                ("images".into(), "ghcr.io/org/repo/fixture".into()),
+                (
+                    "tags".into(),
+                    "type=ref,event=branch\ntype=sha,prefix=sha-".into(),
+                ),
+            ]
+            .into(),
+            env: Vec::new(),
+        };
+        let result = native_docker_metadata(&action, &state);
+        assert_eq!(
+            result.state.outputs["tags"],
+            "ghcr.io/org/repo/fixture:main\nghcr.io/org/repo/fixture:sha-abcdef1"
+        );
+    }
+
+    #[test]
+    fn native_docker_metadata_ref_branch_skipped_for_tag_ref() {
+        let state = JobExecutionState::new_with_context(
+            &[
+                ("GITHUB_REF".into(), "refs/tags/v1.0.0".into()),
+                ("GITHUB_SHA".into(), "abcdef1234567890".into()),
+                ("GITHUB_REPOSITORY".into(), "org/repo".into()),
+            ],
+            &[],
+        );
+        let action = NativeActionInvocation {
+            adapter: NativeActionAdapter::DockerMetadata,
+            inputs: [
+                ("images".into(), "ghcr.io/org/repo/fixture".into()),
+                ("tags".into(), "type=ref,event=branch".into()),
+            ]
+            .into(),
+            env: Vec::new(),
+        };
+        let result = native_docker_metadata(&action, &state);
+        // no branch ref → falls back to sha default
+        assert!(result.state.outputs["tags"].starts_with("ghcr.io/org/repo/fixture:sha-"));
+    }
+
+    #[test]
     fn native_tool_adapters_use_job_container_without_node_sidecars() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -5659,14 +5841,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .unwrap();
 
         assert_eq!(results.len(), 7); // 5 main + sccache-post + rust-cache-post
-        assert!(results[0]
-            .state
-            .path
-            .contains(&"/opt/mise/shims".into()));
-        assert!(results[3]
-            .state
-            .path
-            .contains(&"/root/.cargo/bin".into()));
+        assert!(results[0].state.path.contains(&"/opt/mise/shims".into()));
+        assert!(results[3].state.path.contains(&"/root/.cargo/bin".into()));
         assert_eq!(results[4].state.outputs["cache-hit"], "false");
         assert_eq!(results[4].state.env["CACHE_ON_FAILURE"], "true");
         let docker_exec_calls = executor
@@ -5678,7 +5854,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             })
             .map(|(_, args)| args)
             .collect::<Vec<_>>();
-        assert_eq!(docker_exec_calls.len(), 4);
+        // mise, mold, just (main steps) + sccache start + sccache post (show-stats + stop)
+        assert_eq!(docker_exec_calls.len(), 5);
         assert!(docker_exec_calls
             .iter()
             .any(|args| args.iter().any(|arg| arg.contains("https://mise.run"))));
@@ -5688,6 +5865,9 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert!(docker_exec_calls.iter().any(|args| args
             .iter()
             .any(|arg| arg.contains("apt-get install -y --no-install-recommends just"))));
+        assert!(docker_exec_calls
+            .iter()
+            .any(|args| args.iter().any(|arg| arg.contains("sccache --show-stats"))));
         assert_eq!(
             executor
                 .runner()
@@ -8819,7 +8999,8 @@ fi"#
         // Velnor always overwrites on duplicate (re-runs on same slot reuse artifact store).
         assert_eq!(duplicate_results[0].exit_code, 0);
         assert_eq!(
-            fs::read_to_string(temp.join("_velnor_artifacts/local-1/duplicate/second.txt")).unwrap(),
+            fs::read_to_string(temp.join("_velnor_artifacts/local-1/duplicate/second.txt"))
+                .unwrap(),
             "second\n"
         );
         let overwrite_results = DockerScriptExecutor::new(RecordingRunner::default())
@@ -9851,9 +10032,9 @@ bitcoin-processor-app.push=true")
         assert!(
             node_calls[1].contains(&"GITHUB_PATH=/github/file_commands/setup-python_path".into())
         );
-        assert!(node_calls[1].last().is_some_and(|arg| {
-            arg.contains("export PATH='/opt/mise/shims':\"$PATH\"")
-        }));
+        assert!(node_calls[1]
+            .last()
+            .is_some_and(|arg| { arg.contains("export PATH='/opt/mise/shims':\"$PATH\"") }));
         assert!(node_calls[2].ends_with(&[
             "node:24-bookworm".into(),
             "sh".into(),
@@ -9972,9 +10153,9 @@ bitcoin-processor-app.push=true")
             assert!(call.contains(&"GITHUB_REPOSITORY=ChainArgos/java-monorepo".into()));
             assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
-            assert!(call.last().is_some_and(|arg| {
-                arg.contains("export PATH='/root/.cargo/bin':\"$PATH\"")
-            }));
+            assert!(call
+                .last()
+                .is_some_and(|arg| { arg.contains("export PATH='/root/.cargo/bin':\"$PATH\"") }));
         }
         assert!(node_calls[0].contains(&"INPUT_REPO=casey/just".into()));
         assert!(node_calls[0].contains(&"INPUT_GITHUB-TOKEN=ghs_token".into()));

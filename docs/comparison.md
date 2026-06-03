@@ -76,9 +76,33 @@ should *improve*:
 - Keep **user-command** stdout/stderr verbatim (including their ANSI); only frame
   it (group header + timestamps) the way GitHub does.
 
+## Implementation status
+
+### Implemented (Phase 0, this pass)
+
+| # | Area | Before | After |
+|---|------|--------|-------|
+| 1 | Expandability | Many steps not expandable (no log blob uploaded) | Every non-skipped step gets a log blob → expandable |
+| 2 | Per-line timestamps | Absent in uploaded blobs | RFC3339 prefix on every uploaded line; "Show timestamps" toggle works |
+| 3 | `::group::` collapsible sections | None in synthetic steps | "Set up job" and "Complete job" use `##[group]`/`##[endgroup]` sections; user `::group::` passes through |
+| 4 | ANSI color | Mostly plain | Cache hit/miss colored green/yellow; metadata header bold-cyan; cache path cyan |
+| 5 | "Set up job" content | 1 line (runner version only) | Runner version + OS group + image group + permissions + action list + job name |
+| 6 | "Complete job" content | Empty | Post-job cleanup group (container stop, network remove, dir clean, slot recycle) |
+| 7 | Annotations | Empty in job completion | Step-level annotations aggregated into `RunServiceCompleteJob.annotations` |
+| 8 | Step summaries | Only in step log (appended as text) | Separate `upload_step_summary` call to Results Service `CreateStepSummaryMetadata` |
+| 9 | Checkout step log | Empty lines → not expandable | Syncing repo URL, ref, fetch depth, destination, result |
+| 10 | Cache step content | Plain text only | Colored hit/miss with timing ms |
+
+### Remaining (post-Phase-0 or cosmetic)
+
+| # | Area | Status |
+|---|------|--------|
+| 1 | External step IDs with `-check` suffix | Cosmetic; composite step naming from `action.rs:1278` |
+| 2 | Step numbering parity (GitHub post steps at #37–40) | Cosmetic for Phase 0 |
+| 3 | API-based lane comparison (live re-capture) | Needs live Sentry run |
+
 ## Status
 
-- [ ] Both lanes re-captured via the GitHub API.
-- [ ] Field-by-field step + log diff recorded here.
-- [ ] Improvement plan items implemented (track in the UI parity checklist).
-- [ ] After/again render shows Velnor **not less informative** than GitHub.
+- [x] Improvement plan items implemented (§1–§10 above).
+- [ ] Both lanes re-captured via the GitHub API (needs live Sentry run).
+- [ ] After/again render confirms Velnor not less informative than GitHub.
