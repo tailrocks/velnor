@@ -2244,11 +2244,11 @@ pub trait GitHubRunnerProtocol {
 /// Matches the GitHub Actions `TimelineRecordFeedLinesWrapper` wire format.
 #[derive(Debug, Clone, Serialize)]
 pub struct FeedLines {
-    pub count: usize,
+    // GitHub Results Service expects camelCase field names.
     pub value: Vec<String>,
-    #[serde(rename = "step_id")]
+    #[serde(rename = "stepId")]
     pub step_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "startLine", skip_serializing_if = "Option::is_none")]
     pub start_line: Option<i64>,
 }
 
@@ -2289,7 +2289,6 @@ impl FeedStreamClient {
         use tokio_tungstenite::{connect_async, tungstenite::Message};
 
         let feed = FeedLines {
-            count: lines.len(),
             value: lines,
             step_id: step_id.to_string(),
             start_line,
@@ -2317,13 +2316,23 @@ impl FeedStreamClient {
             .await
             .context("connect to feed stream WebSocket")?;
 
-        // Chunk into 1 KB text frames (matching the official runner behaviour)
-        for chunk in bytes.chunks(1024) {
-            ws.send(Message::Text(
-                String::from_utf8_lossy(chunk).into_owned().into(),
-            ))
-            .await
-            .context("send WebSocket frame")?;
+        // Send as single text frame (the JSON fits comfortably in one frame).
+        ws.send(Message::Text(
+            String::from_utf8_lossy(&bytes).into_owned().into(),
+        ))
+        .await
+        .context("send WebSocket frame")?;
+
+        // Drain any server messages and wait for close handshake.
+        use futures_util::StreamExt;
+        while let Ok(Some(msg)) = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            ws.next(),
+        ).await {
+            match msg {
+                Ok(Message::Close(_)) | Err(_) => break,
+                _ => {}
+            }
         }
         ws.close(None).await.ok();
         Ok(())

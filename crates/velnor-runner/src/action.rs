@@ -812,9 +812,15 @@ fn composite_action_invocations_with_path(
                 )
             })
             .unwrap_or_else(|| workspace_container.to_string());
+        let composite_display_name = step.name.clone()
+            .filter(|n| !n.is_empty() && !n.starts_with("__"))
+            .unwrap_or_else(|| {
+                let first = rendered.lines().next().unwrap_or("").trim();
+                if first.is_empty() { String::new() } else { format!("Run {first}") }
+            });
         invocations.push(CompositeActionInvocation::Script(ScriptStep {
             id: step_id,
-            display_name: step.name.clone().unwrap_or_default(),
+            display_name: composite_display_name,
             script: rendered,
             shell,
             working_directory_container,

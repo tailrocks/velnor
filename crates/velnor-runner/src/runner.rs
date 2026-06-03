@@ -1723,8 +1723,13 @@ fn start_step_log_publisher(
 
             if let Some(client) = &feed_client {
                 if !lines.is_empty() {
+                    // Prefix each line with ISO 8601 timestamp (GitHub runner format).
+                    let ts = unix_now_iso8601();
+                    let timestamped: Vec<String> = lines.iter()
+                        .map(|l| format!("{ts} {l}"))
+                        .collect();
                     if let Err(e) = client
-                        .append_log_lines(&log.step_id, lines.clone(), Some(line_counter))
+                        .append_log_lines(&log.step_id, timestamped, Some(line_counter))
                         .await
                     {
                         eprintln!(
@@ -1872,6 +1877,32 @@ fn execute_script_job(
         fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
     }
     let context_data = job_context_data(job);
+    // Synthetic "Set up job" step matching GitHub-hosted runner output.
+    let setup_step_id = format!("{}-setup", job.job_id);
+    if let Some(sender) = &step_start_sender {
+        let _ = sender.send(StepStartEvent {
+            step_id: setup_step_id.clone(),
+            display_name: "Set up job".to_string(),
+            order: 0,
+        });
+    }
+    if let Some(sender) = &step_log_sender {
+        let _ = sender.send(StepLog {
+            step_id: setup_step_id,
+            display_name: "Set up job".to_string(),
+            order: 0,
+            lines: Vec::new(),
+            masks: Vec::new(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+        });
+    }
     let mut command_runner = ProcessCommandRunner;
     let checkout_plans = checkout_plans(job, &workspace)?;
     let (runtime_checkout_plans, eager_checkout_plans): (Vec<_>, Vec<_>) = checkout_plans
@@ -1882,8 +1913,40 @@ fn execute_script_job(
         .into_iter()
         .map(|plan| resolve_checkout_plan_context(plan, &base_env, &context_data))
         .collect::<Vec<_>>();
-    execute_checkouts(&mut command_runner, &eager_checkout_plans)?;
+    let mut checkout_order: i32 = 0;
     for plan in &eager_checkout_plans {
+        checkout_order += 1;
+        // Emit step events so GitHub shows the checkout step in the job's step list.
+        if let Some(sender) = &step_start_sender {
+            let _ = sender.send(StepStartEvent {
+                step_id: plan.step_id.clone(),
+                display_name: plan.display_name.clone(),
+                order: checkout_order,
+            });
+        }
+        let checkout_result = crate::checkout::execute_checkout(&mut command_runner, plan);
+        let exit_code = if checkout_result.is_ok() { 0 } else { 1 };
+        if let Err(ref e) = checkout_result {
+            eprintln!("Checkout failed: {e:#}");
+        }
+        if let Some(sender) = &step_log_sender {
+            let _ = sender.send(StepLog {
+                step_id: plan.step_id.clone(),
+                display_name: plan.display_name.clone(),
+                order: checkout_order,
+                lines: Vec::new(),
+                masks: Vec::new(),
+                annotations: Vec::new(),
+                telemetry: Vec::new(),
+                exit_code,
+                skipped: false,
+                failure_ignored: false,
+                error_count: if exit_code != 0 { 1 } else { 0 },
+                warning_count: 0,
+                notice_count: 0,
+            });
+        }
+        checkout_result?;
         configure_safe_directory(&home, &workspace, &plan.destination)?;
     }
     let local_action_plans =
@@ -1950,7 +2013,11 @@ fn execute_script_job(
         .chain(runtime_checkout_plans.iter())
         .cloned()
         .collect::<Vec<_>>();
-    let mut executor = DockerScriptExecutor::new(command_runner);
+    // Keep clones for synthetic steps after executor (senders are moved into executor below).
+    let post_step_start_sender = step_start_sender.clone();
+    let post_step_log_sender = step_log_sender.clone();
+    let mut executor = DockerScriptExecutor::new(command_runner)
+        .with_initial_order(checkout_order);
     if let Some(sender) = step_start_sender {
         executor = executor.with_step_start_sender(sender);
     }
@@ -2007,6 +2074,68 @@ fn execute_script_job(
     } else {
         TaskResult::Succeeded
     };
+    // "Post Run actions/checkout@vN" steps for each checkout (credential cleanup).
+    let mut post_order = summary.step_logs.iter().map(|l| l.order).max().unwrap_or(0);
+    for plan in &cleanup_checkout_plans {
+        post_order += 1;
+        let post_step_id = format!("{}-post", plan.step_id);
+        let post_name = {
+            let n = plan.display_name.strip_prefix("Run ").unwrap_or(&plan.display_name);
+            format!("Post Run {n}")
+        };
+        if let Some(sender) = &post_step_start_sender {
+            let _ = sender.send(StepStartEvent {
+                step_id: post_step_id.clone(),
+                display_name: post_name.clone(),
+                order: post_order,
+            });
+        }
+        if let Some(sender) = &post_step_log_sender {
+            let _ = sender.send(StepLog {
+                step_id: post_step_id,
+                display_name: post_name,
+                order: post_order,
+                lines: Vec::new(),
+                masks: Vec::new(),
+                annotations: Vec::new(),
+                telemetry: Vec::new(),
+                exit_code: 0,
+                skipped: false,
+                failure_ignored: false,
+                error_count: 0,
+                warning_count: 0,
+                notice_count: 0,
+            });
+        }
+    }
+
+    // Synthetic "Complete job" step matching GitHub-hosted runner output.
+    let complete_step_id = format!("{}-complete", job.job_id);
+    let complete_order = post_order + 1;
+    if let Some(sender) = &post_step_start_sender {
+        let _ = sender.send(StepStartEvent {
+            step_id: complete_step_id.clone(),
+            display_name: "Complete job".to_string(),
+            order: complete_order,
+        });
+    }
+    if let Some(sender) = &post_step_log_sender {
+        let _ = sender.send(StepLog {
+            step_id: complete_step_id,
+            display_name: "Complete job".to_string(),
+            order: complete_order,
+            lines: Vec::new(),
+            masks: Vec::new(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+        });
+    }
     Ok(ScriptJobResult {
         result,
         outputs: summary.job_outputs,
@@ -2593,8 +2722,15 @@ async fn complete_run_service_job(
     let step_results = step_logs
         .iter()
         .map(|log| RunServiceStepResult {
-            external_id: None,
-            name: log.step_id.clone(),
+            // external_id must match the Twirp-registered step external_id so GitHub
+            // merges this result onto the existing step instead of creating a duplicate
+            // entry at default order 0.
+            external_id: Some(log.step_id.clone()),
+            name: if log.display_name.is_empty() {
+                log.step_id.clone()
+            } else {
+                log.display_name.clone()
+            },
             status: TimelineRecordState::Completed,
             conclusion: step_log_result(log),
             completed_log_lines: log.lines.len() as i64,

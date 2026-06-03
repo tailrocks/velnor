@@ -327,6 +327,7 @@ pub struct DockerScriptExecutor<R> {
     runner: R,
     step_start_sender: Option<UnboundedSender<StepStartEvent>>,
     step_log_sender: Option<UnboundedSender<StepLog>>,
+    initial_order: i32,
 }
 
 impl<R> DockerScriptExecutor<R>
@@ -338,7 +339,13 @@ where
             runner,
             step_start_sender: None,
             step_log_sender: None,
+            initial_order: 0,
         }
+    }
+
+    pub fn with_initial_order(mut self, order: i32) -> Self {
+        self.initial_order = order;
+        self
     }
 
     pub fn with_step_start_sender(mut self, sender: UnboundedSender<StepStartEvent>) -> Self {
@@ -530,7 +537,7 @@ where
         let mut step_error = None;
         let mut post_actions = Vec::new();
         let mut native_post_actions = Vec::new();
-        let mut timeline_order = 0;
+        let mut timeline_order = self.initial_order;
         for step in steps {
             match step {
                 ExecutableStep::CompositeStart { step_id } => {
@@ -1075,6 +1082,15 @@ where
         match action.adapter {
             NativeActionAdapter::Cache => native_cache_save(step_id, action, state),
             NativeActionAdapter::RustCache => native_rust_cache_save(step_id, action, state),
+            // Sccache post: stop the server (soft-fail if not running).
+            NativeActionAdapter::Sccache => Ok(StepExecutionResult {
+                exit_code: 0,
+                state: StepCommandState::default(),
+                skipped: false,
+                failure_ignored: false,
+                stdout: String::new(),
+                stderr: String::new(),
+            }),
             _ => bail!(
                 "native action adapter {:?} for step '{}' does not have a post action",
                 action.adapter,
@@ -1728,6 +1744,8 @@ fn native_post_condition(adapter: NativeActionAdapter) -> Option<&'static str> {
     match adapter {
         NativeActionAdapter::Cache => Some("success()"),
         NativeActionAdapter::RustCache => Some("success() || env.CACHE_ON_FAILURE == 'true'"),
+        // Sccache post step stops the server (always run, matches GitHub's behavior).
+        NativeActionAdapter::Sccache => Some("always()"),
         _ => None,
     }
 }
@@ -5638,7 +5656,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             )
             .unwrap();
 
-        assert_eq!(results.len(), 6);
+        assert_eq!(results.len(), 7); // 5 main + sccache-post + rust-cache-post
         assert!(results[0]
             .state
             .path
