@@ -27,3 +27,6 @@ Start here:
 - [Runner V2 reference](reference/latest-runner-v2-refresh-2026-06-01.md):
   current upstream `actions/runner` V2 source pin used by
   `velnor-tools check-runner-reference`.
+- [Target action registry](reference/target-action-registry.md): every in-scope
+  action pinned to its focus version with a direct link to that version's
+  upstream source — the source-of-truth for implementing/verifying adapters.
