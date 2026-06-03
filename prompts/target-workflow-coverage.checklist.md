@@ -3,11 +3,12 @@
 Goal: [target-workflow-coverage.md](target-workflow-coverage.md). Work
 top-to-bottom. Prove every fix against the fixture (never edit the fixture).
 
-Behavior truth: <https://github.com/actions/runner> + each action's upstream
-**at its pinned tag**. Registry (pins + source links):
+Behavior truth: <https://github.com/actions/runner> + each action's **latest**
+upstream source. Registry (source links):
 `docs/reference/target-action-registry.md` — open the row and read the upstream
-source before touching an adapter; only cover features the consumers (Jackin,
-ChainArgos) actually use. Contract: `docs/native-action-adapter-contract.md`.
+source before touching an adapter; Velnor tracks latest only (no historical
+versions). Only cover features the consumers (Jackin, ChainArgos) actually use.
+Contract: `docs/native-action-adapter-contract.md`.
 
 Primary files:
 `crates/velnor-runner/src/action.rs` (`NativeActionAdapter` enum + router at
@@ -27,9 +28,7 @@ Primary files:
 - [ ] Confirm the dispatch catch-all (`executor.rs:1067-1073`) is unreachable
   (no declared-but-unimplemented adapter).
 - [ ] For each family below, open its `native_*` impl and compare against the
-  upstream action's **source at the pinned tag** (registry
-  `Source @ SHA` link), not just docs. Confirm the registry pin still
-  matches the latest version the consumers use; bump + re-read the diff if not.
+  **latest** upstream source (registry `Source` link), not just docs.
 
 ## 1. Checkout & SCM
 
