@@ -28,7 +28,7 @@ Primary files:
   (no declared-but-unimplemented adapter).
 - [ ] For each family below, open its `native_*` impl and compare against the
   upstream action's **source at the pinned tag** (registry
-  `Source @ version` link), not just docs. Confirm the registry pin still
+  `Source @ SHA` link), not just docs. Confirm the registry pin still
   matches the latest version the consumers use; bump + re-read the diff if not.
 
 ## 1. Checkout & SCM

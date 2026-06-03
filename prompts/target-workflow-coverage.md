@@ -39,7 +39,7 @@ instead of executing marketplace JS — for performance and control.
   — the authoritative list of every in-scope action, the **version we focus
   on**, and a direct link to that version's upstream source. Before you
   implement or change any adapter, open the registry row, follow its
-  **Source @ version** link, and read the real upstream TypeScript /
+  **Source @ SHA** link, and read the real upstream TypeScript /
   composite / Docker behavior. *The source at the pinned tag is the contract* —
   do not guess from docs or memory.
 - **Always track latest.** The registry records both Focus and latest for each
