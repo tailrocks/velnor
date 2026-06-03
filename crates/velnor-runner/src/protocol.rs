@@ -503,10 +503,15 @@ impl RegistrationClient {
                         .context("parse JIT runner config response");
                 }
                 Err(e) if e.is_connect() => {
-                    eprintln!("JIT config connect error (attempt {}/3): {e:#}", attempt + 1);
+                    eprintln!(
+                        "JIT config connect error (attempt {}/3): {e:#}",
+                        attempt + 1
+                    );
                     last_err = anyhow::Error::from(e).context("send JIT runner config request");
                 }
-                Err(e) => return Err(anyhow::Error::from(e).context("send JIT runner config request")),
+                Err(e) => {
+                    return Err(anyhow::Error::from(e).context("send JIT runner config request"))
+                }
             }
         }
         Err(last_err)
@@ -2307,8 +2312,11 @@ impl FeedStreamClient {
     /// The official GitHub runner keeps this connection open for the whole job.
     pub async fn connect(
         &self,
-    ) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>
-    {
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    > {
         use tokio_tungstenite::connect_async;
         // Append plan_id and job_id as query parameters so the Results Service
         // can route the connection to the correct run's blob storage.
@@ -2513,7 +2521,10 @@ impl TwirpResultsClient {
         const RECEIVER: &str = "twirp/results.services.receiver.Receiver";
 
         // 1. Get signed upload URL.
-        let url = format!("{}/{RECEIVER}/GetStepLogsSignedBlobURL", self.results_service_url);
+        let url = format!(
+            "{}/{RECEIVER}/GetStepLogsSignedBlobURL",
+            self.results_service_url
+        );
         #[derive(serde::Serialize)]
         struct GetUrlReq<'a> {
             workflow_run_backend_id: &'a str,
@@ -2540,11 +2551,16 @@ impl TwirpResultsClient {
             .await
             .context("GetStepLogsSignedBlobURL parse")?;
 
-        let logs_url = resp.logs_url.filter(|u| !u.is_empty())
+        let logs_url = resp
+            .logs_url
+            .filter(|u| !u.is_empty())
             .ok_or_else(|| anyhow::anyhow!("GetStepLogsSignedBlobURL returned empty URL"))?;
 
         // 2. Upload log content (single block – firstBlock && finalize path).
-        let content: Vec<u8> = lines.iter().flat_map(|l| format!("{l}\n").into_bytes()).collect();
+        let content: Vec<u8> = lines
+            .iter()
+            .flat_map(|l| format!("{l}\n").into_bytes())
+            .collect();
         let line_count = lines.len() as i64;
         let content_len = content.len();
         let put_resp = self
@@ -2564,7 +2580,10 @@ impl TwirpResultsClient {
         }
 
         // 3. Finalize with metadata.
-        let url = format!("{}/{RECEIVER}/CreateStepLogsMetadata", self.results_service_url);
+        let url = format!(
+            "{}/{RECEIVER}/CreateStepLogsMetadata",
+            self.results_service_url
+        );
         #[derive(serde::Serialize)]
         struct MetaReq<'a> {
             workflow_run_backend_id: &'a str,
@@ -2575,7 +2594,9 @@ impl TwirpResultsClient {
         }
         let ts = {
             use time::{format_description::well_known::Rfc3339, OffsetDateTime};
-            OffsetDateTime::now_utc().format(&Rfc3339).unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+            OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
         };
         let meta_resp = self
             .http
@@ -2595,6 +2616,110 @@ impl TwirpResultsClient {
         if !meta_status.is_success() {
             let body = meta_resp.text().await.unwrap_or_default();
             bail!("CreateStepLogsMetadata failed: status={meta_status}, body={body}");
+        }
+        Ok(())
+    }
+
+    /// Upload GITHUB_STEP_SUMMARY content to the Results Service so it renders
+    /// in the GitHub UI "Summary" tab. Follows the same signed-URL flow as step
+    /// log upload: GetStepSummarySignedBlobURL → PUT → CreateStepSummaryMetadata.
+    pub async fn upload_step_summary(
+        &self,
+        plan_id: &str,
+        job_id: &str,
+        step_id: &str,
+        content: &str,
+    ) -> Result<()> {
+        const RECEIVER: &str = "twirp/results.services.receiver.Receiver";
+
+        // 1. Get signed upload URL.
+        let url = format!(
+            "{}/{RECEIVER}/GetStepSummarySignedBlobURL",
+            self.results_service_url
+        );
+        #[derive(serde::Serialize)]
+        struct GetUrlReq<'a> {
+            workflow_run_backend_id: &'a str,
+            workflow_job_run_backend_id: &'a str,
+            step_backend_id: &'a str,
+        }
+        #[derive(serde::Deserialize)]
+        struct GetUrlResp {
+            blob_url: Option<String>,
+        }
+        let resp: GetUrlResp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&GetUrlReq {
+                workflow_run_backend_id: plan_id,
+                workflow_job_run_backend_id: job_id,
+                step_backend_id: step_id,
+            })
+            .send()
+            .await
+            .context("GetStepSummarySignedBlobURL request")?
+            .json()
+            .await
+            .context("GetStepSummarySignedBlobURL parse")?;
+
+        let blob_url = resp
+            .blob_url
+            .filter(|u| !u.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("GetStepSummarySignedBlobURL returned empty URL"))?;
+
+        // 2. Upload summary content.
+        let content_bytes = content.as_bytes().to_vec();
+        let content_len = content_bytes.len();
+        let put_resp = self
+            .http
+            .put(&blob_url)
+            .header("Content-Type", "text/plain")
+            .header("Content-Length", content_len.to_string())
+            .header("x-ms-blob-type", "BlockBlob")
+            .body(content_bytes)
+            .send()
+            .await
+            .context("step summary PUT")?;
+        let put_status = put_resp.status();
+        if !put_status.is_success() {
+            let body = put_resp.text().await.unwrap_or_default();
+            bail!("step summary PUT failed: status={put_status}, body={body}");
+        }
+
+        // 3. Finalize with metadata.
+        let url = format!(
+            "{}/{RECEIVER}/CreateStepSummaryMetadata",
+            self.results_service_url
+        );
+        #[derive(serde::Serialize)]
+        struct MetaReq<'a> {
+            workflow_run_backend_id: &'a str,
+            workflow_job_run_backend_id: &'a str,
+            step_backend_id: &'a str,
+            uploaded_at: String,
+        }
+        use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+        let ts = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
+        let meta_resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&MetaReq {
+                workflow_run_backend_id: plan_id,
+                workflow_job_run_backend_id: job_id,
+                step_backend_id: step_id,
+                uploaded_at: ts,
+            })
+            .send()
+            .await
+            .context("CreateStepSummaryMetadata request")?;
+        let meta_status = meta_resp.status();
+        if !meta_status.is_success() {
+            let body = meta_resp.text().await.unwrap_or_default();
+            bail!("CreateStepSummaryMetadata failed: status={meta_status}, body={body}");
         }
         Ok(())
     }
