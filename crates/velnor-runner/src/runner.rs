@@ -1934,7 +1934,7 @@ fn execute_script_job(
             display_name: "Set up job".to_string(),
             order: 1,
             lines: vec![
-                format!("Current runner version: '{}'", crate::protocol::VELNOR_RUNNER_NAME),
+                format!("Current runner version: '{}'", crate::protocol::velnor_runner_display()),
             ],
             masks: Vec::new(),
             annotations: Vec::new(),

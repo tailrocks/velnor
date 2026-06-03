@@ -23,10 +23,15 @@ use std::{
 use url::Url;
 use uuid::Uuid;
 
+/// GitHub Actions runner protocol version Velnor implements.
 pub const RUNNER_VERSION: &str = "2.334.0";
 pub const RUNNER_USER_AGENT: &str = "actions-runner/2.334.0 (velnor)";
-/// Display name shown in "Set up job" log and GitHub UI.
-pub const VELNOR_RUNNER_NAME: &str = "Velnor Runner/0.10.1-dev";
+/// Velnor's own version, sourced from Cargo.toml.
+pub const VELNOR_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Display name shown in "Set up job" log: "Velnor Runner/<version> (protocol: <runner_version>)"
+pub fn velnor_runner_display() -> String {
+    format!("Velnor Runner/{VELNOR_VERSION} (protocol: {RUNNER_VERSION})")
+}
 pub const EMPTY_LOCK_TOKEN: &str = "00000000-0000-0000-0000-000000000000";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
