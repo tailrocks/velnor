@@ -33,9 +33,11 @@ Primary files:
 
 ## 1. Checkout & SCM
 
-- [ ] `actions/checkout` (`checkout.rs`, `ExecutableStep::Checkout`) — ref,
-  fetch-depth, submodules, persist-credentials, token masking
-  (`checkout.rs:1257-1282`), external-repo checkout used by targets.
+- [ ] `actions/checkout` (`checkout.rs`, `ExecutableStep::Checkout`) — `path`,
+  `ref`, `fetch-depth`, `token` + token masking (`checkout.rs:1257-1282`),
+  external-repo checkout used by targets. **`submodules`, sparse checkout, LFS
+  are out of scope** (contract §132) — confirm no consumer workflow needs them;
+  if one does, the audit fails first and the feature is added as a capability.
 - [ ] Verify multi-repo / selected-repo checkout patterns the targets use.
 
 ## 2. Cache family
