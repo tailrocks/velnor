@@ -1,18 +1,17 @@
 use crate::{
     cli::PreflightArgs,
     executor::{CommandRunner, ProcessCommandRunner},
-    platform,
 };
 use anyhow::{bail, Context, Result};
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
 
 pub fn preflight(args: PreflightArgs) -> Result<()> {
-    platform::validate_linux_host(std::env::consts::OS)?;
     let mut runner = ProcessCommandRunner;
     preflight_with_runner(args, &mut runner)
 }
@@ -108,6 +107,8 @@ fn verify_script_execution(
     let args = vec![
         "run".to_string(),
         "--rm".to_string(),
+        "--name".to_string(),
+        preflight_container_name("script"),
         "--workdir".to_string(),
         "/__w".to_string(),
         "-v".to_string(),
@@ -170,6 +171,8 @@ fn container_docker_client_args(docker_image: &str, require_buildx: bool) -> Vec
     let mut args = vec![
         "run".to_string(),
         "--rm".to_string(),
+        "--name".to_string(),
+        preflight_container_name("docker-client"),
         "-v".to_string(),
         "/var/run/docker.sock:/var/run/docker.sock".to_string(),
     ];
@@ -191,6 +194,8 @@ fn verify_job_image_tools(runner: &mut dyn CommandRunner, docker_image: &str) ->
     let args = vec![
         "run".to_string(),
         "--rm".to_string(),
+        "--name".to_string(),
+        preflight_container_name("image-tools"),
         docker_image.to_string(),
         "sh".to_string(),
         "-c".to_string(),
@@ -222,6 +227,8 @@ fn verify_bind_mount(
     let args = vec![
         "run".to_string(),
         "--rm".to_string(),
+        "--name".to_string(),
+        preflight_container_name("bind-mount"),
         "-v".to_string(),
         format!(
             "{}:/__t",
@@ -262,6 +269,14 @@ fn docker_mount_path(
         )
     })?;
     Ok(host_work_dir.join(relative))
+}
+
+fn preflight_container_name(kind: &str) -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("velnor-preflight-{kind}-{}-{nanos}", std::process::id())
 }
 
 fn bind_mount_error_detail(path: &str, stderr: &str) -> String {
@@ -351,6 +366,9 @@ mod tests {
     fn docker_client_args_require_cli_inside_job_image() {
         let args = container_docker_client_args("ubuntu:24.04", true);
 
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "--name" && pair[1].starts_with("velnor-preflight-docker-client-")
+        }));
         assert!(args.contains(&"/var/run/docker.sock:/var/run/docker.sock".to_string()));
         assert!(!args.iter().any(|arg| arg.contains("/usr/local/bin/docker")));
         assert!(!args.iter().any(|arg| arg.contains("cli-plugins")));
@@ -389,6 +407,9 @@ mod tests {
         let image_tools_call = &runner.calls[3];
         assert_eq!(image_tools_call.0, "docker");
         assert_eq!(image_tools_call.1[0], "run");
+        assert!(image_tools_call.1.windows(2).any(|pair| {
+            pair[0] == "--name" && pair[1].starts_with("velnor-preflight-image-tools-")
+        }));
         assert_eq!(
             image_tools_call
                 .1
@@ -403,6 +424,9 @@ mod tests {
         ));
         let script_call = &runner.calls[4];
         assert_eq!(script_call.0, "docker");
+        assert!(script_call.1.windows(2).any(|pair| {
+            pair[0] == "--name" && pair[1].starts_with("velnor-preflight-script-")
+        }));
         assert!(script_call
             .1
             .contains(&"/__t/velnor-preflight.sh".to_string()));
@@ -413,6 +437,9 @@ mod tests {
         let bind_mount_call = &runner.calls[5];
         assert_eq!(bind_mount_call.0, "docker");
         assert_eq!(bind_mount_call.1[0], "run");
+        assert!(bind_mount_call.1.windows(2).any(|pair| {
+            pair[0] == "--name" && pair[1].starts_with("velnor-preflight-bind-mount-")
+        }));
         assert!(bind_mount_call.1.contains(&format!(
             "{}:/__t",
             temp.join("preflight").join("temp").display()

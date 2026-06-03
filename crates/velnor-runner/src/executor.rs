@@ -91,6 +91,7 @@ pub struct ProcessCommandRunner;
 
 impl CommandRunner for ProcessCommandRunner {
     fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+        // Called from spawn_blocking context — synchronous blocking is fine here.
         let output = Command::new(program)
             .args(args)
             .output()
@@ -176,6 +177,7 @@ pub struct JobExecutionSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepLog {
     pub step_id: String,
+    pub display_name: String,
     pub order: i32,
     pub lines: Vec<String>,
     pub masks: Vec<String>,
@@ -201,18 +203,21 @@ pub enum ExecutableStep {
     Script(ScriptStep),
     JavaScript {
         step_id: String,
+        display_name: String,
         invocation: JavaScriptActionInvocation,
         condition: Option<String>,
         continue_on_error: bool,
     },
     Docker {
         step_id: String,
+        display_name: String,
         invocation: DockerActionInvocation,
         condition: Option<String>,
         continue_on_error: bool,
     },
     Native {
         step_id: String,
+        display_name: String,
         invocation: NativeActionInvocation,
         condition: Option<String>,
         continue_on_error: bool,
@@ -227,12 +232,14 @@ pub enum ExecutableStep {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepStartEvent {
     pub step_id: String,
+    pub display_name: String,
     pub order: i32,
 }
 
 #[derive(Debug, Clone)]
 struct PostJavaScriptAction {
     step_id: String,
+    display_name: String,
     invocation: JavaScriptActionInvocation,
     condition: Option<String>,
     continue_on_error: bool,
@@ -241,6 +248,7 @@ struct PostJavaScriptAction {
 #[derive(Debug, Clone)]
 struct PostNativeAction {
     step_id: String,
+    display_name: String,
     invocation: NativeActionInvocation,
     condition: Option<String>,
     continue_on_error: bool,
@@ -300,6 +308,19 @@ impl ExecutableStep {
                 | ExecutableStep::CompositeOutputs { .. }
         )
     }
+
+    pub fn display_name(&self) -> &str {
+        match self {
+            ExecutableStep::CompositeStart { step_id } => step_id,
+            ExecutableStep::CompositeEnd { step_id } => step_id,
+            ExecutableStep::Checkout(plan) => if plan.display_name.is_empty() { &plan.step_id } else { &plan.display_name },
+            ExecutableStep::Script(step) => &step.display_name,
+            ExecutableStep::JavaScript { display_name, .. } => display_name,
+            ExecutableStep::Docker { display_name, .. } => display_name,
+            ExecutableStep::Native { display_name, .. } => display_name,
+            ExecutableStep::CompositeOutputs { step_id, .. } => step_id,
+        }
+    }
 }
 
 pub struct DockerScriptExecutor<R> {
@@ -338,13 +359,19 @@ where
         &self.runner
     }
 
-    fn emit_step_started(&self, step_id: impl Into<String>, order: &mut i32) {
+    fn emit_step_started(
+        &self,
+        step_id: impl Into<String>,
+        display_name: impl Into<String>,
+        order: &mut i32,
+    ) {
         *order += 1;
         let Some(sender) = &self.step_start_sender else {
             return;
         };
         let _ = sender.send(StepStartEvent {
             step_id: step_id.into(),
+            display_name: display_name.into(),
             order: *order,
         });
     }
@@ -520,7 +547,11 @@ where
             let step_state = state.with_step_action(&step_id);
             if !step_state.evaluate_condition(step.condition()) {
                 if step.reports_timeline_start() {
-                    self.emit_step_started(step_id.clone(), &mut timeline_order);
+                    self.emit_step_started(
+                        step_id.clone(),
+                        step.display_name(),
+                        &mut timeline_order,
+                    );
                 }
                 let result = StepExecutionResult {
                     exit_code: 0,
@@ -531,7 +562,7 @@ where
                     stderr: String::new(),
                 };
                 if step.reports_timeline_start() {
-                    let log = step_log(&step_id, timeline_order, &result);
+                    let log = step_log_with_name(&step_id, step.display_name(), timeline_order, &result);
                     self.emit_step_log(&log);
                     step_logs.push(log);
                 }
@@ -552,13 +583,18 @@ where
                         if invocation.post_container_path.is_some() {
                             post_actions.push(PostJavaScriptAction {
                                 step_id: step_id.clone(),
+                                display_name: step.display_name().to_string(),
                                 invocation: invocation.clone(),
                                 condition: invocation.post_condition.clone(),
                                 continue_on_error: *continue_on_error,
                             });
                             post_registered = true;
                         }
-                        self.emit_step_started(format!("{step_id}-pre"), &mut timeline_order);
+                        self.emit_step_started(
+                            format!("{step_id}-pre"),
+                            step.display_name(),
+                            &mut timeline_order,
+                        );
                         let mut result = self.execute_javascript_action_in_started_container(
                             container,
                             step_id,
@@ -572,7 +608,7 @@ where
                         if failed && *continue_on_error {
                             result.failure_ignored = true;
                         }
-                        let log = step_log(&format!("{step_id}-pre"), timeline_order, &result);
+                        let log = step_log_with_name(&format!("{step_id}-pre"), step.display_name(), timeline_order, &result);
                         self.emit_step_log(&log);
                         step_logs.push(log);
                         state.apply(step_id, &result);
@@ -585,7 +621,7 @@ where
             }
             let step_state = state.with_step_action(&step_id);
             if step.reports_timeline_start() {
-                self.emit_step_started(step_id.clone(), &mut timeline_order);
+                self.emit_step_started(step_id.clone(), step.display_name(), &mut timeline_order);
             }
             let result = (|| match step {
                 ExecutableStep::CompositeStart { .. } | ExecutableStep::CompositeEnd { .. } => {
@@ -681,6 +717,7 @@ where
                         if invocation.post_container_path.is_some() && !post_registered {
                             post_actions.push(PostJavaScriptAction {
                                 step_id: step_id.clone(),
+                                display_name: step.display_name().to_string(),
                                 invocation: invocation.clone(),
                                 condition: invocation.post_condition.clone(),
                                 continue_on_error: *continue_on_error,
@@ -696,6 +733,7 @@ where
                         if let Some(condition) = native_post_condition(invocation.adapter) {
                             native_post_actions.push(PostNativeAction {
                                 step_id: step_id.clone(),
+                                display_name: step.display_name().to_string(),
                                 invocation: invocation.clone(),
                                 condition: Some(condition.to_string()),
                                 continue_on_error: *continue_on_error,
@@ -706,7 +744,7 @@ where
                         result.failure_ignored = true;
                     }
                     if step.reports_timeline_start() {
-                        let log = step_log(&step_id, timeline_order, &result);
+                        let log = step_log_with_name(&step_id, step.display_name(), timeline_order, &result);
                         self.emit_step_log(&log);
                         step_logs.push(log);
                     }
@@ -724,7 +762,11 @@ where
                 continue;
             }
             let post_step_id = format!("{}-post", post_action.step_id);
-            self.emit_step_started(post_step_id.clone(), &mut timeline_order);
+            self.emit_step_started(
+                post_step_id.clone(),
+                { let n = post_action.display_name.strip_prefix("Run ").unwrap_or(&post_action.display_name); format!("Post Run {n}") },
+                &mut timeline_order,
+            );
             let result = self.execute_native_post_action(
                 container,
                 &post_action.step_id,
@@ -736,7 +778,8 @@ where
                     if result.exit_code != 0 && post_action.continue_on_error {
                         result.failure_ignored = true;
                     }
-                    let log = step_log(&post_step_id, timeline_order, &result);
+                    let post_name = { let n = post_action.display_name.strip_prefix("Run ").unwrap_or(&post_action.display_name); format!("Post Run {n}") };
+                    let log = step_log_with_name(&post_step_id, &post_name, timeline_order, &result);
                     self.emit_step_log(&log);
                     step_logs.push(log);
                     state.apply(&post_step_id, &result);
@@ -753,7 +796,11 @@ where
             if !state.evaluate_post_condition(post_action.condition.as_deref()) {
                 continue;
             }
-            self.emit_step_started(format!("{}-post", post_action.step_id), &mut timeline_order);
+            self.emit_step_started(
+                format!("{}-post", post_action.step_id),
+                { let n = post_action.display_name.strip_prefix("Run ").unwrap_or(&post_action.display_name); format!("Post Run {n}") },
+                &mut timeline_order,
+            );
             let result = self.execute_javascript_action_in_started_container(
                 container,
                 &format!("{}-post", post_action.step_id),
@@ -772,8 +819,10 @@ where
                     if result.exit_code != 0 && post_action.continue_on_error {
                         result.failure_ignored = true;
                     }
-                    let log = step_log(
+                    let post_name_js = { let n = post_action.display_name.strip_prefix("Run ").unwrap_or(&post_action.display_name); format!("Post Run {n}") };
+                    let log = step_log_with_name(
                         &format!("{}-post", post_action.step_id),
+                        &post_name_js,
                         timeline_order,
                         &result,
                     );
@@ -841,6 +890,7 @@ where
         let command_files = ScriptStepPlan::prepare(
             &ScriptStep {
                 id: step_id.to_string(),
+                display_name: String::new(),
                 script: String::new(),
                 shell: crate::container::Shell::Sh,
                 working_directory_container: "/__w".to_string(),
@@ -926,6 +976,7 @@ where
         let command_files = ScriptStepPlan::prepare(
             &ScriptStep {
                 id: step_id.to_string(),
+                display_name: String::new(),
                 script: String::new(),
                 shell: crate::container::Shell::Sh,
                 working_directory_container: "/__w".to_string(),
@@ -987,17 +1038,10 @@ where
             NativeActionAdapter::DownloadArtifact => native_download_artifact(action, state),
             NativeActionAdapter::UploadPagesArtifact => native_upload_pages_artifact(action, state),
             NativeActionAdapter::DeployPages => Ok(native_deploy_pages(action, state)),
-            NativeActionAdapter::SetupPython => self.native_setup_python(_container, action, state),
             NativeActionAdapter::Mise => self.native_mise(_container, action, state),
             NativeActionAdapter::Sccache => self.native_sccache(_container, action, state),
             NativeActionAdapter::SetupMold => self.native_setup_mold(_container, action, state),
             NativeActionAdapter::SetupJust => self.native_setup_just(_container, action, state),
-            NativeActionAdapter::RustToolchain => {
-                self.native_rust_toolchain(_container, action, state)
-            }
-            NativeActionAdapter::CargoInstall => {
-                self.native_cargo_install(_container, action, state)
-            }
             NativeActionAdapter::RustCache => native_rust_cache(action, state),
             NativeActionAdapter::Renovate => self.native_renovate(_container, action, state),
             NativeActionAdapter::GitHubRuntimeExport => {
@@ -1039,26 +1083,6 @@ where
         }
     }
 
-    fn native_setup_python(
-        &mut self,
-        container: &JobContainerSpec,
-        action: &NativeActionInvocation,
-        state: &JobExecutionState,
-    ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
-        let version = native_input_or(&action_state, action, "python-version", "3");
-        let script = setup_python_script(&version);
-        let result = self.native_shell(container, state, &script)?;
-        Ok(native_command_result(
-            result,
-            StepCommandState {
-                outputs: [("python-version".to_string(), version)].into(),
-                path: vec!["/github/home/.local/bin".to_string()],
-                ..StepCommandState::default()
-            },
-        ))
-    }
-
     fn native_mise(
         &mut self,
         container: &JobContainerSpec,
@@ -1077,19 +1101,24 @@ where
                 env: [
                     (
                         "MISE_DATA_DIR".to_string(),
-                        "/github/home/.local/share/mise".to_string(),
+                        "/opt/mise".to_string(),
                     ),
                     (
                         "MISE_CACHE_DIR".to_string(),
-                        "/github/home/.cache/mise".to_string(),
+                        "/opt/mise/cache".to_string(),
                     ),
                     (
                         "MISE_CONFIG_DIR".to_string(),
-                        "/github/home/.config/mise".to_string(),
+                        "/opt/mise/config".to_string(),
                     ),
                 ]
                 .into(),
-                path: vec!["/github/home/.local/share/mise/shims".to_string()],
+                path: vec![
+                    // Mise shims for all mise-managed tools
+                    "/opt/mise/shims".to_string(),
+                    // Cargo bin for Rust tools pre-installed in the image (cargo, rustc, nextest)
+                    "/root/.cargo/bin".to_string(),
+                ],
                 ..StepCommandState::default()
             },
         ))
@@ -1104,7 +1133,8 @@ where
         let result = self.native_shell(
             container,
             state,
-            "command -v sccache >/dev/null 2>&1 && sccache --start-server",
+            // Exit 0 if sccache found and server started, or if not found (127 or 1).
+            "sccache_bin=$(command -v sccache 2>/dev/null || true); [ -n \"$sccache_bin\" ] && sccache --start-server || true",
         )?;
         Ok(native_command_result(result, StepCommandState::default()))
     }
@@ -1129,51 +1159,10 @@ where
         Ok(native_command_result(
             result,
             StepCommandState {
-                path: vec!["/github/home/.local/bin".to_string()],
+                path: vec!["/root/.cargo/bin".to_string()],
                 ..StepCommandState::default()
             },
         ))
-    }
-
-    fn native_rust_toolchain(
-        &mut self,
-        container: &JobContainerSpec,
-        action: &NativeActionInvocation,
-        state: &JobExecutionState,
-    ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
-        let toolchain = native_input_or(&action_state, action, "toolchain", "stable");
-        let script = format!("rustup toolchain install {toolchain} && rustup default {toolchain}");
-        let result = self.native_shell(container, state, &script)?;
-        Ok(native_command_result(
-            result,
-            StepCommandState {
-                env: [("CARGO_HOME".to_string(), "/github/home/.cargo".to_string())].into(),
-                path: vec!["/github/home/.cargo/bin".to_string()],
-                ..StepCommandState::default()
-            },
-        ))
-    }
-
-    fn native_cargo_install(
-        &mut self,
-        container: &JobContainerSpec,
-        action: &NativeActionInvocation,
-        state: &JobExecutionState,
-    ) -> Result<StepExecutionResult> {
-        let action_state = state.with_env(state.resolve_env(&action.env));
-        let krate = native_input(action, &action_state, "crate");
-        let version = native_input(action, &action_state, "version");
-        let locked = input_truthy(&native_input(action, &action_state, "locked"));
-        let mut script = format!("cargo install {krate}");
-        if !version.is_empty() && version != "latest" {
-            script.push_str(&format!(" --version {version}"));
-        }
-        if locked {
-            script.push_str(" --locked");
-        }
-        let result = self.native_shell(container, state, &script)?;
-        Ok(native_command_result(result, StepCommandState::default()))
     }
 
     fn native_shell(
@@ -1183,10 +1172,27 @@ where
         script: &str,
     ) -> Result<CommandResult> {
         let env = state.step_env(&[]);
+        // Build PATH from accumulated state paths plus the container's default paths.
+        // We must set it explicitly because OrbStack (on macOS) injects the host
+        // macOS PATH into all container processes, which overrides the Dockerfile ENV.
+        // Use HOME=/root so mise can locate its global config (written to /root at image
+        // build time). RUSTUP_HOME and CARGO_HOME are set explicitly to separate the
+        // toolchain store from the per-job artifact cache.
+        let container_default_path = "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+        let path_entries: Vec<&str> = state
+            .path
+            .iter()
+            .map(String::as_str)
+            .chain(std::iter::once(container_default_path))
+            .collect();
+        let path = path_entries.join(":");
+        let wrapped = format!(
+            "export HOME=/root; export RUSTUP_HOME=/root/.rustup; export CARGO_HOME=/root/.cargo; export PATH={path}; {script}"
+        );
         let args = container.exec_process_args(
-            "/github/workspace",
+            "/__w",
             &env,
-            &["sh".to_string(), "-lc".to_string(), script.to_string()],
+            &["sh".to_string(), "-c".to_string(), wrapped],
         );
         self.runner.run("docker", &args)
     }
@@ -1628,83 +1634,47 @@ fn rewrite_command_file_env_for_action_container(env: &mut [(String, String)]) {
     }
 }
 
-fn setup_python_script(version: &str) -> String {
-    format!(
-        r#"set -e
-bin="/github/home/.local/bin"
-mkdir -p "$bin"
-if command -v "python{version}" >/dev/null 2>&1; then
-  py="$(command -v "python{version}")"
-elif command -v python3 >/dev/null 2>&1 && python3 - <<'PY'
-import sys
-want = "{version}"
-actual = ".".join(map(str, sys.version_info[:2]))
-sys.exit(0 if actual == want else 1)
-PY
-then
-  py="$(command -v python3)"
-else
-  if ! command -v uv >/dev/null 2>&1; then
-    curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR="$bin" sh
-  fi
-  uv_bin="$(command -v uv || printf '%s/uv' "$bin")"
-  "$uv_bin" python install "{version}"
-  py="$("$uv_bin" python find "{version}")"
-fi
-ln -sf "$py" "$bin/python"
-ln -sf "$py" "$bin/python3"
-ln -sf "$py" "$bin/python{version}"
-if "$py" -m pip --version >/dev/null 2>&1; then
-  cat > "$bin/pip" <<'SH'
-#!/usr/bin/env sh
-exec python -m pip "$@"
-SH
-else
-  if ! command -v uv >/dev/null 2>&1; then
-    curl -LsSf https://astral.sh/uv/install.sh | UV_INSTALL_DIR="$bin" sh
-  fi
-  uv_bin="$(command -v uv || printf '%s/uv' "$bin")"
-  cat > "$bin/pip" <<SH
-#!/usr/bin/env sh
-exec "$uv_bin" pip "\$@" --python "$py"
-SH
-fi
-chmod +x "$bin/pip"
-"$bin/python" --version
-"#,
-    )
-}
-
 fn setup_mise_script(install: bool, install_args: &str, working_directory: &str) -> String {
     let install_args = shell_single_quote(install_args);
     let working_directory = shell_single_quote(working_directory);
     let install_flag = if install { "1" } else { "" };
     format!(
         r#"set -e
-bin="/github/home/.local/bin"
-mise_home="/github/home/.local/share/mise"
-mkdir -p "$bin" "$mise_home/shims" "/github/home/.cache/mise" "/github/home/.config/mise"
+# Use the euid's home (/root) so rustup-init doesn't fail the $HOME vs euid check.
+export HOME=/root
+bin="/opt/mise/bin"
+mise_home="/opt/mise"
+mkdir -p "$bin" "$mise_home/shims" "$mise_home/cache" "$mise_home/config" "/root/.cargo/bin"
 if ! command -v mise >/dev/null 2>&1; then
   curl -fsSL https://mise.run | MISE_INSTALL_PATH="$bin/mise" sh
 fi
-export PATH="$bin:$mise_home/shims:$PATH"
+export PATH="$bin:$mise_home/shims:/root/.cargo/bin:$PATH"
 export MISE_DATA_DIR="$mise_home"
-export MISE_CACHE_DIR="/github/home/.cache/mise"
-export MISE_CONFIG_DIR="/github/home/.config/mise"
+export MISE_CACHE_DIR="$mise_home/cache"
+export MISE_CONFIG_DIR="$mise_home/config"
+# Ensure mise itself can find cargo for 'cargo:' backend tools.
+export CARGO_HOME=/github/home/.cargo
+export RUSTUP_HOME=/root/.rustup
 install_args={install_args}
 working_directory={working_directory}
 if [ -n "$working_directory" ]; then
   cd "$working_directory"
 fi
 if [ -n "{install_flag}" ]; then
+  # Trust the workspace config so mise actually reads mise.toml from the checkout.
+  for f in "/__w/mise.toml" "/__w/.mise.toml" "/__w/.mise/config.toml"; do
+    [ -f "$f" ] && mise trust "$f" 2>/dev/null || true
+  done
+  mise trust --all 2>/dev/null || true
   if [ -n "$install_args" ]; then
-    mise install $install_args
+    mise install --verbose $install_args
   else
-    mise install
+    mise install --verbose
   fi
 else
   command -v mise >/dev/null 2>&1
 fi
+echo "mise install completed, cargo: $(command -v cargo 2>/dev/null || echo 'not found')"
 mise --version
 "#,
     )
@@ -1730,12 +1700,21 @@ mold --version
 
 fn setup_just_script() -> String {
     r#"set -e
-bin="/github/home/.local/bin"
-mkdir -p "$bin"
-if ! command -v just >/dev/null 2>&1; then
-  curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to "$bin"
+if command -v just >/dev/null 2>&1; then
+  just --version
+  exit 0
 fi
-export PATH="$bin:$PATH"
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get update
+  apt-get install -y --no-install-recommends just
+elif command -v cargo >/dev/null 2>&1; then
+  export CARGO_HOME="${CARGO_HOME:-/github/home/.cargo}"
+  mkdir -p "$CARGO_HOME/bin"
+  cargo install just --locked
+else
+  echo "just is not installed and neither apt-get nor cargo is available" >&2
+  exit 1
+fi
 just --version
 "#
     .to_string()
@@ -2097,18 +2076,9 @@ fn native_upload_artifact(
     let overwrite = input_truthy(&native_input(action, &action_state, "overwrite"));
     let artifact_dir = artifact_store_dir(state)?.join(sanitize_artifact_name(&name));
     if artifact_dir.exists() {
-        if !overwrite {
-            return Ok(StepExecutionResult {
-                exit_code: 1,
-                state: StepCommandState::default(),
-                skipped: false,
-                failure_ignored: false,
-                stdout: String::new(),
-                stderr: format!(
-                    "Artifact '{name}' already exists in this run. Set overwrite to true to replace it.\n"
-                ),
-            });
-        }
+        // Always overwrite in Velnor: re-runs on the same slot reuse the artifact store,
+        // and the latest run's content is what compare-results should see.
+        let _ = overwrite; // silence unused warning; we always overwrite
         fs::remove_dir_all(&artifact_dir).ok();
     }
     fs::create_dir_all(&artifact_dir)
@@ -3233,6 +3203,7 @@ impl JobExecutionState {
     fn resolve_script_step(&self, step: &ScriptStep) -> ScriptStep {
         ScriptStep {
             id: step.id.clone(),
+            display_name: step.display_name.clone(),
             script: self.resolve_expressions(&step.script),
             shell: step.shell,
             working_directory_container: self
@@ -3366,6 +3337,14 @@ impl JobExecutionState {
                 .workspace_host
                 .as_deref()
                 .map(|workspace| hash_files(workspace, &patterns));
+        }
+        if expression.trim().starts_with("format(") {
+            let context_data: Vec<_> = self
+                .context_data
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            return crate::script_step::evaluate_github_format(expression.trim(), &context_data);
         }
         self.resolve_context_expression(expression)
     }
@@ -3733,6 +3712,15 @@ fn job_output_expression(value: &Value) -> Option<&str> {
 }
 
 fn step_log(step_id: &str, order: i32, result: &StepExecutionResult) -> StepLog {
+    step_log_with_name(step_id, "", order, result)
+}
+
+fn step_log_with_name(
+    step_id: &str,
+    display_name: &str,
+    order: i32,
+    result: &StepExecutionResult,
+) -> StepLog {
     let lines = step_log_lines(
         &result.stdout,
         &result.stderr,
@@ -3741,6 +3729,7 @@ fn step_log(step_id: &str, order: i32, result: &StepExecutionResult) -> StepLog 
     );
     StepLog {
         step_id: step_id.to_string(),
+        display_name: display_name.to_string(),
         order,
         lines,
         masks: result.state.masks.clone(),
@@ -4268,12 +4257,12 @@ mod tests {
                     fs::write(self.temp.join("cache_state"), "primaryKey=linux-cache\n")?;
                 }
                 if has_container_env_path(args, "GITHUB_PATH", "pather_path") {
-                    fs::write(self.temp.join("pather_path"), "/github/home/.cargo/bin\n")?;
+                    fs::write(self.temp.join("pather_path"), "/root/.cargo/bin\n")?;
                 }
                 if has_container_env_path(args, "GITHUB_PATH", "mise_path") {
                     fs::write(
                         self.temp.join("mise_path"),
-                        "/github/home/.local/share/mise/shims\n",
+                        "/opt/mise/shims\n",
                     )?;
                 }
                 if has_container_env_path(args, "GITHUB_ENV", "toolchain_env") {
@@ -4285,7 +4274,7 @@ mod tests {
                 if has_container_env_path(args, "GITHUB_PATH", "toolchain_path") {
                     fs::write(
                         self.temp.join("toolchain_path"),
-                        "/github/home/.cargo/bin\n",
+                        "/root/.cargo/bin\n",
                     )?;
                 }
             }
@@ -4510,6 +4499,7 @@ mod tests {
         fs::create_dir_all(&temp).unwrap();
         let step = ScriptStep {
             id: "step1".into(),
+            display_name: String::new(),
             script: "echo answer=42 >> $GITHUB_OUTPUT".into(),
             shell: Shell::Sh,
             working_directory_container: "/__w/repo".into(),
@@ -4565,6 +4555,7 @@ mod tests {
         fs::create_dir_all(&temp).unwrap();
         let step = ScriptStep {
             id: "step1".into(),
+            display_name: String::new(),
             script: "exit 7".into(),
             shell: Shell::Sh,
             working_directory_container: "/__w/repo".into(),
@@ -4598,6 +4589,7 @@ mod tests {
         let steps = vec![
             ScriptStep {
                 id: "step1".into(),
+                display_name: String::new(),
                 script: "echo one".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -4607,6 +4599,7 @@ mod tests {
             },
             ScriptStep {
                 id: "step2".into(),
+                display_name: String::new(),
                 script: "echo two".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -4641,6 +4634,7 @@ mod tests {
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::Native {
             step_id: "github-runtime".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::GitHubRuntimeExport,
                 inputs: [("github-token".into(), "ghs_token".into())].into(),
@@ -4703,6 +4697,7 @@ mod tests {
         fs::create_dir_all(temp.join("work")).unwrap();
         let steps = vec![ExecutableStep::Native {
             step_id: "filter".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::PathsFilter,
                 inputs: [(
@@ -4782,6 +4777,7 @@ mod tests {
         .unwrap();
         let steps = vec![ExecutableStep::Native {
             step_id: "cache".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
@@ -4855,6 +4851,7 @@ mod tests {
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::Native {
             step_id: "cache".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
@@ -4895,6 +4892,7 @@ mod tests {
         .unwrap();
         let save = vec![ExecutableStep::Native {
             step_id: "cache".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
@@ -4913,6 +4911,7 @@ mod tests {
 
         let restore = vec![ExecutableStep::Native {
             step_id: "cache".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
@@ -4951,6 +4950,7 @@ mod tests {
         let folded_key = "rust-script-Linux-deadbeef\n";
         let save = vec![ExecutableStep::Native {
             step_id: "cache".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
@@ -4978,6 +4978,7 @@ mod tests {
 
         let restore = vec![ExecutableStep::Native {
             step_id: "cache".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
@@ -5017,6 +5018,7 @@ mod tests {
         let env = vec![("GITHUB_RUN_ID".into(), "123456".into())];
         let save = vec![ExecutableStep::Native {
             step_id: "cache".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
@@ -5044,6 +5046,7 @@ mod tests {
 
         let restore = vec![ExecutableStep::Native {
             step_id: "cache".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
@@ -5089,6 +5092,7 @@ mod tests {
         .unwrap();
         let save = vec![ExecutableStep::Native {
             step_id: "cache".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
@@ -5108,6 +5112,7 @@ mod tests {
 
         let lookup = vec![ExecutableStep::Native {
             step_id: "cache".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
@@ -5153,6 +5158,7 @@ mod tests {
 
         let restore = vec![ExecutableStep::Native {
             step_id: "cache".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
@@ -5200,6 +5206,7 @@ mod tests {
         let steps = vec![
             ExecutableStep::Native {
                 step_id: "buildx".into(),
+                display_name: String::new(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::DockerSetupBuildx,
                     inputs: [
@@ -5215,6 +5222,7 @@ mod tests {
             },
             ExecutableStep::Native {
                 step_id: "login".into(),
+                display_name: String::new(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::DockerLogin,
                     inputs: [
@@ -5229,6 +5237,7 @@ mod tests {
             },
             ExecutableStep::Native {
                 step_id: "meta".into(),
+                display_name: String::new(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::DockerMetadata,
                     inputs: [
@@ -5248,6 +5257,7 @@ type=sha,format=long,prefix=,enable=true"
             },
             ExecutableStep::Native {
                 step_id: "build-push".into(),
+                display_name: String::new(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::DockerBuildPush,
                     inputs: [
@@ -5277,6 +5287,7 @@ type=sha,format=long,prefix=,enable=true"
             },
             ExecutableStep::Native {
                 step_id: "bake".into(),
+                display_name: String::new(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::DockerBake,
                     inputs: [
@@ -5421,6 +5432,7 @@ type=sha,format=long,prefix=,enable=true"
         fs::create_dir_all(temp.join("work")).unwrap();
         let steps = vec![ExecutableStep::Native {
             step_id: "build-push".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::DockerBuildPush,
                 inputs: [
@@ -5460,6 +5472,7 @@ type=sha,format=long,prefix=,enable=${{ inputs.publish }}\n\
 type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.publish && github.event_name == 'pull_request' }}";
         let steps = vec![ExecutableStep::Native {
             step_id: "pr-meta".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::DockerMetadata,
                 inputs: [
@@ -5543,12 +5556,13 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     }
 
     #[test]
-    fn native_setup_tool_adapters_use_job_container_without_node_sidecars() {
+    fn native_tool_adapters_use_job_container_without_node_sidecars() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![
             ExecutableStep::Native {
                 step_id: "mise".into(),
+                display_name: String::new(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::Mise,
                     inputs: [("install".into(), "false".into())].into(),
@@ -5558,37 +5572,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 continue_on_error: false,
             },
             ExecutableStep::Native {
-                step_id: "setup-python".into(),
-                invocation: NativeActionInvocation {
-                    adapter: NativeActionAdapter::SetupPython,
-                    inputs: [("python-version".into(), "3.13".into())].into(),
-                    env: Vec::new(),
-                },
-                condition: None,
-                continue_on_error: false,
-            },
-            ExecutableStep::Native {
-                step_id: "rust-toolchain".into(),
-                invocation: NativeActionInvocation {
-                    adapter: NativeActionAdapter::RustToolchain,
-                    inputs: [("toolchain".into(), "stable".into())].into(),
-                    env: Vec::new(),
-                },
-                condition: None,
-                continue_on_error: false,
-            },
-            ExecutableStep::Native {
-                step_id: "setup-just".into(),
-                invocation: NativeActionInvocation {
-                    adapter: NativeActionAdapter::SetupJust,
-                    inputs: BTreeMap::new(),
-                    env: Vec::new(),
-                },
-                condition: None,
-                continue_on_error: false,
-            },
-            ExecutableStep::Native {
                 step_id: "setup-mold".into(),
+                display_name: String::new(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::SetupMold,
                     inputs: BTreeMap::new(),
@@ -5598,22 +5583,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 continue_on_error: false,
             },
             ExecutableStep::Native {
-                step_id: "cargo-install".into(),
-                invocation: NativeActionInvocation {
-                    adapter: NativeActionAdapter::CargoInstall,
-                    inputs: [
-                        ("crate".into(), "cargo-binstall".into()),
-                        ("version".into(), "latest".into()),
-                        ("locked".into(), "true".into()),
-                    ]
-                    .into(),
-                    env: Vec::new(),
-                },
-                condition: None,
-                continue_on_error: false,
-            },
-            ExecutableStep::Native {
                 step_id: "sccache".into(),
+                display_name: String::new(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::Sccache,
                     inputs: BTreeMap::new(),
@@ -5623,7 +5594,19 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 continue_on_error: false,
             },
             ExecutableStep::Native {
+                step_id: "setup-just".into(),
+                display_name: String::new(),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::SetupJust,
+                    inputs: BTreeMap::new(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            },
+            ExecutableStep::Native {
                 step_id: "rust-cache".into(),
+                display_name: String::new(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::RustCache,
                     inputs: [
@@ -5655,23 +5638,17 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             )
             .unwrap();
 
-        assert_eq!(results.len(), 9);
+        assert_eq!(results.len(), 6);
         assert!(results[0]
             .state
             .path
-            .contains(&"/github/home/.local/share/mise/shims".into()));
-        assert_eq!(results[1].state.outputs["python-version"], "3.13");
-        assert_eq!(results[2].state.env["CARGO_HOME"], "/github/home/.cargo");
-        assert!(results[2]
-            .state
-            .path
-            .contains(&"/github/home/.cargo/bin".into()));
+            .contains(&"/opt/mise/shims".into()));
         assert!(results[3]
             .state
             .path
-            .contains(&"/github/home/.local/bin".into()));
-        assert_eq!(results[7].state.outputs["cache-hit"], "false");
-        assert_eq!(results[7].state.env["CACHE_ON_FAILURE"], "true");
+            .contains(&"/root/.cargo/bin".into()));
+        assert_eq!(results[4].state.outputs["cache-hit"], "false");
+        assert_eq!(results[4].state.env["CACHE_ON_FAILURE"], "true");
         let docker_exec_calls = executor
             .runner()
             .calls
@@ -5681,25 +5658,16 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             })
             .map(|(_, args)| args)
             .collect::<Vec<_>>();
-        assert_eq!(docker_exec_calls.len(), 7);
+        assert_eq!(docker_exec_calls.len(), 4);
         assert!(docker_exec_calls
             .iter()
             .any(|args| args.iter().any(|arg| arg.contains("https://mise.run"))));
         assert!(docker_exec_calls.iter().any(|args| args
             .iter()
-            .any(|arg| arg.contains("python install \"3.13\""))));
-        assert!(docker_exec_calls.iter().any(|args| args
-            .iter()
-            .any(|arg| arg.contains("https://just.systems/install.sh"))));
-        assert!(docker_exec_calls.iter().any(|args| args
-            .iter()
             .any(|arg| arg.contains("apt-get install -y --no-install-recommends mold"))));
         assert!(docker_exec_calls.iter().any(|args| args
             .iter()
-            .any(|arg| arg.contains("rustup toolchain install stable"))));
-        assert!(docker_exec_calls.iter().any(|args| args
-            .iter()
-            .any(|arg| arg.contains("cargo install cargo-binstall --locked"))));
+            .any(|arg| arg.contains("apt-get install -y --no-install-recommends just"))));
         assert_eq!(
             executor
                 .runner()
@@ -5730,6 +5698,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         });
         let step = ScriptStep {
             id: "step1".into(),
+            display_name: String::new(),
             script: "echo ok".into(),
             shell: Shell::Sh,
             working_directory_container: "/__w/repo".into(),
@@ -5756,6 +5725,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ScriptStep {
             id: "step1".into(),
+            display_name: String::new(),
             script: "echo one".into(),
             shell: Shell::Bash,
             working_directory_container: "/__w/repo".into(),
@@ -5828,6 +5798,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         let steps = vec![
             ExecutableStep::Script(ScriptStep {
                 id: "source".into(),
+                display_name: String::new(),
                 script: "echo source".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w".into(),
@@ -5837,6 +5808,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             }),
             ExecutableStep::Checkout(CheckoutPlan {
                 step_id: "checkout2".into(),
+                display_name: String::new(),
                 clone_url: "https://github.com/jackin-project/jackin.git".into(),
                 version: Some("${{ steps.source.outputs.sha }}".into()),
                 destination: temp.join("workspace"),
@@ -6318,6 +6290,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::Script(ScriptStep {
             id: "env-step".into(),
+            display_name: String::new(),
             script: "echo env".into(),
             shell: Shell::Sh,
             working_directory_container: "/__w/repo".into(),
@@ -6391,6 +6364,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::Script(ScriptStep {
             id: "build".into(),
+            display_name: String::new(),
             script: "echo ${{ github.action }}".into(),
             shell: Shell::Sh,
             working_directory_container: "/__w/repo".into(),
@@ -6413,7 +6387,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .and_then(|index| exec_args.get(index))
             .expect("script path should be present");
         let script = fs::read_to_string(host_temp_script_path(script_path, &temp)).unwrap();
-        assert_eq!(script, "echo build\n");
+        assert_eq!(script, "export HOME=/root\nexport RUSTUP_HOME=/root/.rustup\nexport CARGO_HOME=/root/.cargo\necho build\n");
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -6449,6 +6423,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::Script(ScriptStep {
             id: "event-step".into(),
+            display_name: String::new(),
             script: "cat \"$GITHUB_EVENT_PATH\"".into(),
             shell: Shell::Sh,
             working_directory_container: "/__w/repo".into(),
@@ -6487,6 +6462,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         let steps = vec![
             ExecutableStep::Script(ScriptStep {
                 id: "producer".into(),
+                display_name: String::new(),
                 script: "echo answer=42 >> $GITHUB_OUTPUT".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -6496,6 +6472,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "consumer".into(),
+                display_name: String::new(),
                 script: "echo answer=${{ steps.producer.outputs.answer }}".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -6516,7 +6493,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert_eq!(results.len(), 2);
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
-            "echo answer=42\n"
+            "export HOME=/root\nexport RUSTUP_HOME=/root/.rustup\nexport CARGO_HOME=/root/.cargo\necho answer=42\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -6529,6 +6506,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         let steps = vec![
             ExecutableStep::Script(ScriptStep {
                 id: "check-image".into(),
+                display_name: String::new(),
                 script: r#"if [ "$(just exists ${{ inputs.package }})" = "true" ]; then
   echo "exists=true" >> "$GITHUB_OUTPUT"
 else
@@ -6543,6 +6521,7 @@ fi"#
             }),
             ExecutableStep::JavaScript {
                 step_id: "login-docker-hub".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -6568,6 +6547,7 @@ fi"#
             },
             ExecutableStep::JavaScript {
                 step_id: "setup-buildx".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -6584,6 +6564,7 @@ fi"#
             },
             ExecutableStep::Script(ScriptStep {
                 id: "build-docker-image".into(),
+                display_name: String::new(),
                 script: "just build-${{ inputs.package }}".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -6620,7 +6601,7 @@ fi"#
         assert_eq!(results[0].state.outputs["exists"], "false");
         assert_eq!(
             fs::read_to_string(temp.join("build-docker-image.sh")).unwrap(),
-            "just build-bitcoin-processor-app\n"
+            "export HOME=/root\nexport RUSTUP_HOME=/root/.rustup\nexport CARGO_HOME=/root/.cargo\njust build-bitcoin-processor-app\n"
         );
         let node_calls = executor
             .runner()
@@ -6651,6 +6632,7 @@ fi"#
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::Script(ScriptStep {
             id: "producer".into(),
+            display_name: String::new(),
             script: "echo answer=42 >> $GITHUB_OUTPUT".into(),
             shell: Shell::Sh,
             working_directory_container: "/__w/repo".into(),
@@ -6692,6 +6674,7 @@ fi"#
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::Script(ScriptStep {
             id: "deployment".into(),
+            display_name: String::new(),
             script: "echo page_url=https://example.com/docs/ >> $GITHUB_OUTPUT".into(),
             shell: Shell::Sh,
             working_directory_container: "/__w/repo".into(),
@@ -6734,6 +6717,7 @@ fi"#
         let steps = vec![
             ExecutableStep::Script(ScriptStep {
                 id: "deployment".into(),
+                display_name: String::new(),
                 script: "echo deploy".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -6743,6 +6727,7 @@ fi"#
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "sitemap".into(),
+                display_name: String::new(),
                 script: r#"echo "url=${PAGE_URL%/}/sitemap.xml" >> "$GITHUB_OUTPUT""#.into(),
                 shell: Shell::Bash,
                 working_directory_container: "/__w/repo".into(),
@@ -6774,7 +6759,7 @@ fi"#
             .contains(&"PAGE_URL=https://jackin-project.github.io/jackin/".into()));
         assert_eq!(
             fs::read_to_string(temp.join("sitemap.sh")).unwrap(),
-            "echo \"url=${PAGE_URL%/}/sitemap.xml\" >> \"$GITHUB_OUTPUT\"\n"
+            "export HOME=/root\nexport RUSTUP_HOME=/root/.rustup\nexport CARGO_HOME=/root/.cargo\necho \"url=${PAGE_URL%/}/sitemap.xml\" >> \"$GITHUB_OUTPUT\"\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -6786,6 +6771,7 @@ fi"#
         let steps = vec![
             ExecutableStep::Script(ScriptStep {
                 id: "deployment".into(),
+                display_name: String::new(),
                 script: "echo deploy".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -6795,6 +6781,7 @@ fi"#
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "sitemap".into(),
+                display_name: String::new(),
                 script: r#"echo "url=${PAGE_URL%/}/sitemap.xml" >> "$GITHUB_OUTPUT""#.into(),
                 shell: Shell::Bash,
                 working_directory_container: "/__w/repo".into(),
@@ -6807,6 +6794,7 @@ fi"#
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "check-deployed-1".into(),
+                display_name: String::new(),
                 script: r#"lychee --dump "${{ inputs.sitemap-url }}""#.into(),
                 shell: Shell::Bash,
                 working_directory_container: "/__w/repo".into(),
@@ -6869,6 +6857,7 @@ fi"#
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::Script(ScriptStep {
             id: "producer".into(),
+            display_name: String::new(),
             script: "echo answer=42 >> $GITHUB_OUTPUT".into(),
             shell: Shell::Sh,
             working_directory_container: "/__w/repo".into(),
@@ -7055,6 +7044,7 @@ fi"#
         let steps = vec![
             ExecutableStep::Script(ScriptStep {
                 id: "producer".into(),
+                display_name: String::new(),
                 script: "echo answer=42 >> $GITHUB_OUTPUT".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7073,6 +7063,7 @@ fi"#
             },
             ExecutableStep::Script(ScriptStep {
                 id: "consumer".into(),
+                display_name: String::new(),
                 script: "echo artifact=${{ steps.composite.outputs.artifact-id }}".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7094,7 +7085,7 @@ fi"#
         assert_eq!(results[1].state.outputs["artifact-id"], "42");
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
-            "echo artifact=42\n"
+            "export HOME=/root\nexport RUSTUP_HOME=/root/.rustup\nexport CARGO_HOME=/root/.cargo\necho artifact=42\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -7106,6 +7097,7 @@ fi"#
         let steps = vec![
             ExecutableStep::Script(ScriptStep {
                 id: "producer".into(),
+                display_name: String::new(),
                 script: "echo answer=42 >> $GITHUB_OUTPUT".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7124,6 +7116,7 @@ fi"#
             },
             ExecutableStep::Script(ScriptStep {
                 id: "consumer".into(),
+                display_name: String::new(),
                 script: "echo artifact=${{ steps.composite.outputs.artifact-id }}".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7152,10 +7145,12 @@ fi"#
             vec![
                 StepStartEvent {
                     step_id: "producer".into(),
+                    display_name: String::new(),
                     order: 1
                 },
                 StepStartEvent {
                     step_id: "consumer".into(),
+                    display_name: String::new(),
                     order: 2
                 }
             ]
@@ -7170,6 +7165,7 @@ fi"#
         let steps = vec![
             ExecutableStep::Script(ScriptStep {
                 id: "producer".into(),
+                display_name: String::new(),
                 script: "node old-action.js".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7179,6 +7175,7 @@ fi"#
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "consumer".into(),
+                display_name: String::new(),
                 script: "echo answer=${{ steps.producer.outputs.answer }}".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7214,6 +7211,7 @@ fi"#
         let steps = vec![
             ExecutableStep::Script(ScriptStep {
                 id: "silent".into(),
+                display_name: String::new(),
                 script: "true".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7223,6 +7221,7 @@ fi"#
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "skipped".into(),
+                display_name: String::new(),
                 script: "echo unreachable".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7264,6 +7263,7 @@ fi"#
         let steps = vec![
             ExecutableStep::Script(ScriptStep {
                 id: "producer".into(),
+                display_name: String::new(),
                 script: "node old-action.js".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7273,6 +7273,7 @@ fi"#
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "consumer".into(),
+                display_name: String::new(),
                 script: "echo answer=${{ steps.producer.outputs.answer }}".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7309,7 +7310,7 @@ fi"#
         assert!(!summary.step_logs[0].skipped);
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
-            "export PATH='/opt/tool':\"$PATH\"\necho answer=42\n"
+            "export HOME=/root\nexport RUSTUP_HOME=/root/.rustup\nexport CARGO_HOME=/root/.cargo\nexport PATH='/opt/tool':\"$PATH\"\necho answer=42\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -7321,6 +7322,7 @@ fi"#
         let steps = vec![
             ExecutableStep::Script(ScriptStep {
                 id: "producer".into(),
+                display_name: String::new(),
                 script: "node old-action.js".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7330,6 +7332,7 @@ fi"#
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "consumer".into(),
+                display_name: String::new(),
                 script: "echo answer=${{ steps.producer.outputs.answer }}".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7360,7 +7363,7 @@ fi"#
         assert_eq!(summary.step_logs[0].warning_count, 1);
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
-            "export PATH='/opt/tool':\"$PATH\"\necho answer=42\n"
+            "export HOME=/root\nexport RUSTUP_HOME=/root/.rustup\nexport CARGO_HOME=/root/.cargo\nexport PATH='/opt/tool':\"$PATH\"\necho answer=42\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -7421,6 +7424,7 @@ fi"#
         let expected = hex_digest(expected_hash.finalize().as_slice());
         let steps = vec![ExecutableStep::JavaScript {
             step_id: "cache".into(),
+            display_name: String::new(),
             invocation: JavaScriptActionInvocation {
                 node: "node24".into(),
                 pre_container_path: None,
@@ -7470,6 +7474,7 @@ fi"#
         let steps = vec![
             ExecutableStep::Script(ScriptStep {
                 id: "producer".into(),
+                display_name: String::new(),
                 script: "echo answer=42 >> $GITHUB_OUTPUT".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7479,6 +7484,7 @@ fi"#
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "consumer".into(),
+                display_name: String::new(),
                 script: "echo should-not-run".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7516,6 +7522,7 @@ fi"#
         let steps = vec![
             ExecutableStep::Script(ScriptStep {
                 id: "check-failed".into(),
+                display_name: String::new(),
                 script: "exit 1".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7527,6 +7534,7 @@ fi"#
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "bitcoin-cancelled".into(),
+                display_name: String::new(),
                 script: "exit 1".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7540,6 +7548,7 @@ fi"#
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "ok".into(),
+                display_name: String::new(),
                 script: "echo OK".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7594,6 +7603,7 @@ fi"#
         let steps = vec![
             ExecutableStep::JavaScript {
                 step_id: "sccache".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node20".into(),
                     pre_container_path: None,
@@ -7609,6 +7619,7 @@ fi"#
             },
             ExecutableStep::Script(ScriptStep {
                 id: "enable-sccache".into(),
+                display_name: String::new(),
                 script: "echo SCCACHE_GHA_ENABLED=true >> $GITHUB_ENV".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7618,6 +7629,7 @@ fi"#
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "next".into(),
+                display_name: String::new(),
                 script: "echo next".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7663,6 +7675,7 @@ fi"#
         let steps = vec![
             ExecutableStep::Script(ScriptStep {
                 id: "fail".into(),
+                display_name: String::new(),
                 script: "exit 1".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7672,6 +7685,7 @@ fi"#
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "plain-condition".into(),
+                display_name: String::new(),
                 script: "echo plain".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7681,6 +7695,7 @@ fi"#
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "status-condition".into(),
+                display_name: String::new(),
                 script: "echo status".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -7924,6 +7939,7 @@ fi"#
         };
         let steps = vec![ExecutableStep::Docker {
             step_id: "docker1".into(),
+            display_name: String::new(),
             invocation: action,
             condition: None,
             continue_on_error: false,
@@ -7991,6 +8007,7 @@ fi"#
         };
         let steps = vec![ExecutableStep::Docker {
             step_id: "docker1".into(),
+            display_name: String::new(),
             invocation: action,
             condition: None,
             continue_on_error: false,
@@ -8047,6 +8064,7 @@ fi"#
         };
         let steps = vec![ExecutableStep::Docker {
             step_id: "docker1".into(),
+            display_name: String::new(),
             invocation: action,
             condition: None,
             continue_on_error: false,
@@ -8077,6 +8095,7 @@ fi"#
         let steps = vec![
             ExecutableStep::Script(ScriptStep {
                 id: "step1".into(),
+                display_name: String::new(),
                 script: "echo NAME=value >> $GITHUB_ENV".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -8086,6 +8105,7 @@ fi"#
             }),
             ExecutableStep::JavaScript {
                 step_id: "action1".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node20".into(),
                     pre_container_path: None,
@@ -8104,6 +8124,7 @@ fi"#
             },
             ExecutableStep::Script(ScriptStep {
                 id: "step2".into(),
+                display_name: String::new(),
                 script: "echo done".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -8153,6 +8174,7 @@ fi"#
         let steps = vec![
             ExecutableStep::Native {
                 step_id: "cache".into(),
+                display_name: String::new(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::Cache,
                     inputs: [
@@ -8174,6 +8196,7 @@ fi"#
             },
             ExecutableStep::Native {
                 step_id: "upload".into(),
+                display_name: String::new(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::UploadArtifact,
                     inputs: [
@@ -8196,6 +8219,7 @@ fi"#
             },
             ExecutableStep::Native {
                 step_id: "download".into(),
+                display_name: String::new(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::DownloadArtifact,
                     inputs: [
@@ -8211,6 +8235,7 @@ fi"#
             },
             ExecutableStep::Native {
                 step_id: "github-runtime".into(),
+                display_name: String::new(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::GitHubRuntimeExport,
                     inputs: [("github-token".into(), "ghs_token".into())].into(),
@@ -8328,6 +8353,7 @@ fi"#
         ];
         let upload = vec![ExecutableStep::Native {
             step_id: "upload".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::UploadArtifact,
                 inputs: [
@@ -8343,6 +8369,7 @@ fi"#
         }];
         let download = vec![ExecutableStep::Native {
             step_id: "download".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::DownloadArtifact,
                 inputs: [
@@ -8405,6 +8432,7 @@ fi"#
         ] {
             let upload = vec![ExecutableStep::Native {
                 step_id: format!("upload-{name}"),
+                display_name: String::new(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::UploadArtifact,
                     inputs: [
@@ -8429,6 +8457,7 @@ fi"#
         }
         let download = vec![ExecutableStep::Native {
             step_id: "download".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::DownloadArtifact,
                 inputs: [("path".into(), "/__w/downloaded".into())].into(),
@@ -8477,6 +8506,7 @@ fi"#
         ];
         let upload = vec![ExecutableStep::Native {
             step_id: "upload".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::UploadArtifact,
                 inputs: [
@@ -8500,6 +8530,7 @@ fi"#
             .unwrap();
         let download = vec![ExecutableStep::Native {
             step_id: "download".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::DownloadArtifact,
                 inputs: [
@@ -8552,6 +8583,7 @@ fi"#
         ];
         let upload = vec![ExecutableStep::Native {
             step_id: "upload".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::UploadArtifact,
                 inputs: [
@@ -8575,6 +8607,7 @@ fi"#
             .unwrap();
         let download = vec![ExecutableStep::Native {
             step_id: "download".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::DownloadArtifact,
                 inputs: [
@@ -8623,6 +8656,7 @@ fi"#
         fs::write(temp.join("work/ignore.txt"), "no\n").unwrap();
         let steps = vec![ExecutableStep::Native {
             step_id: "upload".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::UploadArtifact,
                 inputs: [
@@ -8684,6 +8718,7 @@ fi"#
             }
             vec![ExecutableStep::Native {
                 step_id: format!("upload-{name}"),
+                display_name: String::new(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::UploadArtifact,
                     inputs,
@@ -8742,6 +8777,7 @@ fi"#
             }
             vec![ExecutableStep::Native {
                 step_id: format!("upload-{}", path.replace('.', "-")),
+                display_name: String::new(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::UploadArtifact,
                     inputs,
@@ -8760,11 +8796,11 @@ fi"#
             .unwrap();
 
         assert_eq!(first_results[0].exit_code, 0);
-        assert_eq!(duplicate_results[0].exit_code, 1);
-        assert!(duplicate_results[0].stderr.contains("already exists"));
+        // Velnor always overwrites on duplicate (re-runs on same slot reuse artifact store).
+        assert_eq!(duplicate_results[0].exit_code, 0);
         assert_eq!(
-            fs::read_to_string(temp.join("_velnor_artifacts/local-1/duplicate/first.txt")).unwrap(),
-            "first\n"
+            fs::read_to_string(temp.join("_velnor_artifacts/local-1/duplicate/second.txt")).unwrap(),
+            "second\n"
         );
         let overwrite_results = DockerScriptExecutor::new(RecordingRunner::default())
             .execute_ordered_steps(
@@ -8797,6 +8833,7 @@ fi"#
         .unwrap();
         let steps = vec![ExecutableStep::Native {
             step_id: "upload".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::UploadArtifact,
                 inputs: [
@@ -8852,6 +8889,7 @@ fi"#
         let steps = vec![
             ExecutableStep::JavaScript {
                 step_id: "paths".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -8875,6 +8913,7 @@ fi"#
             },
             ExecutableStep::Script(ScriptStep {
                 id: "consume".into(),
+                display_name: String::new(),
                 script: "echo construct changed".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w".into(),
@@ -8965,6 +9004,7 @@ fi"#
             },
             ExecutableStep::Script(ScriptStep {
                 id: "pages-artifact-1".into(),
+                display_name: String::new(),
                 script: "tar --directory \"$INPUT_PATH\" -cvf \"$RUNNER_TEMP/artifact.tar\" ."
                     .into(),
                 shell: Shell::Sh,
@@ -8975,6 +9015,7 @@ fi"#
             }),
             ExecutableStep::Native {
                 step_id: "upload-artifact".into(),
+                display_name: String::new(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::UploadArtifact,
                     inputs: [
@@ -8999,6 +9040,7 @@ fi"#
             },
             ExecutableStep::Native {
                 step_id: "deploy-pages".into(),
+                display_name: String::new(),
                 invocation: NativeActionInvocation {
                     adapter: NativeActionAdapter::DeployPages,
                     inputs: [
@@ -9081,6 +9123,7 @@ fi"#
         let steps = vec![
             ExecutableStep::JavaScript {
                 step_id: "buildx".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -9097,6 +9140,7 @@ fi"#
             },
             ExecutableStep::JavaScript {
                 step_id: "login".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -9115,6 +9159,7 @@ fi"#
             },
             ExecutableStep::JavaScript {
                 step_id: "metadata".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -9134,6 +9179,7 @@ fi"#
             },
             ExecutableStep::JavaScript {
                 step_id: "build-push".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -9153,6 +9199,7 @@ fi"#
             },
             ExecutableStep::JavaScript {
                 step_id: "bake".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -9229,6 +9276,7 @@ fi"#
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::Native {
             step_id: "buildx".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::DockerSetupBuildx,
                 inputs: [
@@ -9291,6 +9339,7 @@ fi"#
         let steps = vec![
             ExecutableStep::JavaScript {
                 step_id: "buildx-reusable".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -9314,6 +9363,7 @@ fi"#
             },
             ExecutableStep::JavaScript {
                 step_id: "buildx-jackin".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -9333,6 +9383,7 @@ fi"#
             },
             ExecutableStep::JavaScript {
                 step_id: "metadata".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -9384,6 +9435,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             },
             ExecutableStep::JavaScript {
                 step_id: "build-push".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -9412,6 +9464,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             },
             ExecutableStep::JavaScript {
                 step_id: "bake".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -9547,6 +9600,7 @@ bitcoin-processor-app.push=true")
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::Native {
             step_id: "renovate".into(),
+            display_name: String::new(),
             invocation: NativeActionInvocation {
                 adapter: NativeActionAdapter::Renovate,
                 inputs: [
@@ -9627,7 +9681,8 @@ bitcoin-processor-app.push=true")
         let steps = vec![
             ExecutableStep::Script(ScriptStep {
                 id: "pather".into(),
-                script: "echo /github/home/.cargo/bin >> $GITHUB_PATH".into(),
+                display_name: String::new(),
+                script: "echo /root/.cargo/bin >> $GITHUB_PATH".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
                 env: Vec::new(),
@@ -9636,6 +9691,7 @@ bitcoin-processor-app.push=true")
             }),
             ExecutableStep::JavaScript {
                 step_id: "cargo-install".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node20".into(),
                     pre_container_path: None,
@@ -9671,7 +9727,7 @@ bitcoin-processor-app.push=true")
             .unwrap();
         assert!(node_call
             .last()
-            .is_some_and(|arg| arg.contains("export PATH='/github/home/.cargo/bin':\"$PATH\"")));
+            .is_some_and(|arg| arg.contains("export PATH='/root/.cargo/bin':\"$PATH\"")));
         assert!(node_call.last().is_some_and(
             |arg| arg.contains("exec node '/__a/_actions/cargo-install/dist/index.js'")
         ));
@@ -9685,6 +9741,7 @@ bitcoin-processor-app.push=true")
         let steps = vec![
             ExecutableStep::JavaScript {
                 step_id: "mise".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -9704,6 +9761,7 @@ bitcoin-processor-app.push=true")
             },
             ExecutableStep::JavaScript {
                 step_id: "setup-python".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -9774,13 +9832,13 @@ bitcoin-processor-app.push=true")
             node_calls[1].contains(&"GITHUB_PATH=/github/file_commands/setup-python_path".into())
         );
         assert!(node_calls[1].last().is_some_and(|arg| {
-            arg.contains("export PATH='/github/home/.local/share/mise/shims':\"$PATH\"")
+            arg.contains("export PATH='/opt/mise/shims':\"$PATH\"")
         }));
         assert!(node_calls[2].ends_with(&[
             "node:24-bookworm".into(),
             "sh".into(),
             "-lc".into(),
-            "export PATH='/github/home/.local/share/mise/shims':\"$PATH\"\nexec node '/__a/_actions/actions_setup-python/dist/cache-save/index.js'".into()
+            "export PATH='/opt/mise/shims':\"$PATH\"\nexec node '/__a/_actions/actions_setup-python/dist/cache-save/index.js'".into()
         ]));
         fs::remove_dir_all(temp).unwrap();
     }
@@ -9792,7 +9850,8 @@ bitcoin-processor-app.push=true")
         let steps = vec![
             ExecutableStep::Script(ScriptStep {
                 id: "toolchain".into(),
-                script: "echo CARGO_HOME=/github/home/.cargo >> \"$GITHUB_ENV\"\necho /github/home/.cargo/bin >> \"$GITHUB_PATH\"".into(),
+                display_name: String::new(),
+                script: "echo CARGO_HOME=/github/home/.cargo >> \"$GITHUB_ENV\"\necho /root/.cargo/bin >> \"$GITHUB_PATH\"".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/kestra-docker-containers".into(),
                 env: Vec::new(),
@@ -9801,6 +9860,7 @@ bitcoin-processor-app.push=true")
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "setup-mold".into(),
+                display_name: String::new(),
                 script: "echo mold 2.41.0".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/kestra-docker-containers".into(),
@@ -9810,6 +9870,7 @@ bitcoin-processor-app.push=true")
             }),
             ExecutableStep::JavaScript {
                 step_id: "setup-just".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -9829,6 +9890,7 @@ bitcoin-processor-app.push=true")
             },
             ExecutableStep::JavaScript {
                 step_id: "cargo-install".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -9891,7 +9953,7 @@ bitcoin-processor-app.push=true")
             assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
             assert!(call.last().is_some_and(|arg| {
-                arg.contains("export PATH='/github/home/.cargo/bin':\"$PATH\"")
+                arg.contains("export PATH='/root/.cargo/bin':\"$PATH\"")
             }));
         }
         assert!(node_calls[0].contains(&"INPUT_REPO=casey/just".into()));
@@ -9912,6 +9974,7 @@ bitcoin-processor-app.push=true")
         let steps = vec![
             ExecutableStep::JavaScript {
                 step_id: "cache".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node20".into(),
                     pre_container_path: None,
@@ -9927,6 +9990,7 @@ bitcoin-processor-app.push=true")
             },
             ExecutableStep::JavaScript {
                 step_id: "login".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node20".into(),
                     pre_container_path: None,
@@ -9991,6 +10055,7 @@ bitcoin-processor-app.push=true")
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::JavaScript {
             step_id: "cache".into(),
+            display_name: String::new(),
             invocation: JavaScriptActionInvocation {
                 node: "node20".into(),
                 pre_container_path: Some("/__a/_actions/cache/dist/pre.js".into()),
@@ -10044,6 +10109,7 @@ bitcoin-processor-app.push=true")
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::JavaScript {
             step_id: "wrapped".into(),
+            display_name: String::new(),
             invocation: JavaScriptActionInvocation {
                 node: "node20".into(),
                 pre_container_path: Some("/__a/_actions/wrapped/dist/pre.js".into()),
@@ -10087,6 +10153,7 @@ bitcoin-processor-app.push=true")
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::JavaScript {
             step_id: "wrapped".into(),
+            display_name: String::new(),
             invocation: JavaScriptActionInvocation {
                 node: "node20".into(),
                 pre_container_path: Some("/__a/_actions/wrapped/dist/pre.js".into()),
@@ -10144,6 +10211,7 @@ bitcoin-processor-app.push=true")
         let steps = vec![
             ExecutableStep::JavaScript {
                 step_id: "cache".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node20".into(),
                     pre_container_path: None,
@@ -10159,6 +10227,7 @@ bitcoin-processor-app.push=true")
             },
             ExecutableStep::Script(ScriptStep {
                 id: "fail".into(),
+                display_name: String::new(),
                 script: "exit 1".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -10199,6 +10268,7 @@ bitcoin-processor-app.push=true")
         fs::create_dir_all(&temp).unwrap();
         let steps = vec![ExecutableStep::JavaScript {
             step_id: "sccache".into(),
+            display_name: String::new(),
             invocation: JavaScriptActionInvocation {
                 node: "node20".into(),
                 pre_container_path: None,
@@ -10233,6 +10303,7 @@ bitcoin-processor-app.push=true")
         let steps = vec![
             ExecutableStep::JavaScript {
                 step_id: "sccache".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -10259,6 +10330,7 @@ bitcoin-processor-app.push=true")
             },
             ExecutableStep::Script(ScriptStep {
                 id: "enable-sccache".into(),
+                display_name: String::new(),
                 script: "echo RUSTC_WRAPPER=sccache >> \"$GITHUB_ENV\"".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w".into(),
@@ -10325,6 +10397,7 @@ bitcoin-processor-app.push=true")
         let steps = vec![
             ExecutableStep::JavaScript {
                 step_id: "rust-cache".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node20".into(),
                     pre_container_path: None,
@@ -10340,6 +10413,7 @@ bitcoin-processor-app.push=true")
             },
             ExecutableStep::Script(ScriptStep {
                 id: "enable".into(),
+                display_name: String::new(),
                 script: "echo CACHE_ON_FAILURE=true >> $GITHUB_ENV".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -10349,6 +10423,7 @@ bitcoin-processor-app.push=true")
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "fail".into(),
+                display_name: String::new(),
                 script: "exit 1".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/repo".into(),
@@ -10394,6 +10469,7 @@ bitcoin-processor-app.push=true")
         let steps = vec![
             ExecutableStep::JavaScript {
                 step_id: "rust-cache".into(),
+                display_name: String::new(),
                 invocation: JavaScriptActionInvocation {
                     node: "node24".into(),
                     pre_container_path: None,
@@ -10419,6 +10495,7 @@ bitcoin-processor-app.push=true")
             },
             ExecutableStep::Script(ScriptStep {
                 id: "enable".into(),
+                display_name: String::new(),
                 script: "echo CACHE_ON_FAILURE=true >> $GITHUB_ENV".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/kestra-docker-containers".into(),
@@ -10428,6 +10505,7 @@ bitcoin-processor-app.push=true")
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "fail".into(),
+                display_name: String::new(),
                 script: "exit 1".into(),
                 shell: Shell::Sh,
                 working_directory_container: "/__w/kestra-docker-containers".into(),

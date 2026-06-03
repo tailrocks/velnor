@@ -33,9 +33,9 @@ Velnor owns runner-side execution:
 - native behavior for supported `uses:` actions
 
 The runtime must never hardcode a workflow file, job id, or step id from
-`jackin` or `java-monorepo`. Target-specific snapshots in `scripts/target_audit.py`
-are only drift alarms: they tell us when the target repos start using a new
-feature class that Velnor does not support yet.
+`jackin` or `java-monorepo`. Target-specific snapshots in
+`velnor-tools target-audit` are only drift alarms: they tell us when the target
+repos start using a new feature class that Velnor does not support yet.
 
 ## Adapter Shape
 
@@ -104,14 +104,11 @@ until a new target workflow needs more.
 | `actions/download-artifact` | `DownloadArtifact` | `name`, `pattern`, all-artifacts mode, `path`, container-visible `download-path` output, `merge-multiple`, latest directory layout semantics, downloaded directory/file permissions normalized to `755`/`644`, same-run cross-job handoff on one Velnor host |
 | `actions/upload-pages-artifact` | `UploadPagesArtifact` | package pages directory and expose artifact handoff |
 | `actions/deploy-pages` | `DeployPages` | pages artifact name and deployment output `page_url` |
-| `actions/setup-python` | `SetupPython` | install/select requested Python, expose `python`/`pip`, update tool cache and `GITHUB_PATH` |
 | `dorny/paths-filter` | `PathsFilter` | evaluate target multiline filters for push, PR, workflow dispatch |
 | `jdx/mise-action` | `Mise` | install mise when missing, install requested tools, use shared home, update `GITHUB_PATH` |
 | `mozilla-actions/sccache-action` | `Sccache` | configure env/path/cache, fail honestly when `sccache` is unavailable so target `continue-on-error` gates work |
 | `rui314/setup-mold` | `SetupMold` | install/link mold for later Rust builds |
-| `extractions/setup-just` | `SetupJust` | install just binary for later scripts, update `GITHUB_PATH` |
-| `dtolnay/rust-toolchain` | `RustToolchain` | install/select stable Rust toolchain |
-| `baptiste0928/cargo-install` | `CargoInstall` | install crate with `locked` support |
+| `extractions/setup-just` | `SetupJust` | install just or reuse image-provided just, update cargo bin path |
 | `Swatinem/rust-cache` | `RustCache` | restore/save cache dirs, `shared-key`, `cache-on-failure`, shared workdir cache storage |
 | `crazy-max/ghaction-github-runtime` | `GitHubRuntimeExport` | export runtime/cache/results env values |
 | `renovatebot/github-action` | `Renovate` | run Renovate with target env/token/Docker access |

@@ -11,12 +11,16 @@ trap 'rm -rf "$mock_bin" "$calls_file"' EXIT
 cat >"$mock_bin/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$VELNOR_FIXTURE_STATUS_TEST_CALLS"
+if [[ "$1" == "--version" ]]; then
+  printf 'gh version 0.0.0-test\n'
+  exit 0
+fi
 if [[ "$1 $2" == "run list" ]]; then
-  printf '456\n'
+  printf '[{"databaseId":456}]\n'
   exit 0
 fi
 if [[ "$1 $2" == "run view" ]]; then
-  printf 'url\thttps://example.test/run/%s\n' "$3"
+  printf '{"url":"https://example.test/run/%s","status":"completed","conclusion":"success","jobs":[{"name":"compat","status":"completed","conclusion":"success"}]}\n' "$3"
   exit 0
 fi
 echo "unexpected gh call: $*" >&2
@@ -32,7 +36,7 @@ if [[ "$output" != *"https://example.test/run/456"* ]]; then
   exit 1
 fi
 
-if [[ "$calls" != *"run list --repo donbeave/velnor-actions-fixture --workflow compat.yml --limit 1 --json databaseId --jq .[0].databaseId // \"\""* ]]; then
+if [[ "$calls" != *"run list --repo donbeave/velnor-actions-fixture --workflow compat.yml --limit 1 --json databaseId"* ]]; then
   echo "fixture status did not query latest compat run: $calls" >&2
   exit 1
 fi

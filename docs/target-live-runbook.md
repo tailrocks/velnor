@@ -6,13 +6,11 @@ The implementation checklist is tracked in [roadmap.md](roadmap.md).
 
 ## Prerequisites
 
-- Linux process environment where the Docker daemon can see Velnor's
-  bind-mounted work directory. `velnor-runner configure`, `velnor-runner run`,
-  and `velnor-runner preflight` fail immediately outside Linux. Running Velnor
-  itself inside a Linux Docker container is valid, including from a macOS
-  workstation, if `/var/run/docker.sock` is mounted and
-  `--docker-host-work-dir` points at the host path visible to the Docker
-  daemon.
+- macOS or Linux process environment where the Docker daemon can run Linux job
+  containers and see Velnor's bind-mounted work directory. Running Velnor inside
+  a Linux Docker container is valid, including from a macOS workstation, if
+  `/var/run/docker.sock` is mounted and `--docker-host-work-dir` points at the
+  host path visible to the Docker daemon.
 - A local Docker socket is preferred. Remote `DOCKER_HOST=tcp://...` daemons
   usually fail unless `--work-dir` points to a path mounted into that daemon,
   because Velnor mounts job scripts, workspace, temp files, artifacts, and cache
@@ -24,9 +22,9 @@ The implementation checklist is tracked in [roadmap.md](roadmap.md).
   skips the local socket preflight when using a remote daemon. Docker-heavy
   target workflows still need Docker access inside the job container.
 - Git, Docker CLI, and Buildx plugin installed on the host.
-- GitHub PAT in `GITHUB_TOKEN` with permission to register a repository self-hosted runner for the target repo.
-- Set `VELNOR_TARGET_MVP_ARM_LABEL=true` only on ARM Linux hosts; the live proof
-  scripts reject that label on non-ARM hosts before registration.
+- GitHub PAT in `GITHUB_TOKEN` with permission to create and delete JIT self-hosted runner configs for the target repo.
+- Set `VELNOR_TARGET_MVP_ARM_LABEL=true` only on hosts where Docker can provide ARM64 Linux job containers; the live proof
+  scripts reject that label on incompatible hosts before JIT config.
 - A persistent Velnor `--work-dir` shared by all jobs in the same validation run; native cache restore/save and artifact upload/download use this shared work directory for single-host handoff until GitHub cache/artifact service transport is implemented.
 - Current target verifier passes locally:
 
@@ -58,7 +56,7 @@ scripts/live_host_doctor.sh
 
 Before attempting the fixture smoke, run the fixture readiness gate. It checks
 the current fixture workflow status, fixture feature surface, and live host
-readiness, but does not register runners or dispatch workflows:
+readiness, but does not create JIT runner configs or dispatch workflows:
 
 ```sh
 scripts/fixture_readiness.sh
@@ -71,7 +69,7 @@ scripts/fixture_report.sh
 ```
 
 Set `VELNOR_RUN_TARGET_VERIFY=true` to include the target workflow verifier, and
-set `VELNOR_CHECK_TARGET_MVP_CONFIG=true` after runner registration to validate
+set `VELNOR_CHECK_TARGET_MVP_CONFIG=true` after JIT config creation to validate
 the stored target labels, V2 settings, ids, and credentials.
 
 `velnor-runner run` also performs Docker preflight by default before it polls
@@ -112,12 +110,12 @@ scripts/fixture_smoke.sh
 ```
 
 The readiness script checks fixture status, fixture feature-surface drift, and
-host Docker readiness without runner registration or workflow dispatch. The
+host Docker readiness without JIT runner config creation or workflow dispatch. The
 smoke script runs `cargo test -q`, Docker preflight through the host doctor,
-fixture runner slot registration, one bounded Velnor daemon with `--once` and
+fixture JIT runner slot setup, one bounded Velnor daemon with `--once` and
 one internal slot per requested fixture job, and a GitHub run status summary.
 Set `VELNOR_RUN_TARGET_VERIFY=true` when you also want the host doctor to run
-`scripts/target_verify.sh` before runner registration. Override the count with
+`scripts/target_verify.sh` before JIT runner config creation. Override the count with
 `VELNOR_FIXTURE_JOB_COUNT` when the fixture shape changes. By default it
 dispatches a fresh `compat.yml` run and waits for the new run id. Set
 `VELNOR_FIXTURE_RUN_ID=<run-id>` to consume an existing run; set
@@ -128,7 +126,7 @@ from a non-default ref or with workflow inputs. Input validation uses the same
 `key=value` rules as target smoke scripts. Fixture workflow values are required
 and must be file names ending in `.yml` or `.yaml`. The script removes the temporary
 fixture runner on exit by default; set
-`VELNOR_FIXTURE_CLEANUP_RUNNER=false` to keep it registered for debugging. The
+`VELNOR_FIXTURE_CLEANUP_RUNNER=false` to keep it visible for debugging. The
 manual daemon equivalent is:
 
 ```sh
@@ -160,9 +158,9 @@ gh workflow run compat.yml --repo donbeave/velnor-actions-fixture
 gh workflow run docker.yml --repo donbeave/velnor-actions-fixture
 ```
 
-## Register Target Repositories
+## Configure Target Repositories
 
-For `ChainArgos/java-monorepo`, register with the target preset. This includes `hetzner-sentry-ci`, `ubuntu-latest`, and `ubuntu-24.04`.
+For `ChainArgos/java-monorepo`, create a JIT runner config with the target preset. This includes `hetzner-sentry-ci`, `ubuntu-latest`, and `ubuntu-24.04`.
 
 ```sh
 cargo run --bin velnor-runner -- configure \
@@ -202,19 +200,19 @@ enabled by default. Tune it with `VELNOR_CHAINARGOS_RUST_PACKAGES`,
 `VELNOR_CHAINARGOS_SEQUENCE_INCLUDE_KESTRA`, and per-workflow job counts such as
 `VELNOR_CHAINARGOS_RUST_JOB_COUNT`.
 Boolean controls must be exactly `true` or `false`, and job counts must be
-positive integers; the sequence fails before runner registration on invalid
+positive integers; the sequence fails before JIT runner config creation on invalid
 values.
 
 The real target repositories are manual validation surfaces. Before running any
 target smoke or target sequence script against `ChainArgos/java-monorepo` or
 `jackin-project/jackin`, the operator must explicitly set
 `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`. Without that confirmation, the scripts
-fail before runner registration or workflow dispatch.
+fail before JIT runner config creation or workflow dispatch.
 
-It runs the live host doctor, registers `ChainArgos/java-monorepo` with the
+It runs the live host doctor, creates JIT runner configs for `ChainArgos/java-monorepo` with the
 target label preset and consumes queued jobs through bounded daemon mode
-(`daemon --once --slots N`). Set `VELNOR_TARGET_CLEANUP_RUNNER=true` to remove
-the registered runner on exit. Sanitized job payloads are written to
+(`daemon --once --slots N`). Set `VELNOR_TARGET_CLEANUP_RUNNER=true` to delete
+the stored JIT runner id on exit. Sanitized job payloads are written to
 `.velnor-job-dumps/chainargos-target` by default; set
 `VELNOR_DUMP_JOB_MESSAGES=` to disable dumps or point it at another directory. Set
 `VELNOR_TARGET_WORKFLOW=ansible.yml` to have the script dispatch the first
@@ -225,7 +223,7 @@ workflow should be dispatched from a non-default ref. Set
 `VELNOR_TARGET_INPUTS=packages=bitcoin-processor-app,push=false` for
 `workflow_dispatch` inputs; each comma-separated `key=value` is passed to
 `gh workflow run -f`. Input keys must match `[A-Za-z_][A-Za-z0-9_-]*`; empty
-entries and entries without `=` are rejected before runner registration. Set
+entries and entries without `=` are rejected before JIT runner config creation. Set
 `VELNOR_TARGET_JOB_COUNT=<n>` when validating a workflow that queues multiple
 Velnor jobs and should be consumed by one smoke script invocation. Production
 Velnor is one daemon with multiple internal GitHub runner slots: each slot owns
@@ -258,7 +256,7 @@ cargo run --bin velnor-runner -- daemon \
 waits until one GitHub job is actually acquired and handled. It does not exit
 just because the broker has no message yet or sends a control message. The idle
 timeout is optional, but it makes smoke runs fail clearly when labels, workflow
-dispatch, or runner registration are wrong.
+dispatch, or JIT runner config creation are wrong.
 
 Before dispatch, fixture and target smoke scripts check repository self-hosted
 runners and fail if another online runner can match the proof labels. This
@@ -314,10 +312,10 @@ The sequence runs `ci.yml`, `construct.yml`, and `docs.yml` with
 `VELNOR_JACKIN_SEQUENCE_INCLUDE_DOCS`, and
 `VELNOR_JACKIN_SEQUENCE_WATCH_RUN`.
 Boolean controls must be exactly `true` or `false`, and job counts must be
-positive integers; the sequence fails before runner registration on invalid
+positive integers; the sequence fails before JIT runner config creation on invalid
 values.
 
-Register the same runner to `jackin-project/jackin` with x64 Linux labels:
+Create a JIT runner config for `jackin-project/jackin` with x64 Linux labels:
 
 ```sh
 cargo run --bin velnor-runner -- configure \
@@ -353,7 +351,7 @@ For each run, record:
 
 The smoke scripts write a Markdown evidence file under `.velnor-live-evidence`
 by default after Velnor consumes jobs and after a watched run completes or
-fails. Those files include a best-effort GitHub API snapshot of the registered
+fails. Those files include a best-effort GitHub API snapshot of the JIT
 runner labels, run job IDs/URLs, run artifacts, job steps, a bounded
 first/last-line log excerpt, a bounded snapshot of Velnor's local
 `_velnor_caches`, `_velnor_artifacts`, and `_velnor_sccache` directories under
@@ -363,7 +361,7 @@ Velnor. Set
 `VELNOR_LIVE_EVIDENCE_LOG_LINES=<n>` to change the log excerpt size. Set
 `VELNOR_LIVE_EVIDENCE_LOCAL_ENTRIES=<n>` to change the per-store listing size.
 Both evidence count values must be positive integers; smoke scripts validate
-them before runner registration.
+them before JIT runner config creation.
 
 If a fixture or target smoke script fails after a GitHub run id is known, it
 writes a best-effort evidence file before cleanup with phase

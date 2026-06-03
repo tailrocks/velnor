@@ -42,7 +42,7 @@ output="$(
 )"
 calls="$(cat "$calls_file")"
 
-if [[ "$output" != *"does not register runners or dispatch workflows"* ]]; then
+if [[ "$output" != *"does not create JIT runner configs or dispatch workflows"* ]]; then
   echo "fixture readiness did not describe its non-mutating behavior" >&2
   exit 1
 fi

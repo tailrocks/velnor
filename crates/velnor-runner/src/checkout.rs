@@ -6,6 +6,7 @@ use crate::{
     },
 };
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{Map, Value};
 use std::{
     collections::BTreeMap,
@@ -18,6 +19,7 @@ use url::Url;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckoutPlan {
     pub step_id: String,
+    pub display_name: String,
     pub clone_url: String,
     pub version: Option<String>,
     pub destination: PathBuf,
@@ -56,8 +58,19 @@ pub fn checkout_plans(
         let checkout_repository = checkout_repository(step);
         let clone_url = checkout_clone_url(checkout_repository.as_deref(), &self_repository)?;
         let destination = workspace_host.join(checkout_path(step)?);
+        let reference_name = step.reference.as_ref().and_then(|r| r.name.as_deref()).unwrap_or("");
+        let reference_ref = step.reference.as_ref().and_then(|r| r.git_ref.as_deref()).unwrap_or("");
+        let display_name = step.display_name.as_deref()
+            .filter(|n| !n.is_empty() && !n.starts_with("__"))
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| {
+                if reference_name.is_empty() { String::new() }
+                else if reference_ref.is_empty() { format!("Run {reference_name}") }
+                else { format!("Run {reference_name}@{reference_ref}") }
+            });
         plans.push(CheckoutPlan {
             step_id: checkout_step_id(step, index),
+            display_name,
             clone_url,
             version: checkout_ref(step).or_else(|| {
                 checkout_repository
@@ -79,6 +92,14 @@ pub fn checkout_plans(
             }),
             destination,
             token: checkout_token(step, job)
+                // Prefer system.github.token (the GITHUB_TOKEN with repo access) over
+                // SystemVssConnection's AccessToken (runner OAuth token, no repo scope).
+                .or_else(|| {
+                    job.variables
+                        .get("system.github.token")
+                        .and_then(|v| v.value.clone())
+                        .filter(|v| !v.is_empty())
+                })
                 .or_else(|| system_access_token(job.system_connection())),
             fetch_depth: checkout_fetch_depth(step)?,
             fetch_tags: checkout_fetch_tags(step),
@@ -245,10 +266,7 @@ where
         "protocol.version=2".to_string(),
     ];
     if let Some(token) = token {
-        fetch.extend([
-            "-c".to_string(),
-            format!("http.extraheader=AUTHORIZATION: bearer {token}"),
-        ]);
+        fetch.extend(["-c".to_string(), git_basic_auth_header(&token)]);
     }
     fetch.extend(["fetch".to_string(), "--prune".to_string()]);
     match fetch_depth {
@@ -332,7 +350,7 @@ where
             "config".to_string(),
             "--local".to_string(),
             git_extraheader_key(clone_url),
-            format!("AUTHORIZATION: bearer {token}"),
+            git_basic_auth_value(&token),
         ],
     )
 }
@@ -574,7 +592,14 @@ fn resolve_token_expression(token: &str, job: &AgentJobRequestMessage) -> Option
     if expression.eq_ignore_ascii_case("github.token")
         || expression.eq_ignore_ascii_case("secrets.GITHUB_TOKEN")
     {
-        return system_access_token(job.system_connection());
+        // system.github.token is the GITHUB_TOKEN for workflow git/API auth.
+        // The SystemVssConnection AccessToken is for the Actions service API — not git auth.
+        return job
+            .variables
+            .get("system.github.token")
+            .and_then(|v| v.value.clone())
+            .filter(|v| !v.is_empty())
+            .or_else(|| system_access_token(job.system_connection()));
     }
     for prefix in ["secrets.", "secret."] {
         if let Some(name) = expression.strip_prefix(prefix) {
@@ -660,13 +685,51 @@ fn context_string<'a>(context_data: &'a BTreeMap<String, Value>, path: &str) -> 
     let root = parts.next()?;
     let mut value = context_data.get(root)?;
     for part in parts {
-        value = value.as_object()?.get(part)?;
+        value = context_object_get(value, part)?;
     }
     value.as_str()
 }
 
+/// Navigate a context value by key, handling both plain objects and
+/// the GitHub V2 broker format `{"d": [{"k": key, "v": value}, ...]}`.
+fn context_object_get<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    if let Some(obj) = value.as_object() {
+        // Plain object lookup
+        if let Some(v) = obj.get(key) {
+            return Some(v);
+        }
+        // GitHub broker compact format: {"d": [{"k": "...", "v": ...}, ...]}
+        if let Some(items) = obj.get("d").and_then(Value::as_array) {
+            for item in items {
+                if let Some(item_obj) = item.as_object() {
+                    let k = item_obj
+                        .get("k")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if k.eq_ignore_ascii_case(key) {
+                        return item_obj.get("v");
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn path_arg(path: &Path) -> String {
     path.display().to_string()
+}
+
+/// Build the git http.extraheader value for basic auth (matches actions/runner format).
+/// GitHub's git service expects: AUTHORIZATION: basic base64("x-access-token:<token>")
+fn git_basic_auth_value(token: &str) -> String {
+    let encoded = STANDARD.encode(format!("x-access-token:{token}"));
+    format!("AUTHORIZATION: basic {encoded}")
+}
+
+/// Build the full git -c argument for the http.extraheader using basic auth.
+fn git_basic_auth_header(token: &str) -> String {
+    format!("http.extraheader={}", git_basic_auth_value(token))
 }
 
 fn git_extraheader_key(clone_url: &str) -> String {
@@ -684,6 +747,7 @@ fn format_git_args(args: &[String]) -> String {
         .map(|arg| {
             if arg.starts_with("http.extraheader=AUTHORIZATION:")
                 || arg.starts_with("AUTHORIZATION: bearer ")
+                || arg.starts_with("AUTHORIZATION: basic ")
             {
                 "http.extraheader=AUTHORIZATION: ***".to_string()
             } else {
@@ -739,6 +803,7 @@ mod tests {
             std::env::temp_dir().join(format!("velnor-checkout-test-{}", std::process::id()));
         let plan = CheckoutPlan {
             step_id: "checkout".into(),
+            display_name: String::new(),
             clone_url: "https://github.com/acme/repo.git".into(),
             version: Some("abc123".into()),
             destination: temp.clone(),
@@ -762,9 +827,7 @@ mod tests {
             .any(|(_, args)| args.contains(&"fetch".to_string())
                 && args.contains(&"abc123".to_string())
                 && args.contains(&"--depth=1".to_string())
-                && args
-                    .iter()
-                    .any(|arg| arg.contains("AUTHORIZATION: bearer token"))));
+                && args.iter().any(|arg| arg.contains("AUTHORIZATION: basic "))));
         assert!(runner.calls.iter().any(|(_, args)| args.ends_with(&[
             "checkout".into(),
             "--force".into(),
@@ -779,10 +842,11 @@ mod tests {
             .calls
             .iter()
             .any(|(_, args)| args.ends_with(&["clean".into(), "-ffdx".into()])));
-        assert!(runner.calls.iter().any(|(_, args)| args.ends_with(&[
-            "http.https://github.com/.extraheader".into(),
-            "AUTHORIZATION: bearer token".into()
-        ])));
+        assert!(runner.calls.iter().any(|(_, args)| {
+            args.len() >= 2
+                && args[args.len() - 2] == "http.https://github.com/.extraheader"
+                && args[args.len() - 1].starts_with("AUTHORIZATION: basic ")
+        }));
 
         std::fs::remove_dir_all(temp).ok();
     }
@@ -796,6 +860,7 @@ mod tests {
         std::fs::create_dir_all(temp.join(".git")).unwrap();
         let plan = CheckoutPlan {
             step_id: "checkout".into(),
+            display_name: String::new(),
             clone_url: "https://github.com/acme/repo.git".into(),
             version: Some("abc123".into()),
             destination: temp.clone(),
@@ -825,6 +890,7 @@ mod tests {
     fn cleanup_skips_disabled_persistence() {
         let plan = CheckoutPlan {
             step_id: "checkout".into(),
+            display_name: String::new(),
             clone_url: "https://github.com/acme/repo.git".into(),
             version: Some("abc123".into()),
             destination: PathBuf::from("/tmp/nonexistent-velnor-cleanup-test"),
@@ -851,6 +917,7 @@ mod tests {
         ));
         let plan = CheckoutPlan {
             step_id: "checkout".into(),
+            display_name: String::new(),
             clone_url: "https://github.com/acme/repo.git".into(),
             version: Some("main".into()),
             destination: temp.clone(),

@@ -6,6 +6,27 @@ implemented, what is still missing, and how work is verified.
 The high-level product vision lives in [vision.md](vision.md). This roadmap is
 the source of truth for current implementation work.
 
+## Hard Rules
+
+**Fixture is the contract.** `donbeave/velnor-actions-fixture` defines the exact
+GitHub Actions patterns Velnor must support. Never simplify or remove fixture
+content to work around a Velnor gap. Fix Velnor instead.
+
+**actions/runner is the source of truth.** When implementing protocol behavior —
+expression types, input structures, JIT fields, broker messages, credentials —
+always read https://github.com/actions/runner first. Do not guess. Implement to
+match what GitHub's own runner does.
+
+**Always use the latest protocol version.** When the official runner has both a
+legacy and a current implementation path, always choose the current one:
+- Results Service (WebSocket + Twirp) over Distributed Task timeline API
+- V2 broker over classic polling
+- JIT config over registration tokens
+- Latest crate versions in Cargo.toml at all times
+
+Never implement deprecated paths from the runner just because they exist in older
+code. If a newer path exists, that is what Velnor implements.
+
 ## Implementation Goal
 
 Velnor is a GitHub Actions-compatible runner daemon with a Rust runtime.
@@ -36,7 +57,7 @@ artifact, Renovate, and related Rust CI/CD behavior.
 The target repositories are current at:
 
 - `jackin-project/jackin`: `52a457b689940e05ed65015d2a82ff0e22577d2e`
-- `ChainArgos/java-monorepo`: `56491ec5b17702186506217452b58bcf57572079`
+- `ChainArgos/java-monorepo`: `92b52c3249f1d58e208bd0aeaea20580a4a07139`
 
 ### Shared Rust CI Requirements
 
@@ -124,6 +145,7 @@ local/composite behavior for Phase 0:
 - `actions/deploy-pages`
 - `dorny/paths-filter`
 - `jdx/mise-action`
+- `extractions/setup-just`
 - `Swatinem/rust-cache`
 - `mozilla-actions/sccache-action`
 - `rui314/setup-mold`
@@ -176,13 +198,12 @@ Required behavior:
   when the job container image supplies the expected tools.
 - `ubuntu-24.04-arm` is valid only when Docker can provide ARM Linux containers.
 
-Current implementation gap:
+Current implementation status:
 
-- `velnor-runner configure`, `run`, and `preflight` currently reject non-Linux
-  process hosts.
-- That guard must be changed. Host OS validation should move from "daemon
-  process must be Linux" to "claimed runner labels and job container OS must be
-  Linux-compatible".
+- `velnor-runner configure`, `run`, `daemon`, and `preflight` no longer reject
+  non-Linux process hosts.
+- Host validation is capability-based: runner labels and Docker job containers
+  must be Linux-compatible, while macOS/Darwin labels remain rejected.
 
 ## GitHub Protocol Decision
 
@@ -218,11 +239,12 @@ Unsupported setup paths:
 - classic distributed-task polling
 - fallback from missing V2 settings to classic polling
 
-Current implementation gap:
+Current implementation status:
 
-- code still contains classic registration-token setup and remove flow.
-- daemon slot setup still calls the classic `configure` path.
-- JIT decode and JIT slot recycling are not implemented yet.
+- classic registration-token setup and remove flow are removed from the product
+  CLI path.
+- daemon slot setup uses the JIT `configure` path.
+- JIT decode and daemon slot recycling are implemented.
 
 ## Daemon Slot Model
 
@@ -521,12 +543,12 @@ Performance evidence to collect:
 - remove `NativeActionAdapter::SetupPython` variant from `action.rs`
 - remove `native_setup_python` implementation from `executor.rs`
 - remove all `SetupPython` test fixtures and match arms
-- remove `NativeActionAdapter::RustToolchain` and `NativeActionAdapter::SetupJust`
-  variants from `action.rs`
-- remove `native_rust_toolchain`, `native_setup_just`, and `setup_just_script`
-  implementations from `executor.rs`
-- remove all `RustToolchain` and `SetupJust` test fixtures and match arms in
-  `action.rs` and `runner.rs`
+- remove `NativeActionAdapter::RustToolchain` variant from `action.rs`
+- remove `native_rust_toolchain` implementation from `executor.rs`
+- retain `NativeActionAdapter::SetupJust` because current Jackin target
+  workflows use `extractions/setup-just`
+- remove all `RustToolchain` test fixtures and match arms in `action.rs` and
+  `runner.rs`
 - remove `NativeActionAdapter::CargoInstall` variant from `action.rs`
 - remove `native_cargo_install` implementation from `executor.rs`
 - remove all `CargoInstall` test fixtures and match arms in `action.rs`

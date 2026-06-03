@@ -116,14 +116,11 @@ pub enum NativeActionAdapter {
     DownloadArtifact,
     UploadPagesArtifact,
     DeployPages,
-    SetupPython,
     PathsFilter,
     Mise,
     Sccache,
     SetupMold,
     SetupJust,
-    RustToolchain,
-    CargoInstall,
     RustCache,
     GitHubRuntimeExport,
     Renovate,
@@ -142,14 +139,11 @@ pub fn native_action_adapter(repository: &str) -> Option<NativeActionAdapter> {
         "actions/download-artifact" => Some(NativeActionAdapter::DownloadArtifact),
         "actions/upload-pages-artifact" => Some(NativeActionAdapter::UploadPagesArtifact),
         "actions/deploy-pages" => Some(NativeActionAdapter::DeployPages),
-        "actions/setup-python" => Some(NativeActionAdapter::SetupPython),
         "dorny/paths-filter" => Some(NativeActionAdapter::PathsFilter),
         "jdx/mise-action" => Some(NativeActionAdapter::Mise),
         "mozilla-actions/sccache-action" => Some(NativeActionAdapter::Sccache),
         "rui314/setup-mold" => Some(NativeActionAdapter::SetupMold),
         "extractions/setup-just" => Some(NativeActionAdapter::SetupJust),
-        "dtolnay/rust-toolchain" => Some(NativeActionAdapter::RustToolchain),
-        "baptiste0928/cargo-install" => Some(NativeActionAdapter::CargoInstall),
         "swatinem/rust-cache" => Some(NativeActionAdapter::RustCache),
         "crazy-max/ghaction-github-runtime" => Some(NativeActionAdapter::GitHubRuntimeExport),
         "renovatebot/github-action" => Some(NativeActionAdapter::Renovate),
@@ -820,6 +814,7 @@ fn composite_action_invocations_with_path(
             .unwrap_or_else(|| workspace_container.to_string());
         invocations.push(CompositeActionInvocation::Script(ScriptStep {
             id: step_id,
+            display_name: step.name.clone().unwrap_or_default(),
             script: rendered,
             shell,
             working_directory_container,
@@ -1064,13 +1059,26 @@ fn input_value(value: &serde_json::Value) -> String {
         serde_json::Value::String(value) => value.clone(),
         serde_json::Value::Bool(value) => value.to_string(),
         serde_json::Value::Number(value) => value.to_string(),
-        serde_json::Value::Object(object) => object
-            .get("value")
-            .or_else(|| object.get("Value"))
-            .or_else(|| object.get("lit"))
-            .or_else(|| object.get("Lit"))
-            .map(input_value)
-            .unwrap_or_default(),
+        serde_json::Value::Object(object) => {
+            // Prefer literal value first, then fall back to expression syntax.
+            if let Some(v) = object
+                .get("value")
+                .or_else(|| object.get("Value"))
+                .or_else(|| object.get("lit"))
+                .or_else(|| object.get("Lit"))
+            {
+                return input_value(v);
+            }
+            // Expression type (type=3): wrap expr so resolve_expressions can evaluate it.
+            if let Some(expr) = object
+                .get("expr")
+                .or_else(|| object.get("Expr"))
+                .and_then(|v| v.as_str())
+            {
+                return format!("${{{{{expr}}}}}");
+            }
+            String::new()
+        }
         _ => String::new(),
     }
 }
@@ -1438,11 +1446,11 @@ runs:
                 "id": "setup",
                 "reference": {
                     "type": "Repository",
-                    "name": "actions/setup-python",
+                    "name": "actions/cache",
                     "ref": "v5",
                     "path": "sub/action"
                 },
-                "inputs": { "python-version": "3.12", "cache-on-failure": true, "fetch-depth": 0 },
+                "inputs": { "key": "cargo-linux", "cache-on-failure": true, "fetch-depth": 0 },
                 "environment": { "PIP_INDEX_URL": "${{ github.server_url }}" }
             }
         ]))
@@ -1452,16 +1460,16 @@ runs:
 
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].step_id, "setup");
-        assert_eq!(plans[0].repository, "actions/setup-python");
+        assert_eq!(plans[0].repository, "actions/cache");
         assert_eq!(plans[0].git_ref, "v5");
         assert_eq!(
             plans[0].repository_dir,
             Path::new("/tmp/actions")
                 .join("_actions")
-                .join("actions_setup-python")
+                .join("actions_cache")
                 .join("v5")
         );
-        assert_eq!(plans[0].inputs["python-version"], "3.12");
+        assert_eq!(plans[0].inputs["key"], "cargo-linux");
         assert_eq!(plans[0].inputs["cache-on-failure"], "true");
         assert_eq!(plans[0].inputs["fetch-depth"], "0");
         assert_eq!(
@@ -1472,7 +1480,7 @@ runs:
             plans[0].action_dir,
             Path::new("/tmp/actions")
                 .join("_actions")
-                .join("actions_setup-python")
+                .join("actions_cache")
                 .join("v5")
                 .join("sub/action")
         );
@@ -1591,7 +1599,7 @@ runs:
                 "id": "setup",
                 "reference": {
                     "type": "Repository",
-                    "name": "actions/setup-python",
+                    "name": "actions/cache",
                     "ref": "v6"
                 }
             }
@@ -2045,11 +2053,11 @@ runs:
         let actions_host = Path::new("/tmp/actions");
         let plan = RepositoryActionPlan {
             step_id: "toolchain".into(),
-            repository: "dtolnay/rust-toolchain".into(),
+            repository: "acme/toolchain".into(),
             git_ref: "stable".into(),
             source_path: None,
-            repository_dir: actions_host.join("_actions/dtolnay_rust-toolchain/stable"),
-            action_dir: actions_host.join("_actions/dtolnay_rust-toolchain/stable"),
+            repository_dir: actions_host.join("_actions/acme_toolchain/stable"),
+            action_dir: actions_host.join("_actions/acme_toolchain/stable"),
             inputs: [("toolchain".to_string(), "stable".to_string())].into(),
             env: Vec::new(),
             condition: None,
@@ -2074,7 +2082,7 @@ runs:
         let runtime = metadata.runtime().unwrap();
         let resolved = ResolvedAction {
             plan,
-            metadata_path: actions_host.join("_actions/dtolnay_rust-toolchain/stable/action.yml"),
+            metadata_path: actions_host.join("_actions/acme_toolchain/stable/action.yml"),
             metadata,
             runtime,
         };
@@ -2091,14 +2099,14 @@ runs:
         assert!(step.continue_on_error);
         assert_eq!(
             step.working_directory_container,
-            "/__a/_actions/dtolnay_rust-toolchain/stable/fixtures"
+            "/__a/_actions/acme_toolchain/stable/fixtures"
         );
         assert!(step
             .script
-            .contains("/__a/_actions/dtolnay_rust-toolchain/stable stable"));
+            .contains("/__a/_actions/acme_toolchain/stable stable"));
         assert!(step.env.contains(&(
             "GITHUB_ACTION_PATH".into(),
-            "/__a/_actions/dtolnay_rust-toolchain/stable".into()
+            "/__a/_actions/acme_toolchain/stable".into()
         )));
     }
 
@@ -2107,11 +2115,11 @@ runs:
         let actions_host = Path::new("/tmp/actions");
         let plan = RepositoryActionPlan {
             step_id: "toolchain".into(),
-            repository: "dtolnay/rust-toolchain".into(),
+            repository: "acme/toolchain".into(),
             git_ref: "stable".into(),
             source_path: None,
-            repository_dir: actions_host.join("_actions/dtolnay_rust-toolchain/stable"),
-            action_dir: actions_host.join("_actions/dtolnay_rust-toolchain/stable"),
+            repository_dir: actions_host.join("_actions/acme_toolchain/stable"),
+            action_dir: actions_host.join("_actions/acme_toolchain/stable"),
             inputs: [
                 ("toolchain".to_string(), "stable".to_string()),
                 ("target".to_string(), "x86_64-unknown-linux-gnu".to_string()),
@@ -2144,7 +2152,7 @@ runs:
         let runtime = metadata.runtime().unwrap();
         let resolved = ResolvedAction {
             plan,
-            metadata_path: actions_host.join("_actions/dtolnay_rust-toolchain/stable/action.yml"),
+            metadata_path: actions_host.join("_actions/acme_toolchain/stable/action.yml"),
             metadata,
             runtime,
         };
@@ -2167,7 +2175,7 @@ runs:
                 ("toolchain".into(), "stable".into()),
                 (
                     "GITHUB_ACTION_PATH".into(),
-                    "/__a/_actions/dtolnay_rust-toolchain/stable".into()
+                    "/__a/_actions/acme_toolchain/stable".into()
                 )
             ]
         );
@@ -2916,7 +2924,6 @@ runs:
                 NativeActionAdapter::UploadPagesArtifact,
             ),
             ("actions/deploy-pages", NativeActionAdapter::DeployPages),
-            ("actions/setup-python", NativeActionAdapter::SetupPython),
             ("dorny/paths-filter", NativeActionAdapter::PathsFilter),
             ("jdx/mise-action", NativeActionAdapter::Mise),
             (
@@ -2925,11 +2932,6 @@ runs:
             ),
             ("rui314/setup-mold", NativeActionAdapter::SetupMold),
             ("extractions/setup-just", NativeActionAdapter::SetupJust),
-            ("dtolnay/rust-toolchain", NativeActionAdapter::RustToolchain),
-            (
-                "baptiste0928/cargo-install",
-                NativeActionAdapter::CargoInstall,
-            ),
             ("Swatinem/rust-cache", NativeActionAdapter::RustCache),
             (
                 "crazy-max/ghaction-github-runtime",

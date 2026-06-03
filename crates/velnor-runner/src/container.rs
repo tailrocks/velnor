@@ -57,6 +57,10 @@ impl JobContainerSpec {
             "-e".into(),
             "HOME=/github/home".into(),
             "-e".into(),
+            "RUSTUP_HOME=/root/.rustup".into(),
+            "-e".into(),
+            "CARGO_HOME=/github/home/.cargo".into(),
+            "-e".into(),
             "RUNNER_TEMP=/__t".into(),
             "-e".into(),
             "RUNNER_TOOL_CACHE=/__tool".into(),
@@ -125,6 +129,8 @@ impl JobContainerSpec {
         let mut args = vec![
             "run".into(),
             "--rm".into(),
+            "--name".into(),
+            self.sidecar_container_name("node-action"),
             "--network".into(),
             self.network.clone(),
             "--workdir".into(),
@@ -208,6 +214,8 @@ impl JobContainerSpec {
         let mut args = vec![
             "run".into(),
             "--rm".into(),
+            "--name".into(),
+            self.sidecar_container_name("docker-action"),
             "--network".into(),
             self.network.clone(),
             "--workdir".into(),
@@ -305,6 +313,10 @@ impl JobContainerSpec {
     fn local_work_dir(&self) -> Option<&Path> {
         let job_dir = self.temp_host.parent()?;
         job_dir.parent()
+    }
+
+    fn sidecar_container_name(&self, kind: &str) -> String {
+        format!("velnor-{kind}-{}", self.name)
     }
 }
 
@@ -586,6 +598,9 @@ mod tests {
 
         assert!(args
             .windows(2)
+            .any(|pair| pair == ["--name", "velnor-node-action-velnor-job-1"]));
+        assert!(args
+            .windows(2)
             .any(|pair| pair == ["--network", "velnor-net-1"]));
         assert!(args.windows(2).any(|pair| pair == ["--workdir", "/__w"]));
         assert!(args.contains(&"/tmp/work:/__w".into()));
@@ -720,6 +735,9 @@ mod tests {
             &["arg1".into()],
         );
 
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--name", "velnor-docker-action-velnor-job-1"]));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--network", "velnor-net-1"]));

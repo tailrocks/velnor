@@ -120,6 +120,7 @@ mod tests {
         let root = std::env::temp_dir().join("velnor-plan-test");
         let step = ExecutableStep::Script(crate::script_step::ScriptStep {
             id: "check".into(),
+            display_name: String::new(),
             script: "cargo check".into(),
             shell: Shell::Bash,
             working_directory_container: "/__w".into(),

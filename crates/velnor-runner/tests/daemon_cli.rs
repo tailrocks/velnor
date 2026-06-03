@@ -23,15 +23,13 @@ fn load_runner_name(config_dir: &Path) -> String {
 }
 
 #[test]
-fn daemon_dry_run_registration_cli_writes_slot_configs_and_exits() {
+fn daemon_dry_run_jit_config_cli_writes_slot_configs_and_exits() {
     let config_dir = unique_temp_dir("daemon-cli");
     let output = Command::new(env!("CARGO_BIN_EXE_velnor-runner"))
         .args([
             "daemon",
             "--url",
             "https://github.com/owner/repo",
-            "--token",
-            "fake",
             "--name",
             "velnor-ci",
             "--labels",
@@ -41,7 +39,7 @@ fn daemon_dry_run_registration_cli_writes_slot_configs_and_exits() {
             "--once",
             "--config-dir",
             config_dir.to_str().unwrap(),
-            "--dry-run-registration",
+            "--dry-run-jit-config",
         ])
         .output()
         .unwrap();
@@ -53,7 +51,7 @@ fn daemon_dry_run_registration_cli_writes_slot_configs_and_exits() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout)
-        .contains("Daemon registration dry run complete; skipped polling GitHub for jobs."));
+        .contains("Daemon JIT config dry run complete; skipped polling GitHub for jobs."));
     assert_eq!(
         load_runner_name(&config_dir.join("slots").join("slot-1")),
         "velnor-ci-slot-1"

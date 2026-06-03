@@ -60,12 +60,10 @@ runner identity and broker session. The current `run --once` path remains the
 single-slot compatibility/proof path.
 Product target: Velnor daemon can run on macOS or Linux, but assigned jobs run
 inside Linux Docker containers. Velnor refuses macOS/Darwin runner labels and
-does not claim macOS job capability. Current code still rejects non-Linux
-process hosts in `configure`, `run`, and `preflight`; that guard must be changed
-as part of the macOS-host support work. Running the Velnor daemon inside a
-Linux Docker container is also supported, including from Docker Desktop on
-macOS, as long as the container can reach the Docker daemon and the daemon can
-see Velnor's bind-mounted work directory. Any macOS legs in existing target
+does not claim macOS job capability. Running the Velnor daemon inside a Linux
+Docker container is also supported, including from Docker Desktop on macOS, as
+long as the container can reach the Docker daemon and the daemon can see
+Velnor's bind-mounted work directory. Any macOS legs in existing target
 workflows are outside Velnor's execution surface.
 
 ```sh
@@ -77,9 +75,9 @@ cargo run --bin velnor-runner -- configure \
 
 cargo run --bin velnor-runner -- configure \
   --url https://github.com/OWNER/REPO \
-  --token fake \
+  --pat "$GITHUB_TOKEN" \
   --labels velnor \
-  --dry-run
+  --dry-run-jit-config
 
 cargo run --bin velnor-runner -- status --slots 2
 cargo run --bin velnor-runner -- daemon \
@@ -93,8 +91,7 @@ cargo run --bin velnor-runner -- run
 cargo run --bin velnor-runner -- remove --pat "$GITHUB_TOKEN" --slots 2
 ```
 
-Current commands still include legacy configuration flags while the code moves
-to the JIT-only setup path. Product behavior is now defined as:
+Product behavior:
 
 - Velnor uses `POST /repos/{owner}/{repo}/actions/runners/generate-jitconfig`
   for repository targets, or the matching organization/enterprise JIT endpoint.
@@ -129,6 +126,8 @@ Local target coverage is checked with:
 ```sh
 scripts/target_verify.sh
 cargo test -q
+cargo run -q -p velnor-tools -- target-audit --check-target-mvp /tmp/velnor-jackin /tmp/velnor-chainargos
+cargo run -q -p velnor-tools -- target-verify
 ```
 
 `scripts/target_verify.sh` expects the `jackin` and ChainArgos target checkouts
@@ -139,6 +138,7 @@ auditing a local snapshot.
 Live host readiness is checked with:
 
 ```sh
+cargo run -q -p velnor-tools -- live-host-doctor-plan
 scripts/live_host_doctor.sh
 ```
 
@@ -146,6 +146,11 @@ Fixture proof readiness can be checked without registering a runner or
 dispatching a workflow:
 
 ```sh
+cargo run -q -p velnor-tools -- fixture-readiness
+cargo run -q -p velnor-tools -- fixture-report
+cargo run -q -p velnor-tools -- fixture-smoke-plan
+cargo run -q -p velnor-tools -- fixture-status
+cargo run -q -p velnor-tools -- target-smoke-plan --repo owner/repo
 scripts/fixture_readiness.sh
 ```
 
@@ -164,8 +169,9 @@ cargo run -q -p velnor-tools -- fixture-audit
 
 Repository automation policy: new committed automation should be Rust. Prefer
 `velnor-tools` subcommands over adding shell or Python scripts. Existing shell
-and Python automation is being migrated incrementally; Python runner-reference
-and fixture-audit checks have already moved to `velnor-tools`.
+and Python automation is being migrated incrementally; runner-reference,
+fixture-audit, live host doctor planning, fixture smoke planning, and target
+smoke planning checks have already moved to `velnor-tools`.
 
 The live proof scripts are Linux-only as well; they fail before runner
 registration on non-Linux hosts, and reject `VELNOR_TARGET_MVP_ARM_LABEL=true`

@@ -16,6 +16,7 @@ use std::{
 #[derive(Debug, Clone)]
 pub struct ScriptStep {
     pub id: String,
+    pub display_name: String,
     pub script: String,
     pub shell: Shell,
     pub working_directory_container: String,
@@ -36,6 +37,15 @@ pub fn github_script_steps_with_defaults(
     workspace_container: &str,
     defaults: &[Value],
 ) -> Result<Vec<ScriptStep>> {
+    github_script_steps_with_context(steps, workspace_container, defaults, &[])
+}
+
+pub fn github_script_steps_with_context(
+    steps: &[ActionStep],
+    workspace_container: &str,
+    defaults: &[Value],
+    context_data: &[(String, Value)],
+) -> Result<Vec<ScriptStep>> {
     let defaults = RunDefaults::from_job_defaults(defaults)?;
     let mut script_steps = Vec::new();
     for (index, step) in steps.iter().enumerate() {
@@ -46,11 +56,12 @@ pub fn github_script_steps_with_defaults(
             continue;
         }
 
-        script_steps.push(github_script_step(
+        script_steps.push(github_script_step_with_context(
             step,
             index,
             workspace_container,
             &defaults,
+            context_data,
         )?);
     }
     Ok(script_steps)
@@ -68,18 +79,32 @@ fn github_script_step(
     workspace_container: &str,
     defaults: &RunDefaults,
 ) -> Result<ScriptStep> {
+    github_script_step_with_context(step, index, workspace_container, defaults, &[])
+}
+
+fn github_script_step_with_context(
+    step: &ActionStep,
+    index: usize,
+    workspace_container: &str,
+    defaults: &RunDefaults,
+    context_data: &[(String, Value)],
+) -> Result<ScriptStep> {
     let inputs = step
         .inputs
         .as_ref()
         .and_then(|value| value.as_object())
         .ok_or_else(|| anyhow::anyhow!("script step {} missing inputs object", index + 1))?;
-    let script = string_input_field(inputs, &["script", "Script"]).ok_or_else(|| {
-        anyhow::anyhow!(
-            "script step {} missing script input; input keys: {}",
-            index + 1,
-            input_summary(inputs)
-        )
-    })?;
+    // GitHub sends script body as a plain literal OR as a format() expression when ${{ }} is used.
+    let script: String = string_input_field(inputs, &["script", "Script"])
+        .map(String::from)
+        .or_else(|| evaluate_script_format_expr(inputs, &["script", "Script"], context_data))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "script step {} missing script input; input keys: {}",
+                index + 1,
+                input_summary(inputs)
+            )
+        })?;
     let shell = string_input_field(inputs, &["shell", "Shell"])
         .or(defaults.shell.as_deref())
         .map(github_shell)
@@ -98,9 +123,26 @@ fn github_script_step(
     .map(|path| workspace_path(workspace_container, path))
     .unwrap_or_else(|| workspace_container.to_string());
 
+    // For script steps, only use DisplayName (the explicit `name:` field from YAML).
+    // The Name field in the job message may be a step ID (e.g. "msrv"), not a display
+    // name. Fall back to "Run {first_line_of_script}" to match GitHub's behavior.
+    let display_name = step
+        .display_name
+        .as_deref()
+        .filter(|n| !n.is_empty() && !n.starts_with("__"))
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| {
+            let first_line = script.lines().next().unwrap_or("").trim();
+            if first_line.is_empty() {
+                String::new()
+            } else {
+                format!("Run {first_line}")
+            }
+        });
     Ok(ScriptStep {
         id: step_id(step, index),
-        script: script.to_string(),
+        display_name,
+        script,
         shell,
         working_directory_container: working_directory,
         env: step_environment(step)?,
@@ -236,6 +278,134 @@ fn input_name_field(object: &serde_json::Map<String, Value>) -> Option<&str> {
     ["name", "Name", "key", "Key"]
         .iter()
         .find_map(|name| object.get(*name).and_then(input_value_as_str))
+}
+
+/// Evaluate a GitHub Actions `format()` expression from the inputs map.
+/// Used when the script body is an expression like `format('just clippy "{0}"', matrix.package)`.
+fn evaluate_script_format_expr(
+    inputs: &serde_json::Map<String, Value>,
+    names: &[&str],
+    context_data: &[(String, Value)],
+) -> Option<String> {
+    let map = inputs.get("map").or_else(|| inputs.get("Map"))?;
+    let items = map.as_array()?;
+    let entry = items.iter().find(|item| {
+        item.as_object()
+            .and_then(|obj| input_name_field(obj))
+            .map_or(false, |key| {
+                names.iter().any(|n| n.eq_ignore_ascii_case(key))
+            })
+    })?;
+    let value = entry
+        .as_object()
+        .and_then(|obj| obj.get("value").or_else(|| obj.get("Value")))?;
+    let obj = value.as_object()?;
+    let expr = obj
+        .get("expr")
+        .or_else(|| obj.get("Expr"))
+        .and_then(|v| v.as_str())?;
+    evaluate_github_format(expr, context_data)
+}
+
+/// Evaluate a GitHub Actions `format(template, args...)` expression.
+/// Returns the formatted string with `{N}` placeholders replaced by resolved context values.
+pub fn evaluate_github_format(expr: &str, context_data: &[(String, Value)]) -> Option<String> {
+    let expr = expr.trim();
+    let inner = expr
+        .strip_prefix("format(")
+        .and_then(|s| s.strip_suffix(')'))?;
+
+    // Split on commas not inside quotes (simple greedy parser for well-formed expressions)
+    let parts = split_format_args(inner);
+    if parts.is_empty() {
+        return None;
+    }
+
+    // First arg is the template (single-quoted string)
+    let template = parts[0].trim().strip_prefix('\'')?.strip_suffix('\'')?;
+
+    // Remaining args are context expressions like `matrix.package`
+    // Use a placeholder during {N} substitution to avoid touching {{ and }} escape sequences.
+    let placeholder_open = "\x00LBRACE\x00";
+    let placeholder_close = "\x00RBRACE\x00";
+    let mut result = template
+        .replace("''", "'") // escaped single quotes in single-quoted string
+        .replace("{{", placeholder_open)
+        .replace("}}", placeholder_close);
+    for (i, arg) in parts[1..].iter().enumerate() {
+        let resolved = resolve_context_path(arg.trim(), context_data).unwrap_or_default();
+        result = result.replace(&format!("{{{i}}}"), &resolved);
+    }
+    // Restore escaped braces: {{ → { and }} → }
+    result = result
+        .replace(placeholder_open, "{")
+        .replace(placeholder_close, "}");
+    Some(result)
+}
+
+fn split_format_args(s: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut in_single_quote = false;
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if !in_single_quote => {
+                in_single_quote = true;
+                current.push(ch);
+            }
+            '\'' if in_single_quote => {
+                if chars.peek() == Some(&'\'') {
+                    // escaped quote ''
+                    current.push(ch);
+                    current.push(chars.next().unwrap());
+                } else {
+                    in_single_quote = false;
+                    current.push(ch);
+                }
+            }
+            ',' if !in_single_quote => {
+                parts.push(current.trim().to_string());
+                current = String::new();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        parts.push(current.trim().to_string());
+    }
+    parts
+}
+
+/// Resolve a dot-path context expression like `matrix.package` from context_data.
+fn resolve_context_path(path: &str, context_data: &[(String, Value)]) -> Option<String> {
+    let mut parts = path.splitn(2, '.');
+    let top = parts.next()?;
+    let rest = parts.next();
+    let top_value = context_data
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(top))
+        .map(|(_, v)| v)?;
+    match rest {
+        None => Some(value_to_string(top_value)),
+        Some(rest) => {
+            let mut cur = top_value;
+            for key in rest.split('.') {
+                cur = cur.get(key)?;
+            }
+            Some(value_to_string(cur))
+        }
+    }
+}
+
+fn value_to_string(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
 }
 
 fn input_value_as_str(value: &Value) -> Option<&str> {
@@ -661,16 +831,29 @@ fn fix_script(script: &str) -> String {
 
 fn script_with_path_prelude(script: &str, path_prepend: &[String]) -> String {
     let fixed = fix_script(script);
-    if path_prepend.is_empty() {
-        return fixed;
+    // Always reset HOME and Rust env vars to the container's expected values.
+    // OrbStack (on macOS developer hosts) injects the host user's HOME and PATH
+    // into every exec'd process, which breaks mise toolchain lookups (RUSTUP_HOME
+    // ends up pointing at a macOS path that doesn't exist in the container).
+    let mut prelude = vec![
+        // HOME=/root and CARGO_HOME=/root/.cargo: mise shims canonicalize these paths.
+        // OrbStack (on macOS) injects the host user's HOME and the container sets
+        // CARGO_HOME=/github/home/.cargo (a bind-mounted path). Both cause mise's
+        // canonicalize to fail, breaking the cargo/rustc shims.
+        // Using /root paths avoids bind-mount canonicalize failures.
+        "export HOME=/root".to_string(),
+        "export RUSTUP_HOME=/root/.rustup".to_string(),
+        "export CARGO_HOME=/root/.cargo".to_string(),
+    ];
+    if !path_prepend.is_empty() {
+        let joined = path_prepend
+            .iter()
+            .map(|path| shell_single_quote(path))
+            .collect::<Vec<_>>()
+            .join(":");
+        prelude.push(format!("export PATH={joined}:\"$PATH\""));
     }
-
-    let joined = path_prepend
-        .iter()
-        .map(|path| shell_single_quote(path))
-        .collect::<Vec<_>>()
-        .join(":");
-    format!("export PATH={joined}:\"$PATH\"\n{fixed}")
+    format!("{}\n{fixed}", prelude.join("\n"))
 }
 
 fn shell_single_quote(value: &str) -> String {
@@ -695,6 +878,7 @@ mod tests {
         let temp = temp_step_dir();
         let step = ScriptStep {
             id: "step1".into(),
+            display_name: String::new(),
             script: "echo hello".into(),
             shell: Shell::Bash,
             working_directory_container: "/__w/repo".into(),
@@ -707,7 +891,7 @@ mod tests {
 
         assert_eq!(
             fs::read_to_string(&plan.script_host_path).unwrap(),
-            "echo hello\n"
+            "export HOME=/root\nexport RUSTUP_HOME=/root/.rustup\nexport CARGO_HOME=/root/.cargo\necho hello\n"
         );
         assert!(plan
             .env
@@ -720,6 +904,7 @@ mod tests {
         let temp = temp_step_dir();
         let step = ScriptStep {
             id: "step1".into(),
+            display_name: String::new(),
             script: "echo test".into(),
             shell: Shell::Sh,
             working_directory_container: "/__w/repo".into(),
@@ -763,6 +948,7 @@ mod tests {
         let temp = temp_step_dir();
         let step = ScriptStep {
             id: "step1".into(),
+            display_name: String::new(),
             script: "tool --version".into(),
             shell: Shell::Bash,
             working_directory_container: "/__w/repo".into(),
@@ -779,7 +965,7 @@ mod tests {
 
         assert_eq!(
             fs::read_to_string(&plan.script_host_path).unwrap(),
-            "export PATH='/opt/bin':'/path/with'\\''quote':\"$PATH\"\ntool --version\n"
+            "export HOME=/root\nexport RUSTUP_HOME=/root/.rustup\nexport CARGO_HOME=/root/.cargo\nexport PATH='/opt/bin':'/path/with'\\''quote':\"$PATH\"\ntool --version\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -1093,5 +1279,75 @@ mod tests {
         .unwrap();
 
         assert!(has_enabled_non_script_steps(&steps));
+    }
+
+    #[test]
+    fn evaluates_format_expr_with_context() {
+        let result = evaluate_github_format(
+            "format('just clippy \"{0}\"', matrix.package)",
+            &[(
+                "matrix".to_string(),
+                serde_json::json!({"package": "app-b"}),
+            )],
+        );
+        assert_eq!(result.as_deref(), Some("just clippy \"app-b\""));
+    }
+
+    #[test]
+    fn evaluates_format_expr_with_escaped_braces() {
+        // {{ and }} in GitHub format() are escape sequences for literal { and }
+        let expr = "format('{{\\n  echo stats ({0})\\n}} >> \"${{ENV}}\"\\n', matrix.config.lane)";
+        let result = evaluate_github_format(
+            expr,
+            &[(
+                "matrix".to_string(),
+                serde_json::json!({"config": {"lane": "velnor"}}),
+            )],
+        );
+        let expected = "{\\n  echo stats (velnor)\\n} >> \"${ENV}\"\\n";
+        assert_eq!(result.as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn evaluates_format_expr_multi_arg() {
+        let result = evaluate_github_format(
+            "format('python3 write.py \"{0}\" \"{1}\"', matrix.package, matrix.config.lane)",
+            &[(
+                "matrix".to_string(),
+                serde_json::json!({"package": "app-a", "config": {"lane": "velnor"}}),
+            )],
+        );
+        assert_eq!(
+            result.as_deref(),
+            Some("python3 write.py \"app-a\" \"velnor\"")
+        );
+    }
+
+    #[test]
+    fn maps_script_steps_with_format_expr() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([{
+            "enabled": true,
+            "reference": { "type": "Script" },
+            "inputs": {
+                "map": [{
+                    "Key": {"lit": "script", "type": 0},
+                    "Value": {
+                        "col": 14,
+                        "expr": "format('just clippy \"{0}\"', matrix.package)",
+                        "type": 3
+                    }
+                }],
+                "type": 2
+            }
+        }]))
+        .unwrap();
+
+        let context = vec![(
+            "matrix".to_string(),
+            serde_json::json!({"package": "app-b"}),
+        )];
+        let script_steps = github_script_steps_with_context(&steps, "/__w", &[], &context).unwrap();
+        assert_eq!(script_steps.len(), 1);
+        assert_eq!(script_steps[0].script, "just clippy \"app-b\"");
     }
 }

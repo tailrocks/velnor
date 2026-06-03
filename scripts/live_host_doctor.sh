@@ -2,7 +2,6 @@
 set -euo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$ROOT/scripts/live_sequence_common.sh"
 
 WORK_DIR="${VELNOR_WORK_DIR:-$ROOT/.velnor-work}"
 DOCKER_HOST_WORK_DIR="${VELNOR_DOCKER_HOST_WORK_DIR:-}"
@@ -13,27 +12,10 @@ TARGET_MVP_ARM_LABEL="${VELNOR_TARGET_MVP_ARM_LABEL:-false}"
 
 cd "$ROOT"
 
-velnor_require_bool VELNOR_REQUIRE_DOCKER_SOCKET "$REQUIRE_DOCKER_SOCKET"
-velnor_require_bool VELNOR_CHECK_TARGET_MVP_CONFIG "$CHECK_TARGET_MVP_CONFIG"
-velnor_require_bool VELNOR_RUN_TARGET_VERIFY "$RUN_TARGET_VERIFY"
-velnor_require_bool VELNOR_TARGET_MVP_ARM_LABEL "$TARGET_MVP_ARM_LABEL"
-
-host_os="$(uname -s)"
-if [[ "$host_os" != "Linux" ]]; then
-  echo "unsupported host OS '$host_os'; Velnor live proof scripts are Linux-only" >&2
-  exit 2
-fi
-
-if [[ "$TARGET_MVP_ARM_LABEL" == "true" ]]; then
-  host_arch="$(uname -m)"
-  case "$host_arch" in
-    aarch64|arm64) ;;
-    *)
-      echo "unsupported ARM runner label on host architecture '$host_arch'; only set VELNOR_TARGET_MVP_ARM_LABEL=true on an ARM Linux host" >&2
-      exit 2
-      ;;
-  esac
-fi
+echo "==> Planning live host doctor"
+cargo run -q -p velnor-tools -- live-host-doctor-plan \
+  --host-os "$(uname -s)" \
+  --host-arch "$(uname -m)"
 
 echo "==> Checking required host tools"
 for tool in git docker cargo; do

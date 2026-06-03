@@ -12,7 +12,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Register this machine as a GitHub self-hosted runner.
+    /// Create and store a GitHub JIT runner configuration.
     Configure(ConfigureArgs),
     /// Run one daemon process that manages one or more internal runner slots.
     Daemon(DaemonArgs),
@@ -51,15 +51,11 @@ pub struct PreflightArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct ConfigureArgs {
-    /// Repository, organization, or enterprise URL accepted by GitHub runner registration.
+    /// Repository, organization, or enterprise URL accepted by GitHub JIT runner configuration.
     #[arg(long)]
     pub url: String,
 
-    /// GitHub runner registration token. If omitted, pass --pat to request one.
-    #[arg(long, env = "VELNOR_RUNNER_TOKEN")]
-    pub token: Option<String>,
-
-    /// GitHub personal access token used to request a short-lived runner registration token.
+    /// GitHub personal access token used to create a JIT runner configuration.
     #[arg(long, env = "GITHUB_TOKEN")]
     pub pat: Option<String>,
 
@@ -67,7 +63,7 @@ pub struct ConfigureArgs {
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Comma-separated labels to register. Example: velnor,hetzner-sentry-ci.
+    /// Comma-separated labels for the JIT runner. Example: velnor,hetzner-sentry-ci.
     #[arg(long, value_delimiter = ',')]
     pub labels: Vec<String>,
 
@@ -83,11 +79,11 @@ pub struct ConfigureArgs {
     #[arg(long)]
     pub replace: bool,
 
-    /// Runner group/pool id. If omitted, Velnor chooses the default self-hosted pool.
+    /// Runner group id for JIT configuration. Defaults to GitHub's default group id 1.
     #[arg(long)]
     pub pool_id: Option<i64>,
 
-    /// Runner group/pool name. Used when multiple self-hosted pools exist.
+    /// Runner group name is not supported by JIT setup; pass --pool-id for non-default groups.
     #[arg(long)]
     pub pool_name: Option<String>,
 
@@ -161,15 +157,11 @@ pub struct DaemonArgs {
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
 
-    /// Repository, organization, or enterprise URL accepted by GitHub runner registration. If provided, daemon configures internal slots before polling.
+    /// Repository, organization, or enterprise URL accepted by GitHub JIT runner configuration. If provided, daemon configures internal slots before polling.
     #[arg(long)]
     pub url: Option<String>,
 
-    /// GitHub runner registration token. If omitted, pass --pat to request one.
-    #[arg(long, env = "VELNOR_RUNNER_TOKEN")]
-    pub token: Option<String>,
-
-    /// GitHub personal access token used to request short-lived runner registration tokens.
+    /// GitHub personal access token used to create JIT runner configurations.
     #[arg(long, env = "GITHUB_TOKEN")]
     pub pat: Option<String>,
 
@@ -177,7 +169,7 @@ pub struct DaemonArgs {
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Comma-separated labels to register. Example: velnor,hetzner-sentry-ci.
+    /// Comma-separated labels for each JIT runner. Example: velnor,hetzner-sentry-ci.
     #[arg(long, value_delimiter = ',')]
     pub labels: Vec<String>,
 
@@ -189,20 +181,20 @@ pub struct DaemonArgs {
     #[arg(long)]
     pub target_mvp_arm_label: bool,
 
-    /// Replace existing slot runners with the same names during daemon startup registration.
+    /// Replace existing slot configs during daemon startup JIT configuration.
     #[arg(long)]
     pub replace: bool,
 
-    /// Runner group/pool id. If omitted, Velnor chooses the default self-hosted pool.
+    /// Runner group id for JIT configuration. Defaults to GitHub's default group id 1.
     #[arg(long)]
     pub pool_id: Option<i64>,
 
-    /// Runner group/pool name. Used when multiple self-hosted pools exist.
+    /// Runner group name is not supported by JIT setup; pass --pool-id for non-default groups.
     #[arg(long)]
     pub pool_name: Option<String>,
 
-    /// Validate daemon slot registration payloads without calling GitHub.
-    #[arg(long)]
+    /// Validate daemon slot JIT payloads without calling GitHub.
+    #[arg(long = "dry-run-jit-config")]
     pub dry_run_registration: bool,
 
     /// Number of internal GitHub runner slots managed by this daemon.
@@ -260,15 +252,11 @@ pub struct DaemonArgs {
 
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
-    /// GitHub runner remove token. If omitted, pass --pat to request one.
-    #[arg(long, env = "VELNOR_RUNNER_REMOVE_TOKEN")]
-    pub token: Option<String>,
-
-    /// GitHub personal access token used to request a short-lived runner remove token.
+    /// GitHub personal access token used to delete the exact stored JIT runner id.
     #[arg(long, env = "GITHUB_TOKEN")]
     pub pat: Option<String>,
 
-    /// Only remove local configuration, even if --token or --pat is provided.
+    /// Only remove local configuration, even if --pat is provided.
     #[arg(long)]
     pub local_only: bool,
 

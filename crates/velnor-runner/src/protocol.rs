@@ -4,19 +4,20 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use reqwest::{
-    header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT},
+    header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, USER_AGENT},
     Client, Method, StatusCode,
 };
 use rsa::{
     pkcs8::{EncodePrivateKey, LineEnding},
     rand_core::OsRng,
     traits::PublicKeyParts,
-    RsaPrivateKey,
+    BigUint, RsaPrivateKey,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
+    fmt,
     time::{SystemTime, UNIX_EPOCH},
 };
 use url::Url;
@@ -31,9 +32,8 @@ pub struct GitHubScope {
     pub original_url: String,
     pub hosted: bool,
     pub api_base_url: Url,
-    pub tenant_credential_url: Url,
-    pub registration_token_url: Url,
-    pub remove_token_url: Url,
+    pub jit_config_url: Url,
+    runner_scope_path: String,
 }
 
 impl GitHubScope {
@@ -51,21 +51,32 @@ impl GitHubScope {
         }
 
         let api_base_url = api_base_url(&url, hosted)?;
-        let tenant_credential_url = api_base_url.join("actions/runner-registration")?;
         let token_scope = token_scope_path(&segments)?;
-        let registration_token_url =
-            api_base_url.join(&format!("{token_scope}/actions/runners/registration-token"))?;
-        let remove_token_url =
-            api_base_url.join(&format!("{token_scope}/actions/runners/remove-token"))?;
+        let jit_config_url =
+            api_base_url.join(&format!("{token_scope}/actions/runners/generate-jitconfig"))?;
 
         Ok(Self {
             original_url: input.to_string(),
             hosted,
             api_base_url,
-            tenant_credential_url,
-            registration_token_url,
-            remove_token_url,
+            jit_config_url,
+            runner_scope_path: token_scope,
         })
+    }
+
+    pub fn runner_url(&self, runner_id: i64) -> Result<Url> {
+        self.api_base_url
+            .join(&format!(
+                "{}/actions/runners/{runner_id}",
+                self.runner_scope_path
+            ))
+            .context("build GitHub runner URL")
+    }
+
+    pub fn runners_url(&self) -> Result<Url> {
+        self.api_base_url
+            .join(&format!("{}/actions/runners", self.runner_scope_path))
+            .context("build GitHub runners URL")
     }
 }
 
@@ -95,37 +106,198 @@ fn token_scope_path(segments: &[&str]) -> Result<String> {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TenantCredentialRequest {
-    pub url: String,
-    pub runner_event: RunnerEvent,
+#[derive(Debug, Clone, Serialize)]
+pub struct GitHubJitConfigRequest {
+    pub name: String,
+    pub runner_group_id: i64,
+    pub labels: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_folder: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RunnerEvent {
-    Register,
-    Remove,
+#[derive(Debug, Clone, Deserialize)]
+pub struct GitHubJitConfigResponse {
+    pub runner: GitHubJitRunner,
+    pub encoded_jit_config: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GitHubRunnerToken {
-    #[serde(rename = "token")]
-    pub token: String,
-    #[serde(rename = "expires_at")]
-    pub expires_at: String,
+#[derive(Debug, Clone, Deserialize)]
+pub struct GitHubJitRunner {
+    pub id: i64,
+    pub name: String,
+    pub os: String,
+    pub status: String,
+    pub busy: bool,
+    pub labels: Vec<GitHubJitRunnerLabel>,
+    #[serde(default)]
+    pub runner_group_id: Option<i64>,
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GitHubAuthResult {
-    #[serde(rename = "url")]
-    pub server_url: String,
-    #[serde(rename = "token_schema")]
-    pub token_schema: String,
-    #[serde(rename = "token")]
-    pub token: String,
-    #[serde(default, rename = "use_v2_flow")]
+#[derive(Debug, Clone, Deserialize)]
+pub struct GitHubJitRunnerLabel {
+    pub name: String,
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedJitConfig {
+    pub settings: DecodedJitRunnerSettings,
+    pub credentials: DecodedJitCredentials,
+    pub private_key_pem: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ListedRunner {
+    pub id: Option<i64>,
+    pub name: Option<String>,
+}
+
+fn deser_bool_from_any<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    struct Visitor;
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = bool;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("boolean or string boolean")
+        }
+        fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+            Ok(v)
+        }
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            match v {
+                "true" | "True" | "TRUE" => Ok(true),
+                "false" | "False" | "FALSE" => Ok(false),
+                _ => Err(E::custom(format!("expected bool string, got: {v}"))),
+            }
+        }
+    }
+    d.deserialize_any(Visitor)
+}
+
+fn ws_host(url: &str) -> &str {
+    url.split("://")
+        .nth(1)
+        .and_then(|s| s.split('/').next())
+        .unwrap_or("results-receiver.actions.githubusercontent.com")
+}
+
+fn deser_opt_i64_from_any<'de, D: Deserializer<'de>>(d: D) -> Result<Option<i64>, D::Error> {
+    struct Visitor;
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = Option<i64>;
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("integer, string integer, or null")
+        }
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Ok(Some(v))
+        }
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Ok(Some(v as i64))
+        }
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            if v.is_empty() {
+                return Ok(None);
+            }
+            v.parse::<i64>().map(Some).map_err(E::custom)
+        }
+        fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<Self::Value, D2::Error> {
+            serde::de::Deserialize::deserialize(d)
+        }
+    }
+    d.deserialize_any(Visitor)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DecodedJitRunnerSettings {
+    #[serde(
+        default,
+        rename = "AgentId",
+        alias = "agentId",
+        alias = "agent_id",
+        deserialize_with = "deser_opt_i64_from_any"
+    )]
+    pub agent_id: Option<i64>,
+    #[serde(
+        default,
+        rename = "AgentName",
+        alias = "agentName",
+        alias = "agent_name"
+    )]
+    pub agent_name: Option<String>,
+    #[serde(
+        default,
+        rename = "PoolId",
+        alias = "poolId",
+        alias = "pool_id",
+        deserialize_with = "deser_opt_i64_from_any"
+    )]
+    pub pool_id: Option<i64>,
+    #[serde(default, rename = "PoolName", alias = "poolName", alias = "pool_name")]
+    pub pool_name: Option<String>,
+    #[serde(
+        default,
+        rename = "ServerUrl",
+        alias = "serverUrl",
+        alias = "server_url"
+    )]
+    pub server_url: Option<String>,
+    #[serde(
+        default,
+        rename = "ServerUrlV2",
+        alias = "serverUrlV2",
+        alias = "server_url_v2"
+    )]
+    pub server_url_v2: Option<String>,
+    #[serde(
+        default,
+        rename = "GitHubUrl",
+        alias = "gitHubUrl",
+        alias = "github_url"
+    )]
+    pub github_url: Option<String>,
+    #[serde(
+        default,
+        rename = "WorkFolder",
+        alias = "workFolder",
+        alias = "work_folder"
+    )]
+    pub work_folder: Option<String>,
+    #[serde(
+        default,
+        rename = "UseV2Flow",
+        alias = "useV2Flow",
+        alias = "use_v2_flow",
+        deserialize_with = "deser_bool_from_any"
+    )]
     pub use_v2_flow: bool,
+    #[serde(
+        default,
+        rename = "Ephemeral",
+        alias = "ephemeral",
+        deserialize_with = "deser_bool_from_any"
+    )]
+    pub ephemeral: bool,
+    #[serde(
+        default,
+        rename = "DisableUpdate",
+        alias = "disableUpdate",
+        alias = "disable_update",
+        deserialize_with = "deser_bool_from_any"
+    )]
+    pub disable_update: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct DecodedJitCredentials {
+    #[serde(rename = "Scheme", alias = "scheme")]
+    pub scheme: String,
+    #[serde(rename = "Data", alias = "data")]
+    pub data: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -272,110 +444,212 @@ impl RegistrationClient {
     pub fn new() -> Result<Self> {
         let http = Client::builder()
             .user_agent(RUNNER_USER_AGENT)
+            .use_native_tls()
+            .tcp_keepalive(None)
+            .connection_verbose(false)
             .build()
-            .context("build GitHub registration HTTP client")?;
+            .context("build GitHub runner HTTP client")?;
         Ok(Self { http })
     }
 
-    pub async fn exchange_tenant_credential(
+    pub async fn generate_jit_config(
         &self,
         scope: &GitHubScope,
-        runner_token: &str,
-        runner_event: RunnerEvent,
-    ) -> Result<GitHubAuthResult> {
-        let request = TenantCredentialRequest {
-            url: scope.original_url.clone(),
-            runner_event,
-        };
+        pat: &str,
+        request: &GitHubJitConfigRequest,
+    ) -> Result<GitHubJitConfigResponse> {
+        // Retry up to 3 times on transient TCP connection errors (ECONNRESET).
+        let mut last_err = anyhow::anyhow!("no attempts made");
+        for attempt in 0..3u32 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(u64::from(attempt) * 2)).await;
+            }
+            let result = self
+                .http
+                .post(scope.jit_config_url.clone())
+                .bearer_auth(pat)
+                .header(USER_AGENT, RUNNER_USER_AGENT)
+                .header(ACCEPT, "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .json(request)
+                .send()
+                .await;
+            match result {
+                Ok(r) => {
+                    let status = r.status();
+                    let request_id = r
+                        .headers()
+                        .get("x-github-request-id")
+                        .and_then(|v| v.to_str().ok())
+                        .map(ToOwned::to_owned);
+                    if status != StatusCode::CREATED {
+                        let body = r.text().await.unwrap_or_default();
+                        bail!(
+                            "JIT runner config request failed: status={status}, request_id={}, body={}",
+                            request_id.unwrap_or_else(|| "unknown".to_string()),
+                            body
+                        );
+                    }
+                    return r
+                        .json::<GitHubJitConfigResponse>()
+                        .await
+                        .context("parse JIT runner config response");
+                }
+                Err(e) if e.is_connect() => {
+                    eprintln!("JIT config connect error (attempt {}/3): {e:#}", attempt + 1);
+                    last_err = anyhow::Error::from(e).context("send JIT runner config request");
+                }
+                Err(e) => return Err(anyhow::Error::from(e).context("send JIT runner config request")),
+            }
+        }
+        Err(last_err)
+    }
 
+    pub async fn list_runners(&self, scope: &GitHubScope, pat: &str) -> Result<Vec<ListedRunner>> {
         let response = self
             .http
-            .post(scope.tenant_credential_url.clone())
-            .header(AUTHORIZATION, format!("RemoteAuth {runner_token}"))
+            .get(scope.runners_url()?)
+            .bearer_auth(pat)
             .header(USER_AGENT, RUNNER_USER_AGENT)
-            .header(ACCEPT, "application/vnd.github.v3+json")
-            .json(&request)
+            .header(ACCEPT, "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
             .send()
             .await
-            .context("send tenant credential request")?;
+            .context("send list runners request")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            bail!("list runners request failed: status={status}, body={body}");
+        }
+        #[derive(Deserialize)]
+        struct Page {
+            runners: Vec<ListedRunner>,
+        }
+        let page: Page = response
+            .json()
+            .await
+            .context("parse list runners response")?;
+        Ok(page.runners)
+    }
+
+    pub async fn delete_runner(
+        &self,
+        scope: &GitHubScope,
+        pat: &str,
+        runner_id: i64,
+    ) -> Result<()> {
+        let response = self
+            .http
+            .delete(scope.runner_url(runner_id)?)
+            .bearer_auth(pat)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .header(ACCEPT, "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .context("send delete runner request")?;
 
         let status = response.status();
+        if status == StatusCode::NO_CONTENT || status == StatusCode::NOT_FOUND {
+            return Ok(());
+        }
+
         let request_id = response
             .headers()
             .get("x-github-request-id")
             .and_then(|value| value.to_str().ok())
             .map(ToOwned::to_owned);
+        let body = response.text().await.unwrap_or_default();
+        bail!(
+            "delete runner request failed: status={status}, request_id={}, body={}",
+            request_id.unwrap_or_else(|| "unknown".to_string()),
+            body
+        );
+    }
+}
 
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            bail!(
-                "tenant credential request failed: status={status}, request_id={}, body={}",
-                request_id.unwrap_or_else(|| "unknown".to_string()),
-                body
-            );
+pub fn decode_jit_config(encoded_jit_config: &str) -> Result<DecodedJitConfig> {
+    let decoded = STANDARD
+        .decode(encoded_jit_config)
+        .context("decode encoded_jit_config")?;
+    let decoded = String::from_utf8(decoded).context("decode encoded_jit_config UTF-8")?;
+    let file_map: BTreeMap<String, String> =
+        serde_json::from_str(&decoded).context("parse encoded_jit_config file map")?;
+
+    let settings = decode_jit_file(&file_map, ".runner")?;
+    let credentials = decode_jit_file(&file_map, ".credentials")?;
+    let rsa_params = decode_jit_file_bytes(&file_map, ".credentials_rsaparams")?;
+    let private_key_pem = rsa_parameters_json_to_pem(&rsa_params)?;
+
+    Ok(DecodedJitConfig {
+        settings,
+        credentials,
+        private_key_pem,
+    })
+}
+
+fn decode_jit_file<T>(file_map: &BTreeMap<String, String>, name: &str) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let bytes = decode_jit_file_bytes(file_map, name)?;
+    serde_json::from_slice(&bytes).with_context(|| format!("parse JIT config file {name}"))
+}
+
+fn decode_jit_file_bytes(file_map: &BTreeMap<String, String>, name: &str) -> Result<Vec<u8>> {
+    let encoded = file_map
+        .get(name)
+        .ok_or_else(|| anyhow::anyhow!("encoded_jit_config missing {name}"))?;
+    STANDARD
+        .decode(encoded)
+        .with_context(|| format!("decode JIT config file {name}"))
+}
+
+fn rsa_parameters_json_to_pem(json_bytes: &[u8]) -> Result<String> {
+    let params: RsaParametersJson =
+        serde_json::from_slice(json_bytes).context("parse JIT RSA parameters")?;
+    let key = RsaPrivateKey::from_components(
+        BigUint::from_bytes_be(&params.modulus.decode()?),
+        BigUint::from_bytes_be(&params.exponent.decode()?),
+        BigUint::from_bytes_be(&params.d.decode()?),
+        vec![
+            BigUint::from_bytes_be(&params.p.decode()?),
+            BigUint::from_bytes_be(&params.q.decode()?),
+        ],
+    )
+    .context("build RSA private key from JIT parameters")?;
+    key.to_pkcs8_pem(LineEnding::LF)
+        .context("encode JIT RSA private key")
+        .map(|pem| pem.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+struct RsaParametersJson {
+    #[serde(rename = "d")]
+    d: JsonBytes,
+    #[serde(rename = "exponent")]
+    exponent: JsonBytes,
+    #[serde(rename = "modulus")]
+    modulus: JsonBytes,
+    #[serde(rename = "p")]
+    p: JsonBytes,
+    #[serde(rename = "q")]
+    q: JsonBytes,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum JsonBytes {
+    Base64(String),
+    Array(Vec<u8>),
+}
+
+impl JsonBytes {
+    fn decode(&self) -> Result<Vec<u8>> {
+        match self {
+            JsonBytes::Base64(value) => STANDARD.decode(value).context("decode RSA parameter"),
+            JsonBytes::Array(value) => Ok(value.clone()),
         }
-
-        response
-            .json::<GitHubAuthResult>()
-            .await
-            .context("parse tenant credential response")
-    }
-
-    pub async fn create_runner_registration_token(
-        &self,
-        scope: &GitHubScope,
-        pat: &str,
-    ) -> Result<GitHubRunnerToken> {
-        self.create_runner_token(scope.registration_token_url.clone(), pat, "registration")
-            .await
-    }
-
-    pub async fn create_runner_remove_token(
-        &self,
-        scope: &GitHubScope,
-        pat: &str,
-    ) -> Result<GitHubRunnerToken> {
-        self.create_runner_token(scope.remove_token_url.clone(), pat, "remove")
-            .await
-    }
-
-    async fn create_runner_token(
-        &self,
-        url: Url,
-        pat: &str,
-        token_type: &str,
-    ) -> Result<GitHubRunnerToken> {
-        let basic = STANDARD.encode(format!("github:{pat}"));
-        let response = self
-            .http
-            .post(url)
-            .header(AUTHORIZATION, format!("basic {basic}"))
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .header(ACCEPT, "application/vnd.github.v3+json")
-            .send()
-            .await
-            .with_context(|| format!("send {token_type} token request"))?;
-
-        let status = response.status();
-        let request_id = response
-            .headers()
-            .get("x-github-request-id")
-            .and_then(|value| value.to_str().ok())
-            .map(ToOwned::to_owned);
-
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            bail!(
-                "runner {token_type} token request failed: status={status}, request_id={}, body={}",
-                request_id.unwrap_or_else(|| "unknown".to_string()),
-                body
-            );
-        }
-
-        response
-            .json::<GitHubRunnerToken>()
-            .await
-            .with_context(|| format!("parse {token_type} token response"))
     }
 }
 
@@ -1964,9 +2238,217 @@ pub trait GitHubRunnerProtocol {
     async fn finish_job(&self, request_id: i64, result: TaskResult) -> anyhow::Result<()>;
 }
 
+// ── Results Service: WebSocket live console feed ──────────────────────────────
+
+/// Log lines batch sent over the WebSocket feed stream.
+/// Matches the GitHub Actions `TimelineRecordFeedLinesWrapper` wire format.
+#[derive(Debug, Clone, Serialize)]
+pub struct FeedLines {
+    pub count: usize,
+    pub value: Vec<String>,
+    #[serde(rename = "step_id")]
+    pub step_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<i64>,
+}
+
+/// WebSocket client for streaming live console output to the GitHub Results Service.
+/// Connects to `FeedStreamUrl` from the `SystemVssConnection` endpoint data.
+pub struct FeedStreamClient {
+    url: String,
+    token: String,
+}
+
+impl FeedStreamClient {
+    pub fn new(feed_stream_url: impl Into<String>, token: impl Into<String>) -> Self {
+        Self {
+            url: feed_stream_url.into(),
+            token: token.into(),
+        }
+    }
+
+    /// Try to create a FeedStreamClient from the SystemVssConnection endpoint data.
+    /// Returns None if the endpoint doesn't have the required FeedStreamUrl or AccessToken.
+    pub fn from_endpoint_data(data: &BTreeMap<String, String>, token: &str) -> Option<Self> {
+        let url = data.get("FeedStreamUrl")?.clone();
+        if url.is_empty() || token.is_empty() {
+            return None;
+        }
+        Some(Self::new(url, token))
+    }
+
+    /// Send a batch of log lines for a step over the WebSocket feed.
+    /// Opens a new connection per call, chunks JSON into ≤1 KB text frames.
+    pub async fn append_log_lines(
+        &self,
+        step_id: &str,
+        lines: Vec<String>,
+        start_line: Option<i64>,
+    ) -> Result<()> {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+        let feed = FeedLines {
+            count: lines.len(),
+            value: lines,
+            step_id: step_id.to_string(),
+            start_line,
+        };
+        let json = serde_json::to_string(&feed)?;
+        let bytes = json.into_bytes();
+
+        let request = tokio_tungstenite::tungstenite::http::Request::builder()
+            .method("GET")
+            .uri(&self.url)
+            .header("Host", ws_host(&self.url))
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("User-Agent", RUNNER_USER_AGENT)
+            .header("Upgrade", "websocket")
+            .header("Connection", "Upgrade")
+            .header("Sec-WebSocket-Version", "13")
+            .header(
+                "Sec-WebSocket-Key",
+                STANDARD.encode(uuid::Uuid::new_v4().as_bytes()),
+            )
+            .body(())
+            .context("build WebSocket request")?;
+
+        let (mut ws, _) = connect_async(request)
+            .await
+            .context("connect to feed stream WebSocket")?;
+
+        // Chunk into 1 KB text frames (matching the official runner behaviour)
+        for chunk in bytes.chunks(1024) {
+            ws.send(Message::Text(
+                String::from_utf8_lossy(chunk).into_owned().into(),
+            ))
+            .await
+            .context("send WebSocket frame")?;
+        }
+        ws.close(None).await.ok();
+        Ok(())
+    }
+}
+
+// ── Results Service: Twirp step status updates ────────────────────────────────
+
+/// Step status values (matches GitHub Actions Results Service proto enum).
+#[derive(Debug, Clone, Copy, Serialize)]
+pub enum StepStatus {
+    #[serde(rename = "3")]
+    InProgress = 3,
+    #[serde(rename = "6")]
+    Completed = 6,
+}
+
+/// Step conclusion values.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub enum StepConclusion {
+    #[serde(rename = "0")]
+    Unknown = 0,
+    #[serde(rename = "2")]
+    Success = 2,
+    #[serde(rename = "3")]
+    Failure = 3,
+    #[serde(rename = "4")]
+    Cancelled = 4,
+    #[serde(rename = "7")]
+    Skipped = 7,
+}
+
+/// A step record sent to the Twirp WorkflowStepsUpdate endpoint.
+#[derive(Debug, Clone, Serialize)]
+pub struct TwirpStep {
+    pub external_id: String,
+    pub number: usize,
+    pub name: String,
+    pub status: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    pub conclusion: u8,
+}
+
+/// Request body for `WorkflowStepsUpdate` Twirp call.
+#[derive(Debug, Serialize)]
+struct WorkflowStepsUpdateRequest<'a> {
+    steps: &'a [TwirpStep],
+    change_order: i64,
+    workflow_job_run_backend_id: &'a str,
+    workflow_run_backend_id: &'a str,
+}
+
+/// Client for the GitHub Actions Results Service Twirp API.
+pub struct TwirpResultsClient {
+    results_service_url: String,
+    token: String,
+    http: Client,
+}
+
+impl TwirpResultsClient {
+    pub fn new(results_service_url: impl Into<String>, token: impl Into<String>) -> Result<Self> {
+        Ok(Self {
+            results_service_url: results_service_url.into().trim_end_matches('/').to_string(),
+            token: token.into(),
+            http: Client::builder()
+                .user_agent(RUNNER_USER_AGENT)
+                .build()
+                .context("build Twirp HTTP client")?,
+        })
+    }
+
+    /// Create from SystemVssConnection endpoint data if ResultsServiceUrl is present.
+    pub fn from_endpoint_data(
+        data: &BTreeMap<String, String>,
+        token: &str,
+    ) -> Option<Result<Self>> {
+        let url = data.get("ResultsServiceUrl")?.clone();
+        if url.is_empty() || token.is_empty() {
+            return None;
+        }
+        Some(Self::new(url, token))
+    }
+
+    /// Send step status updates via `WorkflowStepsUpdate`.
+    pub async fn update_steps(
+        &self,
+        steps: &[TwirpStep],
+        workflow_run_backend_id: &str,
+        workflow_job_run_backend_id: &str,
+        change_order: i64,
+    ) -> Result<()> {
+        let url = format!(
+            "{}/twirp/github.actions.results.api.v1.WorkflowStepUpdateService/WorkflowStepsUpdate",
+            self.results_service_url
+        );
+        let body = WorkflowStepsUpdateRequest {
+            steps,
+            change_order,
+            workflow_job_run_backend_id,
+            workflow_run_backend_id,
+        };
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.token)
+            .json(&body)
+            .send()
+            .await
+            .context("send Twirp WorkflowStepsUpdate")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            bail!("WorkflowStepsUpdate failed: status={status}, body={body}");
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rsa::{pkcs8::DecodePrivateKey, traits::PrivateKeyParts};
 
     #[test]
     fn hosted_repo_scope_builds_expected_urls() {
@@ -1975,16 +2457,12 @@ mod tests {
         assert!(scope.hosted);
         assert_eq!(scope.api_base_url.as_str(), "https://api.github.com/");
         assert_eq!(
-            scope.tenant_credential_url.as_str(),
-            "https://api.github.com/actions/runner-registration"
+            scope.jit_config_url.as_str(),
+            "https://api.github.com/repos/donbeave/velnor/actions/runners/generate-jitconfig"
         );
         assert_eq!(
-            scope.registration_token_url.as_str(),
-            "https://api.github.com/repos/donbeave/velnor/actions/runners/registration-token"
-        );
-        assert_eq!(
-            scope.remove_token_url.as_str(),
-            "https://api.github.com/repos/donbeave/velnor/actions/runners/remove-token"
+            scope.runner_url(42).unwrap().as_str(),
+            "https://api.github.com/repos/donbeave/velnor/actions/runners/42"
         );
     }
 
@@ -1993,8 +2471,8 @@ mod tests {
         let scope = GitHubScope::parse("https://github.com/ChainArgos").unwrap();
 
         assert_eq!(
-            scope.registration_token_url.as_str(),
-            "https://api.github.com/orgs/ChainArgos/actions/runners/registration-token"
+            scope.jit_config_url.as_str(),
+            "https://api.github.com/orgs/ChainArgos/actions/runners/generate-jitconfig"
         );
     }
 
@@ -2003,8 +2481,8 @@ mod tests {
         let scope = GitHubScope::parse("https://github.com/enterprises/acme").unwrap();
 
         assert_eq!(
-            scope.registration_token_url.as_str(),
-            "https://api.github.com/enterprises/acme/actions/runners/registration-token"
+            scope.jit_config_url.as_str(),
+            "https://api.github.com/enterprises/acme/actions/runners/generate-jitconfig"
         );
     }
 
@@ -2014,12 +2492,8 @@ mod tests {
 
         assert!(!scope.hosted);
         assert_eq!(
-            scope.registration_token_url.as_str(),
-            "https://github.example.com/api/v3/repos/org/repo/actions/runners/registration-token"
-        );
-        assert_eq!(
-            scope.tenant_credential_url.as_str(),
-            "https://github.example.com/api/v3/actions/runner-registration"
+            scope.jit_config_url.as_str(),
+            "https://github.example.com/api/v3/repos/org/repo/actions/runners/generate-jitconfig"
         );
     }
 
@@ -2149,33 +2623,69 @@ mod tests {
     }
 
     #[test]
-    fn auth_result_accepts_v2_flag() {
-        let auth: GitHubAuthResult = serde_json::from_str(
-            r#"{
-                "url": "https://pipelines.actions.githubusercontent.com/",
-                "token_schema": "OAuthAccessToken",
-                "token": "secret",
-                "use_v2_flow": true
-            }"#,
-        )
-        .unwrap();
+    fn decodes_jit_config_file_map() {
+        let key_pair = RunnerKeyPair::generate().unwrap();
+        let private_key = RsaPrivateKey::from_pkcs8_pem(&key_pair.private_key_pem).unwrap();
+        let primes = private_key.primes();
+        let rsa_params = serde_json::json!({
+            "d": STANDARD.encode(private_key.d().to_bytes_be()),
+            "exponent": STANDARD.encode(private_key.e().to_bytes_be()),
+            "modulus": STANDARD.encode(private_key.n().to_bytes_be()),
+            "p": STANDARD.encode(primes[0].to_bytes_be()),
+            "q": STANDARD.encode(primes[1].to_bytes_be())
+        });
+        let files = BTreeMap::from([
+            (
+                ".runner".to_string(),
+                STANDARD.encode(
+                    serde_json::json!({
+                        "AgentId": 42,
+                        "AgentName": "velnor-jit",
+                        "PoolId": 1,
+                        "PoolName": "Default",
+                        "ServerUrl": "https://pipelines.actions.githubusercontent.com/tenant/",
+                        "ServerUrlV2": "https://broker.actions.githubusercontent.com/tenant/",
+                        "GitHubUrl": "https://github.com/owner/repo",
+                        "UseV2Flow": true,
+                        "Ephemeral": true,
+                        "DisableUpdate": true
+                    })
+                    .to_string(),
+                ),
+            ),
+            (
+                ".credentials".to_string(),
+                STANDARD.encode(
+                    serde_json::json!({
+                        "Scheme": "OAuth",
+                        "Data": {
+                            "clientId": "client-id",
+                            "authorizationUrl": "https://vstoken.actions.githubusercontent.com/token",
+                            "requireFipsCryptography": "false"
+                        }
+                    })
+                    .to_string(),
+                ),
+            ),
+            (
+                ".credentials_rsaparams".to_string(),
+                STANDARD.encode(rsa_params.to_string()),
+            ),
+        ]);
+        let encoded = STANDARD.encode(serde_json::to_string(&files).unwrap());
 
-        assert_eq!(auth.token_schema, "OAuthAccessToken");
-        assert!(auth.use_v2_flow);
-    }
+        let decoded = decode_jit_config(&encoded).unwrap();
 
-    #[test]
-    fn runner_token_response_parses_expiry() {
-        let token: GitHubRunnerToken = serde_json::from_str(
-            r#"{
-                "token": "abc",
-                "expires_at": "2026-05-31T20:00:00Z"
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(token.token, "abc");
-        assert_eq!(token.expires_at, "2026-05-31T20:00:00Z");
+        assert_eq!(decoded.settings.agent_id, Some(42));
+        assert_eq!(decoded.settings.agent_name.as_deref(), Some("velnor-jit"));
+        assert!(decoded.settings.use_v2_flow);
+        assert_eq!(
+            decoded.settings.server_url_v2.as_deref(),
+            Some("https://broker.actions.githubusercontent.com/tenant/")
+        );
+        assert_eq!(decoded.credentials.scheme, "OAuth");
+        assert_eq!(decoded.credentials.data["clientId"], "client-id");
+        assert!(decoded.private_key_pem.contains("BEGIN PRIVATE KEY"));
     }
 
     #[test]
@@ -2626,5 +3136,40 @@ mod tests {
 
         assert_eq!(parts.len(), 3);
         assert!(parts.iter().all(|part| !part.is_empty()));
+    }
+
+    #[test]
+    fn decoded_jit_runner_settings_accepts_string_agent_id() {
+        // GitHub returns AgentId/PoolId as quoted strings in some JIT payloads.
+        let json = r#"{"AgentId":"23","PoolId":"1"}"#;
+        let settings: DecodedJitRunnerSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(settings.agent_id, Some(23));
+        assert_eq!(settings.pool_id, Some(1));
+    }
+
+    #[test]
+    fn decoded_jit_runner_settings_accepts_integer_agent_id() {
+        let json = r#"{"AgentId":42,"PoolId":7}"#;
+        let settings: DecodedJitRunnerSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(settings.agent_id, Some(42));
+        assert_eq!(settings.pool_id, Some(7));
+    }
+
+    #[test]
+    fn decoded_jit_runner_settings_accepts_string_booleans() {
+        // GitHub returns UseV2Flow and Ephemeral as capitalized strings.
+        let json = r#"{"UseV2Flow":"True","Ephemeral":"True","DisableUpdate":"False"}"#;
+        let settings: DecodedJitRunnerSettings = serde_json::from_str(json).unwrap();
+        assert!(settings.use_v2_flow);
+        assert!(settings.ephemeral);
+        assert!(!settings.disable_update);
+    }
+
+    #[test]
+    fn decoded_jit_runner_settings_accepts_native_booleans() {
+        let json = r#"{"UseV2Flow":true,"Ephemeral":false}"#;
+        let settings: DecodedJitRunnerSettings = serde_json::from_str(json).unwrap();
+        assert!(settings.use_v2_flow);
+        assert!(!settings.ephemeral);
     }
 }

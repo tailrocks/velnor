@@ -26,3 +26,5 @@ time.workspace = true
 tokio.workspace = true
 url.workspace = true
 uuid.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true

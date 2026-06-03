@@ -10,6 +10,7 @@ RUN apt-get update \
         docker.io \
         git \
         jq \
+        python3 \
         libssl-dev \
         openssh-client \
         pkg-config \
@@ -19,5 +20,21 @@ RUN apt-get update \
         zip \
         zstd \
     && rm -rf /var/lib/apt/lists/*
+
+# Pre-install mise and Rust stable + cargo-nextest at /opt/mise (not bind-mounted
+# by Velnor at job time). At runtime Velnor sets MISE_DATA_DIR=/opt/mise so mise
+# finds the pre-installed tools and skips extraction (prevents ENOMEM on Docker Desktop).
+ENV HOME=/root \
+    MISE_DATA_DIR=/opt/mise \
+    MISE_CACHE_DIR=/opt/mise/cache \
+    MISE_CONFIG_DIR=/opt/mise/config \
+    PATH=/opt/mise/bin:/opt/mise/shims:$PATH
+
+RUN mkdir -p /opt/mise/bin && \
+    curl -fsSL https://mise.run | MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
+    mise use --global rust@stable 'cargo:cargo-nextest@latest' && \
+    mise reshim && \
+    mise exec -- rustc --version && \
+    mise exec -- cargo nextest --version
 
 WORKDIR /__w

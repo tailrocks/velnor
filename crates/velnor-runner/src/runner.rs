@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -42,15 +42,15 @@ use crate::{
     job_message::{ActionReferenceType, AgentJobRequestMessage},
     platform,
     protocol::{
-        AcquireJobOutcome, BrokerClient, DistributedTaskClient, GitHubAuthResult, GitHubScope,
-        OAuthClient, OAuthJwtCredentials, RegistrationClient, RunServiceAnnotation,
-        RunServiceAnnotationLevel, RunServiceClient, RunServiceCompleteJob, RunServiceStepResult,
-        RunServiceTelemetry, RunServiceVariableValue, RunnerEvent, RunnerJobRequestRef,
-        RunnerKeyPair, RunnerStatus, TaskAgent, TaskAgentPool, TaskAgentSession, TaskResult,
-        TimelineRecord, TimelineRecordFeedLines, TimelineRecordState, RUNNER_JOB_REQUEST,
+        decode_jit_config, AcquireJobOutcome, BrokerClient, DistributedTaskClient,
+        GitHubJitConfigRequest, GitHubScope, OAuthClient, OAuthJwtCredentials, RegistrationClient,
+        RunServiceAnnotation, RunServiceAnnotationLevel, RunServiceClient, RunServiceCompleteJob,
+        RunServiceStepResult, RunServiceTelemetry, RunServiceVariableValue, RunnerJobRequestRef,
+        RunnerStatus, TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines,
+        TimelineRecordState, RUNNER_JOB_REQUEST,
     },
     runtime_env::job_runtime_env,
-    script_step::{github_script_steps_with_defaults, StepAnnotation, StepAnnotationLevel},
+    script_step::{StepAnnotation, StepAnnotationLevel},
 };
 
 const JOB_CANCELLATION_MESSAGE: &str = "JobCancellation";
@@ -125,7 +125,6 @@ impl BrokerPollState {
 }
 
 pub async fn configure(args: ConfigureArgs) -> Result<()> {
-    platform::validate_linux_host(std::env::consts::OS)?;
     let dir = config::config_dir(args.config_dir)?;
     let scope = GitHubScope::parse(&args.url)?;
     let agent_name = args.name.unwrap_or_else(default_agent_name);
@@ -136,194 +135,205 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
     );
     validate_linux_only_labels(&labels)?;
     platform::validate_arm_label_matches_host(&labels, std::env::consts::ARCH)?;
-    let key_pair = if args.dry_run {
-        None
-    } else {
-        Some(RunnerKeyPair::generate()?)
-    };
-    let agent = TaskAgent::new(
-        agent_name.clone(),
-        labels.clone(),
-        key_pair
-            .as_ref()
-            .map(|key_pair| key_pair.public_key.clone()),
-        false,
-    );
-    let registration = if args.dry_run {
-        None
-    } else {
-        let registration_client = RegistrationClient::new()?;
-        let runner_token = runner_token(
-            &registration_client,
-            &scope,
-            args.token.as_ref(),
-            args.pat.as_ref(),
-            RunnerTokenKind::Registration,
-        )
-        .await?;
-        let auth = registration_client
-            .exchange_tenant_credential(&scope, &runner_token, RunnerEvent::Register)
-            .await?;
-        let client = DistributedTaskClient::new(&auth.server_url, &auth.token)?;
-        let pools = client.get_agent_pools(args.pool_name.as_deref()).await?;
-        let pool = select_pool(&pools, args.pool_id, args.pool_name.as_deref())?;
-        let existing = client.get_agents(pool.id, &agent_name).await?;
-        let registered_agent = if let Some(existing_agent) = existing.first() {
-            if !args.replace {
-                bail!("runner '{}' already exists; pass --replace", agent_name);
-            }
-            client
-                .replace_agent(pool.id, &agent.clone().with_id(existing_agent.id()?))
-                .await?
-        } else {
-            client.add_agent(pool.id, &agent).await?
-        };
 
-        Some(RegistrationResult {
-            auth,
-            pool,
-            agent: registered_agent,
-        })
+    if args.pool_name.is_some() && args.pool_id.is_none() {
+        bail!("JIT runner config requires numeric --pool-id for non-default runner groups");
+    }
+
+    let runner_group_id = args.pool_id.unwrap_or(1);
+    let jit_request = GitHubJitConfigRequest {
+        name: agent_name.clone(),
+        runner_group_id,
+        labels: labels.clone(),
+        work_folder: None,
     };
-    let credentials = match (&registration, &key_pair) {
-        (Some(registration), Some(key_pair)) => Some(stored_credentials(
-            &registration.auth,
-            &registration.agent,
-            key_pair,
-        )?),
-        _ => None,
+
+    let pat = if args.dry_run {
+        None
+    } else {
+        Some(
+            args.pat
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("GitHub PAT required for JIT config: pass --pat"))?,
+        )
+    };
+
+    if args.replace {
+        remove_existing_jit_config_for_replace(&dir, pat).await?;
+    }
+
+    let jit_config = if args.dry_run {
+        None
+    } else {
+        let pat = pat.expect("live JIT config requires PAT");
+        let jit_client = RegistrationClient::new()?;
+        let response = match jit_client
+            .generate_jit_config(&scope, pat, &jit_request)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) if e.to_string().contains("409") => {
+                // Orphaned runner from a previous failed run — delete by name and retry once.
+                eprintln!(
+                    "JIT 409: deleting orphaned runner '{}' and retrying",
+                    agent_name
+                );
+                delete_orphaned_jit_runner_by_name(&scope, pat, &agent_name).await?;
+                jit_client
+                    .generate_jit_config(&scope, pat, &jit_request)
+                    .await?
+            }
+            Err(e) => return Err(e),
+        };
+        Some((
+            response.runner,
+            decode_jit_config(&response.encoded_jit_config)?,
+        ))
     };
 
     let stored = StoredRunnerConfig {
         settings: RunnerSettings {
-            github_url: scope.original_url.clone(),
-            server_url: registration
+            github_url: jit_config
                 .as_ref()
-                .map(|registration| registration.auth.server_url.clone()),
-            server_url_v2: registration
+                .and_then(|(_, config)| config.settings.github_url.clone())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| scope.original_url.clone()),
+            server_url: jit_config
                 .as_ref()
-                .and_then(|registration| agent_string_property(&registration.agent, "ServerUrlV2")),
-            pool_id: registration
+                .and_then(|(_, config)| config.settings.server_url.clone()),
+            server_url_v2: jit_config
                 .as_ref()
-                .map(|registration| registration.pool.id),
-            pool_name: registration
-                .as_ref()
-                .and_then(|registration| registration.pool.name.clone()),
-            agent_id: registration
-                .as_ref()
-                .and_then(|registration| registration.agent.id),
-            agent_name,
-            labels,
-            use_v2_flow: registration.as_ref().is_some_and(|registration| {
-                registration.auth.use_v2_flow
-                    || agent_bool_property(&registration.agent, "UseV2Flow") == Some(true)
+                .and_then(|(_, config)| config.settings.server_url_v2.clone()),
+            pool_id: jit_config.as_ref().and_then(|(runner, config)| {
+                config
+                    .settings
+                    .pool_id
+                    .or(runner.runner_group_id)
+                    .or(Some(runner_group_id))
             }),
-            ephemeral: false,
+            pool_name: jit_config
+                .as_ref()
+                .and_then(|(_, config)| config.settings.pool_name.clone()),
+            agent_id: jit_config
+                .as_ref()
+                .and_then(|(runner, config)| config.settings.agent_id.or(Some(runner.id))),
+            agent_name: jit_config
+                .as_ref()
+                .and_then(|(_, config)| config.settings.agent_name.clone())
+                .unwrap_or(agent_name),
+            labels,
+            use_v2_flow: jit_config
+                .as_ref()
+                .is_some_and(|(_, config)| config.settings.use_v2_flow),
+            ephemeral: jit_config.as_ref().is_some(),
             disable_update: true,
         },
-        credentials,
+        credentials: match &jit_config {
+            Some((_, config)) => Some(stored_jit_credentials(config)?),
+            None => None,
+        },
     };
-    if registration.is_some()
+    if jit_config.is_some()
         && (!stored.settings.use_v2_flow || stored.settings.server_url_v2.is_none())
     {
         bail!(
-            "GitHub did not return required V2 runner settings (UseV2Flow/ServerUrlV2); Velnor targets the latest hosted GitHub broker/run-service protocol only"
+            "GitHub JIT config did not return required V2 runner settings (UseV2Flow/ServerUrlV2); Velnor uses the hosted GitHub broker/run-service protocol only"
         );
     }
 
     config::save(&dir, &stored)?;
     println!("Wrote local runner config to {}", dir.display());
     println!("GitHub scope API: {}", scope.api_base_url);
+    println!("JIT config endpoint: {}", scope.jit_config_url);
     println!(
-        "Tenant credential endpoint: {}",
-        scope.tenant_credential_url
+        "Prepared JIT runner request for '{}' with {} label(s) in runner group {}.",
+        jit_request.name,
+        jit_request.labels.len(),
+        jit_request.runner_group_id
     );
-    println!("Runner token endpoint: {}", scope.registration_token_url);
-    println!(
-        "Prepared TaskAgent payload for '{}' with {} label(s).",
-        agent.name,
-        agent.labels.len()
-    );
-    if let Some(registration) = registration {
+    if let Some((runner, _)) = jit_config {
         println!(
-            "Registered agent id {} in pool {}.",
-            registration.agent.id.unwrap_or_default(),
-            registration.pool.id
+            "Created JIT runner id {} in group {}.",
+            runner.id,
+            runner.runner_group_id.unwrap_or(runner_group_id)
         );
-        println!("Session create/message poll is the next Milestone 0 step.");
     } else {
-        println!("Dry run: skipped tenant credential exchange.");
+        println!("Dry run: skipped JIT config request.");
     }
 
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
-enum RunnerTokenKind {
-    Registration,
-    Remove,
-}
-
-async fn runner_token(
-    client: &RegistrationClient,
-    scope: &GitHubScope,
-    explicit_token: Option<&String>,
-    pat: Option<&String>,
-    kind: RunnerTokenKind,
-) -> Result<String> {
-    if let Some(token) = explicit_token {
-        return Ok(token.clone());
-    }
-
-    if let Some(pat) = pat {
-        let token = match kind {
-            RunnerTokenKind::Registration => {
-                client.create_runner_registration_token(scope, pat).await?
-            }
-            RunnerTokenKind::Remove => client.create_runner_remove_token(scope, pat).await?,
-        };
-        println!(
-            "Fetched short-lived runner {:?} token; expires at {}.",
-            kind, token.expires_at
-        );
-        return Ok(token.token);
-    }
-
-    bail!("runner token required: pass --token or --pat")
-}
-
-struct RegistrationResult {
-    auth: GitHubAuthResult,
-    pool: TaskAgentPool,
-    agent: TaskAgent,
-}
-
-fn stored_credentials(
-    auth: &GitHubAuthResult,
-    agent: &TaskAgent,
-    key_pair: &RunnerKeyPair,
-) -> Result<StoredCredentials> {
-    if let Some(authorization) = &agent.authorization {
-        if let (Some(client_id), Some(authorization_url)) =
-            (&authorization.client_id, &authorization.authorization_url)
-        {
-            return Ok(StoredCredentials {
-                scheme: CredentialScheme::OAuth,
-                data: json!({
-                    "clientId": client_id,
-                    "authorizationUrl": authorization_url,
-                    "privateKeyPem": key_pair.private_key_pem,
-                    "requireFipsCryptography": "false",
-                }),
-            });
+async fn remove_existing_jit_config_for_replace(dir: &Path, pat: Option<&str>) -> Result<()> {
+    if let Some(stored) = config::load(dir).ok() {
+        if let (Some(pat), Some(agent_id)) = (pat, stored.settings.agent_id) {
+            let scope = GitHubScope::parse(&stored.settings.github_url)?;
+            RegistrationClient::new()?
+                .delete_runner(&scope, pat, agent_id)
+                .await
+                .with_context(|| {
+                    format!("delete existing JIT runner id {agent_id} before replace")
+                })?;
+            println!(
+                "Deleted or confirmed absent existing JIT runner id {agent_id} before replace."
+            );
         }
+        if config::remove(dir)? {
+            println!(
+                "Removed existing local JIT runner config from {}",
+                dir.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// After a 409 Conflict on JIT creation, find and delete any orphaned runner
+/// with the given name on GitHub, then allow the caller to retry.
+pub async fn delete_orphaned_jit_runner_by_name(
+    scope: &GitHubScope,
+    pat: &str,
+    agent_name: &str,
+) -> Result<()> {
+    let client = RegistrationClient::new()?;
+    let agents = client.list_runners(scope, pat).await?;
+    let orphan = agents
+        .iter()
+        .find(|a| a.name.as_deref() == Some(agent_name));
+    if let Some(orphan) = orphan {
+        let id = orphan
+            .id
+            .ok_or_else(|| anyhow::anyhow!("orphaned runner has no id"))?;
+        client
+            .delete_runner(scope, pat, id)
+            .await
+            .with_context(|| format!("delete orphaned JIT runner '{agent_name}' id {id}"))?;
+        println!("Deleted orphaned JIT runner '{agent_name}' id {id} before retry.");
+    }
+    Ok(())
+}
+
+fn stored_jit_credentials(config: &crate::protocol::DecodedJitConfig) -> Result<StoredCredentials> {
+    let mut data = config
+        .credentials
+        .data
+        .iter()
+        .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+        .collect::<serde_json::Map<_, _>>();
+    if config.credentials.scheme.eq_ignore_ascii_case("OAuth") {
+        data.insert(
+            "privateKeyPem".to_string(),
+            serde_json::Value::String(config.private_key_pem.clone()),
+        );
     }
 
     Ok(StoredCredentials {
-        scheme: credential_scheme(&auth.token_schema)?,
-        data: json!({
-            "token": auth.token,
-        }),
+        scheme: if config.credentials.scheme.eq_ignore_ascii_case("OAuth") {
+            CredentialScheme::OAuth
+        } else {
+            credential_scheme(&config.credentials.scheme)?
+        },
+        data: serde_json::Value::Object(data),
     })
 }
 
@@ -335,52 +345,7 @@ fn credential_scheme(token_schema: &str) -> Result<CredentialScheme> {
     }
 }
 
-fn select_pool(
-    pools: &[TaskAgentPool],
-    pool_id: Option<i64>,
-    pool_name: Option<&str>,
-) -> Result<TaskAgentPool> {
-    if let Some(pool_id) = pool_id {
-        return pools
-            .iter()
-            .find(|pool| pool.id == pool_id)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("runner pool id {pool_id} not found"));
-    }
-
-    if let Some(pool_name) = pool_name {
-        return pools
-            .iter()
-            .find(|pool| {
-                pool.name
-                    .as_deref()
-                    .is_some_and(|name| name.eq_ignore_ascii_case(pool_name))
-            })
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("runner pool '{pool_name}' not found"));
-    }
-
-    pools
-        .iter()
-        .find(|pool| pool.is_internal && !pool.is_hosted)
-        .or_else(|| pools.iter().find(|pool| !pool.is_hosted))
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("no self-hosted runner pool found"))
-}
-
-trait TaskAgentExt {
-    fn id(&self) -> Result<i64>;
-}
-
-impl TaskAgentExt for TaskAgent {
-    fn id(&self) -> Result<i64> {
-        self.id
-            .ok_or_else(|| anyhow::anyhow!("GitHub returned agent without id"))
-    }
-}
-
 pub async fn run(args: RunArgs) -> Result<()> {
-    platform::validate_linux_host(std::env::consts::OS)?;
     if args.complete_noop && args.execute_scripts {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
     }
@@ -391,24 +356,23 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let agent_id = stored
         .settings
         .agent_id
-        .ok_or_else(|| anyhow::anyhow!("runner is not registered: missing agent_id"))?;
+        .ok_or_else(|| anyhow::anyhow!("runner is not configured: missing agent_id"))?;
     let token = oauth_access_token(&stored).await?;
     ensure_v2_runner_settings(&stored)?;
     run_v2(args, dir, stored, agent_id, token).await
 }
 
 pub async fn daemon(args: DaemonArgs) -> Result<()> {
-    platform::validate_linux_host(std::env::consts::OS)?;
     let slots = validate_daemon_slots(args.slots)?;
     if args.complete_noop && args.execute_scripts {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
     }
 
     let config_base = config::config_dir(args.config_dir.clone())?;
-    preflight_before_daemon_registration(&args, &config_base, slots)?;
+    preflight_before_daemon_jit_config(&args, &config_base, slots)?;
     configure_daemon_slots(&args, &config_base, slots).await?;
-    if !daemon_should_poll_after_registration(&args) {
-        println!("Daemon registration dry run complete; skipped polling GitHub for jobs.");
+    if !daemon_should_poll_after_jit_config(&args) {
+        println!("Daemon JIT config dry run complete; skipped polling GitHub for jobs.");
         return Ok(());
     }
     let mut slot_tasks = JoinSet::new();
@@ -425,19 +389,123 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     }
 
     for slot_index in 1..=slots {
-        let slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
+        let daemon_args = args.clone();
+        let config_base = config_base.clone();
         slot_tasks.spawn(async move {
-            run(slot_args)
+            run_daemon_slot(daemon_args, config_base, slot_index, slots)
                 .await
                 .with_context(|| format!("daemon slot-{slot_index} failed"))
         });
     }
 
+    let mut failures = Vec::new();
     while let Some(result) = slot_tasks.join_next().await {
-        result.context("daemon slot task panicked")??;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                eprintln!("{error:#}");
+                failures.push(error);
+            }
+            Err(error) => {
+                let error = anyhow::Error::new(error).context("daemon slot task panicked");
+                eprintln!("{error:#}");
+                failures.push(error);
+            }
+        }
+    }
+    if !failures.is_empty() {
+        bail!("{} daemon slot task(s) failed", failures.len());
     }
 
     Ok(())
+}
+
+async fn run_daemon_slot(
+    args: DaemonArgs,
+    config_base: PathBuf,
+    slot_index: usize,
+    slots: usize,
+) -> Result<()> {
+    if args.url.is_none() {
+        let slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
+        return run(slot_args).await;
+    }
+
+    let mut cycle = 1_u64;
+    loop {
+        let mut slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
+        if !args.once {
+            slot_args.once = true;
+        }
+        if let Err(error) = run(slot_args).await {
+            cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
+            if args.once {
+                return Err(error);
+            }
+            eprintln!(
+                "daemon slot-{slot_index} cycle {cycle} failed; creating a fresh JIT config before retry: {error:#}"
+            );
+            retry_daemon_slot_jit_config(&args, &config_base, slot_index, slots, cycle).await?;
+            cycle += 1;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        }
+        if args.once {
+            return Ok(());
+        }
+        recycle_daemon_slot(&args, &config_base, slot_index, slots, cycle).await?;
+        cycle += 1;
+    }
+}
+
+async fn recycle_daemon_slot(
+    args: &DaemonArgs,
+    config_base: &Path,
+    slot_index: usize,
+    slots: usize,
+    cycle: u64,
+) -> Result<()> {
+    let slot_dir = daemon_slot_config_dir(config_base, slot_index, slots);
+    if config::remove(&slot_dir)? {
+        println!(
+            "Discarded local JIT runner config for {} after cycle {cycle}.",
+            daemon_slot_name(slot_index)
+        );
+    }
+    let configure_args = daemon_slot_configure_args(args, config_base, slot_index, slots)?;
+    configure(configure_args)
+        .await
+        .with_context(|| format!("recycle JIT config for daemon slot-{slot_index}"))?;
+    Ok(())
+}
+
+async fn cleanup_failed_daemon_slot(
+    args: &DaemonArgs,
+    config_base: &Path,
+    slot_index: usize,
+    slots: usize,
+    cycle: u64,
+) {
+    let slot_dir = daemon_slot_config_dir(config_base, slot_index, slots);
+    if let Err(error) = delete_and_remove_daemon_slot_jit_config(args, &slot_dir).await {
+        eprintln!(
+            "daemon slot-{slot_index} cycle {cycle} cleanup failed for {}: {error:#}",
+            slot_dir.display()
+        );
+    }
+}
+
+async fn retry_daemon_slot_jit_config(
+    args: &DaemonArgs,
+    config_base: &Path,
+    slot_index: usize,
+    slots: usize,
+    cycle: u64,
+) -> Result<()> {
+    let configure_args = daemon_slot_configure_args(args, config_base, slot_index, slots)?;
+    configure(configure_args).await.with_context(|| {
+        format!("retry JIT config for daemon slot-{slot_index} after cycle {cycle}")
+    })
 }
 
 async fn configure_daemon_slots(args: &DaemonArgs, config_base: &Path, slots: usize) -> Result<()> {
@@ -445,27 +513,81 @@ async fn configure_daemon_slots(args: &DaemonArgs, config_base: &Path, slots: us
         return Ok(());
     }
 
-    println!("Configuring {slots} Velnor daemon runner slot(s) before polling GitHub.");
+    println!("Configuring {slots} Velnor daemon JIT runner slot(s) before polling GitHub.");
+    let mut configured_slots = Vec::new();
     for slot_index in 1..=slots {
         let slot_config_dir = daemon_slot_config_dir(config_base, slot_index, slots);
-        if !daemon_slot_should_register(&slot_config_dir, args.replace, args.dry_run_registration) {
+        if !daemon_slot_should_configure_jit(
+            &slot_config_dir,
+            args.replace,
+            args.dry_run_registration,
+        ) {
             println!(
-                "Using existing daemon {} config at {}.",
+                "Using existing daemon {} JIT config at {}.",
                 daemon_slot_name(slot_index),
                 slot_config_dir.display()
             );
             continue;
         }
 
+        if args.replace && !args.dry_run_registration {
+            delete_and_remove_daemon_slot_jit_config(args, &slot_config_dir).await?;
+        }
+
         let configure_args = daemon_slot_configure_args(args, config_base, slot_index, slots)?;
-        configure(configure_args)
-            .await
-            .with_context(|| format!("configure daemon slot-{slot_index}"))?;
+        if let Err(error) = configure(configure_args).await {
+            cleanup_configured_daemon_slots(args, config_base, slots, &configured_slots).await;
+            return Err(error).with_context(|| format!("configure daemon slot-{slot_index}"));
+        }
+        configured_slots.push(slot_index);
     }
     Ok(())
 }
 
-fn daemon_slot_should_register(
+async fn cleanup_configured_daemon_slots(
+    args: &DaemonArgs,
+    config_base: &Path,
+    slots: usize,
+    configured_slots: &[usize],
+) {
+    for slot_index in configured_slots {
+        let slot_dir = daemon_slot_config_dir(config_base, *slot_index, slots);
+        if let Err(error) = delete_and_remove_daemon_slot_jit_config(args, &slot_dir).await {
+            eprintln!(
+                "cleanup failed for configured daemon slot-{slot_index} at {}: {error:#}",
+                slot_dir.display()
+            );
+        }
+    }
+}
+
+async fn delete_and_remove_daemon_slot_jit_config(
+    args: &DaemonArgs,
+    slot_dir: &Path,
+) -> Result<()> {
+    let Some(stored) = config::load(slot_dir).ok() else {
+        return Ok(());
+    };
+
+    if let (Some(pat), Some(agent_id)) = (args.pat.as_ref(), stored.settings.agent_id) {
+        let scope = GitHubScope::parse(&stored.settings.github_url)?;
+        RegistrationClient::new()?
+            .delete_runner(&scope, pat, agent_id)
+            .await
+            .with_context(|| format!("delete daemon JIT runner id {agent_id}"))?;
+        println!("Deleted or confirmed absent daemon JIT runner id {agent_id}.");
+    }
+
+    if config::remove(slot_dir)? {
+        println!(
+            "Removed local daemon JIT runner config from {}",
+            slot_dir.display()
+        );
+    }
+    Ok(())
+}
+
+fn daemon_slot_should_configure_jit(
     slot_config_dir: &Path,
     replace: bool,
     dry_run_registration: bool,
@@ -473,11 +595,11 @@ fn daemon_slot_should_register(
     replace || dry_run_registration || config::load(slot_config_dir).is_err()
 }
 
-fn daemon_should_poll_after_registration(args: &DaemonArgs) -> bool {
+fn daemon_should_poll_after_jit_config(args: &DaemonArgs) -> bool {
     !args.dry_run_registration
 }
 
-fn preflight_before_daemon_registration(
+fn preflight_before_daemon_jit_config(
     args: &DaemonArgs,
     config_base: &Path,
     slots: usize,
@@ -488,7 +610,7 @@ fn preflight_before_daemon_registration(
 
     for preflight_args in daemon_preflight_args(args, config_base, slots)? {
         crate::preflight::preflight(preflight_args)
-            .context("Docker preflight failed before daemon runner registration")?;
+            .context("Docker preflight failed before daemon JIT runner configuration")?;
     }
     Ok(())
 }
@@ -529,11 +651,10 @@ fn daemon_slot_configure_args(
     let url = args
         .url
         .clone()
-        .ok_or_else(|| anyhow::anyhow!("daemon slot registration requires --url"))?;
+        .ok_or_else(|| anyhow::anyhow!("daemon slot JIT configuration requires --url"))?;
 
     Ok(ConfigureArgs {
         url,
-        token: args.token.clone(),
         pat: args.pat.clone(),
         name: daemon_slot_agent_name(args.name.as_deref(), slot_index, slot_count),
         labels: args.labels.clone(),
@@ -657,7 +778,7 @@ fn ensure_v2_runner_settings(stored: &StoredRunnerConfig) -> Result<()> {
         return Ok(());
     }
     bail!(
-        "runner config is missing required V2 settings (UseV2Flow/ServerUrlV2); reconfigure against hosted GitHub with the latest runner registration flow"
+        "runner config is missing required V2 settings (UseV2Flow/ServerUrlV2); reconfigure with GitHub JIT runner configuration"
     )
 }
 
@@ -1087,7 +1208,13 @@ async fn handle_job_request(
             dump_path.display()
         );
     }
-    let script_steps = match github_script_steps_with_defaults(&job.steps, "/__w", &job.defaults) {
+    let early_context = job_context_data(&job);
+    let script_steps = match crate::script_step::github_script_steps_with_context(
+        &job.steps,
+        "/__w",
+        &job.defaults,
+        &early_context,
+    ) {
         Ok(script_steps) => {
             println!("Mapped {} script run step(s).", script_steps.len());
             Some(script_steps)
@@ -1165,7 +1292,7 @@ async fn handle_job_request(
             Ok(_) => {}
             Err(_) => eprintln!("Timed out waiting for best-effort step timeline publisher."),
         }
-        match tokio::time::timeout(Duration::from_secs(5), step_logs_publisher).await {
+        match tokio::time::timeout(Duration::from_secs(30), step_logs_publisher).await {
             Ok(Err(error)) if !error.is_cancelled() => {
                 eprintln!("Step log publisher failed: {error:#}");
             }
@@ -1433,7 +1560,9 @@ async fn start_run_service_lock_renewal(
 
     Ok(tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            // Renew every 25 seconds — the run-service validity window is ~30 seconds,
+            // so renewing at 25s keeps safe margin without hammering the API.
+            tokio::time::sleep(Duration::from_secs(25)).await;
             match client.renew_job(&run_service_url, &plan_id, &job_id).await {
                 Ok(response) => {
                     println!(
@@ -1492,8 +1621,54 @@ fn start_step_timeline_publisher(
     job: AgentJobRequestMessage,
     mut receiver: UnboundedReceiver<StepStartEvent>,
 ) -> JoinHandle<()> {
+    // Build Twirp client for Results Service step status updates if available.
+    let twirp_client = job
+        .system_connection()
+        .and_then(|ep| {
+            let token = ep
+                .authorization
+                .as_ref()
+                .and_then(|a| a.parameters.get("AccessToken"))
+                .cloned()
+                .unwrap_or_default();
+            crate::protocol::TwirpResultsClient::from_endpoint_data(&ep.data, &token)
+        })
+        .and_then(|r| r.ok());
+
+    let plan_id = job.plan.plan_id.clone();
+    let job_id = job.job_id.clone();
+
     tokio::spawn(async move {
+        let mut change_order: i64 = 1;
         while let Some(event) = receiver.recv().await {
+            // Send step "in-progress" update via Twirp Results Service
+            if let Some(client) = &twirp_client {
+                let step = crate::protocol::TwirpStep {
+                    external_id: event.step_id.clone(),
+                    number: event.order as usize,
+                    name: if event.display_name.is_empty() {
+                        event.step_id.clone()
+                    } else {
+                        event.display_name.clone()
+                    },
+                    status: crate::protocol::StepStatus::InProgress as u8,
+                    started_at: Some(unix_now_iso8601()),
+                    completed_at: None,
+                    conclusion: crate::protocol::StepConclusion::Unknown as u8,
+                };
+                if let Err(e) = client
+                    .update_steps(&[step], &plan_id, &job_id, change_order)
+                    .await
+                {
+                    eprintln!(
+                        "Best-effort Twirp step start failed for '{}': {e:#}",
+                        event.step_id
+                    );
+                }
+                change_order += 1;
+            }
+
+            // Also update the distributed task timeline (legacy path)
             if let Err(error) = publish_timeline_step_started(&job, &event).await {
                 eprintln!(
                     "Best-effort timeline step start update failed for '{}': {error:#}",
@@ -1508,8 +1683,89 @@ fn start_step_log_publisher(
     job: AgentJobRequestMessage,
     mut receiver: UnboundedReceiver<StepLog>,
 ) -> JoinHandle<()> {
+    let feed_client = job.system_connection().and_then(|ep| {
+        let token = ep
+            .authorization
+            .as_ref()
+            .and_then(|a| a.parameters.get("AccessToken"))
+            .cloned()
+            .unwrap_or_default();
+        crate::protocol::FeedStreamClient::from_endpoint_data(&ep.data, &token)
+    });
+
+    let twirp_client = job
+        .system_connection()
+        .and_then(|ep| {
+            let token = ep
+                .authorization
+                .as_ref()
+                .and_then(|a| a.parameters.get("AccessToken"))
+                .cloned()
+                .unwrap_or_default();
+            crate::protocol::TwirpResultsClient::from_endpoint_data(&ep.data, &token)
+        })
+        .and_then(|r| r.ok());
+
+    let plan_id = job.plan.plan_id.clone();
+    let job_id = job.job_id.clone();
+
     tokio::spawn(async move {
+        let mut line_counter: i64 = 1;
+        let mut change_order: i64 = 1000; // Offset from start-event change_orders
         while let Some(log) = receiver.recv().await {
+            let masks = job_secret_mask_values(&job);
+            let lines: Vec<String> = log
+                .lines
+                .iter()
+                .map(|l| mask_single_value(l, &masks))
+                .collect();
+            let line_count = lines.len() as i64;
+
+            if let Some(client) = &feed_client {
+                if !lines.is_empty() {
+                    if let Err(e) = client
+                        .append_log_lines(&log.step_id, lines.clone(), Some(line_counter))
+                        .await
+                    {
+                        eprintln!(
+                            "Best-effort WebSocket feed failed for '{}': {e:#}",
+                            log.step_id
+                        );
+                    }
+                }
+            }
+            line_counter += line_count;
+
+            // Send step completion via Twirp Results Service.
+            if let Some(client) = &twirp_client {
+                let conclusion = if log.skipped {
+                    crate::protocol::StepConclusion::Skipped
+                } else if log.exit_code != 0 && !log.failure_ignored {
+                    crate::protocol::StepConclusion::Failure
+                } else {
+                    crate::protocol::StepConclusion::Success
+                };
+                let step = crate::protocol::TwirpStep {
+                    external_id: log.step_id.clone(),
+                    number: log.order as usize,
+                    name: if log.display_name.is_empty() { log.step_id.clone() } else { log.display_name.clone() },
+                    status: crate::protocol::StepStatus::Completed as u8,
+                    started_at: None,
+                    completed_at: Some(unix_now_iso8601()),
+                    conclusion: conclusion as u8,
+                };
+                if let Err(e) = client
+                    .update_steps(&[step], &plan_id, &job_id, change_order)
+                    .await
+                {
+                    eprintln!(
+                        "Best-effort Twirp step completion failed for '{}': {e:#}",
+                        log.step_id
+                    );
+                }
+                change_order += 1;
+            }
+
             if let Err(error) = publish_timeline_step_log(&job, &log).await {
                 eprintln!(
                     "Best-effort timeline step log upload failed for '{}': {error:#}",
@@ -1518,6 +1774,16 @@ fn start_step_log_publisher(
             }
         }
     })
+}
+
+fn mask_single_value(line: &str, masks: &[String]) -> String {
+    let mut result = line.to_string();
+    for mask in masks {
+        if !mask.is_empty() {
+            result = result.replace(mask.as_str(), "***");
+        }
+    }
+    result
 }
 
 #[derive(Debug, Deserialize)]
@@ -1871,7 +2137,49 @@ fn job_context_data(job: &AgentJobRequestMessage) -> Vec<(String, Value)> {
         }
     }
 
-    context_data.into_iter().collect()
+    // Expand any context values stored in GitHub V2 broker compact format
+    // {"d": [{"k": key, "v": value}, ...]} into plain flat objects so that
+    // expression evaluation and context lookups work uniformly.
+    let expanded: BTreeMap<String, Value> = context_data
+        .into_iter()
+        .map(|(k, v)| (k, expand_broker_context_value(v)))
+        .collect();
+    expanded.into_iter().collect()
+}
+
+fn expand_broker_context_value(value: Value) -> Value {
+    match value {
+        Value::Object(ref obj) => {
+            if let Some(items) = obj.get("d").and_then(Value::as_array) {
+                // Compact format: expand [{k, v}] into a plain object, recursively.
+                let mut map = Map::new();
+                for item in items {
+                    if let Some(item_obj) = item.as_object() {
+                        let k = item_obj
+                            .get("k")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        if let Some(v) = item_obj.get("v") {
+                            if !k.is_empty() {
+                                map.insert(k, expand_broker_context_value(v.clone()));
+                            }
+                        }
+                    }
+                }
+                if !map.is_empty() {
+                    return Value::Object(map);
+                }
+            }
+            // Plain object: recursively expand each value.
+            let expanded: Map<String, Value> = obj
+                .iter()
+                .map(|(k, v)| (k.clone(), expand_broker_context_value(v.clone())))
+                .collect();
+            Value::Object(expanded)
+        }
+        other => other,
+    }
 }
 
 fn secret_context_names(variable_name: &str) -> Vec<String> {
@@ -1993,6 +2301,7 @@ fn ordered_executable_steps(
                                     &plan,
                                     parent_condition,
                                     parent_continue_on_error,
+                                    "",
                                 ) {
                                     continue;
                                 }
@@ -2012,6 +2321,7 @@ fn ordered_executable_steps(
                                     actions_host,
                                     parent_condition,
                                     parent_continue_on_error,
+                                    "",
                                 )?;
                             }
                             CompositeActionInvocation::Outputs(outputs) => {
@@ -2046,7 +2356,14 @@ fn ordered_executable_steps(
                 let plan = repository_iter
                     .next()
                     .ok_or_else(|| anyhow::anyhow!("repository action mapping count mismatch"))?;
-                if append_native_action_step_from_plan(&mut ordered, plan, None, false) {
+                let step_display_name = action_step_display_name(step);
+                if append_native_action_step_from_plan(
+                    &mut ordered,
+                    plan,
+                    None,
+                    false,
+                    &step_display_name,
+                ) {
                     continue;
                 }
                 let action = resolved_actions
@@ -2066,6 +2383,7 @@ fn ordered_executable_steps(
                     actions_host,
                     None,
                     false,
+                    &step_display_name,
                 )?;
             }
             _ => bail!("unsupported enabled step in job"),
@@ -2081,11 +2399,13 @@ fn append_resolved_action_steps(
     actions_host: &std::path::Path,
     parent_condition: Option<&str>,
     parent_continue_on_error: bool,
+    display_name: &str,
 ) -> Result<()> {
     let continue_on_error = parent_continue_on_error || action.plan.continue_on_error;
     if let Some(invocation) = action.native_invocation() {
         ordered.push(ExecutableStep::Native {
             step_id: action.plan.step_id.clone(),
+            display_name: display_name.to_string(),
             invocation,
             condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
             continue_on_error,
@@ -2095,12 +2415,14 @@ fn append_resolved_action_steps(
     match &action.runtime {
         ActionRuntime::JavaScript { .. } => ordered.push(ExecutableStep::JavaScript {
             step_id: action.plan.step_id.clone(),
+            display_name: display_name.to_string(),
             invocation: action.javascript_invocation(actions_host)?,
             condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
             continue_on_error,
         }),
         ActionRuntime::Docker { .. } => ordered.push(ExecutableStep::Docker {
             step_id: action.plan.step_id.clone(),
+            display_name: display_name.to_string(),
             invocation: action.docker_invocation(actions_host)?,
             condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
             continue_on_error,
@@ -2127,6 +2449,7 @@ fn append_resolved_action_steps(
                             &plan,
                             action_condition.as_deref(),
                             continue_on_error,
+                            "",
                         ) {
                             continue;
                         }
@@ -2146,6 +2469,7 @@ fn append_resolved_action_steps(
                             actions_host,
                             action_condition.as_deref(),
                             continue_on_error,
+                            "",
                         )?;
                     }
                     CompositeActionInvocation::Outputs(outputs) => {
@@ -2170,12 +2494,14 @@ fn append_native_action_step_from_plan(
     plan: &RepositoryActionPlan,
     parent_condition: Option<&str>,
     parent_continue_on_error: bool,
+    display_name: &str,
 ) -> bool {
     let Some(invocation) = native_invocation_from_plan(plan) else {
         return false;
     };
     ordered.push(ExecutableStep::Native {
         step_id: plan.step_id.clone(),
+        display_name: display_name.to_string(),
         invocation,
         condition: combine_conditions(parent_condition, plan.condition.as_deref()),
         continue_on_error: parent_continue_on_error || plan.continue_on_error,
@@ -2216,6 +2542,35 @@ fn job_work_dir(
     work_dir
         .unwrap_or_else(|| config_dir.join("_work"))
         .join(sanitize_path_segment(&job.job_id))
+}
+
+fn unix_now_iso8601() -> String {
+    use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+    OffsetDateTime::now_utc()
+        .format(&Rfc3339)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
+
+fn action_step_display_name(step: &crate::job_message::ActionStep) -> String {
+    let explicit = step
+        .display_name
+        .as_deref()
+        .or(step.name.as_deref())
+        .filter(|n| !n.is_empty() && !n.starts_with("__"));
+    if let Some(name) = explicit {
+        return name.to_string();
+    }
+    if let Some(reference) = &step.reference {
+        if let Some(action_name) = reference.name.as_deref() {
+            if !action_name.is_empty() {
+                return match reference.git_ref.as_deref() {
+                    Some(r) if !r.is_empty() => format!("Run {action_name}@{r}"),
+                    _ => format!("Run {action_name}"),
+                };
+            }
+        }
+    }
+    String::new()
 }
 
 async fn complete_run_service_job(
@@ -2587,7 +2942,7 @@ async fn oauth_access_token(stored: &StoredRunnerConfig) -> Result<String> {
     let credentials = stored
         .credentials
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("runner is not registered: missing credentials"))?;
+        .ok_or_else(|| anyhow::anyhow!("runner is not configured: missing credentials"))?;
 
     match credentials.scheme {
         CredentialScheme::OAuthAccessToken => credentials
@@ -2610,10 +2965,16 @@ async fn oauth_access_token(stored: &StoredRunnerConfig) -> Result<String> {
 }
 
 fn credential_str(credentials: &StoredCredentials, key: &str) -> Result<String> {
-    credentials
+    // GitHub JIT credentials use PascalCase keys (e.g. ClientId, AuthorizationUrl).
+    // Accept any case variant by searching case-insensitively.
+    let obj = credentials
         .data
-        .get(key)
-        .and_then(|value| value.as_str())
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("OAuth credentials data is not an object"))?;
+    let lower_key = key.to_ascii_lowercase();
+    obj.iter()
+        .find(|(k, _)| k.to_ascii_lowercase() == lower_key)
+        .and_then(|(_, v)| v.as_str())
         .map(ToOwned::to_owned)
         .ok_or_else(|| anyhow::anyhow!("OAuth credentials missing {key}"))
 }
@@ -2643,36 +3004,23 @@ fn daemon_slot_config_dirs(config_base: &Path, slots: usize) -> Result<Vec<PathB
 async fn remove_one(args: &RemoveArgs, dir: &Path) -> Result<()> {
     let stored = config::load(&dir).ok();
 
-    if !args.local_only && (args.token.is_some() || args.pat.is_some()) {
+    if !args.local_only && args.pat.is_some() {
         let stored = stored
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("local runner config is required for remote remove"))?;
         let scope = GitHubScope::parse(&stored.settings.github_url)?;
-        let pool_id = stored
-            .settings
-            .pool_id
-            .ok_or_else(|| anyhow::anyhow!("local runner config missing pool_id"))?;
         let agent_id = stored
             .settings
             .agent_id
             .ok_or_else(|| anyhow::anyhow!("local runner config missing agent_id"))?;
-        let registration_client = RegistrationClient::new()?;
-        let remove_token = runner_token(
-            &registration_client,
-            &scope,
-            args.token.as_ref(),
-            args.pat.as_ref(),
-            RunnerTokenKind::Remove,
-        )
-        .await?;
-        let auth = registration_client
-            .exchange_tenant_credential(&scope, &remove_token, RunnerEvent::Remove)
+        RegistrationClient::new()?
+            .delete_runner(&scope, args.pat.as_ref().unwrap(), agent_id)
             .await?;
-        let client = DistributedTaskClient::new(&auth.server_url, &auth.token)?;
-        client.delete_agent(pool_id, agent_id).await?;
-        println!("Removed remote runner agent {agent_id} from pool {pool_id}.");
+        println!("Deleted or confirmed absent remote JIT runner id {agent_id}.");
     } else if !args.local_only {
-        println!("Remote remove skipped; pass --pat or --token to unregister from GitHub.");
+        println!(
+            "Remote remove skipped; pass --pat to delete the stored JIT runner id from GitHub."
+        );
     }
 
     if config::remove(&dir)? {
@@ -2803,6 +3151,10 @@ fn normalize_labels(
     if labels.is_empty() {
         labels.push("velnor".to_string());
     }
+    // self-hosted is always required so GitHub can match the runner.
+    if !labels.iter().any(|l| l == "self-hosted") {
+        labels.insert(0, "self-hosted".to_string());
+    }
     if target_mvp_labels {
         labels.extend(
             target_mvp_required_x64_labels()
@@ -2841,24 +3193,6 @@ fn default_agent_name() -> String {
         .ok()
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "velnor-runner".to_string())
-}
-
-fn agent_string_property(agent: &TaskAgent, name: &str) -> Option<String> {
-    agent
-        .properties
-        .as_ref()
-        .and_then(|properties| properties.get(name))
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-}
-
-fn agent_bool_property(agent: &TaskAgent, name: &str) -> Option<bool> {
-    agent
-        .properties
-        .as_ref()
-        .and_then(|properties| properties.get(name))
-        .and_then(Value::as_bool)
 }
 
 #[cfg(test)]
@@ -2942,7 +3276,6 @@ mod tests {
         DaemonArgs {
             config_dir: None,
             url: None,
-            token: None,
             pat: None,
             name: None,
             labels: Vec::new(),
@@ -3009,7 +3342,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_multislot_configure_args_register_isolated_runner_slots() {
+    fn daemon_multislot_configure_args_build_isolated_jit_runner_slots() {
         let mut args = daemon_args(2);
         args.url = Some("https://github.com/owner/repo".into());
         args.pat = Some("pat".into());
@@ -3036,29 +3369,76 @@ mod tests {
     }
 
     #[test]
-    fn daemon_slot_registration_skips_valid_existing_config_unless_replace() {
+    fn daemon_slot_jit_config_skips_valid_existing_config_unless_replace() {
         let dir = unique_temp_dir("daemon-slot-config");
         config::save(&dir, &stored_config()).unwrap();
 
-        assert!(!daemon_slot_should_register(&dir, false, false));
-        assert!(daemon_slot_should_register(&dir, true, false));
-        assert!(daemon_slot_should_register(&dir, false, true));
+        assert!(!daemon_slot_should_configure_jit(&dir, false, false));
+        assert!(daemon_slot_should_configure_jit(&dir, true, false));
+        assert!(daemon_slot_should_configure_jit(&dir, false, true));
 
         fs::remove_dir_all(&dir).unwrap();
-        assert!(daemon_slot_should_register(&dir, false, false));
+        assert!(daemon_slot_should_configure_jit(&dir, false, false));
+    }
+
+    #[tokio::test]
+    async fn configure_replace_dry_run_removes_stale_local_jit_config() {
+        let dir = unique_temp_dir("configure-replace-dry-run");
+        config::save(&dir, &stored_config()).unwrap();
+
+        configure(ConfigureArgs {
+            url: "https://github.com/owner/repo".into(),
+            pat: None,
+            name: Some("velnor-replaced".into()),
+            labels: vec!["velnor".into()],
+            target_mvp_labels: false,
+            target_mvp_arm_label: false,
+            replace: true,
+            pool_id: None,
+            pool_name: None,
+            dry_run: true,
+            config_dir: Some(dir.clone()),
+        })
+        .await
+        .unwrap();
+
+        let stored = config::load(&dir).unwrap();
+        assert_eq!(stored.settings.agent_name, "velnor-replaced");
+        assert_eq!(stored.settings.agent_id, None);
+        assert!(!stored.settings.ephemeral);
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn daemon_failed_slot_cleanup_without_pat_removes_only_local_slot_config() {
+        let base = unique_temp_dir("daemon-slot-local-cleanup");
+        let slot_dir = daemon_slot_config_dir(&base, 2, 2);
+        config::save(&slot_dir, &stored_config()).unwrap();
+        let mut args = daemon_args(2);
+        args.url = Some("https://github.com/owner/repo".into());
+
+        delete_and_remove_daemon_slot_jit_config(&args, &slot_dir)
+            .await
+            .unwrap();
+
+        assert!(config::load(&slot_dir).is_err());
+        assert!(base.join("slots").exists());
+
+        fs::remove_dir_all(base).unwrap();
     }
 
     #[test]
-    fn daemon_registration_dry_run_does_not_poll_for_jobs() {
+    fn daemon_jit_config_dry_run_does_not_poll_for_jobs() {
         let mut args = daemon_args(1);
-        assert!(daemon_should_poll_after_registration(&args));
+        assert!(daemon_should_poll_after_jit_config(&args));
 
         args.dry_run_registration = true;
-        assert!(!daemon_should_poll_after_registration(&args));
+        assert!(!daemon_should_poll_after_jit_config(&args));
     }
 
     #[test]
-    fn daemon_preflight_args_cover_each_registration_slot_before_polling() {
+    fn daemon_preflight_args_cover_each_jit_slot_before_polling() {
         let mut args = daemon_args(2);
         args.url = Some("https://github.com/owner/repo".into());
         args.work_dir = Some(Path::new("/runner/work").to_path_buf());
@@ -3433,6 +3813,7 @@ mod tests {
     fn safe_environment_url_skips_masked_values() {
         let log = StepLog {
             step_id: "deploy".into(),
+            display_name: String::new(),
             order: 1,
             lines: Vec::new(),
             masks: vec!["runtime-secret".into()],
@@ -3502,6 +3883,7 @@ mod tests {
         .unwrap();
         let log = StepLog {
             step_id: "step-1".into(),
+            display_name: String::new(),
             order: 7,
             lines: vec!["hello".into()],
             masks: Vec::new(),
@@ -3582,6 +3964,7 @@ mod tests {
         .unwrap();
         let event = StepStartEvent {
             step_id: "step-1".into(),
+            display_name: String::new(),
             order: 2,
         };
 
@@ -3638,6 +4021,7 @@ mod tests {
         .unwrap();
         let log = StepLog {
             step_id: "step-1".into(),
+            display_name: String::new(),
             order: 1,
             lines: Vec::new(),
             masks: vec!["step-secret".into()],
@@ -3795,23 +4179,11 @@ mod tests {
     }
 
     #[test]
-    fn reads_v2_settings_from_agent_properties() {
-        let mut agent = TaskAgent::new("velnor", vec![], None, false);
-        agent.properties = Some(serde_json::json!({
-            "ServerUrlV2": "https://broker.actions.githubusercontent.com/tenant/",
-            "UseV2Flow": true
-        }));
-
-        assert_eq!(
-            agent_string_property(&agent, "ServerUrlV2").as_deref(),
-            Some("https://broker.actions.githubusercontent.com/tenant/")
-        );
-        assert_eq!(agent_bool_property(&agent, "UseV2Flow"), Some(true));
-    }
-
-    #[test]
     fn default_labels_keep_velnor_only() {
-        assert_eq!(normalize_labels(Vec::new(), false, false), vec!["velnor"]);
+        assert_eq!(
+            normalize_labels(Vec::new(), false, false),
+            vec!["self-hosted", "velnor"]
+        );
     }
 
     #[test]
@@ -3821,6 +4193,7 @@ mod tests {
             vec![
                 "custom",
                 "hetzner-sentry-ci",
+                "self-hosted",
                 "ubuntu-24.04",
                 "ubuntu-latest",
                 "velnor-target-mvp"
@@ -3855,6 +4228,7 @@ mod tests {
             normalize_labels(Vec::new(), true, true),
             vec![
                 "hetzner-sentry-ci",
+                "self-hosted",
                 "ubuntu-24.04",
                 "ubuntu-24.04-arm",
                 "ubuntu-latest",
@@ -3873,7 +4247,7 @@ mod tests {
         let error = platform::validate_arm_label_matches_host(&labels, "x86_64")
             .unwrap_err()
             .to_string();
-        assert!(error.contains("only claim it on an ARM Linux host"));
+        assert!(error.contains("only claim it when Docker can provide ARM64 Linux job containers"));
     }
 
     #[test]
@@ -4103,6 +4477,7 @@ runs:
     fn eager_checkout_resolves_ref_from_job_context() {
         let plan = CheckoutPlan {
             step_id: "checkout".into(),
+            display_name: String::new(),
             clone_url: "https://github.com/jackin-project/jackin.git".into(),
             version: Some("${{ needs.source-changed.outputs.sha }}".into()),
             destination: Path::new("/tmp/work").to_path_buf(),
@@ -4135,6 +4510,7 @@ runs:
     fn checkout_step_output_ref_survives_eager_context_resolution() {
         let plan = CheckoutPlan {
             step_id: "checkout2".into(),
+            display_name: String::new(),
             clone_url: "https://github.com/jackin-project/jackin.git".into(),
             version: Some("${{ steps.source.outputs.sha }}".into()),
             destination: Path::new("/tmp/work").to_path_buf(),
@@ -4160,6 +4536,7 @@ runs:
     fn eager_checkout_resolves_ref_from_github_env_context() {
         let plan = CheckoutPlan {
             step_id: "checkout".into(),
+            display_name: String::new(),
             clone_url: "https://github.com/jackin-project/jackin.git".into(),
             version: Some("${{ github.sha }}".into()),
             destination: Path::new("/tmp/work").to_path_buf(),
@@ -4275,82 +4652,6 @@ runs:
             &ordered[2],
             ExecutableStep::CompositeEnd { step_id } if step_id == "docs"
         ));
-    }
-
-    #[test]
-    fn ordered_steps_expand_repository_composite_action() {
-        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
-            "messageType": "PipelineAgentJobRequest",
-            "plan": { "planId": "plan" },
-            "timeline": { "id": "timeline" },
-            "jobId": "job",
-            "jobDisplayName": "Toolchain",
-            "requestId": 1,
-            "steps": [{
-                "id": "rust",
-                "reference": {
-                    "type": "Repository",
-                    "name": "dtolnay/rust-toolchain",
-                    "ref": "stable"
-                },
-                "condition": "runner.os == 'Linux'",
-                "inputs": { "toolchain": "stable" }
-            }]
-        }))
-        .unwrap();
-        let actions_host = Path::new("/tmp/actions");
-        let plan = RepositoryActionPlan {
-            step_id: "rust".into(),
-            repository: "dtolnay/rust-toolchain".into(),
-            git_ref: "stable".into(),
-            source_path: None,
-            repository_dir: actions_host.join("_actions/dtolnay_rust-toolchain/stable"),
-            action_dir: actions_host.join("_actions/dtolnay_rust-toolchain/stable"),
-            inputs: [("toolchain".to_string(), "stable".to_string())].into(),
-            env: Vec::new(),
-            condition: Some("runner.os == 'Linux'".into()),
-            continue_on_error: false,
-        };
-        let metadata = parse_action_metadata(
-            r#"
-runs:
-  using: composite
-  steps:
-    - shell: bash
-      if: runner.os != 'Windows'
-      run: echo "${{ inputs.toolchain }}"
-"#,
-        )
-        .unwrap();
-        let plans = vec![plan.clone()];
-        let resolved = ResolvedAction {
-            plan,
-            metadata_path: actions_host.join("_actions/dtolnay_rust-toolchain/stable/action.yml"),
-            runtime: metadata.runtime().unwrap(),
-            metadata,
-        };
-
-        let ordered =
-            ordered_executable_steps(&job, &[], &plans, &[resolved], &[], actions_host, &[])
-                .unwrap();
-
-        assert_eq!(ordered.len(), 1);
-        let ExecutableStep::Native {
-            step_id,
-            invocation,
-            condition,
-            ..
-        } = &ordered[0]
-        else {
-            panic!("target repository action should expand to native adapter step")
-        };
-        assert_eq!(step_id, "rust");
-        assert_eq!(
-            invocation.adapter,
-            crate::action::NativeActionAdapter::RustToolchain
-        );
-        assert_eq!(invocation.inputs["toolchain"], "stable");
-        assert_eq!(condition.as_deref(), Some("runner.os == 'Linux'"));
     }
 
     #[test]
@@ -4956,5 +5257,31 @@ runs:
                 .collect();
         }
         resolved
+    }
+
+    #[test]
+    fn expand_broker_context_value_flattens_d_array() {
+        let compact = serde_json::json!({
+            "d": [
+                {"k": "repository", "v": "donbeave/velnor-actions-fixture"},
+                {"k": "ref", "v": "refs/heads/main"}
+            ]
+        });
+        let expanded = expand_broker_context_value(compact);
+        assert_eq!(
+            expanded.get("repository").and_then(Value::as_str),
+            Some("donbeave/velnor-actions-fixture")
+        );
+        assert_eq!(
+            expanded.get("ref").and_then(Value::as_str),
+            Some("refs/heads/main")
+        );
+    }
+
+    #[test]
+    fn expand_broker_context_value_preserves_plain_object() {
+        let plain = serde_json::json!({"repository": "org/repo", "sha": "abc123"});
+        let result = expand_broker_context_value(plain.clone());
+        assert_eq!(result, plain);
     }
 }
