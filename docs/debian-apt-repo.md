@@ -46,11 +46,24 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
      for users to install into `/etc/apt/keyrings`.
 
 4. **Host on GitHub Pages** — publish the reprepro output tree (`dists/`,
-   `pool/`, `velnor.gpg`) to the `gh-pages` branch (or a `docs/`-served repo).
+   `pool/`, `velnor.gpg`) to the `gh-pages` branch.
    Served at e.g. `https://chainargos.github.io/velnor-apt/`.
-   - Alternative considered: GitHub Releases assets — works but you must hand-roll
-     the `Packages` index pointing at asset URLs; reprepro + Pages is cleaner and
-     gives a real signed `dists/` layout. Pages it is.
+
+### Where it lives (storage decision)
+
+- **Store = GitHub Pages.** apt fetches the signed tree over HTTPS directly.
+- **Dedicated repo** `chainargos/velnor-apt` (NOT the velnor source repo) so the
+  `.deb` binaries don't bloat the code git history; the signed tree lives on its
+  `gh-pages` branch.
+- **GitHub Packages does NOT support apt/deb** (npm/Docker/Maven/NuGet/RubyGems
+  only) — can't use it.
+- **GitHub Releases** is the alternative blob store: keep `.deb` assets in
+  Releases (2 GB/asset, no repo bloat) and host only the small `Packages`/
+  `Release` index on Pages pointing at the asset URLs. Use this only if the
+  `pool/` ever gets large; for now velnor-runner `.deb` ≈ 12 MB and a few
+  versions sit comfortably inside Pages' ~1 GB repo / ~100 GB-month limits.
+- **Keep it lean**: prune old versions from `pool/` on release, or periodically
+  squash the `gh-pages` history.
 
 ## CI (GitHub Actions, on tag `v*`)
 
