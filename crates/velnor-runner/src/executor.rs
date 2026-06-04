@@ -1798,6 +1798,15 @@ if [ -n "{install_flag}" ]; then
 else
   command -v mise >/dev/null 2>&1
 fi
+# Expose active mise tool bin dirs to subsequent steps via GITHUB_PATH. Velnor
+# only puts the shims dir on the step PATH, but executables installed INTO a
+# mise-managed tool — e.g. `pip install ansible-core` into mise's python, which
+# drops ansible-galaxy/ansible-playbook in the python tool's bin — live in the
+# tool's install bin, not the shims. jdx/mise-action exposes these; match it so
+# such binaries are found in later steps.
+if [ -n "${{GITHUB_PATH:-}}" ]; then
+  mise bin-paths 2>/dev/null >> "$GITHUB_PATH" || true
+fi
 echo "mise install completed, cargo: $(command -v cargo 2>/dev/null || echo 'not found')"
 mise --version
 "#,
