@@ -14,7 +14,7 @@ path = "src/main.rs"
 # Produces target/debian/velnor-runner_<version>_amd64.deb with the binary, a
 # systemd unit, a config conffile, and maintainer scripts.
 [package.metadata.deb]
-maintainer = "Alexey Zhokhov <alexey@chainargos.com>"
+maintainer = "Alexey Zhokhov <alexey@zhokhov.com>"
 copyright = "2026, Tailrocks"
 license-file = []
 extended-description = """
