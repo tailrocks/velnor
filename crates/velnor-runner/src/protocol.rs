@@ -2712,11 +2712,6 @@ impl TwirpResultsClient {
     ) -> Result<()> {
         const RECEIVER: &str = "twirp/results.services.receiver.Receiver";
 
-        // 1. Get signed upload URL.
-        let url = format!(
-            "{}/{RECEIVER}/GetStepLogsSignedBlobURL",
-            self.results_service_url
-        );
         #[derive(serde::Serialize)]
         struct GetUrlReq<'a> {
             workflow_run_backend_id: &'a str,
@@ -2727,41 +2722,114 @@ impl TwirpResultsClient {
         struct GetUrlResp {
             logs_url: Option<String>,
         }
-        let resp: GetUrlResp = self
-            .http
-            .post(&url)
-            .bearer_auth(&self.token)
-            .json(&GetUrlReq {
-                workflow_run_backend_id: plan_id,
-                workflow_job_run_backend_id: job_id,
-                step_backend_id: step_id,
-            })
-            .send()
-            .await
-            .context("GetStepLogsSignedBlobURL request")?
-            .json()
-            .await
-            .context("GetStepLogsSignedBlobURL parse")?;
+        #[derive(serde::Serialize)]
+        struct MetaReq<'a> {
+            workflow_run_backend_id: &'a str,
+            workflow_job_run_backend_id: &'a str,
+            step_backend_id: &'a str,
+            uploaded_at: String,
+            line_count: i64,
+        }
 
-        let logs_url = resp
-            .logs_url
-            .filter(|u| !u.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("GetStepLogsSignedBlobURL returned empty URL"))?;
-
-        // 2. Upload log content (single block – firstBlock && finalize path).
+        let get_url = format!(
+            "{}/{RECEIVER}/GetStepLogsSignedBlobURL",
+            self.results_service_url
+        );
+        let meta_url = format!(
+            "{}/{RECEIVER}/CreateStepLogsMetadata",
+            self.results_service_url
+        );
+        let get_body = serde_json::to_string(&GetUrlReq {
+            workflow_run_backend_id: plan_id,
+            workflow_job_run_backend_id: job_id,
+            step_backend_id: step_id,
+        })
+        .context("serialize GetStepLogsSignedBlobURL")?;
         let content: Vec<u8> = lines
             .iter()
             .flat_map(|l| format!("{l}\n").into_bytes())
             .collect();
         let line_count = lines.len() as i64;
-        let content_len = content.len();
+
+        // The two Twirp calls hit GitHub infra and are throttled by TLS
+        // fingerprint under heavy concurrent load — if they drop, the step
+        // renders with an EMPTY log body (less detail than GitHub). Route them
+        // through curl (LibreSSL, not throttled) and retry the whole flow so log
+        // content always lands. The PUT goes to Azure blob storage (not GitHub,
+        // not throttled), so it stays on reqwest.
+        let mut last_err = String::new();
+        for attempt in 0..3 {
+            match self
+                .upload_step_log_once(
+                    &get_url,
+                    &meta_url,
+                    &get_body,
+                    &content,
+                    line_count,
+                    plan_id,
+                    job_id,
+                    step_id,
+                )
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) => last_err = format!("{e:#}"),
+            }
+            if attempt < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(200 * (attempt + 1))).await;
+            }
+        }
+        bail!("upload_step_log failed after 3 attempts: {last_err}");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn upload_step_log_once(
+        &self,
+        get_url: &str,
+        meta_url: &str,
+        get_body: &str,
+        content: &[u8],
+        line_count: i64,
+        plan_id: &str,
+        job_id: &str,
+        step_id: &str,
+    ) -> Result<()> {
+        #[derive(serde::Deserialize)]
+        struct GetUrlResp {
+            logs_url: Option<String>,
+        }
+        #[derive(serde::Serialize)]
+        struct MetaReq<'a> {
+            workflow_run_backend_id: &'a str,
+            workflow_job_run_backend_id: &'a str,
+            step_backend_id: &'a str,
+            uploaded_at: String,
+            line_count: i64,
+        }
+
+        // 1. Get signed upload URL (curl — GitHub infra).
+        let (status, body) =
+            curl_json_request("POST", get_url, &self.token, Some(get_body.to_string()), 30)
+                .await
+                .context("GetStepLogsSignedBlobURL request")?;
+        if !(200..300).contains(&status) {
+            bail!("GetStepLogsSignedBlobURL failed: status={status}, body={body}");
+        }
+        let resp: GetUrlResp =
+            serde_json::from_str(&body).context("GetStepLogsSignedBlobURL parse")?;
+        let logs_url = resp
+            .logs_url
+            .filter(|u| !u.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("GetStepLogsSignedBlobURL returned empty URL"))?;
+
+        // 2. PUT log content to Azure blob (single block; reqwest — not GitHub infra).
         let put_resp = self
             .http
             .put(&logs_url)
             .header("Content-Type", "text/plain")
-            .header("Content-Length", content_len.to_string())
+            .header("Content-Length", content.len().to_string())
             .header("x-ms-blob-type", "BlockBlob")
-            .body(content)
+            .body(content.to_vec())
             .send()
             .await
             .context("step log PUT")?;
@@ -2771,43 +2839,27 @@ impl TwirpResultsClient {
             bail!("step log PUT failed: status={put_status}, body={body}");
         }
 
-        // 3. Finalize with metadata.
-        let url = format!(
-            "{}/{RECEIVER}/CreateStepLogsMetadata",
-            self.results_service_url
-        );
-        #[derive(serde::Serialize)]
-        struct MetaReq<'a> {
-            workflow_run_backend_id: &'a str,
-            workflow_job_run_backend_id: &'a str,
-            step_backend_id: &'a str,
-            uploaded_at: String,
-            line_count: i64,
-        }
+        // 3. Finalize with metadata (curl — GitHub infra).
         let ts = {
             use time::{format_description::well_known::Rfc3339, OffsetDateTime};
             OffsetDateTime::now_utc()
                 .format(&Rfc3339)
                 .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
         };
-        let meta_resp = self
-            .http
-            .post(&url)
-            .bearer_auth(&self.token)
-            .json(&MetaReq {
-                workflow_run_backend_id: plan_id,
-                workflow_job_run_backend_id: job_id,
-                step_backend_id: step_id,
-                uploaded_at: ts,
-                line_count,
-            })
-            .send()
-            .await
-            .context("CreateStepLogsMetadata request")?;
-        let meta_status = meta_resp.status();
-        if !meta_status.is_success() {
-            let body = meta_resp.text().await.unwrap_or_default();
-            bail!("CreateStepLogsMetadata failed: status={meta_status}, body={body}");
+        let meta_body = serde_json::to_string(&MetaReq {
+            workflow_run_backend_id: plan_id,
+            workflow_job_run_backend_id: job_id,
+            step_backend_id: step_id,
+            uploaded_at: ts,
+            line_count,
+        })
+        .context("serialize CreateStepLogsMetadata")?;
+        let (meta_status, meta_body_resp) =
+            curl_json_request("POST", meta_url, &self.token, Some(meta_body), 30)
+                .await
+                .context("CreateStepLogsMetadata request")?;
+        if !(200..300).contains(&meta_status) {
+            bail!("CreateStepLogsMetadata failed: status={meta_status}, body={meta_body_resp}");
         }
         Ok(())
     }
