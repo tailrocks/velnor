@@ -2902,19 +2902,21 @@ fn append_job_console(path: &Path, display_name: &str, lines: &[String], step_ma
 
 fn unix_now_iso8601() -> String {
     use time::{format_description, OffsetDateTime};
-    // GitHub's frontend parses timestamps from log blobs using a regex that expects
-    // second-precision RFC3339 (no sub-second component): YYYY-MM-DDTHH:MM:SSZ.
-    // Sub-second precision (e.g. .098615Z from Rfc3339) is not parsed — the timestamp
-    // appears as plain text in the content column instead of the separate timestamp column.
-    let fmt = format_description::parse("[year]-[month]-[day]T[hour]:[minute]:[second]Z")
-        .unwrap_or_else(|_| vec![]);
+    // GitHub's log UI strips a leading per-line timestamp ONLY when it matches the
+    // runner's .NET "o" round-trip format with 7 fractional digits:
+    // `YYYY-MM-DDTHH:MM:SS.fffffffZ` (e.g. 2026-06-04T15:27:50.9085200Z). A
+    // second-precision timestamp (no dot) is NOT recognised, so it leaks into the
+    // visible log content column instead of the timestamp toggle. Always emit the
+    // 7-digit sub-second form — see `unix_now_iso8601_is_github_strippable`.
+    // REGRESSION HISTORY: this once emitted second precision and the timestamp
+    // showed up as plain text in every log line. Do NOT drop the sub-seconds.
+    let fmt = format_description::parse(
+        "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:7]Z",
+    )
+    .unwrap_or_else(|_| vec![]);
     OffsetDateTime::now_utc()
-        .replace_nanosecond(0)
-        .map(|t| {
-            t.format(&fmt)
-                .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
-        })
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+        .format(&fmt)
+        .unwrap_or_else(|_| "1970-01-01T00:00:00.0000000Z".to_string())
 }
 
 /// Build the "Set up job" log lines — mirrors the GitHub-hosted runner's
@@ -5992,24 +5994,43 @@ runs:
     }
 
     #[test]
-    fn unix_now_iso8601_produces_second_precision_no_subseconds() {
-        // GitHub's frontend timestamp regex requires YYYY-MM-DDTHH:MM:SSZ with no
-        // sub-second component. Sub-seconds (.098615Z) are NOT parsed → timestamp
-        // appears as plain log content instead of the separate timestamp column.
+    fn unix_now_iso8601_is_github_strippable() {
+        // REGRESSION GUARD (do not weaken): GitHub's log UI strips a leading
+        // per-line timestamp from the visible content ONLY when it matches the
+        // runner's .NET "o" format with SEVEN fractional digits —
+        // `YYYY-MM-DDTHH:MM:SS.fffffffZ` (e.g. 2026-06-04T15:27:50.9085200Z).
+        //
+        // This file once emitted SECOND precision (no sub-seconds) on the mistaken
+        // belief that sub-seconds broke the parser. The opposite is true: without
+        // the fractional component GitHub does NOT recognise the prefix and the
+        // timestamp leaks into every visible log line. If this test ever fails
+        // because the format lost its sub-seconds, timestamps are back in the UI.
         let ts = unix_now_iso8601();
-        // Must match YYYY-MM-DDTHH:MM:SSZ exactly — no dot, no fractional seconds.
         assert!(
-            !ts.contains('.'),
-            "timestamp must not contain sub-seconds: {ts}"
+            ts.contains('.'),
+            "timestamp MUST contain sub-seconds or GitHub renders it as log content: {ts}"
         );
-        assert!(ts.ends_with('Z'), "timestamp must end with Z (UTC): {ts}");
-        // Basic structural validation.
+        let (date_time, frac_z) = ts.split_once('.').expect("timestamp must contain '.'");
+        // Date-time portion: YYYY-MM-DDTHH:MM:SS (19 chars).
         assert_eq!(
-            ts.len(),
-            20,
-            "expected 20-char timestamp YYYY-MM-DDTHH:MM:SSZ: {ts}"
+            date_time.len(),
+            19,
+            "expected YYYY-MM-DDTHH:MM:SS before the dot: {ts}"
         );
-        assert!(ts.contains('T'), "timestamp must contain T separator: {ts}");
+        assert!(date_time.contains('T'), "timestamp must contain T separator: {ts}");
+        assert!(frac_z.ends_with('Z'), "timestamp must end with Z (UTC): {ts}");
+        let frac = frac_z.trim_end_matches('Z');
+        assert_eq!(
+            frac.len(),
+            7,
+            "GitHub's .NET 'o' format uses exactly 7 fractional digits: {ts}"
+        );
+        assert!(
+            frac.chars().all(|c| c.is_ascii_digit()),
+            "fractional seconds must be all digits: {ts}"
+        );
+        // Full form: 19 (date-time) + 1 (dot) + 7 (frac) + 1 (Z) = 28 chars.
+        assert_eq!(ts.len(), 28, "expected 28-char .NET 'o' timestamp: {ts}");
     }
 
     #[test]
