@@ -1180,7 +1180,37 @@ where
         let install_args = native_input(action, &action_state, "install_args");
         let working_directory = native_input(action, &action_state, "working_directory");
         let script = setup_mise_script(install, &install_args, &working_directory);
-        let result = self.native_shell(container, state, &script)?;
+        let mut result = self.native_shell(container, state, &script)?;
+        let mut path = vec![
+            // Mise shims for all mise-managed tools
+            "/opt/mise/shims".to_string(),
+            // Cargo bin for Rust tools pre-installed in the image (cargo, rustc, nextest)
+            "/root/.cargo/bin".to_string(),
+        ];
+        // Add the active mise tool install bin dirs (emitted by setup_mise_script)
+        // so executables installed into a mise-managed tool (e.g. ansible-galaxy
+        // from `pip install ansible-core` into mise's python) are on PATH for
+        // subsequent steps. Strip the marker lines from the logged output so the
+        // step log stays clean (UI parity with the GitHub-hosted lane).
+        for line in result.stdout.lines() {
+            if let Some(dir) = line.strip_prefix("__VELNOR_MISE_BIN__") {
+                let dir = dir.trim();
+                if !dir.is_empty() && !path.iter().any(|p| p == dir) {
+                    path.push(dir.to_string());
+                }
+            }
+        }
+        if result.stdout.contains("__VELNOR_MISE_BIN__") {
+            let filtered: Vec<&str> = result
+                .stdout
+                .lines()
+                .filter(|l| !l.starts_with("__VELNOR_MISE_BIN__"))
+                .collect();
+            result.stdout = filtered.join("\n");
+            if !result.stdout.is_empty() {
+                result.stdout.push('\n');
+            }
+        }
         Ok(native_command_result(
             result,
             StepCommandState {
@@ -1193,12 +1223,7 @@ where
                     ),
                 ]
                 .into(),
-                path: vec![
-                    // Mise shims for all mise-managed tools
-                    "/opt/mise/shims".to_string(),
-                    // Cargo bin for Rust tools pre-installed in the image (cargo, rustc, nextest)
-                    "/root/.cargo/bin".to_string(),
-                ],
+                path,
                 ..StepCommandState::default()
             },
         ))
@@ -1798,15 +1823,13 @@ if [ -n "{install_flag}" ]; then
 else
   command -v mise >/dev/null 2>&1
 fi
-# Expose active mise tool bin dirs to subsequent steps via GITHUB_PATH. Velnor
-# only puts the shims dir on the step PATH, but executables installed INTO a
-# mise-managed tool — e.g. `pip install ansible-core` into mise's python, which
-# drops ansible-galaxy/ansible-playbook in the python tool's bin — live in the
-# tool's install bin, not the shims. jdx/mise-action exposes these; match it so
-# such binaries are found in later steps.
-if [ -n "${{GITHUB_PATH:-}}" ]; then
-  mise bin-paths 2>/dev/null >> "$GITHUB_PATH" || true
-fi
+# Emit active mise tool bin dirs as markers. native_mise parses these and adds
+# them to PATH for subsequent steps. Velnor only puts the shims dir on the step
+# PATH, but executables installed INTO a mise-managed tool — e.g. `pip install
+# ansible-core` into mise's python (ansible-galaxy/ansible-playbook land in the
+# python tool's bin) — live in the tool's install bin, not the shims. This makes
+# them findable in later steps, matching jdx/mise-action.
+mise bin-paths 2>/dev/null | while IFS= read -r p; do [ -n "$p" ] && echo "__VELNOR_MISE_BIN__$p"; done || true
 echo "mise install completed, cargo: $(command -v cargo 2>/dev/null || echo 'not found')"
 mise --version
 "#,
