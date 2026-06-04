@@ -2566,6 +2566,23 @@ impl FeedStreamClient {
         Ok(())
     }
 
+    /// Send a WebSocket ping to keep the feed connection warm during idle gaps
+    /// (e.g. a long compile step that emits no log lines). Without periodic
+    /// traffic GitHub closes the idle connection and the next log send hits a
+    /// Broken pipe, making the live console stutter.
+    pub async fn send_ping(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    ) -> Result<()> {
+        use futures_util::SinkExt;
+        use tokio_tungstenite::tungstenite::Message;
+        ws.send(Message::Ping(Vec::new().into()))
+            .await
+            .context("send WebSocket keepalive ping")?;
+        Ok(())
+    }
+
     /// Legacy per-call method. Prefer connect() + send_log_lines() for jobs.
     pub async fn append_log_lines(
         &self,
