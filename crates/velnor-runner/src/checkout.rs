@@ -162,17 +162,31 @@ where
     )
 }
 
-pub fn cleanup_checkout_credentials<R>(runner: &mut R, plans: &[CheckoutPlan]) -> Result<()>
+/// Run the post-checkout credential cleanup for each plan, returning the
+/// GitHub-style git-command trace for each (aligned with `plans` by index) so
+/// the "Post Run actions/checkout" step log shows the cleanup instead of being
+/// empty. A plan that has nothing to clean yields an empty trace.
+pub fn cleanup_checkout_credentials<R>(
+    runner: &mut R,
+    plans: &[CheckoutPlan],
+) -> Result<Vec<Vec<String>>>
 where
     R: CommandRunner,
 {
+    let mut traces = Vec::with_capacity(plans.len());
     for plan in plans {
-        cleanup_checkout_credential(runner, plan)?;
+        let mut log = Vec::new();
+        cleanup_checkout_credential(runner, plan, &mut log)?;
+        traces.push(log);
     }
-    Ok(())
+    Ok(traces)
 }
 
-fn cleanup_checkout_credential<R>(runner: &mut R, plan: &CheckoutPlan) -> Result<()>
+fn cleanup_checkout_credential<R>(
+    runner: &mut R,
+    plan: &CheckoutPlan,
+    log: &mut Vec<String>,
+) -> Result<()>
 where
     R: CommandRunner,
 {
@@ -188,7 +202,14 @@ where
         "--unset-all".to_string(),
         git_extraheader_key(&plan.clone_url),
     ];
+    log.push(format!("[command]git {}", format_git_args(&args)));
     let result = runner.run("git", &args)?;
+    for line in result.stdout.lines().chain(result.stderr.lines()) {
+        let trimmed = line.trim_end();
+        if !trimmed.is_empty() {
+            log.push(trimmed.to_string());
+        }
+    }
     if result.code != 0 {
         eprintln!(
             "Failed to cleanup checkout credentials in {}: {}",
