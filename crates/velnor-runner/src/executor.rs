@@ -1210,12 +1210,7 @@ where
         _action: &NativeActionInvocation,
         state: &JobExecutionState,
     ) -> Result<StepExecutionResult> {
-        let result = self.native_shell(
-            container,
-            state,
-            // Exit 0 if sccache found and server started, or if not found (127 or 1).
-            "sccache_bin=$(command -v sccache 2>/dev/null || true); [ -n \"$sccache_bin\" ] && sccache --start-server || true",
-        )?;
+        let result = self.native_shell(container, state, &sccache_setup_script())?;
         Ok(native_command_result(result, StepCommandState::default()))
     }
 
@@ -1807,6 +1802,49 @@ echo "mise install completed, cargo: $(command -v cargo 2>/dev/null || echo 'not
 mise --version
 "#,
     )
+}
+
+fn sccache_setup_script() -> String {
+    // Mirror mozilla-actions/sccache-action: ensure the sccache binary is present
+    // (download the release if the job image doesn't ship it), then start the
+    // server. The workflow sets RUSTC_WRAPPER=sccache, so the binary MUST exist on
+    // PATH or every rustc/clippy invocation fails with
+    // "could not execute process `sccache ...`: No such file or directory".
+    // SCCACHE_GHA_ENABLED + the ACTIONS_RESULTS_URL/ACTIONS_RUNTIME_TOKEN env that
+    // Velnor injects let sccache use the GitHub Actions cache backend.
+    r#"set -e
+if ! command -v sccache >/dev/null 2>&1; then
+  ver="v0.15.0"
+  case "$(uname -m)" in
+    x86_64) arch="x86_64-unknown-linux-musl" ;;
+    aarch64|arm64) arch="aarch64-unknown-linux-musl" ;;
+    *) echo "unsupported arch $(uname -m) for sccache" >&2; exit 1 ;;
+  esac
+  tmp="$(mktemp -d)"
+  curl -fsSL "https://github.com/mozilla/sccache/releases/download/${ver}/sccache-${ver}-${arch}.tar.gz" -o "$tmp/sccache.tar.gz"
+  tar -xzf "$tmp/sccache.tar.gz" -C "$tmp"
+  install -m 0755 "$tmp/sccache-${ver}-${arch}/sccache" /usr/local/bin/sccache
+  rm -rf "$tmp"
+fi
+sccache --version
+# Velnor provides a fast, host-shared sccache cache bind-mounted at
+# /var/cache/sccache. Use that local backend instead of the GitHub Actions cache
+# service: this is not a GitHub-hosted cache environment, so SCCACHE_GHA_ENABLED
+# would make the server fail ("cache url for ghac not found") and every
+# RUSTC_WRAPPER=sccache compile would error. Export the override via GITHUB_ENV so
+# subsequent compile steps (clippy/test) pick it up, and disable the GHA backend.
+SCCACHE_LOCAL_DIR=/var/cache/sccache
+mkdir -p "$SCCACHE_LOCAL_DIR" 2>/dev/null || true
+if [ -n "${GITHUB_ENV:-}" ]; then
+  echo "SCCACHE_DIR=$SCCACHE_LOCAL_DIR" >> "$GITHUB_ENV"
+  echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+fi
+export SCCACHE_DIR="$SCCACHE_LOCAL_DIR"
+export SCCACHE_GHA_ENABLED=false
+# Best-effort: cargo will auto-start the server on first use anyway.
+sccache --start-server 2>/dev/null || true
+"#
+    .to_string()
 }
 
 fn setup_mold_script() -> String {

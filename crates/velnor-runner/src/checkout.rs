@@ -295,28 +295,24 @@ where
     }
     run_git(runner, &fetch)?;
 
-    run_git(
-        runner,
-        &[
-            "-C".to_string(),
-            path_arg(destination),
-            "checkout".to_string(),
-            "--force".to_string(),
-            "FETCH_HEAD".to_string(),
-        ],
-    )?;
+    let mut checkout = vec!["-C".to_string(), path_arg(destination)];
+    checkout.extend(lfs_skip_smudge_args());
+    checkout.extend([
+        "checkout".to_string(),
+        "--force".to_string(),
+        "FETCH_HEAD".to_string(),
+    ]);
+    run_git(runner, &checkout)?;
 
     if clean {
-        run_git(
-            runner,
-            &[
-                "-C".to_string(),
-                path_arg(destination),
-                "reset".to_string(),
-                "--hard".to_string(),
-                "HEAD".to_string(),
-            ],
-        )?;
+        let mut reset = vec!["-C".to_string(), path_arg(destination)];
+        reset.extend(lfs_skip_smudge_args());
+        reset.extend([
+            "reset".to_string(),
+            "--hard".to_string(),
+            "HEAD".to_string(),
+        ]);
+        run_git(runner, &reset)?;
         run_git(
             runner,
             &[
@@ -335,6 +331,29 @@ where
     }
 
     Ok(())
+}
+
+/// `git -c` args that make the git-lfs smudge/process filters skip downloading
+/// LFS objects, leaving the pointer files in place. This matches the default
+/// behavior of `actions/checkout` (`lfs: false`): a repo that uses Git LFS is
+/// checked out without fetching LFS blobs, so no LFS credentials are needed.
+///
+/// Without this, the job image's globally-installed git-lfs runs its smudge
+/// filter during `git checkout` and makes its own authenticated request to the
+/// LFS endpoint, which fails ("could not read Username for https://github.com")
+/// because the credential helper is not configured for the lfs subprocess.
+///
+/// (LFS download — the `lfs: true` opt-in — is a separate feature; ChainArgos and
+/// the fixture both use the default, so skipping is the correct match today.)
+fn lfs_skip_smudge_args() -> [String; 6] {
+    [
+        "-c".to_string(),
+        "filter.lfs.smudge=git-lfs smudge --skip -- %f".to_string(),
+        "-c".to_string(),
+        "filter.lfs.process=git-lfs filter-process --skip".to_string(),
+        "-c".to_string(),
+        "filter.lfs.required=false".to_string(),
+    ]
 }
 
 fn persist_git_credentials<R>(
