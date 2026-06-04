@@ -376,6 +376,9 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
 
     let config_base = config::config_dir(args.config_dir.clone())?;
     preflight_before_daemon_jit_config(&args, &config_base, slots)?;
+    if args.url.is_some() && !args.dry_run_registration {
+        prune_stale_velnor_docker_resources();
+    }
     configure_daemon_slots(&args, &config_base, slots).await?;
     if !daemon_should_poll_after_jit_config(&args) {
         println!("Daemon JIT config dry run complete; skipped polling GitHub for jobs.");
@@ -675,6 +678,51 @@ fn validate_daemon_slots(slots: usize) -> Result<usize> {
         bail!("--slots must be greater than zero");
     }
     Ok(slots)
+}
+
+/// Remove leftover Velnor Docker resources from previous (possibly crashed)
+/// daemon runs. A daemon killed mid-job cannot run its per-job cleanup, so the
+/// job network + container leak; enough leaked `velnor-net-*` networks exhaust
+/// Docker's address pool and then EVERY new job fails to create its network
+/// ("all predefined address pools have been fully subnetted"). Pruning on
+/// startup makes a crash self-healing. Best-effort — never fails startup. Safe
+/// because a daemon restart already orphans any in-flight job (JIT runners are
+/// per-job), so anything matching here is dead.
+fn prune_stale_velnor_docker_resources() {
+    let docker = |args: &[&str]| std::process::Command::new("docker").args(args).output().ok();
+    let ids_from = |args: &[&str]| -> Vec<String> {
+        docker(args)
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .split_whitespace()
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let containers = ids_from(&["ps", "-aq", "--filter", "name=velnor-job"]);
+    if !containers.is_empty() {
+        let mut args = vec!["rm".to_string(), "-f".to_string()];
+        args.extend(containers.iter().cloned());
+        let _ = docker(&args.iter().map(String::as_str).collect::<Vec<_>>());
+        eprintln!(
+            "Pruned {} stale velnor-job container(s) at startup.",
+            containers.len()
+        );
+    }
+
+    let networks = ids_from(&["network", "ls", "-q", "--filter", "name=velnor-net"]);
+    if !networks.is_empty() {
+        let mut args = vec!["network".to_string(), "rm".to_string()];
+        args.extend(networks.iter().cloned());
+        let _ = docker(&args.iter().map(String::as_str).collect::<Vec<_>>());
+        eprintln!(
+            "Pruned {} stale velnor-net network(s) at startup.",
+            networks.len()
+        );
+    }
 }
 
 fn daemon_slot_configure_args(
