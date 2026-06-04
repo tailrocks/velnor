@@ -42,6 +42,11 @@ Proper distribution: a **Debian package (`.deb`)** that installs the runner the
 right way, instead of the current ad-hoc transient `systemd-run` + manual
 git-bundle deploys. Target this as the real fix for daemon operations.
 
+- [ ] **apt-native repo + `.deb`** — full design in
+      [`docs/debian-apt-repo.md`](../docs/debian-apt-repo.md): cargo-deb builds
+      the `.deb`, reprepro builds a GPG-signed apt repo, GitHub Pages hosts it,
+      GitHub Actions publishes on tag, users `apt install velnor-runner` via a
+      `signed-by` keyring and `apt upgrade` to update.
 - [ ] **`.deb` package** (e.g. via `cargo-deb` or `nfpm`):
   - ships the `velnor-runner` binary to `/usr/bin` (or `/opt/velnor`)
   - installs a **systemd unit** `velnor-daemon.service` (`Restart=always`,
