@@ -60,17 +60,26 @@ git-bundle deploys. Target this as the real fix for daemon operations.
   - [x] **release-deb.yml validated** — tag `v0.1.0-rc1` built a clean amd64
         `.deb` on Ubuntu CI (run 26983987624) + attached it to the GitHub
         Release. velnor side of the pipeline works end-to-end.
-  - [ ] **velnor is PRIVATE** → velnor-apt's `publish.yml` needs a
-        `VELNOR_RELEASE_TOKEN` (PAT with read access to donbeave/velnor) to
-        download the release `.deb`. Also note: publishing to the PUBLIC
-        velnor-apt repo makes the `.deb` binary public even though the source is
-        private — decide if that's intended (else host the apt repo privately +
-        use `raw.githubusercontent.com` + `auth.conf.d`).
-  - [ ] **GPG signing key** — create it; add `APT_GPG_PRIVATE_KEY` +
-        `APT_GPG_PASSPHRASE` secrets to `velnor-apt`; set `SignWith` key id;
-        publish the public `velnor.gpg`.
-  - [ ] **Enable GitHub Pages** on `velnor-apt` (Source: `gh-pages`) after the
-        first publish run creates the branch.
+  - [x] **Decision: public binary via Pages** — velnor-apt is public; the
+        compiled `.deb` is public, velnor source stays private.
+  - [x] **GPG signing key created + wired** — RSA-4096 key
+        `B3766CA119CCC5CFEF8F844777786ADA478A7BCD`; `APT_GPG_PRIVATE_KEY` +
+        `APT_GPG_PASSPHRASE` (empty: passphraseless) secrets set on velnor-apt;
+        `SignWith` set; public `velnor.gpg` published. Private key only lives in
+        the velnor-apt secret — rotate via the same steps if needed.
+  - [x] **GitHub Pages enabled + LIVE** — served at
+        `https://www.zhokhov.com/velnor-apt` (donbeave's custom Pages domain;
+        HTTPS works, `donbeave.github.io/velnor-apt` 301-redirects there).
+  - [x] **First publish done + VERIFIED** — `publish.yml` signed + published
+        `velnor-runner 0.1.0-rc1`; `InRelease` shows **Good signature**, the
+        `.deb` is reachable, `apt install velnor-runner` from
+        `https://www.zhokhov.com/velnor-apt` works. `publish.yml` reads the `.deb`
+        from velnor-apt's OWN release (same-repo token — no private-repo read).
+  - [ ] **Only remaining: auto-publish on tag** — add a PAT with write on
+        `donbeave/velnor-apt` as a velnor secret `VELNOR_APT_TOKEN`. Then a
+        `git tag vX.Y.Z` makes `release-deb.yml` build the `.deb`, upload it to
+        velnor-apt's release, and trigger `publish.yml` — fully automatic. Until
+        the PAT exists, publish manually (the workflow prints the two commands).
 - [ ] **`.deb` package** (e.g. via `cargo-deb` or `nfpm`):
   - ships the `velnor-runner` binary to `/usr/bin` (or `/opt/velnor`)
   - installs a **systemd unit** `velnor-daemon.service` (`Restart=always`,
