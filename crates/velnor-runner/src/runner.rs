@@ -521,6 +521,8 @@ async fn configure_daemon_slots(args: &DaemonArgs, config_base: &Path, slots: us
 
     println!("Configuring {slots} Velnor daemon JIT runner slot(s) before polling GitHub.");
     let mut configured_slots = Vec::new();
+    let mut usable_slots = 0usize;
+    let mut skipped_slots = Vec::new();
     for slot_index in 1..=slots {
         let slot_config_dir = daemon_slot_config_dir(config_base, slot_index, slots);
         if !daemon_slot_should_configure_jit(
@@ -533,6 +535,7 @@ async fn configure_daemon_slots(args: &DaemonArgs, config_base: &Path, slots: us
                 daemon_slot_name(slot_index),
                 slot_config_dir.display()
             );
+            usable_slots += 1;
             continue;
         }
 
@@ -541,11 +544,32 @@ async fn configure_daemon_slots(args: &DaemonArgs, config_base: &Path, slots: us
         }
 
         let configure_args = daemon_slot_configure_args(args, config_base, slot_index, slots)?;
+        // Per-slot best-effort: a slot whose previous runner is still registered
+        // and busy (stale from a prior crash) can't reclaim its name yet and will
+        // fail here (409 → orphan delete → 422). That must NOT take down the whole
+        // daemon — skip this slot and run on the rest; it recovers on a later
+        // restart once the stale runner ages out.
         if let Err(error) = configure(configure_args).await {
-            cleanup_configured_daemon_slots(args, config_base, slots, &configured_slots).await;
-            return Err(error).with_context(|| format!("configure daemon slot-{slot_index}"));
+            eprintln!(
+                "Warning: could not configure daemon slot-{slot_index} (skipping; running on the remaining slots): {error:#}"
+            );
+            skipped_slots.push(slot_index);
+            continue;
         }
         configured_slots.push(slot_index);
+        usable_slots += 1;
+    }
+
+    if usable_slots == 0 {
+        cleanup_configured_daemon_slots(args, config_base, slots, &configured_slots).await;
+        bail!(
+            "could not configure any of the {slots} daemon runner slot(s); all failed (e.g. stale busy runners holding every slot name)"
+        );
+    }
+    if !skipped_slots.is_empty() {
+        eprintln!(
+            "Daemon starting with {usable_slots}/{slots} runner slot(s); skipped slot(s): {skipped_slots:?}."
+        );
     }
     Ok(())
 }
