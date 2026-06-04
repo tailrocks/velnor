@@ -2209,10 +2209,10 @@ fn execute_script_job(
     );
     let mut command_runner = executor.into_runner();
     let cleanup_result = cleanup_checkout_credentials(&mut command_runner, &cleanup_checkout_plans);
-    let summary = match (summary_result, cleanup_result) {
-        (Ok(summary), Ok(())) => summary,
+    let (summary, cleanup_traces) = match (summary_result, cleanup_result) {
+        (Ok(summary), Ok(traces)) => (summary, traces),
         (Ok(_), Err(error)) => return Err(error.context("cleanup checkout credentials")),
-        (Err(error), Ok(())) => return Err(error),
+        (Err(error), Ok(_)) => return Err(error),
         (Err(error), Err(cleanup_error)) => {
             eprintln!("Checkout credential cleanup failed after job error: {cleanup_error:#}");
             return Err(error);
@@ -2251,7 +2251,7 @@ fn execute_script_job(
     // "Post Run actions/checkout@vN" steps for each checkout (credential cleanup).
     let mut post_order = summary.step_logs.iter().map(|l| l.order).max().unwrap_or(0);
     let mut extra_step_logs: Vec<StepLog> = Vec::new();
-    for plan in &cleanup_checkout_plans {
+    for (index, plan) in cleanup_checkout_plans.iter().enumerate() {
         post_order += 1;
         let post_step_id = uuid::Uuid::new_v4().to_string();
         let post_name = {
@@ -2269,13 +2269,16 @@ fn execute_script_job(
                 order: post_order,
             });
         }
+        // Show the credential-cleanup git trace (matches GitHub's "Post Run
+        // actions/checkout"); empty when the plan had nothing to clean.
+        let post_lines = cleanup_traces.get(index).cloned().unwrap_or_default();
         let post_log = StepLog {
             step_id: post_step_id,
             display_name: post_name,
             order: post_order,
             started_at: post_ts.clone(),
             completed_at: post_ts,
-            lines: Vec::new(),
+            lines: post_lines,
             masks: Vec::new(),
             annotations: Vec::new(),
             telemetry: Vec::new(),
