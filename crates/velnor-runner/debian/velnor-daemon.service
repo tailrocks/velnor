@@ -1,0 +1,29 @@
+[Unit]
+Description=Velnor self-hosted GitHub Actions runner daemon
+Documentation=https://github.com/donbeave/velnor
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+# Config + token live here (token NOT on argv: --pat reads GITHUB_TOKEN from env).
+EnvironmentFile=/etc/velnor/velnor.env
+ExecStart=/usr/bin/velnor-runner daemon \
+  --url ${VELNOR_URL} \
+  --name ${VELNOR_NAME} \
+  --labels ${VELNOR_LABELS} \
+  --slots ${VELNOR_SLOTS} \
+  --work-dir ${VELNOR_WORK_DIR} \
+  --replace \
+  --require-docker-socket
+Restart=always
+RestartSec=5
+# Manages Docker containers + the daemon socket; runs as root (matches a typical
+# self-hosted CI runner host). Harden to a docker-group user later if desired.
+User=root
+StateDirectory=velnor
+WorkingDirectory=/var/lib/velnor
+
+[Install]
+WantedBy=multi-user.target

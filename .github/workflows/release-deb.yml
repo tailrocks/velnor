@@ -1,0 +1,65 @@
+name: Release deb
+
+# Build the velnor-runner .deb on a version tag, attach it to the GitHub
+# Release, and (optionally) trigger the velnor-apt repo to publish it.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to (re)build the .deb for (e.g. v0.1.0)."
+        type: string
+        required: true
+
+permissions:
+  contents: write # create/upload the GitHub Release asset
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build .deb (version pinned to the tag)
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          cargo deb -p velnor-runner --deb-version "$VERSION"
+          ls -la target/debian/*.deb
+
+      - name: Attach .deb to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          DEB="$(ls target/debian/velnor-runner_*_amd64.deb)"
+          # Create the release if it does not exist yet, then upload the asset.
+          gh release view "$TAG" >/dev/null 2>&1 \
+            || gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release upload "$TAG" "$DEB" --clobber
+
+      - name: Trigger velnor-apt to publish (optional)
+        env:
+          DISPATCH_TOKEN: ${{ secrets.VELNOR_APT_DISPATCH_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISPATCH_TOKEN:-}" ]; then
+            echo "No VELNOR_APT_DISPATCH_TOKEN secret; skipping cross-repo publish trigger."
+            echo "Publish manually: gh workflow run publish.yml -R donbeave/velnor-apt -f version=$TAG"
+            exit 0
+          fi
+          GH_TOKEN="$DISPATCH_TOKEN" gh api repos/donbeave/velnor-apt/dispatches \
+            -f event_type=publish-deb \
+            -f "client_payload[version]=$TAG"

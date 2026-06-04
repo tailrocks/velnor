@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  configure)
+    # State directories for runner work + JIT config.
+    install -d -m 0750 /var/lib/velnor /var/lib/velnor/work
+    # Keep the token file readable only by root.
+    if [ -f /etc/velnor/velnor.env ]; then
+      chmod 0640 /etc/velnor/velnor.env || true
+    fi
+    if [ -d /run/systemd/system ]; then
+      systemctl daemon-reload || true
+      systemctl enable velnor-daemon.service || true
+      # Restart only if it was already running (clean upgrade); fresh installs
+      # stay stopped until the operator fills in /etc/velnor/velnor.env.
+      systemctl try-restart velnor-daemon.service || true
+    fi
+    echo "velnor-runner installed. Set GITHUB_TOKEN + VELNOR_URL in"
+    echo "  /etc/velnor/velnor.env  then:  sudo systemctl start velnor-daemon"
+    ;;
+esac
+
+exit 0
