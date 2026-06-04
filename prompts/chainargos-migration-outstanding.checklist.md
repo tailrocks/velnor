@@ -37,16 +37,34 @@ what is LEFT.
 
 ## To do
 
-### Priority 1 — make the Velnor daemon production-grade (operational)
-- [ ] **Real systemd service** (not transient `systemd-run`): unit file with
-      `Restart=always`, `RestartSec`, `WantedBy=multi-user.target` (boot start).
+### Priority 1 — package the Velnor daemon properly (Debian package)
+Proper distribution: a **Debian package (`.deb`)** that installs the runner the
+right way, instead of the current ad-hoc transient `systemd-run` + manual
+git-bundle deploys. Target this as the real fix for daemon operations.
+
+- [ ] **`.deb` package** (e.g. via `cargo-deb` or `nfpm`):
+  - ships the `velnor-runner` binary to `/usr/bin` (or `/opt/velnor`)
+  - installs a **systemd unit** `velnor-daemon.service` (`Restart=always`,
+    `RestartSec`, `WantedBy=multi-user.target` → boot start)
+  - creates a dedicated service user + state dirs (`/var/lib/velnor`,
+    `/etc/velnor` for the `.env`/PAT), correct perms
+  - config file (URL, name, labels, slots, work-dir, token) under `/etc/velnor`
+    read by the unit (no secrets on argv — keeps the PAT out of `/proc`)
+  - `postinst`/`prerm` enable/disable + start/stop; clean upgrade path
+    (`apt install ./velnor-runner.deb` to update the binary + restart)
+  - apt repo or release artifact so install/upgrade is `apt`-native
 - [ ] **Stop idle-exit churn** — currently `--idle-timeout-seconds 2400` exits
       after 40 min idle; combined with rapid restarts it piles up stale "busy"
-      runner registrations until "0 usable slots" exits. Either drop idle-timeout
-      for a long-running service, or have startup proactively delete *all* of its
-      own prior named runners before registering.
+      runner registrations until "0 usable slots" exits. For a packaged
+      long-running service, drop the idle-timeout, and have startup proactively
+      delete *all* of its own prior named runners before registering.
 - [ ] **Boot/auto-recovery verified** — daemon comes back after reboot + after a
       crash without manual `gh api DELETE runners` + restart.
+
+> Interim (until the `.deb` exists): a hand-written
+> `/etc/systemd/system/velnor-daemon.service` with `Restart=always` + an
+> `EnvironmentFile=/etc/velnor/velnor.env` already removes the worst of the
+> churn. The `.deb` is the durable answer.
 
 ### Priority 2 — live UX
 - [ ] **Live-feed WebSocket keepalive** — feed Broken-pipe under load; reconnect +
