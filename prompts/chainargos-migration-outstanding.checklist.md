@@ -50,12 +50,13 @@ git-bundle deploys. Target this as the real fix for daemon operations.
   - [x] **apt repo created + scaffolded**: `donbeave/velnor-apt` (public) — README
         with install steps, `conf/distributions` (reprepro), `publish.yml`
         (download `.deb` → reprepro sign → publish gh-pages).
-  - [ ] **velnor side: build the `.deb`** — add `[package.metadata.deb]` to the
-        velnor `Cargo.toml` (binary, `velnor-daemon.service` unit with
-        `Restart=always`, `/etc/velnor/velnor.env` conffile, `velnor` user,
-        `/var/lib/velnor`, postinst/prerm) + a `release-deb.yml` that runs
-        `cargo deb` on tag and attaches the `.deb` to the GitHub Release (and
-        triggers `velnor-apt` `publish-deb`).
+  - [x] **velnor side: build the `.deb`** — `[package.metadata.deb]` +
+        `crates/velnor-runner/debian/` (unit `Restart=always`, `velnor.env`
+        conffile, postinst/prerm/postrm) + `.github/workflows/release-deb.yml`
+        (cargo deb on `v*` tag → attach to Release → trigger velnor-apt). Layout
+        verified locally with cargo-deb 3.7.0. Token via `GITHUB_TOKEN` env (off
+        argv). NOTE: runs as `User=root` (manages Docker) — not a `velnor` user;
+        harden later if desired.
   - [ ] **GPG signing key** — create it; add `APT_GPG_PRIVATE_KEY` +
         `APT_GPG_PASSPHRASE` secrets to `velnor-apt`; set `SignWith` key id;
         publish the public `velnor.gpg`.
