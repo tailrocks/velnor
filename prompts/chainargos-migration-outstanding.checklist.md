@@ -113,14 +113,26 @@ git-bundle deploys. Target this as the real fix for daemon operations.
 > churn. The `.deb` is the durable answer.
 
 ### Priority 2 — live UX
-- [ ] **Live-feed WebSocket keepalive** — feed Broken-pipe under load; reconnect +
-      resend masks it (final v2 blob unaffected) but the *live* console is choppy.
-      Add ping/keepalive so the streaming console doesn't stutter.
+- [x] **Live-feed WebSocket keepalive** DONE (rc3) — the publisher loop now uses
+      `tokio::select!` with a 15s interval that sends a WebSocket ping during idle
+      gaps (e.g. a long compile with no log output), keeping the feed warm so
+      GitHub doesn't close it and the next send doesn't Broken-pipe. Shipped +
+      deployed to Sentry via `apt upgrade` (rc2 → rc3).
 
 ### Priority 3 — second repo
-- [ ] **Migrate `ChainArgos/blockchain-nodes` to Velnor** — uses `lfs: true`
-      (download support already built + proven). Apply the same runner-selection
-      pattern; verify green on both lanes.
+- [~] **Migrate `ChainArgos/blockchain-nodes` to Velnor** — workflow changes DONE
+      in **draft PR ChainArgos/blockchain-nodes#578**: `build-image.yml` gains a
+      `lane` input (velnor default / github / hetzner); `build-publish.yml` passes
+      lane to all 36 image builds; `renovate.yml` defaults to Velnor. Uses
+      `lfs: true` (Velnor LFS support).
+  - [ ] **BLOCKED on infra (operator):** the Sentry Velnor daemon is repo-scoped
+        to `java-monorepo`, so it does NOT serve blockchain-nodes jobs. Need an
+        **org-level** `velnor-target-mvp` runner (register the daemon against the
+        `ChainArgos` org — requires an org-admin PAT; my token got 403 on the org
+        runners API) OR a blockchain-nodes-scoped daemon. Until then PR #578 must
+        stay unmerged (default velnor would leave builds with no runner). After
+        the runner exists: dispatch `build-image.yml` for one package on
+        `lane=velnor` to verify, then merge.
 
 ### Platform gaps (GitHub V2 sends third-party runners a leaner message — likely NOT runner-fixable; decide whether to work around)
 - [ ] **Downloadable log archive empty** (`gh run view --log` / "Download log
