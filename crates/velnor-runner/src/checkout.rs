@@ -139,7 +139,11 @@ fn has_unsupported_enabled_action(steps: &[ActionStep]) -> bool {
     })
 }
 
-pub fn execute_checkout<R>(runner: &mut R, plan: &CheckoutPlan) -> Result<()>
+pub fn execute_checkout<R>(
+    runner: &mut R,
+    plan: &CheckoutPlan,
+    log: &mut Vec<String>,
+) -> Result<()>
 where
     R: CommandRunner,
 {
@@ -154,6 +158,7 @@ where
         plan.persist_credentials,
         plan.clean,
         plan.lfs,
+        log,
     )
 }
 
@@ -238,6 +243,7 @@ pub fn fetch_git_ref<R>(
     persist_credentials: bool,
     clean: bool,
     lfs: bool,
+    log: &mut Vec<String>,
 ) -> Result<()>
 where
     R: CommandRunner,
@@ -245,7 +251,7 @@ where
     std::fs::create_dir_all(destination)
         .with_context(|| format!("create {}", destination.display()))?;
 
-    run_git(runner, &["init".to_string(), path_arg(destination)])?;
+    run_git(runner, &["init".to_string(), path_arg(destination)], log)?;
     run_git(
         runner,
         &[
@@ -255,6 +261,7 @@ where
             "remove".to_string(),
             "origin".to_string(),
         ],
+        log,
     )
     .ok();
     run_git(
@@ -267,6 +274,7 @@ where
             "origin".to_string(),
             clone_url.to_string(),
         ],
+        log,
     )?;
 
     let mut fetch = vec![
@@ -299,7 +307,7 @@ where
             ]);
         }
     }
-    run_git(runner, &fetch)?;
+    run_git(runner, &fetch, log)?;
 
     // For lfs:true, the git-lfs smudge filter runs during checkout and downloads
     // LFS blobs — it authenticates via the persisted http.<host>.extraheader, so
@@ -307,7 +315,7 @@ where
     // the smudge entirely (no LFS fetch, no creds needed) via lfs_skip_smudge_args.
     if lfs {
         if let Some(token) = token {
-            persist_git_credentials(runner, destination, clone_url, token)?;
+            persist_git_credentials(runner, destination, clone_url, token, log)?;
         }
     }
 
@@ -320,7 +328,7 @@ where
         "--force".to_string(),
         "FETCH_HEAD".to_string(),
     ]);
-    run_git(runner, &checkout)?;
+    run_git(runner, &checkout, log)?;
 
     if clean {
         let mut reset = vec!["-C".to_string(), path_arg(destination)];
@@ -332,7 +340,7 @@ where
             "--hard".to_string(),
             "HEAD".to_string(),
         ]);
-        run_git(runner, &reset)?;
+        run_git(runner, &reset, log)?;
         run_git(
             runner,
             &[
@@ -341,12 +349,13 @@ where
                 "clean".to_string(),
                 "-ffdx".to_string(),
             ],
+            log,
         )?;
     }
 
     if persist_credentials {
         if let Some(token) = token {
-            persist_git_credentials(runner, destination, clone_url, token)?;
+            persist_git_credentials(runner, destination, clone_url, token, log)?;
         }
     }
 
@@ -381,6 +390,7 @@ fn persist_git_credentials<R>(
     destination: &Path,
     clone_url: &str,
     token: &str,
+    log: &mut Vec<String>,
 ) -> Result<()>
 where
     R: CommandRunner,
@@ -395,14 +405,25 @@ where
             git_extraheader_key(clone_url),
             git_basic_auth_value(&token),
         ],
+        log,
     )
 }
 
-fn run_git<R>(runner: &mut R, args: &[String]) -> Result<()>
+fn run_git<R>(runner: &mut R, args: &[String], log: &mut Vec<String>) -> Result<()>
 where
     R: CommandRunner,
 {
+    // Echo the command (token masked) the way actions/checkout does — a
+    // `[command]git …` line followed by the command's own output — so the
+    // checkout step log reads like the GitHub-hosted runner's git trace.
+    log.push(format!("[command]git {}", format_git_args(args)));
     let result = runner.run("git", args)?;
+    for line in result.stdout.lines().chain(result.stderr.lines()) {
+        let trimmed = line.trim_end();
+        if !trimmed.is_empty() {
+            log.push(trimmed.to_string());
+        }
+    }
     if result.code != 0 {
         bail!(
             "git {} failed with code {}: {}",
@@ -872,7 +893,7 @@ mod tests {
         };
         let mut runner = RecordingRunner::default();
 
-        execute_checkout(&mut runner, &plan).unwrap();
+        execute_checkout(&mut runner, &plan, &mut Vec::new()).unwrap();
 
         assert_eq!(runner.calls[0].0, "git");
         assert_eq!(runner.calls[0].1[0], "init");
@@ -989,7 +1010,7 @@ mod tests {
         };
         let mut runner = RecordingRunner::default();
 
-        execute_checkout(&mut runner, &plan).unwrap();
+        execute_checkout(&mut runner, &plan, &mut Vec::new()).unwrap();
 
         let fetch = runner
             .calls

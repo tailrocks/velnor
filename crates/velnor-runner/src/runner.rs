@@ -2093,13 +2093,15 @@ fn execute_script_job(
                 order: checkout_order,
             });
         }
-        let checkout_result = crate::checkout::execute_checkout(&mut command_runner, plan);
+        let mut checkout_trace = Vec::new();
+        let checkout_result =
+            crate::checkout::execute_checkout(&mut command_runner, plan, &mut checkout_trace);
         let exit_code = if checkout_result.is_ok() { 0 } else { 1 };
         if let Err(ref e) = checkout_result {
             eprintln!("Checkout failed: {e:#}");
         }
         if let Some(sender) = &step_log_sender {
-            let checkout_lines = checkout_step_lines(plan, exit_code);
+            let checkout_lines = checkout_step_lines(plan, exit_code, &checkout_trace);
             let _ = sender.send(StepLog {
                 step_id: plan.step_id.clone(),
                 display_name: plan.display_name.clone(),
@@ -3009,7 +3011,7 @@ fn setup_job_lines(job: &AgentJobRequestMessage, docker_image: &str) -> Vec<Stri
 }
 
 /// Build log lines for a checkout step from the checkout plan.
-fn checkout_step_lines(plan: &CheckoutPlan, exit_code: i32) -> Vec<String> {
+fn checkout_step_lines(plan: &CheckoutPlan, exit_code: i32, trace: &[String]) -> Vec<String> {
     let mut lines = Vec::new();
     // Show the repo being checked out (mask auth from URL for display).
     let display_url = plan
@@ -3028,6 +3030,9 @@ fn checkout_step_lines(plan: &CheckoutPlan, exit_code: i32) -> Vec<String> {
         }
     }
     lines.push(format!("Repository path: {}", plan.destination.display()));
+    // The actual `[command]git …` trace, matching the GitHub-hosted runner's
+    // checkout log instead of a bare summary.
+    lines.extend(trace.iter().cloned());
     if exit_code == 0 {
         lines.push("Checkout completed successfully".to_string());
     } else {
@@ -5985,9 +5990,15 @@ runs:
             condition: None,
             continue_on_error: false,
         };
-        let lines = checkout_step_lines(&plan, 0);
+        let trace = vec![
+            "[command]git init /work".to_string(),
+            "[command]git fetch --prune origin main".to_string(),
+        ];
+        let lines = checkout_step_lines(&plan, 0, &trace);
         let joined = lines.join("\n");
         assert!(joined.contains("github.com/org/repo.git"));
+        assert!(joined.contains("[command]git init /work"));
+        assert!(joined.contains("[command]git fetch --prune origin main"));
         assert!(joined.contains("main"));
         assert!(joined.contains("Fetch depth: 1"));
         assert!(joined.contains("Checkout completed successfully"));

@@ -1017,18 +1017,21 @@ where
         if let Some(version) = plan.version.as_mut() {
             *version = state.resolve_expressions(version);
         }
-        execute_checkout(&mut self.runner, &plan)?;
+        let mut trace = Vec::new();
+        execute_checkout(&mut self.runner, &plan, &mut trace)?;
         configure_safe_directory(
             &container.home_host,
             &container.workspace_host,
             &plan.destination,
         )?;
+        // Surface the git-command trace as the step's output so the runtime
+        // checkout step log matches the eager path (and GitHub-hosted).
         Ok(StepExecutionResult {
             exit_code: 0,
             state: StepCommandState::default(),
             skipped: false,
             failure_ignored: false,
-            stdout: String::new(),
+            stdout: trace.join("\n"),
             stderr: String::new(),
         })
     }

@@ -404,7 +404,8 @@ where
                 false,
                 true,
                 true,
-                false, // lfs: action repos don't use LFS
+                false,           // lfs: action repos don't use LFS
+                &mut Vec::new(), // action-repo fetch trace is internal, not surfaced
             )?;
         }
         resolved.push(resolve_action(plan)?);
