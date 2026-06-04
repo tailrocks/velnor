@@ -4931,6 +4931,7 @@ runs:
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            lfs: false,
             condition: None,
             continue_on_error: false,
         };
@@ -4964,6 +4965,7 @@ runs:
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            lfs: false,
             condition: None,
             continue_on_error: false,
         };
@@ -4990,6 +4992,7 @@ runs:
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            lfs: false,
             condition: None,
             continue_on_error: false,
         };
@@ -5886,6 +5889,7 @@ runs:
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            lfs: false,
             condition: None,
             continue_on_error: false,
         };
