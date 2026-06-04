@@ -304,7 +304,44 @@ fn evaluate_script_format_expr(
         .get("expr")
         .or_else(|| obj.get("Expr"))
         .and_then(|v| v.as_str())?;
-    evaluate_github_format(expr, context_data)
+    // Eagerly evaluate the format() call so that {{ / }} escape sequences in the
+    // template are resolved (e.g. ${{output}} → ${output} for bash variables).
+    // Args that cannot be resolved from context_data (e.g. steps.X.outputs.Y)
+    // are replaced with a `${{ arg }}` lazy expression so that resolve_expressions
+    // picks them up at step-run time without the nested-}} problem.
+    evaluate_format_expr_with_lazy_args(expr, context_data)
+        .or_else(|| Some(format!("${{{{ {expr} }}}}")))
+}
+
+fn evaluate_format_expr_with_lazy_args(
+    expr: &str,
+    context_data: &[(String, Value)],
+) -> Option<String> {
+    let inner = expr.trim().strip_prefix("format(")?.strip_suffix(')')?;
+    let parts = split_format_args(inner);
+    if parts.is_empty() {
+        return None;
+    }
+    let template = parts[0].trim().strip_prefix('\'')?.strip_suffix('\'')?;
+    let placeholder_open = "\x00LBRACE\x00";
+    let placeholder_close = "\x00RBRACE\x00";
+    let mut result = template
+        .replace("''", "'")
+        .replace("{{", placeholder_open)
+        .replace("}}", placeholder_close);
+    for (i, arg) in parts[1..].iter().enumerate() {
+        let value = if let Some(v) = resolve_context_path(arg.trim(), context_data) {
+            v
+        } else {
+            // Unresolvable at setup time → lazy ${{ arg }} for runtime resolution
+            format!("${{{{ {} }}}}", arg.trim())
+        };
+        result = result.replace(&format!("{{{i}}}"), &value);
+    }
+    result = result
+        .replace(placeholder_open, "{")
+        .replace(placeholder_close, "}");
+    Some(result)
 }
 
 /// Evaluate a GitHub Actions `format(template, args...)` expression.
@@ -341,6 +378,11 @@ pub fn evaluate_github_format(expr: &str, context_data: &[(String, Value)]) -> O
         .replace(placeholder_open, "{")
         .replace(placeholder_close, "}");
     Some(result)
+}
+
+/// Public alias so executor.rs can call the format-arg parser directly.
+pub fn split_format_args_pub(s: &str) -> Vec<String> {
+    split_format_args(s)
 }
 
 fn split_format_args(s: &str) -> Vec<String> {
@@ -549,13 +591,23 @@ fn environment_value(value: &Value) -> String {
         Value::String(value) => value.clone(),
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
-        Value::Object(object) => object
-            .get("value")
-            .or_else(|| object.get("Value"))
-            .or_else(|| object.get("lit"))
-            .or_else(|| object.get("Lit"))
-            .map(environment_value)
-            .unwrap_or_default(),
+        Value::Object(object) => {
+            if let Some(expr) = object
+                .get("expr")
+                .or_else(|| object.get("Expr"))
+                .and_then(Value::as_str)
+            {
+                // Wrap in ${{ }} so resolve_env resolves it at step-run time
+                return format!("${{{{ {expr} }}}}");
+            }
+            object
+                .get("value")
+                .or_else(|| object.get("Value"))
+                .or_else(|| object.get("lit"))
+                .or_else(|| object.get("Lit"))
+                .map(environment_value)
+                .unwrap_or_default()
+        }
         _ => String::new(),
     }
 }
@@ -584,10 +636,15 @@ fn workspace_path(workspace_container: &str, path: &str) -> String {
 }
 
 fn step_id(step: &ActionStep, index: usize) -> String {
-    step.id
+    // Prefer context_name (the YAML `id:` field, e.g. "run-output") over the
+    // internal UUID stored in step.id. Expressions like `steps.run-output.outputs.x`
+    // reference the YAML id, so the step must be stored under that key.
+    // Skip auto-generated names that start with "__" (e.g. "__run", "__run_2").
+    step.context_name
         .as_deref()
-        .or(step.context_name.as_deref())
-        .or(step.name.as_deref())
+        .filter(|n| !n.is_empty() && !n.starts_with("__"))
+        .or_else(|| step.id.as_deref())
+        .or_else(|| step.name.as_deref())
         .map(sanitize_step_id)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| format!("step{}", index + 1))
@@ -863,14 +920,13 @@ fn shell_single_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_step_dir() -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("velnor-step-test-{nonce}"))
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("velnor-step-test-{}-{}", std::process::id(), id))
     }
 
     #[test]
@@ -1348,6 +1404,7 @@ mod tests {
         )];
         let script_steps = github_script_steps_with_context(&steps, "/__w", &[], &context).unwrap();
         assert_eq!(script_steps.len(), 1);
+        // matrix.package is resolvable from context_data → eagerly substituted.
         assert_eq!(script_steps[0].script, "just clippy \"app-b\"");
     }
 }

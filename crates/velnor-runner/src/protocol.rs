@@ -357,33 +357,73 @@ impl OAuthClient {
         credentials: &OAuthJwtCredentials,
     ) -> Result<String> {
         let assertion = build_client_assertion(credentials)?;
-        let params = [
-            ("grant_type", "client_credentials".to_string()),
-            (
+        // Build URL-encoded form body for curl --data
+        let body: String = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("grant_type", "client_credentials")
+            .append_pair(
                 "client_assertion_type",
-                "urn:ietf:params:oauth:client-assertion-type:jwt-bearer".to_string(),
-            ),
-            ("client_assertion", assertion),
-        ];
+                "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+            )
+            .append_pair("client_assertion", &assertion)
+            .finish();
+        let url = credentials.authorization_url.clone();
+        let ua = RUNNER_USER_AGENT.to_string();
 
-        let response = self
-            .http
-            .post(&credentials.authorization_url)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .header(ACCEPT, "application/json")
-            .form(&params)
-            .send()
-            .await
-            .context("send OAuth token request")?;
+        let output = tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let tmp = std::env::temp_dir();
+            let cfg_path = tmp.join(format!("velnor-oauth-{}.cfg", uuid::Uuid::new_v4()));
+            let body_path = tmp.join(format!("velnor-oauth-{}.body", uuid::Uuid::new_v4()));
+            let cfg = format!(
+                "header = \"User-Agent: {ua}\"\n\
+                 header = \"Accept: application/json\"\n\
+                 header = \"Content-Type: application/x-www-form-urlencoded\"\n\
+                 request = POST\n\
+                 silent\n\
+                 write-out = \"\\n%{{http_code}}\"\n"
+            );
+            let write_0600 = |p: &std::path::Path, c: &[u8]| -> std::io::Result<()> {
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(p)?;
+                f.write_all(c)
+            };
+            if let Err(e) = write_0600(&cfg_path, cfg.as_bytes()) {
+                return Err(e);
+            }
+            if let Err(e) = write_0600(&body_path, body.as_bytes()) {
+                let _ = std::fs::remove_file(&cfg_path);
+                return Err(e);
+            }
+            let out = std::process::Command::new("curl")
+                .arg("--config")
+                .arg(&cfg_path)
+                .arg("--data")
+                .arg(format!("@{}", body_path.display()))
+                .arg(&url)
+                .output();
+            let _ = std::fs::remove_file(&cfg_path);
+            let _ = std::fs::remove_file(&body_path);
+            out
+        })
+        .await
+        .context("spawn_blocking curl oauth")?
+        .context("run curl oauth")?;
 
-        let status = response.status();
-        let text = response.text().await.context("read OAuth token response")?;
-        if !status.is_success() && status != reqwest::StatusCode::BAD_REQUEST {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let (text, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
+        let status: u16 = status_str.trim().parse().unwrap_or(0);
+        let ok = status >= 200 && status < 300;
+        if !ok && status != 400 {
             bail!("OAuth token request failed: status={status}, body={text}");
         }
 
         let token: OAuthTokenResponse =
-            serde_json::from_str(&text).context("parse OAuth token response")?;
+            serde_json::from_str(text.trim()).context("parse OAuth token response")?;
 
         if let Some(error) = token.error {
             bail!(
@@ -451,9 +491,10 @@ impl RegistrationClient {
     pub fn new() -> Result<Self> {
         let http = Client::builder()
             .user_agent(RUNNER_USER_AGENT)
-            .use_native_tls()
+            .use_rustls_tls()
             .tcp_keepalive(None)
             .connection_verbose(false)
+            .timeout(std::time::Duration::from_secs(120))
             .build()
             .context("build GitHub runner HTTP client")?;
         Ok(Self { http })
@@ -465,52 +506,96 @@ impl RegistrationClient {
         pat: &str,
         request: &GitHubJitConfigRequest,
     ) -> Result<GitHubJitConfigResponse> {
-        // Retry up to 3 times on transient TCP connection errors (ECONNRESET).
+        // Use curl for runner registration. GitHub's infrastructure applies TLS-fingerprint-based
+        // throttling that causes reqwest/hyper connections to hang for 120+ seconds without a
+        // response, while libcurl (LibreSSL) succeeds instantly. Using curl as a subprocess is
+        // the reliable workaround.
+        let url = scope.jit_config_url.to_string();
+        let body = serde_json::to_string(request).context("serialize JIT config request")?;
+        let pat = pat.to_string();
+        let ua = RUNNER_USER_AGENT.to_string();
+
         let mut last_err = anyhow::anyhow!("no attempts made");
         for attempt in 0..3u32 {
             if attempt > 0 {
-                tokio::time::sleep(std::time::Duration::from_secs(u64::from(attempt) * 2)).await;
+                let backoff = std::time::Duration::from_secs(u64::from(attempt) * 5);
+                eprintln!(
+                    "JIT config error (attempt {}/3), retrying in {}s",
+                    attempt,
+                    backoff.as_secs()
+                );
+                tokio::time::sleep(backoff).await;
             }
-            let result = self
-                .http
-                .post(scope.jit_config_url.clone())
-                .bearer_auth(pat)
-                .header(USER_AGENT, RUNNER_USER_AGENT)
-                .header(ACCEPT, "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .json(request)
-                .send()
-                .await;
-            match result {
-                Ok(r) => {
-                    let status = r.status();
-                    let request_id = r
-                        .headers()
-                        .get("x-github-request-id")
-                        .and_then(|v| v.to_str().ok())
-                        .map(ToOwned::to_owned);
-                    if status != StatusCode::CREATED {
-                        let body = r.text().await.unwrap_or_default();
-                        bail!(
-                            "JIT runner config request failed: status={status}, request_id={}, body={}",
-                            request_id.unwrap_or_else(|| "unknown".to_string()),
-                            body
-                        );
-                    }
-                    return r
-                        .json::<GitHubJitConfigResponse>()
-                        .await
-                        .context("parse JIT runner config response");
+            let url2 = url.clone();
+            let body2 = body.clone();
+            let pat2 = pat.clone();
+            let ua2 = ua.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                use std::os::unix::fs::OpenOptionsExt;
+                let tmp = std::env::temp_dir();
+                let cfg_path = tmp.join(format!("velnor-jit-{}.cfg", uuid::Uuid::new_v4()));
+                let body_path = tmp.join(format!("velnor-jit-{}.body", uuid::Uuid::new_v4()));
+                let cfg = format!(
+                    "header = \"User-Agent: {ua2}\"\n\
+                     header = \"Authorization: Bearer {pat2}\"\n\
+                     header = \"Accept: application/vnd.github+json\"\n\
+                     header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
+                     header = \"Content-Type: application/json\"\n\
+                     request = POST\n\
+                     silent\n\
+                     write-out = \"\\n%{{http_code}}\"\n"
+                );
+                let write_0600 = |p: &std::path::Path, c: &[u8]| -> std::io::Result<()> {
+                    use std::io::Write;
+                    let mut f = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .mode(0o600)
+                        .open(p)?;
+                    f.write_all(c)
+                };
+                if let Err(e) = write_0600(&cfg_path, cfg.as_bytes()) {
+                    return Err(e);
                 }
-                Err(e) if e.is_connect() => {
-                    eprintln!(
-                        "JIT config connect error (attempt {}/3): {e:#}",
-                        attempt + 1
-                    );
+                if let Err(e) = write_0600(&body_path, body2.as_bytes()) {
+                    let _ = std::fs::remove_file(&cfg_path);
+                    return Err(e);
+                }
+                let out = std::process::Command::new("curl")
+                    .arg("--config")
+                    .arg(&cfg_path)
+                    .arg("--data")
+                    .arg(format!("@{}", body_path.display()))
+                    .arg(&url2)
+                    .output();
+                let _ = std::fs::remove_file(&cfg_path);
+                let _ = std::fs::remove_file(&body_path);
+                out
+            })
+            .await
+            .context("spawn_blocking curl")?;
+
+            match result {
+                Err(e) => {
                     last_err = anyhow::Error::from(e).context("send JIT runner config request");
                 }
-                Err(e) => {
-                    return Err(anyhow::Error::from(e).context("send JIT runner config request"))
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let (json_part, status_str) =
+                        stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
+                    let status: u16 = status_str.trim().parse().unwrap_or(0);
+                    if status == 201 {
+                        return serde_json::from_str::<GitHubJitConfigResponse>(json_part.trim())
+                            .context("parse JIT runner config response");
+                    }
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    last_err = anyhow::anyhow!(
+                        "JIT runner config request failed: status={status}, body={json_part}, stderr={stderr}"
+                    );
+                    if status == 409 {
+                        return Err(last_err);
+                    }
                 }
             }
         }
@@ -550,34 +635,144 @@ impl RegistrationClient {
         pat: &str,
         runner_id: i64,
     ) -> Result<()> {
-        let response = self
-            .http
-            .delete(scope.runner_url(runner_id)?)
-            .bearer_auth(pat)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .header(ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await
-            .context("send delete runner request")?;
+        let url = scope.runner_url(runner_id)?.to_string();
+        let pat = pat.to_string();
+        let ua = RUNNER_USER_AGENT.to_string();
 
-        let status = response.status();
-        if status == StatusCode::NO_CONTENT || status == StatusCode::NOT_FOUND {
+        let output = tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let tmp = std::env::temp_dir();
+            let cfg_path = tmp.join(format!("velnor-del-{}.cfg", uuid::Uuid::new_v4()));
+            let cfg = format!(
+                "header = \"User-Agent: {ua}\"\n\
+                 header = \"Authorization: Bearer {pat}\"\n\
+                 header = \"Accept: application/vnd.github+json\"\n\
+                 header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
+                 request = DELETE\n\
+                 silent\n\
+                 write-out = \"\\n%{{http_code}}\"\n"
+            );
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&cfg_path)?;
+            f.write_all(cfg.as_bytes())?;
+            drop(f);
+            let out = std::process::Command::new("curl")
+                .arg("--config")
+                .arg(&cfg_path)
+                .arg(&url)
+                .output();
+            let _ = std::fs::remove_file(&cfg_path);
+            out
+        })
+        .await
+        .context("spawn_blocking curl delete")?
+        .context("run curl delete")?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let (body, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
+        let status: u16 = status_str.trim().parse().unwrap_or(0);
+        if status == 204 || status == 404 {
             return Ok(());
         }
-
-        let request_id = response
-            .headers()
-            .get("x-github-request-id")
-            .and_then(|value| value.to_str().ok())
-            .map(ToOwned::to_owned);
-        let body = response.text().await.unwrap_or_default();
         bail!(
-            "delete runner request failed: status={status}, request_id={}, body={}",
-            request_id.unwrap_or_else(|| "unknown".to_string()),
+            "delete runner request failed: status={status}, body={}",
             body
         );
     }
+}
+
+/// Make an HTTP request via curl subprocess. GitHub's infrastructure applies TLS-fingerprint-based
+/// throttling to reqwest/hyper connections; curl (LibreSSL) is not affected.
+/// Returns (http_status_code, response_body_string).
+///
+/// The Authorization header and request body are written to mode-0600 temp files
+/// and passed via `--config` / `--data @file` so they do not appear on argv
+/// (which is visible in `ps aux` and audit logs).
+pub async fn curl_json_request(
+    method: &str,
+    url: &str,
+    bearer_token: &str,
+    json_body: Option<String>,
+    max_time_secs: u64,
+) -> Result<(u16, String)> {
+    let url = url.to_string();
+    let token = bearer_token.to_string();
+    let ua = RUNNER_USER_AGENT.to_string();
+    let method = method.to_string();
+    let max_time = max_time_secs.to_string();
+    let output = tokio::task::spawn_blocking(move || {
+        // Write secrets to a mode-0600 curl config file so they stay off argv.
+        let tmp_dir = std::env::temp_dir();
+        let cfg_path = tmp_dir.join(format!("velnor-curl-{}.cfg", uuid::Uuid::new_v4()));
+        let body_path = tmp_dir.join(format!("velnor-curl-{}.body", uuid::Uuid::new_v4()));
+
+        let mut cfg = format!(
+            "header = \"User-Agent: {ua}\"\n\
+             header = \"Authorization: Bearer {token}\"\n\
+             header = \"Accept: application/json\"\n\
+             max-time = {max_time}\n\
+             request = {method}\n\
+             silent\n\
+             write-out = \"\\n%{{http_code}}\"\n"
+        );
+        let has_body = json_body.is_some();
+        if has_body {
+            cfg.push_str("header = \"Content-Type: application/json\"\n");
+        }
+
+        // Write config file with restricted permissions.
+        use std::os::unix::fs::OpenOptionsExt;
+        let write_secret = |path: &std::path::Path, content: &[u8]| -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)?;
+            use std::io::Write;
+            f.write_all(content)
+        };
+
+        if let Err(e) = write_secret(&cfg_path, cfg.as_bytes()) {
+            return Err(e);
+        }
+
+        if has_body {
+            if let Some(body) = json_body {
+                if let Err(e) = write_secret(&body_path, body.as_bytes()) {
+                    let _ = std::fs::remove_file(&cfg_path);
+                    return Err(e);
+                }
+            }
+        }
+
+        let mut cmd = std::process::Command::new("curl");
+        cmd.arg("--config").arg(&cfg_path);
+        if has_body {
+            cmd.arg("--data").arg(format!("@{}", body_path.display()));
+        }
+        cmd.arg(&url);
+        let result = cmd.output();
+
+        let _ = std::fs::remove_file(&cfg_path);
+        if has_body {
+            let _ = std::fs::remove_file(&body_path);
+        }
+        result
+    })
+    .await
+    .context("spawn_blocking curl")?
+    .context("run curl")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (body, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
+    let status: u16 = status_str.trim().parse().unwrap_or(0);
+    Ok((status, body.to_string()))
 }
 
 pub fn decode_jit_config(encoded_jit_config: &str) -> Result<DecodedJitConfig> {
@@ -695,31 +890,23 @@ impl BrokerClient {
 
     pub async fn create_session(&self, session: &TaskAgentSession) -> Result<TaskAgentSession> {
         let url = broker_session_url(&self.base_url)?;
-        let response = self
-            .http
-            .post(url)
-            .bearer_auth(&self.bearer_token)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .json(session)
-            .send()
-            .await
-            .context("send create broker session request")?;
-
-        parse_json_response(response, "create broker session").await
+        let body = serde_json::to_string(session).context("serialize session")?;
+        let (status, text) =
+            curl_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
+        if !(200..300).contains(&status) {
+            bail!("create broker session failed: status={status}, body={text}");
+        }
+        serde_json::from_str(&text).context("parse create broker session response")
     }
 
     pub async fn delete_session(&self) -> Result<()> {
         let url = broker_session_url(&self.base_url)?;
-        let response = self
-            .http
-            .delete(url)
-            .bearer_auth(&self.bearer_token)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .send()
-            .await
-            .context("send delete broker session request")?;
-
-        parse_empty_response(response, "delete broker session").await
+        let (status, text) =
+            curl_json_request("DELETE", url.as_str(), &self.bearer_token, None, 30).await?;
+        if status != 0 && !(200..300).contains(&status) {
+            bail!("delete broker session failed: status={status}, body={text}");
+        }
+        Ok(())
     }
 
     pub async fn get_runner_message(
@@ -729,16 +916,17 @@ impl BrokerClient {
         disable_update: bool,
     ) -> Result<Option<TaskAgentMessage>> {
         let url = broker_message_url(&self.base_url, session_id, status, disable_update)?;
-        let response = self
-            .http
-            .get(url)
-            .bearer_auth(&self.bearer_token)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .send()
-            .await
-            .context("send get broker message request")?;
-
-        parse_optional_task_agent_message_response(response, "get broker message").await
+        let (http_status, text) =
+            curl_json_request("GET", url.as_str(), &self.bearer_token, None, 70).await?;
+        if http_status == 204 || text.trim().is_empty() {
+            return Ok(None);
+        }
+        if !(200..300).contains(&http_status) {
+            bail!("get broker message failed: status={http_status}, body={text}");
+        }
+        serde_json::from_str(text.trim())
+            .map(Some)
+            .context("parse get broker message response")
     }
 
     pub async fn acknowledge_runner_request(
@@ -748,18 +936,13 @@ impl BrokerClient {
         status: RunnerStatus,
     ) -> Result<()> {
         let url = broker_acknowledge_url(&self.base_url, session_id, status)?;
-        let body = json!({ "runnerRequestId": runner_request_id });
-        let response = self
-            .http
-            .post(url)
-            .bearer_auth(&self.bearer_token)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .json(&body)
-            .send()
-            .await
-            .context("send broker acknowledge request")?;
-
-        parse_empty_response(response, "acknowledge broker runner request").await
+        let body = json!({ "runnerRequestId": runner_request_id }).to_string();
+        let (http_status, text) =
+            curl_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
+        if http_status != 0 && !(200..300).contains(&http_status) {
+            bail!("acknowledge broker runner request failed: status={http_status}, body={text}");
+        }
+        Ok(())
     }
 }
 
@@ -798,22 +981,28 @@ impl RunServiceClient {
         billing_owner_id: Option<&str>,
     ) -> Result<AcquireJobOutcome> {
         let url = run_service_acquire_job_url(run_service_url)?;
-        let body = AcquireJobRequest {
+        let body = serde_json::to_string(&AcquireJobRequest {
             job_message_id,
             runner_os,
             billing_owner_id,
-        };
-        let response = self
-            .http
-            .post(url)
-            .bearer_auth(&self.bearer_token)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .json(&body)
-            .send()
-            .await
-            .context("send run-service acquire job request")?;
-
-        parse_acquire_job_response(response).await
+        })
+        .context("serialize acquire job request")?;
+        let (status, text) =
+            curl_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
+        let status_code = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        if is_non_retriable_acquire_status(status_code) {
+            return Ok(AcquireJobOutcome::Skipped {
+                status: status_code,
+                request_id: None,
+                body: text,
+            });
+        }
+        if !(200..300).contains(&status) {
+            bail!("acquire run-service job failed: status={status}, body={text}");
+        }
+        serde_json::from_str::<Value>(&text)
+            .map(AcquireJobOutcome::Acquired)
+            .context("parse acquire run-service job response")
     }
 
     pub async fn renew_job(
@@ -823,18 +1012,14 @@ impl RunServiceClient {
         job_id: &str,
     ) -> Result<RenewJobResponse> {
         let url = run_service_renew_job_url(run_service_url)?;
-        let body = RenewJobRequest { plan_id, job_id };
-        let response = self
-            .http
-            .post(url)
-            .bearer_auth(&self.bearer_token)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .json(&body)
-            .send()
-            .await
-            .context("send run-service renew job request")?;
-
-        parse_json_response(response, "renew run-service job").await
+        let body = serde_json::to_string(&RenewJobRequest { plan_id, job_id })
+            .context("serialize renew job request")?;
+        let (status, text) =
+            curl_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
+        if !(200..300).contains(&status) {
+            bail!("renew run-service job failed: status={status}, body={text}");
+        }
+        serde_json::from_str(&text).context("parse renew run-service job response")
     }
 
     pub async fn complete_job(
@@ -843,17 +1028,13 @@ impl RunServiceClient {
         completion: RunServiceCompleteJob,
     ) -> Result<()> {
         let url = run_service_complete_job_url(run_service_url)?;
-        let response = self
-            .http
-            .post(url)
-            .bearer_auth(&self.bearer_token)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .json(&completion)
-            .send()
-            .await
-            .context("send run-service complete job request")?;
-
-        parse_empty_response(response, "complete run-service job").await
+        let body = serde_json::to_string(&completion).context("serialize complete job request")?;
+        let (status, text) =
+            curl_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
+        if !(200..300).contains(&status) {
+            bail!("complete run-service job failed: status={status}, body={text}");
+        }
+        Ok(())
     }
 }
 
@@ -1842,12 +2023,20 @@ pub struct RunServiceVariableValue {
 pub struct RunServiceStepResult {
     #[serde(rename = "external_id", skip_serializing_if = "Option::is_none")]
     pub external_id: Option<String>,
+    /// Sequential 1-indexed step number. GitHub uses this for `number` in the
+    /// REST API response and for the `/logs/{n}` URL. Maps to `TimelineRecord.Order`.
+    #[serde(rename = "number", skip_serializing_if = "Option::is_none")]
+    pub number: Option<i64>,
     #[serde(rename = "name")]
     pub name: String,
     #[serde(rename = "status")]
     pub status: TimelineRecordState,
     #[serde(rename = "conclusion")]
     pub conclusion: TaskResult,
+    #[serde(rename = "started_at", skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(rename = "completed_at", skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
     #[serde(rename = "completed_log_lines")]
     pub completed_log_lines: i64,
     #[serde(rename = "annotations", skip_serializing_if = "Vec::is_empty")]
@@ -2725,6 +2914,152 @@ impl TwirpResultsClient {
     }
 }
 
+/// Upload artifact files to GitHub's Results Service (artifact v4 format).
+///
+/// Uses synchronous `reqwest::blocking` — safe to call from `tokio::task::spawn_blocking`
+/// threads (the Velnor job executor context).
+///
+/// Flow: CreateArtifact → PUT zip to signed URL → FinalizeArtifact
+pub fn upload_artifact_blocking(
+    results_service_url: &str,
+    token: &str,
+    plan_id: &str,
+    job_id: &str,
+    name: &str,
+    files: &[(String, Vec<u8>)], // (archive path, content)
+) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
+    let base = results_service_url.trim_end_matches('/');
+    let tmp_dir = std::env::temp_dir();
+
+    // Write a mode-0600 file and return its path. Caller must delete.
+    let write_secret_file = |suffix: &str, content: &[u8]| -> std::io::Result<std::path::PathBuf> {
+        let p = tmp_dir.join(format!("velnor-artifact-{}.{suffix}", uuid::Uuid::new_v4()));
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&p)?;
+        f.write_all(content)?;
+        Ok(p)
+    };
+
+    // Helper: curl POST with JSON via 0600 config + body files — secrets stay off argv.
+    let curl_post = |url: &str, body: &str| -> Result<String> {
+        let cfg = format!(
+            "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
+             header = \"Authorization: Bearer {token}\"\n\
+             header = \"Accept: application/json\"\n\
+             header = \"Content-Type: application/json\"\n\
+             max-time = 30\n\
+             request = POST\n\
+             silent\n\
+             write-out = \"\\n%{{http_code}}\"\n"
+        );
+        let cfg_path = write_secret_file("cfg", cfg.as_bytes()).context("write curl cfg")?;
+        let body_path = write_secret_file("body", body.as_bytes()).context("write curl body")?;
+        let out = std::process::Command::new("curl")
+            .arg("--config")
+            .arg(&cfg_path)
+            .arg("--data")
+            .arg(format!("@{}", body_path.display()))
+            .arg(url)
+            .output();
+        let _ = std::fs::remove_file(&cfg_path);
+        let _ = std::fs::remove_file(&body_path);
+        let out = out.context("run curl")?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let (resp_body, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
+        let status: u16 = status_str.trim().parse().unwrap_or(0);
+        if !(200..300).contains(&status) {
+            bail!("curl POST {url}: status={status}, body={resp_body}");
+        }
+        Ok(resp_body.to_string())
+    };
+
+    // 1. CreateArtifact → signed upload URL.
+    let create_url = format!("{base}/{SERVICE}/CreateArtifact");
+    let create_body = serde_json::to_string(&serde_json::json!({
+        "workflow_run_backend_id": plan_id,
+        "workflow_job_run_backend_id": job_id,
+        "name": name,
+        "version": 4
+    }))
+    .context("serialize CreateArtifact")?;
+    let create_text = curl_post(&create_url, &create_body).context("CreateArtifact request")?;
+    let create_resp: serde_json::Value =
+        serde_json::from_str(&create_text).context("CreateArtifact parse")?;
+    if create_resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        bail!("CreateArtifact: backend returned ok=false or absent");
+    }
+    let upload_url = create_resp
+        .get("signed_upload_url")
+        .and_then(|v| v.as_str())
+        .filter(|u| !u.is_empty())
+        .context("CreateArtifact: empty signed_upload_url")?
+        .to_string();
+
+    // 2. Create zip archive and PUT to signed URL.
+    // The signed URL is itself a credential — keep it off argv via --config.
+    let zip_bytes = {
+        let buf = std::io::Cursor::new(Vec::new());
+        let mut zw = zip::ZipWriter::new(buf);
+        let opts = zip::write::FileOptions::<()>::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (archive_path, content) in files {
+            zw.start_file(archive_path, opts)
+                .context("zip start_file")?;
+            zw.write_all(content).context("zip write")?;
+        }
+        zw.finish().context("zip finish")?.into_inner()
+    };
+    let zip_size = zip_bytes.len() as u64;
+
+    let zip_path = write_secret_file("zip", &zip_bytes).context("write zip temp file")?;
+    let put_cfg = format!(
+        "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
+         header = \"Content-Type: application/zip\"\n\
+         header = \"Content-Length: {zip_size}\"\n\
+         header = \"x-ms-blob-type: BlockBlob\"\n\
+         max-time = 60\n\
+         request = PUT\n\
+         silent\n\
+         write-out = \"\\n%{{http_code}}\"\n\
+         url = \"{upload_url}\"\n"
+    );
+    let put_cfg_path = write_secret_file("put.cfg", put_cfg.as_bytes()).context("write PUT cfg")?;
+    let put_out = std::process::Command::new("curl")
+        .arg("--config")
+        .arg(&put_cfg_path)
+        .arg("--data-binary")
+        .arg(format!("@{}", zip_path.display()))
+        .output();
+    let _ = std::fs::remove_file(&put_cfg_path);
+    let _ = std::fs::remove_file(&zip_path);
+    let put_out = put_out.context("run curl PUT")?;
+    let stdout = String::from_utf8_lossy(&put_out.stdout);
+    let (_, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
+    let put_status: u16 = status_str.trim().parse().unwrap_or(0);
+    if !(200..300).contains(&put_status) {
+        bail!("artifact blob PUT failed: status={put_status}");
+    }
+
+    // 3. FinalizeArtifact.
+    let finalize_url = format!("{base}/{SERVICE}/FinalizeArtifact");
+    let finalize_body = serde_json::to_string(&serde_json::json!({
+        "workflow_run_backend_id": plan_id,
+        "workflow_job_run_backend_id": job_id,
+        "name": name,
+        "size": zip_size.to_string()
+    }))
+    .context("serialize FinalizeArtifact")?;
+    curl_post(&finalize_url, &finalize_body).context("FinalizeArtifact request")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3132,8 +3467,11 @@ mod tests {
             .into(),
             step_results: vec![RunServiceStepResult {
                 external_id: Some("step".into()),
+                number: None,
                 name: "step".into(),
                 status: TimelineRecordState::Completed,
+                started_at: None,
+                completed_at: None,
                 conclusion: TaskResult::Succeeded,
                 completed_log_lines: 2,
                 annotations: vec![RunServiceAnnotation {

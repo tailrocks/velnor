@@ -385,10 +385,12 @@ fn is_checkout_step(step: &ActionStep) -> bool {
 }
 
 pub(crate) fn checkout_step_id(step: &ActionStep, index: usize) -> String {
-    step.id
+    // Prefer context_name (YAML id:) over internal UUID for expression lookup.
+    step.context_name
         .as_deref()
-        .or(step.context_name.as_deref())
-        .or(step.name.as_deref())
+        .filter(|n| !n.is_empty() && !n.starts_with("__"))
+        .or_else(|| step.id.as_deref())
+        .or_else(|| step.name.as_deref())
         .map(sanitize_segment)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| format!("checkout{}", index + 1))
