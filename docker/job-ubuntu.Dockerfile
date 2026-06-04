@@ -13,8 +13,14 @@ RUN apt-get update \
         git \
         git-lfs \
         jq \
+        libbz2-dev \
         libclang-dev \
+        libffi-dev \
+        liblzma-dev \
+        libncurses-dev \
+        libreadline-dev \
         libsasl2-dev \
+        libsqlite3-dev \
         libssl-dev \
         libzstd-dev \
         openssh-client \
@@ -22,6 +28,9 @@ RUN apt-get update \
         protobuf-compiler \
         python3 \
         tar \
+        tk-dev \
+        uuid-dev \
+        zlib1g-dev \
         unzip \
         xz-utils \
         zip \
