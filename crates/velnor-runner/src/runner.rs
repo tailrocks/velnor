@@ -1832,7 +1832,29 @@ fn start_step_log_publisher(
             None
         };
 
-        while let Some(log) = receiver.recv().await {
+        // Keep the feed connection warm: ping during idle gaps (e.g. a long
+        // compile step with no log output) so GitHub doesn't close it and the
+        // live console doesn't stutter on the next send.
+        let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
+        ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            let log = tokio::select! {
+                maybe = receiver.recv() => match maybe {
+                    Some(log) => log,
+                    None => break,
+                },
+                _ = ping_interval.tick() => {
+                    if let Some(ws) = ws_conn.as_mut() {
+                        if let Err(e) = crate::protocol::FeedStreamClient::send_ping(ws).await {
+                            eprintln!(
+                                "[feed] keepalive ping failed: {e:#}; dropping to reconnect on next send"
+                            );
+                            ws_conn = None;
+                        }
+                    }
+                    continue;
+                }
+            };
             let masks = job_secret_mask_values(&job);
             let lines: Vec<String> = log
                 .lines
