@@ -44,7 +44,11 @@ ENV HOME=/root \
     MISE_DATA_DIR=/opt/mise \
     MISE_CACHE_DIR=/opt/mise/cache \
     MISE_CONFIG_DIR=/opt/mise/config \
-    PATH=/opt/mise/bin:/opt/mise/shims:$PATH
+    PATH=/opt/mise/bin:/opt/mise/shims:$PATH \
+    # Use precompiled python (python-build-standalone) instead of compiling via
+    # pyenv. pyenv lacks definitions for brand-new versions (e.g. 3.14) and
+    # compiling is slow; GitHub-hosted mise uses precompiled too, so this matches.
+    MISE_PYTHON_COMPILE=0
 
 RUN mkdir -p /opt/mise/bin && \
     curl -fsSL https://mise.run | MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
