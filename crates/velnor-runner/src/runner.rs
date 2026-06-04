@@ -268,15 +268,21 @@ async fn remove_existing_jit_config_for_replace(dir: &Path, pat: Option<&str>) -
     if let Some(stored) = config::load(dir).ok() {
         if let (Some(pat), Some(agent_id)) = (pat, stored.settings.agent_id) {
             let scope = GitHubScope::parse(&stored.settings.github_url)?;
-            RegistrationClient::new()?
+            // Best-effort: a runner that is mid-job returns 422 ("currently
+            // busy"). That must NOT crash daemon startup — the busy runner will
+            // finish and go offline on its own; we just drop the stale local
+            // config and register a fresh JIT runner for this slot.
+            match RegistrationClient::new()?
                 .delete_runner(&scope, pat, agent_id)
                 .await
-                .with_context(|| {
-                    format!("delete existing JIT runner id {agent_id} before replace")
-                })?;
-            println!(
-                "Deleted or confirmed absent existing JIT runner id {agent_id} before replace."
-            );
+            {
+                Ok(()) => println!(
+                    "Deleted or confirmed absent existing JIT runner id {agent_id} before replace."
+                ),
+                Err(e) => eprintln!(
+                    "Warning: could not delete existing JIT runner id {agent_id} before replace (continuing): {e:#}"
+                ),
+            }
         }
         if config::remove(dir)? {
             println!(
@@ -571,11 +577,17 @@ async fn delete_and_remove_daemon_slot_jit_config(
 
     if let (Some(pat), Some(agent_id)) = (args.pat.as_ref(), stored.settings.agent_id) {
         let scope = GitHubScope::parse(&stored.settings.github_url)?;
-        RegistrationClient::new()?
+        // Best-effort (see remove_existing_jit_config_for_replace): a busy runner
+        // returns 422 and must not abort daemon startup.
+        match RegistrationClient::new()?
             .delete_runner(&scope, pat, agent_id)
             .await
-            .with_context(|| format!("delete daemon JIT runner id {agent_id}"))?;
-        println!("Deleted or confirmed absent daemon JIT runner id {agent_id}.");
+        {
+            Ok(()) => println!("Deleted or confirmed absent daemon JIT runner id {agent_id}."),
+            Err(e) => eprintln!(
+                "Warning: could not delete daemon JIT runner id {agent_id} (continuing): {e:#}"
+            ),
+        }
     }
 
     if config::remove(slot_dir)? {
