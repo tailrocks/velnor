@@ -57,6 +57,15 @@ git-bundle deploys. Target this as the real fix for daemon operations.
         verified locally with cargo-deb 3.7.0. Token via `GITHUB_TOKEN` env (off
         argv). NOTE: runs as `User=root` (manages Docker) — not a `velnor` user;
         harden later if desired.
+  - [x] **release-deb.yml validated** — tag `v0.1.0-rc1` built a clean amd64
+        `.deb` on Ubuntu CI (run 26983987624) + attached it to the GitHub
+        Release. velnor side of the pipeline works end-to-end.
+  - [ ] **velnor is PRIVATE** → velnor-apt's `publish.yml` needs a
+        `VELNOR_RELEASE_TOKEN` (PAT with read access to donbeave/velnor) to
+        download the release `.deb`. Also note: publishing to the PUBLIC
+        velnor-apt repo makes the `.deb` binary public even though the source is
+        private — decide if that's intended (else host the apt repo privately +
+        use `raw.githubusercontent.com` + `auth.conf.d`).
   - [ ] **GPG signing key** — create it; add `APT_GPG_PRIVATE_KEY` +
         `APT_GPG_PASSPHRASE` secrets to `velnor-apt`; set `SignWith` key id;
         publish the public `velnor.gpg`.
