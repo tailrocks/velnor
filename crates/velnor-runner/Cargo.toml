@@ -28,3 +28,4 @@ url.workspace = true
 uuid.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
+zip.workspace = true

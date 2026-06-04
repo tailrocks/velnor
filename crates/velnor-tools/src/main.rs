@@ -719,17 +719,29 @@ struct GitHubContentFile {
 }
 
 async fn fetch_github_file(repo: &str, git_ref: &str, path: &str) -> Result<String> {
-    let url = format!("https://api.github.com/repos/{repo}/contents/{path}?ref={git_ref}");
-    let payload = github_http_client()?
-        .get(url)
-        .headers(github_headers("velnor-fixture-audit")?)
-        .send()
-        .await
-        .with_context(|| format!("fetch {repo}@{git_ref}:{path}"))?
-        .error_for_status()
-        .with_context(|| format!("fetch {repo}@{git_ref}:{path}"))?
-        .json::<GitHubContentFile>()
-        .await
+    // Use `gh` CLI to bypass reqwest TLS-fingerprint throttling from GitHub's infrastructure.
+    let output = tokio::task::spawn_blocking({
+        let repo = repo.to_string();
+        let git_ref = git_ref.to_string();
+        let path = path.to_string();
+        move || {
+            Command::new("gh")
+                .args([
+                    "api",
+                    &format!("repos/{repo}/contents/{path}?ref={git_ref}"),
+                ])
+                .output()
+        }
+    })
+    .await
+    .context("spawn_blocking gh api")?
+    .with_context(|| format!("fetch {repo}@{git_ref}:{path}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("fetch {repo}@{git_ref}:{path}: {stderr}");
+    }
+    let payload: GitHubContentFile = serde_json::from_slice(&output.stdout)
         .with_context(|| format!("parse GitHub content response for {path}"))?;
     if payload.kind != "file" {
         bail!("{path} is not a file in {repo}@{git_ref}");
@@ -2215,8 +2227,10 @@ fn expected_target_uses() -> BTreeMap<String, usize> {
         ("actions/checkout", 46),
         ("actions/deploy-pages", 1),
         ("actions/download-artifact", 3),
+        ("actions/setup-python", 1),
         ("actions/upload-artifact", 6),
         ("actions/upload-pages-artifact", 1),
+        ("baptiste0928/cargo-install", 1),
         ("crazy-max/ghaction-github-runtime", 2),
         ("docker/bake-action", 1),
         ("docker/build-push-action", 1),
@@ -2224,8 +2238,9 @@ fn expected_target_uses() -> BTreeMap<String, usize> {
         ("docker/metadata-action", 1),
         ("docker/setup-buildx-action", 5),
         ("dorny/paths-filter", 5),
-        ("extractions/setup-just", 3),
-        ("jdx/mise-action", 15),
+        ("dtolnay/rust-toolchain", 1),
+        ("extractions/setup-just", 4),
+        ("jdx/mise-action", 13),
         ("mozilla-actions/sccache-action", 7),
         ("renovatebot/github-action", 2),
         ("rui314/setup-mold", 5),
