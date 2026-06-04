@@ -98,7 +98,7 @@ git-bundle deploys. Target this as the real fix for daemon operations.
       delete *all* of its own prior named runners before registering.
 - [ ] **Boot/auto-recovery verified** — daemon comes back after reboot + after a
       crash without manual `gh api DELETE runners` + restart.
-- [ ] **Docker network leak** — interrupted jobs / daemon crashes leave
+- [x] **Docker network leak** FIXED (rc2: prune velnor-net + velnor-job on startup; verified) — interrupted jobs / daemon crashes leave
       `velnor-net-*` networks behind; they accumulate until Docker's address pool
       is exhausted (`docker network create … all predefined address pools have
       been fully subnetted`) and then ALL new jobs fail. Hit this after 27 leaked
