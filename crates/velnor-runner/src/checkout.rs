@@ -28,6 +28,9 @@ pub struct CheckoutPlan {
     pub fetch_tags: bool,
     pub persist_credentials: bool,
     pub clean: bool,
+    /// `lfs: true` input — download Git LFS objects during checkout. Default false
+    /// (matches actions/checkout: leave LFS pointers, do not fetch blobs).
+    pub lfs: bool,
     pub condition: Option<String>,
     pub continue_on_error: bool,
 }
@@ -119,6 +122,7 @@ pub fn checkout_plans(
             fetch_tags: checkout_fetch_tags(step),
             persist_credentials: checkout_persist_credentials(step),
             clean: checkout_clean(step),
+            lfs: checkout_lfs(step),
             condition: step.condition.clone(),
             continue_on_error: crate::script_step::step_continue_on_error(step),
         });
@@ -149,6 +153,7 @@ where
         plan.fetch_tags,
         plan.persist_credentials,
         plan.clean,
+        plan.lfs,
     )
 }
 
@@ -232,6 +237,7 @@ pub fn fetch_git_ref<R>(
     fetch_tags: bool,
     persist_credentials: bool,
     clean: bool,
+    lfs: bool,
 ) -> Result<()>
 where
     R: CommandRunner,
@@ -295,8 +301,20 @@ where
     }
     run_git(runner, &fetch)?;
 
+    // For lfs:true, the git-lfs smudge filter runs during checkout and downloads
+    // LFS blobs — it authenticates via the persisted http.<host>.extraheader, so
+    // set credentials up BEFORE checkout. For lfs:false (default) we instead skip
+    // the smudge entirely (no LFS fetch, no creds needed) via lfs_skip_smudge_args.
+    if lfs {
+        if let Some(token) = token {
+            persist_git_credentials(runner, destination, clone_url, token)?;
+        }
+    }
+
     let mut checkout = vec!["-C".to_string(), path_arg(destination)];
-    checkout.extend(lfs_skip_smudge_args());
+    if !lfs {
+        checkout.extend(lfs_skip_smudge_args());
+    }
     checkout.extend([
         "checkout".to_string(),
         "--force".to_string(),
@@ -306,7 +324,9 @@ where
 
     if clean {
         let mut reset = vec!["-C".to_string(), path_arg(destination)];
-        reset.extend(lfs_skip_smudge_args());
+        if !lfs {
+            reset.extend(lfs_skip_smudge_args());
+        }
         reset.extend([
             "reset".to_string(),
             "--hard".to_string(),
@@ -568,6 +588,15 @@ fn checkout_fetch_tags(step: &ActionStep) -> bool {
     step.inputs
         .as_ref()
         .and_then(|inputs| input_string(inputs, &["fetch-tags", "fetchTags", "FetchTags"]))
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+}
+
+/// `lfs` input (actions/checkout). Default false: leave LFS pointers, do not
+/// fetch blobs. `true`: download LFS objects during checkout (needs auth).
+fn checkout_lfs(step: &ActionStep) -> bool {
+    step.inputs
+        .as_ref()
+        .and_then(|inputs| input_string(inputs, &["lfs", "Lfs", "LFS"]))
         .is_some_and(|value| value.eq_ignore_ascii_case("true"))
 }
 
@@ -837,6 +866,7 @@ mod tests {
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            lfs: false,
             condition: None,
             continue_on_error: false,
         };
@@ -894,6 +924,7 @@ mod tests {
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            lfs: false,
             condition: None,
             continue_on_error: false,
         };
@@ -924,6 +955,7 @@ mod tests {
             fetch_tags: false,
             persist_credentials: false,
             clean: true,
+            lfs: false,
             condition: None,
             continue_on_error: false,
         };
@@ -951,6 +983,7 @@ mod tests {
             fetch_tags: false,
             persist_credentials: true,
             clean: true,
+            lfs: false,
             condition: None,
             continue_on_error: false,
         };
