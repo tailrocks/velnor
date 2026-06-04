@@ -28,6 +28,7 @@ and gates green).
 | 1 | **Target workflow coverage** | Native Rust adapters + runtime features so target jobs *execute correctly*; Rust-first performance (parallelism, aggressive caches). | — (foundation) | `/goal prompts/target-workflow-coverage.md` |
 | 2 | **GitHub UI parity** | Equal-or-better Checks UI experience: expandable steps, grouping, ANSI color, timestamps, synthetic steps, conclusions. | #1 (jobs must run before their output can be made faithful) | `/goal prompts/github-ui-parity.md` |
 | 3 | **Fixture proof completion** | End-to-end green fixture proof via JIT/V2 + compare + timing/cache evidence; the Phase 0 gate. | #1 and #2 | `/goal prompts/fixture-proof.md` |
+| 4 | **ChainArgos runner parity** | Real-target proof. Phase A: repoint `ChainArgos/java-monorepo` from self-hosted to GitHub-hosted runners and make every pipeline green (fix the project where infra masked breakage). Phase B: run the *same* jobs on GitHub + Velnor lanes in parallel; fix Velnor for any divergence, never the job. | Phase A: none. Phase B: #1, #2, #3 | `/goal prompts/chainargos-runner-parity.md` |
 
 Copy-paste, in order:
 
@@ -39,6 +40,9 @@ Copy-paste, in order:
 ```
 ```text
 /goal prompts/fixture-proof.md
+```
+```text
+/goal prompts/chainargos-runner-parity.md
 ```
 
 > Why this order: make jobs **run correctly** first (coverage), then make their
