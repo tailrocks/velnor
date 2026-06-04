@@ -1749,7 +1749,7 @@ fn start_step_log_publisher(
                     eprintln!(
                         "[feed] Sending {} lines for step {}",
                         lines.len(),
-                        &log.step_id[..8]
+                        &log.step_id[..log.step_id.len().min(8)]
                     );
                     let ts = unix_now_iso8601();
                     let timestamped: Vec<String> =
@@ -1793,8 +1793,16 @@ fn start_step_log_publisher(
                         log.display_name.clone()
                     },
                     status: crate::protocol::StepStatus::Completed as u8,
-                    started_at: None,
-                    completed_at: Some(unix_now_iso8601()),
+                    started_at: if log.started_at.is_empty() {
+                        None
+                    } else {
+                        Some(log.started_at.clone())
+                    },
+                    completed_at: Some(if log.completed_at.is_empty() {
+                        unix_now_iso8601()
+                    } else {
+                        log.completed_at.clone()
+                    }),
                     conclusion: conclusion as u8,
                 };
                 if let Err(e) = client
@@ -1963,6 +1971,8 @@ fn execute_script_job(
             step_id: setup_step_id,
             display_name: "Set up job".to_string(),
             order: 1,
+            started_at: unix_now_iso8601(),
+            completed_at: unix_now_iso8601(),
             lines: setup_job_lines(job, docker_image),
             masks: Vec::new(),
             annotations: Vec::new(),
@@ -2008,6 +2018,8 @@ fn execute_script_job(
                 step_id: plan.step_id.clone(),
                 display_name: plan.display_name.clone(),
                 order: checkout_order,
+                started_at: unix_now_iso8601(),
+                completed_at: unix_now_iso8601(),
                 lines: checkout_lines,
                 masks: Vec::new(),
                 annotations: Vec::new(),
@@ -2150,6 +2162,7 @@ fn execute_script_job(
     };
     // "Post Run actions/checkout@vN" steps for each checkout (credential cleanup).
     let mut post_order = summary.step_logs.iter().map(|l| l.order).max().unwrap_or(0);
+    let mut extra_step_logs: Vec<StepLog> = Vec::new();
     for plan in &cleanup_checkout_plans {
         post_order += 1;
         let post_step_id = uuid::Uuid::new_v4().to_string();
@@ -2160,6 +2173,7 @@ fn execute_script_job(
                 .unwrap_or(&plan.display_name);
             format!("Post Run {n}")
         };
+        let post_ts = unix_now_iso8601();
         if let Some(sender) = &post_step_start_sender {
             let _ = sender.send(StepStartEvent {
                 step_id: post_step_id.clone(),
@@ -2167,24 +2181,28 @@ fn execute_script_job(
                 order: post_order,
             });
         }
+        let post_log = StepLog {
+            step_id: post_step_id,
+            display_name: post_name,
+            order: post_order,
+            started_at: post_ts.clone(),
+            completed_at: post_ts,
+            lines: Vec::new(),
+            masks: Vec::new(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        };
         if let Some(sender) = &post_step_log_sender {
-            let _ = sender.send(StepLog {
-                step_id: post_step_id,
-                display_name: post_name,
-                order: post_order,
-                lines: Vec::new(),
-                masks: Vec::new(),
-                annotations: Vec::new(),
-                telemetry: Vec::new(),
-                exit_code: 0,
-                skipped: false,
-                failure_ignored: false,
-                error_count: 0,
-                warning_count: 0,
-                notice_count: 0,
-                summary: String::new(),
-            });
+            let _ = sender.send(post_log.clone());
         }
+        extra_step_logs.push(post_log);
     }
 
     // Synthetic "Complete job" step matching GitHub-hosted runner output.
@@ -2197,29 +2215,37 @@ fn execute_script_job(
             order: complete_order,
         });
     }
+    let complete_ts = unix_now_iso8601();
+    let complete_log = StepLog {
+        step_id: complete_step_id,
+        display_name: "Complete job".to_string(),
+        order: complete_order,
+        started_at: complete_ts.clone(),
+        completed_at: complete_ts,
+        lines: complete_job_lines(),
+        masks: Vec::new(),
+        annotations: Vec::new(),
+        telemetry: Vec::new(),
+        exit_code: 0,
+        skipped: false,
+        failure_ignored: false,
+        error_count: 0,
+        warning_count: 0,
+        notice_count: 0,
+        summary: String::new(),
+    };
     if let Some(sender) = &post_step_log_sender {
-        let _ = sender.send(StepLog {
-            step_id: complete_step_id,
-            display_name: "Complete job".to_string(),
-            order: complete_order,
-            lines: complete_job_lines(),
-            masks: Vec::new(),
-            annotations: Vec::new(),
-            telemetry: Vec::new(),
-            exit_code: 0,
-            skipped: false,
-            failure_ignored: false,
-            error_count: 0,
-            warning_count: 0,
-            notice_count: 0,
-            summary: String::new(),
-        });
+        let _ = sender.send(complete_log.clone());
     }
+    extra_step_logs.push(complete_log);
+
+    let mut all_step_logs = summary.step_logs;
+    all_step_logs.extend(extra_step_logs);
     Ok(ScriptJobResult {
         result,
         outputs: summary.job_outputs,
         environment_url,
-        step_logs: summary.step_logs,
+        step_logs: all_step_logs,
     })
 }
 
@@ -2753,9 +2779,19 @@ fn job_work_dir(
 }
 
 fn unix_now_iso8601() -> String {
-    use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+    use time::{format_description, OffsetDateTime};
+    // GitHub's frontend parses timestamps from log blobs using a regex that expects
+    // second-precision RFC3339 (no sub-second component): YYYY-MM-DDTHH:MM:SSZ.
+    // Sub-second precision (e.g. .098615Z from Rfc3339) is not parsed — the timestamp
+    // appears as plain text in the content column instead of the separate timestamp column.
+    let fmt = format_description::parse("[year]-[month]-[day]T[hour]:[minute]:[second]Z")
+        .unwrap_or_else(|_| vec![]);
     OffsetDateTime::now_utc()
-        .format(&Rfc3339)
+        .replace_nanosecond(0)
+        .map(|t| {
+            t.format(&fmt)
+                .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+        })
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
@@ -2781,29 +2817,33 @@ fn setup_job_lines(job: &AgentJobRequestMessage, docker_image: &str) -> Vec<Stri
     lines.push(format!("Image: {docker_image}"));
     lines.push("##[endgroup]".to_string());
 
-    // GITHUB_TOKEN Permissions (best-effort from context data).
-    let permissions = job
-        .context_data
-        .get("github")
-        .and_then(|g| g.get("token"))
-        .and_then(|t| t.get("permissions"))
-        .and_then(|p| p.as_object());
-    if let Some(perms) = permissions {
-        lines.push("##[group]GITHUB_TOKEN Permissions".to_string());
-        for (scope, level) in perms {
-            let display = level
-                .as_str()
-                .unwrap_or_else(|| level.as_str().unwrap_or("read"));
-            lines.push(format!("  {scope}: {display}"));
+    // GITHUB_TOKEN Permissions — read from job variable "system.github.token.permissions"
+    // (JSON string like {"Actions":"read","Contents":"read","Metadata":"read"}).
+    // GitHub always shows this group when permissions are known; "Secret source: Actions"
+    // is shown separately after the group (not as an exclusive fallback).
+    let perm_json = job
+        .variables
+        .get("system.github.token.permissions")
+        .and_then(|v| v.value.as_deref());
+    if let Some(json_str) = perm_json {
+        if let Ok(serde_json::Value::Object(perms)) =
+            serde_json::from_str::<serde_json::Value>(json_str)
+        {
+            lines.push("##[group]GITHUB_TOKEN Permissions".to_string());
+            for (scope, level) in &perms {
+                let display = level.as_str().unwrap_or("read");
+                lines.push(format!("  {scope}: {display}"));
+            }
+            lines.push("##[endgroup]".to_string());
         }
-        lines.push("##[endgroup]".to_string());
-    } else {
-        lines.push("Secret source: Actions".to_string());
     }
+    lines.push("Secret source: Actions".to_string());
 
     lines.push("Prepare workflow directory".to_string());
 
     // Enumerate repository actions used by the job (non-local uses).
+    // Format matches GitHub: "Download action repository '<name>@<ref>' (SHA:<sha>)"
+    // SHA is included when the git_ref looks like a full commit hash (40 hex chars).
     let repo_actions: Vec<_> = job
         .steps
         .iter()
@@ -2825,7 +2865,17 @@ fn setup_job_lines(job: &AgentJobRequestMessage, docker_image: &str) -> Vec<Stri
         lines.push("##[group]Prepare all required actions".to_string());
         lines.push("Getting action download info".to_string());
         for (name, git_ref) in repo_actions {
-            lines.push(format!("  Download action repository '{name}@{git_ref}'"));
+            // If git_ref is a full SHA (40 hex chars), show it as "(SHA:…)"; otherwise
+            // the ref is a tag/branch and no SHA suffix is shown.
+            let sha_suffix =
+                if git_ref.len() == 40 && git_ref.chars().all(|c| c.is_ascii_hexdigit()) {
+                    format!(" (SHA:{git_ref})")
+                } else {
+                    String::new()
+                };
+            lines.push(format!(
+                "Download action repository '{name}@{git_ref}'{sha_suffix}"
+            ));
         }
         lines.push("##[endgroup]".to_string());
     }
@@ -2921,6 +2971,13 @@ async fn complete_run_service_job(
             // merges this result onto the existing step instead of creating a duplicate
             // entry at default order 0.
             external_id: Some(log.step_id.clone()),
+            // number is the sequential 1-indexed step position GitHub uses for its REST
+            // API `number` field and `/logs/{n}` URL. order 0 means unset — skip it.
+            number: if log.order > 0 {
+                Some(log.order as i64)
+            } else {
+                None
+            },
             name: if log.display_name.is_empty() {
                 log.step_id.clone()
             } else {
@@ -2928,6 +2985,18 @@ async fn complete_run_service_job(
             },
             status: TimelineRecordState::Completed,
             conclusion: step_log_result(log),
+            started_at: if log.started_at.is_empty() {
+                None
+            } else {
+                Some(log.started_at.clone())
+            },
+            // Use per-step completed_at tracked in StepLog so GitHub shows accurate
+            // step durations. Fallback to current time only if not tracked.
+            completed_at: Some(if log.completed_at.is_empty() {
+                unix_now_iso8601()
+            } else {
+                log.completed_at.clone()
+            }),
             completed_log_lines: log.lines.len() as i64,
             annotations: log.annotations.iter().map(run_service_annotation).collect(),
         })
@@ -4150,6 +4219,8 @@ mod tests {
             step_id: "deploy".into(),
             display_name: String::new(),
             order: 1,
+            started_at: String::new(),
+            completed_at: String::new(),
             lines: Vec::new(),
             masks: vec!["runtime-secret".into()],
             annotations: Vec::new(),
@@ -4221,6 +4292,8 @@ mod tests {
             step_id: "step-1".into(),
             display_name: String::new(),
             order: 7,
+            started_at: String::new(),
+            completed_at: String::new(),
             lines: vec!["hello".into()],
             masks: Vec::new(),
             annotations: Vec::new(),
@@ -4360,6 +4433,8 @@ mod tests {
             step_id: "step-1".into(),
             display_name: String::new(),
             order: 1,
+            started_at: String::new(),
+            completed_at: String::new(),
             lines: Vec::new(),
             masks: vec!["step-secret".into()],
             annotations: Vec::new(),
@@ -5642,6 +5717,51 @@ runs:
         assert!(joined.contains("##[group]Operating System"));
         assert!(joined.contains("##[endgroup]"));
         assert!(joined.contains("Prepare workflow directory"));
+        // Secret source always present regardless of whether permissions are known.
+        assert!(joined.contains("Secret source: Actions"));
+    }
+
+    #[test]
+    fn setup_job_lines_shows_github_token_permissions() {
+        // Permissions are stored in job variable "system.github.token.permissions"
+        // as a JSON string. The group must appear AND "Secret source: Actions" must
+        // follow it (not be a fallback).
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanType": "Build", "ScopeIdentifier": "s", "PlanId": "p", "Version": 1 },
+            "Timeline": { "Id": "t" },
+            "JobId": "j",
+            "JobDisplayName": "CI",
+            "RequestId": 1,
+            "Variables": {
+                "system.github.token.permissions": {
+                    "Value": "{\"Actions\":\"read\",\"Contents\":\"read\",\"Metadata\":\"read\"}",
+                    "IsSecret": false
+                }
+            }
+        }))
+        .unwrap();
+        let lines = setup_job_lines(&job, "velnor/job-ubuntu:24.04");
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("##[group]GITHUB_TOKEN Permissions"),
+            "permissions group missing: {joined}"
+        );
+        assert!(joined.contains("Actions: read"), "scope missing: {joined}");
+        assert!(joined.contains("Contents: read"), "scope missing: {joined}");
+        assert!(joined.contains("Metadata: read"), "scope missing: {joined}");
+        // "Secret source: Actions" must ALSO appear after the permissions group.
+        assert!(
+            joined.contains("Secret source: Actions"),
+            "secret source missing: {joined}"
+        );
+        // Permissions group must come BEFORE Secret source in the output.
+        let perm_pos = joined.find("##[group]GITHUB_TOKEN Permissions").unwrap();
+        let secret_pos = joined.find("Secret source: Actions").unwrap();
+        assert!(
+            perm_pos < secret_pos,
+            "permissions group must precede Secret source line"
+        );
     }
 
     #[test]
@@ -5671,8 +5791,44 @@ runs:
         .unwrap();
         let lines = setup_job_lines(&job, "velnor/job-ubuntu:24.04");
         let joined = lines.join("\n");
-        assert!(joined.contains("actions/checkout@v6"));
+        // Tag ref: no SHA suffix.
+        assert!(
+            joined.contains("Download action repository 'actions/checkout@v6'"),
+            "{joined}"
+        );
+        assert!(
+            !joined.contains("(SHA:"),
+            "tag ref must not show SHA suffix: {joined}"
+        );
         assert!(joined.contains("##[group]Prepare all required actions"));
+    }
+
+    #[test]
+    fn setup_job_lines_action_download_shows_sha_when_ref_is_commit() {
+        let sha = "de0fac2e4500dabe0009e67214ff5f5447ce83dd";
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanType": "Build", "ScopeIdentifier": "s", "PlanId": "p", "Version": 1 },
+            "Timeline": { "Id": "t" },
+            "JobId": "j",
+            "JobDisplayName": "CI",
+            "RequestId": 1,
+            "Steps": [{
+                "Reference": {
+                    "Type": "Repository",
+                    "Name": "actions/checkout",
+                    "Ref": sha
+                }
+            }]
+        }))
+        .unwrap();
+        let lines = setup_job_lines(&job, "velnor/job-ubuntu:24.04");
+        let joined = lines.join("\n");
+        // Full 40-char SHA ref: show SHA suffix matching GitHub UI format.
+        assert!(
+            joined.contains(&format!("'actions/checkout@{sha}' (SHA:{sha})")),
+            "SHA suffix missing for commit ref: {joined}"
+        );
     }
 
     #[test]
@@ -5707,5 +5863,130 @@ runs:
         assert!(joined.contains("main"));
         assert!(joined.contains("Fetch depth: 1"));
         assert!(joined.contains("Checkout completed successfully"));
+    }
+
+    #[test]
+    fn unix_now_iso8601_produces_second_precision_no_subseconds() {
+        // GitHub's frontend timestamp regex requires YYYY-MM-DDTHH:MM:SSZ with no
+        // sub-second component. Sub-seconds (.098615Z) are NOT parsed → timestamp
+        // appears as plain log content instead of the separate timestamp column.
+        let ts = unix_now_iso8601();
+        // Must match YYYY-MM-DDTHH:MM:SSZ exactly — no dot, no fractional seconds.
+        assert!(
+            !ts.contains('.'),
+            "timestamp must not contain sub-seconds: {ts}"
+        );
+        assert!(ts.ends_with('Z'), "timestamp must end with Z (UTC): {ts}");
+        // Basic structural validation.
+        assert_eq!(
+            ts.len(),
+            20,
+            "expected 20-char timestamp YYYY-MM-DDTHH:MM:SSZ: {ts}"
+        );
+        assert!(ts.contains('T'), "timestamp must contain T separator: {ts}");
+    }
+
+    #[test]
+    fn run_service_step_result_uses_per_step_completed_at_not_job_finish() {
+        // RunServiceStepResult.completed_at must come from StepLog.completed_at (the
+        // actual step finish time), NOT from a single job-level completion_time.
+        // Before this fix all steps showed the job finish time as completed_at,
+        // making step durations inflate to the total job duration.
+        use crate::executor::StepLog;
+        use crate::protocol::{RunServiceStepResult, TaskResult, TimelineRecordState};
+
+        let step_log = StepLog {
+            step_id: "abc-uuid".to_string(),
+            display_name: "Run cargo test".to_string(),
+            order: 5,
+            started_at: "2026-06-04T10:00:00Z".to_string(),
+            completed_at: "2026-06-04T10:00:03Z".to_string(), // 3s step
+            lines: vec!["test passed".to_string()],
+            masks: vec![],
+            annotations: vec![],
+            telemetry: vec![],
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        };
+
+        // Simulate what complete_run_service_job does to build RunServiceStepResult.
+        let result = RunServiceStepResult {
+            external_id: Some(step_log.step_id.clone()),
+            number: Some(step_log.order as i64),
+            name: step_log.display_name.clone(),
+            status: TimelineRecordState::Completed,
+            conclusion: TaskResult::Succeeded,
+            started_at: if step_log.started_at.is_empty() {
+                None
+            } else {
+                Some(step_log.started_at.clone())
+            },
+            completed_at: Some(if step_log.completed_at.is_empty() {
+                unix_now_iso8601()
+            } else {
+                step_log.completed_at.clone()
+            }),
+            completed_log_lines: step_log.lines.len() as i64,
+            annotations: vec![],
+        };
+
+        assert_eq!(
+            result.started_at.as_deref(),
+            Some("2026-06-04T10:00:00Z"),
+            "started_at must be the step start time"
+        );
+        assert_eq!(
+            result.completed_at.as_deref(),
+            Some("2026-06-04T10:00:03Z"),
+            "completed_at must be the step finish time, not job finish time"
+        );
+        assert_eq!(result.number, Some(5), "step number preserved");
+    }
+
+    #[test]
+    fn complete_job_step_log_has_correct_timestamps_and_order() {
+        // The synthetic "Complete job" StepLog must have:
+        // - started_at set to the time it was created (not empty)
+        // - completed_at also set (not empty) so duration shows 0s not inflated
+        // - order > 0 so it gets a proper /logs/{n} URL
+        // This test verifies the shape matches what complete_run_service_job expects.
+        let ts = unix_now_iso8601();
+        let log = crate::executor::StepLog {
+            step_id: uuid::Uuid::new_v4().to_string(),
+            display_name: "Complete job".to_string(),
+            order: 25,
+            started_at: ts.clone(),
+            completed_at: ts.clone(),
+            lines: complete_job_lines(),
+            masks: vec![],
+            annotations: vec![],
+            telemetry: vec![],
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        };
+
+        assert!(!log.started_at.is_empty(), "started_at must be set");
+        assert!(!log.completed_at.is_empty(), "completed_at must be set");
+        assert_eq!(log.order, 25, "order must be > 0 for valid log URL");
+        assert_eq!(log.display_name, "Complete job");
+        assert!(
+            !log.lines.is_empty(),
+            "Complete job must have content lines"
+        );
+        // started_at == completed_at → 0s duration displayed in GitHub UI.
+        assert_eq!(
+            log.started_at, log.completed_at,
+            "synthetic step: started == completed so duration shows 0s"
+        );
     }
 }

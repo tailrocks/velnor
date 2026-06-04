@@ -187,6 +187,10 @@ pub struct StepLog {
     pub step_id: String,
     pub display_name: String,
     pub order: i32,
+    /// RFC3339 timestamp when this step began executing (empty if not tracked).
+    pub started_at: String,
+    /// RFC3339 timestamp when this step finished (empty if not tracked).
+    pub completed_at: String,
     pub lines: Vec<String>,
     pub masks: Vec<String>,
     pub annotations: Vec<StepAnnotation>,
@@ -388,16 +392,18 @@ where
         step_id: impl Into<String>,
         display_name: impl Into<String>,
         order: &mut i32,
-    ) {
+    ) -> String {
         *order += 1;
+        let started_at = unix_now_rfc3339();
         let Some(sender) = &self.step_start_sender else {
-            return;
+            return started_at;
         };
         let _ = sender.send(StepStartEvent {
             step_id: step_id.into(),
             display_name: display_name.into(),
             order: *order,
         });
+        started_at
     }
 
     fn emit_step_log(&self, log: &StepLog) {
@@ -570,8 +576,9 @@ where
             let step_id = step.id().to_string();
             let step_state = state.with_step_action(&step_id);
             if !step_state.evaluate_condition(step.condition()) {
+                let mut skipped_started_at = String::new();
                 if step.reports_timeline_start() {
-                    self.emit_step_started(
+                    skipped_started_at = self.emit_step_started(
                         step_id.clone(),
                         step.display_name(),
                         &mut timeline_order,
@@ -586,8 +593,14 @@ where
                     stderr: String::new(),
                 };
                 if step.reports_timeline_start() {
-                    let log =
-                        step_log_with_name(&step_id, step.display_name(), timeline_order, &result);
+                    let log = step_log_with_name(
+                        &step_id,
+                        step.display_name(),
+                        timeline_order,
+                        &skipped_started_at,
+                        &unix_now_rfc3339(),
+                        &result,
+                    );
                     self.emit_step_log(&log);
                     step_logs.push(log);
                 }
@@ -616,7 +629,7 @@ where
                             post_registered = true;
                         }
                         let pre_step_id = uuid::Uuid::new_v4().to_string();
-                        self.emit_step_started(
+                        let pre_started_at = self.emit_step_started(
                             pre_step_id.clone(),
                             step.display_name(),
                             &mut timeline_order,
@@ -638,6 +651,8 @@ where
                             &pre_step_id,
                             step.display_name(),
                             timeline_order,
+                            &pre_started_at,
+                            &unix_now_rfc3339(),
                             &result,
                         );
                         self.emit_step_log(&log);
@@ -651,9 +666,11 @@ where
                 }
             }
             let step_state = state.with_step_action(&step_id);
-            if step.reports_timeline_start() {
-                self.emit_step_started(step_id.clone(), step.display_name(), &mut timeline_order);
-            }
+            let main_started_at = if step.reports_timeline_start() {
+                self.emit_step_started(step_id.clone(), step.display_name(), &mut timeline_order)
+            } else {
+                String::new()
+            };
             let result = (|| match step {
                 ExecutableStep::CompositeStart { .. } | ExecutableStep::CompositeEnd { .. } => {
                     unreachable!("composite boundary steps are handled before execution")
@@ -779,6 +796,8 @@ where
                             &step_id,
                             step.display_name(),
                             timeline_order,
+                            &main_started_at,
+                            &unix_now_rfc3339(),
                             &result,
                         );
                         self.emit_step_log(&log);
@@ -798,15 +817,16 @@ where
                 continue;
             }
             let post_step_id = uuid::Uuid::new_v4().to_string();
-            self.emit_step_started(
+            let post_name_native = {
+                let n = post_action
+                    .display_name
+                    .strip_prefix("Run ")
+                    .unwrap_or(&post_action.display_name);
+                format!("Post Run {n}")
+            };
+            let native_post_started_at = self.emit_step_started(
                 post_step_id.clone(),
-                {
-                    let n = post_action
-                        .display_name
-                        .strip_prefix("Run ")
-                        .unwrap_or(&post_action.display_name);
-                    format!("Post Run {n}")
-                },
+                post_name_native.clone(),
                 &mut timeline_order,
             );
             let result = self.execute_native_post_action(
@@ -820,15 +840,14 @@ where
                     if result.exit_code != 0 && post_action.continue_on_error {
                         result.failure_ignored = true;
                     }
-                    let post_name = {
-                        let n = post_action
-                            .display_name
-                            .strip_prefix("Run ")
-                            .unwrap_or(&post_action.display_name);
-                        format!("Post Run {n}")
-                    };
-                    let log =
-                        step_log_with_name(&post_step_id, &post_name, timeline_order, &result);
+                    let log = step_log_with_name(
+                        &post_step_id,
+                        &post_name_native,
+                        timeline_order,
+                        &native_post_started_at,
+                        &unix_now_rfc3339(),
+                        &result,
+                    );
                     self.emit_step_log(&log);
                     step_logs.push(log);
                     state.apply(&post_step_id, &result);
@@ -846,15 +865,16 @@ where
                 continue;
             }
             let js_post_step_id = uuid::Uuid::new_v4().to_string();
-            self.emit_step_started(
+            let js_post_name = {
+                let n = post_action
+                    .display_name
+                    .strip_prefix("Run ")
+                    .unwrap_or(&post_action.display_name);
+                format!("Post Run {n}")
+            };
+            let js_post_started_at = self.emit_step_started(
                 js_post_step_id.clone(),
-                {
-                    let n = post_action
-                        .display_name
-                        .strip_prefix("Run ")
-                        .unwrap_or(&post_action.display_name);
-                    format!("Post Run {n}")
-                },
+                js_post_name.clone(),
                 &mut timeline_order,
             );
             let result = self.execute_javascript_action_in_started_container(
@@ -875,17 +895,12 @@ where
                     if result.exit_code != 0 && post_action.continue_on_error {
                         result.failure_ignored = true;
                     }
-                    let post_name_js = {
-                        let n = post_action
-                            .display_name
-                            .strip_prefix("Run ")
-                            .unwrap_or(&post_action.display_name);
-                        format!("Post Run {n}")
-                    };
                     let log = step_log_with_name(
                         &js_post_step_id,
-                        &post_name_js,
+                        &js_post_name,
                         timeline_order,
+                        &js_post_started_at,
+                        &unix_now_rfc3339(),
                         &result,
                     );
                     self.emit_step_log(&log);
@@ -1380,11 +1395,23 @@ where
         let action_state = state.with_env(state.resolve_env(&action.env));
         let context = native_input_or(&action_state, action, "context", ".");
         let mut args = vec!["buildx".to_string(), "build".to_string()];
-        push_arg(
-            &mut args,
-            "--file",
-            &native_input(action, &action_state, "file"),
-        );
+        // Resolve --file relative to the host context path so Docker finds it even
+        // when its CWD differs from the build context (e.g. when run via ProcessCommandRunner
+        // whose CWD is the runner binary directory, not the job workspace).
+        let file_input = native_input(action, &action_state, "file");
+        if !file_input.trim().is_empty() {
+            let file_path = if std::path::Path::new(&file_input).is_absolute() {
+                file_input.clone()
+            } else {
+                // Make the Dockerfile path absolute by joining it to the resolved context.
+                let ctx_host = host_context_path(&action_state, &context);
+                std::path::PathBuf::from(&ctx_host)
+                    .join(&file_input)
+                    .display()
+                    .to_string()
+            };
+            push_arg(&mut args, "--file", &file_path);
+        }
         push_arg(
             &mut args,
             "--platform",
@@ -1395,6 +1422,9 @@ where
         }
         for label in input_values(&native_input(action, &action_state, "labels")) {
             push_arg(&mut args, "--label", &label);
+        }
+        for build_arg in input_values(&native_input(action, &action_state, "build-args")) {
+            push_arg(&mut args, "--build-arg", &build_arg);
         }
         for cache in input_values(&native_input(action, &action_state, "cache-from")) {
             push_arg(&mut args, "--cache-from", &cache);
@@ -1409,7 +1439,7 @@ where
             args.push("--load".to_string());
         }
         args.push(host_context_path(&action_state, &context));
-        let env = action_state.step_env(&[]);
+        let env = host_docker_env(action_state.step_env(&[]));
         Ok(native_command_result(
             self.runner.run_with_env("docker", &args, &env)?,
             StepCommandState::default(),
@@ -1423,12 +1453,29 @@ where
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
         let mut args = vec!["buildx".to_string(), "bake".to_string()];
+        // Resolve bake file paths to absolute host paths so `docker buildx bake`
+        // finds them regardless of the process CWD (which may be the runner binary
+        // dir, not the job workspace).
+        let ws_path = action_state
+            .workspace_host
+            .as_deref()
+            .map(|p| p.display().to_string());
         for file in input_values(&native_input(action, &action_state, "files")) {
-            push_arg(
-                &mut args,
-                "--file",
-                &host_context_path(&action_state, &file),
-            );
+            let abs = if std::path::Path::new(&file).is_absolute() {
+                host_context_path(&action_state, &file)
+            } else if let Some(ref w) = ws_path {
+                std::path::Path::new(w).join(&file).display().to_string()
+            } else {
+                host_context_path(&action_state, &file)
+            };
+            push_arg(&mut args, "--file", &abs);
+        }
+        // docker buildx bake default context = process CWD, NOT the job workspace.
+        // Inject `*.context=WORKSPACE` so all targets without explicit context use
+        // the job workspace where Dockerfiles and sources live.
+        if let Some(ref w) = ws_path {
+            args.push("--set".to_string());
+            args.push(format!("*.context={w}"));
         }
         for set in input_values(&native_input(action, &action_state, "set")) {
             push_arg(&mut args, "--set", &set);
@@ -1441,7 +1488,7 @@ where
             &action_state,
             "targets",
         )));
-        let env = action_state.step_env(&[]);
+        let env = host_docker_env(action_state.step_env(&[]));
         Ok(native_command_result(
             self.runner.run_with_env("docker", &args, &env)?,
             StepCommandState::default(),
@@ -1581,6 +1628,22 @@ where
         fs::create_dir_all(sccache_host(&container.temp_host)).with_context(|| {
             format!(
                 "create shared sccache directory for {}",
+                container.temp_host.display()
+            )
+        })?;
+        // The temp dir is bind-mounted over the job container's /tmp. A plain
+        // create_dir_all yields 0755 owned by the daemon user, which leaves the
+        // container's /tmp non-sticky and unwritable by non-root sandbox users
+        // (e.g. apt's `_apt`, uid 100). That makes `apt-get update` fail with
+        // "Couldn't create temporary file /tmp/apt.conf.*". A real /tmp is
+        // world-writable and sticky (1777); force that so the mount matches.
+        fs::set_permissions(
+            &container.temp_host,
+            std::fs::Permissions::from_mode(0o1777),
+        )
+        .with_context(|| {
+            format!(
+                "set 1777 (sticky, world-writable) on job temp dir {}",
                 container.temp_host.display()
             )
         })?;
@@ -1759,19 +1822,20 @@ if ! command -v mold >/dev/null 2>&1; then
 fi
 mold --version
 # Wire mold as the Cargo linker (mirrors rui314/setup-mold upstream behavior).
+# Use cc (gcc) with -fuse-ld=mold rather than requiring clang, so this works on
+# systems without clang installed. mold supports being invoked via gcc's linker
+# flag on both x86_64 and aarch64 Linux.
 CARGO_CFG="${CARGO_HOME:-$HOME/.cargo}/config.toml"
 mkdir -p "$(dirname "$CARGO_CFG")"
 if ! grep -qF '[target.x86_64-unknown-linux-gnu]' "$CARGO_CFG" 2>/dev/null; then
   cat >> "$CARGO_CFG" <<'MOLDEOF'
 [target.x86_64-unknown-linux-gnu]
-linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 MOLDEOF
 fi
 if ! grep -qF '[target.aarch64-unknown-linux-gnu]' "$CARGO_CFG" 2>/dev/null; then
   cat >> "$CARGO_CFG" <<'MOLDEOF'
 [target.aarch64-unknown-linux-gnu]
-linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 MOLDEOF
 fi
@@ -2226,6 +2290,44 @@ fn native_upload_artifact(
         .get("ACTIONS_RESULTS_URL")
         .cloned()
         .unwrap_or_else(|| "https://results.actions".to_string());
+
+    // Also upload to GitHub's Results Service artifact store so that GitHub-hosted
+    // jobs (like compare/aggregate jobs) can download the artifact via
+    // `actions/download-artifact`. Without this, only same-host Velnor jobs can
+    // access local artifacts.
+    if let Some(runtime_token) = action_state.env.get("ACTIONS_RUNTIME_TOKEN") {
+        if let Some((plan_id, job_id)) = artifact_backend_ids_from_token(runtime_token) {
+            // Collect files from the local artifact store for the zip upload.
+            let mut zip_files: Vec<(String, Vec<u8>)> = Vec::new();
+            if let Ok(entries) = fs::read_dir(&artifact_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let (Ok(content), Some(file_name)) =
+                            (fs::read(&path), path.file_name().and_then(|n| n.to_str()))
+                        {
+                            zip_files.push((file_name.to_string(), content));
+                        }
+                    }
+                }
+            }
+            if !zip_files.is_empty() {
+                if let Err(e) = crate::protocol::upload_artifact_blocking(
+                    &results_url,
+                    runtime_token,
+                    &plan_id,
+                    &job_id,
+                    &name,
+                    &zip_files,
+                ) {
+                    eprintln!(
+                        "Best-effort Results Service artifact upload failed for '{name}': {e:#}"
+                    );
+                }
+            }
+        }
+    }
+
     let artifact_url = format!(
         "{}/artifacts/{artifact_id}",
         results_url.trim_end_matches('/')
@@ -2955,6 +3057,17 @@ fn native_command_result(result: CommandResult, state: StepCommandState) -> Step
     }
 }
 
+/// Filter env vars that break Docker CLI plugin discovery when running Docker
+/// commands directly on the host (not inside the job container).
+/// Docker CLI plugins (buildx, etc.) are stored in ~/.docker/cli-plugins.
+/// If HOME is overridden to a container path like /github/home, Docker cannot
+/// find the plugins and treats subcommands like `buildx` as unknown commands.
+fn host_docker_env(env: Vec<(String, String)>) -> Vec<(String, String)> {
+    env.into_iter()
+        .filter(|(name, _)| name != "HOME" && name != "USERPROFILE")
+        .collect()
+}
+
 fn push_arg(args: &mut Vec<String>, name: &str, value: &str) {
     if !value.trim().is_empty() {
         args.push(name.to_string());
@@ -3493,14 +3606,40 @@ impl JobExecutionState {
                 .map(|workspace| hash_files(workspace, &patterns));
         }
         if expression.trim().starts_with("format(") {
-            let context_data: Vec<_> = self
-                .context_data
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            return crate::script_step::evaluate_github_format(expression.trim(), &context_data);
+            // Resolve format() args through the full state resolver so that runtime
+            // values like `steps.run-output.outputs.output` are available (not just
+            // compile-time context_data values from the job message).
+            return self.resolve_format_expression(expression.trim());
         }
         self.resolve_context_expression(expression)
+    }
+
+    /// Evaluate `format('template', arg0, arg1, ...)` using the full state resolver
+    /// so runtime step outputs (`steps.X.outputs.Y`) are accessible for args.
+    fn resolve_format_expression(&self, expression: &str) -> Option<String> {
+        let inner = expression.strip_prefix("format(")?.strip_suffix(')')?;
+        let parts = crate::script_step::split_format_args_pub(inner);
+        if parts.is_empty() {
+            return None;
+        }
+        let template = parts[0].trim().strip_prefix('\'')?.strip_suffix('\'')?;
+        let placeholder_open = "\x00LBRACE\x00";
+        let placeholder_close = "\x00RBRACE\x00";
+        let mut result = template
+            .replace("''", "'")
+            .replace("{{", placeholder_open)
+            .replace("}}", placeholder_close);
+        for (i, arg) in parts[1..].iter().enumerate() {
+            // Use full state resolver so runtime values (step outputs, etc.) work.
+            let resolved = self
+                .resolve_expression_value(arg.trim())
+                .unwrap_or_default();
+            result = result.replace(&format!("{{{i}}}"), &resolved);
+        }
+        result = result
+            .replace(placeholder_open, "{")
+            .replace(placeholder_close, "}");
+        Some(result)
     }
 
     fn resolve_context_expression(&self, expression: &str) -> Option<String> {
@@ -3866,13 +4005,16 @@ fn job_output_expression(value: &Value) -> Option<&str> {
 }
 
 fn step_log(step_id: &str, order: i32, result: &StepExecutionResult) -> StepLog {
-    step_log_with_name(step_id, "", order, result)
+    let now = unix_now_rfc3339();
+    step_log_with_name(step_id, "", order, &now, &now, result)
 }
 
 fn step_log_with_name(
     step_id: &str,
     display_name: &str,
     order: i32,
+    started_at: &str,
+    completed_at: &str,
     result: &StepExecutionResult,
 ) -> StepLog {
     let lines = step_log_lines(
@@ -3885,6 +4027,8 @@ fn step_log_with_name(
         step_id: step_id.to_string(),
         display_name: display_name.to_string(),
         order,
+        started_at: started_at.to_string(),
+        completed_at: completed_at.to_string(),
         lines,
         masks: result.state.masks.clone(),
         annotations: result.state.annotations.clone(),
@@ -3899,15 +4043,60 @@ fn step_log_with_name(
     }
 }
 
+/// Extract workflow backend IDs from the ACTIONS_RUNTIME_TOKEN JWT.
+///
+/// The token's `scp` claim contains `Actions.Results:{workflowRunBackendId}:{workflowJobRunBackendId}`.
+/// These are the IDs needed for Results Service Twirp calls (CreateArtifact etc.).
+fn artifact_backend_ids_from_token(token: &str) -> Option<(String, String)> {
+    use base64::Engine;
+    let parts: Vec<&str> = token.splitn(3, '.').collect();
+    let payload_b64 = parts.get(1)?;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload_b64))
+        .ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    let scp = json.get("scp")?.as_str()?;
+    for part in scp.split(' ') {
+        if let Some(rest) = part.strip_prefix("Actions.Results:") {
+            let ids: Vec<&str> = rest.splitn(2, ':').collect();
+            if ids.len() == 2 {
+                return Some((ids[0].to_string(), ids[1].to_string()));
+            }
+        }
+    }
+    None
+}
+
+fn unix_now_rfc3339() -> String {
+    use time::{format_description, OffsetDateTime};
+    // GitHub's frontend parses log-blob timestamps with a regex expecting second-precision
+    // RFC3339 (YYYY-MM-DDTHH:MM:SSZ). Sub-second precision causes the timestamp to appear
+    // as plain content text instead of the separate timestamp column.
+    let fmt = format_description::parse("[year]-[month]-[day]T[hour]:[minute]:[second]Z")
+        .unwrap_or_else(|_| vec![]);
+    OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .map(|t| {
+            t.format(&fmt)
+                .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+        })
+        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+}
+
 fn step_log_lines(
     stdout: &str,
     stderr: &str,
     command_lines: &[String],
     summary: &str,
 ) -> Vec<String> {
+    // Exclude workflow command lines (::command::...) from stdout/stderr: these are
+    // processed into command_lines (as ##[group] markers, set-env, etc.) and would
+    // appear twice in the blob if kept. GitHub's own runner strips them from the log.
     let mut lines = stdout
         .lines()
         .chain(stderr.lines())
+        .filter(|line| !line.starts_with("::"))
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
     lines.extend(command_lines.iter().cloned());
@@ -10966,5 +11155,268 @@ bitcoin-processor-app.push=true")
             }
             _ => {}
         }
+    }
+
+    // ── timestamp format ──────────────────────────────────────────────────
+
+    #[test]
+    fn unix_now_rfc3339_produces_second_precision_no_subseconds() {
+        // Must match YYYY-MM-DDTHH:MM:SSZ — GitHub's frontend timestamp regex
+        // requires no sub-second component to render timestamps in the separate
+        // timestamp column rather than as plain content text.
+        let ts = unix_now_rfc3339();
+        assert!(
+            !ts.contains('.'),
+            "timestamp must not contain sub-seconds: {ts}"
+        );
+        assert!(ts.ends_with('Z'), "timestamp must end with Z: {ts}");
+        assert_eq!(
+            ts.len(),
+            20,
+            "expected YYYY-MM-DDTHH:MM:SSZ (20 chars): {ts}"
+        );
+    }
+
+    // ── step_log_lines ────────────────────────────────────────────────────
+
+    #[test]
+    fn step_log_lines_strips_workflow_command_lines_from_stdout() {
+        // ::group:: / ::endgroup:: / ::set-env:: lines are workflow commands that
+        // get converted to ##[group] markers in command_lines. If they're also
+        // included verbatim in stdout, they appear twice in the blob — once as raw
+        // text and once as the parsed ##[group] marker. GitHub's own runner strips
+        // them from the visible log; Velnor must do the same.
+        let stdout =
+            "::group::Build phase\nsome build output\n::endgroup::\n::set-output name=x::42\n";
+        let stderr = "";
+        let command_lines = vec![
+            "##[group]Build phase".to_string(),
+            "##[endgroup]".to_string(),
+        ];
+        let lines = step_log_lines(stdout, stderr, &command_lines, "");
+
+        // Raw ::group:: lines must NOT appear.
+        assert!(
+            !lines.iter().any(|l| l.starts_with("::")),
+            "workflow command lines must be stripped from output: {lines:?}"
+        );
+        // The processed markers from command_lines must still be present.
+        assert!(
+            lines.iter().any(|l| l == "##[group]Build phase"),
+            "##[group] marker from command_lines must be present: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l == "##[endgroup]"),
+            "##[endgroup] from command_lines must be present: {lines:?}"
+        );
+        // Regular output must pass through.
+        assert!(
+            lines.iter().any(|l| l == "some build output"),
+            "non-command output must pass through: {lines:?}"
+        );
+        // ::set-output:: also stripped (it's a workflow command starting with ::).
+        assert!(
+            !lines.iter().any(|l| l.starts_with("::set-output")),
+            "::set-output must be stripped: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn step_log_lines_passes_through_normal_output() {
+        let stdout = "cargo test passed\nall 42 tests passed\n";
+        let stderr = "warning: unused import\n";
+        let lines = step_log_lines(stdout, stderr, &[], "");
+        assert!(lines.iter().any(|l| l.contains("cargo test passed")));
+        assert!(lines.iter().any(|l| l.contains("all 42 tests passed")));
+        assert!(lines.iter().any(|l| l.contains("warning: unused import")));
+    }
+
+    #[test]
+    fn step_log_lines_appends_summary_section() {
+        let stdout = "output line\n";
+        let summary = "### Results\nAll passed";
+        let lines = step_log_lines(stdout, "", &[], summary);
+        let joined = lines.join("\n");
+        assert!(joined.contains("Step summary:"));
+        assert!(joined.contains("### Results"));
+        assert!(joined.contains("All passed"));
+    }
+
+    // ── setup_mold_script ─────────────────────────────────────────────────
+
+    #[test]
+    fn setup_mold_script_does_not_require_clang() {
+        // Removing `linker = "clang"` was necessary because clang is not installed
+        // in the arm64 job image. The script must use -fuse-ld=mold with the
+        // default cc (gcc) linker instead.
+        let script = setup_mold_script();
+        assert!(
+            !script.contains("linker = \"clang\""),
+            "script must not require clang as linker: {script}"
+        );
+        assert!(
+            script.contains("fuse-ld=mold"),
+            "script must wire mold via -fuse-ld=mold: {script}"
+        );
+        // Still configures both x86_64 and aarch64 targets.
+        assert!(script.contains("x86_64-unknown-linux-gnu"));
+        assert!(script.contains("aarch64-unknown-linux-gnu"));
+        // Installs mold via apt if not present.
+        assert!(script.contains("apt-get install"));
+        assert!(script.contains("mold --version"));
+    }
+
+    // ── RunServiceStepResult fields ───────────────────────────────────────
+    // (Serialization tests for the newly-added fields)
+
+    #[test]
+    fn run_service_step_result_serializes_number_field() {
+        use crate::protocol::{
+            RunServiceAnnotation, RunServiceStepResult, TaskResult, TimelineRecordState,
+        };
+        let result = RunServiceStepResult {
+            external_id: Some("abc-uuid".to_string()),
+            number: Some(7),
+            name: "Run just test".to_string(),
+            status: TimelineRecordState::Completed,
+            conclusion: TaskResult::Succeeded,
+            started_at: Some("2026-06-04T10:00:00Z".to_string()),
+            completed_at: Some("2026-06-04T10:00:05Z".to_string()),
+            completed_log_lines: 42,
+            annotations: vec![],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        // number must be present in payload (GitHub uses it for /logs/{n} URL).
+        assert!(
+            json.contains("\"number\":7"),
+            "number field missing: {json}"
+        );
+        // started_at and completed_at must be present.
+        assert!(
+            json.contains("\"started_at\":\"2026-06-04T10:00:00Z\""),
+            "started_at missing: {json}"
+        );
+        assert!(
+            json.contains("\"completed_at\":\"2026-06-04T10:00:05Z\""),
+            "completed_at missing: {json}"
+        );
+        // external_id present.
+        assert!(
+            json.contains("\"external_id\":\"abc-uuid\""),
+            "external_id missing: {json}"
+        );
+    }
+
+    #[test]
+    fn run_service_step_result_omits_none_fields() {
+        use crate::protocol::{RunServiceStepResult, TaskResult, TimelineRecordState};
+        let result = RunServiceStepResult {
+            external_id: None,
+            number: None,
+            name: "step".to_string(),
+            status: TimelineRecordState::Completed,
+            conclusion: TaskResult::Succeeded,
+            started_at: None,
+            completed_at: None,
+            completed_log_lines: 0,
+            annotations: vec![],
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        // None fields must be omitted (skip_serializing_if = "Option::is_none").
+        assert!(
+            !json.contains("number"),
+            "absent number must be omitted: {json}"
+        );
+        assert!(
+            !json.contains("started_at"),
+            "absent started_at must be omitted: {json}"
+        );
+        assert!(
+            !json.contains("completed_at"),
+            "absent completed_at must be omitted: {json}"
+        );
+        assert!(
+            !json.contains("external_id"),
+            "absent external_id must be omitted: {json}"
+        );
+    }
+
+    // ── StepLog.started_at ────────────────────────────────────────────────
+
+    #[test]
+    fn step_log_with_name_records_started_at() {
+        // started_at must flow from emit_step_started through step_log_with_name
+        // into StepLog so RunServiceStepResult can include the actual step start time.
+        let started = "2026-06-04T10:00:00Z";
+        let completed = "2026-06-04T10:00:05Z";
+        let result = StepExecutionResult {
+            exit_code: 0,
+            state: StepCommandState::default(),
+            skipped: false,
+            failure_ignored: false,
+            stdout: "ok\n".to_string(),
+            stderr: String::new(),
+        };
+        let log = step_log_with_name("step1", "Run tests", 3, started, completed, &result);
+        assert_eq!(
+            log.started_at, started,
+            "started_at must be stored in StepLog"
+        );
+        assert_eq!(
+            log.completed_at, completed,
+            "completed_at must be stored in StepLog"
+        );
+        assert_eq!(log.order, 3);
+        assert_eq!(log.display_name, "Run tests");
+    }
+
+    // ── host_docker_env ───────────────────────────────────────────────────
+
+    #[test]
+    fn host_docker_env_strips_home_so_docker_cli_plugins_are_found() {
+        // When HOME is overridden to a container path (e.g. /github/home), Docker
+        // looks for CLI plugins (buildx) in /github/home/.docker/cli-plugins which
+        // doesn't exist on the host → `docker buildx` treated as unknown command →
+        // `unknown flag: --file` error. Stripping HOME lets Docker inherit the host
+        // HOME where the plugins are actually installed (~/.docker/cli-plugins).
+        let env = vec![
+            ("HOME".to_string(), "/github/home".to_string()),
+            (
+                "ACTIONS_CACHE_URL".to_string(),
+                "https://cache.example.com/".to_string(),
+            ),
+            ("GITHUB_WORKSPACE".to_string(), "/__w".to_string()),
+            (
+                "ACTIONS_RUNTIME_TOKEN".to_string(),
+                "secret-token".to_string(),
+            ),
+            ("USERPROFILE".to_string(), "C:\\Users\\runner".to_string()),
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+        ];
+        let filtered = host_docker_env(env);
+        // HOME and USERPROFILE must be stripped.
+        assert!(
+            !filtered.iter().any(|(k, _)| k == "HOME"),
+            "HOME must be stripped: {filtered:?}"
+        );
+        assert!(
+            !filtered.iter().any(|(k, _)| k == "USERPROFILE"),
+            "USERPROFILE must be stripped: {filtered:?}"
+        );
+        // ACTIONS_* and other vars must be preserved so GHA cache works.
+        assert!(
+            filtered
+                .iter()
+                .any(|(k, v)| k == "ACTIONS_CACHE_URL" && v.contains("cache.example")),
+            "ACTIONS_CACHE_URL must be preserved: {filtered:?}"
+        );
+        assert!(
+            filtered.iter().any(|(k, _)| k == "GITHUB_WORKSPACE"),
+            "GITHUB_WORKSPACE must be preserved: {filtered:?}"
+        );
+        assert!(
+            filtered.iter().any(|(k, _)| k == "PATH"),
+            "PATH must be preserved: {filtered:?}"
+        );
     }
 }
