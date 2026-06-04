@@ -370,24 +370,45 @@ impl OAuthClient {
         let ua = RUNNER_USER_AGENT.to_string();
 
         let output = tokio::task::spawn_blocking(move || {
-            std::process::Command::new("curl")
-                .args([
-                    "-s",
-                    "-w",
-                    "\n%{http_code}",
-                    "-X",
-                    "POST",
-                    "-H",
-                    &format!("User-Agent: {ua}"),
-                    "-H",
-                    "Accept: application/json",
-                    "-H",
-                    "Content-Type: application/x-www-form-urlencoded",
-                    "--data-raw",
-                    &body,
-                    &url,
-                ])
-                .output()
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let tmp = std::env::temp_dir();
+            let cfg_path = tmp.join(format!("velnor-oauth-{}.cfg", uuid::Uuid::new_v4()));
+            let body_path = tmp.join(format!("velnor-oauth-{}.body", uuid::Uuid::new_v4()));
+            let cfg = format!(
+                "header = \"User-Agent: {ua}\"\n\
+                 header = \"Accept: application/json\"\n\
+                 header = \"Content-Type: application/x-www-form-urlencoded\"\n\
+                 request = POST\n\
+                 silent\n\
+                 write-out = \"\\n%{{http_code}}\"\n"
+            );
+            let write_0600 = |p: &std::path::Path, c: &[u8]| -> std::io::Result<()> {
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(p)?;
+                f.write_all(c)
+            };
+            if let Err(e) = write_0600(&cfg_path, cfg.as_bytes()) {
+                return Err(e);
+            }
+            if let Err(e) = write_0600(&body_path, body.as_bytes()) {
+                let _ = std::fs::remove_file(&cfg_path);
+                return Err(e);
+            }
+            let out = std::process::Command::new("curl")
+                .arg("--config")
+                .arg(&cfg_path)
+                .arg("--data")
+                .arg(format!("@{}", body_path.display()))
+                .arg(&url)
+                .output();
+            let _ = std::fs::remove_file(&cfg_path);
+            let _ = std::fs::remove_file(&body_path);
+            out
         })
         .await
         .context("spawn_blocking curl oauth")?
@@ -510,28 +531,47 @@ impl RegistrationClient {
             let pat2 = pat.clone();
             let ua2 = ua.clone();
             let result = tokio::task::spawn_blocking(move || {
-                std::process::Command::new("curl")
-                    .args([
-                        "-s",
-                        "-w",
-                        "\n%{http_code}",
-                        "-X",
-                        "POST",
-                        "-H",
-                        &format!("User-Agent: {ua2}"),
-                        "-H",
-                        &format!("Authorization: Bearer {pat2}"),
-                        "-H",
-                        "Accept: application/vnd.github+json",
-                        "-H",
-                        "X-GitHub-Api-Version: 2022-11-28",
-                        "-H",
-                        "Content-Type: application/json",
-                        "-d",
-                        &body2,
-                        &url2,
-                    ])
-                    .output()
+                use std::os::unix::fs::OpenOptionsExt;
+                let tmp = std::env::temp_dir();
+                let cfg_path = tmp.join(format!("velnor-jit-{}.cfg", uuid::Uuid::new_v4()));
+                let body_path = tmp.join(format!("velnor-jit-{}.body", uuid::Uuid::new_v4()));
+                let cfg = format!(
+                    "header = \"User-Agent: {ua2}\"\n\
+                     header = \"Authorization: Bearer {pat2}\"\n\
+                     header = \"Accept: application/vnd.github+json\"\n\
+                     header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
+                     header = \"Content-Type: application/json\"\n\
+                     request = POST\n\
+                     silent\n\
+                     write-out = \"\\n%{{http_code}}\"\n"
+                );
+                let write_0600 = |p: &std::path::Path, c: &[u8]| -> std::io::Result<()> {
+                    use std::io::Write;
+                    let mut f = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .mode(0o600)
+                        .open(p)?;
+                    f.write_all(c)
+                };
+                if let Err(e) = write_0600(&cfg_path, cfg.as_bytes()) {
+                    return Err(e);
+                }
+                if let Err(e) = write_0600(&body_path, body2.as_bytes()) {
+                    let _ = std::fs::remove_file(&cfg_path);
+                    return Err(e);
+                }
+                let out = std::process::Command::new("curl")
+                    .arg("--config")
+                    .arg(&cfg_path)
+                    .arg("--data")
+                    .arg(format!("@{}", body_path.display()))
+                    .arg(&url2)
+                    .output();
+                let _ = std::fs::remove_file(&cfg_path);
+                let _ = std::fs::remove_file(&body_path);
+                out
             })
             .await
             .context("spawn_blocking curl")?;
@@ -600,24 +640,34 @@ impl RegistrationClient {
         let ua = RUNNER_USER_AGENT.to_string();
 
         let output = tokio::task::spawn_blocking(move || {
-            std::process::Command::new("curl")
-                .args([
-                    "-s",
-                    "-w",
-                    "\n%{http_code}",
-                    "-X",
-                    "DELETE",
-                    "-H",
-                    &format!("User-Agent: {ua}"),
-                    "-H",
-                    &format!("Authorization: Bearer {pat}"),
-                    "-H",
-                    "Accept: application/vnd.github+json",
-                    "-H",
-                    "X-GitHub-Api-Version: 2022-11-28",
-                    &url,
-                ])
-                .output()
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let tmp = std::env::temp_dir();
+            let cfg_path = tmp.join(format!("velnor-del-{}.cfg", uuid::Uuid::new_v4()));
+            let cfg = format!(
+                "header = \"User-Agent: {ua}\"\n\
+                 header = \"Authorization: Bearer {pat}\"\n\
+                 header = \"Accept: application/vnd.github+json\"\n\
+                 header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
+                 request = DELETE\n\
+                 silent\n\
+                 write-out = \"\\n%{{http_code}}\"\n"
+            );
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&cfg_path)?;
+            f.write_all(cfg.as_bytes())?;
+            drop(f);
+            let out = std::process::Command::new("curl")
+                .arg("--config")
+                .arg(&cfg_path)
+                .arg(&url)
+                .output();
+            let _ = std::fs::remove_file(&cfg_path);
+            out
         })
         .await
         .context("spawn_blocking curl delete")?
@@ -639,6 +689,10 @@ impl RegistrationClient {
 /// Make an HTTP request via curl subprocess. GitHub's infrastructure applies TLS-fingerprint-based
 /// throttling to reqwest/hyper connections; curl (LibreSSL) is not affected.
 /// Returns (http_status_code, response_body_string).
+///
+/// The Authorization header and request body are written to mode-0600 temp files
+/// and passed via `--config` / `--data @file` so they do not appear on argv
+/// (which is visible in `ps aux` and audit logs).
 pub async fn curl_json_request(
     method: &str,
     url: &str,
@@ -652,27 +706,64 @@ pub async fn curl_json_request(
     let method = method.to_string();
     let max_time = max_time_secs.to_string();
     let output = tokio::task::spawn_blocking(move || {
+        // Write secrets to a mode-0600 curl config file so they stay off argv.
+        let tmp_dir = std::env::temp_dir();
+        let cfg_path = tmp_dir.join(format!("velnor-curl-{}.cfg", uuid::Uuid::new_v4()));
+        let body_path = tmp_dir.join(format!("velnor-curl-{}.body", uuid::Uuid::new_v4()));
+
+        let mut cfg = format!(
+            "header = \"User-Agent: {ua}\"\n\
+             header = \"Authorization: Bearer {token}\"\n\
+             header = \"Accept: application/json\"\n\
+             max-time = {max_time}\n\
+             request = {method}\n\
+             silent\n\
+             write-out = \"\\n%{{http_code}}\"\n"
+        );
+        let has_body = json_body.is_some();
+        if has_body {
+            cfg.push_str("header = \"Content-Type: application/json\"\n");
+        }
+
+        // Write config file with restricted permissions.
+        use std::os::unix::fs::OpenOptionsExt;
+        let write_secret = |path: &std::path::Path, content: &[u8]| -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)?;
+            use std::io::Write;
+            f.write_all(content)
+        };
+
+        if let Err(e) = write_secret(&cfg_path, cfg.as_bytes()) {
+            return Err(e);
+        }
+
+        if has_body {
+            if let Some(body) = json_body {
+                if let Err(e) = write_secret(&body_path, body.as_bytes()) {
+                    let _ = std::fs::remove_file(&cfg_path);
+                    return Err(e);
+                }
+            }
+        }
+
         let mut cmd = std::process::Command::new("curl");
-        cmd.args([
-            "-s",
-            "-w",
-            "\n%{http_code}",
-            "--max-time",
-            &max_time,
-            "-X",
-            &method,
-            "-H",
-            &format!("User-Agent: {ua}"),
-            "-H",
-            &format!("Authorization: Bearer {token}"),
-            "-H",
-            "Accept: application/json",
-        ]);
-        if let Some(body) = json_body {
-            cmd.args(["-H", "Content-Type: application/json", "-d", &body]);
+        cmd.arg("--config").arg(&cfg_path);
+        if has_body {
+            cmd.arg("--data").arg(format!("@{}", body_path.display()));
         }
         cmd.arg(&url);
-        cmd.output()
+        let result = cmd.output();
+
+        let _ = std::fs::remove_file(&cfg_path);
+        if has_body {
+            let _ = std::fs::remove_file(&body_path);
+        }
+        result
     })
     .await
     .context("spawn_blocking curl")?
@@ -2838,34 +2929,48 @@ pub fn upload_artifact_blocking(
     files: &[(String, Vec<u8>)], // (archive path, content)
 ) -> Result<()> {
     use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
     let base = results_service_url.trim_end_matches('/');
+    let tmp_dir = std::env::temp_dir();
 
-    // Helper: curl POST with JSON, returns response body.
+    // Write a mode-0600 file and return its path. Caller must delete.
+    let write_secret_file = |suffix: &str, content: &[u8]| -> std::io::Result<std::path::PathBuf> {
+        let p = tmp_dir.join(format!("velnor-artifact-{}.{suffix}", uuid::Uuid::new_v4()));
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&p)?;
+        f.write_all(content)?;
+        Ok(p)
+    };
+
+    // Helper: curl POST with JSON via 0600 config + body files — secrets stay off argv.
     let curl_post = |url: &str, body: &str| -> Result<String> {
+        let cfg = format!(
+            "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
+             header = \"Authorization: Bearer {token}\"\n\
+             header = \"Accept: application/json\"\n\
+             header = \"Content-Type: application/json\"\n\
+             max-time = 30\n\
+             request = POST\n\
+             silent\n\
+             write-out = \"\\n%{{http_code}}\"\n"
+        );
+        let cfg_path = write_secret_file("cfg", cfg.as_bytes()).context("write curl cfg")?;
+        let body_path = write_secret_file("body", body.as_bytes()).context("write curl body")?;
         let out = std::process::Command::new("curl")
-            .args([
-                "-s",
-                "-w",
-                "\n%{http_code}",
-                "--max-time",
-                "30",
-                "-X",
-                "POST",
-                "-H",
-                &format!("User-Agent: {RUNNER_USER_AGENT}"),
-                "-H",
-                &format!("Authorization: Bearer {token}"),
-                "-H",
-                "Accept: application/json",
-                "-H",
-                "Content-Type: application/json",
-                "-d",
-                body,
-                url,
-            ])
-            .output()
-            .context("run curl")?;
+            .arg("--config")
+            .arg(&cfg_path)
+            .arg("--data")
+            .arg(format!("@{}", body_path.display()))
+            .arg(url)
+            .output();
+        let _ = std::fs::remove_file(&cfg_path);
+        let _ = std::fs::remove_file(&body_path);
+        let out = out.context("run curl")?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         let (resp_body, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
         let status: u16 = status_str.trim().parse().unwrap_or(0);
@@ -2897,7 +3002,8 @@ pub fn upload_artifact_blocking(
         .context("CreateArtifact: empty signed_upload_url")?
         .to_string();
 
-    // 2. Create zip archive and PUT to signed URL via temp file.
+    // 2. Create zip archive and PUT to signed URL.
+    // The signed URL is itself a credential — keep it off argv via --config.
     let zip_bytes = {
         let buf = std::io::Cursor::new(Vec::new());
         let mut zw = zip::ZipWriter::new(buf);
@@ -2912,33 +3018,28 @@ pub fn upload_artifact_blocking(
     };
     let zip_size = zip_bytes.len() as u64;
 
-    let tmp_path =
-        std::env::temp_dir().join(format!("velnor-artifact-{}.zip", uuid::Uuid::new_v4()));
-    std::fs::write(&tmp_path, &zip_bytes).context("write artifact temp file")?;
+    let zip_path = write_secret_file("zip", &zip_bytes).context("write zip temp file")?;
+    let put_cfg = format!(
+        "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
+         header = \"Content-Type: application/zip\"\n\
+         header = \"Content-Length: {zip_size}\"\n\
+         header = \"x-ms-blob-type: BlockBlob\"\n\
+         max-time = 60\n\
+         request = PUT\n\
+         silent\n\
+         write-out = \"\\n%{{http_code}}\"\n\
+         url = \"{upload_url}\"\n"
+    );
+    let put_cfg_path = write_secret_file("put.cfg", put_cfg.as_bytes()).context("write PUT cfg")?;
     let put_out = std::process::Command::new("curl")
-        .args([
-            "-s",
-            "-w",
-            "\n%{http_code}",
-            "--max-time",
-            "60",
-            "-X",
-            "PUT",
-            "-H",
-            &format!("User-Agent: {RUNNER_USER_AGENT}"),
-            "-H",
-            "Content-Type: application/zip",
-            "-H",
-            &format!("Content-Length: {zip_size}"),
-            "-H",
-            "x-ms-blob-type: BlockBlob",
-            "--data-binary",
-            &format!("@{}", tmp_path.display()),
-            &upload_url,
-        ])
-        .output()
-        .context("run curl PUT")?;
-    let _ = std::fs::remove_file(&tmp_path);
+        .arg("--config")
+        .arg(&put_cfg_path)
+        .arg("--data-binary")
+        .arg(format!("@{}", zip_path.display()))
+        .output();
+    let _ = std::fs::remove_file(&put_cfg_path);
+    let _ = std::fs::remove_file(&zip_path);
+    let put_out = put_out.context("run curl PUT")?;
     let stdout = String::from_utf8_lossy(&put_out.stdout);
     let (_, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
     let put_status: u16 = status_str.trim().parse().unwrap_or(0);
