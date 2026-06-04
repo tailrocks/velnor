@@ -2678,20 +2678,23 @@ impl TwirpResultsClient {
             workflow_job_run_backend_id,
             workflow_run_backend_id,
         };
-        let response = self
-            .http
-            .post(&url)
-            .bearer_auth(&self.token)
-            .json(&body)
-            .send()
-            .await
-            .context("send Twirp WorkflowStepsUpdate")?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            bail!("WorkflowStepsUpdate failed: status={status}, body={body}");
+        // Route through curl: GitHub throttles reqwest/hyper by TLS fingerprint
+        // under heavy concurrent load, which silently dropped step records (the
+        // job's step list went incomplete in the UI). curl (LibreSSL) is immune.
+        // Retry a couple times so a transient blip never loses a step record.
+        let body_json = serde_json::to_string(&body).context("serialize WorkflowStepsUpdate")?;
+        let mut last_err = String::new();
+        for attempt in 0..3 {
+            match curl_json_request("POST", &url, &self.token, Some(body_json.clone()), 30).await {
+                Ok((status, _)) if (200..300).contains(&status) => return Ok(()),
+                Ok((status, resp)) => last_err = format!("status={status}, body={resp}"),
+                Err(e) => last_err = e.to_string(),
+            }
+            if attempt < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(200 * (attempt + 1))).await;
+            }
         }
-        Ok(())
+        bail!("WorkflowStepsUpdate failed after 3 attempts: {last_err}");
     }
 
     /// Upload step log content to Results Service blob storage.
