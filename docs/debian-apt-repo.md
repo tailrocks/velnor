@@ -47,7 +47,7 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
 
 4. **Host on GitHub Pages** — publish the reprepro output tree (`dists/`,
    `pool/`, `velnor.gpg`) to the `gh-pages` branch.
-   Served at e.g. `https://donbeave.github.io/velnor-apt/`.
+   Served at e.g. `https://www.zhokhov.com/velnor-apt/`.
 
 ### Where it lives (storage decision)
 
@@ -83,9 +83,9 @@ upgrade` picks it up. That is the whole upgrade story.
 
 ```bash
 sudo install -m0755 -d /etc/apt/keyrings
-curl -fsSL https://donbeave.github.io/velnor-apt/velnor.gpg \
+curl -fsSL https://www.zhokhov.com/velnor-apt/velnor.gpg \
   | sudo tee /etc/apt/keyrings/velnor.gpg > /dev/null
-echo "deb [signed-by=/etc/apt/keyrings/velnor.gpg] https://donbeave.github.io/velnor-apt stable main" \
+echo "deb [signed-by=/etc/apt/keyrings/velnor.gpg] https://www.zhokhov.com/velnor-apt stable main" \
   | sudo tee /etc/apt/sources.list.d/velnor.list
 sudo apt update
 sudo apt install velnor-runner
