@@ -404,6 +404,7 @@ where
                 false,
                 true,
                 true,
+                false, // lfs: action repos don't use LFS
             )?;
         }
         resolved.push(resolve_action(plan)?);

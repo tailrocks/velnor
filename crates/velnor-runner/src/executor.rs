@@ -6244,6 +6244,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 fetch_tags: false,
                 persist_credentials: true,
                 clean: true,
+                lfs: false,
                 condition: None,
                 continue_on_error: false,
             }),
