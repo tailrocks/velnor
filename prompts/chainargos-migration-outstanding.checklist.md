@@ -47,6 +47,20 @@ git-bundle deploys. Target this as the real fix for daemon operations.
       the `.deb`, reprepro builds a GPG-signed apt repo, GitHub Pages hosts it,
       GitHub Actions publishes on tag, users `apt install velnor-runner` via a
       `signed-by` keyring and `apt upgrade` to update.
+  - [x] **apt repo created + scaffolded**: `donbeave/velnor-apt` (public) — README
+        with install steps, `conf/distributions` (reprepro), `publish.yml`
+        (download `.deb` → reprepro sign → publish gh-pages).
+  - [ ] **velnor side: build the `.deb`** — add `[package.metadata.deb]` to the
+        velnor `Cargo.toml` (binary, `velnor-daemon.service` unit with
+        `Restart=always`, `/etc/velnor/velnor.env` conffile, `velnor` user,
+        `/var/lib/velnor`, postinst/prerm) + a `release-deb.yml` that runs
+        `cargo deb` on tag and attaches the `.deb` to the GitHub Release (and
+        triggers `velnor-apt` `publish-deb`).
+  - [ ] **GPG signing key** — create it; add `APT_GPG_PRIVATE_KEY` +
+        `APT_GPG_PASSPHRASE` secrets to `velnor-apt`; set `SignWith` key id;
+        publish the public `velnor.gpg`.
+  - [ ] **Enable GitHub Pages** on `velnor-apt` (Source: `gh-pages`) after the
+        first publish run creates the branch.
 - [ ] **`.deb` package** (e.g. via `cargo-deb` or `nfpm`):
   - ships the `velnor-runner` binary to `/usr/bin` (or `/opt/velnor`)
   - installs a **systemd unit** `velnor-daemon.service` (`Restart=always`,
