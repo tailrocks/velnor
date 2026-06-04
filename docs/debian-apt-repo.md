@@ -47,12 +47,12 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
 
 4. **Host on GitHub Pages** — publish the reprepro output tree (`dists/`,
    `pool/`, `velnor.gpg`) to the `gh-pages` branch.
-   Served at e.g. `https://chainargos.github.io/velnor-apt/`.
+   Served at e.g. `https://donbeave.github.io/velnor-apt/`.
 
 ### Where it lives (storage decision)
 
 - **Store = GitHub Pages.** apt fetches the signed tree over HTTPS directly.
-- **Dedicated repo** `chainargos/velnor-apt` (NOT the velnor source repo) so the
+- **Dedicated repo** `donbeave/velnor-apt` (NOT the velnor source repo) so the
   `.deb` binaries don't bloat the code git history; the signed tree lives on its
   `gh-pages` branch.
 - **GitHub Packages does NOT support apt/deb** (npm/Docker/Maven/NuGet/RubyGems
@@ -83,9 +83,9 @@ upgrade` picks it up. That is the whole upgrade story.
 
 ```bash
 sudo install -m0755 -d /etc/apt/keyrings
-curl -fsSL https://chainargos.github.io/velnor-apt/velnor.gpg \
+curl -fsSL https://donbeave.github.io/velnor-apt/velnor.gpg \
   | sudo tee /etc/apt/keyrings/velnor.gpg > /dev/null
-echo "deb [signed-by=/etc/apt/keyrings/velnor.gpg] https://chainargos.github.io/velnor-apt stable main" \
+echo "deb [signed-by=/etc/apt/keyrings/velnor.gpg] https://donbeave.github.io/velnor-apt stable main" \
   | sudo tee /etc/apt/sources.list.d/velnor.list
 sudo apt update
 sudo apt install velnor-runner
