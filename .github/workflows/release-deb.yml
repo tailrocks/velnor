@@ -49,17 +49,27 @@ jobs:
             || gh release create "$TAG" --title "$TAG" --generate-notes
           gh release upload "$TAG" "$DEB" --clobber
 
-      - name: Trigger velnor-apt to publish (optional)
+      - name: Push .deb to velnor-apt + trigger publish (optional)
+        # velnor is private; velnor-apt publishes from its OWN release. So upload
+        # the .deb to a velnor-apt release, then dispatch its publish workflow.
+        # Needs VELNOR_APT_TOKEN: a PAT with `repo` (contents + workflow) write on
+        # donbeave/velnor-apt. Without it, publish velnor-apt manually.
         env:
-          DISPATCH_TOKEN: ${{ secrets.VELNOR_APT_DISPATCH_TOKEN }}
+          APT_TOKEN: ${{ secrets.VELNOR_APT_TOKEN }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          if [ -z "${DISPATCH_TOKEN:-}" ]; then
-            echo "No VELNOR_APT_DISPATCH_TOKEN secret; skipping cross-repo publish trigger."
-            echo "Publish manually: gh workflow run publish.yml -R donbeave/velnor-apt -f version=$TAG"
+          DEB="$(ls target/debian/velnor-runner_*_amd64.deb)"
+          if [ -z "${APT_TOKEN:-}" ]; then
+            echo "No VELNOR_APT_TOKEN secret; skipping auto-publish."
+            echo "Publish manually:"
+            echo "  gh release upload $TAG '$DEB' --repo donbeave/velnor-apt --clobber"
+            echo "  gh workflow run publish.yml --repo donbeave/velnor-apt -f version=$TAG"
             exit 0
           fi
-          GH_TOKEN="$DISPATCH_TOKEN" gh api repos/donbeave/velnor-apt/dispatches \
-            -f event_type=publish-deb \
-            -f "client_payload[version]=$TAG"
+          export GH_TOKEN="$APT_TOKEN"
+          gh release view "$TAG" --repo donbeave/velnor-apt >/dev/null 2>&1 \
+            || gh release create "$TAG" --repo donbeave/velnor-apt --title "velnor-runner $TAG" --notes "velnor-runner .deb (amd64)."
+          gh release upload "$TAG" "$DEB" --repo donbeave/velnor-apt --clobber
+          gh workflow run publish.yml --repo donbeave/velnor-apt -f version="$TAG"
+          echo "Uploaded $DEB to velnor-apt $TAG and triggered publish."
