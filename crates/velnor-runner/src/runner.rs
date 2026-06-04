@@ -1744,8 +1744,19 @@ fn start_step_log_publisher(
                 .collect();
             let line_count = lines.len() as i64;
 
-            if let Some(ws) = ws_conn.as_mut() {
-                if !lines.is_empty() {
+            if !lines.is_empty() {
+                // GitHub may close the feed WebSocket between steps / after idle, so a
+                // later send hits a Broken pipe. Reconnect (lazily, and once on send
+                // failure) so the live console does not go dark for the rest of the job.
+                if ws_conn.is_none() {
+                    if let Some(client) = &feed_client {
+                        if let Ok(ws) = client.connect().await {
+                            eprintln!("[feed] WebSocket reconnected.");
+                            ws_conn = Some(ws);
+                        }
+                    }
+                }
+                if let Some(ws) = ws_conn.as_mut() {
                     eprintln!(
                         "[feed] Sending {} lines for step {}",
                         lines.len(),
@@ -1757,7 +1768,7 @@ fn start_step_log_publisher(
                     if let Err(e) = crate::protocol::FeedStreamClient::send_log_lines(
                         ws,
                         &log.step_id,
-                        timestamped,
+                        timestamped.clone(),
                         Some(line_counter),
                         Some(&plan_id),
                         Some(&job_id),
@@ -1765,11 +1776,32 @@ fn start_step_log_publisher(
                     .await
                     {
                         eprintln!(
-                            "Best-effort WebSocket feed send failed for '{}': {e:#}",
+                            "Best-effort WebSocket feed send failed for '{}': {e:#}; reconnecting",
                             log.step_id
                         );
-                        // Drop broken connection; remaining logs go without live feed.
                         ws_conn = None;
+                        // Reconnect once and resend this batch so no step's live log is lost.
+                        if let Some(client) = &feed_client {
+                            if let Ok(mut ws2) = client.connect().await {
+                                if crate::protocol::FeedStreamClient::send_log_lines(
+                                    &mut ws2,
+                                    &log.step_id,
+                                    timestamped,
+                                    Some(line_counter),
+                                    Some(&plan_id),
+                                    Some(&job_id),
+                                )
+                                .await
+                                .is_ok()
+                                {
+                                    eprintln!(
+                                        "[feed] resent {} lines after reconnect.",
+                                        line_count
+                                    );
+                                    ws_conn = Some(ws2);
+                                }
+                            }
+                        }
                     }
                 }
             }
