@@ -1631,6 +1631,22 @@ where
                 container.temp_host.display()
             )
         })?;
+        // The temp dir is bind-mounted over the job container's /tmp. A plain
+        // create_dir_all yields 0755 owned by the daemon user, which leaves the
+        // container's /tmp non-sticky and unwritable by non-root sandbox users
+        // (e.g. apt's `_apt`, uid 100). That makes `apt-get update` fail with
+        // "Couldn't create temporary file /tmp/apt.conf.*". A real /tmp is
+        // world-writable and sticky (1777); force that so the mount matches.
+        fs::set_permissions(
+            &container.temp_host,
+            std::fs::Permissions::from_mode(0o1777),
+        )
+        .with_context(|| {
+            format!(
+                "set 1777 (sticky, world-writable) on job temp dir {}",
+                container.temp_host.display()
+            )
+        })?;
         self.run_docker(&container.create_network_args())?;
         for service in &container.services {
             self.run_docker(&service.start_args())?;
