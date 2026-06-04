@@ -1292,7 +1292,9 @@ async fn handle_job_request(
         let (step_start_sender, step_start_receiver) = tokio::sync::mpsc::unbounded_channel();
         let step_timeline = start_step_timeline_publisher(job.clone(), step_start_receiver);
         let (step_log_sender, step_log_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let step_logs_publisher = start_step_log_publisher(job.clone(), step_log_receiver);
+        let console_log_path = Some(job_console_log_path(config_dir, args.work_dir.clone(), &job));
+        let step_logs_publisher =
+            start_step_log_publisher(job.clone(), step_log_receiver, console_log_path);
         let config_dir = config_dir.to_path_buf();
         let work_dir = args.work_dir.clone();
         let docker_host_work_dir = args.docker_host_work_dir.clone();
@@ -1718,6 +1720,7 @@ fn start_step_timeline_publisher(
 fn start_step_log_publisher(
     job: AgentJobRequestMessage,
     mut receiver: UnboundedReceiver<StepLog>,
+    console_log_path: Option<PathBuf>,
 ) -> JoinHandle<()> {
     let plan_id_for_feed = job.plan.plan_id.clone();
     let job_id_for_feed = job.job_id.clone();
@@ -1752,6 +1755,16 @@ fn start_step_log_publisher(
         let mut line_counter: i64 = 1;
         let mut change_order: i64 = 1000; // Offset from start-event change_orders
 
+        // Prepare the live console file that the job container tails as PID 1
+        // (so `docker logs <job-container>` mirrors the GitHub UI). Create it
+        // fresh for this job; the container's `tail -F` picks it up.
+        if let Some(path) = &console_log_path {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, b"");
+        }
+
         // Open ONE persistent WebSocket connection for the entire job (matching the
         // official GitHub runner which keeps a single connection open per job).
         let mut ws_conn = if let Some(client) = &feed_client {
@@ -1779,6 +1792,11 @@ fn start_step_log_publisher(
                 .map(|l| mask_single_value(l, &masks))
                 .collect();
             let line_count = lines.len() as i64;
+
+            // Mirror this step to the container's live console file (docker logs).
+            if let Some(path) = &console_log_path {
+                append_job_console(path, &log.display_name, &lines, &log.masks);
+            }
 
             if !lines.is_empty() {
                 // GitHub may close the feed WebSocket between steps / after idle, so a
@@ -2844,6 +2862,42 @@ fn job_work_dir(
     work_dir
         .unwrap_or_else(|| config_dir.join("_work"))
         .join(sanitize_path_segment(&job.job_id))
+}
+
+/// Host path of the live console file the job container tails as PID 1. Lives
+/// under the job's temp dir (mounted at `/__t`), so the container streams it via
+/// `tail -F /__t/_velnor/console.log` and `docker logs` mirrors the UI output.
+fn job_console_log_path(
+    config_dir: &std::path::Path,
+    work_dir: Option<PathBuf>,
+    job: &AgentJobRequestMessage,
+) -> PathBuf {
+    job_work_dir(config_dir, work_dir, job)
+        .join("temp")
+        .join("_velnor")
+        .join("console.log")
+}
+
+/// Append one completed step's masked output to the live console file. `lines`
+/// are already job-secret-masked; `step_masks` adds any per-step `::add-mask::`
+/// values so nothing secret reaches `docker logs`.
+fn append_job_console(path: &Path, display_name: &str, lines: &[String], step_masks: &[String]) {
+    use std::io::Write;
+    let mut out = String::new();
+    if !display_name.is_empty() {
+        out.push_str(&format!("\n=== {display_name} ===\n"));
+    }
+    for line in lines {
+        out.push_str(&mask_value(line, step_masks));
+        out.push('\n');
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = file.write_all(out.as_bytes());
+    }
 }
 
 fn unix_now_iso8601() -> String {

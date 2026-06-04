@@ -80,11 +80,15 @@ impl JobContainerSpec {
         }
         self.append_docker_cli_mounts(&mut args);
 
+        // PID 1 tails a live console file instead of /dev/null, so
+        // `docker logs <job-container>` mirrors the GitHub UI step output.
+        // Velnor appends each masked step's lines to this file (mounted at
+        // /__t). `tail -F` waits for the file if it does not exist yet.
         args.extend([
             self.image.clone(),
-            "tail".into(),
-            "-f".into(),
-            "/dev/null".into(),
+            "sh".into(),
+            "-c".into(),
+            "mkdir -p /__t/_velnor && touch /__t/_velnor/console.log && exec tail -n +1 -F /__t/_velnor/console.log".into(),
         ]);
         args
     }
@@ -512,7 +516,11 @@ mod tests {
         assert!(args.contains(&"NODE_OPTIONS=--max-old-space-size=4096".into()));
         assert!(args.windows(2).any(|pair| pair == ["--cpus", "2"]));
         assert!(args.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
-        assert_eq!(args.last().map(String::as_str), Some("/dev/null"));
+        // PID 1 tails the live console file (so `docker logs` mirrors the UI).
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("mkdir -p /__t/_velnor && touch /__t/_velnor/console.log && exec tail -n +1 -F /__t/_velnor/console.log")
+        );
     }
 
     #[test]
