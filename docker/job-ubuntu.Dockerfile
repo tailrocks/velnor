@@ -5,15 +5,22 @@ RUN apt-get update \
         bash \
         build-essential \
         ca-certificates \
+        clang \
+        cmake \
         curl \
         docker-buildx \
         docker.io \
         git \
+        git-lfs \
         jq \
-        python3 \
+        libclang-dev \
+        libsasl2-dev \
         libssl-dev \
+        libzstd-dev \
         openssh-client \
         pkg-config \
+        protobuf-compiler \
+        python3 \
         tar \
         unzip \
         xz-utils \
