@@ -125,14 +125,32 @@ git-bundle deploys. Target this as the real fix for daemon operations.
       `lane` input (velnor default / github / hetzner); `build-publish.yml` passes
       lane to all 36 image builds; `renovate.yml` defaults to Velnor. Uses
       `lfs: true` (Velnor LFS support).
-  - [ ] **BLOCKED on infra (operator):** the Sentry Velnor daemon is repo-scoped
-        to `java-monorepo`, so it does NOT serve blockchain-nodes jobs. Need an
-        **org-level** `velnor-target-mvp` runner (register the daemon against the
-        `ChainArgos` org — requires an org-admin PAT; my token got 403 on the org
-        runners API) OR a blockchain-nodes-scoped daemon. Until then PR #578 must
-        stay unmerged (default velnor would leave builds with no runner). After
-        the runner exists: dispatch `build-image.yml` for one package on
-        `lane=velnor` to verify, then merge.
+  - [x] **Runner infra solved** — a SECOND velnor daemon on Sentry scoped to
+        blockchain-nodes (systemd `velnor-daemon-bcn`, config
+        `/etc/velnor/blockchain-nodes.env`, `--config-dir /var/lib/velnor/bcn-config`,
+        2 slots) registers `velnor-target-mvp` runners for the repo. The daemon
+        PAT can register repo-level runners on blockchain-nodes (201). No org
+        admin needed. (Currently stopped/disabled — re-enable once the velnor
+        build gap below is fixed: `systemctl enable --now velnor-daemon-bcn`.)
+  - [x] **github lane VERIFIED** — `build-image.yml` for `debian-blockchain-base`
+        on `lane=github` succeeded (run 26990829478). blockchain-nodes runs on
+        GitHub-hosted via the new pattern.
+  - [ ] **velnor lane BLOCKED on a velnor bug** (run 26990823037 failed at
+        `baptiste0928/cargo-install`: "Unable to locate executable file: cargo").
+        Root cause: velnor runs JS actions in a **node:20 sidecar** (not the job
+        container). `dtolnay/rust-toolchain` installs cargo to
+        `/github/home/.cargo/bin` (on the bind-mounted home the sidecar shares)
+        but does NOT add it to `GITHUB_PATH` on a from-scratch container (it
+        assumes a pre-rust image), so the next JS action (`cargo-install`) can't
+        find `cargo`. java-monorepo avoids this (mise-action + script steps run in
+        the job container which has cargo on PATH).
+        FIX (identified, not yet shipped): always include
+        `/github/home/.cargo/bin` in the node-action PATH
+        (`container.rs::node_action_shell_command`, always use the `sh -lc`
+        prelude). It's a ~1-line change but touches ~12 node-action tests that
+        assert exact invocations, and the heavy `cargo install` + `just build-*`
+        docker steps may surface further gaps — scope it as a focused task.
+        Then re-enable the bcn daemon, verify `lane=velnor`, and merge PR #578.
 
 ### Platform gaps (GitHub V2 sends third-party runners a leaner message — likely NOT runner-fixable; decide whether to work around)
 - [ ] **Downloadable log archive empty** (`gh run view --log` / "Download log
