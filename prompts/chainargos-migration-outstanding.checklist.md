@@ -141,9 +141,10 @@ git-bundle deploys. Target this as the real fix for daemon operations.
       both ABSENT from velnor's V2 broker message (`plan.scopeIdentifier=null`,
       only the run-service host given). The v1 timeline-log flow was implemented
       and reverted as dead code. Web UI logs (v2) ARE complete.
-      - Optional workaround: upload the full job log as a regular **build
-        artifact** (`job-log.txt`) — the artifacts API IS reachable, so that
-        download would work (not the native button, but a real archive).
+      - [x] **Workaround shipped (rc4):** velnor uploads the full masked job log
+        as a **`job-log.txt` artifact** at completion (under the run's Artifacts),
+        so there IS a real "download the logs" path. Not the native button, but a
+        working archive. (Deploy to Sentry via `apt upgrade` once on rc4.)
 - [ ] **Step display names show `Run <command>`** instead of the YAML `name:`
       (Tests / Rustfmt / Clippy). Proven at the wire: the broker step has
       `name=__run`/`__run_2`, `displayName=None` — GitHub strips the name. Only a
