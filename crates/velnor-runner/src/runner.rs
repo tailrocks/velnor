@@ -3149,6 +3149,68 @@ fn action_step_display_name(step: &crate::job_message::ActionStep) -> String {
     String::new()
 }
 
+/// Build one masked, GitHub-style text blob of the whole job — each step wrapped
+/// in `##[group]<name>` … `##[endgroup]` — for the downloadable `job-log.txt`.
+fn build_combined_job_log(job: &AgentJobRequestMessage, step_logs: &[StepLog]) -> String {
+    let secret_masks = job_secret_mask_values(job);
+    let mut out = String::new();
+    for log in step_logs {
+        if log.skipped {
+            continue;
+        }
+        let name = if log.display_name.is_empty() {
+            log.step_id.as_str()
+        } else {
+            log.display_name.as_str()
+        };
+        out.push_str(&format!("##[group]{name}\n"));
+        for line in &log.lines {
+            let masked = mask_value(&mask_single_value(line, &secret_masks), &log.masks);
+            out.push_str(&masked);
+            out.push('\n');
+        }
+        out.push_str("##[endgroup]\n");
+    }
+    out
+}
+
+/// Upload the combined job log as a `job-log.txt` artifact (best-effort). Gives a
+/// real "download the logs" path since GitHub doesn't serve the v1 /logs archive
+/// for Velnor's V2 jobs.
+async fn upload_job_log_artifact(job: &AgentJobRequestMessage, step_logs: &[StepLog]) {
+    if step_logs.is_empty() {
+        return;
+    }
+    let Some(endpoint) = job.system_connection() else {
+        return;
+    };
+    let Some(token) = system_connection_access_token(endpoint) else {
+        return;
+    };
+    let Some(results_url) = endpoint.data.get("ResultsServiceUrl").cloned() else {
+        return;
+    };
+    let plan_id = job.plan.plan_id.clone();
+    let job_id = job.job_id.clone();
+    let content = build_combined_job_log(job, step_logs).into_bytes();
+    let outcome = tokio::task::spawn_blocking(move || {
+        crate::protocol::upload_artifact_blocking(
+            &results_url,
+            &token,
+            &plan_id,
+            &job_id,
+            "job-log",
+            &[("job-log.txt".to_string(), content)],
+        )
+    })
+    .await;
+    match outcome {
+        Ok(Ok(())) => println!("Uploaded job-log.txt artifact."),
+        Ok(Err(e)) => eprintln!("Best-effort job-log artifact upload failed: {e:#}"),
+        Err(e) => eprintln!("Best-effort job-log artifact task join failed: {e:#}"),
+    }
+}
+
 async fn complete_run_service_job(
     client: &RunServiceClient,
     run_service_url: &str,
@@ -3166,6 +3228,11 @@ async fn complete_run_service_job(
             eprintln!("Best-effort timeline log upload failed: {error:#}");
         }
     }
+    // Best-effort: publish the whole job log as a downloadable artifact
+    // ("job-log.txt"). GitHub does not expose the v1 /logs archive ("Download
+    // log archive" / `gh run view --log`) for Velnor's V2 jobs, so this gives a
+    // real way to download the full log — it shows up under the run's Artifacts.
+    upload_job_log_artifact(job, &step_logs).await;
     let step_results = step_logs
         .iter()
         .map(|log| RunServiceStepResult {
