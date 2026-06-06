@@ -22,7 +22,8 @@ use crate::{
         composite_action_invocations, composite_repository_action_plans,
         composite_repository_action_plans_from_resolved, download_repository_actions,
         is_local_action_step, local_action_plans_with_context, native_action_adapter,
-        native_invocation_from_plan, repository_action_plans, resolve_local_action, ActionMetadata,
+        native_invocation_from_plan, repository_action_plans, resolve_local_action,
+        unsupported_action_error, ActionMetadata,
         ActionRuntime, CompositeActionInvocation, LocalActionPlan, RepositoryActionPlan,
         ResolvedAction,
     },
@@ -2807,6 +2808,9 @@ fn append_resolved_action_steps(
         });
         return Ok(());
     }
+    if let Some(message) = unsupported_action_error(&action.plan.repository) {
+        bail!("{message}");
+    }
     match &action.runtime {
         ActionRuntime::JavaScript { .. } => ordered.push(ExecutableStep::JavaScript {
             step_id: action.plan.step_id.clone(),
@@ -5414,6 +5418,56 @@ runs:
             invocation.main_container_path,
             "/__a/_actions/acme_action/v1/sub/action/sub.js"
         );
+    }
+
+    #[test]
+    fn unsupported_actions_fail_at_step_planning_time() {
+        let actions_host = Path::new("/tmp/actions");
+        let metadata = parse_action_metadata("runs:\n  using: node20\n  main: index.js\n").unwrap();
+        for repository in ["dtolnay/rust-toolchain", "baptiste0928/cargo-install"] {
+            let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+                "messageType": "PipelineAgentJobRequest",
+                "plan": { "planId": "plan" },
+                "timeline": { "id": "timeline" },
+                "jobId": "job",
+                "jobDisplayName": "Build",
+                "requestId": 1,
+                "steps": [{
+                    "id": "step",
+                    "reference": {
+                        "type": "Repository",
+                        "name": repository,
+                        "ref": "stable"
+                    }
+                }]
+            }))
+            .unwrap();
+            let plan = RepositoryActionPlan {
+                step_id: "step".into(),
+                repository: repository.into(),
+                git_ref: "stable".into(),
+                source_path: None,
+                repository_dir: actions_host.join("_actions/step/stable"),
+                action_dir: actions_host.join("_actions/step/stable"),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            };
+            let resolved = vec![ResolvedAction {
+                plan: plan.clone(),
+                metadata_path: actions_host.join("_actions/step/stable/action.yml"),
+                runtime: metadata.runtime().unwrap(),
+                metadata: metadata.clone(),
+            }];
+            let error =
+                ordered_executable_steps(&job, &[], &[plan], &resolved, &[], actions_host, &[])
+                    .unwrap_err();
+            assert!(
+                error.to_string().contains("jdx/mise-action"),
+                "expected error for {repository} to mention jdx/mise-action, got: {error}"
+            );
+        }
     }
 
     #[test]

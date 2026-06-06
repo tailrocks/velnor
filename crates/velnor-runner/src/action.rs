@@ -156,6 +156,28 @@ pub fn native_action_adapter(repository: &str) -> Option<NativeActionAdapter> {
     }
 }
 
+/// Returns an error message for actions that are explicitly not supported on Velnor.
+///
+/// These actions run as node JavaScript in ephemeral sidecar containers. They rely on
+/// tool binaries (e.g. `cargo`) being present in those containers, but Velnor's sidecar
+/// images are plain node images with no Rust tooling. Velnor cannot silently emulate
+/// this — it fails with a cryptic "executable not found" error. Fail fast instead.
+pub fn unsupported_action_error(repository: &str) -> Option<&'static str> {
+    match repository.to_ascii_lowercase().as_str() {
+        "dtolnay/rust-toolchain" => Some(
+            "dtolnay/rust-toolchain is not supported on Velnor: it installs Rust inside an \
+             ephemeral node sidecar container, so the toolchain is lost when the container exits. \
+             Use jdx/mise-action with a 'rust = \"stable\"' entry in mise.toml instead.",
+        ),
+        "baptiste0928/cargo-install" => Some(
+            "baptiste0928/cargo-install is not supported on Velnor: it invokes cargo inside an \
+             ephemeral node sidecar container that has no Rust tooling. \
+             Use jdx/mise-action with a 'cargo:<crate> = \"latest\"' entry in mise.toml instead.",
+        ),
+        _ => None,
+    }
+}
+
 impl ActionMetadata {
     pub fn runtime(&self) -> Result<ActionRuntime> {
         let using = self.runs.using.to_ascii_lowercase();
@@ -2974,6 +2996,26 @@ runs:
             assert_eq!(native_action_adapter(repository), Some(adapter));
         }
         assert_eq!(native_action_adapter("owner/unknown-action"), None);
+    }
+
+    #[test]
+    fn unsupported_actions_return_error_message() {
+        assert!(unsupported_action_error("dtolnay/rust-toolchain").is_some());
+        assert!(unsupported_action_error("DTOLNAY/RUST-TOOLCHAIN").is_some());
+        assert!(unsupported_action_error("baptiste0928/cargo-install").is_some());
+        assert!(unsupported_action_error("Baptiste0928/Cargo-Install").is_some());
+        assert!(unsupported_action_error("jdx/mise-action").is_none());
+        assert!(unsupported_action_error("owner/unknown-action").is_none());
+        assert!(
+            unsupported_action_error("dtolnay/rust-toolchain")
+                .unwrap()
+                .contains("jdx/mise-action")
+        );
+        assert!(
+            unsupported_action_error("baptiste0928/cargo-install")
+                .unwrap()
+                .contains("jdx/mise-action")
+        );
     }
 
     fn action_metadata_files(root: &Path) -> Vec<PathBuf> {
