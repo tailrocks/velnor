@@ -21,6 +21,7 @@ pub struct JobContainerSpec {
     pub docker_cli_plugin_host_dir: Option<PathBuf>,
     pub docker_host_work_dir: Option<PathBuf>,
     pub verify_bind_mounts: bool,
+    pub daemon_id: String,
 }
 
 impl JobContainerSpec {
@@ -70,6 +71,7 @@ impl JobContainerSpec {
         for (name, value) in &self.env {
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
+        args.extend(["--label".into(), format!("velnor.daemon-id={}", self.daemon_id)]);
         args.extend(self.options.iter().cloned());
 
         if self.mount_docker_socket {
@@ -495,6 +497,7 @@ mod tests {
             docker_cli_plugin_host_dir: None,
             docker_host_work_dir: None,
             verify_bind_mounts: false,
+            daemon_id: "test-daemon".into(),
         }
     }
 

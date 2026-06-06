@@ -26,6 +26,7 @@ pub fn github_job_container_spec(
     paths: GitHubJobContainerPaths,
     docker_image: &str,
     node_action_image: &str,
+    daemon_id: String,
 ) -> JobContainerSpec {
     JobContainerSpec {
         name: job_container_name(job),
@@ -45,6 +46,7 @@ pub fn github_job_container_spec(
         docker_cli_plugin_host_dir: None,
         docker_host_work_dir: paths.docker_host_work_dir,
         verify_bind_mounts: true,
+        daemon_id,
     }
 }
 
