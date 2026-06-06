@@ -449,9 +449,8 @@ where
             )
             .map(|summary| summary.step_results);
 
-        let cleanup_result = self.cleanup(container);
-        if let Err(error) = cleanup_result {
-            return Err(error.context("cleanup failed after script step"));
+        if let Err(error) = self.cleanup(container) {
+            eprintln!("Warning: cleanup failed after script step: {error:#}");
         }
         result
     }
@@ -528,9 +527,8 @@ where
             temp_host,
         );
 
-        let cleanup_result = self.cleanup(container);
-        if let Err(error) = cleanup_result {
-            return Err(error.context("cleanup failed after ordered job steps"));
+        if let Err(error) = self.cleanup(container) {
+            eprintln!("Warning: cleanup failed after ordered job steps: {error:#}");
         }
         result
     }
@@ -947,9 +945,8 @@ where
             )
         })();
 
-        let cleanup_result = self.cleanup(container);
-        if let Err(error) = cleanup_result {
-            return Err(error.context("cleanup failed after JavaScript action"));
+        if let Err(error) = self.cleanup(container) {
+            eprintln!("Warning: cleanup failed after JavaScript action: {error:#}");
         }
         result
     }
@@ -1187,10 +1184,13 @@ where
         let mut path = vec![
             // Mise binary dir so subsequent steps can call `mise run ...` directly.
             "/opt/mise/bin".to_string(),
-            // Mise shims for all mise-managed tools
-            "/opt/mise/shims".to_string(),
-            // Cargo bin for Rust tools pre-installed in the image (cargo, rustc, nextest)
+            // Real cargo/rustc from rustup precedes the mise cargo shim so that
+            // `cargo install` inside mise tasks uses the actual toolchain. The mise
+            // shim exits with "cargo is not a valid shim" when rust/cargo are not
+            // in the active toolset but the real binary is not on PATH first.
             "/root/.cargo/bin".to_string(),
+            // Mise shims for all other mise-managed tools
+            "/opt/mise/shims".to_string(),
         ];
         // Add the active mise tool install bin dirs (emitted by setup_mise_script)
         // so executables installed into a mise-managed tool (e.g. ansible-galaxy
@@ -1617,7 +1617,7 @@ where
     }
 
     fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
-        let container_result = self.run_docker(&container.remove_container_args());
+        let container_result = self.run_docker_remove_container(&container.remove_container_args());
         let service_results = container
             .services
             .iter()
@@ -1724,6 +1724,29 @@ where
     fn run_docker(&mut self, args: &[String]) -> Result<CommandResult> {
         let result = self.runner.run("docker", args)?;
         if result.code != 0 {
+            bail!(
+                "docker {} failed with code {}: {}",
+                args.join(" "),
+                result.code,
+                result.stderr
+            );
+        }
+        Ok(result)
+    }
+
+    fn run_docker_remove_container(&mut self, args: &[String]) -> Result<CommandResult> {
+        let result = self.runner.run("docker", args)?;
+        if result.code != 0 {
+            // Docker reports this when another rm request is already in flight for
+            // the same container (e.g. the container exited on its own and Docker
+            // started its own GC pass concurrently with our `docker rm --force`).
+            // The container IS being removed — treat it as success so a clean
+            // container removal does not cause the slot to cycle unnecessarily.
+            if result.stderr.contains("removal of container")
+                && result.stderr.contains("is already in progress")
+            {
+                return Ok(result);
+            }
             bail!(
                 "docker {} failed with code {}: {}",
                 args.join(" "),
