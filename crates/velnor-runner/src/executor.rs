@@ -1185,6 +1185,8 @@ where
         let script = setup_mise_script(install, &install_args, &working_directory);
         let mut result = self.native_shell(container, state, &script)?;
         let mut path = vec![
+            // Mise binary dir so subsequent steps can call `mise run ...` directly.
+            "/opt/mise/bin".to_string(),
             // Mise shims for all mise-managed tools
             "/opt/mise/shims".to_string(),
             // Cargo bin for Rust tools pre-installed in the image (cargo, rustc, nextest)
