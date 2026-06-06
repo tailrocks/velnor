@@ -2105,6 +2105,40 @@ fn execute_script_job(
     step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
 ) -> Result<ScriptJobResult> {
     let job_dir = job_work_dir(config_dir, work_dir, job);
+    let result = execute_script_job_inner(
+        &job_dir,
+        docker_host_work_dir,
+        docker_image,
+        node_action_image,
+        run_service_url,
+        billing_owner_id,
+        job,
+        script_steps,
+        step_start_sender,
+        step_log_sender,
+    );
+    if let Err(e) = fs::remove_dir_all(&job_dir) {
+        eprintln!(
+            "Warning: failed to clean up job workspace at {}: {e:#}",
+            job_dir.display()
+        );
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_script_job_inner(
+    job_dir: &std::path::Path,
+    docker_host_work_dir: Option<PathBuf>,
+    docker_image: &str,
+    node_action_image: &str,
+    run_service_url: &str,
+    billing_owner_id: Option<String>,
+    job: &AgentJobRequestMessage,
+    script_steps: &[crate::script_step::ScriptStep],
+    step_start_sender: Option<tokio::sync::mpsc::UnboundedSender<StepStartEvent>>,
+    step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
+) -> Result<ScriptJobResult> {
     let workspace = job_dir.join("workspace");
     let temp = job_dir.join("temp");
     let home = job_dir.join("home");
