@@ -1797,10 +1797,14 @@ export HOME=/root
 bin="/opt/mise/bin"
 mise_home="/opt/mise"
 mkdir -p "$bin" "$mise_home/shims" "$mise_home/cache" "$mise_home/config" "/root/.cargo/bin"
+# Set PATH before the mise check so the pre-installed image binary is found and
+# curl re-download is skipped. /root/.cargo/bin precedes /opt/mise/shims so that
+# the real cargo binary (from rustup) shadows any mise cargo shim, avoiding
+# "cargo is not a valid shim" failures when mise calls cargo internally.
+export PATH="$bin:/root/.cargo/bin:$mise_home/shims:$PATH"
 if ! command -v mise >/dev/null 2>&1; then
   curl -fsSL https://mise.run | MISE_INSTALL_PATH="$bin/mise" sh
 fi
-export PATH="$bin:$mise_home/shims:/root/.cargo/bin:$PATH"
 export MISE_DATA_DIR="$mise_home"
 export MISE_CACHE_DIR="$mise_home/cache"
 export MISE_CONFIG_DIR="$mise_home/config"
