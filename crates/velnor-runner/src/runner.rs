@@ -378,7 +378,12 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     let config_base = config::config_dir(args.config_dir.clone())?;
     preflight_before_daemon_jit_config(&args, &config_base, slots)?;
     if args.url.is_some() && !args.dry_run_registration {
-        prune_stale_velnor_docker_resources();
+        let daemon_id = args
+            .work_dir
+            .as_deref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "default".to_string());
+        prune_stale_velnor_docker_resources(&daemon_id);
     }
     configure_daemon_slots(&args, &config_base, slots).await?;
     if !daemon_should_poll_after_jit_config(&args) {
@@ -689,7 +694,7 @@ fn validate_daemon_slots(slots: usize) -> Result<usize> {
 /// startup makes a crash self-healing. Best-effort — never fails startup. Safe
 /// because a daemon restart already orphans any in-flight job (JIT runners are
 /// per-job), so anything matching here is dead.
-fn prune_stale_velnor_docker_resources() {
+fn prune_stale_velnor_docker_resources(daemon_id: &str) {
     let docker = |args: &[&str]| std::process::Command::new("docker").args(args).output().ok();
     let ids_from = |args: &[&str]| -> Vec<String> {
         docker(args)
@@ -703,7 +708,15 @@ fn prune_stale_velnor_docker_resources() {
             .unwrap_or_default()
     };
 
-    let containers = ids_from(&["ps", "-aq", "--filter", "name=velnor-job"]);
+    let label_filter = format!("label=velnor.daemon-id={daemon_id}");
+    let containers = ids_from(&[
+        "ps",
+        "-aq",
+        "--filter",
+        "name=velnor-job",
+        "--filter",
+        &label_filter,
+    ]);
     if !containers.is_empty() {
         let mut args = vec!["rm".to_string(), "-f".to_string()];
         args.extend(containers.iter().cloned());
@@ -1351,6 +1364,11 @@ async fn handle_job_request(
         let node_action_image = args.node_action_image.clone();
         let run_service_url = run_service_job.run_service_url.clone();
         let billing_owner_id = run_service_job.billing_owner_id.clone();
+        let daemon_id = args
+            .work_dir
+            .as_deref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "default".to_string());
         let job_to_execute = job.clone();
         let script_steps = script_steps.clone();
         let job_result = tokio::task::spawn_blocking(move || {
@@ -1366,6 +1384,7 @@ async fn handle_job_request(
                 &script_steps,
                 Some(step_start_sender),
                 Some(step_log_sender),
+                daemon_id,
             )
         })
         .await
@@ -2103,6 +2122,7 @@ fn execute_script_job(
     script_steps: &[crate::script_step::ScriptStep],
     step_start_sender: Option<tokio::sync::mpsc::UnboundedSender<StepStartEvent>>,
     step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
+    daemon_id: String,
 ) -> Result<ScriptJobResult> {
     let job_dir = job_work_dir(config_dir, work_dir, job);
     let result = execute_script_job_inner(
@@ -2116,6 +2136,7 @@ fn execute_script_job(
         script_steps,
         step_start_sender,
         step_log_sender,
+        daemon_id,
     );
     if let Err(e) = fs::remove_dir_all(&job_dir) {
         eprintln!(
@@ -2138,6 +2159,7 @@ fn execute_script_job_inner(
     script_steps: &[crate::script_step::ScriptStep],
     step_start_sender: Option<tokio::sync::mpsc::UnboundedSender<StepStartEvent>>,
     step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
+    daemon_id: String,
 ) -> Result<ScriptJobResult> {
     let workspace = job_dir.join("workspace");
     let temp = job_dir.join("temp");
@@ -2273,6 +2295,7 @@ fn execute_script_job_inner(
         },
         docker_image,
         node_action_image,
+        daemon_id,
     );
     let plan = github_normalized_job_plan(
         job,
