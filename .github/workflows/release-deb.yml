@@ -52,16 +52,16 @@ jobs:
       - name: Push .deb to velnor-apt + trigger publish (optional)
         # velnor is private; velnor-apt publishes from its OWN release. So upload
         # the .deb to a velnor-apt release, then dispatch its publish workflow.
-        # Needs GITHUB_VELNOR_APT_TOKEN: a fine-grained PAT with Contents:write +
+        # Needs GH_VELNOR_APT_TOKEN: a fine-grained PAT with Contents:write +
         # Actions:write on tailrocks/velnor-apt. Without it, publish manually.
         env:
-          APT_TOKEN: ${{ secrets.GITHUB_VELNOR_APT_TOKEN }}
+          APT_TOKEN: ${{ secrets.GH_VELNOR_APT_TOKEN }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           DEB="$(ls target/debian/velnor-runner_*_amd64.deb)"
           if [ -z "${APT_TOKEN:-}" ]; then
-            echo "No GITHUB_VELNOR_APT_TOKEN secret; skipping auto-publish."
+            echo "No GH_VELNOR_APT_TOKEN secret; skipping auto-publish."
             echo "Publish manually:"
             echo "  gh release upload $TAG '$DEB' --repo tailrocks/velnor-apt --clobber"
             echo "  gh workflow run publish.yml --repo tailrocks/velnor-apt -f version=$TAG"
