@@ -660,13 +660,14 @@ where
                 }
                 _ => {}
             }
-            let step_id = step.id().to_string();
-            let step_state = state.with_step_action(&step_id);
+            let step_context_id = step.id().to_string();
+            let step_backend_id = github_backend_step_id(&step_context_id);
+            let step_state = state.with_step_action(&step_context_id);
             if !step_state.evaluate_condition(step.condition()) {
                 let mut skipped_started_at = String::new();
                 if step.reports_timeline_start() {
                     skipped_started_at = self.emit_step_started(
-                        step_id.clone(),
+                        step_backend_id.clone(),
                         step.display_name(),
                         &mut timeline_order,
                     );
@@ -681,7 +682,7 @@ where
                 };
                 if step.reports_timeline_start() {
                     let log = step_log_with_name(
-                        &step_id,
+                        &step_backend_id,
                         step.display_name(),
                         timeline_order,
                         &skipped_started_at,
@@ -692,7 +693,7 @@ where
                     self.emit_step_log(&log);
                     step_logs.push(log);
                 }
-                state.apply(&step_id, &result);
+                state.apply(&step_context_id, &result);
                 results.push(result);
                 continue;
             }
@@ -754,9 +755,13 @@ where
                     }
                 }
             }
-            let step_state = state.with_step_action(&step_id);
+            let step_state = state.with_step_action(&step_context_id);
             let main_started_at = if step.reports_timeline_start() {
-                self.emit_step_started(step_id.clone(), step.display_name(), &mut timeline_order)
+                self.emit_step_started(
+                    step_backend_id.clone(),
+                    step.display_name(),
+                    &mut timeline_order,
+                )
             } else {
                 String::new()
             };
@@ -784,7 +789,7 @@ where
                     let mut on_output = |_: CommandStream, line: &str| {
                         emit_live_step_log(
                             &live_sender,
-                            &step.id,
+                            &step_backend_id,
                             &step.display_name,
                             timeline_order,
                             &main_started_at,
@@ -866,7 +871,7 @@ where
                     {
                         if invocation.post_container_path.is_some() && !post_registered {
                             post_actions.push(PostJavaScriptAction {
-                                step_id: step_id.clone(),
+                                step_id: step_context_id.clone(),
                                 display_name: step.display_name().to_string(),
                                 invocation: invocation.clone(),
                                 condition: invocation.post_condition.clone(),
@@ -882,7 +887,7 @@ where
                     {
                         if let Some(condition) = native_post_condition(invocation.adapter) {
                             native_post_actions.push(PostNativeAction {
-                                step_id: step_id.clone(),
+                                step_id: step_context_id.clone(),
                                 display_name: step.display_name().to_string(),
                                 invocation: invocation.clone(),
                                 condition: Some(condition.to_string()),
@@ -895,7 +900,7 @@ where
                     }
                     if step.reports_timeline_start() {
                         let log = step_log_with_name(
-                            &step_id,
+                            &step_backend_id,
                             step.display_name(),
                             timeline_order,
                             &main_started_at,
@@ -906,7 +911,7 @@ where
                         self.emit_step_log(&log);
                         step_logs.push(log);
                     }
-                    state.apply(&step_id, &result);
+                    state.apply(&step_context_id, &result);
                     results.push(result);
                 }
                 Err(error) => {
@@ -1911,6 +1916,14 @@ fn emit_live_step_log(
 
 fn post_step_display_name(display_name: &str) -> String {
     format!("Post {display_name}")
+}
+
+fn github_backend_step_id(context_step_id: &str) -> String {
+    if uuid::Uuid::parse_str(context_step_id).is_ok() {
+        context_step_id.to_string()
+    } else {
+        uuid::Uuid::new_v4().to_string()
+    }
 }
 
 fn action_context_env(env: &[(String, String)]) -> Vec<(String, String)> {
@@ -5184,6 +5197,10 @@ mod tests {
         std::env::temp_dir().join(format!("velnor-executor-test-{nonce}-{sequence}"))
     }
 
+    fn assert_uuid(value: &str) {
+        uuid::Uuid::parse_str(value).unwrap_or_else(|_| panic!("expected UUID, got {value}"));
+    }
+
     fn host_temp_script_path(container_path: &str, temp: &Path) -> PathBuf {
         temp.join(container_path.trim_start_matches("/__t/"))
     }
@@ -7971,21 +7988,13 @@ fi"#
             events.push(event);
         }
 
-        assert_eq!(
-            events,
-            vec![
-                StepStartEvent {
-                    step_id: "producer".into(),
-                    display_name: String::new(),
-                    order: 1
-                },
-                StepStartEvent {
-                    step_id: "consumer".into(),
-                    display_name: String::new(),
-                    order: 2
-                }
-            ]
-        );
+        assert_eq!(events.len(), 2);
+        assert_uuid(&events[0].step_id);
+        assert_eq!(events[0].display_name, "");
+        assert_eq!(events[0].order, 1);
+        assert_uuid(&events[1].step_id);
+        assert_eq!(events[1].display_name, "");
+        assert_eq!(events[1].order, 2);
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -8028,9 +8037,9 @@ fi"#
         }
 
         assert_eq!(logs.len(), 2);
-        assert_eq!(logs[0].step_id, "producer");
+        assert_uuid(&logs[0].step_id);
         assert_eq!(logs[0].order, 1);
-        assert_eq!(logs[1].step_id, "consumer");
+        assert_uuid(&logs[1].step_id);
         assert_eq!(logs[1].order, 2);
         fs::remove_dir_all(temp).unwrap();
     }
@@ -8076,7 +8085,7 @@ fi"#
 
         assert_eq!(summary.step_results.len(), 2);
         assert_eq!(summary.step_logs.len(), 2);
-        assert_eq!(summary.step_logs[0].step_id, "silent");
+        assert_uuid(&summary.step_logs[0].step_id);
         assert_eq!(summary.step_logs[0].order, 1);
         assert!(
             !summary.step_logs[0].lines.is_empty(),
@@ -8087,7 +8096,7 @@ fi"#
             .iter()
             .any(|line| line == "Finishing: step"));
         assert!(!summary.step_logs[0].skipped);
-        assert_eq!(summary.step_logs[1].step_id, "skipped");
+        assert_uuid(&summary.step_logs[1].step_id);
         assert_eq!(summary.step_logs[1].order, 2);
         assert!(summary.step_logs[1].lines.is_empty());
         assert!(summary.step_logs[1].skipped);
@@ -8140,7 +8149,7 @@ fi"#
         assert_eq!(results[0].state.error_count, 1);
         assert_eq!(results[0].state.warning_count, 0);
         assert_eq!(results[0].state.notice_count, 0);
-        assert_eq!(summary.step_logs[0].step_id, "producer");
+        assert_uuid(&summary.step_logs[0].step_id);
         assert!(summary.step_logs[0].lines.contains(&"hidden".to_string()));
         assert_eq!(summary.step_logs[0].masks, vec!["hidden"]);
         assert_eq!(summary.step_logs[0].error_count, 1);
