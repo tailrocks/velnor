@@ -475,6 +475,7 @@ pub struct JavaScriptActionInvocation {
     pub post_container_path: Option<String>,
     pub post_condition: Option<String>,
     pub action_container_path: String,
+    pub inputs: BTreeMap<String, String>,
     pub env: Vec<(String, String)>,
 }
 
@@ -484,6 +485,7 @@ pub struct DockerActionInvocation {
     pub build_context_host: Option<PathBuf>,
     pub dockerfile_host: Option<PathBuf>,
     pub action_container_path: String,
+    pub inputs: BTreeMap<String, String>,
     pub env: Vec<(String, String)>,
     pub entrypoint: Option<String>,
     pub args: Vec<String>,
@@ -556,6 +558,7 @@ impl ResolvedAction {
             post_container_path,
             post_condition: self.metadata.runs.post_if.clone(),
             action_container_path,
+            inputs: self.plan.inputs.clone(),
             env,
         })
     }
@@ -625,6 +628,7 @@ impl ResolvedAction {
             build_context_host,
             dockerfile_host,
             action_container_path,
+            inputs: self.plan.inputs.clone(),
             env,
             entrypoint,
             args,
