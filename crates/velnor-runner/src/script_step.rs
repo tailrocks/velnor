@@ -124,21 +124,25 @@ fn github_script_step_with_context(
     .unwrap_or_else(|| workspace_container.to_string());
 
     // Prefer DisplayName, but GitHub can send explicit script-step names in Name
-    // while unnamed script steps use internal names such as "__run".
-    let display_name = step
-        .display_name
-        .as_deref()
-        .or_else(|| step.name.as_deref())
-        .filter(|n| !n.is_empty() && !n.starts_with("__"))
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| {
-            let first_line = script.lines().next().unwrap_or("").trim();
-            if first_line.is_empty() {
-                String::new()
-            } else {
-                format!("Run {first_line}")
-            }
-        });
+    // or in the script inputs map while unnamed script steps use internal names
+    // such as "__run".
+    let display_name = [
+        step.display_name.as_deref(),
+        step.name.as_deref(),
+        string_input_field(inputs, &["displayName", "DisplayName", "name", "Name"]),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|n| !n.is_empty() && !n.starts_with("__"))
+    .map(|n| n.to_string())
+    .unwrap_or_else(|| {
+        let first_line = script.lines().next().unwrap_or("").trim();
+        if first_line.is_empty() {
+            String::new()
+        } else {
+            format!("Run {first_line}")
+        }
+    });
     Ok(ScriptStep {
         id: step_id(step, index),
         display_name,
@@ -1102,6 +1106,26 @@ mod tests {
 
         assert_eq!(mapped[0].display_name, "Tests");
         assert_eq!(mapped[1].display_name, "Run echo fallback");
+    }
+
+    #[test]
+    fn script_step_uses_input_name_as_display_name() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "install",
+                "name": "__run",
+                "reference": { "type": "Script" },
+                "inputs": {
+                    "script": "pip install ansible-core",
+                    "name": "Install Ansible"
+                }
+            }
+        ]))
+        .unwrap();
+
+        let mapped = github_script_steps(&steps, "/__w/repo").unwrap();
+
+        assert_eq!(mapped[0].display_name, "Install Ansible");
     }
 
     #[test]
