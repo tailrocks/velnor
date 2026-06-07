@@ -349,6 +349,7 @@ pub struct DockerScriptExecutor<R> {
     step_start_sender: Option<UnboundedSender<StepStartEvent>>,
     step_log_sender: Option<UnboundedSender<StepLog>>,
     initial_order: i32,
+    trailing_post_action_count: usize,
 }
 
 impl<R> DockerScriptExecutor<R>
@@ -361,11 +362,17 @@ where
             step_start_sender: None,
             step_log_sender: None,
             initial_order: 0,
+            trailing_post_action_count: 0,
         }
     }
 
     pub fn with_initial_order(mut self, order: i32) -> Self {
         self.initial_order = order;
+        self
+    }
+
+    pub fn with_trailing_post_action_count(mut self, count: usize) -> Self {
+        self.trailing_post_action_count = count;
         self
     }
 
@@ -810,10 +817,21 @@ where
                 }
             }
         }
-        for post_action in native_post_actions.into_iter().rev() {
-            if !state.evaluate_post_condition(post_action.condition.as_deref()) {
-                continue;
-            }
+        let native_post_actions = native_post_actions
+            .into_iter()
+            .rev()
+            .filter(|post_action| state.evaluate_post_condition(post_action.condition.as_deref()))
+            .collect::<Vec<_>>();
+        let post_actions = post_actions
+            .into_iter()
+            .rev()
+            .filter(|post_action| state.evaluate_post_condition(post_action.condition.as_deref()))
+            .collect::<Vec<_>>();
+        reserve_github_post_step_orders(
+            &mut timeline_order,
+            native_post_actions.len() + post_actions.len() + self.trailing_post_action_count,
+        );
+        for post_action in native_post_actions {
             let post_step_id = uuid::Uuid::new_v4().to_string();
             let post_name_native = {
                 let n = post_action
@@ -858,10 +876,7 @@ where
                 }
             }
         }
-        for post_action in post_actions.into_iter().rev() {
-            if !state.evaluate_post_condition(post_action.condition.as_deref()) {
-                continue;
-            }
+        for post_action in post_actions {
             let js_post_step_id = uuid::Uuid::new_v4().to_string();
             let js_post_name = {
                 let n = post_action
@@ -4104,6 +4119,15 @@ fn job_output_expression(value: &Value) -> Option<&str> {
                 .or_else(|| object.get("Lit"))
         })
         .and_then(job_output_expression)
+}
+
+fn reserve_github_post_step_orders(current_order: &mut i32, visible_post_step_count: usize) {
+    if visible_post_step_count == 0 {
+        return;
+    }
+    let complete_order = (*current_order * 2) + 1;
+    let first_post_order = complete_order - visible_post_step_count as i32;
+    *current_order = (*current_order).max(first_post_order - 1);
 }
 
 fn step_log(step_id: &str, order: i32, result: &StepExecutionResult) -> StepLog {
@@ -10468,7 +10492,7 @@ bitcoin-processor-app.push=true")
         let steps = vec![
             ExecutableStep::JavaScript {
                 step_id: "cache".into(),
-                display_name: String::new(),
+                display_name: "Run actions/cache@v4".into(),
                 invocation: JavaScriptActionInvocation {
                     node: "node20".into(),
                     pre_container_path: None,
@@ -10484,7 +10508,7 @@ bitcoin-processor-app.push=true")
             },
             ExecutableStep::JavaScript {
                 step_id: "login".into(),
-                display_name: String::new(),
+                display_name: "Run docker/login-action@v3".into(),
                 invocation: JavaScriptActionInvocation {
                     node: "node20".into(),
                     pre_container_path: None,
@@ -10499,10 +10523,13 @@ bitcoin-processor-app.push=true")
                 continue_on_error: false,
             },
         ];
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
             calls: Vec::new(),
             temp: temp.clone(),
-        });
+        })
+        .with_initial_order(1)
+        .with_step_log_sender(sender);
 
         let results = executor
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
@@ -10540,6 +10567,22 @@ bitcoin-processor-app.push=true")
             "/__a/_actions/cache/dist/save.js".into()
         ]));
         assert!(exec_calls[3].contains(&"STATE_primaryKey=linux-cache".into()));
+
+        let mut logs = Vec::new();
+        while let Ok(log) = receiver.try_recv() {
+            logs.push(log);
+        }
+        assert_eq!(
+            logs.iter()
+                .map(|log| (log.order, log.display_name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (2, "Run actions/cache@v4"),
+                (3, "Run docker/login-action@v3"),
+                (5, "Post Run docker/login-action@v3"),
+                (6, "Post Run actions/cache@v4"),
+            ]
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 

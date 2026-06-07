@@ -2366,7 +2366,9 @@ fn execute_script_job_inner(
     // Keep clones for synthetic steps after executor (senders are moved into executor below).
     let post_step_start_sender = step_start_sender.clone();
     let post_step_log_sender = step_log_sender.clone();
-    let mut executor = DockerScriptExecutor::new(command_runner).with_initial_order(checkout_order);
+    let mut executor = DockerScriptExecutor::new(command_runner)
+        .with_initial_order(checkout_order)
+        .with_trailing_post_action_count(cleanup_checkout_plans.len());
     if let Some(sender) = step_start_sender {
         executor = executor.with_step_start_sender(sender);
     }
@@ -2425,6 +2427,24 @@ fn execute_script_job_inner(
     };
     // "Post Run actions/checkout@vN" steps for each checkout (credential cleanup).
     let mut post_order = summary.step_logs.iter().map(|l| l.order).max().unwrap_or(0);
+    let visible_post_count = summary
+        .step_logs
+        .iter()
+        .filter(|log| log.display_name.starts_with("Post Run "))
+        .count()
+        + cleanup_checkout_plans.len();
+    if visible_post_count > 0 {
+        let main_order = summary
+            .step_logs
+            .iter()
+            .filter(|log| !log.display_name.starts_with("Post Run "))
+            .map(|log| log.order)
+            .max()
+            .unwrap_or(post_order);
+        let complete_order = (main_order * 2) + 1;
+        let first_cleanup_order = complete_order - cleanup_checkout_plans.len() as i32;
+        post_order = post_order.max(first_cleanup_order - 1);
+    }
     let mut extra_step_logs: Vec<StepLog> = Vec::new();
     for (index, plan) in cleanup_checkout_plans.iter().enumerate() {
         post_order += 1;
