@@ -928,13 +928,7 @@ where
         );
         for post_action in native_post_actions {
             let post_step_id = uuid::Uuid::new_v4().to_string();
-            let post_name_native = {
-                let n = post_action
-                    .display_name
-                    .strip_prefix("Run ")
-                    .unwrap_or(&post_action.display_name);
-                format!("Post Run {n}")
-            };
+            let post_name_native = post_step_display_name(&post_action.display_name);
             let native_post_started_at = self.emit_step_started(
                 post_step_id.clone(),
                 post_name_native.clone(),
@@ -973,13 +967,7 @@ where
         }
         for post_action in post_actions {
             let js_post_step_id = uuid::Uuid::new_v4().to_string();
-            let js_post_name = {
-                let n = post_action
-                    .display_name
-                    .strip_prefix("Run ")
-                    .unwrap_or(&post_action.display_name);
-                format!("Post Run {n}")
-            };
+            let js_post_name = post_step_display_name(&post_action.display_name);
             let js_post_started_at = self.emit_step_started(
                 js_post_step_id.clone(),
                 js_post_name.clone(),
@@ -1914,6 +1902,10 @@ fn emit_live_step_log(
         notice_count: 0,
         summary: String::new(),
     });
+}
+
+fn post_step_display_name(display_name: &str) -> String {
+    format!("Post {display_name}")
 }
 
 fn action_context_env(env: &[(String, String)]) -> Vec<(String, String)> {
