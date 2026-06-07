@@ -23,6 +23,7 @@ RUN apt-get update \
         libsqlite3-dev \
         libssl-dev \
         libzstd-dev \
+        mold \
         openssh-client \
         pkg-config \
         protobuf-compiler \
@@ -37,8 +38,8 @@ RUN apt-get update \
         zstd \
     && rm -rf /var/lib/apt/lists/*
 
-# Pre-install mise and Rust stable + cargo-nextest at /opt/mise (not bind-mounted
-# by Velnor at job time). At runtime Velnor sets MISE_DATA_DIR=/opt/mise so mise
+# Pre-install mise and the Rust CI toolchain at /opt/mise (not bind-mounted by
+# Velnor at job time). At runtime Velnor sets MISE_DATA_DIR=/opt/mise so mise
 # finds the pre-installed tools and skips extraction (prevents ENOMEM on Docker Desktop).
 ENV HOME=/root \
     MISE_DATA_DIR=/opt/mise \
@@ -52,9 +53,24 @@ ENV HOME=/root \
 
 RUN mkdir -p /opt/mise/bin && \
     curl -fsSL https://mise.run | MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
-    mise use --global rust@stable 'cargo:cargo-nextest@latest' && \
+    mise use --global rust@1.96.0 'cargo:cargo-nextest@latest' protoc@latest && \
     mise reshim && \
+    rustup component add rustfmt clippy && \
     mise exec -- rustc --version && \
-    mise exec -- cargo nextest --version
+    mise exec -- cargo nextest --version && \
+    mise exec -- protoc --version
+
+RUN ver="v0.15.0" && \
+    case "$(uname -m)" in \
+      x86_64) arch="x86_64-unknown-linux-musl" ;; \
+      aarch64|arm64) arch="aarch64-unknown-linux-musl" ;; \
+      *) echo "unsupported arch $(uname -m) for sccache" >&2; exit 1 ;; \
+    esac && \
+    tmp="$(mktemp -d)" && \
+    curl -fsSL "https://github.com/mozilla/sccache/releases/download/${ver}/sccache-${ver}-${arch}.tar.gz" -o "$tmp/sccache.tar.gz" && \
+    tar -xzf "$tmp/sccache.tar.gz" -C "$tmp" && \
+    install -m 0755 "$tmp/sccache-${ver}-${arch}/sccache" /usr/local/bin/sccache && \
+    rm -rf "$tmp" && \
+    sccache --version
 
 WORKDIR /__w
