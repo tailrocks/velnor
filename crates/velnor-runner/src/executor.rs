@@ -4262,10 +4262,12 @@ fn step_log_with_name(
     result: &StepExecutionResult,
 ) -> StepLog {
     let lines = step_log_lines(
+        display_name,
         &result.stdout,
         &result.stderr,
         &result.state.log_lines,
         &result.state.summary,
+        result.skipped,
     );
     StepLog {
         step_id: step_id.to_string(),
@@ -4329,25 +4331,39 @@ fn unix_now_rfc3339() -> String {
 }
 
 fn step_log_lines(
+    display_name: &str,
     stdout: &str,
     stderr: &str,
     command_lines: &[String],
     summary: &str,
+    skipped: bool,
 ) -> Vec<String> {
+    if skipped {
+        return Vec::new();
+    }
+    let step_name = if display_name.is_empty() {
+        "step"
+    } else {
+        display_name
+    };
+    let mut lines = vec![format!("##[group]{step_name}")];
     // Exclude workflow command lines (::command::...) from stdout/stderr: these are
     // processed into command_lines (as ##[group] markers, set-env, etc.) and would
     // appear twice in the blob if kept. GitHub's own runner strips them from the log.
-    let mut lines = stdout
-        .lines()
-        .chain(stderr.lines())
-        .filter(|line| !line.starts_with("::"))
-        .map(ToOwned::to_owned)
-        .collect::<Vec<_>>();
+    lines.extend(
+        stdout
+            .lines()
+            .chain(stderr.lines())
+            .filter(|line| !line.starts_with("::"))
+            .map(ToOwned::to_owned),
+    );
     lines.extend(command_lines.iter().cloned());
     if !summary.is_empty() {
         lines.push("Step summary:".to_string());
         lines.extend(summary.lines().map(ToOwned::to_owned));
     }
+    lines.push("##[endgroup]".to_string());
+    lines.push(format!("Finishing: {step_name}"));
     lines
 }
 
@@ -7882,7 +7898,14 @@ fi"#
         assert_eq!(summary.step_logs.len(), 2);
         assert_eq!(summary.step_logs[0].step_id, "silent");
         assert_eq!(summary.step_logs[0].order, 1);
-        assert!(summary.step_logs[0].lines.is_empty());
+        assert!(
+            !summary.step_logs[0].lines.is_empty(),
+            "executed steps need a log blob even when the command is silent"
+        );
+        assert!(summary.step_logs[0]
+            .lines
+            .iter()
+            .any(|line| line == "Finishing: step"));
         assert!(!summary.step_logs[0].skipped);
         assert_eq!(summary.step_logs[1].step_id, "skipped");
         assert_eq!(summary.step_logs[1].order, 2);
@@ -8019,15 +8042,13 @@ fi"#
 
         let log = step_log("sccache", 1, &result);
 
-        assert_eq!(
-            log.lines,
-            vec![
-                "done".to_string(),
-                "Step summary:".to_string(),
-                "### cache stats".to_string(),
-                "hit rate: 80%".to_string()
-            ]
-        );
+        let joined = log.lines.join("\n");
+        assert!(joined.contains("##[group]step"));
+        assert!(joined.contains("done"));
+        assert!(joined.contains("Step summary:"));
+        assert!(joined.contains("### cache stats"));
+        assert!(joined.contains("hit rate: 80%"));
+        assert!(joined.contains("Finishing: step"));
     }
 
     #[test]
@@ -11458,7 +11479,7 @@ bitcoin-processor-app.push=true")
             "##[group]Build phase".to_string(),
             "##[endgroup]".to_string(),
         ];
-        let lines = step_log_lines(stdout, stderr, &command_lines, "");
+        let lines = step_log_lines("Run tests", stdout, stderr, &command_lines, "", false);
 
         // Raw ::group:: lines must NOT appear.
         assert!(
@@ -11490,21 +11511,42 @@ bitcoin-processor-app.push=true")
     fn step_log_lines_passes_through_normal_output() {
         let stdout = "cargo test passed\nall 42 tests passed\n";
         let stderr = "warning: unused import\n";
-        let lines = step_log_lines(stdout, stderr, &[], "");
+        let lines = step_log_lines("Run cargo test", stdout, stderr, &[], "", false);
         assert!(lines.iter().any(|l| l.contains("cargo test passed")));
         assert!(lines.iter().any(|l| l.contains("all 42 tests passed")));
         assert!(lines.iter().any(|l| l.contains("warning: unused import")));
+        assert!(lines.iter().any(|l| l == "##[group]Run cargo test"));
+        assert!(lines.iter().any(|l| l == "Finishing: Run cargo test"));
     }
 
     #[test]
     fn step_log_lines_appends_summary_section() {
         let stdout = "output line\n";
         let summary = "### Results\nAll passed";
-        let lines = step_log_lines(stdout, "", &[], summary);
+        let lines = step_log_lines("Summarize", stdout, "", &[], summary, false);
         let joined = lines.join("\n");
         assert!(joined.contains("Step summary:"));
         assert!(joined.contains("### Results"));
         assert!(joined.contains("All passed"));
+    }
+
+    #[test]
+    fn step_log_lines_keeps_silent_executed_steps_expandable() {
+        let lines = step_log_lines("Silent action", "", "", &[], "", false);
+        assert_eq!(
+            lines,
+            vec![
+                "##[group]Silent action".to_string(),
+                "##[endgroup]".to_string(),
+                "Finishing: Silent action".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn step_log_lines_keeps_skipped_steps_empty() {
+        let lines = step_log_lines("Skipped action", "", "", &[], "", true);
+        assert!(lines.is_empty());
     }
 
     // ── setup_mold_script ─────────────────────────────────────────────────
