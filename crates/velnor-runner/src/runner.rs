@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose, Engine as _};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::{
@@ -1350,6 +1351,8 @@ async fn handle_job_request(
         );
     }
     let early_context = job_context_data(&job);
+    let mut job = job;
+    apply_workflow_script_step_names(&mut job, &early_context).await;
     let script_steps = match crate::script_step::github_script_steps_with_context(
         &job.steps,
         "/__w",
@@ -2702,6 +2705,231 @@ fn expand_broker_context_value(value: Value) -> Value {
     }
 }
 
+async fn apply_workflow_script_step_names(
+    job: &mut AgentJobRequestMessage,
+    context_data: &[(String, Value)],
+) {
+    let Some(workflow) = workflow_source_context(context_data) else {
+        return;
+    };
+    let Some(token) = context_string(context_data, "github.token") else {
+        eprintln!("Skipping workflow script-step name lookup: missing GitHub token.");
+        return;
+    };
+    let Ok(contents) = fetch_workflow_file(&workflow, &token).await else {
+        eprintln!(
+            "Skipping workflow script-step name lookup: could not fetch {} at {}.",
+            workflow.path, workflow.sha
+        );
+        return;
+    };
+    let names_by_line = workflow_run_step_names_by_line(&contents);
+    if names_by_line.is_empty() {
+        return;
+    }
+
+    let mut updated = 0usize;
+    for step in &mut job.steps {
+        if step.reference_type() != Some(crate::job_message::ActionReferenceType::Script) {
+            continue;
+        }
+        if step
+            .display_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .is_some()
+        {
+            continue;
+        }
+        if step
+            .name
+            .as_deref()
+            .filter(|name| !name.is_empty() && !name.starts_with("__"))
+            .is_some()
+        {
+            continue;
+        }
+        let Some(line) = crate::script_step::script_input_source_line(step) else {
+            continue;
+        };
+        let Some(name) = names_by_line.get(&line) else {
+            continue;
+        };
+        step.display_name = Some(name.clone());
+        updated += 1;
+    }
+    if updated > 0 {
+        println!("Recovered {updated} script step display name(s) from workflow YAML.");
+    }
+}
+
+#[derive(Debug)]
+struct WorkflowSourceContext {
+    repository: String,
+    path: String,
+    sha: String,
+}
+
+fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowSourceContext> {
+    let path = context_string(context_data, "job.workflow_file_path")
+        .or_else(|| context_string(context_data, "github.event.workflow"))?;
+    let sha = context_string(context_data, "github.workflow_sha")
+        .or_else(|| context_string(context_data, "github.sha"))?;
+    let repository = context_string(context_data, "job.workflow_repository")
+        .or_else(|| context_string(context_data, "github.repository"))
+        .or_else(|| {
+            context_string(context_data, "github.workflow_ref").and_then(|workflow_ref| {
+                workflow_ref.split_once('/').map(|(owner, rest)| {
+                    let repo = rest.split_once('/').map(|(repo, _)| repo).unwrap_or(rest);
+                    format!("{owner}/{repo}")
+                })
+            })
+        })?;
+    Some(WorkflowSourceContext {
+        repository,
+        path,
+        sha,
+    })
+}
+
+fn context_string(context_data: &[(String, Value)], path: &str) -> Option<String> {
+    let mut parts = path.split('.');
+    let first = parts.next()?;
+    let mut value = context_data
+        .iter()
+        .find(|(name, _)| name == first)
+        .map(|(_, value)| value)?;
+    for part in parts {
+        value = value.as_object()?.get(part)?;
+    }
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubContentsResponse {
+    content: String,
+    encoding: Option<String>,
+}
+
+async fn fetch_workflow_file(source: &WorkflowSourceContext, token: &str) -> Result<String> {
+    let (owner, repo) = source
+        .repository
+        .split_once('/')
+        .ok_or_else(|| anyhow::anyhow!("invalid workflow repository '{}'", source.repository))?;
+    let mut url = url::Url::parse("https://api.github.com/")?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("cannot build GitHub contents URL"))?;
+        segments.push("repos");
+        segments.push(owner);
+        segments.push(repo);
+        segments.push("contents");
+        for segment in source.path.trim_start_matches('/').split('/') {
+            if !segment.is_empty() {
+                segments.push(segment);
+            }
+        }
+    }
+    url.query_pairs_mut().append_pair("ref", &source.sha);
+    let (status, body) =
+        crate::protocol::curl_json_request("GET", url.as_str(), token, None, 30).await?;
+    if !(200..300).contains(&status) {
+        bail!(
+            "fetch workflow file failed: status={status}, repository={}, path={}, ref={}",
+            source.repository,
+            source.path,
+            source.sha
+        );
+    }
+    let response: GitHubContentsResponse =
+        serde_json::from_str(&body).context("parse workflow contents response")?;
+    if !response
+        .encoding
+        .as_deref()
+        .unwrap_or("base64")
+        .eq_ignore_ascii_case("base64")
+    {
+        bail!("unsupported workflow contents encoding");
+    }
+    let encoded = response.content.replace(['\n', '\r'], "");
+    let bytes = general_purpose::STANDARD
+        .decode(encoded)
+        .context("decode workflow contents")?;
+    String::from_utf8(bytes).context("decode workflow contents as UTF-8")
+}
+
+fn workflow_run_step_names_by_line(contents: &str) -> BTreeMap<u64, String> {
+    let lines: Vec<&str> = contents.lines().collect();
+    let mut result = BTreeMap::new();
+    let mut starts = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.trim_start().starts_with("- "))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    starts.push(lines.len());
+
+    for pair in starts.windows(2) {
+        let start = pair[0];
+        let end = pair[1];
+        let mut name = None;
+        let mut run_line = None;
+        for (offset, line) in lines[start..end].iter().enumerate() {
+            let trimmed = line.trim_start();
+            if name.is_none() {
+                name = yaml_name_value(trimmed);
+            }
+            if yaml_has_run_key(trimmed) {
+                run_line = Some(start + offset + 1);
+                break;
+            }
+        }
+        let (Some(name), Some(run_line)) = (name, run_line) else {
+            continue;
+        };
+        for line in run_line..=end {
+            result.insert(line as u64, name.clone());
+        }
+    }
+    result
+}
+
+fn yaml_name_value(trimmed_line: &str) -> Option<String> {
+    let value = trimmed_line
+        .strip_prefix("- name:")
+        .or_else(|| trimmed_line.strip_prefix("name:"))?
+        .trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(unquote_yaml_scalar(value))
+}
+
+fn yaml_has_run_key(trimmed_line: &str) -> bool {
+    trimmed_line
+        .strip_prefix("- run:")
+        .or_else(|| trimmed_line.strip_prefix("run:"))
+        .is_some()
+}
+
+fn unquote_yaml_scalar(value: &str) -> String {
+    let value = value.trim();
+    if value.len() >= 2 {
+        let first = value.as_bytes()[0];
+        let last = value.as_bytes()[value.len() - 1];
+        if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') {
+            return value[1..value.len() - 1].to_string();
+        }
+    }
+    value.to_string()
+}
+
 fn secret_context_names(variable_name: &str) -> Vec<String> {
     if variable_name.eq_ignore_ascii_case("system.github.token") {
         return vec!["GITHUB_TOKEN".to_string()];
@@ -4034,6 +4262,37 @@ mod tests {
         assert!(should_execute_job(&run_args(false, true, false)));
         assert!(!should_execute_job(&run_args(true, false, false)));
         assert!(!should_execute_job(&run_args(false, false, true)));
+    }
+
+    #[test]
+    fn workflow_run_step_names_map_source_lines_to_explicit_names() {
+        let yaml = r#"
+name: Ansible
+jobs:
+  syntax-check:
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Ansible
+        run: pip install ansible-core
+      - name: Install required collections
+        run: ansible-galaxy collection install -r requirements.yaml
+      - name: Syntax check playbooks
+        run: |
+          set -euo pipefail
+          ansible-playbook --syntax-check site.yml
+"#;
+
+        let names = workflow_run_step_names_by_line(yaml);
+
+        assert_eq!(names.get(&8).map(String::as_str), Some("Install Ansible"));
+        assert_eq!(
+            names.get(&10).map(String::as_str),
+            Some("Install required collections")
+        );
+        assert_eq!(
+            names.get(&13).map(String::as_str),
+            Some("Syntax check playbooks")
+        );
     }
 
     #[test]

@@ -155,6 +155,11 @@ fn github_script_step_with_context(
     })
 }
 
+pub(crate) fn script_input_source_line(step: &ActionStep) -> Option<u64> {
+    let inputs = step.inputs.as_ref()?.as_object()?;
+    source_line_for_input(inputs, &["script", "Script"])
+}
+
 #[derive(Debug, Default)]
 struct RunDefaults {
     shell: Option<String>,
@@ -242,6 +247,65 @@ fn string_input_field<'a>(
 ) -> Option<&'a str> {
     direct_string_input_field(object, names)
         .or_else(|| nested_map_string_input_field(object, names))
+}
+
+fn source_line_for_input(object: &serde_json::Map<String, Value>, names: &[&str]) -> Option<u64> {
+    direct_source_line_for_input(object, names)
+        .or_else(|| nested_map_source_line_for_input(object, names))
+}
+
+fn direct_source_line_for_input(
+    object: &serde_json::Map<String, Value>,
+    names: &[&str],
+) -> Option<u64> {
+    let entry = object.iter().find_map(|(key, value)| {
+        names
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(key))
+            .then_some(value)
+    })?;
+    input_source_line(entry)
+}
+
+fn nested_map_source_line_for_input(
+    object: &serde_json::Map<String, Value>,
+    names: &[&str],
+) -> Option<u64> {
+    let map = object.get("map").or_else(|| object.get("Map"))?;
+    if let Some(map) = map.as_object() {
+        return source_line_for_input(map, names);
+    }
+    map.as_array().and_then(|items| {
+        items.iter().find_map(|item| {
+            let item = item.as_object()?;
+            let name = input_name_field(item)?;
+            if !names
+                .iter()
+                .any(|expected| name.eq_ignore_ascii_case(expected))
+            {
+                return None;
+            }
+            item.get("value")
+                .or_else(|| item.get("Value"))
+                .and_then(input_source_line)
+        })
+    })
+}
+
+fn input_source_line(value: &Value) -> Option<u64> {
+    match value {
+        Value::Object(object) => object
+            .get("line")
+            .or_else(|| object.get("Line"))
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                object
+                    .get("value")
+                    .or_else(|| object.get("Value"))
+                    .and_then(input_source_line)
+            }),
+        _ => None,
+    }
 }
 
 fn direct_string_input_field<'a>(
@@ -1126,6 +1190,30 @@ mod tests {
         let mapped = github_script_steps(&steps, "/__w/repo").unwrap();
 
         assert_eq!(mapped[0].display_name, "Install Ansible");
+    }
+
+    #[test]
+    fn script_step_input_source_line_reads_broker_literal_line() {
+        let step: ActionStep = serde_json::from_value(serde_json::json!({
+            "name": "__run",
+            "reference": { "type": "Script" },
+            "inputs": {
+                "map": [{
+                    "Key": { "lit": "script", "type": 0 },
+                    "Value": {
+                        "col": 14,
+                        "file": 1,
+                        "line": 71,
+                        "lit": "pip install ansible-core",
+                        "type": 0
+                    }
+                }],
+                "type": 2
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(script_input_source_line(&step), Some(71));
     }
 
     #[test]
