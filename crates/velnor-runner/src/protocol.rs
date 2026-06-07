@@ -2749,7 +2749,6 @@ impl TwirpResultsClient {
             uploaded_at: String,
             line_count: i64,
         }
-
         let get_url = format!(
             "{}/{RECEIVER}/GetStepLogsSignedBlobURL",
             self.results_service_url
@@ -2818,6 +2817,10 @@ impl TwirpResultsClient {
             uploaded_at: String,
             line_count: i64,
         }
+        #[derive(serde::Deserialize)]
+        struct MetaResp {
+            ok: bool,
+        }
 
         // 1. Get signed upload URL (curl — GitHub infra).
         let (status, body) =
@@ -2872,6 +2875,11 @@ impl TwirpResultsClient {
                 .context("CreateStepLogsMetadata request")?;
         if !(200..300).contains(&meta_status) {
             bail!("CreateStepLogsMetadata failed: status={meta_status}, body={meta_body_resp}");
+        }
+        let meta_resp: MetaResp =
+            serde_json::from_str(&meta_body_resp).context("CreateStepLogsMetadata parse")?;
+        if !meta_resp.ok {
+            bail!("CreateStepLogsMetadata returned ok=false: body={meta_body_resp}");
         }
         Ok(())
     }
