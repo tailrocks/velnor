@@ -2241,25 +2241,27 @@ fn execute_script_job_inner(
             order: 1,
         });
     }
+    let setup_ts = unix_now_iso8601();
+    let setup_log = StepLog {
+        step_id: setup_step_id,
+        display_name: "Set up job".to_string(),
+        order: 1,
+        started_at: setup_ts.clone(),
+        completed_at: setup_ts,
+        lines: setup_job_lines(job, docker_image),
+        masks: Vec::new(),
+        annotations: Vec::new(),
+        telemetry: Vec::new(),
+        exit_code: 0,
+        skipped: false,
+        failure_ignored: false,
+        error_count: 0,
+        warning_count: 0,
+        notice_count: 0,
+        summary: String::new(),
+    };
     if let Some(sender) = &step_log_sender {
-        let _ = sender.send(StepLog {
-            step_id: setup_step_id,
-            display_name: "Set up job".to_string(),
-            order: 1,
-            started_at: unix_now_iso8601(),
-            completed_at: unix_now_iso8601(),
-            lines: setup_job_lines(job, docker_image),
-            masks: Vec::new(),
-            annotations: Vec::new(),
-            telemetry: Vec::new(),
-            exit_code: 0,
-            skipped: false,
-            failure_ignored: false,
-            error_count: 0,
-            warning_count: 0,
-            notice_count: 0,
-            summary: String::new(),
-        });
+        let _ = sender.send(setup_log.clone());
     }
     let mut command_runner = ProcessCommandRunner;
     let checkout_plans = checkout_plans(job, &workspace)?;
@@ -2534,7 +2536,8 @@ fn execute_script_job_inner(
     }
     extra_step_logs.push(complete_log);
 
-    let mut all_step_logs = summary.step_logs;
+    let mut all_step_logs = vec![setup_log];
+    all_step_logs.extend(summary.step_logs);
     all_step_logs.extend(extra_step_logs);
     Ok(ScriptJobResult {
         result,
