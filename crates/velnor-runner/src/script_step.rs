@@ -123,12 +123,12 @@ fn github_script_step_with_context(
     .map(|path| workspace_path(workspace_container, path))
     .unwrap_or_else(|| workspace_container.to_string());
 
-    // For script steps, only use DisplayName (the explicit `name:` field from YAML).
-    // The Name field in the job message may be a step ID (e.g. "msrv"), not a display
-    // name. Fall back to "Run {first_line_of_script}" to match GitHub's behavior.
+    // Prefer DisplayName, but GitHub can send explicit script-step names in Name
+    // while unnamed script steps use internal names such as "__run".
     let display_name = step
         .display_name
         .as_deref()
+        .or_else(|| step.name.as_deref())
         .filter(|n| !n.is_empty() && !n.starts_with("__"))
         .map(|n| n.to_string())
         .unwrap_or_else(|| {
@@ -1064,6 +1064,7 @@ mod tests {
 
         assert_eq!(mapped.len(), 1);
         assert_eq!(mapped[0].id, "run-1");
+        assert_eq!(mapped[0].display_name, "Run tests");
         assert_eq!(mapped[0].script, "cargo test");
         assert!(matches!(mapped[0].shell, Shell::Bash));
         assert_eq!(mapped[0].working_directory_container, "/__w/repo/crates");
@@ -1077,6 +1078,30 @@ mod tests {
             ]
         );
         assert!(mapped[0].continue_on_error);
+    }
+
+    #[test]
+    fn script_step_uses_non_internal_name_as_display_name() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "id": "tests",
+                "name": "Tests",
+                "reference": { "type": "Script" },
+                "inputs": { "script": "cargo nextest run -p app --profile ci" }
+            },
+            {
+                "id": "fallback",
+                "name": "__run",
+                "reference": { "type": "Script" },
+                "inputs": { "script": "echo fallback" }
+            }
+        ]))
+        .unwrap();
+
+        let mapped = github_script_steps(&steps, "/__w/repo").unwrap();
+
+        assert_eq!(mapped[0].display_name, "Tests");
+        assert_eq!(mapped[1].display_name, "Run echo fallback");
     }
 
     #[test]
