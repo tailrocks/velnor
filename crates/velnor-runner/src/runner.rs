@@ -2464,13 +2464,7 @@ fn execute_script_job_inner(
     for (index, plan) in cleanup_checkout_plans.iter().enumerate() {
         post_order += 1;
         let post_step_id = uuid::Uuid::new_v4().to_string();
-        let post_name = {
-            let n = plan
-                .display_name
-                .strip_prefix("Run ")
-                .unwrap_or(&plan.display_name);
-            format!("Post Run {n}")
-        };
+        let post_name = post_step_display_name(&plan.display_name);
         let post_ts = unix_now_iso8601();
         if let Some(sender) = &post_step_start_sender {
             let _ = sender.send(StepStartEvent {
@@ -3571,6 +3565,10 @@ fn action_step_display_name(step: &crate::job_message::ActionStep) -> String {
         }
     }
     String::new()
+}
+
+fn post_step_display_name(display_name: &str) -> String {
+    format!("Post {display_name}")
 }
 
 /// Build one masked, GitHub-style text blob of the whole job — each step wrapped
