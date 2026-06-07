@@ -2445,14 +2445,14 @@ fn execute_script_job_inner(
     let visible_post_count = summary
         .step_logs
         .iter()
-        .filter(|log| log.display_name.starts_with("Post Run "))
+        .filter(|log| log.display_name.starts_with("Post "))
         .count()
         + cleanup_checkout_plans.len();
     if visible_post_count > 0 {
         let main_order = summary
             .step_logs
             .iter()
-            .filter(|log| !log.display_name.starts_with("Post Run "))
+            .filter(|log| !log.display_name.starts_with("Post "))
             .map(|log| log.order)
             .max()
             .unwrap_or(post_order);
