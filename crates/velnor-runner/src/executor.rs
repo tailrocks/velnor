@@ -6,7 +6,7 @@ use crate::{
         NativeActionInvocation,
     },
     checkout::{configure_safe_directory, execute_checkout, CheckoutPlan},
-    container::{sccache_host, JobContainerSpec},
+    container::{sccache_host, JobContainerSpec, Shell},
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
     workflow_command::parse_workflow_commands,
 };
@@ -687,6 +687,7 @@ where
                         &skipped_started_at,
                         &unix_now_rfc3339(),
                         &result,
+                        &step_log_prelude(step, &step_state),
                     );
                     self.emit_step_log(&log);
                     step_logs.push(log);
@@ -741,6 +742,7 @@ where
                             &pre_started_at,
                             &unix_now_rfc3339(),
                             &result,
+                            &step_log_prelude(step, &step_state),
                         );
                         self.emit_step_log(&log);
                         step_logs.push(log);
@@ -899,6 +901,7 @@ where
                             &main_started_at,
                             &unix_now_rfc3339(),
                             &result,
+                            &step_log_prelude(step, &step_state),
                         );
                         self.emit_step_log(&log);
                         step_logs.push(log);
@@ -952,6 +955,7 @@ where
                         &native_post_started_at,
                         &unix_now_rfc3339(),
                         &result,
+                        &native_post_log_prelude(&post_action.invocation, &state),
                     );
                     self.emit_step_log(&log);
                     step_logs.push(log);
@@ -998,6 +1002,7 @@ where
                         &js_post_started_at,
                         &unix_now_rfc3339(),
                         &result,
+                        &javascript_post_log_prelude(&post_action.invocation, &state),
                     );
                     self.emit_step_log(&log);
                     step_logs.push(log);
@@ -4250,7 +4255,169 @@ fn reserve_github_post_step_orders(current_order: &mut i32, visible_post_step_co
 
 fn step_log(step_id: &str, order: i32, result: &StepExecutionResult) -> StepLog {
     let now = unix_now_rfc3339();
-    step_log_with_name(step_id, "", order, &now, &now, result)
+    step_log_with_name(step_id, "", order, &now, &now, result, &[])
+}
+
+fn step_log_prelude(step: &ExecutableStep, state: &JobExecutionState) -> Vec<String> {
+    match step {
+        ExecutableStep::CompositeStart { .. }
+        | ExecutableStep::CompositeEnd { .. }
+        | ExecutableStep::CompositeOutputs { .. } => Vec::new(),
+        ExecutableStep::Checkout(plan) => checkout_log_prelude(plan, state),
+        ExecutableStep::Script(step) => script_log_prelude(step, state),
+        ExecutableStep::JavaScript { invocation, .. } => {
+            action_log_prelude(&invocation.inputs, &invocation.env, state)
+        }
+        ExecutableStep::Docker { invocation, .. } => {
+            action_log_prelude(&invocation.inputs, &invocation.env, state)
+        }
+        ExecutableStep::Native { invocation, .. } => {
+            action_log_prelude(&invocation.inputs, &invocation.env, state)
+        }
+    }
+}
+
+fn native_post_log_prelude(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> Vec<String> {
+    action_log_prelude(&action.inputs, &action.env, state)
+}
+
+fn javascript_post_log_prelude(
+    action: &JavaScriptActionInvocation,
+    state: &JobExecutionState,
+) -> Vec<String> {
+    action_log_prelude(&action.inputs, &action.env, state)
+}
+
+fn script_log_prelude(step: &ScriptStep, state: &JobExecutionState) -> Vec<String> {
+    let mut lines = Vec::new();
+    let script = state.resolve_expressions(&step.script);
+    if !script.trim().is_empty() {
+        lines.push(format!("Run {}", script.lines().next().unwrap_or_default()));
+        lines.extend(script.lines().map(ToOwned::to_owned));
+    }
+    lines.push(format!("shell: {}", shell_log_name(step.shell)));
+    if step.working_directory_container != "/__w" {
+        lines.push(format!(
+            "working-directory: {}",
+            step.working_directory_container
+        ));
+    }
+    append_env_lines(&mut lines, &state.resolve_env(&step.env));
+    lines
+}
+
+fn checkout_log_prelude(plan: &CheckoutPlan, state: &JobExecutionState) -> Vec<String> {
+    let mut inputs = BTreeMap::new();
+    inputs.insert(
+        "repository".to_string(),
+        checkout_repository_for_log(&plan.clone_url),
+    );
+    if let Some(version) = &plan.version {
+        inputs.insert("ref".to_string(), state.resolve_expressions(version));
+    }
+    inputs.insert("token".to_string(), "***".to_string());
+    inputs.insert(
+        "persist-credentials".to_string(),
+        plan.persist_credentials.to_string(),
+    );
+    inputs.insert("clean".to_string(), plan.clean.to_string());
+    inputs.insert(
+        "fetch-depth".to_string(),
+        plan.fetch_depth
+            .map_or_else(|| "0".to_string(), |depth| depth.to_string()),
+    );
+    inputs.insert("fetch-tags".to_string(), plan.fetch_tags.to_string());
+    inputs.insert("lfs".to_string(), plan.lfs.to_string());
+    inputs.insert("submodules".to_string(), "false".to_string());
+    inputs.insert("set-safe-directory".to_string(), "true".to_string());
+
+    let mut lines = Vec::new();
+    append_with_lines(&mut lines, &inputs, state);
+    lines
+}
+
+fn action_log_prelude(
+    inputs: &BTreeMap<String, String>,
+    env: &[(String, String)],
+    state: &JobExecutionState,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    append_with_lines(&mut lines, inputs, state);
+    let explicit_env = env
+        .iter()
+        .filter(|(name, _)| {
+            !name.starts_with("GITHUB_ACTION")
+                && !name.starts_with("INPUT_")
+                && name != "GITHUB_ACTION_PATH"
+                && name != "GITHUB_ACTION_REPOSITORY"
+                && name != "GITHUB_ACTION_REF"
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    append_env_lines(&mut lines, &state.resolve_env(&explicit_env));
+    lines
+}
+
+fn append_with_lines(
+    lines: &mut Vec<String>,
+    inputs: &BTreeMap<String, String>,
+    state: &JobExecutionState,
+) {
+    if inputs.is_empty() {
+        return;
+    }
+    lines.push("with:".to_string());
+    for (name, value) in inputs {
+        lines.push(format!(
+            "  {name}: {}",
+            redact_log_value(name, &state.resolve_expressions(value))
+        ));
+    }
+}
+
+fn append_env_lines(lines: &mut Vec<String>, env: &[(String, String)]) {
+    if env.is_empty() {
+        return;
+    }
+    lines.push("env:".to_string());
+    for (name, value) in env {
+        lines.push(format!("  {name}: {}", redact_log_value(name, value)));
+    }
+}
+
+fn redact_log_value(name: &str, value: &str) -> String {
+    let name = name.to_ascii_lowercase();
+    if name.contains("token")
+        || name.contains("password")
+        || name.contains("secret")
+        || name.contains("credential")
+        || name.contains("authorization")
+        || name == "key"
+        || name.ends_with("_key")
+        || name.ends_with("-key")
+    {
+        "***".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn shell_log_name(shell: Shell) -> &'static str {
+    match shell {
+        Shell::Bash => "bash -e {0}",
+        Shell::Sh => "sh -e {0}",
+    }
+}
+
+fn checkout_repository_for_log(clone_url: &str) -> String {
+    clone_url
+        .strip_prefix("https://github.com/")
+        .and_then(|value| value.strip_suffix(".git"))
+        .unwrap_or(clone_url)
+        .to_string()
 }
 
 fn step_log_with_name(
@@ -4260,6 +4427,7 @@ fn step_log_with_name(
     started_at: &str,
     completed_at: &str,
     result: &StepExecutionResult,
+    prelude: &[String],
 ) -> StepLog {
     let lines = step_log_lines(
         display_name,
@@ -4268,6 +4436,7 @@ fn step_log_with_name(
         &result.state.log_lines,
         &result.state.summary,
         result.skipped,
+        prelude,
     );
     StepLog {
         step_id: step_id.to_string(),
@@ -4337,6 +4506,7 @@ fn step_log_lines(
     command_lines: &[String],
     summary: &str,
     skipped: bool,
+    prelude: &[String],
 ) -> Vec<String> {
     if skipped {
         return Vec::new();
@@ -4347,6 +4517,7 @@ fn step_log_lines(
         display_name
     };
     let mut lines = vec![format!("##[group]{step_name}")];
+    lines.extend(prelude.iter().cloned());
     // Exclude workflow command lines (::command::...) from stdout/stderr: these are
     // processed into command_lines (as ##[group] markers, set-env, etc.) and would
     // appear twice in the blob if kept. GitHub's own runner strips them from the log.
@@ -7182,6 +7353,7 @@ fi"#
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/docker_login-action/v4".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![
                         (
                             "INPUT_USERNAME".into(),
@@ -7208,6 +7380,7 @@ fi"#
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/docker_setup-buildx-action/v4".into(),
+                    inputs: BTreeMap::new(),
                     env: Vec::new(),
                 },
                 condition: Some(condition.into()),
@@ -8089,7 +8262,8 @@ fi"#
                 post_container_path: None,
                 post_condition: None,
                 action_container_path: "/__a/_actions/actions_cache".into(),
-                env: vec![
+                    inputs: BTreeMap::new(),
+                    env: vec![
                     ("INPUT_PATH".into(), "~/.cache/rust-script".into()),
                     (
                         "INPUT_KEY".into(),
@@ -8268,6 +8442,7 @@ fi"#
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/sccache".into(),
+                    inputs: BTreeMap::new(),
                     env: Vec::new(),
                 },
                 condition: None,
@@ -8533,6 +8708,7 @@ fi"#
             post_container_path: None,
             post_condition: None,
             action_container_path: "/__a/_actions/acme_action/v1".into(),
+            inputs: BTreeMap::new(),
             env: vec![
                 (
                     "GITHUB_ACTION_PATH".into(),
@@ -8579,6 +8755,7 @@ fi"#
             build_context_host: None,
             dockerfile_host: None,
             action_container_path: "/__a/_actions/acme_docker/v1".into(),
+            inputs: BTreeMap::new(),
             env: vec![
                 (
                     "GITHUB_ACTION_PATH".into(),
@@ -8654,6 +8831,7 @@ fi"#
             build_context_host: None,
             dockerfile_host: None,
             action_container_path: "/__a/_actions/acme_docker/v1".into(),
+            inputs: BTreeMap::new(),
             env: Vec::new(),
             entrypoint: Some("${{ env.DOCKER_ENTRYPOINT }}".into()),
             args: vec![
@@ -8714,6 +8892,7 @@ fi"#
             build_context_host: Some(action_dir.clone()),
             dockerfile_host: Some(action_dir.join("Dockerfile")),
             action_container_path: "/__a/_actions/acme_docker/v1".into(),
+            inputs: BTreeMap::new(),
             env: Vec::new(),
             entrypoint: None,
             args: Vec::new(),
@@ -8770,6 +8949,7 @@ fi"#
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/acme_action/v1".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![
                         ("INPUT_NAME".into(), "value".into()),
                         ("TOKEN".into(), "${{ github.token }}".into()),
@@ -9555,6 +9735,7 @@ fi"#
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/dorny_paths-filter".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![
                         ("INPUT_TOKEN".into(), "${{ github.token }}".into()),
                         ("INPUT_BASE".into(), "main".into()),
@@ -9790,6 +9971,7 @@ fi"#
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/docker_setup-buildx-action".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![("INPUT_INSTALL".into(), "true".into())],
                 },
                 condition: None,
@@ -9806,6 +9988,7 @@ fi"#
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/docker_login-action".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![
                         ("INPUT_USERNAME".into(), "docker-user".into()),
                         ("INPUT_PASSWORD".into(), "docker-token".into()),
@@ -9826,6 +10009,7 @@ fi"#
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/docker_metadata-action".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![
                         ("INPUT_IMAGES".into(), "ghcr.io/chainargos/app".into()),
                         ("INPUT_TAGS".into(), "type=sha".into()),
@@ -9846,6 +10030,7 @@ fi"#
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/docker_build-push-action".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![
                         ("INPUT_CONTEXT".into(), ".".into()),
                         ("INPUT_PUSH".into(), "false".into()),
@@ -9867,6 +10052,7 @@ fi"#
                     ),
                     post_condition: None,
                     action_container_path: "/__a/_actions/docker_bake-action".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![
                         ("INPUT_FILES".into(), "docker-bake.hcl".into()),
                         ("INPUT_TARGETS".into(), "app".into()),
@@ -10006,6 +10192,7 @@ fi"#
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/docker_setup-buildx-action".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![
                         (
                             "INPUT_NAME".into(),
@@ -10030,6 +10217,7 @@ fi"#
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/docker_setup-buildx-action".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![
                         ("INPUT_NAME".into(), "${{ env.BUILDX_BUILDER }}".into()),
                         ("INPUT_DRIVER".into(), "docker-container".into()),
@@ -10050,6 +10238,7 @@ fi"#
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/docker_metadata-action".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![
                         ("INPUT_IMAGES".into(), "${{ inputs.image }}".into()),
                         (
@@ -10102,6 +10291,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/docker_build-push-action".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![
                         ("INPUT_CONTEXT".into(), ".".into()),
                         (
@@ -10130,6 +10320,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/docker_bake-action".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![
                         ("INPUT_FILES".into(), "backend-rust/docker-bake.hcl".into()),
                         ("INPUT_TARGETS".into(), "${{ needs.changes.outputs.bake-targets }}".into()),
@@ -10357,6 +10548,7 @@ bitcoin-processor-app.push=true")
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/cargo-install".into(),
+                    inputs: BTreeMap::new(),
                     env: Vec::new(),
                 },
                 condition: None,
@@ -10407,6 +10599,7 @@ bitcoin-processor-app.push=true")
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/jdx_mise-action".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![
                         ("INPUT_INSTALL".into(), "false".into()),
                         ("INPUT_CACHE".into(), "false".into()),
@@ -10430,6 +10623,7 @@ bitcoin-processor-app.push=true")
                     ),
                     post_condition: Some("success()".into()),
                     action_container_path: "/__a/_actions/actions_setup-python".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![
                         ("INPUT_PYTHON-VERSION".into(), "3.13".into()),
                         (
@@ -10537,6 +10731,7 @@ bitcoin-processor-app.push=true")
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/extractions_setup-crate".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![
                         ("INPUT_REPO".into(), "casey/just".into()),
                         ("INPUT_GITHUB-TOKEN".into(), "${{ github.token }}".into()),
@@ -10557,6 +10752,7 @@ bitcoin-processor-app.push=true")
                     post_container_path: None,
                     post_condition: None,
                     action_container_path: "/__a/_actions/baptiste0928_cargo-install".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![
                         ("INPUT_CRATE".into(), "cargo-binstall".into()),
                         ("INPUT_VERSION".into(), "latest".into()),
@@ -10640,6 +10836,7 @@ bitcoin-processor-app.push=true")
                     post_container_path: Some("/__a/_actions/cache/dist/save.js".into()),
                     post_condition: None,
                     action_container_path: "/__a/_actions/cache".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![("INPUT_KEY".into(), "linux-cache".into())],
                 },
                 condition: None,
@@ -10656,6 +10853,7 @@ bitcoin-processor-app.push=true")
                     post_container_path: Some("/__a/_actions/docker_login/dist/post.js".into()),
                     post_condition: None,
                     action_container_path: "/__a/_actions/docker_login".into(),
+                    inputs: BTreeMap::new(),
                     env: Vec::new(),
                 },
                 condition: None,
@@ -10740,6 +10938,7 @@ bitcoin-processor-app.push=true")
                 post_container_path: None,
                 post_condition: None,
                 action_container_path: "/__a/_actions/cache".into(),
+                inputs: BTreeMap::new(),
                 env: Vec::new(),
             },
             condition: None,
@@ -10794,6 +10993,7 @@ bitcoin-processor-app.push=true")
                 post_container_path: Some("/__a/_actions/wrapped/dist/post.js".into()),
                 post_condition: None,
                 action_container_path: "/__a/_actions/wrapped".into(),
+                inputs: BTreeMap::new(),
                 env: Vec::new(),
             },
             condition: None,
@@ -10838,6 +11038,7 @@ bitcoin-processor-app.push=true")
                 post_container_path: Some("/__a/_actions/wrapped/dist/post.js".into()),
                 post_condition: None,
                 action_container_path: "/__a/_actions/wrapped".into(),
+                inputs: BTreeMap::new(),
                 env: Vec::new(),
             },
             condition: None,
@@ -10896,6 +11097,7 @@ bitcoin-processor-app.push=true")
                     post_container_path: Some("/__a/_actions/cache/dist/save.js".into()),
                     post_condition: Some("success()".into()),
                     action_container_path: "/__a/_actions/cache".into(),
+                    inputs: BTreeMap::new(),
                     env: Vec::new(),
                 },
                 condition: None,
@@ -10953,6 +11155,7 @@ bitcoin-processor-app.push=true")
                 post_container_path: Some("/__a/_actions/sccache/dist/show_stats/index.js".into()),
                 post_condition: None,
                 action_container_path: "/__a/_actions/sccache".into(),
+                inputs: BTreeMap::new(),
                 env: Vec::new(),
             },
             condition: None,
@@ -10992,6 +11195,7 @@ bitcoin-processor-app.push=true")
                     ),
                     post_condition: None,
                     action_container_path: "/__a/_actions/mozilla-actions_sccache-action".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![
                         (
                             "INPUT_TOKEN".into(),
@@ -11082,6 +11286,7 @@ bitcoin-processor-app.push=true")
                     post_container_path: Some("/__a/_actions/rust-cache/dist/save/index.js".into()),
                     post_condition: Some("success() || env.CACHE_ON_FAILURE == 'true'".into()),
                     action_container_path: "/__a/_actions/rust-cache".into(),
+                    inputs: BTreeMap::new(),
                     env: Vec::new(),
                 },
                 condition: None,
@@ -11157,6 +11362,7 @@ bitcoin-processor-app.push=true")
                     ),
                     post_condition: Some("success() || env.CACHE_ON_FAILURE == 'true'".into()),
                     action_container_path: "/__a/_actions/Swatinem_rust-cache".into(),
+                    inputs: BTreeMap::new(),
                     env: vec![
                         (
                             "INPUT_CACHE-DIRECTORIES".into(),
@@ -11479,7 +11685,7 @@ bitcoin-processor-app.push=true")
             "##[group]Build phase".to_string(),
             "##[endgroup]".to_string(),
         ];
-        let lines = step_log_lines("Run tests", stdout, stderr, &command_lines, "", false);
+        let lines = step_log_lines("Run tests", stdout, stderr, &command_lines, "", false, &[]);
 
         // Raw ::group:: lines must NOT appear.
         assert!(
@@ -11511,7 +11717,7 @@ bitcoin-processor-app.push=true")
     fn step_log_lines_passes_through_normal_output() {
         let stdout = "cargo test passed\nall 42 tests passed\n";
         let stderr = "warning: unused import\n";
-        let lines = step_log_lines("Run cargo test", stdout, stderr, &[], "", false);
+        let lines = step_log_lines("Run cargo test", stdout, stderr, &[], "", false, &[]);
         assert!(lines.iter().any(|l| l.contains("cargo test passed")));
         assert!(lines.iter().any(|l| l.contains("all 42 tests passed")));
         assert!(lines.iter().any(|l| l.contains("warning: unused import")));
@@ -11520,10 +11726,39 @@ bitcoin-processor-app.push=true")
     }
 
     #[test]
+    fn step_log_lines_includes_github_style_metadata_prelude() {
+        let prelude = vec![
+            "with:".to_string(),
+            "  token: ***".to_string(),
+            "env:".to_string(),
+            "  RUN_TESTS: true".to_string(),
+        ];
+        let lines = step_log_lines("Run action", "done\n", "", &[], "", false, &prelude);
+        let joined = lines.join("\n");
+        assert!(joined.contains("with:\n  token: ***"));
+        assert!(joined.contains("env:\n  RUN_TESTS: true"));
+        assert!(joined.contains("done"));
+    }
+
+    #[test]
+    fn action_log_prelude_redacts_secret_like_inputs() {
+        let state = JobExecutionState::new(&[]);
+        let inputs = BTreeMap::from([
+            ("username".to_string(), "chainargos".to_string()),
+            ("password".to_string(), "secret-value".to_string()),
+        ]);
+        let lines = action_log_prelude(&inputs, &[], &state);
+        let joined = lines.join("\n");
+        assert!(joined.contains("username: chainargos"));
+        assert!(joined.contains("password: ***"));
+        assert!(!joined.contains("secret-value"));
+    }
+
+    #[test]
     fn step_log_lines_appends_summary_section() {
         let stdout = "output line\n";
         let summary = "### Results\nAll passed";
-        let lines = step_log_lines("Summarize", stdout, "", &[], summary, false);
+        let lines = step_log_lines("Summarize", stdout, "", &[], summary, false, &[]);
         let joined = lines.join("\n");
         assert!(joined.contains("Step summary:"));
         assert!(joined.contains("### Results"));
@@ -11532,7 +11767,7 @@ bitcoin-processor-app.push=true")
 
     #[test]
     fn step_log_lines_keeps_silent_executed_steps_expandable() {
-        let lines = step_log_lines("Silent action", "", "", &[], "", false);
+        let lines = step_log_lines("Silent action", "", "", &[], "", false, &[]);
         assert_eq!(
             lines,
             vec![
@@ -11545,7 +11780,7 @@ bitcoin-processor-app.push=true")
 
     #[test]
     fn step_log_lines_keeps_skipped_steps_empty() {
-        let lines = step_log_lines("Skipped action", "", "", &[], "", true);
+        let lines = step_log_lines("Skipped action", "", "", &[], "", true, &[]);
         assert!(lines.is_empty());
     }
 
@@ -11662,7 +11897,7 @@ bitcoin-processor-app.push=true")
             stdout: "ok\n".to_string(),
             stderr: String::new(),
         };
-        let log = step_log_with_name("step1", "Run tests", 3, started, completed, &result);
+        let log = step_log_with_name("step1", "Run tests", 3, started, completed, &result, &[]);
         assert_eq!(
             log.started_at, started,
             "started_at must be stored in StepLog"
