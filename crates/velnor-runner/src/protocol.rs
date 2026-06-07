@@ -542,6 +542,7 @@ impl RegistrationClient {
                      header = \"X-GitHub-Api-Version: 2022-11-28\"\n\
                      header = \"Content-Type: application/json\"\n\
                      request = POST\n\
+                     location\n\
                      silent\n\
                      write-out = \"\\n%{{http_code}}\"\n"
                 );
@@ -717,6 +718,7 @@ pub async fn curl_json_request(
              header = \"Accept: application/json\"\n\
              max-time = {max_time}\n\
              request = {method}\n\
+             location\n\
              silent\n\
              write-out = \"\\n%{{http_code}}\"\n"
         );
@@ -2778,14 +2780,7 @@ impl TwirpResultsClient {
         for attempt in 0..3 {
             match self
                 .upload_step_log_once(
-                    &get_url,
-                    &meta_url,
-                    &get_body,
-                    &content,
-                    line_count,
-                    plan_id,
-                    job_id,
-                    step_id,
+                    &get_url, &meta_url, &get_body, &content, line_count, plan_id, job_id, step_id,
                 )
                 .await
             {

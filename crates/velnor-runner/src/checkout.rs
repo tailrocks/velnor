@@ -139,11 +139,7 @@ fn has_unsupported_enabled_action(steps: &[ActionStep]) -> bool {
     })
 }
 
-pub fn execute_checkout<R>(
-    runner: &mut R,
-    plan: &CheckoutPlan,
-    log: &mut Vec<String>,
-) -> Result<()>
+pub fn execute_checkout<R>(runner: &mut R, plan: &CheckoutPlan, log: &mut Vec<String>) -> Result<()>
 where
     R: CommandRunner,
 {

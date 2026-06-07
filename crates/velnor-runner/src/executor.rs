@@ -4878,6 +4878,7 @@ mod tests {
             docker_cli_plugin_host_dir: None,
             docker_host_work_dir: None,
             verify_bind_mounts: false,
+            daemon_id: "test-daemon".into(),
         }
     }
 
@@ -11374,9 +11375,7 @@ bitcoin-processor-app.push=true")
 
     #[test]
     fn run_service_step_result_serializes_number_field() {
-        use crate::protocol::{
-            RunServiceAnnotation, RunServiceStepResult, TaskResult, TimelineRecordState,
-        };
+        use crate::protocol::{RunServiceStepResult, TaskResult, TimelineRecordState};
         let result = RunServiceStepResult {
             external_id: Some("abc-uuid".to_string()),
             number: Some(7),
