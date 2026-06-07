@@ -4393,16 +4393,23 @@ fn redact_log_value(name: &str, value: &str) -> String {
     if name.contains("token")
         || name.contains("password")
         || name.contains("secret")
-        || name.contains("credential")
         || name.contains("authorization")
-        || name == "key"
-        || name.ends_with("_key")
-        || name.ends_with("-key")
+        || name == "ssh-key"
+        || name.ends_with("_ssh_key")
+        || name.ends_with("-ssh-key")
+        || name == "private-key"
+        || name.ends_with("_private_key")
+        || name.ends_with("-private-key")
+        || looks_like_sensitive_value(value)
     {
         "***".to_string()
     } else {
         value.to_string()
     }
+}
+
+fn looks_like_sensitive_value(value: &str) -> bool {
+    value.contains("-----BEGIN ") && value.contains(" PRIVATE KEY-----")
 }
 
 fn shell_log_name(shell: Shell) -> &'static str {
@@ -11746,12 +11753,36 @@ bitcoin-processor-app.push=true")
         let inputs = BTreeMap::from([
             ("username".to_string(), "chainargos".to_string()),
             ("password".to_string(), "secret-value".to_string()),
+            ("ssh-key".to_string(), "-----BEGIN OPENSSH PRIVATE KEY-----".to_string()),
         ]);
         let lines = action_log_prelude(&inputs, &[], &state);
         let joined = lines.join("\n");
         assert!(joined.contains("username: chainargos"));
         assert!(joined.contains("password: ***"));
+        assert!(joined.contains("ssh-key: ***"));
         assert!(!joined.contains("secret-value"));
+        assert!(!joined.contains("BEGIN OPENSSH PRIVATE KEY"));
+    }
+
+    #[test]
+    fn action_log_prelude_keeps_non_secret_diagnostics_visible() {
+        let state = JobExecutionState::new(&[]);
+        let inputs = BTreeMap::from([
+            (
+                "key".to_string(),
+                "rust-script-Velnor-Linux-abcdef".to_string(),
+            ),
+            (
+                "shared-key".to_string(),
+                "kestra-rust-build-cache-Velnor".to_string(),
+            ),
+            ("persist-credentials".to_string(), "true".to_string()),
+        ]);
+        let lines = action_log_prelude(&inputs, &[], &state);
+        let joined = lines.join("\n");
+        assert!(joined.contains("key: rust-script-Velnor-Linux-abcdef"));
+        assert!(joined.contains("shared-key: kestra-rust-build-cache-Velnor"));
+        assert!(joined.contains("persist-credentials: true"));
     }
 
     #[test]
