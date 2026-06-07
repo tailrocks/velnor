@@ -19,9 +19,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::BTreeMap,
     fs,
-    io::Write,
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
+    sync::mpsc,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -47,6 +48,15 @@ pub struct CommandResult {
 pub trait CommandRunner {
     fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult>;
 
+    fn run_streaming(
+        &mut self,
+        program: &str,
+        args: &[String],
+        _on_output: &mut dyn FnMut(CommandStream, &str),
+    ) -> Result<CommandResult> {
+        self.run(program, args)
+    }
+
     fn run_with_env(
         &mut self,
         program: &str,
@@ -66,6 +76,12 @@ pub trait CommandRunner {
         let _ = stdin;
         self.run(program, args)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandStream {
+    Stdout,
+    Stderr,
 }
 
 pub fn render_context_expressions(value: &str, context_data: &[(String, Value)]) -> String {
@@ -109,6 +125,57 @@ impl CommandRunner for ProcessCommandRunner {
             code: exit_code(output.status)?,
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+
+    fn run_streaming(
+        &mut self,
+        program: &str,
+        args: &[String],
+        on_output: &mut dyn FnMut(CommandStream, &str),
+    ) -> Result<CommandResult> {
+        let mut child = Command::new(program)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("run {program} {}", args.join(" ")))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("missing stdout pipe for {program}"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("missing stderr pipe for {program}"))?;
+        let (sender, receiver) = mpsc::channel();
+        let stdout_sender = sender.clone();
+        thread::spawn(move || stream_reader(stdout, CommandStream::Stdout, stdout_sender));
+        thread::spawn(move || stream_reader(stderr, CommandStream::Stderr, sender));
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        for (stream, line) in receiver {
+            match stream {
+                CommandStream::Stdout => {
+                    stdout.push_str(&line);
+                    stdout.push('\n');
+                }
+                CommandStream::Stderr => {
+                    stderr.push_str(&line);
+                    stderr.push('\n');
+                }
+            }
+            on_output(stream, &line);
+        }
+
+        let status = child
+            .wait()
+            .with_context(|| format!("wait for {program} {}", args.join(" ")))?;
+        Ok(CommandResult {
+            code: exit_code(status)?,
+            stdout,
+            stderr,
         })
     }
 
@@ -161,6 +228,21 @@ impl CommandRunner for ProcessCommandRunner {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
+    }
+}
+
+fn stream_reader<R: std::io::Read + Send + 'static>(
+    reader: R,
+    stream: CommandStream,
+    sender: mpsc::Sender<(CommandStream, String)>,
+) {
+    for line in BufReader::new(reader).lines() {
+        let Ok(line) = line else {
+            break;
+        };
+        if sender.send((stream, line)).is_err() {
+            break;
+        }
     }
 }
 
@@ -696,7 +778,20 @@ where
                         &plan.working_directory_container,
                         &env,
                     );
-                    let step_result = self.runner.run("docker", &exec_args)?;
+                    let live_sender = self.step_log_sender.clone();
+                    let mut on_output = |_: CommandStream, line: &str| {
+                        emit_live_step_log(
+                            &live_sender,
+                            &step.id,
+                            &step.display_name,
+                            timeline_order,
+                            &main_started_at,
+                            line,
+                        );
+                    };
+                    let step_result =
+                        self.runner
+                            .run_streaming("docker", &exec_args, &mut on_output)?;
                     let mut command_state = plan.collect_state()?;
                     command_state.merge(parse_workflow_commands_from_output(
                         &step_result.stdout,
@@ -1788,6 +1883,37 @@ where
         }
         bail!("service container '{}' did not become ready", service.name)
     }
+}
+
+fn emit_live_step_log(
+    sender: &Option<UnboundedSender<StepLog>>,
+    step_id: &str,
+    display_name: &str,
+    order: i32,
+    started_at: &str,
+    line: &str,
+) {
+    let Some(sender) = sender else {
+        return;
+    };
+    let _ = sender.send(StepLog {
+        step_id: step_id.to_string(),
+        display_name: display_name.to_string(),
+        order,
+        started_at: started_at.to_string(),
+        completed_at: String::new(),
+        lines: vec![line.to_string()],
+        masks: Vec::new(),
+        annotations: Vec::new(),
+        telemetry: Vec::new(),
+        exit_code: 0,
+        skipped: false,
+        failure_ignored: false,
+        error_count: 0,
+        warning_count: 0,
+        notice_count: 0,
+        summary: String::new(),
+    });
 }
 
 fn action_context_env(env: &[(String, String)]) -> Vec<(String, String)> {
