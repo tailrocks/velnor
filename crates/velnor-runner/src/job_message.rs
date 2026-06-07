@@ -196,7 +196,12 @@ pub struct ActionStep {
     pub id: Option<String>,
     #[serde(default, rename = "Name", alias = "name")]
     pub name: Option<String>,
-    #[serde(default, rename = "DisplayName", alias = "displayName")]
+    #[serde(
+        default,
+        rename = "DisplayName",
+        alias = "displayName",
+        alias = "display_name"
+    )]
     pub display_name: Option<String>,
     #[serde(default = "default_true", rename = "Enabled", alias = "enabled")]
     pub enabled: bool,
@@ -206,7 +211,12 @@ pub struct ActionStep {
     pub continue_on_error: Option<Value>,
     #[serde(default, rename = "TimeoutInMinutes", alias = "timeoutInMinutes")]
     pub timeout_in_minutes: Option<Value>,
-    #[serde(default, rename = "ContextName", alias = "contextName")]
+    #[serde(
+        default,
+        rename = "ContextName",
+        alias = "contextName",
+        alias = "context_name"
+    )]
     pub context_name: Option<String>,
     #[serde(default, rename = "Reference", alias = "reference")]
     pub reference: Option<ActionStepDefinitionReference>,
@@ -427,6 +437,35 @@ mod tests {
             message.steps[0].reference_type(),
             Some(ActionReferenceType::Repository)
         );
+    }
+
+    #[test]
+    fn accepts_snake_case_step_name_fields() {
+        let body = format!(
+            r#"{{
+                "messageType": "PipelineAgentJobRequest",
+                "plan": {{ "planId": "{PLAN_ID}" }},
+                "timeline": {{ "id": "{TIMELINE_ID}" }},
+                "jobId": "{JOB_ID}",
+                "jobDisplayName": "Check",
+                "requestId": 123,
+                "steps": [{{
+                    "name": "__run",
+                    "display_name": "Install Ansible",
+                    "context_name": "install",
+                    "reference": {{ "type": "Script" }},
+                    "inputs": {{ "script": "pip install ansible-core" }}
+                }}]
+            }}"#
+        );
+
+        let message = AgentJobRequestMessage::parse_json(&body).unwrap();
+
+        assert_eq!(
+            message.steps[0].display_name.as_deref(),
+            Some("Install Ansible")
+        );
+        assert_eq!(message.steps[0].context_name.as_deref(), Some("install"));
     }
 
     #[test]
