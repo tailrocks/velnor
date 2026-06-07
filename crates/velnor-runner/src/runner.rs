@@ -2723,15 +2723,25 @@ async fn apply_workflow_script_step_names(
         return;
     };
     let names_by_line = workflow_run_step_names_by_line(&contents);
-    if names_by_line.is_empty() {
-        return;
-    }
+    let names_by_order = workflow_step_names_in_order(&contents);
+    let enabled_step_count = job.steps.iter().filter(|step| step.enabled).count();
+    let use_ordered_names = names_by_order.len() == enabled_step_count;
 
     let mut updated = 0usize;
+    let mut enabled_index = 0usize;
     for step in &mut job.steps {
-        if step.reference_type() != Some(crate::job_message::ActionReferenceType::Script) {
+        if !step.enabled {
             continue;
         }
+        let ordered_name = if use_ordered_names {
+            names_by_order
+                .get(enabled_index)
+                .and_then(|name| name.as_ref())
+        } else {
+            None
+        };
+        enabled_index += 1;
+
         if step
             .display_name
             .as_deref()
@@ -2748,10 +2758,15 @@ async fn apply_workflow_script_step_names(
         {
             continue;
         }
-        let Some(line) = crate::script_step::script_input_source_line(step) else {
-            continue;
-        };
-        let Some(name) = names_by_line.get(&line) else {
+
+        let line_name =
+            if step.reference_type() == Some(crate::job_message::ActionReferenceType::Script) {
+                crate::script_step::script_input_source_line(step)
+                    .and_then(|line| names_by_line.get(&line))
+            } else {
+                None
+            };
+        let Some(name) = line_name.or(ordered_name) else {
             continue;
         };
         step.display_name = Some(name.clone());
@@ -2899,6 +2914,38 @@ fn workflow_run_step_names_by_line(contents: &str) -> BTreeMap<u64, String> {
     result
 }
 
+fn workflow_step_names_in_order(contents: &str) -> Vec<Option<String>> {
+    let lines: Vec<&str> = contents.lines().collect();
+    let mut result = Vec::new();
+    let mut starts = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.trim_start().starts_with("- "))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    starts.push(lines.len());
+
+    for pair in starts.windows(2) {
+        let start = pair[0];
+        let end = pair[1];
+        let mut name = None;
+        let mut executable = false;
+        for line in &lines[start..end] {
+            let trimmed = line.trim_start();
+            if name.is_none() {
+                name = yaml_name_value(trimmed);
+            }
+            if yaml_has_run_key(trimmed) || yaml_has_uses_key(trimmed) {
+                executable = true;
+            }
+        }
+        if executable {
+            result.push(name);
+        }
+    }
+    result
+}
+
 fn yaml_name_value(trimmed_line: &str) -> Option<String> {
     let value = trimmed_line
         .strip_prefix("- name:")
@@ -2914,6 +2961,13 @@ fn yaml_has_run_key(trimmed_line: &str) -> bool {
     trimmed_line
         .strip_prefix("- run:")
         .or_else(|| trimmed_line.strip_prefix("run:"))
+        .is_some()
+}
+
+fn yaml_has_uses_key(trimmed_line: &str) -> bool {
+    trimmed_line
+        .strip_prefix("- uses:")
+        .or_else(|| trimmed_line.strip_prefix("uses:"))
         .is_some()
 }
 
@@ -4291,6 +4345,35 @@ jobs:
         assert_eq!(
             names.get(&13).map(String::as_str),
             Some("Syntax check playbooks")
+        );
+    }
+
+    #[test]
+    fn workflow_step_names_in_order_recovers_named_actions_and_scripts() {
+        let yaml = r#"
+jobs:
+  build:
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - uses: jdx/mise-action@v4
+      - name: Cache rust-script
+        uses: actions/cache@v5
+      - name: Check if image exists
+        id: check-image
+        run: echo check
+"#;
+
+        let names = workflow_step_names_in_order(yaml);
+
+        assert_eq!(
+            names.iter().map(|name| name.as_deref()).collect::<Vec<_>>(),
+            vec![
+                Some("Checkout code"),
+                None,
+                Some("Cache rust-script"),
+                Some("Check if image exists"),
+            ]
         );
     }
 
