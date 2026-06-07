@@ -2458,7 +2458,7 @@ fn execute_script_job_inner(
             .unwrap_or(post_order);
         let complete_order = (main_order * 2) + 1;
         let first_cleanup_order = complete_order - cleanup_checkout_plans.len() as i32;
-        post_order = post_order.max(first_cleanup_order - 1);
+        post_order = first_cleanup_order - 1;
     }
     let mut extra_step_logs: Vec<StepLog> = Vec::new();
     for (index, plan) in cleanup_checkout_plans.iter().enumerate() {
