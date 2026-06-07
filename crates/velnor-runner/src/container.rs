@@ -71,7 +71,10 @@ impl JobContainerSpec {
         for (name, value) in &self.env {
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
-        args.extend(["--label".into(), format!("velnor.daemon-id={}", self.daemon_id)]);
+        args.extend([
+            "--label".into(),
+            format!("velnor.daemon-id={}", self.daemon_id),
+        ]);
         args.extend(self.options.iter().cloned());
 
         if self.mount_docker_socket {

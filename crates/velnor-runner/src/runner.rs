@@ -3,7 +3,7 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -23,9 +23,8 @@ use crate::{
         composite_repository_action_plans_from_resolved, download_repository_actions,
         is_local_action_step, local_action_plans_with_context, native_action_adapter,
         native_invocation_from_plan, repository_action_plans, resolve_local_action,
-        unsupported_action_error, ActionMetadata,
-        ActionRuntime, CompositeActionInvocation, LocalActionPlan, RepositoryActionPlan,
-        ResolvedAction,
+        unsupported_action_error, ActionMetadata, ActionRuntime, CompositeActionInvocation,
+        LocalActionPlan, RepositoryActionPlan, ResolvedAction,
     },
     checkout::{
         checkout_plans, checkout_step_id, cleanup_checkout_credentials, configure_safe_directory,
@@ -375,7 +374,7 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
     }
 
-    let config_base = config::config_dir(args.config_dir.clone())?;
+    let config_base = daemon_config_dir(&args)?;
     preflight_before_daemon_jit_config(&args, &config_base, slots)?;
     if args.url.is_some() && !args.dry_run_registration {
         let daemon_id = args
@@ -644,6 +643,45 @@ fn daemon_should_poll_after_jit_config(args: &DaemonArgs) -> bool {
     !args.dry_run_registration
 }
 
+fn daemon_config_dir(args: &DaemonArgs) -> Result<PathBuf> {
+    if args.config_dir.is_some() || env::var_os("VELNOR_CONFIG_DIR").is_some() {
+        return config::config_dir(args.config_dir.clone());
+    }
+
+    let base = config::config_dir(None)?;
+    let Some(identity) = args
+        .name
+        .as_deref()
+        .or(args.work_dir.as_deref().and_then(Path::to_str))
+        .or(args.url.as_deref())
+    else {
+        return Ok(base);
+    };
+
+    Ok(base
+        .join("daemons")
+        .join(sanitize_daemon_config_component(identity)))
+}
+
+fn sanitize_daemon_config_component(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        "default".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn preflight_before_daemon_jit_config(
     args: &DaemonArgs,
     config_base: &Path,
@@ -695,7 +733,12 @@ fn validate_daemon_slots(slots: usize) -> Result<usize> {
 /// because a daemon restart already orphans any in-flight job (JIT runners are
 /// per-job), so anything matching here is dead.
 fn prune_stale_velnor_docker_resources(daemon_id: &str) {
-    let docker = |args: &[&str]| std::process::Command::new("docker").args(args).output().ok();
+    let docker = |args: &[&str]| {
+        std::process::Command::new("docker")
+            .args(args)
+            .output()
+            .ok()
+    };
     let ids_from = |args: &[&str]| -> Vec<String> {
         docker(args)
             .filter(|o| o.status.success())
@@ -1354,7 +1397,11 @@ async fn handle_job_request(
         let (step_start_sender, step_start_receiver) = tokio::sync::mpsc::unbounded_channel();
         let step_timeline = start_step_timeline_publisher(job.clone(), step_start_receiver);
         let (step_log_sender, step_log_receiver) = tokio::sync::mpsc::unbounded_channel();
-        let console_log_path = Some(job_console_log_path(config_dir, args.work_dir.clone(), &job));
+        let console_log_path = Some(job_console_log_path(
+            config_dir,
+            args.work_dir.clone(),
+            &job,
+        ));
         let step_logs_publisher =
             start_step_log_publisher(job.clone(), step_log_receiver, console_log_path);
         let config_dir = config_dir.to_path_buf();
@@ -4044,6 +4091,45 @@ mod tests {
     }
 
     #[test]
+    fn daemon_config_dir_isolates_named_daemons_by_default() {
+        let mut fixture = daemon_args(2);
+        fixture.url = Some("https://github.com/tailrocks/velnor-actions-fixture".into());
+        fixture.name = Some("velnor-fixture".into());
+
+        let mut chainargos = daemon_args(10);
+        chainargos.url = Some("https://github.com/ChainArgos/java-monorepo".into());
+        chainargos.name = Some("velnor-sentry".into());
+
+        let fixture_dir = daemon_config_dir(&fixture).unwrap();
+        let chainargos_dir = daemon_config_dir(&chainargos).unwrap();
+
+        assert_ne!(fixture_dir, chainargos_dir);
+        assert!(fixture_dir.ends_with(Path::new("daemons/velnor-fixture")));
+        assert!(chainargos_dir.ends_with(Path::new("daemons/velnor-sentry")));
+    }
+
+    #[test]
+    fn daemon_config_dir_keeps_explicit_config_dir() {
+        let mut args = daemon_args(4);
+        args.url = Some("https://github.com/ChainArgos/blockchain-nodes".into());
+        args.name = Some("velnor-blockchain-nodes".into());
+        args.config_dir = Some(Path::new("/etc/velnor/blockchain-nodes").to_path_buf());
+
+        let dir = daemon_config_dir(&args).unwrap();
+
+        assert_eq!(dir, Path::new("/etc/velnor/blockchain-nodes"));
+    }
+
+    #[test]
+    fn daemon_config_component_replaces_path_characters() {
+        assert_eq!(
+            sanitize_daemon_config_component("https://github.com/ChainArgos/java-monorepo"),
+            "https---github.com-ChainArgos-java-monorepo"
+        );
+        assert_eq!(sanitize_daemon_config_component("///"), "default");
+    }
+
+    #[test]
     fn daemon_rejects_zero_slots() {
         let error = validate_daemon_slots(0).unwrap_err().to_string();
 
@@ -6279,8 +6365,14 @@ runs:
             19,
             "expected YYYY-MM-DDTHH:MM:SS before the dot: {ts}"
         );
-        assert!(date_time.contains('T'), "timestamp must contain T separator: {ts}");
-        assert!(frac_z.ends_with('Z'), "timestamp must end with Z (UTC): {ts}");
+        assert!(
+            date_time.contains('T'),
+            "timestamp must contain T separator: {ts}"
+        );
+        assert!(
+            frac_z.ends_with('Z'),
+            "timestamp must end with Z (UTC): {ts}"
+        );
         let frac = frac_z.trim_end_matches('Z');
         assert_eq!(
             frac.len(),

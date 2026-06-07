@@ -112,6 +112,7 @@ mod tests {
             docker_cli_plugin_host_dir: None,
             docker_host_work_dir: None,
             verify_bind_mounts: true,
+            daemon_id: "test-daemon".into(),
         }
     }
 

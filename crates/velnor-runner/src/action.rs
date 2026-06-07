@@ -3006,16 +3006,12 @@ runs:
         assert!(unsupported_action_error("Baptiste0928/Cargo-Install").is_some());
         assert!(unsupported_action_error("jdx/mise-action").is_none());
         assert!(unsupported_action_error("owner/unknown-action").is_none());
-        assert!(
-            unsupported_action_error("dtolnay/rust-toolchain")
-                .unwrap()
-                .contains("jdx/mise-action")
-        );
-        assert!(
-            unsupported_action_error("baptiste0928/cargo-install")
-                .unwrap()
-                .contains("jdx/mise-action")
-        );
+        assert!(unsupported_action_error("dtolnay/rust-toolchain")
+            .unwrap()
+            .contains("jdx/mise-action"));
+        assert!(unsupported_action_error("baptiste0928/cargo-install")
+            .unwrap()
+            .contains("jdx/mise-action"));
     }
 
     fn action_metadata_files(root: &Path) -> Vec<PathBuf> {
