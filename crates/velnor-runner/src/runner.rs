@@ -2644,8 +2644,15 @@ fn job_context_data(job: &AgentJobRequestMessage) -> Vec<(String, Value)> {
             }
         }
     }
+    // Expand any context values stored in GitHub V2 broker compact format
+    // {"d": [{"k": key, "v": value}, ...]} into plain flat objects so that
+    // expression evaluation and context lookups work uniformly.
+    let mut expanded: BTreeMap<String, Value> = context_data
+        .into_iter()
+        .map(|(k, v)| (k, expand_broker_context_value(v)))
+        .collect();
     if let Some(token) = github_token {
-        match context_data.get_mut("github") {
+        match expanded.get_mut("github") {
             Some(Value::Object(github)) => {
                 github
                     .entry("token".to_string())
@@ -2655,18 +2662,10 @@ fn job_context_data(job: &AgentJobRequestMessage) -> Vec<(String, Value)> {
             None => {
                 let mut github = Map::new();
                 github.insert("token".to_string(), Value::String(token));
-                context_data.insert("github".to_string(), Value::Object(github));
+                expanded.insert("github".to_string(), Value::Object(github));
             }
         }
     }
-
-    // Expand any context values stored in GitHub V2 broker compact format
-    // {"d": [{"k": key, "v": value}, ...]} into plain flat objects so that
-    // expression evaluation and context lookups work uniformly.
-    let expanded: BTreeMap<String, Value> = context_data
-        .into_iter()
-        .map(|(k, v)| (k, expand_broker_context_value(v)))
-        .collect();
     expanded.into_iter().collect()
 }
 
@@ -4292,6 +4291,41 @@ jobs:
         assert_eq!(
             names.get(&13).map(String::as_str),
             Some("Syntax check playbooks")
+        );
+    }
+
+    #[test]
+    fn job_context_data_keeps_github_token_after_compact_context_expansion() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanId": "plan" },
+            "Timeline": { "Id": "timeline" },
+            "JobId": "job",
+            "JobDisplayName": "job",
+            "RequestId": 1,
+            "Variables": {
+                "system.github.token": { "Value": "token-123", "IsSecret": true }
+            },
+            "ContextData": {
+                "github": {
+                    "d": [
+                        { "k": "workflow_sha", "v": "abc123" }
+                    ],
+                    "t": 2
+                }
+            }
+        }))
+        .unwrap();
+
+        let context = job_context_data(&job);
+
+        assert_eq!(
+            context_string(&context, "github.workflow_sha").as_deref(),
+            Some("abc123")
+        );
+        assert_eq!(
+            context_string(&context, "github.token").as_deref(),
+            Some("token-123")
         );
     }
 
