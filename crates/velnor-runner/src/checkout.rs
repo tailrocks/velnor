@@ -37,13 +37,12 @@ pub struct CheckoutPlan {
 
 impl CheckoutPlan {
     pub fn requires_runtime_context(&self) -> bool {
+        if self.condition.is_some() {
+            return true;
+        }
         self.version
             .as_deref()
             .is_some_and(contains_step_context_expression)
-            || self
-                .condition
-                .as_deref()
-                .is_some_and(contains_step_context_expression)
     }
 }
 
@@ -1329,6 +1328,46 @@ mod tests {
         );
         assert!(plans[0].requires_runtime_context());
         assert_eq!(plans[0].fetch_depth, None);
+    }
+
+    #[test]
+    fn checkout_with_condition_requires_runtime_context() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Preview",
+            "requestId": 1,
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "ChainArgos/java-monorepo",
+                    "version": "abc123",
+                    "properties": { "cloneUrl": "https://github.com/ChainArgos/java-monorepo.git" }
+                }]
+            },
+            "steps": [
+                {
+                    "id": "plan",
+                    "reference": { "type": "Script" },
+                    "inputs": { "script": "echo run-tests=false >> \"$GITHUB_OUTPUT\"" }
+                },
+                {
+                    "reference": { "type": "Repository", "name": "actions/checkout" },
+                    "condition": "${{ steps.plan.outputs.run-tests == 'true' }}"
+                }
+            ]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans.len(), 1);
+        assert!(
+            plans[0].requires_runtime_context(),
+            "conditional checkout must stay in normal step order"
+        );
     }
 
     #[test]
