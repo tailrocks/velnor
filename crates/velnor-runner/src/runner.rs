@@ -2750,22 +2750,21 @@ async fn apply_workflow_script_step_names(
         {
             continue;
         }
-        if step
-            .name
-            .as_deref()
-            .filter(|name| !name.is_empty() && !name.starts_with("__"))
-            .is_some()
-        {
+        let is_script_step =
+            step.reference_type() == Some(crate::job_message::ActionReferenceType::Script);
+        if !is_script_step && has_explicit_step_name(step) {
+            continue;
+        }
+        if is_script_step && has_explicit_script_display_name(step) {
             continue;
         }
 
-        let line_name =
-            if step.reference_type() == Some(crate::job_message::ActionReferenceType::Script) {
-                crate::script_step::script_input_source_line(step)
-                    .and_then(|line| names_by_line.get(&line))
-            } else {
-                None
-            };
+        let line_name = if is_script_step {
+            crate::script_step::script_input_source_line(step)
+                .and_then(|line| names_by_line.get(&line))
+        } else {
+            None
+        };
         let Some(name) = line_name.or(ordered_name) else {
             continue;
         };
@@ -2775,6 +2774,24 @@ async fn apply_workflow_script_step_names(
     if updated > 0 {
         println!("Recovered {updated} script step display name(s) from workflow YAML.");
     }
+}
+
+fn has_explicit_step_name(step: &crate::job_message::ActionStep) -> bool {
+    step.name
+        .as_deref()
+        .filter(|name| !name.is_empty() && !name.starts_with("__"))
+        .is_some()
+}
+
+fn has_explicit_script_display_name(step: &crate::job_message::ActionStep) -> bool {
+    let Some(name) = step
+        .name
+        .as_deref()
+        .filter(|name| !name.is_empty() && !name.starts_with("__"))
+    else {
+        return false;
+    };
+    step.id.as_deref() != Some(name)
 }
 
 #[derive(Debug)]
@@ -4375,6 +4392,30 @@ jobs:
                 Some("Check if image exists"),
             ]
         );
+    }
+
+    #[test]
+    fn script_step_id_name_does_not_block_workflow_display_name_recovery() {
+        let step: crate::job_message::ActionStep = serde_json::from_value(serde_json::json!({
+            "id": "check-image",
+            "name": "check-image",
+            "reference": { "type": "script" }
+        }))
+        .unwrap();
+
+        assert!(!has_explicit_script_display_name(&step));
+    }
+
+    #[test]
+    fn script_step_real_name_blocks_workflow_display_name_recovery() {
+        let step: crate::job_message::ActionStep = serde_json::from_value(serde_json::json!({
+            "id": "check-image",
+            "name": "Check if image exists",
+            "reference": { "type": "script" }
+        }))
+        .unwrap();
+
+        assert!(has_explicit_script_display_name(&step));
     }
 
     #[test]
