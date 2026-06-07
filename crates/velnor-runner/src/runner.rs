@@ -1872,6 +1872,7 @@ fn start_step_log_publisher(
     tokio::spawn(async move {
         let mut line_counter: i64 = 1;
         let mut change_order: i64 = 1000; // Offset from start-event change_orders
+        let mut streamed_steps = BTreeSet::new();
 
         // Prepare the live console file that the job container tails as PID 1
         // (so `docker logs <job-container>` mirrors the GitHub UI). Create it
@@ -1932,13 +1933,20 @@ fn start_step_log_publisher(
                 .map(|l| mask_single_value(l, &masks))
                 .collect();
             let line_count = lines.len() as i64;
+            let live_chunk = log.completed_at.is_empty() && !log.skipped;
+            if live_chunk {
+                streamed_steps.insert(log.step_id.clone());
+            }
+            let already_streamed = !live_chunk && streamed_steps.contains(&log.step_id);
 
             // Mirror this step to the container's live console file (docker logs).
-            if let Some(path) = &console_log_path {
-                append_job_console(path, &log.display_name, &lines, &log.masks);
+            if !already_streamed {
+                if let Some(path) = &console_log_path {
+                    append_job_console(path, &log.display_name, &lines, &log.masks);
+                }
             }
 
-            if !lines.is_empty() {
+            if !already_streamed && !lines.is_empty() {
                 // GitHub may close the feed WebSocket between steps / after idle, so a
                 // later send hits a Broken pipe. Reconnect (lazily, and once on send
                 // failure) so the live console does not go dark for the rest of the job.
@@ -2000,6 +2008,10 @@ fn start_step_log_publisher(
                 }
             }
             line_counter += line_count;
+
+            if live_chunk {
+                continue;
+            }
 
             // Send step completion via Twirp Results Service.
             if let Some(client) = &twirp_client {
