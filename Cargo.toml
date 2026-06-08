@@ -12,7 +12,7 @@ anyhow = "1.0.98"
 base64 = "0.22.1"
 clap = { version = "4.5.38", features = ["derive", "env"] }
 jsonwebtoken = "9.3.1"
-reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls", "native-tls", "blocking"] }
+reqwest = { version = "0.13.0", default-features = false, features = ["json", "rustls-tls", "native-tls", "blocking"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 rsa = { version = "0.9.8", features = ["pem"] }
 serde = { version = "1.0.219", features = ["derive"] }
