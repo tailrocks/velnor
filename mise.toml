@@ -1,0 +1,6 @@
+[tools]
+"cargo:cargo-zigbuild" = "0.22.3"
+zig = "0.16.0"
+
+[settings]
+idiomatic_version_file_enable_tools = ["rust"]
