@@ -12,7 +12,14 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
 ## Pieces
 
 1. **Build the `.deb`** — `cargo-deb` (Rust-native; reads `[package.metadata.deb]`
-   in `Cargo.toml`). Produces `velnor-runner_<version>_amd64.deb`.
+   in `Cargo.toml`). Both holla and velnor use the exact same approach in their
+   `release-deb.yml` (on tag `v*` or workflow_dispatch):
+   - `jdx/mise-action` (rust + zig + cargo:cargo-zigbuild)
+   - sccache + mold
+   - Matrix over `x86_64-unknown-linux-gnu` + `aarch64-unknown-linux-gnu`
+   - `cargo zigbuild --release --locked --target $TGT` (modern glibc, no .2.17 shims — those are only for portable tarballs)
+   - `cargo deb -p velnor-runner --target $TGT --no-build --deb-version "$VERSION"`
+   Produces `velnor-runner_<version>_<arch>.deb` (amd64 + arm64).
    - Package contents: binary → `/usr/bin/velnor-runner`; systemd unit →
      `/lib/systemd/system/velnor-daemon.service`; default config →
      `/etc/velnor/velnor.env` (conffile, token NOT shipped — operator fills it);
@@ -31,7 +38,7 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
      Origin: Velnor
      Label: Velnor
      Codename: stable
-     Architectures: amd64
+     Architectures: amd64 arm64
      Components: main
      SignWith: <GPG key id>
      ```
@@ -64,15 +71,16 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
 
 **Policy:** You should always use GitHub Actions for GitHub Pages deployments (never "Deploy from a branch"). Use `actions/configure-pages`, `actions/upload-pages-artifact`, and `actions/deploy-pages`. The index on Pages is always for currently published versions only.
 
-`.github/workflows/release-deb.yml` (in the original velnor repo):
-1. Uses `jdx/mise-action` + `cargo zigbuild` (latest Debian glibc only) → `cargo deb`.
-2. Attaches the `.deb`(s) to the velnor source GitHub Release.
-3. If `GH_VELNOR_APT_TOKEN` is present, cross-uploads the .deb(s) to the `velnor-apt` repository's Releases (same tag) and triggers `publish.yml` in the apt repo via repository_dispatch or `gh workflow run`.
-4. The apt-repo's `publish.yml` then downloads the .deb from *its own* Releases (default GITHUB_TOKEN is sufficient) and runs reprepro.
+`.github/workflows/release-deb.yml` (unified with holla's):
+1. Uses the exact same pattern as holla: `jdx/mise-action` + sccache + mold + `cargo zigbuild` (latest Debian glibc only, matrix for amd64+arm64) → `cargo deb --target $TGT --no-build --deb-version "$VERSION"`.
+2. Stages per-arch debs + shas as artifacts.
+3. Attaches the `.deb`(s) to the velnor source GitHub Release.
+4. If `GH_VELNOR_APT_TOKEN` is present, cross-uploads the .debs to the `velnor-apt` repository's Releases (same tag) and triggers `publish.yml` in the apt repo via `gh workflow run -f version=$TAG`.
+5. The apt-repo's `publish.yml` then downloads the .debs from *its own* Releases (default GITHUB_TOKEN is sufficient), runs reprepro (fresh index with only the current version's debs), and deploys to Pages.
 
 The `.deb` build + attachment to the original release is the responsibility of the source project. The apt publisher only consumes from the apt-repo's own releases.
    The index on Pages is generated fresh each time with only current versions (no state branch; old versions forgotten from index per maintainer preference). GitHub Pages is deployed via GitHub Actions (recommended; never "Deploy from a branch").
-5. Also attach the raw `.deb` to the GitHub Release for direct download.
+6. Also attach the raw `.deb`(s) to the GitHub Release for direct download.
 
 Each new tag → new `.deb` in the pool → regenerated signed `Release` → `apt
 upgrade` picks it up. That is the whole upgrade story.
@@ -101,8 +109,8 @@ avoids the deprecated global `apt-key` / `trusted.gpg.d`).
   `Cargo.toml`); nfpm is fine too if we later want rpm as well.
 - **reprepro vs aptly**: reprepro is simpler for a single-arch single-suite repo
   and signs Release out of the box; aptly if we later need snapshots/mirroring.
-- **arch**: amd64 first (Sentry + targets are amd64). Add arm64 later via a
-  matrix build if needed.
+- **arch**: amd64 + arm64 via matrix (using zigbuild for cross on ubuntu runner).
+  Both projects (holla + velnor) use the identical release-deb.yml structure.
 - **key rotation**: document a key-rotation procedure; expired signing keys break
   `apt update` for everyone (see the `gh` CLI incident).
 
