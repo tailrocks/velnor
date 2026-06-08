@@ -50,7 +50,7 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
    (using the official `actions/deploy-pages`).
    The `gh-pages` branch is still maintained as an internal git state store
    for `reprepro` (to keep old package versions).
-   Served at e.g. `https://www.zhokhov.com/velnor-apt/`.
+   Served at e.g. `https://velnor-apt.tailrocks.com/`.
 
 ### Where it lives (storage decision)
 
@@ -90,9 +90,9 @@ upgrade` picks it up. That is the whole upgrade story.
 
 ```bash
 sudo install -m0755 -d /etc/apt/keyrings
-curl -fsSL https://www.zhokhov.com/velnor-apt/velnor.gpg \
+curl -fsSL https://velnor-apt.tailrocks.com/velnor.gpg \
   | sudo tee /etc/apt/keyrings/velnor.gpg > /dev/null
-echo "deb [signed-by=/etc/apt/keyrings/velnor.gpg] https://www.zhokhov.com/velnor-apt stable main" \
+echo "deb [signed-by=/etc/apt/keyrings/velnor.gpg] https://velnor-apt.tailrocks.com stable main" \
   | sudo tee /etc/apt/sources.list.d/velnor.list
 sudo apt update
 sudo apt install velnor-runner

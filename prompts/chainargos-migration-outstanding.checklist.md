@@ -68,12 +68,12 @@ git-bundle deploys. Target this as the real fix for daemon operations.
         `SignWith` set; public `velnor.gpg` published. Private key only lives in
         the velnor-apt secret — rotate via the same steps if needed.
   - [x] **GitHub Pages enabled + LIVE** — served at
-        `https://www.zhokhov.com/velnor-apt` (donbeave's custom Pages domain;
+        `https://velnor-apt.tailrocks.com` (custom Pages domain;
         HTTPS works, `donbeave.github.io/velnor-apt` 301-redirects there).
   - [x] **First publish done + VERIFIED** — `publish.yml` signed + published
         `velnor-runner 0.1.0-rc1`; `InRelease` shows **Good signature**, the
         `.deb` is reachable, `apt install velnor-runner` from
-        `https://www.zhokhov.com/velnor-apt` works. `publish.yml` reads the `.deb`
+        `https://velnor-apt.tailrocks.com` works. `publish.yml` reads the `.deb`
         from velnor-apt's OWN release (same-repo token — no private-repo read).
   - [ ] **Only remaining: auto-publish on tag** — add a PAT with write on
         `donbeave/velnor-apt` as a velnor secret `VELNOR_APT_TOKEN`. Then a
