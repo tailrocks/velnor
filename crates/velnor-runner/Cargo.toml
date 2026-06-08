@@ -10,9 +10,14 @@ description = "Velnor self-hosted GitHub Actions runner daemon"
 name = "velnor-runner"
 path = "src/main.rs"
 
-# Debian packaging (cargo-deb). Build: `cargo deb -p velnor-runner`.
-# Produces target/debian/velnor-runner_<version>_amd64.deb with the binary, a
-# systemd unit, a config conffile, and maintainer scripts.
+# Debian packaging (cargo-deb). 
+# The release-deb.yml (on tag) handles:
+#   cargo zigbuild --release --locked --target $TGT
+#   cargo deb -p velnor-runner --target $TGT --no-build --deb-version "$VERSION"
+# This produces target/<triple>/debian/velnor-runner_<ver>_<arch>.deb .
+#
+# The [[bin]] is automatically packaged (correct binary for --target).
+# Extra assets (systemd unit, config, docs) + maintainer-scripts are included.
 [package.metadata.deb]
 maintainer = "Alexey Zhokhov <alexey@zhokhov.com>"
 copyright = "2026, Tailrocks"
@@ -28,7 +33,6 @@ depends = "$auto, git, curl, ca-certificates, docker.io | docker-ce"
 conf-files = ["/etc/velnor/velnor.env"]
 maintainer-scripts = "debian/"
 assets = [
-  ["target/release/velnor-runner", "usr/bin/", "755"],
   ["debian/velnor-daemon.service", "lib/systemd/system/velnor-daemon.service", "644"],
   ["debian/velnor.env", "etc/velnor/velnor.env", "640"],
   ["../../README.md", "usr/share/doc/velnor-runner/README.md", "644"],

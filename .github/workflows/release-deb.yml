@@ -1,32 +1,100 @@
 name: Release deb
 
-# Build the velnor-runner .deb on a version tag, attach it to the GitHub
-# Release, and (optionally) trigger the velnor-apt repo to publish it.
+# Build velnor-runner .deb(s) for Linux on a version tag, attach them to the GitHub
+# Release (source), and (optionally) push them to the velnor-apt repo so it can
+# publish the apt repository.
+#
+# We only target the latest and greatest Debian (recent glibc via zigbuild,
+# no old-glibc .2.17 compatibility shims — those are only for the portable
+# tarball builds if/when a general release.yml exists).
+# $auto depends in cargo-deb + modern target produce a .deb suitable for current Debian/Ubuntu.
+#
+# Uses the same jdx/mise-action + zigbuild + sccache + mold pattern as holla
+# (and jackin-project/jackin) for consistency across tailrocks projects.
+# See holla's release-deb.yml for the reference implementation.
+#
+# Separate from any general release flow (if one is added later for tarballs etc.)
+# so that .debs can be cross-uploaded to velnor-apt's own releases (allowing
+# its publish.yml to consume them with default GITHUB_TOKEN).
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to (re)build the .deb for (e.g. v0.1.0)."
+        description: "Existing tag to (re)build the .deb(s) for (e.g. v0.1.0)."
         type: string
         required: true
 
 permissions:
-  contents: write # create/upload the GitHub Release asset
+  contents: write # create/upload the GitHub Release asset on the source repo
 
 jobs:
   build-deb:
+    # Linux-only .deb builds for the velnor-apt repository.
+    # Uses the exact same jdx/mise-action + zigbuild pattern as holla (and jackin).
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            zigbuild: true
+          - target: aarch64-unknown-linux-gnu
+            zigbuild: true
     runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.event.inputs.tag && github.event.inputs.tag || github.ref_name }}
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - id: sccache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        continue-on-error: true
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+
+      - name: Enable sccache
+        if: steps.sccache.outcome == 'success'
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
+        with:
+          install_args: "rust zig cargo:cargo-zigbuild"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - run: rustup target add ${{ matrix.target }}
+
+      - name: Cache Cargo registry
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
+
+      - name: Install mold linker
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
 
       - name: Install cargo-deb
-        run: cargo install cargo-deb --locked
+        run: mise exec -- cargo install cargo-deb --locked
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.zigbuild }}" = "true" ]; then
+            # Use modern glibc target (no .2.17) because we only target latest Debian
+            # for the .deb packages (see "latest and greatest Debian only" requirement).
+            cargo zigbuild --release --locked --target ${{ matrix.target }}
+          else
+            cargo build --release --locked --target ${{ matrix.target }}
+          fi
 
       - name: Build .deb (version pinned to the tag)
         env:
@@ -34,42 +102,69 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
-          cargo deb -p velnor-runner --deb-version "$VERSION"
-          ls -la target/debian/*.deb
+          cargo deb -p velnor-runner --target ${{ matrix.target }} --no-build --deb-version "$VERSION"
+          ls -la target/${{ matrix.target }}/debian/*.deb
 
-      - name: Attach .deb to the GitHub Release
+      - name: Stage .deb for artifacts
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          DEB_SRC=$(ls target/${{ matrix.target }}/debian/velnor-runner_*.deb | head -1)
+          DEB_DST="velnor-runner-${VERSION}-${{ matrix.target }}.deb"
+          cp "$DEB_SRC" "$DEB_DST"
+          sha256sum "$DEB_DST" | awk '{print $1}' > "$DEB_DST.sha256"
+          ls -l "$DEB_DST"*
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: velnor-runner-deb-${{ matrix.target }}
+          path: |
+            velnor-runner-*.deb
+            velnor-runner-*.deb.sha256
+
+  attach-and-deliver:
+    needs: build-deb
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Attach .deb(s) to the GitHub Release (source)
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          DEB="$(ls target/debian/velnor-runner_*_amd64.deb)"
-          # Create the release if it does not exist yet, then upload the asset.
+          # Create the release if it does not exist yet, then upload the deb assets.
           gh release view "$TAG" >/dev/null 2>&1 \
             || gh release create "$TAG" --title "$TAG" --generate-notes
-          gh release upload "$TAG" "$DEB" --clobber
+          gh release upload "$TAG" artifacts/velnor-runner-*-unknown-linux-gnu.deb artifacts/velnor-runner-*-unknown-linux-gnu.deb.sha256 --clobber
 
-      - name: Push .deb to velnor-apt + trigger publish (optional)
-        # velnor is private; velnor-apt publishes from its OWN release. So upload
-        # the .deb to a velnor-apt release, then dispatch its publish workflow.
-        # Needs GH_VELNOR_APT_TOKEN: a fine-grained PAT with Contents:write +
-        # Actions:write on tailrocks/velnor-apt. Without it, publish manually.
+      - name: Push .deb(s) to velnor-apt + trigger publish (optional)
+        # Same pattern as holla: the source may be private (or we want consistent
+        # delivery). velnor-apt publishes from its *own* release. So we upload the
+        # .deb(s) to a velnor-apt release (same tag), then trigger its publish workflow.
+        # Needs GH_VELNOR_APT_TOKEN: a PAT with Contents:write + Actions:write on
+        # tailrocks/velnor-apt. Without it, publish manually (see echo below).
         env:
           APT_TOKEN: ${{ secrets.GH_VELNOR_APT_TOKEN }}
-          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          DEB="$(ls target/debian/velnor-runner_*_amd64.deb)"
           if [ -z "${APT_TOKEN:-}" ]; then
-            echo "No GH_VELNOR_APT_TOKEN secret; skipping auto-publish."
+            echo "No GH_VELNOR_APT_TOKEN secret; skipping auto-publish to apt."
             echo "Publish manually:"
-            echo "  gh release upload $TAG '$DEB' --repo tailrocks/velnor-apt --clobber"
+            echo "  gh release upload $TAG velnor-runner-*-unknown-linux-gnu.deb velnor-runner-*-unknown-linux-gnu.deb.sha256 --repo tailrocks/velnor-apt --clobber"
             echo "  gh workflow run publish.yml --repo tailrocks/velnor-apt -f version=$TAG"
             exit 0
           fi
           export GH_TOKEN="$APT_TOKEN"
           gh release view "$TAG" --repo tailrocks/velnor-apt >/dev/null 2>&1 \
-            || gh release create "$TAG" --repo tailrocks/velnor-apt --title "velnor-runner $TAG" --notes "velnor-runner .deb (amd64)."
-          gh release upload "$TAG" "$DEB" --repo tailrocks/velnor-apt --clobber
+            || gh release create "$TAG" --repo tailrocks/velnor-apt --title "velnor-runner $TAG (debs)" --notes "velnor-runner .debs for apt repository (amd64 + arm64)."
+          gh release upload "$TAG" artifacts/velnor-runner-*-unknown-linux-gnu.deb artifacts/velnor-runner-*-unknown-linux-gnu.deb.sha256 --repo tailrocks/velnor-apt --clobber
           gh workflow run publish.yml --repo tailrocks/velnor-apt -f version="$TAG"
-          echo "Uploaded $DEB to velnor-apt $TAG and triggered publish."
+          echo "Uploaded velnor-runner debs to velnor-apt $TAG and triggered publish."
