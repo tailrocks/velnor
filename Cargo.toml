@@ -11,15 +11,15 @@ repository = "https://github.com/donbeave/velnor"
 anyhow = "1.0.98"
 base64 = "0.22.1"
 clap = { version = "4.5.38", features = ["derive", "env"] }
-jsonwebtoken = "9.3.1"
-reqwest = { version = "0.13.0", default-features = false, features = ["json", "rustls-tls", "native-tls", "blocking"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+jsonwebtoken = "10.0.0"
+reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls", "native-tls", "blocking"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 rsa = { version = "0.9.8", features = ["pem"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 serde_yaml = "0.9.34"
 globset = "0.4.16"
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 thiserror = "2.0.12"
 time = { version = "0.3.41", features = ["formatting"] }
 tokio = { version = "1.45.1", features = ["macros", "rt-multi-thread", "signal", "time"] }
