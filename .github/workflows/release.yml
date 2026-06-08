@@ -1,0 +1,153 @@
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          version="${GITHUB_REF#refs/tags/v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: check-version
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            zigbuild: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            zigbuild: true
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - id: sccache
+        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        continue-on-error: true
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+
+      - name: Enable sccache
+        if: steps.sccache.outcome == 'success'
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
+      - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
+        with:
+          install_args: "${{ matrix.zigbuild && 'rust zig cargo:cargo-zigbuild' || 'rust' }}"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Cache Cargo registry
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
+
+      - name: Install mold linker
+        if: runner.os == 'Linux'
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.zigbuild }}" = "true" ]; then
+            cargo zigbuild -p velnor-runner --release --locked --target ${{ matrix.target }}.2.17
+          else
+            cargo build -p velnor-runner --release --locked --target ${{ matrix.target }}
+          fi
+
+      - name: Package
+        run: |
+          archive="velnor-runner-${VERSION}-${{ matrix.target }}.tar.gz"
+          tar -czf "$archive" -C "target/${{ matrix.target }}/release" velnor-runner
+          shasum -a 256 "$archive" > "$archive.sha256"
+          echo "archive=$archive" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: velnor-runner-${{ matrix.target }}
+          path: |
+            velnor-runner-*.tar.gz
+            velnor-runner-*.tar.gz.sha256
+
+  release:
+    needs: [check-version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      arm64_macos: ${{ steps.shas.outputs.arm64_macos }}
+      x86_macos: ${{ steps.shas.outputs.x86_macos }}
+      arm64_linux: ${{ steps.shas.outputs.arm64_linux }}
+      x86_linux: ${{ steps.shas.outputs.x86_linux }}
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Read platform SHA256s
+        id: shas
+        run: |
+          read_sha() { awk '{print $1}' "artifacts/$1.sha256"; }
+          echo "arm64_macos=$(read_sha "velnor-runner-${VERSION}-aarch64-apple-darwin.tar.gz")" >> "$GITHUB_OUTPUT"
+          echo "x86_macos=$(read_sha "velnor-runner-${VERSION}-x86_64-apple-darwin.tar.gz")" >> "$GITHUB_OUTPUT"
+          echo "arm64_linux=$(read_sha "velnor-runner-${VERSION}-aarch64-unknown-linux-gnu.tar.gz")" >> "$GITHUB_OUTPUT"
+          echo "x86_linux=$(read_sha "velnor-runner-${VERSION}-x86_64-unknown-linux-gnu.tar.gz")" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${VERSION}" \
+            artifacts/velnor-runner-*.tar.gz \
+            artifacts/velnor-runner-*.tar.gz.sha256 \
+            --title "v${VERSION}" \
+            --generate-notes
+
+  # Homebrew support can be added later similar to holla (requires a tailrocks/homebrew-velnor or similar tap + token).
+  # The job structure is kept for configuration similarity with holla.
+  homebrew:
+    if: false  # Disabled until Homebrew tap is set up for velnor-runner. See holla's release.yml for the pattern.
+    needs: [check-version, release]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Homebrew update step would go here (modeled exactly after holla's release.yml)"
