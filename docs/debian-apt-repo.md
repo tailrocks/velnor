@@ -70,6 +70,8 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
 
 ## CI (GitHub Actions, on tag `v*`)
 
+**Policy:** You should always use GitHub Actions for GitHub Pages deployments (never "Deploy from a branch"). Use `actions/configure-pages`, `actions/upload-pages-artifact`, and `actions/deploy-pages`. The `gh-pages` branch (if used) is only for internal state (e.g. reprepro history), never as the Pages source.
+
 `.github/workflows/release-deb.yml`:
 1. `cargo install cargo-deb` → `cargo deb` → the `.deb`.
 2. Import `APT_GPG_PRIVATE_KEY`.
