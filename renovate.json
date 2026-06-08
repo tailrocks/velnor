@@ -1,0 +1,14 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:best-practices"
+  ],
+  "prHourlyLimit": 0,
+  "prConcurrentLimit": 20,
+  "commitBody": "Signed-off-by: Renovate Bot <renovate@whitesourcesoftware.com>",
+  "recreateWhen": "always",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["at any time"]
+  }
+}
