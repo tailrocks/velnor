@@ -1,11 +1,11 @@
-FROM rust:1.96-bookworm AS build
+FROM rust:1.96-bookworm@sha256:13c186980fa33cc12759b429662a1322939dbe697484b7c33b47dd2698d28460 AS build
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN cargo build --release --bin velnor-runner --bin velnor-tools
 
-FROM ubuntu:24.04
+FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
 
 USER root
 RUN apt-get update \
