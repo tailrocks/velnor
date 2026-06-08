@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::{
     container::{split_container_options, JobContainerSpec, ServiceContainerSpec},
     executor::ExecutableStep,
