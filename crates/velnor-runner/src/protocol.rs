@@ -489,7 +489,7 @@ impl RegistrationClient {
     pub fn new() -> Result<Self> {
         let http = Client::builder()
             .user_agent(RUNNER_USER_AGENT)
-            .use_rustls_tls()
+            .use_native_tls()
             .tcp_keepalive(None)
             .connection_verbose(false)
             .timeout(std::time::Duration::from_secs(120))
@@ -2695,7 +2695,7 @@ impl TwirpResultsClient {
             workflow_job_run_backend_id,
             workflow_run_backend_id,
         };
-        // Route through curl: GitHub throttles reqwest/hyper by TLS fingerprint
+        // Route through curl: GitHub throttles reqwest/hyper by TLS fingerprint (native-tls/OpenSSL)
         // under heavy concurrent load, which silently dropped step records (the
         // job's step list went incomplete in the UI). curl (LibreSSL) is immune.
         // Retry a couple times so a transient blip never loses a step record.
