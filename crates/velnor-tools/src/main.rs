@@ -1,5 +1,3 @@
-use anyhow::{bail, Context, Result};
-use base64::{engine::general_purpose, Engine as _};
 use clap::{ArgAction, Args, Parser, Subcommand};
 use regex::Regex;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};

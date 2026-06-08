@@ -1,5 +1,3 @@
-use crate::job_message::AgentJobRequestMessage;
-use serde_json::{Map, Value};
 
 pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
     let mut env = vec![

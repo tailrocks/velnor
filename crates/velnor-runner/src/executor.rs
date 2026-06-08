@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::{
     action::{
         DockerActionInvocation, JavaScriptActionInvocation, NativeActionAdapter,

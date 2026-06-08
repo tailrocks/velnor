@@ -1,5 +1,3 @@
-use anyhow::{bail, Result};
-
 pub fn validate_arm_label_matches_host(labels: &[String], host_arch: &str) -> Result<()> {
     let has_arm_label = labels
         .iter()
