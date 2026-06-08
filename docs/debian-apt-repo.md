@@ -45,8 +45,11 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
    - Public key published at `https://<pages-host>/velnor.gpg` (and in the repo)
      for users to install into `/etc/apt/keyrings`.
 
-4. **Host on GitHub Pages** — publish the reprepro output tree (`dists/`,
-   `pool/`, `velnor.gpg`) to the `gh-pages` branch.
+4. **Host on GitHub Pages** — the reprepro output tree (`dists/`,
+   `pool/`, `velnor.gpg`) is deployed via a GitHub Actions workflow
+   (using the official `actions/deploy-pages`).
+   The `gh-pages` branch is still maintained as an internal git state store
+   for `reprepro` (to keep old package versions).
    Served at e.g. `https://www.zhokhov.com/velnor-apt/`.
 
 ### Where it lives (storage decision)
@@ -72,8 +75,10 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
 2. Import `APT_GPG_PRIVATE_KEY`.
 3. `reprepro -b apt includedeb stable target/debian/velnor-runner_*.deb`
    (apt repo state kept on the `gh-pages` branch, checked out + updated).
-4. Commit/publish the updated `apt/` tree to `gh-pages` (e.g.
-   `peaceiris/actions-gh-pages` or a plain `git push`).
+4. Upload the updated tree as a GitHub Pages artifact and deploy with
+   the official `actions/deploy-pages` action.
+   The `gh-pages` branch is still maintained (via git) as a state store
+   so that `reprepro` can keep historical package versions.
 5. Also attach the raw `.deb` to the GitHub Release for direct download.
 
 Each new tag → new `.deb` in the pool → regenerated signed `Release` → `apt
