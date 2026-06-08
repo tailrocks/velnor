@@ -40,17 +40,10 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
      `Release.gpg`.
 
 3. **Sign** — a dedicated GPG signing key.
-   - Private key stored as a GitHub Actions secret (`APT_GPG_PRIVATE_KEY`,
-     `APT_GPG_PASSPHRASE`); imported in CI for reprepro `SignWith`.
-   - Public key published at `https://<pages-host>/velnor.gpg` (and in the repo)
-     for users to install into `/etc/apt/keyrings`.
+   - Private key and passphrase are stored securely by maintainers and manually copied into the GitHub repository secrets `APT_GPG_PRIVATE_KEY` / `APT_GPG_PASSPHRASE` (no loading from external secret managers happens inside GitHub Actions). Imported in CI for reprepro `SignWith`.
+   - Public key published at `https://velnor-apt.tailrocks.com/velnor.gpg` (and in the repo) for users to install into `/etc/apt/keyrings`.
 
-4. **Host on GitHub Pages** — the reprepro output tree (`dists/`,
-   `pool/`, `velnor.gpg`) is deployed via a GitHub Actions workflow
-   (using the official `actions/deploy-pages`).
-   The `gh-pages` branch is still maintained as an internal git state store
-   for `reprepro` (to keep old package versions).
-   Served at e.g. `https://velnor-apt.tailrocks.com/`.
+4. **Host on GitHub Pages** — the reprepro output tree (`dists/`, `pool/`, `velnor.gpg`) is deployed via a GitHub Actions workflow (using the official `actions/deploy-pages`). The `apt-state` branch is used internally as a state store for `reprepro` (to keep old package versions). GitHub Pages is deployed via GitHub Actions (recommended; never "Deploy from a branch"). Served at `https://velnor-apt.tailrocks.com/`.
 
 ### Where it lives (storage decision)
 
@@ -65,22 +58,20 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
   `Release` index on Pages pointing at the asset URLs. Use this only if the
   `pool/` ever gets large; for now velnor-runner `.deb` ≈ 12 MB and a few
   versions sit comfortably inside Pages' ~1 GB repo / ~100 GB-month limits.
-- **Keep it lean**: prune old versions from `pool/` on release, or periodically
-  squash the `gh-pages` history.
+- **Keep it lean**: the index on Pages includes only current versions. Old .debs remain in historical Releases (for manual download if needed) but are not part of the current apt repo.
 
 ## CI (GitHub Actions, on tag `v*`)
 
-**Policy:** You should always use GitHub Actions for GitHub Pages deployments (never "Deploy from a branch"). Use `actions/configure-pages`, `actions/upload-pages-artifact`, and `actions/deploy-pages`. The `gh-pages` branch (if used) is only for internal state (e.g. reprepro history), never as the Pages source.
+**Policy:** You should always use GitHub Actions for GitHub Pages deployments (never "Deploy from a branch"). Use `actions/configure-pages`, `actions/upload-pages-artifact`, and `actions/deploy-pages`. The index on Pages is always for currently published versions only.
 
-`.github/workflows/release-deb.yml`:
-1. `cargo install cargo-deb` → `cargo deb` → the `.deb`.
-2. Import `APT_GPG_PRIVATE_KEY`.
-3. `reprepro -b apt includedeb stable target/debian/velnor-runner_*.deb`
-   (apt repo state kept on the `gh-pages` branch, checked out + updated).
-4. Upload the updated tree as a GitHub Pages artifact and deploy with
-   the official `actions/deploy-pages` action.
-   The `gh-pages` branch is still maintained (via git) as a state store
-   so that `reprepro` can keep historical package versions.
+`.github/workflows/release-deb.yml` (in the original velnor repo):
+1. Uses `jdx/mise-action` + `cargo zigbuild` (latest Debian glibc only) → `cargo deb`.
+2. Attaches the `.deb`(s) to the velnor source GitHub Release.
+3. If `GH_VELNOR_APT_TOKEN` is present, cross-uploads the .deb(s) to the `velnor-apt` repository's Releases (same tag) and triggers `publish.yml` in the apt repo via repository_dispatch or `gh workflow run`.
+4. The apt-repo's `publish.yml` then downloads the .deb from *its own* Releases (default GITHUB_TOKEN is sufficient) and runs reprepro.
+
+The `.deb` build + attachment to the original release is the responsibility of the source project. The apt publisher only consumes from the apt-repo's own releases.
+   The index on Pages is generated fresh each time with only current versions (no state branch; old versions forgotten from index per maintainer preference).
 5. Also attach the raw `.deb` to the GitHub Release for direct download.
 
 Each new tag → new `.deb` in the pool → regenerated signed `Release` → `apt
