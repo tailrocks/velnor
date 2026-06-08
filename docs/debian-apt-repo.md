@@ -71,7 +71,7 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
 4. The apt-repo's `publish.yml` then downloads the .deb from *its own* Releases (default GITHUB_TOKEN is sufficient) and runs reprepro.
 
 The `.deb` build + attachment to the original release is the responsibility of the source project. The apt publisher only consumes from the apt-repo's own releases.
-   The index on Pages is generated fresh each time with only current versions (no state branch; old versions forgotten from index per maintainer preference).
+   The index on Pages is generated fresh each time with only current versions (no state branch; old versions forgotten from index per maintainer preference). GitHub Pages is deployed via GitHub Actions (recommended; never "Deploy from a branch").
 5. Also attach the raw `.deb` to the GitHub Release for direct download.
 
 Each new tag → new `.deb` in the pool → regenerated signed `Release` → `apt
