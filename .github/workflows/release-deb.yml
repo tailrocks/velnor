@@ -34,6 +34,7 @@ jobs:
     # Linux-only .deb builds for the velnor-apt repository.
     # Uses the exact same jdx/mise-action + zigbuild pattern as holla (and jackin).
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
@@ -88,6 +89,14 @@ jobs:
           sudo apt-get update
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
             sudo dpkg --add-architecture arm64
+            # arm64 debs (including libssl-dev:arm64) live on ports.ubuntu.com, not security.ubuntu.com.
+            # Adding the ports entries prevents 404s on arm64 indexes during update (which caused exit 100).
+            sudo tee /etc/apt/sources.list.d/ports-arm64.list > /dev/null <<'EOF'
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
+EOF
             sudo apt-get update
             sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu pkg-config libssl-dev:arm64
           else
@@ -143,6 +152,7 @@ jobs:
 
   attach-and-deliver:
     needs: build-deb
+    if: always()
     runs-on: ubuntu-latest
     permissions:
       contents: write
