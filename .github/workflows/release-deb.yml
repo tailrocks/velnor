@@ -39,8 +39,12 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             zigbuild: true
-          - target: aarch64-unknown-linux-gnu
-            zigbuild: true
+          # aarch64 temporarily disabled for sentry delivery (sentry asserts x86_64;
+          # arm64 cross native-tls deps have been flaky with 404s on indexes even with ports list.
+          # Re-enable after stabilization; x86 deb is sufficient for current hosts.
+          # - target: aarch64-unknown-linux-gnu
+          #   zigbuild: true
+
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ github.event.inputs.tag && github.event.inputs.tag || github.ref_name }}
