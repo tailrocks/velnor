@@ -3025,13 +3025,23 @@ fn native_docker_metadata(
     }
     let labels = docker_metadata_labels(&action_state).join("\n");
     let tags = tags.join("\n");
+    let json = docker_metadata_json(&tags, &labels);
     StepExecutionResult {
         exit_code: 0,
         state: StepCommandState {
             outputs: [
                 ("tags".to_string(), tags.clone()),
                 ("labels".to_string(), labels.clone()),
-                ("json".to_string(), docker_metadata_json(&tags, &labels)),
+                ("json".to_string(), json.clone()),
+            ]
+            .into(),
+            // Upstream metadata-action also exports DOCKER_METADATA_OUTPUT_*
+            // env vars for subsequent steps (used by digest fan-in publish
+            // flows: `jq ... <<< "$DOCKER_METADATA_OUTPUT_JSON"`).
+            env: [
+                ("DOCKER_METADATA_OUTPUT_TAGS".to_string(), tags.clone()),
+                ("DOCKER_METADATA_OUTPUT_LABELS".to_string(), labels.clone()),
+                ("DOCKER_METADATA_OUTPUT_JSON".to_string(), json),
             ]
             .into(),
             ..StepCommandState::default()
