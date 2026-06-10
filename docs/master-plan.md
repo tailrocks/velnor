@@ -94,6 +94,41 @@ runs rc25 (first live-streaming build) pending the 0.1.4 apt upgrade.
 
 **"Never again" requirements (Phase 1) follow directly from this table.**
 
+## 3a. Universal caching mandate (operator hard rule, 2026-06-11)
+
+**Everything that can be cached must be cached — in every pipeline, in every
+repository.** Watching dependencies compile in CI (`Compiling memchr …` ×100)
+is a defect, not noise. Concretely, every GitHub Actions pipeline in the
+estate must cache:
+
+- **Rust compilation**: sccache enabled on every compiling job (GHA backend
+  on hosted runners, host-local on Velnor), plus the cargo registry/git cache
+  (registry cache/index/src + git db keyed on Cargo.lock) and a target-dir
+  cache with branch-fallback restore-keys where profiles allow.
+- **Docker layers**: every `docker build`/buildx invocation carries
+  cache-from/cache-to (registry buildcache refs for published images, gha for
+  PR-only builds) — never a cold layer rebuild of unchanged layers.
+- **Inside Dockerfiles**: apt/apk installs behind `--mount=type=cache`
+  (and per-tool layers so one bump doesn't invalidate everything).
+- **Tool installs**: mise tools pinned + mise/tool caches persisted;
+  `cargo:` backends never silently recompile (pin versions; cache the
+  binaries).
+- Anything downloaded repeatedly (LFS objects, SDKs, collections, pip) gets
+  an actions/cache entry keyed on its lockfile/OID.
+
+Scope (all nine, audited and enforced):
+| Repo | Status |
+|---|---|
+| jackin-project/jackin | 4-layer stack + sccache present; AUDIT: cold `Compiling` walls still observed in nextest — verify cache hit rates and fix |
+| jackin-project/jackin-the-architect | per-tool layers + cache mounts; PR/publish caches bridged (role-action#57 + pins bump) |
+| jackin-project/jackin-agent-smith | NOT YET AUDITED |
+| jackin-project/jackin-sentinel | NOT YET AUDITED |
+| ChainArgos/java-monorepo | registry cache (PR #1382) + sccache + job-level gating (PR #1384) + kestra layer cache (PR #1386) |
+| ChainArgos/blockchain-nodes | registry layer cache + exists-sweep (PR #603); cached-build proof pending next version bump |
+| tailrocks/holla | NOT YET AUDITED |
+| tailrocks/velnor | ci.yml jackin-style stack; release-deb has sccache+registry cache |
+| tailrocks/velnor-actions-fixture | NOT YET AUDITED |
+
 ## 4. Hard constraints (inherited, non-negotiable)
 
 - Rust-first, tokio, latest stable toolchain; `actions/runner` as protocol

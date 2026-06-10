@@ -101,6 +101,14 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-06-11: **Universal caching mandate** (operator hard rule, master-plan
+  §3a): everything cacheable must be cached in every pipeline of the
+  nine-repo estate (jackin, jackin-the-architect, jackin-agent-smith,
+  jackin-sentinel, java-monorepo, blockchain-nodes, holla, velnor,
+  velnor-actions-fixture) — sccache on every compiling job, cargo
+  registry/target caches, docker layer cache-from/to on every build, apt
+  cache mounts inside Dockerfiles, pinned+cached tool installs. Visible
+  dependency compilation in CI is a defect.
 - 2026-06-10: Added `docs/master-plan.md` as the top-level goal + execution
   sequence (operator mandate): Velnor default on both ChainArgos repos with the
   GitHub lane kept forever; full parity then superiority vs GitHub-hosted;
