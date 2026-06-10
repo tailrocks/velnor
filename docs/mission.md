@@ -46,7 +46,7 @@ GitHub-hosted runners — and it is tuned end-to-end for Rust.
 
 - **Rust-first mission above is non-negotiable.** Optimize for the latest Rust.
 - **Fixture is the contract** — fix Velnor, never weaken
-  `donbeave/velnor-actions-fixture`.
+  `tailrocks/velnor-actions-fixture`.
 - **`actions/runner` is the protocol source of truth** —
   <https://github.com/actions/runner>. Don't guess.
 - **Latest protocol path only** (Results Service over timeline, V2 over classic,

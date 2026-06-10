@@ -131,7 +131,7 @@ manual daemon equivalent is:
 
 ```sh
 cargo run --bin velnor-runner -- daemon \
-  --url https://github.com/donbeave/velnor-actions-fixture \
+  --url https://github.com/tailrocks/velnor-actions-fixture \
   --pat "$GITHUB_TOKEN" \
   --name velnor-target-mvp \
   --labels velnor-target-mvp \
@@ -154,8 +154,8 @@ scripts/fixture_status.sh
 Manual fixture runs can still be started with:
 
 ```sh
-gh workflow run compat.yml --repo donbeave/velnor-actions-fixture
-gh workflow run docker.yml --repo donbeave/velnor-actions-fixture
+gh workflow run compat.yml --repo tailrocks/velnor-actions-fixture
+gh workflow run docker.yml --repo tailrocks/velnor-actions-fixture
 ```
 
 ## Configure Target Repositories

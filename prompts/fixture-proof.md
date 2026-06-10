@@ -16,7 +16,7 @@
 
 ## Objective
 
-Drive `donbeave/velnor-actions-fixture` to a **fully green Velnor proof**: GitHub
+Drive `tailrocks/velnor-actions-fixture` to a **fully green Velnor proof**: GitHub
 schedules the fixture jobs, Velnor consumes them through the V2 JIT / broker /
 run-service path, the Velnor matrix lanes pass, and the `compare` jobs confirm
 the Velnor lane output matches the GitHub-hosted lane — with evidence captured.
@@ -32,7 +32,7 @@ clear "ready for manual target testing" report.
 
 ## Ground truth
 
-- Fixture repo: <https://github.com/donbeave/velnor-actions-fixture>
+- Fixture repo: <https://github.com/tailrocks/velnor-actions-fixture>
 - Lane model: GitHub-hosted lane (`ubuntu-latest`) vs Velnor lane
   (`[self-hosted, velnor-target-mvp]`), matrixed, with `compare` jobs.
 - Protocol behavior: <https://github.com/actions/runner>.

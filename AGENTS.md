@@ -44,7 +44,7 @@ Violation: starting a new smoke test while previous Velnor lanes are still queue
 
 ## HARD RULE: Never modify velnor-actions-fixture to work around Velnor gaps
 
-The `donbeave/velnor-actions-fixture` repository exists to verify that Velnor can execute the exact GitHub Actions patterns used by ChainArgos and Jackin. It is the ground truth.
+The `tailrocks/velnor-actions-fixture` repository exists to verify that Velnor can execute the exact GitHub Actions patterns used by ChainArgos and Jackin. It is the ground truth.
 
 **Never remove, simplify, or work around fixture content because Velnor does not support it.**
 

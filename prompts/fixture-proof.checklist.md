@@ -3,7 +3,7 @@
 Goal: [fixture-proof.md](fixture-proof.md). Work top-to-bottom. Fix **Velnor**
 on any failure — never the fixture. Record evidence at the end.
 
-Fixture: <https://github.com/donbeave/velnor-actions-fixture>.
+Fixture: <https://github.com/tailrocks/velnor-actions-fixture>.
 Protocol truth: <https://github.com/actions/runner>.
 
 Primary tooling: `crates/velnor-tools/src/main.rs` (subcommands below),

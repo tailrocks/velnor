@@ -74,7 +74,7 @@ Two phases, one goal. Do not start Phase B until Phase A is green and merged.
 
 ### Phase B — Run the **same** pipeline on GitHub **and** Velnor in parallel
 
-Mirror the proven fixture dual-lane pattern (`donbeave/velnor-actions-fixture`
+Mirror the proven fixture dual-lane pattern (`tailrocks/velnor-actions-fixture`
 `compat.yml`): a matrix dimension parameterizes **only `runs-on`**; every step is
 **byte-for-byte identical** across lanes. Both lanes run at the same time on
 different runners.

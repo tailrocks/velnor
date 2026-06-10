@@ -14,7 +14,7 @@ Same fixture workflow, two lanes of one run:
 | GitHub-hosted | `79252067791` | `compat (app-a, github, "ubuntu-latest")` |
 | Velnor | `79252067855` | `compat (app-a, velnor, ["self-hosted","velnor-target-mvp"])` |
 
-Run: `26872768024` · repo: `donbeave/velnor-actions-fixture`.
+Run: `26872768024` · repo: `tailrocks/velnor-actions-fixture`.
 
 Raw render captured: `../.velnor-compare/velnor-job.html` (Velnor lane). Re-capture
 both lanes fresh when iterating.
@@ -26,16 +26,16 @@ two jobs field-by-field. Examples:
 
 ```sh
 # Job + steps (names, numbers, conclusions, started/completed timestamps)
-gh api repos/donbeave/velnor-actions-fixture/actions/jobs/79252067791
-gh api repos/donbeave/velnor-actions-fixture/actions/jobs/79252067855
+gh api repos/tailrocks/velnor-actions-fixture/actions/jobs/79252067791
+gh api repos/tailrocks/velnor-actions-fixture/actions/jobs/79252067855
 
 # Full run + all jobs
-gh api repos/donbeave/velnor-actions-fixture/actions/runs/26872768024
-gh api repos/donbeave/velnor-actions-fixture/actions/runs/26872768024/jobs
+gh api repos/tailrocks/velnor-actions-fixture/actions/runs/26872768024
+gh api repos/tailrocks/velnor-actions-fixture/actions/runs/26872768024/jobs
 
 # Raw logs (zip of per-step logs) — inspect grouping, color codes, timestamps
-gh api repos/donbeave/velnor-actions-fixture/actions/jobs/79252067791/logs > github.zip
-gh api repos/donbeave/velnor-actions-fixture/actions/jobs/79252067855/logs > velnor.zip
+gh api repos/tailrocks/velnor-actions-fixture/actions/jobs/79252067791/logs > github.zip
+gh api repos/tailrocks/velnor-actions-fixture/actions/jobs/79252067855/logs > velnor.zip
 ```
 
 Diff the two jobs' step arrays and the two log archives. Record per-step:
