@@ -80,10 +80,17 @@ fixed today, each with the structural defect it exposed:
 | 2 | Daemons exit(1) when all slots fail to configure → systemd restart loop every ~3 min (counters 508 / 2292) | "0 usable slots" is treated as fatal | A runner daemon must never give up: keep retrying registration with backoff while alive (P1.2) |
 | 3 | v0.1.1/v0.1.2 debs never built; apt repo stuck at 0.1.0-rc12; Sentry running 14-releases-old code | Flush-left heredoc body in `release-deb.yml` (commit 130a858) terminated the YAML block scalar → workflow file invalid since Jun 9 → every tag/branch push produced a phantom 0-job failed run | No workflow linting in velnor CI; no alert on release-pipeline failure (P1.5, P1.6) |
 | 4 | Hours-long queues on Jun 8 (11–12.7 h) during fleet rebuild | Fixed slot fleet + registration churn from idle-timeout exits + stale "busy" runners | Slot management is static and fragile (P3.4 dynamic slots; P1.2 no idle-exit) |
+| 5 | Workspace uncompilable since Jun 8; v0.1.2 `--locked` builds failed | A "remove license headers" commit blindly deleted the first 2 lines of 20 source files (all real code); Cargo.lock never regenerated after the rustls removal + version bump | The repo had **no compile CI at all** — added `ci.yml` (fmt, clippy -D warnings, tests, actionlint, jackin cache stack) (P1.5) |
+| 6 | The published 0.1.2 deb was 3.7 KB — **no binary**; upgrading removed `/usr/bin/velnor-runner` and took the fleet down again (~13 min, rolled back from the local apt cache) | Current cargo-deb treats an explicit `assets` list as a full replacement of the implicit defaults, silently dropping the `[[bin]]` | Binary listed explicitly + release-deb now fails if the deb lacks `usr/bin/velnor-runner` or is < 1 MB; same heredoc YAML bug also fixed in velnor-apt `publish.yml`; apt signing key had rotated (keyring refreshed on Sentry) |
+| 7 | Fixture compat Velnor lanes failed at planning: "action metadata not found in …/.github/actions/check-fixture-output" | GitHub sets `Condition: "success()"` on every step; `CheckoutPlan::requires_runtime_context` treated any condition as runtime → eager checkout never ran → local composite actions unresolvable (verified at the wire from a job dump) | Trivial default conditions (`success()`/`always()`/empty) now stay eager (0.1.4); longer-term: run checkout as a real ordered executor step (no eager/deferred split) |
+| 8 | jsonwebtoken 10.4 bump would panic OAuth signing at runtime ("could not determine CryptoProvider") | Crate now requires exactly one crypto-provider feature; defaults gave none | Pinned `rust_crypto` + `use_pem`; caught only by the new clean-room test run — CI now gates this class |
 
-Fixes shipped today: token + labels restored from a verified-working PAT and
-all three daemons re-registered (10+4+2 runners); PR #1380's Velnor jobs ran
-and passed; `release-deb.yml` YAML fixed on main and v0.1.2 rebuilt/dispatched.
+Fixes shipped today: token + labels restored and all three daemons
+re-registered (10+4+2 runners); PR #1380 merged green; release pipeline fixed
+end-to-end (YAML, lock, imports, vendored OpenSSL for zigbuild, deb binary +
+size guard) — v0.1.3 released with holla-style tar.gz (mac arm64/x86_64 +
+linux arm64/x86_64) + a real deb; v0.1.4 adds the eager-checkout fix; Sentry
+runs rc25 (first live-streaming build) pending the 0.1.4 apt upgrade.
 
 **"Never again" requirements (Phase 1) follow directly from this table.**
 
