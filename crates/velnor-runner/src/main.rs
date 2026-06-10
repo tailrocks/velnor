@@ -14,6 +14,7 @@ mod protocol;
 mod runner;
 mod runtime_env;
 mod script_step;
+mod sd_notify;
 mod workflow_command;
 
 use anyhow::Result;

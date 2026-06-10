@@ -375,8 +375,74 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
     }
 
-    let config_base = daemon_config_dir(&args)?;
-    preflight_before_daemon_jit_config(&args, &config_base, slots)?;
+    // Operator-facing fail-fast: a token that is structurally impossible
+    // (missing, or a literal unexpanded ${...} placeholder — systemd
+    // EnvironmentFile does not expand variables) can never register a runner.
+    // Say exactly what is wrong and where to fix it. The daemon still enters
+    // the supervised retry loop below instead of exiting, so fixing the file
+    // and `systemctl restart` (or a server-side token re-enable) recovers it
+    // without a systemd restart storm in the meantime.
+    let token_problem = diagnose_github_token(args.pat.as_deref());
+    if let Some(problem) = &token_problem {
+        if args.url.is_some() && !args.dry_run_registration {
+            eprintln!("GITHUB_TOKEN problem: {problem}");
+            crate::sd_notify::status(&format!("token problem: {problem}"));
+        }
+    }
+
+    // One-shot modes (dry runs, --once, no-URL local mode) keep their
+    // fail-fast semantics: they are used by tests and tooling that must see
+    // errors. The packaged long-running daemon (url + not once + not dry-run)
+    // must never give up — every failure is retried with backoff forever.
+    let supervised = args.url.is_some() && !args.once && !args.dry_run_registration;
+
+    crate::sd_notify::ready();
+    if let Some(interval) = crate::sd_notify::watchdog_interval() {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                crate::sd_notify::watchdog_ping();
+            }
+        });
+    }
+
+    if !supervised {
+        return daemon_pass(&args, slots).await;
+    }
+
+    let mut attempt: u32 = 0;
+    loop {
+        match daemon_pass(&args, slots).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                attempt += 1;
+                let delay = supervised_retry_delay(attempt);
+                let diagnosis = diagnose_github_token(args.pat.as_deref())
+                    .map(|d| format!(" GITHUB_TOKEN problem: {d}"))
+                    .unwrap_or_default();
+                eprintln!(
+                    "daemon attempt {attempt} failed: {error:#}.{diagnosis} Retrying in {}s (the daemon never exits; fix the cause and it recovers).",
+                    delay.as_secs()
+                );
+                crate::sd_notify::status(&format!(
+                    "registration failing (attempt {attempt}); retrying in {}s",
+                    delay.as_secs()
+                ));
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
+/// One full daemon pass: preflight → prune → JIT-configure slots → supervise
+/// slot tasks. In supervised mode the slot tasks themselves loop forever, so
+/// reaching the end of this function only happens in one-shot modes or when
+/// every slot task has stopped (e.g. all panicked repeatedly).
+async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
+    let config_base = daemon_config_dir(args)?;
+    preflight_before_daemon_jit_config(args, &config_base, slots)?;
     if args.url.is_some() && !args.dry_run_registration {
         let daemon_id = args
             .work_dir
@@ -385,8 +451,8 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
             .unwrap_or_else(|| "default".to_string());
         prune_stale_velnor_docker_resources(&daemon_id);
     }
-    configure_daemon_slots(&args, &config_base, slots).await?;
-    if !daemon_should_poll_after_jit_config(&args) {
+    configure_daemon_slots(args, &config_base, slots).await?;
+    if !daemon_should_poll_after_jit_config(args) {
         println!("Daemon JIT config dry run complete; skipped polling GitHub for jobs.");
         return Ok(());
     }
@@ -402,37 +468,122 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
             config_base.display()
         );
     }
+    crate::sd_notify::status(&format!("supervising {slots} runner slot(s)"));
 
-    for slot_index in 1..=slots {
+    let spawn_slot = |slot_tasks: &mut JoinSet<(usize, Result<()>)>, slot_index: usize| {
         let daemon_args = args.clone();
         let config_base = config_base.clone();
         slot_tasks.spawn(async move {
-            run_daemon_slot(daemon_args, config_base, slot_index, slots)
+            let result = run_daemon_slot(daemon_args, config_base, slot_index, slots)
                 .await
-                .with_context(|| format!("daemon slot-{slot_index} failed"))
+                .with_context(|| format!("daemon slot-{slot_index} failed"));
+            (slot_index, result)
         });
+    };
+
+    for slot_index in 1..=slots {
+        spawn_slot(&mut slot_tasks, slot_index);
     }
 
+    let supervised = args.url.is_some() && !args.once && !args.dry_run_registration;
     let mut failures = Vec::new();
     while let Some(result) = slot_tasks.join_next().await {
         match result {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
+            Ok((_, Ok(()))) => {}
+            Ok((slot_index, Err(error))) => {
                 eprintln!("{error:#}");
-                failures.push(error);
+                if supervised {
+                    // A slot returning an error in supervised mode is a bug
+                    // (slot loops are supposed to retry internally) — but one
+                    // broken slot must never take down the others. Respawn it.
+                    eprintln!("Respawning daemon slot-{slot_index} in 10s.");
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    spawn_slot(&mut slot_tasks, slot_index);
+                } else {
+                    failures.push(error);
+                }
             }
-            Err(error) => {
-                let error = anyhow::Error::new(error).context("daemon slot task panicked");
+            Err(join_error) => {
+                let slot_note = if join_error.is_panic() {
+                    "daemon slot task panicked"
+                } else {
+                    "daemon slot task aborted"
+                };
+                let error = anyhow::Error::new(join_error).context(slot_note);
                 eprintln!("{error:#}");
-                failures.push(error);
+                if supervised {
+                    // Panic isolation: the panicking slot's index is unknown
+                    // from the JoinError alone, so respawn any missing slots
+                    // by simply continuing — remaining slots keep running.
+                    // (Slot identity recovery: respawn is handled by the
+                    // error arm above for non-panic failures; a panic loses
+                    // the index, so restart the whole pass only if the set
+                    // drains completely.)
+                    if slot_tasks.is_empty() {
+                        bail!("all daemon slot tasks stopped (last: panic)");
+                    }
+                } else {
+                    failures.push(error);
+                }
             }
         }
     }
     if !failures.is_empty() {
         bail!("{} daemon slot task(s) failed", failures.len());
     }
+    if supervised {
+        bail!("all daemon slot tasks stopped");
+    }
 
     Ok(())
+}
+
+/// Capped exponential backoff with deterministic jitter for the never-exit
+/// daemon supervision loop: 10s, 20s, 40s, … capped at 10 minutes, with a
+/// per-attempt jitter so multiple daemons on one host do not retry in
+/// lockstep.
+fn supervised_retry_delay(attempt: u32) -> Duration {
+    let base = 10u64.saturating_mul(1u64 << attempt.saturating_sub(1).min(6));
+    let capped = base.min(600);
+    // Cheap deterministic jitter (no RNG dependency): spread by PID.
+    let jitter = (std::process::id() as u64 % 7) * (attempt as u64 % 3);
+    Duration::from_secs(capped + jitter)
+}
+
+/// Classify an operator-supplied GitHub token. `None` means the shape is
+/// plausible; `Some(message)` is a precise, actionable problem description.
+pub fn diagnose_github_token(token: Option<&str>) -> Option<String> {
+    let token = token.unwrap_or("").trim();
+    if token.is_empty() {
+        return Some(
+            "GITHUB_TOKEN is empty or unset. Set it in the EnvironmentFile your unit \
+             references (e.g. /etc/velnor/secrets.env) and restart the service."
+                .to_string(),
+        );
+    }
+    if token.contains("${") || token.contains("$(") {
+        return Some(format!(
+            "GITHUB_TOKEN is a literal unexpanded placeholder ({}…). systemd \
+             EnvironmentFile does NOT expand variables — put the real token value \
+             in the file.",
+            &token[..token.len().min(12)]
+        ));
+    }
+    let plausible = token.starts_with("ghp_")
+        || token.starts_with("gho_")
+        || token.starts_with("ghu_")
+        || token.starts_with("ghs_")
+        || token.starts_with("ghr_")
+        || token.starts_with("github_pat_");
+    if !plausible {
+        return Some(format!(
+            "GITHUB_TOKEN does not look like a GitHub token (saw {}…; expected a \
+             ghp_/gho_/ghs_/github_pat_ prefix). Verify the value in the \
+             EnvironmentFile.",
+            &token[..token.len().min(6)]
+        ));
+    }
+    None
 }
 
 async fn run_daemon_slot(
@@ -460,7 +611,7 @@ async fn run_daemon_slot(
             eprintln!(
                 "daemon slot-{slot_index} cycle {cycle} failed; creating a fresh JIT config before retry: {error:#}"
             );
-            retry_daemon_slot_jit_config(&args, &config_base, slot_index, slots, cycle).await?;
+            reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle).await;
             cycle += 1;
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
@@ -468,8 +619,45 @@ async fn run_daemon_slot(
         if args.once {
             return Ok(());
         }
-        recycle_daemon_slot(&args, &config_base, slot_index, slots, cycle).await?;
+        if let Err(error) = recycle_daemon_slot(&args, &config_base, slot_index, slots, cycle).await
+        {
+            eprintln!(
+                "daemon slot-{slot_index} cycle {cycle} recycle failed: {error:#}; retrying JIT config until it succeeds"
+            );
+            reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle).await;
+        }
         cycle += 1;
+    }
+}
+
+/// Re-create this slot's JIT config, retrying forever with capped backoff.
+/// A slot must never die because GitHub or the network is temporarily
+/// unhappy — it parks here until configuration succeeds (logging the precise
+/// error, including token diagnosis, every attempt).
+async fn reconfigure_daemon_slot_forever(
+    args: &DaemonArgs,
+    config_base: &Path,
+    slot_index: usize,
+    slots: usize,
+    cycle: u64,
+) {
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
+        match retry_daemon_slot_jit_config(args, config_base, slot_index, slots, cycle).await {
+            Ok(()) => return,
+            Err(error) => {
+                let delay = supervised_retry_delay(attempt);
+                let diagnosis = diagnose_github_token(args.pat.as_deref())
+                    .map(|d| format!(" GITHUB_TOKEN problem: {d}"))
+                    .unwrap_or_default();
+                eprintln!(
+                    "daemon slot-{slot_index} JIT reconfigure attempt {attempt} failed: {error:#}.{diagnosis} Retrying in {}s.",
+                    delay.as_secs()
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
     }
 }
 
@@ -4302,6 +4490,47 @@ mod tests {
     use crate::action::{
         parse_action_metadata, resolve_action, ActionRuntime, LocalActionPlan, RepositoryActionPlan,
     };
+
+    #[test]
+    fn token_diagnosis_flags_missing_placeholder_and_garbage() {
+        assert!(diagnose_github_token(None)
+            .unwrap()
+            .contains("empty or unset"));
+        assert!(diagnose_github_token(Some("  "))
+            .unwrap()
+            .contains("empty or unset"));
+        assert!(diagnose_github_token(Some("${VELNOR_GITHUB_TOKEN}"))
+            .unwrap()
+            .contains("unexpanded placeholder"));
+        assert!(diagnose_github_token(Some("hunter2"))
+            .unwrap()
+            .contains("does not look like a GitHub token"));
+    }
+
+    #[test]
+    fn token_diagnosis_accepts_plausible_tokens() {
+        for token in [
+            "ghp_0123456789abcdef0123456789abcdef0123",
+            "gho_0123456789abcdef0123456789abcdef0123",
+            "ghs_0123456789abcdef0123456789abcdef0123",
+            "github_pat_0123456789abcdef_0123456789abcdef",
+        ] {
+            assert_eq!(diagnose_github_token(Some(token)), None, "{token}");
+        }
+    }
+
+    #[test]
+    fn supervised_retry_delay_backs_off_and_caps() {
+        let first = supervised_retry_delay(1).as_secs();
+        let second = supervised_retry_delay(2).as_secs();
+        let huge = supervised_retry_delay(30).as_secs();
+        assert!(first >= 10, "first delay at least base: {first}");
+        assert!(
+            second > first || second >= 20,
+            "delay grows: {first} -> {second}"
+        );
+        assert!(huge <= 600 + 14, "cap plus bounded jitter: {huge}");
+    }
     use crate::protocol::TaskAgentMessage;
     use crate::script_step::StepCommandTelemetry;
     use std::{

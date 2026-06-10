@@ -5,9 +5,25 @@ case "$1" in
   configure)
     # State directories for runner work + JIT config.
     install -d -m 0750 /var/lib/velnor /var/lib/velnor/work
-    # Keep the token file readable only by root.
+    # Keep the config file readable only by root.
     if [ -f /etc/velnor/velnor.env ]; then
       chmod 0640 /etc/velnor/velnor.env || true
+    fi
+    # Secrets split: migrate a real token out of velnor.env into secrets.env
+    # (0600, never shipped or overwritten by the package) so config tooling and
+    # conffile handling can never wipe it again. Idempotent: only runs when the
+    # token still lives in velnor.env and secrets.env does not exist yet.
+    if [ -f /etc/velnor/velnor.env ] && [ ! -f /etc/velnor/secrets.env ]; then
+      token_line=$(grep '^GITHUB_TOKEN=..*' /etc/velnor/velnor.env || true)
+      case "$token_line" in
+        GITHUB_TOKEN=gh*|GITHUB_TOKEN=github_pat_*)
+          umask 077
+          printf '# Velnor secrets — owned by the operator, never touched by the package.\n%s\n' "$token_line" > /etc/velnor/secrets.env
+          chmod 0600 /etc/velnor/secrets.env
+          sed -i 's/^GITHUB_TOKEN=..*/GITHUB_TOKEN=/' /etc/velnor/velnor.env
+          echo "Migrated GITHUB_TOKEN from velnor.env to /etc/velnor/secrets.env (0600)."
+          ;;
+      esac
     fi
     if [ -d /run/systemd/system ]; then
       systemctl daemon-reload || true
@@ -15,9 +31,15 @@ case "$1" in
       # Restart only if it was already running (clean upgrade); fresh installs
       # stay stopped until the operator fills in /etc/velnor/velnor.env.
       systemctl try-restart velnor-daemon.service || true
+      # Restart any template instances (velnor-daemon@<name>) that are running.
+      for unit in $(systemctl list-units --no-legend --plain 'velnor-daemon@*.service' 2>/dev/null | awk '{print $1}'); do
+        systemctl try-restart "$unit" || true
+      done
     fi
-    echo "velnor-runner installed. Set GITHUB_TOKEN + VELNOR_URL in"
-    echo "  /etc/velnor/velnor.env  then:  sudo systemctl start velnor-daemon"
+    echo "velnor-runner installed. Set GITHUB_TOKEN in /etc/velnor/secrets.env (0600),"
+    echo "VELNOR_URL etc. in /etc/velnor/velnor.env, then:  sudo systemctl start velnor-daemon"
+    echo "Multiple targets: /etc/velnor/<name>.env + <name>.secrets.env, then:"
+    echo "  sudo systemctl enable --now velnor-daemon@<name>"
     ;;
 esac
 

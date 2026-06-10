@@ -1,14 +1,23 @@
 [Unit]
 Description=Velnor self-hosted GitHub Actions runner daemon
-Documentation=https://github.com/donbeave/velnor
+Documentation=https://github.com/tailrocks/velnor
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
 
 [Service]
-Type=simple
-# Config + token live here (token NOT on argv: --pat reads GITHUB_TOKEN from env).
+# Type=notify + WatchdogSec: the daemon reports READY/STATUS over sd_notify and
+# pings the watchdog; a hung process is restarted by systemd. The daemon itself
+# never exits on registration/network/credential failures (it retries forever
+# with backoff), so Restart=always is a backstop, not the recovery mechanism.
+Type=notify
+WatchdogSec=180
+# Config lives in velnor.env; the token lives in secrets.env (0600, never
+# shipped or touched by the package) so config tooling cannot wipe it.
+# velnor.env is still read first for backward compatibility — values in
+# secrets.env win. The token is read from the GITHUB_TOKEN env var, never argv.
 EnvironmentFile=/etc/velnor/velnor.env
+EnvironmentFile=-/etc/velnor/secrets.env
 ExecStart=/usr/bin/velnor-runner daemon \
   --url ${VELNOR_URL} \
   --name ${VELNOR_NAME} \
