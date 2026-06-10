@@ -79,6 +79,19 @@ RUN ver="v0.15.0" && \
     rm -rf "$tmp" && \
     sccache --version
 
+# cosign: backs the native sigstore/cosign-installer adapter and the
+# `cosign sign` steps in the agent-role publish workflows.
+RUN cosign_ver="v3.1.1" && \
+    case "$(uname -m)" in \
+      x86_64) cs_arch="amd64" ;; \
+      aarch64|arm64) cs_arch="arm64" ;; \
+      *) echo "unsupported arch $(uname -m) for cosign" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL -o /usr/local/bin/cosign \
+      "https://github.com/sigstore/cosign/releases/download/${cosign_ver}/cosign-linux-${cs_arch}" && \
+    chmod 0755 /usr/local/bin/cosign && \
+    cosign version
+
 # hadolint: backs the native hadolint/hadolint-action adapter.
 RUN hadolint_ver="v2.14.0" && \
     case "$(uname -m)" in \
