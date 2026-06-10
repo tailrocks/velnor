@@ -1,5 +1,6 @@
 [tools]
 actionlint = "1.7.12"
+"cargo:cargo-nextest" = "0.9.137"
 "cargo:cargo-zigbuild" = "0.22.3"
 zig = "0.16.0"
 
