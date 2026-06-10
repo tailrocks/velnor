@@ -129,6 +129,7 @@ pub enum NativeActionAdapter {
     DockerMetadata,
     DockerBuildPush,
     DockerBake,
+    Hadolint,
 }
 
 pub fn native_action_adapter(repository: &str) -> Option<NativeActionAdapter> {
@@ -152,6 +153,7 @@ pub fn native_action_adapter(repository: &str) -> Option<NativeActionAdapter> {
         "docker/metadata-action" => Some(NativeActionAdapter::DockerMetadata),
         "docker/build-push-action" => Some(NativeActionAdapter::DockerBuildPush),
         "docker/bake-action" => Some(NativeActionAdapter::DockerBake),
+        "hadolint/hadolint-action" => Some(NativeActionAdapter::Hadolint),
         _ => None,
     }
 }
@@ -2994,6 +2996,7 @@ runs:
                 NativeActionAdapter::DockerBuildPush,
             ),
             ("docker/bake-action", NativeActionAdapter::DockerBake),
+            ("hadolint/hadolint-action", NativeActionAdapter::Hadolint),
         ];
 
         for (repository, adapter) in adapters {

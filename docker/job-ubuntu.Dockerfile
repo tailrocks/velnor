@@ -79,4 +79,16 @@ RUN ver="v0.15.0" && \
     rm -rf "$tmp" && \
     sccache --version
 
+# hadolint: backs the native hadolint/hadolint-action adapter.
+RUN hadolint_ver="v2.14.0" && \
+    case "$(uname -m)" in \
+      x86_64) hl_arch="x86_64" ;; \
+      aarch64|arm64) hl_arch="arm64" ;; \
+      *) echo "unsupported arch $(uname -m) for hadolint" >&2; exit 1 ;; \
+    esac && \
+    curl -fsSL -o /usr/local/bin/hadolint \
+      "https://github.com/hadolint/hadolint/releases/download/${hadolint_ver}/hadolint-Linux-${hl_arch}" && \
+    chmod 0755 /usr/local/bin/hadolint && \
+    hadolint --version
+
 WORKDIR /__w
