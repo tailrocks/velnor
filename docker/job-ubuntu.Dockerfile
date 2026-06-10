@@ -56,7 +56,7 @@ RUN mkdir -p /opt/mise/bin && \
     # gh: GitHub-hosted runner images preinstall the GitHub CLI and estate
     # scripts rely on it (e.g. jackin-role-action's download script) —
     # drop-in parity requires it in the job image too.
-    mise use --global rust@1.96.0 'cargo:cargo-nextest@0.9.137' 'cargo:rust-script@0.36.0' just@1.51.0 protoc@35.0 gh@2.93.0 && \
+    mise use --global rust@1.96.0 'cargo:cargo-nextest@0.9.137' 'cargo:rust-script@0.36.0' just@1.52.0 protoc@35.0 gh@2.93.0 && \
     mise reshim && \
     rustup component add rustfmt clippy && \
     mise exec -- rustc --version && \
