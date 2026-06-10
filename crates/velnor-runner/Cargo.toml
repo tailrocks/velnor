@@ -32,7 +32,11 @@ velnor-runner binary, a systemd unit (velnor-daemon), and a config file at
 service to register JIT runners and execute jobs in Docker."""
 section = "devel"
 priority = "optional"
-depends = "$auto, git, curl, ca-certificates, docker.io | docker-ce"
+# Explicit depends instead of $auto: dpkg-shlibdeps cannot resolve shared-lib
+# info for a cross-built (arm64) binary on an amd64 host. OpenSSL is vendored,
+# so the runtime surface is just glibc + libgcc (>= 2.34 covers every "latest
+# Debian/Ubuntu" this package targets).
+depends = "libc6 (>= 2.34), libgcc-s1, git, curl, ca-certificates, docker.io | docker-ce"
 conf-files = ["/etc/velnor/velnor.env"]
 maintainer-scripts = "debian/"
 assets = [

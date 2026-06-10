@@ -109,7 +109,9 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
-          cargo deb -p velnor-runner --target ${{ matrix.target }} --no-build --deb-version "$VERSION"
+          # --no-strip: binaries are stripped at link time (profile.release);
+          # the host strip cannot process a cross-built foreign-arch ELF.
+          cargo deb -p velnor-runner --target ${{ matrix.target }} --no-build --no-strip --deb-version "$VERSION"
           ls -la target/${{ matrix.target }}/debian/*.deb
 
       - name: Stage .deb for artifacts
