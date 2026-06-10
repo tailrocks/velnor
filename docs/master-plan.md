@@ -299,6 +299,18 @@ explicitly in scope.
    Per-host caches stay local (sccache/registry warm per host). Optional
    later: shared sccache backend (S3/redis). Gate: second host added by
    `apt install velnor-runner` + one env file; jobs visibly distribute.
+9. **Network resilience under fan-out** (observed 2026-06-10: with ~10
+   concurrent jobs, two `cargo metadata` runs failed — `curl failed`
+   downloading a sparse-index entry and a git-dependency fetch — flaking jobs
+   that pass on retry). Velnor must make jobs *more* network-robust than
+   GitHub-hosted, not less: ship a host-warm shared cargo registry + git-db
+   cache mounted into every job container (so `cargo metadata` rarely touches
+   the network at all), set `CARGO_NET_RETRY`/`CARGO_HTTP_TIMEOUT` defaults in
+   the job environment, and consider a host-local crates/git read-through
+   proxy. Related: the per-IP throttling that motivated the curl transport
+   workaround (P3.1) is the same class — one host, many concurrent fetchers.
+   Gate: 10-way parallel cold `cargo metadata` across slots, zero flakes,
+   repeated 20×.
 
 ### Phase 4 — UX parity and superiority (equal-or-better, verified)
 
@@ -319,6 +331,9 @@ explicitly in scope.
    workaround, document), step numbering parity (cosmetic), adapter output
    polish (group headers, key→value lines, cache hit/miss + bytes + ms,
    sccache stats — make Velnor's speed visible in the log).
+4. Name the `job-log` artifact per job (`job-log-<job-name>`): a run with 9
+   Velnor jobs currently uploads 9 artifacts all named `job-log`,
+   indistinguishable in the UI (observed 2026-06-10).
 
 ### Phase 5 — default-on, continuously proven
 
