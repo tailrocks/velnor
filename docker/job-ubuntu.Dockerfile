@@ -52,7 +52,7 @@ ENV HOME=/root \
     MISE_PYTHON_COMPILE=0
 
 RUN mkdir -p /opt/mise/bin && \
-    curl -fsSL https://mise.run | MISE_VERSION="v2026.6.1" MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
+    curl -fsSL https://mise.run | MISE_VERSION="v2026.6.2" MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
     # gh: GitHub-hosted runner images preinstall the GitHub CLI and estate
     # scripts rely on it (e.g. jackin-role-action's download script) —
     # drop-in parity requires it in the job image too.
