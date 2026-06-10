@@ -1235,12 +1235,14 @@ where
             }
             NativeActionAdapter::PathsFilter => self.native_paths_filter(action, state),
             NativeActionAdapter::DockerSetupBuildx => {
-                self.native_docker_setup_buildx(action, state)
+                self.native_docker_setup_buildx(_container, action, state)
             }
-            NativeActionAdapter::DockerLogin => self.native_docker_login(action, state),
+            NativeActionAdapter::DockerLogin => self.native_docker_login(_container, action, state),
             NativeActionAdapter::DockerMetadata => Ok(native_docker_metadata(action, state)),
-            NativeActionAdapter::DockerBuildPush => self.native_docker_build_push(action, state),
-            NativeActionAdapter::DockerBake => self.native_docker_bake(action, state),
+            NativeActionAdapter::DockerBuildPush => {
+                self.native_docker_build_push(_container, action, state)
+            }
+            NativeActionAdapter::DockerBake => self.native_docker_bake(_container, action, state),
             NativeActionAdapter::Hadolint => self.native_hadolint(_container, action, state),
             NativeActionAdapter::SetupQemu => self.native_setup_qemu(action, state),
             NativeActionAdapter::CosignInstaller => {
@@ -1525,6 +1527,34 @@ where
         ))
     }
 
+    /// Run a docker CLI command inside the job container (docker exec), so
+    /// client-side state — buildx builder registry, registry logins — lives
+    /// in the job container's config and is visible to run steps too
+    /// (host-side invocations write the daemon host's ~/.docker instead).
+    fn container_docker(
+        &mut self,
+        container: &JobContainerSpec,
+        state: &JobExecutionState,
+        docker_args: &[String],
+        stdin: Option<&str>,
+    ) -> Result<CommandResult> {
+        let mut cmd = String::from("docker");
+        for arg in docker_args {
+            cmd.push(' ');
+            cmd.push_str(&shell_single_quote(arg));
+        }
+        if let Some(stdin) = stdin {
+            let env = state.step_env(&[]);
+            let exec_args = container.exec_process_stdin_args(
+                "/__w",
+                &env,
+                &["sh".to_string(), "-c".to_string(), cmd],
+            );
+            return self.runner.run_with_stdin("docker", &exec_args, stdin);
+        }
+        self.native_shell(container, state, &cmd)
+    }
+
     fn run_docker_args(&mut self, args: &[String]) -> Result<CommandResult> {
         self.runner.run("docker", args)
     }
@@ -1597,6 +1627,7 @@ where
 
     fn native_docker_setup_buildx(
         &mut self,
+        container: &JobContainerSpec,
         action: &NativeActionInvocation,
         state: &JobExecutionState,
     ) -> Result<StepExecutionResult> {
@@ -1604,10 +1635,11 @@ where
         let name = native_input_or(&action_state, action, "name", "velnor-builder");
         let driver = native_input_or(&action_state, action, "driver", "docker-container");
         let inspect_args = vec!["buildx".to_string(), "inspect".to_string(), name.clone()];
-        let inspect_result = self.runner.run("docker", &inspect_args)?;
+        let inspect_result =
+            self.container_docker(container, &action_state, &inspect_args, None)?;
         let result = if inspect_result.code == 0 {
             let use_args = vec!["buildx".to_string(), "use".to_string(), name.clone()];
-            self.runner.run("docker", &use_args)?
+            self.container_docker(container, &action_state, &use_args, None)?
         } else {
             let mut args = vec![
                 "buildx".to_string(),
@@ -1621,7 +1653,7 @@ where
             if input_truthy(&native_input_or(&action_state, action, "install", "false")) {
                 args.push("--bootstrap".to_string());
             }
-            self.runner.run("docker", &args)?
+            self.container_docker(container, &action_state, &args, None)?
         };
         Ok(native_command_result(
             result,
@@ -1646,6 +1678,7 @@ where
 
     fn native_docker_login(
         &mut self,
+        container: &JobContainerSpec,
         action: &NativeActionInvocation,
         state: &JobExecutionState,
     ) -> Result<StepExecutionResult> {
@@ -1666,33 +1699,32 @@ where
             "--password-stdin".to_string(),
         ];
         Ok(native_command_result(
-            self.runner.run_with_stdin("docker", &args, &password)?,
+            self.container_docker(container, &action_state, &args, Some(&password))?,
             StepCommandState::default(),
         ))
     }
 
     fn native_docker_build_push(
         &mut self,
+        container: &JobContainerSpec,
         action: &NativeActionInvocation,
         state: &JobExecutionState,
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
         let context = native_input_or(&action_state, action, "context", ".");
         let mut args = vec!["buildx".to_string(), "build".to_string()];
-        // Resolve --file relative to the host context path so Docker finds it even
-        // when its CWD differs from the build context (e.g. when run via ProcessCommandRunner
-        // whose CWD is the runner binary directory, not the job workspace).
+        // The command runs inside the job container with CWD /__w (the
+        // workspace), so context-relative Dockerfile paths resolve naturally;
+        // join relative files to the context like the upstream action does.
         let file_input = native_input(action, &action_state, "file");
         if !file_input.trim().is_empty() {
-            let file_path = if std::path::Path::new(&file_input).is_absolute() {
+            let file_path = if std::path::Path::new(&file_input).is_absolute()
+                || context.trim().is_empty()
+                || context.trim() == "."
+            {
                 file_input.clone()
             } else {
-                // Make the Dockerfile path absolute by joining it to the resolved context.
-                let ctx_host = host_context_path(&action_state, &context);
-                std::path::PathBuf::from(&ctx_host)
-                    .join(&file_input)
-                    .display()
-                    .to_string()
+                format!("{}/{}", context.trim_end_matches('/'), file_input)
             };
             push_arg(&mut args, "--file", &file_path);
         }
@@ -1733,18 +1765,21 @@ where
         // build-push-action exposes digest/imageid/metadata step outputs from
         // buildx's metadata file; downstream jobs (digest fan-in publish flows)
         // depend on `digest`.
-        let metadata_path = std::env::temp_dir().join(format!(
-            "velnor-buildx-metadata-{}.json",
-            uuid::Uuid::new_v4()
-        ));
+        // The command runs inside the job container; /tmp there is the shared
+        // job temp mount, so the daemon reads the file back via temp_host.
+        let metadata_name = format!("velnor-buildx-metadata-{}.json", uuid::Uuid::new_v4());
         push_arg(
             &mut args,
             "--metadata-file",
-            &metadata_path.display().to_string(),
+            &format!("/tmp/{metadata_name}"),
         );
-        args.push(host_context_path(&action_state, &context));
-        let env = host_docker_env(action_state.step_env(&[]));
-        let result = self.runner.run_with_env("docker", &args, &env)?;
+        args.push(container_context_path(&context));
+        let result = self.container_docker(container, &action_state, &args, None)?;
+        let metadata_path = action_state
+            .temp_host
+            .clone()
+            .unwrap_or_else(std::env::temp_dir)
+            .join(&metadata_name);
         let mut command_state = StepCommandState::default();
         if let Ok(raw) = fs::read_to_string(&metadata_path) {
             if let Ok(metadata) = serde_json::from_str::<Value>(&raw) {
@@ -1775,34 +1810,16 @@ where
 
     fn native_docker_bake(
         &mut self,
+        container: &JobContainerSpec,
         action: &NativeActionInvocation,
         state: &JobExecutionState,
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
         let mut args = vec!["buildx".to_string(), "bake".to_string()];
-        // Resolve bake file paths to absolute host paths so `docker buildx bake`
-        // finds them regardless of the process CWD (which may be the runner binary
-        // dir, not the job workspace).
-        let ws_path = action_state
-            .workspace_host
-            .as_deref()
-            .map(|p| p.display().to_string());
+        // The command runs inside the job container with CWD /__w (the
+        // workspace), so workflow-relative bake file paths resolve as-is.
         for file in input_values(&native_input(action, &action_state, "files")) {
-            let abs = if std::path::Path::new(&file).is_absolute() {
-                host_context_path(&action_state, &file)
-            } else if let Some(ref w) = ws_path {
-                std::path::Path::new(w).join(&file).display().to_string()
-            } else {
-                host_context_path(&action_state, &file)
-            };
-            push_arg(&mut args, "--file", &abs);
-        }
-        // docker buildx bake default context = process CWD, NOT the job workspace.
-        // Inject `*.context=WORKSPACE` so all targets without explicit context use
-        // the job workspace where Dockerfiles and sources live.
-        if let Some(ref w) = ws_path {
-            args.push("--set".to_string());
-            args.push(format!("*.context={w}"));
+            push_arg(&mut args, "--file", &file);
         }
         for set in input_values(&native_input(action, &action_state, "set")) {
             push_arg(&mut args, "--set", &set);
@@ -1815,9 +1832,8 @@ where
             &action_state,
             "targets",
         )));
-        let env = host_docker_env(action_state.step_env(&[]));
         Ok(native_command_result(
-            self.runner.run_with_env("docker", &args, &env)?,
+            self.container_docker(container, &action_state, &args, None)?,
             StepCommandState::default(),
         ))
     }
@@ -3660,6 +3676,18 @@ fn input_values(value: &str) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+/// Build context as seen from inside the job container (CWD /__w): relative
+/// values resolve against the workspace naturally; absolute container paths
+/// pass through.
+fn container_context_path(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        ".".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn host_context_path(state: &JobExecutionState, value: &str) -> String {
@@ -6494,58 +6522,44 @@ type=sha,format=long,prefix=,enable=true"
             "org.opencontainers.image.source=https://github.com/ChainArgos/java-monorepo"
         ));
         let runner = executor.runner();
-        let calls = &runner.calls;
-        assert!(calls.iter().any(|(program, args)| {
+        let calls = docker_call_strings(&runner.calls);
+        assert!(calls
+            .iter()
+            .any(|c| c.contains("'buildx' 'create' '--name' 'velnor-builder'")));
+        let login_call = runner.calls.iter().position(|(program, args)| {
             program == "docker"
-                && args.starts_with(&[
-                    "buildx".into(),
-                    "create".into(),
-                    "--name".into(),
-                    "velnor-builder".into(),
-                ])
-        }));
-        let login_call = calls.iter().position(|(program, args)| {
-            program == "docker"
-                && args
-                    == &[
-                        "login".to_string(),
-                        "https://index.docker.io/v1/".to_string(),
-                        "--username".to_string(),
-                        "docker-user".to_string(),
-                        "--password-stdin".to_string(),
-                    ]
+                && args.join(" ").contains(
+                    "'login' 'https://index.docker.io/v1/' '--username' 'docker-user' '--password-stdin'",
+                )
         });
         assert!(login_call.is_some());
         assert_eq!(runner.stdin[login_call.unwrap()], "docker-token");
-        let build_call = calls.iter().position(|(program, args)| {
-            program == "docker"
-                && args.first().is_some_and(|arg| arg == "buildx")
-                && args.get(1).is_some_and(|arg| arg == "build")
-                && !args.contains(&"--load".into())
-                && !args.contains(&"--push".into())
-                && args.contains(&"--tag".into())
-                && args.contains(&"chainargos/rust-bitcoin-processor:abcdef1234567890".into())
-                && args.contains(&"type=gha,scope=bitcoin-processor-app-pr,mode=max".into())
+        let build_call = calls.iter().position(|c| {
+            c.contains("'buildx' 'build'")
+                && !c.contains("'--load'")
+                && !c.contains("'--push'")
+                && c.contains("'--tag' 'chainargos/rust-bitcoin-processor:abcdef1234567890'")
+                && c.contains("'type=gha,scope=bitcoin-processor-app-pr,mode=max'")
         });
         assert!(build_call.is_some());
-        let build_env = &runner.env[build_call.unwrap()];
-        assert!(build_env.contains(&("ACTIONS_RUNTIME_TOKEN".into(), "runtime-token".into())));
-        assert!(build_env.contains(&("ACTIONS_CACHE_URL".into(), "https://cache.actions".into())));
-        let bake_call = calls.iter().position(|(program, args)| {
-            program == "docker"
-                && args.first().is_some_and(|arg| arg == "buildx")
-                && args.get(1).is_some_and(|arg| arg == "bake")
-                && args.contains(&"--set".into())
-                && args.contains(&"*.cache-to=type=gha,scope=rust-workspace,mode=max".into())
-                && args.contains(&"bitcoin-processor-app".into())
+        // Runtime env reaches the container via docker exec -e flags.
+        let build_invocation = &calls[build_call.unwrap()];
+        assert!(build_invocation.contains("ACTIONS_RUNTIME_TOKEN=runtime-token"));
+        assert!(build_invocation.contains("ACTIONS_CACHE_URL=https://cache.actions"));
+        let bake_call = calls.iter().position(|c| {
+            c.contains("'buildx' 'bake'")
+                && c.contains("'--set'")
+                && c.contains("'*.cache-to=type=gha,scope=rust-workspace,mode=max'")
+                && c.contains("'bitcoin-processor-app'")
         });
         assert!(bake_call.is_some());
-        let bake_env = &runner.env[bake_call.unwrap()];
-        assert!(bake_env.contains(&("PUSH".into(), "false".into())));
-        assert!(bake_env.contains(&("SHA".into(), "abcdef1234567890".into())));
-        assert!(bake_env.contains(&("PR_NUMBER".into(), "42".into())));
+        let bake_invocation = &calls[bake_call.unwrap()];
+        assert!(bake_invocation.contains("PUSH=false"));
+        assert!(bake_invocation.contains("SHA=abcdef1234567890"));
+        assert!(bake_invocation.contains("PR_NUMBER=42"));
         assert_eq!(
-            calls
+            runner
+                .calls
                 .iter()
                 .filter(|(_, args)| args.first().is_some_and(|arg| arg == "run")
                     && args.iter().any(|arg| arg.starts_with("node:")))
@@ -6583,12 +6597,9 @@ type=sha,format=long,prefix=,enable=true"
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
-        let calls = &executor.runner().calls;
-        assert!(calls.iter().any(|(program, args)| {
-            program == "docker"
-                && args.starts_with(&["buildx".into(), "build".into()])
-                && args.contains(&"--load".into())
-                && !args.contains(&"--push".into())
+        let calls = docker_call_strings(&executor.runner().calls);
+        assert!(calls.iter().any(|c| {
+            c.contains("'buildx' 'build'") && c.contains("'--load'") && !c.contains("'--push'")
         }));
         fs::remove_dir_all(temp).unwrap();
     }
@@ -10493,36 +10504,22 @@ fi"#
         assert_eq!(results[0].exit_code, 0);
         assert_eq!(results[0].state.outputs["name"], "jackin-construct");
         assert_eq!(results[0].state.env["BUILDX_BUILDER"], "jackin-construct");
-        let calls = &executor.runner().calls;
+        let calls = docker_call_strings(&executor.runner().calls);
         let inspect_call = calls
             .iter()
-            .position(|(program, args)| {
-                program == "docker"
-                    && args
-                        == &[
-                            "buildx".to_string(),
-                            "inspect".to_string(),
-                            "jackin-construct".to_string(),
-                        ]
-            })
+            .position(|c| c.contains("'buildx' 'inspect' 'jackin-construct'"))
             .unwrap();
         let use_call = calls
             .iter()
-            .position(|(program, args)| {
-                program == "docker"
-                    && args
-                        == &[
-                            "buildx".to_string(),
-                            "use".to_string(),
-                            "jackin-construct".to_string(),
-                        ]
-            })
+            .position(|c| c.contains("'buildx' 'use' 'jackin-construct'"))
             .unwrap();
         assert!(inspect_call < use_call);
-        assert!(!calls
-            .iter()
-            .any(|(_, args)| args.first().is_some_and(|arg| arg == "buildx")
-                && args.get(1).is_some_and(|arg| arg == "create")));
+        assert!(
+            calls[inspect_call].starts_with("exec "),
+            "buildx state lives in the job container: {}",
+            calls[inspect_call]
+        );
+        assert!(!calls.iter().any(|c| c.contains("'buildx' 'create'")));
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -12165,6 +12162,14 @@ bitcoin-processor-app.push=true")
 
     // ── hadolint_script ───────────────────────────────────────────────────
 
+    fn docker_call_strings(calls: &[(String, Vec<String>)]) -> Vec<String> {
+        calls
+            .iter()
+            .filter(|(program, _)| program == "docker")
+            .map(|(_, args)| args.join(" "))
+            .collect()
+    }
+
     fn hadolint_inputs_defaults() -> HadolintInputs {
         HadolintInputs {
             dockerfile: "Dockerfile".into(),
@@ -12318,16 +12323,19 @@ bitcoin-processor-app.push=true")
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
-        let calls = &executor.runner().calls;
-        assert!(calls.iter().any(|(program, args)| {
-            program == "docker"
-                && args.starts_with(&["buildx".into(), "build".into()])
-                && args
-                    .contains(&"type=image,push-by-digest=true,name=example/app,push=true".into())
-                && args.contains(&"--output".into())
-                && !args.contains(&"--push".into())
-                && args.contains(&"--metadata-file".into())
-        }));
+        let calls = docker_call_strings(&executor.runner().calls);
+        let invocation = calls
+            .iter()
+            .find(|c| c.contains("'buildx' 'build'"))
+            .expect("buildx build invoked");
+        assert!(
+            invocation.starts_with("exec "),
+            "runs in the job container: {invocation}"
+        );
+        assert!(invocation.contains("'type=image,push-by-digest=true,name=example/app,push=true'"));
+        assert!(invocation.contains("'--output'"));
+        assert!(!invocation.contains("'--push'"));
+        assert!(invocation.contains("'--metadata-file'"));
         fs::remove_dir_all(temp).unwrap();
     }
 

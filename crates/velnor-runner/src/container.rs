@@ -127,6 +127,28 @@ impl JobContainerSpec {
         args
     }
 
+    /// Like exec_process_args, but with stdin kept open (`docker exec -i`) so
+    /// the caller can stream data (e.g. a registry password) to the process.
+    pub fn exec_process_stdin_args(
+        &self,
+        working_directory: &str,
+        env: &[(String, String)],
+        command: &[String],
+    ) -> Vec<String> {
+        let mut args = vec![
+            "exec".into(),
+            "-i".into(),
+            "--workdir".into(),
+            working_directory.into(),
+        ];
+        for (name, value) in env {
+            args.extend(["-e".into(), format!("{name}={value}")]);
+        }
+        args.push(self.name.clone());
+        args.extend(command.iter().cloned());
+        args
+    }
+
     pub fn run_node_action_args(
         &self,
         working_directory: &str,
