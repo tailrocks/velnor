@@ -1,6 +1,6 @@
 [package]
 name = "velnor-runner"
-version = "0.1.2"
+version = "0.1.3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -16,8 +16,11 @@ path = "src/main.rs"
 #   cargo deb -p velnor-runner --target $TGT --no-build --deb-version "$VERSION"
 # This produces target/<triple>/debian/velnor-runner_<ver>_<arch>.deb .
 #
-# The [[bin]] is automatically packaged (correct binary for --target).
-# Extra assets (systemd unit, config, docs) + maintainer-scripts are included.
+# NOTE: an explicit `assets` list REPLACES cargo-deb's implicit defaults
+# (including the [[bin]] itself) in current cargo-deb, so the binary MUST be
+# listed below — the 0.1.2 deb shipped without /usr/bin/velnor-runner exactly
+# because it was missing. cargo-deb rewrites target/release/... to
+# target/<triple>/release/... when --target is passed.
 [package.metadata.deb]
 maintainer = "Alexey Zhokhov <alexey@zhokhov.com>"
 copyright = "2026, Tailrocks"
@@ -33,6 +36,7 @@ depends = "$auto, git, curl, ca-certificates, docker.io | docker-ce"
 conf-files = ["/etc/velnor/velnor.env"]
 maintainer-scripts = "debian/"
 assets = [
+  ["target/release/velnor-runner", "usr/bin/velnor-runner", "755"],
   ["debian/velnor-daemon.service", "lib/systemd/system/velnor-daemon.service", "644"],
   ["debian/velnor.env", "etc/velnor/velnor.env", "640"],
   ["../../README.md", "usr/share/doc/velnor-runner/README.md", "644"],
