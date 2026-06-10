@@ -1,10 +1,20 @@
-# Velnor Roadmap
+# Velnor Roadmap (runner-internal implementation reference)
 
-This document is the implementation roadmap for Velnor. It lists what must be
-implemented, what is still missing, and how work is verified.
+**Top-level direction and sequencing live in [master-plan.md](master-plan.md)**
+— that is the plan. This document is the runner-internal implementation
+reference: protocol decisions, daemon/slot model, Docker execution model,
+adapter strategy, and verification layers.
 
-The high-level product vision lives in [vision.md](vision.md). This roadmap is
-the source of truth for current implementation work.
+Status 2026-06-11: the implementation goal below (drop-in V2/JIT runner,
+Docker job isolation, native adapters, daemon slots) is **achieved and in
+production** — three dual-lane repos run Velnor by default; the daemon ships
+as a Debian package with never-exit supervision, sd_notify watchdog,
+template instances, and doctor timers (master-plan P0/P1 complete). Active
+engineering: master-plan P2 (estate pipeline tuning), P3 (performance core:
+native HTTP transport, zero-copy logs, dynamic slots, org-level JIT), P3b
+(native-adapter completeness — no JS product path), P4 (UX parity matrix).
+Sections below describe the standing architecture; where a detail conflicts
+with master-plan, master-plan wins.
 
 ## Hard Rules
 
@@ -648,7 +658,10 @@ Open naming choice:
 - agent does not set `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true`, dispatch target
   workflows, or perform target validation itself
 
-## Open Questions For User
+## Resolved Questions (historical)
+
+All questions below were resolved during Phase 0/P1; answers inline.
+
 
 1. CLI naming: should `configure` remain and become JIT-only, or should Velnor
    expose a clearer `jit-configure` command?

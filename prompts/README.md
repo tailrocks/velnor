@@ -18,6 +18,11 @@ Every prompt defers to [`../docs/`](../docs/) for direction and correctness:
 docs win — fix the prompt. **When the vision/plan/roadmap changes, update
 `docs/` and `../AGENTS.md` first, then reconcile the prompts** so none go stale.
 
+> **Status 2026-06-11:** the four-prompt sequence below is **complete** —
+> coverage, UI parity, fixture proof, and ChainArgos parity all shipped (see
+> [`../docs/master-plan.md`](../docs/master-plan.md) for live status and the
+> current phases). New goal prompts should be cut from master-plan phases.
+
 ## Run sequence
 
 Run **one prompt per day** with `/goal`, in this order. Do not start the next
