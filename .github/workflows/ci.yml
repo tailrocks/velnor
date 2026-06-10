@@ -142,9 +142,17 @@ jobs:
           echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
+      - name: Cache mise cargo tools
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ~/.local/share/mise/installs/cargo-cargo-nextest
+          key: mise-cargo-nextest-${{ runner.os }}-${{ hashFiles('mise.toml') }}
+          restore-keys: |
+            mise-cargo-nextest-${{ runner.os }}-
+
       - uses: jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925 # v4.1.0
         with:
-          install_args: "rust"
+          install_args: "rust cargo:cargo-nextest"
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cache target dir
@@ -157,7 +165,10 @@ jobs:
             cargo-target-${{ runner.os }}-${{ github.base_ref || 'main' }}-test-
             cargo-target-${{ runner.os }}-main-test-
 
-      - run: cargo test --workspace --locked
+      - run: cargo nextest run --workspace --locked --color=always
+
+      # nextest does not run doctests; keep doctest coverage via cargo test.
+      - run: cargo test --doc --workspace --locked
 
       - name: sccache stats
         if: always() && steps.sccache.outcome == 'success'
