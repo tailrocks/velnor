@@ -136,7 +136,7 @@ Scope (the ten-repo estate, audited and enforced):
 | jackin-project/jackin-the-architect | agent role; per-tool layers + cache mounts; PR/publish caches bridged (role-action#57 + PR #113) |
 | jackin-project/jackin-agent-smith | agent role; caching mandate applied (PR #67: registry-warm CI, gitleaks + Renovate caches) |
 | jackin-project/jackin-sentinel | agent role; caching mandate applied (PR #7, identical to smith) |
-| ChainArgos/jackin-agent-brown | agent role; **dual-lane, Velnor default — SHIPPED PR #89** (validate green on Velnor with the native hadolint adapter, 0.1.7); caching mandate applied; publish-on-Velnor proof in flight |
+| ChainArgos/jackin-agent-brown | agent role; **dual-lane, Velnor default — FULLY PROVEN** (PR #89 + publish-on-Velnor green end-to-end on 0.1.14: digest builds amd64 + arm64-QEMU, artifact fan-in, metadata, imagetools manifest, cosign — 13–32 s/job with warm registry layer cache) |
 | ChainArgos/java-monorepo | registry cache (PR #1382) + sccache + job-level gating (PR #1384) + kestra layer cache (PR #1386) |
 | ChainArgos/blockchain-nodes | registry layer cache + exists-sweep (PR #603); cached-build proof pending next version bump |
 | tailrocks/holla | NOT YET AUDITED |
@@ -402,14 +402,19 @@ native Rust adapter, always matching the **latest** upstream version
 `docs/reference/target-action-registry.md` tracks the pins). The node:20
 sidecar remains only as a diagnostic fallback, never the product path.
 
-New surface from the agent-role repos (jackin-role-action internals) that
-needs adapters beyond the existing 19: `hadolint/hadolint-action`,
-`sigstore/cosign-installer` (+ `cosign sign`/sign-blob flows),
-`actions/attest-build-provenance`, `peter-evans/create-pull-request`,
-`j178/prek-action`, `renovatebot/github-action` (full native execution),
-plus the `gitleaks` scan step. Each adapter: read the latest upstream
-implementation, match behavior + outputs exactly, register in the action
-registry, cover in the fixture.
+**Delivered (0.1.7–0.1.14, proven by the agent-brown dual-lane pipeline):**
+native `hadolint/hadolint-action`, `docker/setup-qemu-action`,
+`sigstore/cosign-installer` (binaries pinned in the job image,
+Renovate-managed); `docker/build-push-action` outputs exporter +
+digest/imageid/metadata step outputs; `docker/metadata-action`
+DOCKER_METADATA_OUTPUT_* env export; docker-family adapters (login,
+setup-buildx, build-push, bake) now execute inside the job container so
+client state (builders, logins) is shared with run steps; broker
+job-output template tokens parsed (cross-job `needs.*.outputs` on Velnor);
+container `/tmp` mapped for native adapters. Remaining new-surface
+adapters: `actions/attest-build-provenance`,
+`peter-evans/create-pull-request`, `j178/prek-action`, full-native
+`renovatebot/github-action`, gitleaks scan step.
 
 ### Phase 4 — UX parity and superiority (equal-or-better, verified)
 
