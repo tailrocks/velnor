@@ -1545,10 +1545,14 @@ where
         }
         if let Some(stdin) = stdin {
             let env = state.step_env(&[]);
+            // Same HOME as native_shell so client state (e.g. the docker
+            // login written here) lands in the config dir every other
+            // adapter invocation reads (/root/.docker).
+            let wrapped = format!("export HOME=/root; {cmd}");
             let exec_args = container.exec_process_stdin_args(
                 "/__w",
                 &env,
-                &["sh".to_string(), "-c".to_string(), cmd],
+                &["sh".to_string(), "-c".to_string(), wrapped],
             );
             return self.runner.run_with_stdin("docker", &exec_args, stdin);
         }
