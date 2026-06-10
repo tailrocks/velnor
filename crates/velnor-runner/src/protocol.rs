@@ -160,6 +160,10 @@ pub struct DecodedJitConfig {
 pub struct ListedRunner {
     pub id: Option<i64>,
     pub name: Option<String>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub busy: Option<bool>,
 }
 
 fn deser_bool_from_any<'de, D: Deserializer<'de>>(d: D) -> Result<bool, D::Error> {

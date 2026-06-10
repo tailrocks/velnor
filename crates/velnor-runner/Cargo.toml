@@ -39,6 +39,10 @@ assets = [
   ["target/release/velnor-runner", "usr/bin/velnor-runner", "755"],
   ["debian/velnor-daemon.service", "lib/systemd/system/velnor-daemon.service", "644"],
   ["debian/velnor-daemon@.service", "lib/systemd/system/velnor-daemon@.service", "644"],
+  ["debian/velnor-doctor.service", "lib/systemd/system/velnor-doctor.service", "644"],
+  ["debian/velnor-doctor.timer", "lib/systemd/system/velnor-doctor.timer", "644"],
+  ["debian/velnor-doctor@.service", "lib/systemd/system/velnor-doctor@.service", "644"],
+  ["debian/velnor-doctor@.timer", "lib/systemd/system/velnor-doctor@.timer", "644"],
   ["debian/velnor.env", "etc/velnor/velnor.env", "640"],
   ["../../README.md", "usr/share/doc/velnor-runner/README.md", "644"],
 ]
