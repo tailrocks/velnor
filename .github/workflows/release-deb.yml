@@ -118,7 +118,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
-          DEB_SRC=$(ls target/${{ matrix.target }}/debian/velnor-runner_*.deb | head -1)
+          DEB_SRC=$(find "target/${{ matrix.target }}/debian" -maxdepth 1 -name "velnor-runner_*.deb" | head -1)
           # Guard: a deb without the binary is ~4KB (the 0.1.2 incident —
           # cargo-deb's explicit assets list had dropped the implicit binary).
           # Require the packaged binary to be present and the deb to be sane.
