@@ -1,3 +1,5 @@
+use anyhow::{bail, Context, Result};
+use base64::{engine::general_purpose, Engine as _};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use std::{

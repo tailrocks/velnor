@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::script_step::{
     StepAnnotation, StepAnnotationLevel, StepCommandState, StepCommandTelemetry,
 };

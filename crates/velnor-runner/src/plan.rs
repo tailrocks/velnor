@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::{
     container::{JobContainerSpec, ServiceContainerSpec},
     executor::{ExecutableStep, JobExecutionSummary, StepExecutionResult, StepLog},
