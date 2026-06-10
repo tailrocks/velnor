@@ -35,6 +35,9 @@ jobs:
         with:
           install_args: "rust"
           github_token: ${{ secrets.GITHUB_TOKEN }}
+      # rustup syncs the pinned toolchain with a minimal profile at first cargo
+      # invocation; the components from rust-toolchain.toml are not guaranteed.
+      - run: rustup component add rustfmt
       - run: cargo fmt --all --check
 
   actionlint:
@@ -97,6 +100,7 @@ jobs:
             cargo-target-${{ runner.os }}-${{ github.base_ref || 'main' }}-clippy-
             cargo-target-${{ runner.os }}-main-clippy-
 
+      - run: rustup component add clippy
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: sccache stats
