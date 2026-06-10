@@ -175,6 +175,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Guard: this job runs with if:always() so partial matrix successes still
+          # deliver, but with zero built debs there is nothing to release — and
+          # `gh release create` on a missing tag would mint the tag at main HEAD.
+          shopt -s nullglob
+          debs=(artifacts/velnor-runner-*-unknown-linux-gnu.deb)
+          if [ "${#debs[@]}" -eq 0 ]; then
+            echo "No .deb artifacts were built; refusing to create/upload a release." >&2
+            exit 1
+          fi
           # Create the release if it does not exist yet, then upload the deb assets.
           gh release view "$TAG" >/dev/null 2>&1 \
             || gh release create "$TAG" --title "$TAG" --generate-notes
