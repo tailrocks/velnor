@@ -101,6 +101,11 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-06-11: **Native-adapter completeness mandate** (operator): Velnor
+  must not execute JavaScript/remote action bundles as the product path —
+  every `uses:` in the estate gets a native Rust adapter pinned to the
+  latest upstream behavior (master-plan P3b); node sidecar = diagnostic
+  fallback only.
 - 2026-06-11: **Universal caching + performance mandate** (operator hard
   rule, master-plan §3a): everything cacheable must be cached in every
   pipeline of the nine-repo estate; rerun-idempotency is the acceptance test

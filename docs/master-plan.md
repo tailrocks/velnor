@@ -393,6 +393,24 @@ explicitly in scope.
    Gate: 10-way parallel cold `cargo metadata` across slots, zero flakes,
    repeated 20×.
 
+### Phase 3b — native-adapter completeness (operator mandate, 2026-06-11)
+
+**Velnor never executes marketplace JavaScript or remote action bundles as
+the product path** — every `uses:` across the estate is implemented as a
+native Rust adapter, always matching the **latest** upstream version
+(`actions/runner` + each action's own source are the references;
+`docs/reference/target-action-registry.md` tracks the pins). The node:20
+sidecar remains only as a diagnostic fallback, never the product path.
+
+New surface from the agent-role repos (jackin-role-action internals) that
+needs adapters beyond the existing 19: `hadolint/hadolint-action`,
+`sigstore/cosign-installer` (+ `cosign sign`/sign-blob flows),
+`actions/attest-build-provenance`, `peter-evans/create-pull-request`,
+`j178/prek-action`, `renovatebot/github-action` (full native execution),
+plus the `gitleaks` scan step. Each adapter: read the latest upstream
+implementation, match behavior + outputs exactly, register in the action
+registry, cover in the fixture.
+
 ### Phase 4 — UX parity and superiority (equal-or-better, verified)
 
 1. Re-run the API-driven lane comparison (docs/comparison.md §method) on
