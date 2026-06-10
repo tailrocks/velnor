@@ -129,18 +129,32 @@ gets challenged; every pipeline is aggressively tuned (and re-tuned) for the
 fastest result the tools can deliver. Velnor itself is designed under this
 rule — if maximum performance is not yet reached, keep iterating.
 
-Scope (all nine, audited and enforced):
+Scope (the ten-repo estate, audited and enforced):
 | Repo | Status |
 |---|---|
-| jackin-project/jackin | 4-layer stack + sccache present; AUDIT: cold `Compiling` walls still observed in nextest — verify cache hit rates and fix |
-| jackin-project/jackin-the-architect | per-tool layers + cache mounts; PR/publish caches bridged (role-action#57 + pins bump) |
-| jackin-project/jackin-agent-smith | NOT YET AUDITED |
-| jackin-project/jackin-sentinel | NOT YET AUDITED |
+| jackin-project/jackin | **pipeline source of truth.** 4-layer stack + sccache; cache-quota eviction fix in PR #563 (bench merge + nextest fallback ladder) |
+| jackin-project/jackin-the-architect | agent role; per-tool layers + cache mounts; PR/publish caches bridged (role-action#57 + PR #113) |
+| jackin-project/jackin-agent-smith | agent role; NOT YET AUDITED |
+| jackin-project/jackin-sentinel | agent role; NOT YET AUDITED |
+| ChainArgos/jackin-agent-brown | agent role; **dual-lane: GitHub-hosted + Velnor** (the only role repo on both); NOT YET AUDITED |
 | ChainArgos/java-monorepo | registry cache (PR #1382) + sccache + job-level gating (PR #1384) + kestra layer cache (PR #1386) |
 | ChainArgos/blockchain-nodes | registry layer cache + exists-sweep (PR #603); cached-build proof pending next version bump |
 | tailrocks/holla | NOT YET AUDITED |
 | tailrocks/velnor | ci.yml jackin-style stack; release-deb has sccache+registry cache |
 | tailrocks/velnor-actions-fixture | NOT YET AUDITED |
+
+**Estate unification rule (operator mandate):** these repositories share very
+similar dependencies and tooling, so they must share the same techniques,
+configuration shape, and writing style. jackin is the base source of truth
+for pipeline design (itself continuously perfected); every improvement made
+anywhere is propagated to every applicable repo. The four agent-role repos
+(jackin-the-architect, jackin-agent-smith, jackin-sentinel,
+jackin-agent-brown) must use the shared `jackin-project/jackin-role-action`
+(composite action + reusable publish workflow) with identical configuration —
+no per-repo drift. jackin-agent-brown additionally runs its pipeline on both
+lanes (GitHub-hosted + Velnor), so Velnor must support the role-action
+pattern end-to-end (hadolint JS action, jackin-role binary download,
+buildx build with gha/registry caches, digest publish + cosign).
 
 ## 4. Hard constraints (inherited, non-negotiable)
 

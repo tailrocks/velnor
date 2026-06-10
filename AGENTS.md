@@ -111,7 +111,11 @@ Never let a prompt, README, or doc describe a direction that the current vision/
   velnor-actions-fixture) — sccache on every compiling job, cargo
   registry/target caches, docker layer cache-from/to on every build, apt
   cache mounts inside Dockerfiles, pinned+cached tool installs. Visible
-  dependency compilation in CI is a defect.
+  dependency compilation in CI is a defect. Estate addition + unification:
+  ChainArgos/jackin-agent-brown joins (dual-lane: GitHub + Velnor); all four
+  agent-role repos (the-architect, agent-smith, sentinel, agent-brown) use
+  the shared jackin-role-action identically; jackin is the pipeline source
+  of truth and improvements propagate to every applicable repo.
 - 2026-06-10: Added `docs/master-plan.md` as the top-level goal + execution
   sequence (operator mandate): Velnor default on both ChainArgos repos with the
   GitHub lane kept forever; full parity then superiority vs GitHub-hosted;
