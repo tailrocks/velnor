@@ -101,8 +101,16 @@ should *improve*:
 | 2 | Step numbering parity (GitHub post steps at #37–40) | Cosmetic for Phase 0 |
 | 3 | API-based lane comparison (live re-capture) | Needs live Sentry run |
 
-## Status
+## Status (2026-06-11)
 
 - [x] Improvement plan items implemented (§1–§10 above).
-- [ ] Both lanes re-captured via the GitHub API (needs live Sentry run).
-- [ ] After/again render confirms Velnor not less informative than GitHub.
+- [x] Live per-line streaming verified in production (0.1.5+ on Sentry):
+      step lines appear in the UI while the step runs; per-step feed line
+      numbering fixed in 0.1.6 (was a job-global counter — protocol mismatch
+      vs actions/runner).
+- [x] Downloadable-archive workaround shipped: the full masked job log is
+      uploaded as a `job-log` artifact (per-job naming still pending,
+      master-plan P4).
+- [ ] Full API-driven lane comparison matrix re-run across every workflow of
+      the three dual-lane repos (master-plan P4.1) — make it a `velnor-tools`
+      subcommand so it is repeatable.

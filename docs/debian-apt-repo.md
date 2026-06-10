@@ -1,4 +1,13 @@
-# Velnor runner — Debian package + apt-native repository (design)
+# Velnor runner — Debian package + apt-native repository
+
+**Status: implemented and fully automatic** since v0.1.4 (amd64) / v0.1.6
+(arm64): `git tag vX.Y.Z && git push --tags` runs CI, builds both debs with a
+binary-presence + size guard, attaches tar.gz + deb assets to the GitHub
+release, uploads to `tailrocks/velnor-apt`, and triggers the signed reprepro
+publish to GitHub Pages — zero manual steps. The packaged daemon ships
+never-exit supervision, sd_notify watchdog, `velnor-daemon@<name>` template
+instances, `/etc/velnor/secrets.env` (0600, operator-owned), and
+`velnor-doctor` timers. The design below documents the pieces.
 
 Goal: install and upgrade the Velnor runner daemon with native apt:
 

@@ -1,8 +1,36 @@
 # Velnor Runner Usage
 
-Operational reference for running the Velnor runner locally, in Docker, and
-against the public fixture. Direction and scope live in [vision.md](vision.md),
-[mission.md](mission.md), and [roadmap.md](roadmap.md); this file is how-to only.
+Operational reference for running the Velnor runner. Direction and scope live
+in [master-plan.md](master-plan.md), [mission.md](mission.md), and
+[roadmap.md](roadmap.md); this file is how-to only.
+
+## Production operation (Debian package)
+
+The runner installs and upgrades via apt (repo: `velnor-apt.tailrocks.com`):
+
+```sh
+sudo apt-get update && sudo apt-get install velnor-runner   # or upgrade
+```
+
+Configuration (one daemon per target scope):
+
+- Default instance: `/etc/velnor/velnor.env` (URL, name, labels, slots,
+  work dir) + `/etc/velnor/secrets.env` (0600, `GITHUB_TOKEN=...` — never
+  shipped or touched by the package; `postinst` migrates a token out of
+  `velnor.env` automatically).
+- Additional instances: `/etc/velnor/<name>.env` + `<name>.secrets.env`,
+  then `systemctl enable --now velnor-daemon@<name>`.
+
+Units (all shipped by the package):
+
+- `velnor-daemon.service` / `velnor-daemon@<name>.service` — `Type=notify`
+  with `WatchdogSec=180`; the daemon reports status via sd_notify and
+  **never exits** on registration/credential/network failures (it retries
+  forever with backoff and shows the precise problem in `systemctl status`,
+  e.g. an unexpanded `${...}` token placeholder).
+- `velnor-doctor.timer` / `velnor-doctor@<name>.timer` — every 10 minutes,
+  lists the daemon's registered runners on GitHub and **fails loudly when
+  none are online** (`velnor-runner doctor --url ... --name ... --slots N`).
 
 ## Current runner state
 
