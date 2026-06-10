@@ -143,20 +143,21 @@ downstream proof runs.
    units read `velnor.env` then `-secrets.env` (secrets win). Template
    instances `velnor-daemon@<name>` use `/etc/velnor/<name>.env` +
    `<name>.secrets.env` — Sentry's three hand-rolled units migrated.
-4. **[PARTIAL 0.1.5] Fleet watchdog**: `Type=notify` + `WatchdogSec=180` +
-   sd_notify READY/STATUS/WATCHDOG live on Sentry. Remaining: a
-   `velnor-runner doctor` probe + timer comparing registered-runner count to
-   expected slots, and/or a GitHub-side scheduled canary that fails loudly
-   when the fleet is gone.
+4. **[DONE 0.1.6] Fleet watchdog**: `Type=notify` + `WatchdogSec=180` +
+   sd_notify READY/STATUS/WATCHDOG (0.1.5), plus `velnor-runner doctor` — a
+   packaged 10-minute timer (default + per-instance, auto-enabled by
+   postinst) that lists this daemon's registered runners and fails the unit
+   loudly when 0 are online (token diagnosis included). Verified live on
+   Sentry. Release-pipeline failures already email the tag pusher via
+   GitHub's native workflow-failure notifications.
 5. **[DONE] Lint + compile gate**: `ci.yml` (fmt, clippy -D warnings, full
    test suite, actionlint+shellcheck, ci-required aggregate) with the jackin
    cache stack, on GitHub-hosted runners.
-6. **[DONE for amd64; arm64 re-enabled pending next tag] Release pipeline
-   end-to-end automation**: proven on v0.1.4/v0.1.5 — tag → CI → deb (binary
-   + size guard) → GitHub release (tar.gz ×4 targets) → velnor-apt upload →
-   signed apt publish → Pages, zero manual steps. aarch64 deb leg re-enabled
-   (vendored OpenSSL removed the cross-apt dependency); proof on the next
-   tag. Remaining: alerting on release-pipeline failure.
+6. **[DONE] Release pipeline end-to-end automation**: proven on
+   v0.1.4–v0.1.6 — tag → CI → deb (binary + size guard) → GitHub release
+   (tar.gz ×4 targets) → velnor-apt upload → signed apt publish → Pages,
+   zero manual steps, **amd64 + arm64** (v0.1.6: cross-safe packaging —
+   link-time strip + explicit depends instead of $auto/dpkg-shlibdeps).
 7. **Token strategy** (durable fix for incident #1): move from a personal
    classic PAT to a **GitHub App** installation (org-scoped, runner-admin
    permissions) minting installation tokens in-daemon, or at minimum a
@@ -230,14 +231,16 @@ never remove testing/release correctness while speeding things up.
    runs everything; `lanes=both` timing report shows GitHub lane at its best.
 
 **Jackin repos** (reference stays GitHub-hosted; fix their own gaps):
-1. jackin: un-serialize `test` from `check-all-features` (pure critical-path
-   latency, up to ~2.5 min); gate `audit`/spell-checks on relevant paths;
-   merge the bench matrix; share clippy/check target caches via restore-keys.
-2. jackin-the-architect: unify PR (gha) and publish (registry) buildx caches
-   — post-merge currently rebuilds ~15 min of identical layers; add
-   paths-filter + concurrency; bump `peter-evans/create-pull-request` off
-   node20 (forced node24 on 2026-06-16 — six days); fix the red
-   `jackin-toolchain.yml` (PR-creation permission).
+1. **[PARTIAL — PR jackin#561 merged]** `test` un-serialized from
+   `check-all-features` (up to ~2.5 min off the critical path) and `audit`
+   gated on the rust filter. Remaining: spell-check gating, bench-matrix
+   merge, cross-job target-cache restore-keys.
+2. **[PARTIAL — PR architect#112 merged]** `create-pull-request` bumped to
+   v8.1.1 (node24; forced migration 2026-06-16). The toolchain workflow's
+   PR-creation 403 is the org-level "Allow GitHub Actions to create and
+   approve pull requests" setting — **needs org admin** (repo-level PUT is
+   overridden; my token lacks admin:org). Remaining: PR/publish buildx cache
+   unification, paths-filter + concurrency.
 3. jackin-role-action: add self-CI (actionlint + shellcheck + smoke-validate
    against the fixture role); deduplicate the inlined download logic.
    Gate: all three repos green; jackin PR wall time ≤ current 4.2–5.2 min
