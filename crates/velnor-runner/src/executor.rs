@@ -1670,18 +1670,61 @@ where
         for cache in input_values(&native_input(action, &action_state, "cache-to")) {
             push_arg(&mut args, "--cache-to", &cache);
         }
-        if input_truthy(&native_input(action, &action_state, "push")) {
+        // The `outputs` input maps to buildx --output (e.g. the publish
+        // workflows' push-by-digest exporter: type=image,push-by-digest=true,
+        // name=...,push=true).
+        let mut has_output = false;
+        for output in input_values(&native_input(action, &action_state, "outputs")) {
+            push_arg(&mut args, "--output", &output);
+            has_output = true;
+        }
+        if input_truthy(&native_input(action, &action_state, "push")) && !has_output {
             args.push("--push".to_string());
         }
-        if input_truthy(&native_input(action, &action_state, "load")) {
+        if input_truthy(&native_input(action, &action_state, "load")) && !has_output {
             args.push("--load".to_string());
         }
+        // build-push-action exposes digest/imageid/metadata step outputs from
+        // buildx's metadata file; downstream jobs (digest fan-in publish flows)
+        // depend on `digest`.
+        let metadata_path = std::env::temp_dir().join(format!(
+            "velnor-buildx-metadata-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        push_arg(
+            &mut args,
+            "--metadata-file",
+            &metadata_path.display().to_string(),
+        );
         args.push(host_context_path(&action_state, &context));
         let env = host_docker_env(action_state.step_env(&[]));
-        Ok(native_command_result(
-            self.runner.run_with_env("docker", &args, &env)?,
-            StepCommandState::default(),
-        ))
+        let result = self.runner.run_with_env("docker", &args, &env)?;
+        let mut command_state = StepCommandState::default();
+        if let Ok(raw) = fs::read_to_string(&metadata_path) {
+            if let Ok(metadata) = serde_json::from_str::<Value>(&raw) {
+                if let Some(digest) = metadata
+                    .get("containerimage.digest")
+                    .and_then(Value::as_str)
+                {
+                    command_state
+                        .outputs
+                        .insert("digest".to_string(), digest.to_string());
+                }
+                if let Some(image_id) = metadata
+                    .get("containerimage.config.digest")
+                    .and_then(Value::as_str)
+                {
+                    command_state
+                        .outputs
+                        .insert("imageid".to_string(), image_id.to_string());
+                }
+                command_state
+                    .outputs
+                    .insert("metadata".to_string(), raw.trim().to_string());
+            }
+            let _ = fs::remove_file(&metadata_path);
+        }
+        Ok(native_command_result(result, command_state))
     }
 
     fn native_docker_bake(
@@ -12150,6 +12193,48 @@ bitcoin-processor-app.push=true")
             resolve_host_path(&state, "/__t/x"),
             Some(PathBuf::from("/host/temp/x"))
         );
+    }
+
+    #[test]
+    fn docker_build_push_outputs_input_maps_to_buildx_output() {
+        let temp = temp_dir();
+        fs::create_dir_all(temp.join("work")).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "build".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::DockerBuildPush,
+                inputs: [
+                    ("context".into(), ".".into()),
+                    (
+                        "outputs".into(),
+                        "type=image,push-by-digest=true,name=example/app,push=true".into(),
+                    ),
+                    ("push".into(), "true".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        let calls = &executor.runner().calls;
+        assert!(calls.iter().any(|(program, args)| {
+            program == "docker"
+                && args.starts_with(&["buildx".into(), "build".into()])
+                && args
+                    .contains(&"type=image,push-by-digest=true,name=example/app,push=true".into())
+                && args.contains(&"--output".into())
+                && !args.contains(&"--push".into())
+                && args.contains(&"--metadata-file".into())
+        }));
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
