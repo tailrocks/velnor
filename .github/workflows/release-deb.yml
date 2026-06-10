@@ -142,6 +142,13 @@ jobs:
           set -euo pipefail
           VERSION="${TAG#v}"
           DEB_SRC=$(ls target/${{ matrix.target }}/debian/velnor-runner_*.deb | head -1)
+          # Guard: a deb without the binary is ~4KB (the 0.1.2 incident —
+          # cargo-deb's explicit assets list had dropped the implicit binary).
+          # Require the packaged binary to be present and the deb to be sane.
+          dpkg-deb -c "$DEB_SRC" | grep -q "usr/bin/velnor-runner" \
+            || { echo "deb does not contain usr/bin/velnor-runner" >&2; exit 1; }
+          [ "$(stat -c%s "$DEB_SRC")" -gt 1000000 ] \
+            || { echo "deb suspiciously small: $(stat -c%s "$DEB_SRC") bytes" >&2; exit 1; }
           DEB_DST="velnor-runner-${VERSION}-${{ matrix.target }}.deb"
           cp "$DEB_SRC" "$DEB_DST"
           sha256sum "$DEB_DST" | awk '{print $1}' > "$DEB_DST.sha256"
