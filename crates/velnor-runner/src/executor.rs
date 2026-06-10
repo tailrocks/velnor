@@ -1495,6 +1495,13 @@ where
         let action_state = state.with_env(state.resolve_env(&action.env));
         let release = native_input(action, &action_state, "cosign-release");
         let install_dir = native_input_or(&action_state, action, "install-dir", "$HOME/.cosign");
+        // install-dir is interpolated inside double quotes so $HOME expands
+        // in-shell (the action's documented default) — reject anything that
+        // could escape the quoting or substitute commands.
+        if install_dir.contains(['"', '`', ';', '&', '|', '\n', '\\']) || install_dir.contains("$(")
+        {
+            bail!("cosign-installer install-dir contains shell metacharacters: {install_dir:?}");
+        }
         let script = cosign_installer_script(&release, &install_dir);
         let mut result = self.native_shell(container, &action_state, &script)?;
         // The action adds install-dir to GITHUB_PATH; mirror that by parsing
