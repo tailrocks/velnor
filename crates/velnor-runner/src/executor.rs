@@ -1242,6 +1242,7 @@ where
             NativeActionAdapter::DockerBuildPush => self.native_docker_build_push(action, state),
             NativeActionAdapter::DockerBake => self.native_docker_bake(action, state),
             NativeActionAdapter::Hadolint => self.native_hadolint(_container, action, state),
+            NativeActionAdapter::SetupQemu => self.native_setup_qemu(action, state),
             _ => {
                 bail!(
                     "native action adapter {:?} for step '{}' is declared but not implemented yet",
@@ -1424,6 +1425,62 @@ where
                 ..StepCommandState::default()
             },
         ))
+    }
+
+    /// Native `docker/setup-qemu-action`: installs binfmt handlers via the
+    /// QEMU static-binaries image (exactly what the JS action runs). The
+    /// `cache-image` input is GHA-cache-specific and ignored — the image is
+    /// pulled through the host Docker daemon, which caches it locally.
+    fn native_setup_qemu(
+        &mut self,
+        action: &NativeActionInvocation,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        let action_state = state.with_env(state.resolve_env(&action.env));
+        let image = native_input_or(
+            &action_state,
+            action,
+            "image",
+            "docker.io/tonistiigi/binfmt:latest",
+        );
+        let platforms = native_input_or(&action_state, action, "platforms", "all");
+        let reset = native_input_or(&action_state, action, "reset", "false");
+        if reset.trim() == "true" {
+            let uninstall = vec![
+                "run".to_string(),
+                "--rm".to_string(),
+                "--privileged".to_string(),
+                image.clone(),
+                "--uninstall".to_string(),
+                "qemu-*".to_string(),
+            ];
+            let result = self.run_docker_args(&uninstall)?;
+            if result.code != 0 {
+                return Ok(native_command_result(result, StepCommandState::default()));
+            }
+        }
+        let args = vec![
+            "run".to_string(),
+            "--rm".to_string(),
+            "--privileged".to_string(),
+            image,
+            "--install".to_string(),
+            platforms.clone(),
+        ];
+        let result = self.run_docker_args(&args)?;
+        let mut outputs = BTreeMap::new();
+        outputs.insert("platforms".to_string(), platforms);
+        Ok(native_command_result(
+            result,
+            StepCommandState {
+                outputs,
+                ..StepCommandState::default()
+            },
+        ))
+    }
+
+    fn run_docker_args(&mut self, args: &[String]) -> Result<CommandResult> {
+        self.runner.run("docker", args)
     }
 
     fn native_shell(
@@ -4309,19 +4366,23 @@ fn template_string_value(value: &Value) -> Option<&str> {
 fn job_output_pairs(job_outputs: Option<&Value>) -> Vec<(String, String)> {
     match job_outputs {
         Some(Value::Object(outputs)) => {
-            if outputs
-                .get("type")
-                .or_else(|| outputs.get("Type"))
-                .is_some()
-                && outputs.get("map").or_else(|| outputs.get("Map")).is_some()
-            {
-                return job_output_pairs(outputs.get("map").or_else(|| outputs.get("Map")));
+            // Template-token mapping objects carry the pairs under "map"
+            // (alongside positional metadata like file/line/col, with or
+            // without a "type" tag — GitHub's broker omits "type" on the
+            // wire). Observed live: JobOutputs = {col,file,line,map:[...]}.
+            if let Some(map) = outputs.get("map").or_else(|| outputs.get("Map")) {
+                return job_output_pairs(Some(map));
             }
             outputs
                 .iter()
-                .filter(|(name, _)| !name.eq_ignore_ascii_case("type"))
+                .filter(|(name, _)| {
+                    !name.eq_ignore_ascii_case("type")
+                        && !name.eq_ignore_ascii_case("file")
+                        && !name.eq_ignore_ascii_case("line")
+                        && !name.eq_ignore_ascii_case("col")
+                })
                 .filter_map(|(name, value)| {
-                    job_output_expression(value).map(|value| (name.clone(), value.to_string()))
+                    job_output_expression(value).map(|value| (name.clone(), value))
                 })
                 .collect()
         }
@@ -4337,12 +4398,12 @@ fn job_output_pair_value(value: &Value) -> Option<(String, String)> {
             let value = object.get("Value").or_else(|| object.get("value"))?;
             Some((
                 job_output_name(key)?.to_string(),
-                job_output_expression(value)?.to_string(),
+                job_output_expression(value)?,
             ))
         }
         Value::Array(pair) if pair.len() == 2 => Some((
             job_output_name(&pair[0])?.to_string(),
-            job_output_expression(&pair[1])?.to_string(),
+            job_output_expression(&pair[1])?,
         )),
         _ => None,
     }
@@ -4361,21 +4422,28 @@ fn job_output_name(value: &Value) -> Option<&str> {
     })
 }
 
-fn job_output_expression(value: &Value) -> Option<&str> {
+fn job_output_expression(value: &Value) -> Option<String> {
     if let Some(value) = value.as_str() {
-        return Some(value);
+        return Some(value.to_string());
     }
-    value
-        .as_object()
-        .and_then(|object| {
-            object
-                .get("value")
-                .or_else(|| object.get("Value"))
-                .or_else(|| object.get("expression"))
-                .or_else(|| object.get("Expression"))
-                .or_else(|| object.get("lit"))
-                .or_else(|| object.get("Lit"))
-        })
+    let object = value.as_object()?;
+    // Bare expression tokens ({"expr": "steps.x.outputs.y", ...}) need the
+    // ${{ }} wrapper so resolve_expressions evaluates them lazily — the
+    // broker sends job-output values in exactly this shape.
+    if let Some(expr) = object
+        .get("expr")
+        .or_else(|| object.get("Expr"))
+        .and_then(Value::as_str)
+    {
+        return Some(format!("${{{{ {expr} }}}}"));
+    }
+    object
+        .get("value")
+        .or_else(|| object.get("Value"))
+        .or_else(|| object.get("expression"))
+        .or_else(|| object.get("Expression"))
+        .or_else(|| object.get("lit"))
+        .or_else(|| object.get("Lit"))
         .and_then(job_output_expression)
 }
 
@@ -12013,6 +12081,48 @@ bitcoin-processor-app.push=true")
         assert!(script.contains("> 'hadolint.txt'"));
         assert!(script.contains("Hadolint output saved to: "));
         assert!(script.contains(">&2"));
+    }
+
+    #[test]
+    fn job_output_pairs_parse_broker_template_token_mapping() {
+        // Exact wire shape captured live from a velnor job dump
+        // (publish / validate-and-config on ChainArgos/jackin-agent-brown):
+        // a mapping token with positional metadata and NO top-level "type".
+        let job_outputs = serde_json::json!({
+            "col": 7, "file": 2, "line": 39,
+            "map": [
+                {
+                    "Key": {"col": 7, "file": 2, "line": 39, "lit": "image", "type": 0},
+                    "Value": {"col": 14, "expr": "steps.config.outputs.image", "file": 2, "line": 39, "type": 3}
+                },
+                {
+                    "Key": {"col": 7, "file": 2, "line": 40, "lit": "construct_version", "type": 0},
+                    "Value": {"col": 26, "expr": "steps.config.outputs.construct_version", "file": 2, "line": 40, "type": 3}
+                }
+            ]
+        });
+        let pairs = job_output_pairs(Some(&job_outputs));
+        assert_eq!(
+            pairs,
+            vec![
+                (
+                    "image".to_string(),
+                    "${{ steps.config.outputs.image }}".to_string()
+                ),
+                (
+                    "construct_version".to_string(),
+                    "${{ steps.config.outputs.construct_version }}".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn setup_qemu_adapter_is_registered() {
+        assert_eq!(
+            crate::action::native_action_adapter("docker/setup-qemu-action"),
+            Some(NativeActionAdapter::SetupQemu)
+        );
     }
 
     #[test]
