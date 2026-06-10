@@ -182,21 +182,20 @@ mean anything. Authorized: create + merge PRs autonomously in all repos;
 never remove testing/release correctness while speeding things up.
 
 **ChainArgos/blockchain-nodes** (weakest CI today — biggest wins):
-1. Buildx layer caching: inject `--cache-from/--cache-to
-   type=registry,ref=chainargos/<pkg>:buildcache[,-<arch>],mode=max` through
-   `docker-build.rs` (it already supports extra args); reuse a named builder
-   instead of creating a fresh one per job. Cold real builds today: geth 95
-   min, cardano 97 min, arbitrum 105 min — repeats must drop to minutes.
-2. Replace the 36 copy-pasted jobs (2035 lines) with a `strategy.matrix`
-   package job (+ the 2-stage base chain) — single-sourced lane ternary,
-   per-package concurrency preserved.
-3. Cheap change detection: one plumbing job does all 36 Docker-Hub existence
-   checks (<30 s) and emits the to-build matrix, so a no-op push costs one
-   short job instead of 36 checkouts (~15 min of fleet time today).
-4. `timeout-minutes` on all jobs; workflow-level concurrency; restrict the
-   hourly Renovate churn (it produced 40+ consecutive cancelled runs during
-   the outage) and give it a GitHub-lane fallback so repo automation never
-   dies with the self-hosted fleet.
+1. **[DONE PR #603]** Buildx registry layer caching
+   (`chainargos/<pkg>:buildcache-<arch>`, `mode=max`) opt-in in
+   `docker-build.rs` (BUILDX_CACHE=registry, set workflow-wide); named
+   builder (`bcn-ci`) reused. Cold real builds were geth 95 min / cardano 97
+   / arbitrum 105 — cached-repeat proof lands with the next version bump.
+2. **[DONE PR #603]** 36 copy-pasted jobs (2035 lines) → discovery job +
+   base/build chain + one matrixed leaf job (~290 lines).
+3. **[DONE PR #603]** One Docker-Hub exists-sweep feeds only missing
+   packages into the matrix — validated live: no-op dispatch = ~1 min
+   (22 s sweep, leaf matrix skipped) vs the former 13–17 min fleet sweep.
+4. **[PARTIAL PR #603]** `timeout-minutes: 180` everywhere + workflow-level
+   run-stacking concurrency shipped. Remaining: Renovate hourly churn
+   restriction + GitHub-lane fallback so repo automation survives a fleet
+   outage.
 5. arm64 without QEMU: native arm64 builders (ubuntu-24.04-arm on the GitHub
    lane; Velnor arm64 host later) + per-arch jobs + manifest merge, replacing
    serial QEMU emulation (2–5× tax on compile-heavy images).
@@ -210,10 +209,10 @@ never remove testing/release correctness while speeding things up.
    `lane=both` dispatch compares clean.
 
 **ChainArgos/java-monorepo** (already strong; close the gaps):
-1. Eliminate no-op test jobs: gate the 8 `test-*` jobs at job level on
-   `needs.changes.outputs.*` so unchanged packages schedule nothing (today
-   each still occupies a Velnor slot for ~10–20 s; on lockfile-touch days the
-   9-job fan-out × no-op was the queue collapse multiplier).
+1. **[DONE PR #1384]** No-op test jobs eliminated: the 8 `test-*` jobs gate
+   at job level on the decide expression (verbatim hoist); unchanged
+   packages skip before scheduling. (Cargo registry cache for all compiling
+   jobs landed earlier as PR #1382.)
 2. Pin and binstall tools: `cargo:cargo-nextest = "latest"` compiled from
    source on cache miss → pin version, prefer prebuilt (`ubi:`/binstall
    backend in mise). Same for `cargo:rust-script` in kestra workflow.
