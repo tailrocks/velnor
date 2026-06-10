@@ -101,5 +101,19 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-06-10: Added `docs/master-plan.md` as the top-level goal + execution
+  sequence (operator mandate): Velnor default on both ChainArgos repos with the
+  GitHub lane kept forever; full parity then superiority vs GitHub-hosted;
+  Phase 1 operational bulletproofing (fail-fast credential validation,
+  never-exit resilience, secrets that survive tooling, watchdog/alerting,
+  actionlint, automated tag→deb→apt delivery, GitHub App credential) comes
+  before all other work — driven by the 2026-06-10 fleet outage (env-file
+  token/label wipe → JIT 401s → 0 runners; invalid `release-deb.yml` YAML →
+  apt repo stuck at rc12). Work is judged by correctness against the goal,
+  never by effort/ROI; root-cause fixes over symptom patches; full refactors
+  in scope. Velnor may be expensive; it may not be slow, lossy, or fragile.
+  Dynamic slot autoscaling + org-level JIT (one fleet, multi-repo) and
+  multi-host scale-out are committed direction (master-plan P3).
+
 - 2026-06-03: Established `docs/` as the source of truth; added `docs/mission.md` (fastest, Rust-first, nicer output, cheaper) and `docs/comparison.md` (GitHub-vs-Velnor UI output). Added the `prompts/` goal-prompt system with a fixed run sequence (1: target workflow coverage, 2: GitHub UI parity, 3: fixture proof). Simplified root `README.md`; moved operator commands to `docs/runner-usage.md`.
 - 2026-06-04: Operator authorized direct work on the real target repo `ChainArgos/java-monorepo`. The "Agents stop at the public fixture — never run the real ChainArgos / Jackin repos" rule is now scoped to **unattended Velnor execution / target validation** (still: do not set `VELNOR_REAL_TARGET_MANUAL_CONFIRM=true` or run the Velnor lane on a real repo without operator-provided host access). It does **not** forbid GitHub-hosted CI hygiene on ChainArgos. New prompt `prompts/chainargos-runner-parity.md` (+ checklist) added: **Phase A** repoints ChainArgos workflows from self-hosted `hetzner-sentry-ci` to GitHub-hosted runners and makes every pipeline green (fixing the project itself where self-hosted infra masked real breakage), via autonomous PR + merge; **Phase B** runs the *same* jobs on GitHub-hosted and Velnor lanes in parallel (fixture `compat.yml` pattern — parameterize only `runs-on`), where any Velnor-lane divergence is fixed in Velnor, never in the job (fixture-is-contract applied to a real repo).
