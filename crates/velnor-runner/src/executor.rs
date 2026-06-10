@@ -3196,6 +3196,15 @@ fn resolve_host_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> {
     if let Some(rest) = path.strip_prefix("/github/runner_temp/") {
         return state.temp_host.as_ref().map(|base| base.join(rest));
     }
+    // The job container bind-mounts the host temp dir at /tmp (container.rs),
+    // so /tmp paths written by steps (e.g. publish digest exports under
+    // /tmp/digests) resolve to the same host directory.
+    if path == "/tmp" {
+        return state.temp_host.clone();
+    }
+    if let Some(rest) = path.strip_prefix("/tmp/") {
+        return state.temp_host.as_ref().map(|base| base.join(rest));
+    }
     if path == "/tmp" {
         return state.temp_host.clone();
     }
@@ -12114,6 +12123,32 @@ bitcoin-processor-app.push=true")
                     "${{ steps.config.outputs.construct_version }}".to_string()
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn resolve_host_path_maps_container_tmp_to_temp_host() {
+        // The job container bind-mounts the host temp dir at /tmp; paths a
+        // step writes under /tmp (e.g. publish digest exports) must resolve
+        // for native adapters like upload-artifact. Observed live: brown's
+        // publish digest upload failed with if-no-files-found: error.
+        let state = JobExecutionState::new_with_workspace(
+            &[],
+            &[],
+            Path::new("/host/work"),
+            Path::new("/host/temp"),
+        );
+        assert_eq!(
+            resolve_host_path(&state, "/tmp/digests"),
+            Some(PathBuf::from("/host/temp/digests"))
+        );
+        assert_eq!(
+            resolve_host_path(&state, "/tmp"),
+            Some(PathBuf::from("/host/temp"))
+        );
+        assert_eq!(
+            resolve_host_path(&state, "/__t/x"),
+            Some(PathBuf::from("/host/temp/x"))
         );
     }
 
