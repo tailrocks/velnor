@@ -120,50 +120,43 @@ downstream proof runs.
       runners across 3 daemons.
 - [x] Fix `release-deb.yml` invalid YAML on main; dispatch v0.1.2 deb build.
 - [x] PR java-monorepo#1380 unblocked → merge once all checks green.
-- [ ] Upgrade Sentry to v0.1.2 via `apt-get update && apt-get install
-      velnor-runner` once published; confirm daemons healthy after upgrade.
-      Gate: `velnor-runner --version` = 0.1.2 on Sentry; runners re-register;
-      one Velnor-lane run green per repo.
+- [x] Sentry upgraded via apt (0.1.4 → 0.1.5 with the P1 daemon); all three
+      daemons healthy, fleet re-registered, fixture compat green on both
+      lanes including compare-results, live per-line log streaming verified.
 
 ### Phase 1 — bulletproof operations ("this never happens again")
 
-1. **Fail-fast credential validation** (velnor-runner): on startup and on
-   every JIT 401, classify the token: empty / contains `${` placeholder /
-   wrong shape / valid-shape-but-rejected. Refuse to start the poll loop with
-   an impossible token and say exactly what is wrong and which file to edit.
-   Root cause: silent acceptance of garbage config. Gate: unit tests + manual
-   start with placeholder token produces one precise error, no restart churn.
-2. **Never-exit resilience loop**: replace "exit(1) when 0 usable slots /
-   idle-timeout" with an internal supervised retry (exponential backoff +
-   jitter, forever), per-slot isolation (a panicked slot restarts alone —
-   today a slot panic kills the daemon, `runner.rs:422-427`), and proactive
-   deletion of this daemon's own stale runner registrations at startup.
-   Remove `--idle-timeout-seconds` from the packaged unit. Gate: kill -9 mid
-   job, revoke token temporarily, watch daemon self-heal without systemd
-   restarts; restart counter stays 0 over 24 h.
-3. **Secrets that survive tooling**: move the PAT out of the
-   package-template-adjacent `velnor.env` into `/etc/velnor/secrets.env`
-   (root:root 0600), referenced via a second `EnvironmentFile=` (or systemd
-   `LoadCredential=`); the deb never ships/overwrites that file; `postinst`
-   migrates existing tokens; daemon refuses placeholders (item 1). Gate:
-   `apt install --reinstall` + upgrade leaves the token intact.
-4. **Fleet watchdog + alerting**: systemd `Type=notify` + `WatchdogSec` with
-   `sd_notify` heartbeats from the poll loop; plus a `velnor-runner doctor`
-   probe (and a small timer unit) that checks registered-runner count per
-   configured repo against expected slots and logs/notifies loudly on
-   mismatch. Optional: a scheduled GitHub-side workflow that fails (and thus
-   emails) when repo runner count is 0 for >10 min. Gate: stop a daemon →
-   alert fires within 10 min.
-5. **Lint the workflows that ship Velnor**: add `actionlint` (via mise) to
-   velnor repo CI on every PR/push touching `.github/**`. A YAML-invalid
-   workflow on main must be impossible to merge silently. Gate: CI fails on
-   the exact heredoc mistake from incident #3.
-6. **Release pipeline end-to-end automation**: add `GH_VELNOR_APT_TOKEN`
-   secret (PAT with write on tailrocks/velnor-apt) so tag → deb → apt publish
-   is fully automatic; re-enable the aarch64 deb leg (currently temp-disabled)
-   once green; alert on release-deb failure (it is the upgrade artery). Gate:
-   `git tag vX.Y.Z && git push --tags` ends with the new version installable
-   via `apt-get upgrade` with zero manual steps, amd64 + arm64.
+1. **[DONE 0.1.5] Fail-fast credential validation**: `diagnose_github_token`
+   classifies empty / `${...}` placeholder / implausible shapes; reported on
+   startup, in `systemctl status` (sd_notify STATUS), and on every retry with
+   the file to fix. Kill-tested live on Sentry: placeholder token → unit
+   stays active, NRestarts=0, status line shows the exact problem.
+2. **[DONE 0.1.5] Never-exit resilience loop**: supervised daemon pass with
+   capped exponential backoff + jitter retries forever; slot JIT
+   reconfiguration retries forever instead of killing the slot; failed slot
+   tasks are respawned (one broken slot cannot stop the rest); one-shot modes
+   (`--once`, dry-run) keep fail-fast semantics for tests/tooling.
+   Remaining sub-item: 24 h restart-counter-stays-0 observation.
+3. **[DONE 0.1.5] Secrets that survive tooling**: token lives in
+   `/etc/velnor/secrets.env` (0600, never shipped/touched by the package);
+   `postinst` migrates idempotently (verified live during the 0.1.5 upgrade);
+   units read `velnor.env` then `-secrets.env` (secrets win). Template
+   instances `velnor-daemon@<name>` use `/etc/velnor/<name>.env` +
+   `<name>.secrets.env` — Sentry's three hand-rolled units migrated.
+4. **[PARTIAL 0.1.5] Fleet watchdog**: `Type=notify` + `WatchdogSec=180` +
+   sd_notify READY/STATUS/WATCHDOG live on Sentry. Remaining: a
+   `velnor-runner doctor` probe + timer comparing registered-runner count to
+   expected slots, and/or a GitHub-side scheduled canary that fails loudly
+   when the fleet is gone.
+5. **[DONE] Lint + compile gate**: `ci.yml` (fmt, clippy -D warnings, full
+   test suite, actionlint+shellcheck, ci-required aggregate) with the jackin
+   cache stack, on GitHub-hosted runners.
+6. **[DONE for amd64; arm64 re-enabled pending next tag] Release pipeline
+   end-to-end automation**: proven on v0.1.4/v0.1.5 — tag → CI → deb (binary
+   + size guard) → GitHub release (tar.gz ×4 targets) → velnor-apt upload →
+   signed apt publish → Pages, zero manual steps. aarch64 deb leg re-enabled
+   (vendored OpenSSL removed the cross-apt dependency); proof on the next
+   tag. Remaining: alerting on release-pipeline failure.
 7. **Token strategy** (durable fix for incident #1): move from a personal
    classic PAT to a **GitHub App** installation (org-scoped, runner-admin
    permissions) minting installation tokens in-daemon, or at minimum a
