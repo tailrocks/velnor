@@ -155,7 +155,10 @@ no per-repo drift. **Lane policy (operator, 2026-06-11): exactly three repos are
 ChainArgos/jackin-agent-brown, ChainArgos/java-monorepo,
 ChainArgos/blockchain-nodes. All three default to Velnor, with `github` and
 `both` selectable per run.** Every other estate repo runs GitHub-hosted only
-(the fixture keeps its own both-lanes-by-default contract role). Velnor must
+(the fixture keeps its own both-lanes-by-default contract role) — but all
+repos share the same approaches and code shape, and **Velnor must support
+the full feature surface of every estate repo** so any of them can be
+switched to Velnor at any moment without workflow rewrites. Velnor must
 support the role-action pattern end-to-end for agent-brown (hadolint JS
 action, jackin-role binary download, buildx build with gha/registry caches,
 digest publish + cosign).
