@@ -101,6 +101,14 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-06-11: Docs refreshed to current truth: mission/vision rewritten
+  (drop-in goal achieved, mandates referenced as law), docs/README index
+  updated, runner-usage gains the apt/systemd production section,
+  debian-apt-repo marked implemented, comparison status updated (live
+  streaming verified, per-step numbering fixed), roadmap reframed as the
+  runner-internal implementation reference (master-plan is the plan),
+  prompts/README sequence marked complete.
+
 - 2026-06-11: **Native-adapter completeness mandate** (operator): Velnor
   must not execute JavaScript/remote action bundles as the product path —
   every `uses:` in the estate gets a native Rust adapter pinned to the
