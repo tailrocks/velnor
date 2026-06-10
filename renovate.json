@@ -9,13 +9,17 @@
   "recreateWhen": "always",
   "lockFileMaintenance": {
     "enabled": true,
-    "schedule": ["at any time"]
+    "schedule": [
+      "at any time"
+    ]
   },
   "customManagers": [
     {
       "customType": "regex",
       "description": "mise tool pins in the job image Dockerfile (mise use --global ...)",
-      "managerFilePatterns": ["/^docker\\/job-ubuntu\\.Dockerfile$/"],
+      "managerFilePatterns": [
+        "/^docker\\/job-ubuntu\\.Dockerfile$/"
+      ],
       "matchStrings": [
         "'cargo:cargo-nextest@(?<currentValue>[0-9.]+)'"
       ],
@@ -25,7 +29,9 @@
     {
       "customType": "regex",
       "description": "rust-script pin in the job image Dockerfile",
-      "managerFilePatterns": ["/^docker\\/job-ubuntu\\.Dockerfile$/"],
+      "managerFilePatterns": [
+        "/^docker\\/job-ubuntu\\.Dockerfile$/"
+      ],
       "matchStrings": [
         "'cargo:rust-script@(?<currentValue>[0-9.]+)'"
       ],
@@ -35,7 +41,9 @@
     {
       "customType": "regex",
       "description": "just pin in the job image Dockerfile",
-      "managerFilePatterns": ["/^docker\\/job-ubuntu\\.Dockerfile$/"],
+      "managerFilePatterns": [
+        "/^docker\\/job-ubuntu\\.Dockerfile$/"
+      ],
       "matchStrings": [
         "\\bjust@(?<currentValue>[0-9.]+)"
       ],
@@ -45,7 +53,9 @@
     {
       "customType": "regex",
       "description": "protoc pin in the job image Dockerfile",
-      "managerFilePatterns": ["/^docker\\/job-ubuntu\\.Dockerfile$/"],
+      "managerFilePatterns": [
+        "/^docker\\/job-ubuntu\\.Dockerfile$/"
+      ],
       "matchStrings": [
         "\\bprotoc@(?<currentValue>[0-9.]+)"
       ],
@@ -56,7 +66,9 @@
     {
       "customType": "regex",
       "description": "gh CLI pin in the job image Dockerfile",
-      "managerFilePatterns": ["/^docker\\/job-ubuntu\\.Dockerfile$/"],
+      "managerFilePatterns": [
+        "/^docker\\/job-ubuntu\\.Dockerfile$/"
+      ],
       "matchStrings": [
         "\\bgh@(?<currentValue>[0-9.]+)"
       ],
@@ -67,7 +79,9 @@
     {
       "customType": "regex",
       "description": "sccache pin in the job image Dockerfile",
-      "managerFilePatterns": ["/^docker\\/job-ubuntu\\.Dockerfile$/"],
+      "managerFilePatterns": [
+        "/^docker\\/job-ubuntu\\.Dockerfile$/"
+      ],
       "matchStrings": [
         "ver=\"v(?<currentValue>[0-9.]+)\""
       ],
@@ -78,7 +92,9 @@
     {
       "customType": "regex",
       "description": "mise installer pin in the job image Dockerfile",
-      "managerFilePatterns": ["/^docker\\/job-ubuntu\\.Dockerfile$/"],
+      "managerFilePatterns": [
+        "/^docker\\/job-ubuntu\\.Dockerfile$/"
+      ],
       "matchStrings": [
         "MISE_VERSION=\"v(?<currentValue>[0-9.]+)\""
       ],
@@ -89,12 +105,27 @@
     {
       "customType": "regex",
       "description": "rust toolchain pin in the job image Dockerfile (kept in sync with rust-toolchain.toml by Renovate)",
-      "managerFilePatterns": ["/^docker\\/job-ubuntu\\.Dockerfile$/"],
+      "managerFilePatterns": [
+        "/^docker\\/job-ubuntu\\.Dockerfile$/"
+      ],
       "matchStrings": [
         "\\brust@(?<currentValue>[0-9.]+)"
       ],
       "datasourceTemplate": "github-releases",
       "depNameTemplate": "rust-lang/rust"
+    },
+    {
+      "customType": "regex",
+      "description": "hadolint pin in the job image Dockerfile",
+      "managerFilePatterns": [
+        "/^docker\\/job-ubuntu\\.Dockerfile$/"
+      ],
+      "matchStrings": [
+        "hadolint_ver=\"v(?<currentValue>[0-9.]+)\""
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "hadolint/hadolint",
+      "extractVersionTemplate": "^v(?<version>.*)$"
     }
   ]
 }

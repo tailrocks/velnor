@@ -1241,6 +1241,7 @@ where
             NativeActionAdapter::DockerMetadata => Ok(native_docker_metadata(action, state)),
             NativeActionAdapter::DockerBuildPush => self.native_docker_build_push(action, state),
             NativeActionAdapter::DockerBake => self.native_docker_bake(action, state),
+            NativeActionAdapter::Hadolint => self.native_hadolint(_container, action, state),
             _ => {
                 bail!(
                     "native action adapter {:?} for step '{}' is declared but not implemented yet",
@@ -1361,6 +1362,52 @@ where
     ) -> Result<StepExecutionResult> {
         let result = self.native_shell(container, state, &setup_mold_script())?;
         Ok(native_command_result(result, StepCommandState::default()))
+    }
+
+    /// Native `hadolint/hadolint-action`: runs the hadolint binary preinstalled
+    /// in the job image. hadolint natively reads the same HADOLINT_* /
+    /// NO_COLOR environment variables the marketplace action's Docker image
+    /// sets, so input mapping mirrors the action's `runs.env` block exactly;
+    /// like the action's wrapper script, the findings are exposed as the
+    /// `results` step output and the newline-stripped HADOLINT_RESULTS env.
+    fn native_hadolint(
+        &mut self,
+        container: &JobContainerSpec,
+        action: &NativeActionInvocation,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        let action_state = state.with_env(state.resolve_env(&action.env));
+        let inputs = HadolintInputs {
+            dockerfile: native_input_or(&action_state, action, "dockerfile", "Dockerfile"),
+            config: native_input(action, &action_state, "config"),
+            recursive: native_input_or(&action_state, action, "recursive", "false"),
+            output_file: native_input_or(&action_state, action, "output-file", "/dev/stdout"),
+            no_color: native_input_or(&action_state, action, "no-color", "false"),
+            no_fail: native_input_or(&action_state, action, "no-fail", "false"),
+            verbose: native_input_or(&action_state, action, "verbose", "false"),
+            format: native_input_or(&action_state, action, "format", "tty"),
+            failure_threshold: native_input_or(&action_state, action, "failure-threshold", "info"),
+            override_error: native_input(action, &action_state, "override-error"),
+            override_warning: native_input(action, &action_state, "override-warning"),
+            override_info: native_input(action, &action_state, "override-info"),
+            override_style: native_input(action, &action_state, "override-style"),
+            ignore: native_input(action, &action_state, "ignore"),
+            trusted_registries: native_input(action, &action_state, "trusted-registries"),
+        };
+        let result = self.native_shell(container, &action_state, &hadolint_script(&inputs))?;
+        let findings = result.stdout.trim_end().to_string();
+        let mut outputs = BTreeMap::new();
+        outputs.insert("results".to_string(), findings.clone());
+        let mut env = BTreeMap::new();
+        env.insert("HADOLINT_RESULTS".to_string(), findings.replace('\n', ""));
+        Ok(native_command_result(
+            result,
+            StepCommandState {
+                outputs,
+                env,
+                ..StepCommandState::default()
+            },
+        ))
     }
 
     fn native_setup_just(
@@ -2061,6 +2108,80 @@ export SCCACHE_GHA_ENABLED=false
 sccache --start-server 2>/dev/null || true
 "#
     .to_string()
+}
+
+/// Inputs of `hadolint/hadolint-action`, defaults matching its action.yml.
+struct HadolintInputs {
+    dockerfile: String,
+    config: String,
+    recursive: String,
+    output_file: String,
+    no_color: String,
+    no_fail: String,
+    verbose: String,
+    format: String,
+    failure_threshold: String,
+    override_error: String,
+    override_warning: String,
+    override_info: String,
+    override_style: String,
+    ignore: String,
+    trusted_registries: String,
+}
+
+/// Shell script mirroring hadolint-action's wrapper: hadolint reads the
+/// HADOLINT_* env vars natively; `-c` is the only flag the wrapper passes.
+/// Like the wrapper, findings are captured and then printed (stdout stays
+/// pure findings — the version banner and the output-file note go to
+/// stderr). POSIX-sh compatible (the job container runs scripts via sh).
+fn hadolint_script(inputs: &HadolintInputs) -> String {
+    let mut script = String::from("set -u\n");
+    for (name, value) in [
+        ("NO_COLOR", &inputs.no_color),
+        ("HADOLINT_NOFAIL", &inputs.no_fail),
+        ("HADOLINT_VERBOSE", &inputs.verbose),
+        ("HADOLINT_FORMAT", &inputs.format),
+        ("HADOLINT_FAILURE_THRESHOLD", &inputs.failure_threshold),
+        ("HADOLINT_OVERRIDE_ERROR", &inputs.override_error),
+        ("HADOLINT_OVERRIDE_WARNING", &inputs.override_warning),
+        ("HADOLINT_OVERRIDE_INFO", &inputs.override_info),
+        ("HADOLINT_OVERRIDE_STYLE", &inputs.override_style),
+        ("HADOLINT_IGNORE", &inputs.ignore),
+    ] {
+        script.push_str(&format!("export {name}={}\n", shell_single_quote(value)));
+    }
+    // The wrapper unsets an empty trusted-registries list (hadolint rejects
+    // an empty value).
+    if !inputs.trusted_registries.trim().is_empty() {
+        script.push_str(&format!(
+            "export HADOLINT_TRUSTED_REGISTRIES={}\n",
+            shell_single_quote(&inputs.trusted_registries)
+        ));
+    }
+    script.push_str("hadolint --version >&2\n");
+    let config_flags = if inputs.config.trim().is_empty() {
+        String::new()
+    } else {
+        format!("-c {} ", shell_single_quote(&inputs.config))
+    };
+    let dockerfile = shell_single_quote(&inputs.dockerfile);
+    if inputs.recursive.trim() == "true" {
+        // `find -exec ... {} +` propagates a non-zero hadolint exit.
+        script.push_str(&format!(
+            "out=$(find . -type f -name {dockerfile} -not -path '*/.git/*' -exec hadolint {config_flags}-- {{}} +)\n"
+        ));
+    } else {
+        script.push_str(&format!("out=$(hadolint {config_flags}-- {dockerfile})\n"));
+    }
+    script.push_str("code=$?\nprintf '%s\\n' \"$out\"\n");
+    if inputs.output_file != "/dev/stdout" && !inputs.output_file.trim().is_empty() {
+        let output = shell_single_quote(&inputs.output_file);
+        script.push_str(&format!(
+            "printf '%s\\n' \"$out\" > {output}\necho \"Hadolint output saved to: \"{output} >&2\n"
+        ));
+    }
+    script.push_str("exit $code\n");
+    script
 }
 
 fn setup_mold_script() -> String {
@@ -11826,6 +11947,80 @@ bitcoin-processor-app.push=true")
     fn step_log_lines_keeps_skipped_steps_empty() {
         let lines = step_log_lines("Skipped action", "", "", &[], "", true, &[]);
         assert!(lines.is_empty());
+    }
+
+    // ── hadolint_script ───────────────────────────────────────────────────
+
+    fn hadolint_inputs_defaults() -> HadolintInputs {
+        HadolintInputs {
+            dockerfile: "Dockerfile".into(),
+            config: String::new(),
+            recursive: "false".into(),
+            output_file: "/dev/stdout".into(),
+            no_color: "false".into(),
+            no_fail: "false".into(),
+            verbose: "false".into(),
+            format: "tty".into(),
+            failure_threshold: "info".into(),
+            override_error: String::new(),
+            override_warning: String::new(),
+            override_info: String::new(),
+            override_style: String::new(),
+            ignore: String::new(),
+            trusted_registries: String::new(),
+        }
+    }
+
+    #[test]
+    fn hadolint_script_default_invocation() {
+        let script = hadolint_script(&hadolint_inputs_defaults());
+        assert!(script.contains("export HADOLINT_FAILURE_THRESHOLD='info'"));
+        assert!(script.contains("out=$(hadolint -- 'Dockerfile')"));
+        assert!(
+            !script.contains("HADOLINT_TRUSTED_REGISTRIES"),
+            "empty trusted-registries must stay unset: {script}"
+        );
+        assert!(
+            !script.contains("saved to"),
+            "default output goes to stdout only"
+        );
+        assert!(script.ends_with("exit $code\n"));
+    }
+
+    #[test]
+    fn hadolint_script_maps_inputs() {
+        let mut inputs = hadolint_inputs_defaults();
+        inputs.dockerfile = "./Dockerfile".into();
+        inputs.config = "./.hadolint.yaml".into();
+        inputs.ignore = "DL3004".into();
+        inputs.failure_threshold = "error".into();
+        inputs.recursive = "true".into();
+        inputs.trusted_registries = "docker.io".into();
+        let script = hadolint_script(&inputs);
+        assert!(script.contains("-c './.hadolint.yaml'"));
+        assert!(script.contains("export HADOLINT_IGNORE='DL3004'"));
+        assert!(script.contains("export HADOLINT_FAILURE_THRESHOLD='error'"));
+        assert!(script.contains("export HADOLINT_TRUSTED_REGISTRIES='docker.io'"));
+        assert!(script.contains("find . -type f -name './Dockerfile'"));
+        assert!(script.contains("-exec hadolint -c './.hadolint.yaml' -- {} +"));
+    }
+
+    #[test]
+    fn hadolint_script_output_file_writes_and_notes_on_stderr() {
+        let mut inputs = hadolint_inputs_defaults();
+        inputs.output_file = "hadolint.txt".into();
+        let script = hadolint_script(&inputs);
+        assert!(script.contains("> 'hadolint.txt'"));
+        assert!(script.contains("Hadolint output saved to: "));
+        assert!(script.contains(">&2"));
+    }
+
+    #[test]
+    fn hadolint_adapter_is_registered() {
+        assert_eq!(
+            crate::action::native_action_adapter("hadolint/hadolint-action"),
+            Some(NativeActionAdapter::Hadolint)
+        );
     }
 
     // ── setup_mold_script ─────────────────────────────────────────────────
