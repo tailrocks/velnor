@@ -136,7 +136,7 @@ Scope (the ten-repo estate, audited and enforced):
 | jackin-project/jackin-the-architect | agent role; per-tool layers + cache mounts; PR/publish caches bridged (role-action#57 + PR #113) |
 | jackin-project/jackin-agent-smith | agent role; NOT YET AUDITED |
 | jackin-project/jackin-sentinel | agent role; NOT YET AUDITED |
-| ChainArgos/jackin-agent-brown | agent role; **dual-lane: GitHub-hosted + Velnor** (the only role repo on both); NOT YET AUDITED |
+| ChainArgos/jackin-agent-brown | agent role; **dual-lane, Velnor default** (the only role repo on both); NOT YET AUDITED |
 | ChainArgos/java-monorepo | registry cache (PR #1382) + sccache + job-level gating (PR #1384) + kestra layer cache (PR #1386) |
 | ChainArgos/blockchain-nodes | registry layer cache + exists-sweep (PR #603); cached-build proof pending next version bump |
 | tailrocks/holla | NOT YET AUDITED |
@@ -151,10 +151,14 @@ anywhere is propagated to every applicable repo. The four agent-role repos
 (jackin-the-architect, jackin-agent-smith, jackin-sentinel,
 jackin-agent-brown) must use the shared `jackin-project/jackin-role-action`
 (composite action + reusable publish workflow) with identical configuration —
-no per-repo drift. jackin-agent-brown additionally runs its pipeline on both
-lanes (GitHub-hosted + Velnor), so Velnor must support the role-action
-pattern end-to-end (hadolint JS action, jackin-role binary download,
-buildx build with gha/registry caches, digest publish + cosign).
+no per-repo drift. **Lane policy (operator, 2026-06-11): exactly three repos are dual-lane —
+ChainArgos/jackin-agent-brown, ChainArgos/java-monorepo,
+ChainArgos/blockchain-nodes. All three default to Velnor, with `github` and
+`both` selectable per run.** Every other estate repo runs GitHub-hosted only
+(the fixture keeps its own both-lanes-by-default contract role). Velnor must
+support the role-action pattern end-to-end for agent-brown (hadolint JS
+action, jackin-role binary download, buildx build with gha/registry caches,
+digest publish + cosign).
 
 ## 4. Hard constraints (inherited, non-negotiable)
 
