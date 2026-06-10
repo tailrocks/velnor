@@ -2059,7 +2059,12 @@ fn start_step_log_publisher(
     let job_id = job.job_id.clone();
 
     tokio::spawn(async move {
-        let mut line_counter: i64 = 1;
+        // Per-step line counters: the feed protocol's startLine is the line
+        // number within the STEP's log (actions/runner numbers per timeline
+        // record), not a job-global counter — a global counter makes every
+        // step after the first claim line numbers far past its real content
+        // and the UI misplaces or drops the live lines.
+        let mut step_line_counters: BTreeMap<String, i64> = BTreeMap::new();
         let mut change_order: i64 = 1000; // Offset from start-event change_orders
         let mut streamed_steps = BTreeSet::new();
 
@@ -2148,8 +2153,9 @@ fn start_step_log_publisher(
                     }
                 }
                 if let Some(ws) = ws_conn.as_mut() {
+                    let start_line = *step_line_counters.entry(log.step_id.clone()).or_insert(1);
                     eprintln!(
-                        "[feed] Sending {} lines for step {}",
+                        "[feed] Sending {} lines for step {} (from line {start_line})",
                         lines.len(),
                         &log.step_id[..log.step_id.len().min(8)]
                     );
@@ -2160,7 +2166,7 @@ fn start_step_log_publisher(
                         ws,
                         &log.step_id,
                         timestamped.clone(),
-                        Some(line_counter),
+                        Some(start_line),
                         Some(&plan_id),
                         Some(&job_id),
                     )
@@ -2178,7 +2184,7 @@ fn start_step_log_publisher(
                                     &mut ws2,
                                     &log.step_id,
                                     timestamped,
-                                    Some(line_counter),
+                                    Some(start_line),
                                     Some(&plan_id),
                                     Some(&job_id),
                                 )
@@ -2195,8 +2201,8 @@ fn start_step_log_publisher(
                         }
                     }
                 }
+                *step_line_counters.entry(log.step_id.clone()).or_insert(1) += line_count;
             }
-            line_counter += line_count;
 
             if live_chunk {
                 continue;
