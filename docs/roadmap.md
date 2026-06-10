@@ -8,7 +8,7 @@ the source of truth for current implementation work.
 
 ## Hard Rules
 
-**Fixture is the contract.** `donbeave/velnor-actions-fixture` defines the exact
+**Fixture is the contract.** `tailrocks/velnor-actions-fixture` defines the exact
 GitHub Actions patterns Velnor must support. Never simplify or remove fixture
 content to work around a Velnor gap. Fix Velnor instead.
 
@@ -416,7 +416,7 @@ Required path:
 
 Current fixture repo:
 
-- `donbeave/velnor-actions-fixture`
+- `tailrocks/velnor-actions-fixture`
 
 Future fixture expansion should cover:
 

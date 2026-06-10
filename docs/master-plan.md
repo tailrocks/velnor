@@ -91,7 +91,7 @@ and passed; `release-deb.yml` YAML fixed on main and v0.1.2 rebuilt/dispatched.
 
 - Rust-first, tokio, latest stable toolchain; `actions/runner` as protocol
   truth; latest protocol path only; fixture
-  (`donbeave/velnor-actions-fixture`) is the contract — fix Velnor, never the
+  (`tailrocks/velnor-actions-fixture`) is the contract — fix Velnor, never the
   fixture.
 - Both lanes forever: never delete the GitHub-hosted path from any workflow.
 - mise is the only tool installer in target workflows.

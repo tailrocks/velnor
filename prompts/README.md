@@ -82,7 +82,7 @@ Bound by the [mission](../docs/mission.md) and the repository hard rules
 - **Rust-first, fastest, cheapest, nicest** — optimize for the latest Rust; beat
   GitHub-hosted on speed/cost; output equal-or-better.
 - **Fixture is the contract** — fix Velnor, never weaken
-  `donbeave/velnor-actions-fixture`.
+  `tailrocks/velnor-actions-fixture`.
 - **`actions/runner` is the protocol source of truth** —
   <https://github.com/actions/runner>.
 - **Latest protocol path only** — Results Service over timeline, V2 over

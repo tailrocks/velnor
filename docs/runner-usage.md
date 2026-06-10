@@ -177,7 +177,7 @@ docker run --rm \
   -v "$PWD/.velnor-config:/config" \
   -v "$PWD/.velnor-job-dumps:/work/.velnor-job-dumps" \
   velnor-runner:local daemon \
-    --url https://github.com/donbeave/velnor-actions-fixture \
+    --url https://github.com/tailrocks/velnor-actions-fixture \
     --pat "$GITHUB_TOKEN" \
     --name velnor-target-mvp \
     --labels velnor-target-mvp \
@@ -252,7 +252,7 @@ work directory.
 
 ## Public fixture repository
 
-Public fixture: <https://github.com/donbeave/velnor-actions-fixture>
+Public fixture: <https://github.com/tailrocks/velnor-actions-fixture>
 
 A small public repository used to prove Velnor against real GitHub Actions
 scheduling before running the large target repositories. Paired workflow lanes:
