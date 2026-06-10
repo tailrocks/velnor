@@ -143,11 +143,6 @@ jobs:
             --title "v${VERSION}" \
             --generate-notes
 
-  # Homebrew support can be added later similar to holla (requires a tailrocks/homebrew-velnor or similar tap + token).
-  # The job structure is kept for configuration similarity with holla.
-  homebrew:
-    if: false  # Disabled until Homebrew tap is set up for velnor-runner. See holla's release.yml for the pattern.
-    needs: [check-version, release]
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "Homebrew update step would go here (modeled exactly after holla's release.yml)"
+  # Homebrew: to be added modeled exactly on holla's release.yml `homebrew` job
+  # once the tailrocks/homebrew-velnor tap and its push token exist
+  # (docs/master-plan.md P1.8).

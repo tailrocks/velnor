@@ -392,9 +392,7 @@ impl OAuthClient {
                     .open(p)?;
                 f.write_all(c)
             };
-            if let Err(e) = write_0600(&cfg_path, cfg.as_bytes()) {
-                return Err(e);
-            }
+            write_0600(&cfg_path, cfg.as_bytes())?;
             if let Err(e) = write_0600(&body_path, body.as_bytes()) {
                 let _ = std::fs::remove_file(&cfg_path);
                 return Err(e);
@@ -417,7 +415,7 @@ impl OAuthClient {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (text, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
         let status: u16 = status_str.trim().parse().unwrap_or(0);
-        let ok = status >= 200 && status < 300;
+        let ok = (200..300).contains(&status);
         if !ok && status != 400 {
             bail!("OAuth token request failed: status={status}, body={text}");
         }
@@ -556,9 +554,7 @@ impl RegistrationClient {
                         .open(p)?;
                     f.write_all(c)
                 };
-                if let Err(e) = write_0600(&cfg_path, cfg.as_bytes()) {
-                    return Err(e);
-                }
+                write_0600(&cfg_path, cfg.as_bytes())?;
                 if let Err(e) = write_0600(&body_path, body2.as_bytes()) {
                     let _ = std::fs::remove_file(&cfg_path);
                     return Err(e);
@@ -740,9 +736,7 @@ pub async fn curl_json_request(
             f.write_all(content)
         };
 
-        if let Err(e) = write_secret(&cfg_path, cfg.as_bytes()) {
-            return Err(e);
-        }
+        write_secret(&cfg_path, cfg.as_bytes())?;
 
         if has_body {
             if let Some(body) = json_body {

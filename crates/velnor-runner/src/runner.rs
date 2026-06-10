@@ -266,7 +266,7 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
 }
 
 async fn remove_existing_jit_config_for_replace(dir: &Path, pat: Option<&str>) -> Result<()> {
-    if let Some(stored) = config::load(dir).ok() {
+    if let Ok(stored) = config::load(dir) {
         if let (Some(pat), Some(agent_id)) = (pat, stored.settings.agent_id) {
             let scope = GitHubScope::parse(&stored.settings.github_url)?;
             // Best-effort: a runner that is mid-job returns 422 ("currently
@@ -1173,6 +1173,7 @@ async fn poll_broker_message(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_v2_message(
     broker: &BrokerClient,
     run_service: &RunServiceClient,
@@ -2172,6 +2173,7 @@ fn kill_job_container(container_name: &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_script_job(
     config_dir: &std::path::Path,
     work_dir: Option<PathBuf>,
@@ -3511,7 +3513,7 @@ fn checkout_step_lines(plan: &CheckoutPlan, exit_code: i32, trace: &[String]) ->
     let display_url = plan
         .clone_url
         .split('@')
-        .last()
+        .next_back()
         .unwrap_or(&plan.clone_url)
         .trim_end_matches('/');
     lines.push(format!("Syncing repository: {display_url}"));
@@ -3636,6 +3638,7 @@ async fn upload_job_log_artifact(job: &AgentJobRequestMessage, step_logs: &[Step
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn complete_run_service_job(
     client: &RunServiceClient,
     run_service_url: &str,
@@ -4100,9 +4103,9 @@ fn daemon_slot_config_dirs(config_base: &Path, slots: usize) -> Result<Vec<PathB
 }
 
 async fn remove_one(args: &RemoveArgs, dir: &Path) -> Result<()> {
-    let stored = config::load(&dir).ok();
+    let stored = config::load(dir).ok();
 
-    if !args.local_only && args.pat.is_some() {
+    if let Some(pat) = args.pat.as_ref().filter(|_| !args.local_only) {
         let stored = stored
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("local runner config is required for remote remove"))?;
@@ -4112,7 +4115,7 @@ async fn remove_one(args: &RemoveArgs, dir: &Path) -> Result<()> {
             .agent_id
             .ok_or_else(|| anyhow::anyhow!("local runner config missing agent_id"))?;
         RegistrationClient::new()?
-            .delete_runner(&scope, args.pat.as_ref().unwrap(), agent_id)
+            .delete_runner(&scope, pat, agent_id)
             .await?;
         println!("Deleted or confirmed absent remote JIT runner id {agent_id}.");
     } else if !args.local_only {
@@ -4121,7 +4124,7 @@ async fn remove_one(args: &RemoveArgs, dir: &Path) -> Result<()> {
         );
     }
 
-    if config::remove(&dir)? {
+    if config::remove(dir)? {
         println!("Removed local runner config from {}", dir.display());
     } else {
         println!("No local runner config at {}", dir.display());
@@ -4146,7 +4149,7 @@ pub async fn status(args: StatusArgs) -> Result<()> {
 }
 
 fn status_one(args: &StatusArgs, dir: &Path) -> Result<()> {
-    let stored = config::load(&dir)?;
+    let stored = config::load(dir)?;
     println!("Config dir: {}", dir.display());
     println!("GitHub URL: {}", stored.settings.github_url);
     println!("Runner name: {}", stored.settings.agent_name);
