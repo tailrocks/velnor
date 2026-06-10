@@ -7,6 +7,11 @@ direction change in [`../AGENTS.md`](../AGENTS.md)) so nothing goes stale.
 
 Start here:
 
+- [Master plan](master-plan.md): the top-level goal + execution sequence across
+  Velnor and the target/reference repositories — current state, the 2026-06-10
+  incident review and the bulletproofing it mandates, and the phased plan
+  (operations hardening → GitHub-lane optimization → runner core performance →
+  UX parity → default-on with continuous proof).
 - [Mission](mission.md): what Velnor optimizes for — fastest, Rust-first, nicer
   output, cheaper. The four pillars every prompt serves.
 - [Vision](vision.md): high-level product goal and Phase 0 scope.

@@ -11,6 +11,7 @@ coding agent (Claude Code or Codex). Each prompt is two files:
 ## Source of truth: always defer to `docs/`
 
 Every prompt defers to [`../docs/`](../docs/) for direction and correctness:
+[master plan (top-level goal + sequence)](../docs/master-plan.md),
 [mission](../docs/mission.md), [vision](../docs/vision.md),
 [roadmap (the plan)](../docs/roadmap.md), and
 [UI comparison](../docs/comparison.md). If a prompt and the docs disagree, the
