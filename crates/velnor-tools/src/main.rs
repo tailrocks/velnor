@@ -1928,10 +1928,10 @@ fn read_target_actions(root: &Path) -> Result<Vec<TargetAction>> {
         return Ok(result);
     }
     for path in collect_yaml_files(&actions)? {
-        if !path
+        if path
             .file_stem()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name == "action")
+            .is_none_or(|name| name != "action")
         {
             continue;
         }
@@ -3744,9 +3744,9 @@ fn fixture_smoke(root: &Path, args: FixtureSmokeArgs) -> Result<()> {
     );
 
     let mut daemon_args_with_pat: Vec<String> = daemon_args;
-    for i in 0..daemon_args_with_pat.len() {
-        if daemon_args_with_pat[i] == "$GITHUB_TOKEN" {
-            daemon_args_with_pat[i] = pat.clone();
+    for arg in &mut daemon_args_with_pat {
+        if arg == "$GITHUB_TOKEN" {
+            *arg = pat.clone();
         }
     }
 
@@ -3989,9 +3989,9 @@ fn target_smoke(root: &Path, args: TargetSmokeArgs) -> Result<()> {
     );
 
     let mut daemon_args_with_pat: Vec<String> = daemon_args;
-    for i in 0..daemon_args_with_pat.len() {
-        if daemon_args_with_pat[i] == "$GITHUB_TOKEN" {
-            daemon_args_with_pat[i] = pat.clone();
+    for arg in &mut daemon_args_with_pat {
+        if arg == "$GITHUB_TOKEN" {
+            *arg = pat.clone();
         }
     }
 
@@ -4225,16 +4225,12 @@ fn check_matrix_parity_job(
         Some(config) => {
             if let Some(entries) = config.as_sequence() {
                 // Inline sequence — check for both lanes directly
-                let has_github = entries.iter().any(|e| {
-                    e.get("lane")
-                        .and_then(|l| l.as_str())
-                        .map_or(false, |l| l == "github")
-                });
-                let has_velnor = entries.iter().any(|e| {
-                    e.get("lane")
-                        .and_then(|l| l.as_str())
-                        .map_or(false, |l| l == "velnor")
-                });
+                let has_github = entries
+                    .iter()
+                    .any(|e| e.get("lane").and_then(|l| l.as_str()) == Some("github"));
+                let has_velnor = entries
+                    .iter()
+                    .any(|e| e.get("lane").and_then(|l| l.as_str()) == Some("velnor"));
                 if !has_github {
                     issues.push(format!("{ctx}: matrix.config missing lane: github entry"));
                 }
@@ -4325,11 +4321,11 @@ fn find_hardcoded_lane_strings(steps_yaml: &str, ctx: &str) -> Vec<String> {
             let before = cleaned[..abs]
                 .chars()
                 .next_back()
-                .map_or(true, |c| !c.is_alphanumeric() && c != '_' && c != '-');
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-');
             let after = cleaned[abs + lane.len()..]
                 .chars()
                 .next()
-                .map_or(true, |c| !c.is_alphanumeric() && c != '_' && c != '-');
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != '-');
             if before && after {
                 // Get surrounding context for the error message
                 let start = abs.saturating_sub(30);
@@ -4453,9 +4449,9 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
 
     #[test]
     fn smoke_plan_fixture_dispatch_defaults_match_shell_contract() {
-        assert_eq!(fixture_smoke_dispatch(None, None).unwrap(), true);
-        assert_eq!(fixture_smoke_dispatch(None, Some(123)).unwrap(), false);
-        assert_eq!(fixture_smoke_dispatch(Some(true), Some(123)).unwrap(), true);
+        assert!(fixture_smoke_dispatch(None, None).unwrap());
+        assert!(!fixture_smoke_dispatch(None, Some(123)).unwrap());
+        assert!(fixture_smoke_dispatch(Some(true), Some(123)).unwrap());
         assert!(fixture_smoke_dispatch(Some(false), None).is_err());
     }
 

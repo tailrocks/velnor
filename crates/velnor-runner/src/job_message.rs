@@ -391,7 +391,7 @@ mod tests {
         assert_eq!(message.job_id, JOB_ID);
         assert_eq!(message.plan.plan_id, PLAN_ID);
         assert_eq!(message.timeline.id, TIMELINE_ID);
-        assert_eq!(message.variables["system.github.token"].is_secret, true);
+        assert!(message.variables["system.github.token"].is_secret);
         assert_eq!(
             message
                 .system_connection()

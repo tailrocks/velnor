@@ -594,6 +594,7 @@ where
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn execute_ordered_steps_with_completion(
         &mut self,
         container: &JobContainerSpec,
@@ -622,6 +623,7 @@ where
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_ordered_steps_in_started_container(
         &mut self,
         container: &JobContainerSpec,
@@ -1041,17 +1043,15 @@ where
     ) -> Result<StepExecutionResult> {
         self.start_job_environment(container)?;
 
-        let result = (|| {
-            self.execute_javascript_action_in_started_container(
-                container,
-                step_id,
-                action,
-                &action.main_container_path,
-                &[],
-                temp_host,
-                &JobExecutionState::default(),
-            )
-        })();
+        let result = self.execute_javascript_action_in_started_container(
+            container,
+            step_id,
+            action,
+            &action.main_container_path,
+            &[],
+            temp_host,
+            &JobExecutionState::default(),
+        );
 
         if let Err(error) = self.cleanup(container) {
             eprintln!("Warning: cleanup failed after JavaScript action: {error:#}");
@@ -1059,6 +1059,7 @@ where
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_javascript_action_in_started_container(
         &mut self,
         container: &JobContainerSpec,
@@ -11762,7 +11763,10 @@ bitcoin-processor-app.push=true")
         let inputs = BTreeMap::from([
             ("username".to_string(), "chainargos".to_string()),
             ("password".to_string(), "secret-value".to_string()),
-            ("ssh-key".to_string(), "-----BEGIN OPENSSH PRIVATE KEY-----".to_string()),
+            (
+                "ssh-key".to_string(),
+                "-----BEGIN OPENSSH PRIVATE KEY-----".to_string(),
+            ),
         ]);
         let lines = action_log_prelude(&inputs, &[], &state);
         let joined = lines.join("\n");

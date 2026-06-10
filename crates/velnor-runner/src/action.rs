@@ -398,8 +398,8 @@ fn step_id(step: &ActionStep, index: usize) -> String {
     step.context_name
         .as_deref()
         .filter(|n| !n.is_empty() && !n.starts_with("__"))
-        .or_else(|| step.id.as_deref())
-        .or_else(|| step.name.as_deref())
+        .or(step.id.as_deref())
+        .or(step.name.as_deref())
         .map(sanitize_segment)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| format!("action{}", index + 1))
@@ -1246,7 +1246,7 @@ fn replace_composite_bare_tokens(
 
 fn inputs_by_descending_name_len(inputs: &BTreeMap<String, String>) -> Vec<(&String, &String)> {
     let mut pairs = inputs.iter().collect::<Vec<_>>();
-    pairs.sort_by(|(left, _), (right, _)| right.len().cmp(&left.len()));
+    pairs.sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
     pairs
 }
 

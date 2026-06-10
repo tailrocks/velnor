@@ -248,6 +248,7 @@ fn checkout_container_path(workspace_host: &Path, destination: &Path) -> Option<
     Some(format!("/__w/{relative}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn fetch_git_ref<R>(
     runner: &mut R,
     clone_url: &str,
@@ -300,7 +301,7 @@ where
         "protocol.version=2".to_string(),
     ];
     if let Some(token) = token {
-        fetch.extend(["-c".to_string(), git_basic_auth_header(&token)]);
+        fetch.extend(["-c".to_string(), git_basic_auth_header(token)]);
     }
     fetch.extend(["fetch".to_string(), "--prune".to_string()]);
     match fetch_depth {
@@ -419,7 +420,7 @@ where
             "config".to_string(),
             "--local".to_string(),
             git_extraheader_key(clone_url),
-            git_basic_auth_value(&token),
+            git_basic_auth_value(token),
         ],
         log,
     )
@@ -465,8 +466,8 @@ pub(crate) fn checkout_step_id(step: &ActionStep, index: usize) -> String {
     step.context_name
         .as_deref()
         .filter(|n| !n.is_empty() && !n.starts_with("__"))
-        .or_else(|| step.id.as_deref())
-        .or_else(|| step.name.as_deref())
+        .or(step.id.as_deref())
+        .or(step.name.as_deref())
         .map(sanitize_segment)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| format!("checkout{}", index + 1))

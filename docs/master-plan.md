@@ -163,6 +163,16 @@ downstream proof runs.
    long-lived fine-grained PAT dedicated to Velnor with expiry monitoring in
    the doctor probe. Gate: registration works with the new credential; doctor
    warns ≥14 days before expiry.
+8. **Release parity with holla** (operator mandate, model:
+   tailrocks/holla v0.4.2): every `v*` tag publishes (a) `tar.gz` + sha256 for
+   macOS arm64/x86_64 and Linux arm64/x86_64 (release.yml — already built this
+   way), (b) the `.deb` for latest Debian via velnor-apt (release-deb.yml),
+   and (c) a Homebrew formula in `tailrocks/homebrew-velnor` (job currently
+   stubbed `if: false` — needs the tap repo + a push token, modeled on
+   holla's release.yml/homebrew-holla). Velnor's own CI/release always runs on
+   GitHub-hosted runners. Gate: `brew install tailrocks/velnor/velnor-runner`
+   and `apt install velnor-runner` both install the tagged version with no
+   manual steps.
 
 ### Phase 2 — make the GitHub-hosted lane as fast as possible (reference parity baseline)
 
