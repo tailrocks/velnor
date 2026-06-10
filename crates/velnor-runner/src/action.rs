@@ -130,6 +130,7 @@ pub enum NativeActionAdapter {
     DockerBuildPush,
     DockerBake,
     Hadolint,
+    SetupQemu,
 }
 
 pub fn native_action_adapter(repository: &str) -> Option<NativeActionAdapter> {
@@ -154,6 +155,7 @@ pub fn native_action_adapter(repository: &str) -> Option<NativeActionAdapter> {
         "docker/build-push-action" => Some(NativeActionAdapter::DockerBuildPush),
         "docker/bake-action" => Some(NativeActionAdapter::DockerBake),
         "hadolint/hadolint-action" => Some(NativeActionAdapter::Hadolint),
+        "docker/setup-qemu-action" => Some(NativeActionAdapter::SetupQemu),
         _ => None,
     }
 }
@@ -2997,6 +2999,7 @@ runs:
             ),
             ("docker/bake-action", NativeActionAdapter::DockerBake),
             ("hadolint/hadolint-action", NativeActionAdapter::Hadolint),
+            ("docker/setup-qemu-action", NativeActionAdapter::SetupQemu),
         ];
 
         for (repository, adapter) in adapters {
