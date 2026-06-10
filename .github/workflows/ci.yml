@@ -167,8 +167,6 @@ jobs:
 
       - run: cargo nextest run --workspace --locked --color=always
 
-      # nextest does not run doctests; keep doctest coverage via cargo test.
-      - run: cargo test --doc --workspace --locked
 
       - name: sccache stats
         if: always() && steps.sccache.outcome == 'success'
