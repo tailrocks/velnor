@@ -37,7 +37,22 @@ pub struct CheckoutPlan {
 
 impl CheckoutPlan {
     pub fn requires_runtime_context(&self) -> bool {
-        if self.condition.is_some() {
+        // GitHub's job message sets `Condition: "success()"` on every step, so
+        // a trivial default condition must not force the checkout onto the
+        // runtime-deferred path — local composite actions are resolved from the
+        // workspace right after the eager checkouts, and a job whose only
+        // checkout is deferred can never resolve them (observed live on the
+        // fixture: "action metadata not found in …/.github/actions/…").
+        if self
+            .condition
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|condition| {
+                !condition.is_empty()
+                    && !condition.eq_ignore_ascii_case("success()")
+                    && !condition.eq_ignore_ascii_case("always()")
+            })
+        {
             return true;
         }
         self.version
@@ -1368,6 +1383,44 @@ mod tests {
         assert!(
             plans[0].requires_runtime_context(),
             "conditional checkout must stay in normal step order"
+        );
+    }
+
+    #[test]
+    fn checkout_with_default_success_condition_is_eager() {
+        // GitHub sets `Condition: "success()"` on every step in the job
+        // message; the trivial default must not defer the checkout, or jobs
+        // using local composite actions can never resolve them.
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Compat",
+            "requestId": 1,
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "tailrocks/velnor-actions-fixture",
+                    "version": "abc123",
+                    "properties": { "cloneUrl": "https://github.com/tailrocks/velnor-actions-fixture.git" }
+                }]
+            },
+            "steps": [
+                {
+                    "reference": { "type": "Repository", "name": "actions/checkout" },
+                    "condition": "success()"
+                }
+            ]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(plans.len(), 1);
+        assert!(
+            !plans[0].requires_runtime_context(),
+            "default success() condition must keep the checkout eager"
         );
     }
 
