@@ -33,5 +33,6 @@ async fn main() -> Result<()> {
         Command::Run(args) => runner::run(args).await,
         Command::Remove(args) => runner::remove(args).await,
         Command::Status(args) => runner::status(args).await,
+        Command::Doctor(args) => runner::doctor(args).await,
     }
 }

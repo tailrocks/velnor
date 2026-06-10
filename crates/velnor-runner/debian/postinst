@@ -35,6 +35,12 @@ case "$1" in
       for unit in $(systemctl list-units --no-legend --plain 'velnor-daemon@*.service' 2>/dev/null | awk '{print $1}'); do
         systemctl try-restart "$unit" || true
       done
+      # Fleet health probe: every 10 minutes, fails loudly when 0 runners are
+      # online. Instances: systemctl enable --now velnor-doctor@<name>.timer
+      systemctl enable --now velnor-doctor.timer || true
+      for unit in $(systemctl list-units --no-legend --plain 'velnor-daemon@*.service' 2>/dev/null | awk '{print $1}' | sed 's/^velnor-daemon@//; s/\.service$//'); do
+        systemctl enable --now "velnor-doctor@${unit}.timer" || true
+      done
     fi
     echo "velnor-runner installed. Set GITHUB_TOKEN in /etc/velnor/secrets.env (0600),"
     echo "VELNOR_URL etc. in /etc/velnor/velnor.env, then:  sudo systemctl start velnor-daemon"

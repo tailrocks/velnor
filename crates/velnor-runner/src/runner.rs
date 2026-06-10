@@ -31,7 +31,7 @@ use crate::{
         checkout_plans, checkout_step_id, cleanup_checkout_credentials, configure_safe_directory,
         CheckoutPlan,
     },
-    cli::{ConfigureArgs, DaemonArgs, PreflightArgs, RemoveArgs, RunArgs, StatusArgs},
+    cli::{ConfigureArgs, DaemonArgs, DoctorArgs, PreflightArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     executor::{
         DockerScriptExecutor, ExecutableStep, ProcessCommandRunner, StepLog, StepStartEvent,
@@ -4322,6 +4322,81 @@ async fn remove_one(args: &RemoveArgs, dir: &Path) -> Result<()> {
         println!("Removed local runner config from {}", dir.display());
     } else {
         println!("No local runner config at {}", dir.display());
+    }
+    Ok(())
+}
+
+/// Fleet health probe: list this daemon's registered runners on GitHub and
+/// fail (non-zero exit) when none are online, so a systemd timer surfaces a
+/// dead fleet loudly instead of jobs queueing in silence (master-plan P1.4).
+pub async fn doctor(args: DoctorArgs) -> Result<()> {
+    let Some(pat) = args.pat.as_deref().filter(|p| !p.trim().is_empty()) else {
+        if let Some(problem) = diagnose_github_token(args.pat.as_deref()) {
+            bail!("doctor cannot list runners: {problem}");
+        }
+        bail!("doctor cannot list runners: GITHUB_TOKEN is not set");
+    };
+    if let Some(problem) = diagnose_github_token(Some(pat)) {
+        bail!("doctor cannot list runners: {problem}");
+    }
+
+    let scope = GitHubScope::parse(&args.url)?;
+    let runners = RegistrationClient::new()?
+        .list_runners(&scope, pat)
+        .await
+        .context("list runners for doctor probe")?;
+
+    let slot_prefix = format!("{}-slot-", args.name);
+    let mine: Vec<_> = runners
+        .iter()
+        .filter(|runner| {
+            runner
+                .name
+                .as_deref()
+                .is_some_and(|name| name == args.name || name.starts_with(&slot_prefix))
+        })
+        .collect();
+    let online = mine
+        .iter()
+        .filter(|runner| runner.status.as_deref() == Some("online"))
+        .count();
+    let busy = mine
+        .iter()
+        .filter(|runner| runner.busy == Some(true))
+        .count();
+
+    println!(
+        "doctor: {} — {online}/{} expected runner(s) online ({} registered, {busy} busy) for prefix '{}'",
+        args.url, args.slots, mine.len(), args.name
+    );
+    for runner in &mine {
+        println!(
+            "  {} [{}{}]",
+            runner.name.as_deref().unwrap_or("?"),
+            runner.status.as_deref().unwrap_or("unknown"),
+            if runner.busy == Some(true) {
+                ", busy"
+            } else {
+                ""
+            }
+        );
+    }
+
+    if online == 0 {
+        bail!(
+            "FLEET DOWN: 0 of {} expected runner(s) online for {} (prefix '{}'). \
+             Check `systemctl status velnor-daemon*` and the GITHUB_TOKEN in \
+             /etc/velnor/*secrets.env.",
+            args.slots,
+            args.url,
+            args.name
+        );
+    }
+    if online < args.slots {
+        eprintln!(
+            "WARNING: only {online}/{} expected runner(s) online — fleet degraded.",
+            args.slots
+        );
     }
     Ok(())
 }

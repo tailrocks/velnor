@@ -24,6 +24,28 @@ pub enum Command {
     Remove(RemoveArgs),
     /// Print local runner configuration status.
     Status(StatusArgs),
+    /// Probe GitHub for this daemon's registered runners and fail loudly when
+    /// the fleet is gone (run from a systemd timer for alerting).
+    Doctor(DoctorArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    /// Repository, organization, or enterprise URL the daemon registers against.
+    #[arg(long)]
+    pub url: String,
+
+    /// Runner base name (slots register as <name>-slot-N).
+    #[arg(long, default_value = "velnor")]
+    pub name: String,
+
+    /// Expected number of runner slots.
+    #[arg(long, default_value_t = 1)]
+    pub slots: usize,
+
+    /// GitHub token used to list runners (same credential as the daemon).
+    #[arg(long, env = "GITHUB_TOKEN")]
+    pub pat: Option<String>,
 }
 
 #[derive(Debug, Args)]
