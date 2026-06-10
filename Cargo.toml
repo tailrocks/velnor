@@ -11,7 +11,9 @@ repository = "https://github.com/tailrocks/velnor"
 anyhow = "1.0.98"
 base64 = "0.22.1"
 clap = { version = "4.5.38", features = ["derive", "env"] }
-jsonwebtoken = "10.0.0"
+# rust_crypto: jsonwebtoken >=10.4 requires exactly one crypto-provider feature
+# or OAuth assertion signing panics at runtime.
+jsonwebtoken = { version = "10.0.0", default-features = false, features = ["rust_crypto", "use_pem"] }
 # native-tls-vendored: build OpenSSL from source so zigbuild cross/deb builds are
 # hermetic (no host multiarch openssl headers; also unblocks the aarch64 deb leg).
 reqwest = { version = "0.12.23", default-features = false, features = ["json", "native-tls", "native-tls-vendored", "blocking"] }
