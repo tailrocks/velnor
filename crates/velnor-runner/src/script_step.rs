@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::{
     command_files::{parse_command_file, FileCommand},
     container::Shell,

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::{
     checkout::fetch_git_ref,
     executor::{render_context_expressions, CommandRunner},
