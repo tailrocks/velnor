@@ -21,7 +21,7 @@ clap = { version = "4.5.38", features = ["derive", "env"] }
 jsonwebtoken = { version = "10.0.0", default-features = false, features = ["rust_crypto", "use_pem"] }
 # native-tls-vendored: build OpenSSL from source so zigbuild cross/deb builds are
 # hermetic (no host multiarch openssl headers; also unblocks the aarch64 deb leg).
-reqwest = { version = "0.12.23", default-features = false, features = ["json", "native-tls", "native-tls-vendored", "blocking"] }
+reqwest = { version = "0.13.0", default-features = false, features = ["json", "native-tls", "native-tls-vendored", "blocking"] }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 rsa = { version = "0.9.8", features = ["pem"] }
 serde = { version = "1.0.219", features = ["derive"] }
