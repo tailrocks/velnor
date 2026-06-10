@@ -134,9 +134,9 @@ Scope (the ten-repo estate, audited and enforced):
 |---|---|
 | jackin-project/jackin | **pipeline source of truth.** 4-layer stack + sccache; cache-quota eviction fix in PR #563 (bench merge + nextest fallback ladder) |
 | jackin-project/jackin-the-architect | agent role; per-tool layers + cache mounts; PR/publish caches bridged (role-action#57 + PR #113) |
-| jackin-project/jackin-agent-smith | agent role; NOT YET AUDITED |
-| jackin-project/jackin-sentinel | agent role; NOT YET AUDITED |
-| ChainArgos/jackin-agent-brown | agent role; **dual-lane, Velnor default** (the only role repo on both); NOT YET AUDITED |
+| jackin-project/jackin-agent-smith | agent role; caching mandate applied (PR #67: registry-warm CI, gitleaks + Renovate caches) |
+| jackin-project/jackin-sentinel | agent role; caching mandate applied (PR #7, identical to smith) |
+| ChainArgos/jackin-agent-brown | agent role; **dual-lane, Velnor default — SHIPPED PR #89** (validate green on Velnor with the native hadolint adapter, 0.1.7); caching mandate applied; publish-on-Velnor proof in flight |
 | ChainArgos/java-monorepo | registry cache (PR #1382) + sccache + job-level gating (PR #1384) + kestra layer cache (PR #1386) |
 | ChainArgos/blockchain-nodes | registry layer cache + exists-sweep (PR #603); cached-build proof pending next version bump |
 | tailrocks/holla | NOT YET AUDITED |
