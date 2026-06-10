@@ -7,6 +7,11 @@ edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/tailrocks/velnor"
 
+# Strip at link time: cross-built .debs cannot run the host `strip` on a
+# foreign-arch ELF (cargo deb is invoked with --no-strip).
+[profile.release]
+strip = "symbols"
+
 [workspace.dependencies]
 anyhow = "1.0.98"
 base64 = "0.22.1"
