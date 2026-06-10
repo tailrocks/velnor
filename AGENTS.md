@@ -101,9 +101,12 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
-- 2026-06-11: **Universal caching mandate** (operator hard rule, master-plan
-  §3a): everything cacheable must be cached in every pipeline of the
-  nine-repo estate (jackin, jackin-the-architect, jackin-agent-smith,
+- 2026-06-11: **Universal caching + performance mandate** (operator hard
+  rule, master-plan §3a): everything cacheable must be cached in every
+  pipeline of the nine-repo estate; rerun-idempotency is the acceptance test
+  (rerunning a just-finished pipeline must re-download/recompile nothing);
+  anything parallelizable runs in parallel; pipelines are iteratively tuned
+  until the maximum the tooling allows. Estate: (jackin, jackin-the-architect, jackin-agent-smith,
   jackin-sentinel, java-monorepo, blockchain-nodes, holla, velnor,
   velnor-actions-fixture) — sccache on every compiling job, cargo
   registry/target caches, docker layer cache-from/to on every build, apt

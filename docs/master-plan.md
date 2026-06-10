@@ -116,6 +116,19 @@ estate must cache:
 - Anything downloaded repeatedly (LFS objects, SDKs, collections, pip) gets
   an actions/cache entry keyed on its lockfile/OID.
 
+**Acceptance test — rerun idempotency:** re-running a pipeline that just
+finished on the same commit must hit caches for effectively everything: no
+crate downloads, no dependency compilation walls, no docker layer rebuilds,
+no tool re-installs. Any re-download/recompile on an unchanged rerun is a
+defect to root-cause (wrong key, evicted cache, missing restore-keys, cold
+backend) and fix — iterate until the maximum the tooling allows.
+
+**Performance-first rule:** CI/CD speed is a first-priority mandate, not a
+nice-to-have. Anything parallelizable runs in parallel; anything sequential
+gets challenged; every pipeline is aggressively tuned (and re-tuned) for the
+fastest result the tools can deliver. Velnor itself is designed under this
+rule — if maximum performance is not yet reached, keep iterating.
+
 Scope (all nine, audited and enforced):
 | Repo | Status |
 |---|---|
