@@ -53,14 +53,18 @@ ENV HOME=/root \
 
 RUN mkdir -p /opt/mise/bin && \
     curl -fsSL https://mise.run | MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
-    mise use --global rust@1.96.0 'cargo:cargo-nextest@latest' 'cargo:rust-script@0.36.0' just@1.51.0 protoc@latest && \
+    # gh: GitHub-hosted runner images preinstall the GitHub CLI and estate
+    # scripts rely on it (e.g. jackin-role-action's download script) —
+    # drop-in parity requires it in the job image too.
+    mise use --global rust@1.96.0 'cargo:cargo-nextest@latest' 'cargo:rust-script@0.36.0' just@1.51.0 protoc@latest gh@latest && \
     mise reshim && \
     rustup component add rustfmt clippy && \
     mise exec -- rustc --version && \
     mise exec -- cargo nextest --version && \
     mise exec -- rust-script --version && \
     mise exec -- just --version && \
-    mise exec -- protoc --version
+    mise exec -- protoc --version && \
+    mise exec -- gh --version
 
 RUN ver="v0.15.0" && \
     case "$(uname -m)" in \
