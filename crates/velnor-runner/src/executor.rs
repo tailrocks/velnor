@@ -1243,6 +1243,9 @@ where
             NativeActionAdapter::DockerBake => self.native_docker_bake(action, state),
             NativeActionAdapter::Hadolint => self.native_hadolint(_container, action, state),
             NativeActionAdapter::SetupQemu => self.native_setup_qemu(action, state),
+            NativeActionAdapter::CosignInstaller => {
+                self.native_cosign_installer(_container, action, state)
+            }
             _ => {
                 bail!(
                     "native action adapter {:?} for step '{}' is declared but not implemented yet",
@@ -1474,6 +1477,42 @@ where
             result,
             StepCommandState {
                 outputs,
+                ..StepCommandState::default()
+            },
+        ))
+    }
+
+    /// Native `sigstore/cosign-installer`: the job image preinstalls a pinned
+    /// cosign at /usr/local/bin; when the requested release matches (or is the
+    /// action default) it is used directly, otherwise the requested version is
+    /// downloaded from the official GitHub release into install-dir.
+    fn native_cosign_installer(
+        &mut self,
+        container: &JobContainerSpec,
+        action: &NativeActionInvocation,
+        state: &JobExecutionState,
+    ) -> Result<StepExecutionResult> {
+        let action_state = state.with_env(state.resolve_env(&action.env));
+        let release = native_input(action, &action_state, "cosign-release");
+        let install_dir = native_input_or(&action_state, action, "install-dir", "$HOME/.cosign");
+        let script = cosign_installer_script(&release, &install_dir);
+        let mut result = self.native_shell(container, &action_state, &script)?;
+        // The action adds install-dir to GITHUB_PATH; mirror that by parsing
+        // the resolved directory marker (install-dir may contain $HOME).
+        let mut path = Vec::new();
+        let mut kept = Vec::new();
+        for line in result.stdout.lines() {
+            if let Some(dir) = line.strip_prefix("__VELNOR_COSIGN_DIR__") {
+                path.push(dir.to_string());
+            } else {
+                kept.push(line.to_string());
+            }
+        }
+        result.stdout = kept.join("\n");
+        Ok(native_command_result(
+            result,
+            StepCommandState {
+                path,
                 ..StepCommandState::default()
             },
         ))
@@ -2282,6 +2321,44 @@ fn hadolint_script(inputs: &HadolintInputs) -> String {
     }
     script.push_str("exit $code\n");
     script
+}
+
+/// POSIX-sh script for the native cosign-installer adapter. The preinstalled
+/// /usr/local/bin/cosign satisfies any request whose version matches; a
+/// different requested release is downloaded from sigstore's GitHub release.
+fn cosign_installer_script(release: &str, install_dir: &str) -> String {
+    let release = release.trim();
+    let want = shell_single_quote(release.trim_start_matches('v'));
+    // install_dir may contain $HOME by contract (the action default) — expand
+    // in-shell, so single-quoting must not apply to the whole value.
+    let dir = install_dir.trim().replace('\'', "'\"'\"'");
+    format!(
+        r#"set -u
+WANT={want}
+DIR="{dir}"
+mkdir -p "$DIR"
+have=""
+if command -v cosign >/dev/null 2>&1; then
+  have=$(cosign version 2>/dev/null | sed -n 's/^GitVersion:[[:space:]]*v\{{0,1\}}//p' | head -1)
+fi
+if [ -n "$have" ] && {{ [ -z "$WANT" ] || [ "$have" = "$WANT" ]; }}; then
+  ln -sf "$(command -v cosign)" "$DIR/cosign"
+  echo "cosign $have (preinstalled)"
+else
+  ver="${{WANT:-$have}}"
+  if [ -z "$ver" ]; then echo "no cosign available and no version requested" >&2; exit 1; fi
+  case "$(uname -m)" in
+    x86_64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *) echo "unsupported arch $(uname -m) for cosign" >&2; exit 1 ;;
+  esac
+  curl -fsSL -o "$DIR/cosign" "https://github.com/sigstore/cosign/releases/download/v${{ver}}/cosign-linux-${{arch}}"
+  chmod 0755 "$DIR/cosign"
+  echo "cosign v${{ver}} installed to $DIR"
+fi
+echo "__VELNOR_COSIGN_DIR__$DIR"
+"#
+    )
 }
 
 fn setup_mold_script() -> String {
@@ -12235,6 +12312,26 @@ bitcoin-processor-app.push=true")
                 && args.contains(&"--metadata-file".into())
         }));
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn cosign_installer_script_prefers_preinstalled_and_downloads_on_mismatch() {
+        let script = cosign_installer_script("v3.1.1", "$HOME/.cosign");
+        assert!(script.contains("WANT='3.1.1'"));
+        assert!(script.contains("DIR=\"$HOME/.cosign\""));
+        assert!(script.contains("command -v cosign"));
+        assert!(script.contains(
+            "https://github.com/sigstore/cosign/releases/download/v${ver}/cosign-linux-${arch}"
+        ));
+        assert!(script.contains("__VELNOR_COSIGN_DIR__"));
+    }
+
+    #[test]
+    fn cosign_installer_adapter_is_registered() {
+        assert_eq!(
+            crate::action::native_action_adapter("sigstore/cosign-installer"),
+            Some(NativeActionAdapter::CosignInstaller)
+        );
     }
 
     #[test]

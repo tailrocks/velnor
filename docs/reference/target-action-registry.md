@@ -64,6 +64,7 @@ routing markers, not behavior pins.
 | `crazy-max/ghaction-github-runtime` | v4 | TS | [master](https://github.com/crazy-max/ghaction-github-runtime) | exports `ACTIONS_*` runtime env |
 | `renovatebot/github-action` | v46 | TS+Docker | [main](https://github.com/renovatebot/github-action) | runs renovate image, token masking, `RENOVATE_*` env |
 | `docker/setup-qemu-action` | v3 | TS | [master](https://github.com/docker/setup-qemu-action) | binfmt install via the QEMU static image (`docker run --rm --privileged <image> --install <platforms>`), reset support, platforms output; cache-image is GHA-specific and ignored |
+| `sigstore/cosign-installer` | v4 | composite (pwsh) | [main](https://github.com/sigstore/cosign-installer) | native install: preinstalled pinned cosign in the job image, version-mismatch download from the official release, install-dir on PATH |
 | `hadolint/hadolint-action` | v3 | Docker | [master](https://github.com/hadolint/hadolint-action) | hadolint binary preinstalled in the job image; `HADOLINT_*` env mapping, `-c` config, recursive find, `results` output + `HADOLINT_RESULTS` env (agent-role repos via jackin-role-action) |
 
 ## Docker family

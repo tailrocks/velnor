@@ -131,6 +131,7 @@ pub enum NativeActionAdapter {
     DockerBake,
     Hadolint,
     SetupQemu,
+    CosignInstaller,
 }
 
 pub fn native_action_adapter(repository: &str) -> Option<NativeActionAdapter> {
@@ -156,6 +157,7 @@ pub fn native_action_adapter(repository: &str) -> Option<NativeActionAdapter> {
         "docker/bake-action" => Some(NativeActionAdapter::DockerBake),
         "hadolint/hadolint-action" => Some(NativeActionAdapter::Hadolint),
         "docker/setup-qemu-action" => Some(NativeActionAdapter::SetupQemu),
+        "sigstore/cosign-installer" => Some(NativeActionAdapter::CosignInstaller),
         _ => None,
     }
 }
@@ -3000,6 +3002,10 @@ runs:
             ("docker/bake-action", NativeActionAdapter::DockerBake),
             ("hadolint/hadolint-action", NativeActionAdapter::Hadolint),
             ("docker/setup-qemu-action", NativeActionAdapter::SetupQemu),
+            (
+                "sigstore/cosign-installer",
+                NativeActionAdapter::CosignInstaller,
+            ),
         ];
 
         for (repository, adapter) in adapters {

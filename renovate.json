@@ -126,6 +126,19 @@
       "datasourceTemplate": "github-releases",
       "depNameTemplate": "hadolint/hadolint",
       "extractVersionTemplate": "^v(?<version>.*)$"
+    },
+    {
+      "customType": "regex",
+      "description": "cosign pin in the job image Dockerfile",
+      "managerFilePatterns": [
+        "/^docker\\/job-ubuntu\\.Dockerfile$/"
+      ],
+      "matchStrings": [
+        "cosign_ver=\"v(?<currentValue>[0-9.]+)\""
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "sigstore/cosign",
+      "extractVersionTemplate": "^v(?<version>.*)$"
     }
   ]
 }
