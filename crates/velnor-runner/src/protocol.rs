@@ -451,8 +451,14 @@ fn build_client_assertion(credentials: &OAuthJwtCredentials) -> Result<String> {
         sub: credentials.client_id.clone(),
         aud: credentials.authorization_url.clone(),
         jti: Uuid::new_v4().to_string(),
-        nbf: now,
-        exp: now + 300,
+        // Backdate the whole 300s validity window by 120s: a host clock
+        // running ahead of GitHub's (skew) must not reject every OAuth
+        // exchange while other API calls still work. The assertion is used
+        // immediately, so trading future validity (180s left) for skew
+        // tolerance is free; the 300s total lifetime stays within GitHub's
+        // accepted assertion lifetime.
+        nbf: now.saturating_sub(120),
+        exp: now.saturating_sub(120) + 300,
     };
     let header = Header::new(Algorithm::RS256);
     let key = EncodingKey::from_rsa_pem(credentials.private_key_pem.as_bytes())
@@ -603,31 +609,50 @@ impl RegistrationClient {
         Err(last_err)
     }
 
+    /// List every runner registration in scope. Paginated (100/page): the
+    /// default 30-item page silently truncates fleets — doctor counts and
+    /// orphan-cleanup-by-name must see ALL runners or they misjudge state.
     pub async fn list_runners(&self, scope: &GitHubScope, pat: &str) -> Result<Vec<ListedRunner>> {
-        let response = self
-            .http
-            .get(scope.runners_url()?)
-            .bearer_auth(pat)
-            .header(USER_AGENT, RUNNER_USER_AGENT)
-            .header(ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await
-            .context("send list runners request")?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            bail!("list runners request failed: status={status}, body={body}");
-        }
         #[derive(Deserialize)]
         struct Page {
+            total_count: Option<u64>,
             runners: Vec<ListedRunner>,
         }
-        let page: Page = response
-            .json()
-            .await
-            .context("parse list runners response")?;
-        Ok(page.runners)
+        let base = scope.runners_url()?;
+        let mut all = Vec::new();
+        let mut page_number = 1u32;
+        loop {
+            let mut url = base.clone();
+            url.query_pairs_mut()
+                .append_pair("per_page", "100")
+                .append_pair("page", &page_number.to_string());
+            let response = self
+                .http
+                .get(url)
+                .bearer_auth(pat)
+                .header(USER_AGENT, RUNNER_USER_AGENT)
+                .header(ACCEPT, "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .send()
+                .await
+                .context("send list runners request")?;
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                bail!("list runners request failed: status={status}, body={body}");
+            }
+            let page: Page = response
+                .json()
+                .await
+                .context("parse list runners response")?;
+            let fetched = page.runners.len();
+            all.extend(page.runners);
+            let total = page.total_count.unwrap_or(all.len() as u64);
+            if fetched < 100 || all.len() as u64 >= total {
+                return Ok(all);
+            }
+            page_number += 1;
+        }
     }
 
     /// Look up one runner registration by id. `Ok(None)` means GitHub no
@@ -925,6 +950,12 @@ pub fn classify_broker_poll(http_status: u16, body: &str) -> BrokerPollClass {
     BrokerPollClass::Error
 }
 
+/// Completion must retry transport failures, 5xx, and curl status-0; other
+/// 4xx (auth, validation, conflict) will not change on retry.
+pub fn is_retriable_completion_status(status: u16) -> bool {
+    !(400..500).contains(&status) || status == 408 || status == 429
+}
+
 /// Decode a GET /actions/runners/{id} response: `Ok(None)` only on a definite
 /// 404 (registration gone); other failures are errors so transient API trouble
 /// is never mistaken for a deleted runner.
@@ -954,6 +985,12 @@ impl BrokerClient {
             base_url: slash_url(server_url_v2)?,
             bearer_token: bearer_token.into(),
         })
+    }
+
+    /// Current broker base URL (post-migration aware), for rebuilding the
+    /// client with refreshed credentials.
+    pub fn base_url_str(&self) -> String {
+        self.base_url.to_string()
     }
 
     pub async fn create_session(&self, session: &TaskAgentSession) -> Result<TaskAgentSession> {
@@ -1097,19 +1134,56 @@ impl RunServiceClient {
         serde_json::from_str(&text).context("parse renew run-service job response")
     }
 
+    /// Report the job result. Retried with backoff on transport failures and
+    /// 5xx: a finished job's outcome must never be lost to one transient
+    /// error — GitHub would mark the job "runner lost communication" while
+    /// its side effects already happened.
     pub async fn complete_job(
         &self,
         run_service_url: &str,
         completion: RunServiceCompleteJob,
     ) -> Result<()> {
+        const MAX_ATTEMPTS: u32 = 6;
         let url = run_service_complete_job_url(run_service_url)?;
         let body = serde_json::to_string(&completion).context("serialize complete job request")?;
-        let (status, text) =
-            curl_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
-        if !(200..300).contains(&status) {
-            bail!("complete run-service job failed: status={status}, body={text}");
+        let mut attempt: u32 = 1;
+        loop {
+            let outcome = curl_json_request(
+                "POST",
+                url.as_str(),
+                &self.bearer_token,
+                Some(body.clone()),
+                30,
+            )
+            .await;
+            let retriable = match &outcome {
+                Ok((status, _)) if (200..300).contains(status) => return Ok(()),
+                Ok((status, _)) => is_retriable_completion_status(*status),
+                Err(_) => true,
+            };
+            if attempt >= MAX_ATTEMPTS || !retriable {
+                return match outcome {
+                    Ok((status, text)) => {
+                        bail!("complete run-service job failed: status={status}, body={text}")
+                    }
+                    Err(error) => Err(error).context("complete run-service job request"),
+                };
+            }
+            let delay =
+                std::time::Duration::from_secs(5u64.saturating_mul(1 << (attempt - 1)).min(60));
+            match &outcome {
+                Ok((status, _)) => eprintln!(
+                    "complete job attempt {attempt}/{MAX_ATTEMPTS} failed (status={status}); retrying in {}s",
+                    delay.as_secs()
+                ),
+                Err(error) => eprintln!(
+                    "complete job attempt {attempt}/{MAX_ATTEMPTS} failed ({error:#}); retrying in {}s",
+                    delay.as_secs()
+                ),
+            }
+            tokio::time::sleep(delay).await;
+            attempt += 1;
         }
-        Ok(())
     }
 }
 
@@ -3258,6 +3332,22 @@ mod tests {
         assert!(parse_runner_lookup(500, "boom").is_err());
         assert!(parse_runner_lookup(0, "").is_err());
         assert!(parse_runner_lookup(401, "bad credentials").is_err());
+    }
+
+    #[test]
+    fn completion_retry_classification() {
+        // Transport/5xx/curl-0 retry; throttling retries.
+        assert!(is_retriable_completion_status(0));
+        assert!(is_retriable_completion_status(500));
+        assert!(is_retriable_completion_status(502));
+        assert!(is_retriable_completion_status(408));
+        assert!(is_retriable_completion_status(429));
+        // Deterministic 4xx must not retry.
+        assert!(!is_retriable_completion_status(400));
+        assert!(!is_retriable_completion_status(401));
+        assert!(!is_retriable_completion_status(404));
+        assert!(!is_retriable_completion_status(409));
+        assert!(!is_retriable_completion_status(422));
     }
     use rsa::{pkcs8::DecodePrivateKey, traits::PrivateKeyParts};
 

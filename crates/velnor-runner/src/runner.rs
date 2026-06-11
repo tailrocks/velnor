@@ -100,6 +100,10 @@ struct BrokerCancellationContext {
     broker: BrokerClient,
     session_id: String,
     disable_update: bool,
+    /// Runner config for refreshing OAuth credentials mid-job: a job can
+    /// outlive the ~1 h token, and the cancellation poller must keep working
+    /// for the job's whole duration.
+    stored: StoredRunnerConfig,
 }
 
 #[derive(Default)]
@@ -457,20 +461,35 @@ fn credential_scheme(token_schema: &str) -> Result<CredentialScheme> {
     }
 }
 
+/// Marker for failures that happen before the runner ever talks to GitHub's
+/// broker (preflight, local config, OAuth exchange). The slot's registration
+/// is unaffected by these — the daemon must NOT delete + re-register on them,
+/// or a persistent local fault (docker down, clock skew, disk full) turns
+/// into a registration churn storm that exhausts the PAT rate limit
+/// fleet-wide within minutes.
+#[derive(Debug, thiserror::Error)]
+#[error("local runner failure (GitHub registration unaffected): {0}")]
+pub struct LocalRunnerFailure(#[source] anyhow::Error);
+
+fn local_failure(error: anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(LocalRunnerFailure(error))
+}
+
 pub async fn run(args: RunArgs) -> Result<()> {
     if args.complete_noop && args.execute_scripts {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
     }
 
     let dir = config::config_dir(args.config_dir.clone())?;
-    preflight_before_executable_run(&args, &dir)?;
-    let stored = config::load(&dir)?;
-    let agent_id = stored
-        .settings
-        .agent_id
-        .ok_or_else(|| anyhow::anyhow!("runner is not configured: missing agent_id"))?;
-    let token = oauth_access_token(&stored).await?;
-    ensure_v2_runner_settings(&stored)?;
+    preflight_before_executable_run(&args, &dir).map_err(local_failure)?;
+    let stored = config::load(&dir).map_err(local_failure)?;
+    let agent_id = stored.settings.agent_id.ok_or_else(|| {
+        local_failure(anyhow::anyhow!(
+            "runner is not configured: missing agent_id"
+        ))
+    })?;
+    let token = oauth_access_token(&stored).await.map_err(local_failure)?;
+    ensure_v2_runner_settings(&stored).map_err(local_failure)?;
     run_v2(args, dir, stored, agent_id, token).await
 }
 
@@ -604,9 +623,31 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         let daemon_args = args.clone();
         let config_base = config_base.clone();
         slot_tasks.spawn(async move {
-            let result = run_daemon_slot(daemon_args, config_base, slot_index, slots)
-                .await
-                .with_context(|| format!("daemon slot-{slot_index} failed"));
+            // catch_unwind keeps the slot index attached to a panic, so the
+            // supervisor can respawn exactly the panicked slot instead of
+            // silently losing capacity until the whole set drains.
+            use futures_util::FutureExt as _;
+            let result = std::panic::AssertUnwindSafe(run_daemon_slot(
+                daemon_args,
+                config_base,
+                slot_index,
+                slots,
+            ))
+            .catch_unwind()
+            .await;
+            let result = match result {
+                Ok(result) => result.with_context(|| format!("daemon slot-{slot_index} failed")),
+                Err(panic) => {
+                    let panic_message = panic
+                        .downcast_ref::<&str>()
+                        .map(|s| (*s).to_string())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "non-string panic payload".to_string());
+                    Err(anyhow::anyhow!(
+                        "daemon slot-{slot_index} task panicked: {panic_message}"
+                    ))
+                }
+            };
             (slot_index, result)
         });
     };
@@ -684,6 +725,60 @@ fn supervised_retry_delay(attempt: u32) -> Duration {
     Duration::from_secs(capped + jitter)
 }
 
+/// Per-slot retry backoff: 5s doubling to 10 minutes, with slot-index salt so
+/// the slots of one daemon (same PID!) never retry or reconnect in lockstep.
+fn slot_retry_delay(attempt: u32, slot_index: usize) -> Duration {
+    let base = 5u64.saturating_mul(1u64 << attempt.saturating_sub(1).min(7));
+    let capped = base.min(600);
+    let jitter = (slot_index as u64 * 7 + std::process::id() as u64) % 17;
+    Duration::from_secs(capped + jitter)
+}
+
+/// Minimum free disk space below which a slot parks instead of registering
+/// runners whose jobs are doomed.
+const DISK_MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Returns a problem description when any of the slot's writable roots is
+/// low on space. Best-effort (`df` failures are treated as healthy — a
+/// broken probe must not park the fleet).
+fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<String> {
+    let mut roots: Vec<&Path> = vec![config_base];
+    if let Some(work_dir) = work_dir {
+        roots.push(work_dir);
+    }
+    for root in roots {
+        if let Some(free) = free_space_bytes(root) {
+            if free < DISK_MIN_FREE_BYTES {
+                return Some(format!(
+                    "low disk space at {} ({} MiB free, need {} MiB)",
+                    root.display(),
+                    free / (1024 * 1024),
+                    DISK_MIN_FREE_BYTES / (1024 * 1024)
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Free bytes on the filesystem holding `path`, via `df -Pk` (POSIX output,
+/// no extra crate). `None` when the probe itself fails.
+fn free_space_bytes(path: &Path) -> Option<u64> {
+    let probe = if path.exists() {
+        path
+    } else {
+        path.parent().filter(|parent| parent.exists())?
+    };
+    let output = Command::new("df").arg("-Pk").arg(probe).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout.lines().nth(1)?;
+    let available_kib: u64 = line.split_whitespace().nth(3)?.parse().ok()?;
+    Some(available_kib * 1024)
+}
+
 /// Classify an operator-supplied GitHub token. `None` means the shape is
 /// plausible; `Some(message)` is a precise, actionable problem description.
 pub fn diagnose_github_token(token: Option<&str>) -> Option<String> {
@@ -732,16 +827,48 @@ async fn run_daemon_slot(
     }
 
     let mut cycle = 1_u64;
+    let mut local_failure_streak: u32 = 0;
     loop {
+        if let Some(note) = disk_space_problem(&config_base, args.work_dir.as_deref()) {
+            // Registering runners whose jobs are doomed (and whose curl
+            // transport needs temp files) only burns API budget — park.
+            let message = format!("daemon slot-{slot_index} parked: {note}");
+            eprintln!("{message}");
+            crate::sd_notify::status(&message);
+            daemon_forensic_log(&config_base, &message);
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            continue;
+        }
         let mut slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
         if !args.once {
             slot_args.once = true;
         }
         if let Err(error) = run(slot_args).await {
-            cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
             if args.once {
+                cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
                 return Err(error);
             }
+            if error.downcast_ref::<LocalRunnerFailure>().is_some() {
+                // Local fault (docker/preflight/OAuth/config): the GitHub
+                // registration is fine — keep it and back off per-slot
+                // instead of delete+re-JIT churning the API every 5s.
+                local_failure_streak += 1;
+                let delay = slot_retry_delay(local_failure_streak, slot_index);
+                eprintln!(
+                    "daemon slot-{slot_index} cycle {cycle} local failure (registration kept, attempt {local_failure_streak}): {error:#}. Retrying in {}s.",
+                    delay.as_secs()
+                );
+                daemon_forensic_log(
+                    &config_base,
+                    &format!(
+                        "slot-{slot_index} cycle {cycle} local failure attempt {local_failure_streak} (registration kept): {error:#}"
+                    ),
+                );
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+            local_failure_streak = 0;
+            cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
             eprintln!(
                 "daemon slot-{slot_index} cycle {cycle} failed; creating a fresh JIT config before retry: {error:#}"
             );
@@ -754,6 +881,7 @@ async fn run_daemon_slot(
             tokio::time::sleep(Duration::from_secs(5)).await;
             continue;
         }
+        local_failure_streak = 0;
         if args.once {
             return Ok(());
         }
@@ -793,7 +921,7 @@ async fn reconfigure_daemon_slot_forever(
         match retry_daemon_slot_jit_config(args, config_base, slot_index, slots, cycle).await {
             Ok(()) => return,
             Err(error) => {
-                let delay = supervised_retry_delay(attempt);
+                let delay = slot_retry_delay(attempt, slot_index);
                 let diagnosis = diagnose_github_token(args.pat.as_deref())
                     .map(|d| format!(" GITHUB_TOKEN problem: {d}"))
                     .unwrap_or_default();
@@ -815,12 +943,20 @@ async fn recycle_daemon_slot(
     cycle: u64,
 ) -> Result<()> {
     let slot_dir = daemon_slot_config_dir(config_base, slot_index, slots);
-    if config::remove(&slot_dir)? {
-        println!(
-            "Discarded local JIT runner config for {} after cycle {cycle}.",
-            daemon_slot_name(slot_index)
+    // Delete the runner registration BY ID before discarding local config:
+    // removing the config first loses the id and orphans the registration on
+    // GitHub, forcing the 409 delete-by-name dance on the next configure (and
+    // polluting the runner list until GitHub's ~1-day ephemeral GC).
+    if let Err(error) = delete_and_remove_daemon_slot_jit_config(args, &slot_dir).await {
+        eprintln!(
+            "Warning: clean recycle of daemon slot-{slot_index} could not delete the old registration (continuing): {error:#}"
         );
+        let _ = config::remove(&slot_dir);
     }
+    println!(
+        "Discarded JIT runner config for {} after cycle {cycle}.",
+        daemon_slot_name(slot_index)
+    );
     let configure_args = daemon_slot_configure_args(args, config_base, slot_index, slots)?;
     configure(configure_args)
         .await
@@ -1921,6 +2057,7 @@ async fn handle_v2_message(
         broker: broker.clone(),
         session_id: session_id.to_string(),
         disable_update,
+        stored: stored.clone(),
     };
     handle_job_request(
         config_dir,
@@ -2003,6 +2140,7 @@ async fn handle_job_request(
             job.job_id.clone(),
             job_container_name(&job),
             canceled.clone(),
+            broker_cancellation.stored,
         );
         let (step_start_sender, step_start_receiver) = tokio::sync::mpsc::unbounded_channel();
         let step_timeline = start_step_timeline_publisher(job.clone(), step_start_receiver);
@@ -2044,10 +2182,19 @@ async fn handle_job_request(
                 daemon_id,
             )
         })
-        .await
-        .context("join Docker job execution task")?;
+        .await;
         cancellation.abort();
-        renewal.abort();
+        let job_result = match job_result {
+            Ok(job_result) => job_result,
+            Err(join_error) => {
+                renewal.abort();
+                return Err(join_error).context("join Docker job execution task");
+            }
+        };
+        // Deliberately NOT aborting lock renewal yet: the job lock must stay
+        // alive until GitHub has accepted the completion call (which is
+        // retried) — otherwise a slow completion lets the server reassign or
+        // fail a job whose side effects already happened.
         match tokio::time::timeout(Duration::from_secs(5), step_timeline).await {
             Ok(Err(error)) if !error.is_cancelled() => {
                 eprintln!("Step timeline publisher failed: {error:#}");
@@ -2080,7 +2227,7 @@ async fn handle_job_request(
                 } else {
                     let infrastructure_failure_category =
                         infrastructure_failure_category(&error).map(ToOwned::to_owned);
-                    complete_run_service_job(
+                    let completion = complete_run_service_job(
                         &run_service_job.client,
                         &run_service_job.run_service_url,
                         &job,
@@ -2092,14 +2239,16 @@ async fn handle_job_request(
                         infrastructure_failure_category,
                         true,
                     )
-                    .await?;
+                    .await;
+                    renewal.abort();
+                    completion?;
                     return Err(error);
                 }
             }
         };
         let outputs = job_result.outputs;
         let step_logs = job_result.step_logs;
-        complete_run_service_job(
+        let completion = complete_run_service_job(
             &run_service_job.client,
             &run_service_job.run_service_url,
             &job,
@@ -2111,7 +2260,9 @@ async fn handle_job_request(
             None,
             false,
         )
-        .await?;
+        .await;
+        renewal.abort();
+        completion?;
         println!(
             "Job completed with result {:?} and message acknowledged.",
             job_result.result
@@ -2341,6 +2492,22 @@ async fn start_run_service_lock_renewal(
     }))
 }
 
+/// Backoff for consecutive cancellation-poll errors: 2s doubling to 60s, so
+/// a dead broker is not hammered every 2s for an entire long job.
+fn cancellation_poll_error_delay(error_streak: u32) -> Duration {
+    Duration::from_secs(
+        2u64.saturating_mul(1 << error_streak.saturating_sub(1).min(5))
+            .min(60),
+    )
+}
+
+/// Errors that look like expired/rejected credentials, which a fresh OAuth
+/// exchange can fix mid-job (jobs can outlive the ~1 h token).
+fn is_credential_poll_error(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    text.contains("status=401") || text.contains("status=403")
+}
+
 fn start_broker_cancellation_poll(
     broker: BrokerClient,
     session_id: String,
@@ -2348,17 +2515,47 @@ fn start_broker_cancellation_poll(
     job_id: String,
     job_container_name: String,
     canceled: Arc<AtomicBool>,
+    stored: StoredRunnerConfig,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let mut broker = broker;
+        let mut error_streak: u32 = 0;
         loop {
             let message = match broker
                 .get_runner_message(&session_id, RunnerStatus::Busy, disable_update)
                 .await
             {
-                Ok(poll) => poll.message,
+                Ok(poll) => {
+                    error_streak = 0;
+                    poll.message
+                }
                 Err(error) => {
-                    eprintln!("Broker cancellation poll failed: {error:#}");
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    error_streak += 1;
+                    // Rate-cap the log line: first few, then once a minute.
+                    if error_streak <= 3 || error_streak.is_multiple_of(30) {
+                        eprintln!(
+                            "Broker cancellation poll failed ({error_streak} consecutive): {error:#}"
+                        );
+                    }
+                    if is_credential_poll_error(&error) {
+                        match oauth_access_token(&stored).await {
+                            Ok(token) => match BrokerClient::new(&broker.base_url_str(), token) {
+                                Ok(refreshed) => {
+                                    broker = refreshed;
+                                    println!(
+                                        "Cancellation poller refreshed broker credentials mid-job."
+                                    );
+                                }
+                                Err(error) => eprintln!(
+                                    "Cancellation poller failed to rebuild broker client: {error:#}"
+                                ),
+                            },
+                            Err(error) => eprintln!(
+                                "Cancellation poller credential refresh failed: {error:#}"
+                            ),
+                        }
+                    }
+                    tokio::time::sleep(cancellation_poll_error_delay(error_streak)).await;
                     continue;
                 }
             };
@@ -2366,6 +2563,35 @@ fn start_broker_cancellation_poll(
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             };
+            if message
+                .message_type
+                .eq_ignore_ascii_case(BROKER_MIGRATION_MESSAGE)
+            {
+                // Migrations can land while busy; following them keeps
+                // cancellation coverage for the rest of the job.
+                match broker_migration_url(&message) {
+                    Ok(migration_url) => match oauth_access_token(&stored).await {
+                        Ok(token) => match BrokerClient::new(&migration_url, token) {
+                            Ok(migrated) => {
+                                broker = migrated;
+                                println!(
+                                    "Cancellation poller applied broker migration: {migration_url}"
+                                );
+                            }
+                            Err(error) => eprintln!(
+                                "Cancellation poller failed to apply broker migration: {error:#}"
+                            ),
+                        },
+                        Err(error) => eprintln!(
+                            "Cancellation poller migration credential refresh failed: {error:#}"
+                        ),
+                    },
+                    Err(error) => {
+                        eprintln!("Cancellation poller received malformed migration: {error:#}")
+                    }
+                }
+                continue;
+            }
             if !is_job_cancellation_for(&message, &job_id) {
                 println!(
                     "Busy broker runner received unsupported message {} type {}; ignoring while job runs.",
@@ -5143,6 +5369,49 @@ mod tests {
             assess_registry_lookup(Some(&listed_runner("offline")), 1),
             RegistryVerdict::RecycleOffline(2)
         );
+    }
+
+    #[test]
+    fn slot_retry_delay_diverges_across_slots_and_caps() {
+        let slot1 = slot_retry_delay(3, 1);
+        let slot2 = slot_retry_delay(3, 2);
+        assert_ne!(slot1, slot2, "same-PID slots must not retry in lockstep");
+        assert!(slot_retry_delay(30, 1) <= Duration::from_secs(600 + 16));
+        assert!(slot_retry_delay(1, 1) >= Duration::from_secs(5));
+    }
+
+    #[test]
+    fn cancellation_poll_backoff_grows_and_caps() {
+        assert_eq!(cancellation_poll_error_delay(1), Duration::from_secs(2));
+        assert_eq!(cancellation_poll_error_delay(2), Duration::from_secs(4));
+        assert_eq!(cancellation_poll_error_delay(10), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn credential_poll_errors_detected_by_status() {
+        assert!(is_credential_poll_error(&anyhow::anyhow!(
+            "get broker message failed: status=401, body="
+        )));
+        assert!(is_credential_poll_error(&anyhow::anyhow!(
+            "get broker message failed: status=403, body=denied"
+        )));
+        assert!(!is_credential_poll_error(&anyhow::anyhow!(
+            "get broker message failed: status=500, body=oops"
+        )));
+    }
+
+    #[test]
+    fn local_failures_are_classified() {
+        let error = local_failure(anyhow::anyhow!("docker is down"));
+        assert!(error.downcast_ref::<LocalRunnerFailure>().is_some());
+        let remote = anyhow::anyhow!("broker polling failed 10 consecutive times");
+        assert!(remote.downcast_ref::<LocalRunnerFailure>().is_none());
+    }
+
+    #[test]
+    fn free_space_probe_works_on_temp_dir() {
+        let free = free_space_bytes(&std::env::temp_dir());
+        assert!(free.is_some_and(|bytes| bytes > 0));
     }
 
     #[test]

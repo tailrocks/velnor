@@ -13,26 +13,81 @@
 
 use std::fs::File;
 use std::io::Write;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
-/// `MakeWriter` over a shared append-mode file handle. Appends of single
-/// lines through one open descriptor keep JSONL records intact.
+/// Rotate trace.jsonl past this size (one `.1` generation kept) — the daemon
+/// runs for days and every poll/forensic event lands here; an unbounded
+/// writer would be the only unbounded disk consumer on the host.
+const TRACE_ROTATE_BYTES: u64 = 32 * 1024 * 1024;
+
+struct RotatingFile {
+    file: File,
+    path: PathBuf,
+    written: u64,
+}
+
+impl RotatingFile {
+    fn open(path: PathBuf) -> std::io::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        let written = file.metadata().map(|m| m.len()).unwrap_or(0);
+        Ok(Self {
+            file,
+            path,
+            written,
+        })
+    }
+
+    fn rotate_if_needed(&mut self) {
+        if self.written < TRACE_ROTATE_BYTES {
+            return;
+        }
+        let mut rotated = self.path.file_name().unwrap_or_default().to_os_string();
+        rotated.push(".1");
+        let rotated = self.path.with_file_name(rotated);
+        if std::fs::rename(&self.path, rotated).is_ok() {
+            if let Ok(fresh) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+            {
+                self.file = fresh;
+                self.written = 0;
+            }
+        }
+    }
+}
+
+/// `MakeWriter` over a shared, size-capped append handle. Line-at-a-time
+/// JSONL writes through one descriptor stay intact; rotation happens between
+/// writes.
 #[derive(Clone)]
-struct SharedFileWriter(Arc<File>);
+struct SharedFileWriter(Arc<Mutex<RotatingFile>>);
 
 impl Write for SharedFileWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        (&*self.0).write(buf)
+        let Ok(mut inner) = self.0.lock() else {
+            return Ok(buf.len());
+        };
+        inner.rotate_if_needed();
+        let written = inner.file.write(buf)?;
+        inner.written += written as u64;
+        Ok(written)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        (&*self.0).flush()
+        let Ok(mut inner) = self.0.lock() else {
+            return Ok(());
+        };
+        inner.file.flush()
     }
 }
 
@@ -55,12 +110,8 @@ pub fn init(log_dir: Option<&Path>) {
 
     let file_layer = log_dir.and_then(|dir| {
         std::fs::create_dir_all(dir).ok()?;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("trace.jsonl"))
-            .ok()?;
-        let writer = SharedFileWriter(Arc::new(file));
+        let file = RotatingFile::open(dir.join("trace.jsonl")).ok()?;
+        let writer = SharedFileWriter(Arc::new(Mutex::new(file)));
         Some(
             tracing_subscriber::fmt::layer()
                 .json()
