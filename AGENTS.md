@@ -101,6 +101,16 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-06-11: **Log format contract is law**
+  ([docs/log-format-contract.md](docs/log-format-contract.md)): live
+  WebSocket feed lines are RAW (the UI adds its own timestamp column);
+  uploaded log-blob lines carry the .NET 7-digit timestamp prefix (the UI
+  strips it into the toggle). This has been broken repeatedly during
+  refactors (doubled timestamps live, or timestamps leaking into content).
+  Any change near log emission must keep the guard tests green, update the
+  contract doc in the same commit, and be verified visually against a
+  GitHub-hosted job both live and completed.
+
 - 2026-06-11: **Stability-first directive** (operator, master-plan §3b +
   P1.9): incident #9 ("zombie fleet" — broker polls kept returning empty
   success while GitHub's runner registry had the runners offline/missing;

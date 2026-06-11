@@ -2803,13 +2803,15 @@ fn start_step_log_publisher(
                         lines.len(),
                         &log.step_id[..log.step_id.len().min(8)]
                     );
-                    let ts = unix_now_iso8601();
-                    let timestamped: Vec<String> =
-                        lines.iter().map(|l| format!("{ts} {l}")).collect();
+                    // LOG FORMAT CONTRACT (docs/log-format-contract.md): live
+                    // feed frames are rendered VERBATIM by the GitHub UI,
+                    // which adds its own timestamp column — lines must be RAW
+                    // content. Only the uploaded log blob gets timestamps.
+                    let feed_lines = live_feed_lines(&lines);
                     if let Err(e) = crate::protocol::FeedStreamClient::send_log_lines(
                         ws,
                         &log.step_id,
-                        timestamped.clone(),
+                        feed_lines.clone(),
                         Some(start_line),
                         Some(&plan_id),
                         Some(&job_id),
@@ -2827,7 +2829,7 @@ fn start_step_log_publisher(
                                 if crate::protocol::FeedStreamClient::send_log_lines(
                                     &mut ws2,
                                     &log.step_id,
-                                    timestamped,
+                                    feed_lines,
                                     Some(start_line),
                                     Some(&plan_id),
                                     Some(&job_id),
@@ -2895,11 +2897,11 @@ fn start_step_log_publisher(
 
                 // Upload step log blob to Results Service (populates data-log-url in GitHub UI).
                 // Upload for every non-skipped step — even empty — so it is expandable.
-                // Add RFC3339 timestamps so the "Show timestamps" toggle works.
+                // LOG FORMAT CONTRACT (docs/log-format-contract.md): blob lines
+                // MUST carry the 7-digit timestamp prefix — the UI strips it
+                // into the "Show timestamps" toggle column.
                 if !log.skipped {
-                    let ts = unix_now_iso8601();
-                    let timestamped: Vec<String> =
-                        lines.iter().map(|l| format!("{ts} {l}")).collect();
+                    let timestamped = blob_log_lines(&unix_now_iso8601(), &lines);
                     if let Err(e) = client
                         .upload_step_log(&plan_id, &job_id, &log.step_id, &timestamped)
                         .await
@@ -4238,14 +4240,18 @@ fn append_job_console(path: &Path, display_name: &str, lines: &[String], step_ma
 
 fn unix_now_iso8601() -> String {
     use time::{format_description, OffsetDateTime};
-    // GitHub's log UI strips a leading per-line timestamp ONLY when it matches the
-    // runner's .NET "o" round-trip format with 7 fractional digits:
-    // `YYYY-MM-DDTHH:MM:SS.fffffffZ` (e.g. 2026-06-04T15:27:50.9085200Z). A
-    // second-precision timestamp (no dot) is NOT recognised, so it leaks into the
-    // visible log content column instead of the timestamp toggle. Always emit the
-    // 7-digit sub-second form — see `unix_now_iso8601_is_github_strippable`.
-    // REGRESSION HISTORY: this once emitted second precision and the timestamp
-    // showed up as plain text in every log line. Do NOT drop the sub-seconds.
+    // LOG FORMAT CONTRACT — read docs/log-format-contract.md before touching
+    // ANY of this. This timestamp prefixes lines in the UPLOADED LOG BLOB
+    // only. GitHub's UI strips a leading per-line timestamp from blob lines
+    // ONLY when it matches the runner's .NET "o" round-trip format with 7
+    // fractional digits: `YYYY-MM-DDTHH:MM:SS.fffffffZ`. A second-precision
+    // timestamp is NOT recognised and leaks into the visible content column.
+    // REGRESSION HISTORY: (1) second precision once leaked timestamps into
+    // every blob line; (2) 2026-06-11: these prefixes were also applied to
+    // LIVE feed frames, doubling timestamps in the live UI — live frames must
+    // be raw (`live_feed_lines`). Guard tests:
+    // `unix_now_iso8601_is_github_strippable`,
+    // `live_feed_lines_are_raw_and_blob_lines_are_timestamped`.
     let fmt = format_description::parse(
         "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:7]Z",
     )
@@ -4253,6 +4259,26 @@ fn unix_now_iso8601() -> String {
     OffsetDateTime::now_utc()
         .format(&fmt)
         .unwrap_or_else(|_| "1970-01-01T00:00:00.0000000Z".to_string())
+}
+
+/// LOG FORMAT CONTRACT (docs/log-format-contract.md): lines for the LIVE
+/// WebSocket feed. The GitHub UI renders feed frames verbatim and supplies
+/// its own timestamp column — embedding a timestamp here doubles it on
+/// screen (2026-06-11 regression). Lines pass through unchanged.
+fn live_feed_lines(lines: &[String]) -> Vec<String> {
+    lines.to_vec()
+}
+
+/// LOG FORMAT CONTRACT (docs/log-format-contract.md): lines for the UPLOADED
+/// log blob (Results Service / data-log-url). Every line MUST be prefixed
+/// with the .NET-style 7-digit timestamp — the UI strips it into the
+/// "Show timestamps" toggle; without it the toggle is empty, and with the
+/// wrong precision the timestamp leaks into visible content.
+fn blob_log_lines(timestamp: &str, lines: &[String]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| format!("{timestamp} {line}"))
+        .collect()
 }
 
 /// Build the "Set up job" log lines — mirrors the GitHub-hosted runner's
@@ -7855,6 +7881,48 @@ runs:
         assert!(joined.contains("main"));
         assert!(joined.contains("Fetch depth: 1"));
         assert!(joined.contains("Checkout completed successfully"));
+    }
+
+    #[test]
+    fn live_feed_lines_are_raw_and_blob_lines_are_timestamped() {
+        // REGRESSION GUARD (do not weaken) — docs/log-format-contract.md.
+        //
+        // 2026-06-11 incident (jm run 27319096003): the LIVE WebSocket feed
+        // sent timestamp-prefixed lines. The GitHub UI renders live frames
+        // VERBATIM and adds its own timestamp column, so every live line
+        // showed a doubled timestamp ("2026-06-11T02:11:32.4623816Z
+        // Updating crates.io index" next to the UI's own time column). Only
+        // the uploaded log blob may carry the prefix — the UI strips it
+        // there into the "Show timestamps" toggle.
+        //
+        // If a refactor routes blob-formatted lines into
+        // FeedStreamClient::send_log_lines (or strips the prefix from blob
+        // uploads), one of these assertions MUST start failing.
+        let lines = vec![
+            "    Updating crates.io index".to_string(),
+            "##[group]Run cargo nextest".to_string(),
+        ];
+        let live = live_feed_lines(&lines);
+        assert_eq!(
+            live, lines,
+            "live feed lines must be RAW content — the UI adds its own timestamp column"
+        );
+        assert!(
+            !live[0].starts_with("20"),
+            "live feed line must not begin with an embedded timestamp: {}",
+            live[0]
+        );
+
+        let blob = blob_log_lines("2026-06-11T02:11:32.4623816Z", &lines);
+        assert_eq!(
+            blob[0], "2026-06-11T02:11:32.4623816Z     Updating crates.io index",
+            "blob lines must be '<7-digit timestamp> <content>' for the UI strip/toggle"
+        );
+        assert_eq!(
+            blob[1],
+            "2026-06-11T02:11:32.4623816Z ##[group]Run cargo nextest"
+        );
+        assert_eq!(blob.len(), lines.len());
     }
 
     #[test]
