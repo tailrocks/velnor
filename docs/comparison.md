@@ -180,7 +180,28 @@ defaults; the node-sidecar (diagnostic fallback) does not live-stream.
       `.velnor-compare/lane-compare-run-27319103370/` (before),
       `.velnor-compare/lane-compare-run-27341195843/` (after),
       `.velnor-live-evidence/tailrocks_velnor-actions-fixture-existing-run-27341195843.md`.
-- [ ] Round-2 content-parity fixes (table above) re-verified live on a
-      0.1.20 fixture run: lane-compare PASS, artifact shows `env:` blocks +
-      pipefail shell line + grouped mise output, no doubled headers, no
-      UUID groups, checkout step present in the artifact.
+- [x] Round-2 content-parity fixes verified live on ChainArgos runs (the
+      operator's production target): the jackin-agent-brown 0.1.21+ artifacts
+      show the pipefail shell line, full `env:` blocks, the composite as one
+      step with embedded sections, `[command]` checkout traces, and no
+      doubled headers / UUID groups / `Finishing:` trailers.
+
+## ChainArgos verification (the repos that matter)
+
+Round-3 went to the production dual-lane repos. Each round's lane-compare
+fed the next runner release:
+
+| Run | Repo / runner | Result | What it taught |
+|-----|---------------|--------|----------------|
+| `27344537718` | jackin-agent-brown, 0.1.21 | success, 8 WORSE rows | GitHub inserts runner-generated `Build <action>` prep steps + reserved-slot numbering gaps → lane-compare now pairs by name-LCS, prep steps = expected divergence. Real finds: explicit `name:` lost (broker sends it only in **DisplayNameToken**, DisplayName is null) and `env: X: ${{ secrets.Y }}` arrived as an **unevaluated expr token** that Velnor blanked — the `if: env.X != ''` login step was silently SKIPPED while GitHub ran it. Both fixed in 0.1.23 (display_name_template; expr tokens render to `${{ }}` and resolve through the executor's secrets context). |
+| `27344544248` | java-monorepo, 0.1.21 | success; only divergence = `Cache Cargo registry` steps under fallback names | Same DisplayNameToken root cause. |
+| `27346553702` | java-monorepo, 0.1.23 | **PASS — zero rows** (9 dual-lane job pairs) | Full parity on the primary ChainArgos repo. |
+| `27346543517` | jackin-agent-brown, 0.1.23 | success, 2 WORSE rows | Login step now executes with its real name ✓; remaining rows = missing post steps: GitHub runs embedded-composite posts under ONE `Post Run <composite>` step and gives login/setup-buildx their own posts (logout / builder removal). Fixed in 0.1.25 (post umbrella + DockerLogin/DockerSetupBuildx posts). |
+
+Also fixed en route (found because the brown velnor lane failed on 0.1.20):
+the shared mise store mount shadowed the image-baked toolchain — dangling
+shims (`gh is not a valid shim`) on repos without a mise.toml; the daemon
+now seeds the store from the job image (0.1.21).
+
+- [ ] Brown re-verified on 0.1.25: lane-compare PASS expected (post rows
+      were the last divergence class).
