@@ -2757,13 +2757,25 @@ fn save_cache_result(
     }
     let t0 = Instant::now();
     let cache_dir = cache_store_dir(state)?.join(sanitize_artifact_name(key));
-    fs::remove_dir_all(&cache_dir).ok();
-    fs::create_dir_all(&cache_dir)
-        .with_context(|| format!("create cache directory {}", cache_dir.display()))?;
-    fs::write(cache_dir.join(".velnor-key"), key)
-        .with_context(|| format!("write cache metadata {}", cache_dir.display()))?;
-    fs::write(cache_dir.join(".velnor-created"), cache_timestamp())
-        .with_context(|| format!("write cache timestamp {}", cache_dir.display()))?;
+    // The store is shared across daemon slots: stage the whole entry next to
+    // its final location and swap with a rename, so a sibling slot restoring
+    // this key never reads a half-written tree.
+    let staging_name = format!(
+        "{}.staging-{}",
+        cache_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("cache"),
+        std::process::id()
+    );
+    let staging_dir = cache_dir.with_file_name(staging_name);
+    fs::remove_dir_all(&staging_dir).ok();
+    fs::create_dir_all(&staging_dir)
+        .with_context(|| format!("create cache staging directory {}", staging_dir.display()))?;
+    fs::write(staging_dir.join(".velnor-key"), key)
+        .with_context(|| format!("write cache metadata {}", staging_dir.display()))?;
+    fs::write(staging_dir.join(".velnor-created"), cache_timestamp())
+        .with_context(|| format!("write cache timestamp {}", staging_dir.display()))?;
 
     let mut saved = 0usize;
     for (index, path) in cache_paths(paths).into_iter().enumerate() {
@@ -2773,7 +2785,7 @@ fn save_cache_result(
         if !source.exists() {
             continue;
         }
-        let target = cache_dir.join(index.to_string());
+        let target = staging_dir.join(index.to_string());
         fs::create_dir_all(&target)
             .with_context(|| format!("create cache entry {}", target.display()))?;
         copy_cache_source(&source, &target)?;
@@ -2781,13 +2793,16 @@ fn save_cache_result(
     }
     let save_ms = t0.elapsed().as_millis();
     if saved == 0 {
-        fs::remove_dir_all(&cache_dir).ok();
+        fs::remove_dir_all(&staging_dir).ok();
         return Ok(cache_save_step_result(
             0,
             "",
             &format!("Cache not saved because no paths exist for key '{key}'\n"),
         ));
     }
+    fs::remove_dir_all(&cache_dir).ok();
+    fs::rename(&staging_dir, &cache_dir)
+        .with_context(|| format!("publish cache entry {}", cache_dir.display()))?;
     Ok(cache_save_step_result(
         0,
         &format!(
@@ -3146,7 +3161,9 @@ fn cache_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
         .temp_host
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("cache actions require a temp directory"))?;
-    Ok(shared_work_root(temp).join("_velnor_caches"))
+    // Daemon-shared (across slots), not per-slot: cold slots must hit the
+    // caches their siblings saved (see container::daemon_shared_root).
+    Ok(crate::container::daemon_shared_root(shared_work_root(temp)).join("_velnor_caches"))
 }
 
 fn shared_work_root(temp: &Path) -> PathBuf {
