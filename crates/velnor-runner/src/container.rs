@@ -428,20 +428,40 @@ fn workflow_host(temp_host: &Path) -> PathBuf {
     temp_host.join("_github_workflow")
 }
 
+/// Climb from a per-slot work root (`…/work/slot-N`) to the daemon-shared
+/// work root (`…/work`). Slot-fragmented caches were the top measured
+/// performance defect: 10 slots × ~2 GB duplicate sccache dirs, and any job
+/// landing on a cold slot misses caches its sibling slots already have.
+/// Compilers' caches (sccache) and the actions-cache store are safe to share
+/// across slots of one daemon (same repo trust domain).
+pub(crate) fn daemon_shared_root(root: PathBuf) -> PathBuf {
+    let is_slot_dir = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("slot-"))
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()));
+    if is_slot_dir {
+        root.parent().map(Path::to_path_buf).unwrap_or(root)
+    } else {
+        root
+    }
+}
+
 pub(crate) fn sccache_host(temp_host: &Path) -> PathBuf {
-    if temp_host.file_name().is_some_and(|name| name == "temp") {
+    let per_slot_root = if temp_host.file_name().is_some_and(|name| name == "temp") {
         if let Some(job_dir) = temp_host.parent() {
             if job_dir.file_name().is_some_and(|name| name == "tmp") {
-                job_dir.join("_velnor_sccache")
+                job_dir.to_path_buf()
             } else {
-                job_dir.parent().unwrap_or(job_dir).join("_velnor_sccache")
+                job_dir.parent().unwrap_or(job_dir).to_path_buf()
             }
         } else {
-            temp_host.join("_velnor_sccache")
+            temp_host.to_path_buf()
         }
     } else {
-        temp_host.join("_velnor_sccache")
-    }
+        temp_host.to_path_buf()
+    };
+    daemon_shared_root(per_slot_root).join("_velnor_sccache")
 }
 
 fn node_action_shell_command(path_prepend: &[String], entrypoint_container_path: &str) -> String {
@@ -524,6 +544,44 @@ mod tests {
             verify_bind_mounts: false,
             daemon_id: "test-daemon".into(),
         }
+    }
+
+    #[test]
+    fn daemon_shared_root_climbs_slot_dirs_only() {
+        assert_eq!(
+            daemon_shared_root(PathBuf::from("/var/lib/velnor-fixture/work/slot-2")),
+            PathBuf::from("/var/lib/velnor-fixture/work")
+        );
+        assert_eq!(
+            daemon_shared_root(PathBuf::from("/var/lib/velnor/work/slot-10")),
+            PathBuf::from("/var/lib/velnor/work")
+        );
+        // Non-slot roots stay untouched.
+        assert_eq!(
+            daemon_shared_root(PathBuf::from("/daemon/work")),
+            PathBuf::from("/daemon/work")
+        );
+        assert_eq!(
+            daemon_shared_root(PathBuf::from("/work/slot-")),
+            PathBuf::from("/work/slot-")
+        );
+        assert_eq!(
+            daemon_shared_root(PathBuf::from("/work/slot-abc")),
+            PathBuf::from("/work/slot-abc")
+        );
+    }
+
+    #[test]
+    fn sccache_host_is_shared_across_daemon_slots() {
+        // slot-N work roots collapse to one daemon-level sccache dir.
+        assert_eq!(
+            sccache_host(Path::new("/var/lib/velnor/work/slot-3/job-9/temp")),
+            PathBuf::from("/var/lib/velnor/work/_velnor_sccache")
+        );
+        assert_eq!(
+            sccache_host(Path::new("/var/lib/velnor/work/slot-7/job-1/temp")),
+            PathBuf::from("/var/lib/velnor/work/_velnor_sccache")
+        );
     }
 
     #[test]
