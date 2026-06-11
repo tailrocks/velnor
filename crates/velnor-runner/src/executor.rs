@@ -2300,7 +2300,13 @@ where
     }
 
     fn wait_for_service(&mut self, service: &crate::container::ServiceContainerSpec) -> Result<()> {
-        for _ in 0..30 {
+        // Exponential backoff (100ms → 1.6s cap, ~30s total budget): most
+        // services report running/healthy within the first second, so a fixed
+        // 1s poll added up to ~1s of dead time per service on the hot path.
+        let mut delay = Duration::from_millis(100);
+        let mut waited = Duration::ZERO;
+        let budget = Duration::from_secs(30);
+        loop {
             let result = self.run_docker(&service.health_status_args())?;
             match result.stdout.trim() {
                 "healthy" | "running" | "" => return Ok(()),
@@ -2310,7 +2316,14 @@ where
                         service.name
                     )
                 }
-                _ => thread::sleep(Duration::from_secs(1)),
+                _ => {
+                    if waited >= budget {
+                        break;
+                    }
+                    thread::sleep(delay);
+                    waited += delay;
+                    delay = (delay * 2).min(Duration::from_millis(1600));
+                }
             }
         }
         bail!("service container '{}' did not become ready", service.name)
@@ -5115,7 +5128,8 @@ fn looks_like_sensitive_value(value: &str) -> bool {
 
 fn shell_log_name(shell: Shell) -> &'static str {
     match shell {
-        Shell::Bash => "bash -e {0}",
+        Shell::Bash => "bash --noprofile --norc -e -o pipefail {0}",
+        Shell::BashDefault => "bash -e {0}",
         Shell::Sh => "sh -e {0}",
     }
 }

@@ -56,21 +56,6 @@ ENV HOME=/root \
     CARGO_NET_RETRY=10 \
     CARGO_HTTP_TIMEOUT=120
 
-RUN mkdir -p /opt/mise/bin && \
-    curl -fsSL https://mise.run | MISE_VERSION="v2026.6.2" MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
-    # gh: GitHub-hosted runner images preinstall the GitHub CLI and estate
-    # scripts rely on it (e.g. jackin-role-action's download script) —
-    # drop-in parity requires it in the job image too.
-    mise use --global rust@1.96.0 'cargo:cargo-nextest@0.9.137' 'cargo:rust-script@0.36.0' just@1.52.0 protoc@35.0 gh@2.94.0 && \
-    mise reshim && \
-    rustup component add rustfmt clippy && \
-    mise exec -- rustc --version && \
-    mise exec -- cargo nextest --version && \
-    mise exec -- rust-script --version && \
-    mise exec -- just --version && \
-    mise exec -- protoc --version && \
-    mise exec -- gh --version
-
 RUN ver="v0.15.0" && \
     case "$(uname -m)" in \
       x86_64) arch="x86_64-unknown-linux-musl" ;; \
@@ -83,6 +68,28 @@ RUN ver="v0.15.0" && \
     install -m 0755 "$tmp/sccache-${ver}-${arch}/sccache" /usr/local/bin/sccache && \
     rm -rf "$tmp" && \
     sccache --version
+
+# The cargo:* tools compile from source: registry/git cache mounts + sccache
+# (scoped to this RUN — runtime jobs choose their own RUSTC_WRAPPER) make a
+# version bump rebuild warm instead of cold.
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    --mount=type=cache,target=/sccache-build \
+    mkdir -p /opt/mise/bin && \
+    curl -fsSL https://mise.run | MISE_VERSION="v2026.6.2" MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
+    # gh: GitHub-hosted runner images preinstall the GitHub CLI and estate
+    # scripts rely on it (e.g. jackin-role-action's download script) —
+    # drop-in parity requires it in the job image too.
+    RUSTC_WRAPPER=sccache SCCACHE_DIR=/sccache-build \
+    mise use --global rust@1.96.0 'cargo:cargo-nextest@0.9.137' 'cargo:rust-script@0.36.0' just@1.52.0 protoc@35.0 gh@2.94.0 && \
+    mise reshim && \
+    rustup component add rustfmt clippy && \
+    mise exec -- rustc --version && \
+    mise exec -- cargo nextest --version && \
+    mise exec -- rust-script --version && \
+    mise exec -- just --version && \
+    mise exec -- protoc --version && \
+    mise exec -- gh --version
 
 # cosign: backs the native sigstore/cosign-installer adapter and the
 # `cosign sign` steps in the agent-role publish workflows.

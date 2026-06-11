@@ -73,6 +73,7 @@ jobs:
           path: |
             ~/.cargo/registry/cache
             ~/.cargo/registry/index
+            ~/.cargo/registry/src
             ~/.cargo/git/db
           key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
