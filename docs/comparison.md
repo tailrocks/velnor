@@ -203,5 +203,12 @@ the shared mise store mount shadowed the image-baked toolchain — dangling
 shims (`gh is not a valid shim`) on repos without a mise.toml; the daemon
 now seeds the store from the job image (0.1.21).
 
-- [ ] Brown re-verified on 0.1.25: lane-compare PASS expected (post rows
-      were the last divergence class).
+- [x] Brown re-verified on 0.1.26 (0.1.25 tag had a stale lock; rebuilt):
+      run `27350691196` lane-compare **PASS — zero rows**. The post umbrella
+      and login/buildx posts closed the last divergence class.
+
+**Final state: all three dual-lane repos at equal-or-better parity** —
+fixture (run 27341195843, 0.1.18), java-monorepo (run 27346553702, 0.1.23),
+jackin-agent-brown (run 27350691196, 0.1.26). The lane-compare gate is
+repeatable on any of them:
+`cargo run -q -p velnor-tools -- lane-compare --repo <owner/repo> --workflow <wf.yml>`.

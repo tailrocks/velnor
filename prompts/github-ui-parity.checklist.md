@@ -198,3 +198,11 @@ Primary files:
 - [x] Annotations, summaries, masking, outputs, conclusions correct.
 - [x] Comparison analysis done; all gates green; evidence recorded
   (lane-compare PASS on the 0.1.18 run closed the gate).
+- [x] **ChainArgos production repos verified** (operator follow-up): three
+  deeper rounds against java-monorepo and jackin-agent-brown found and fixed
+  broker DisplayNameToken names, unevaluated env expr tokens (secrets-driven
+  `if:` steps silently skipped), embedded-composite post umbrellas,
+  login/buildx posts, the shared-mise-store image shadowing, and missing
+  `-o pipefail` on explicit bash. Final: java-monorepo run 27346553702 PASS
+  (0.1.23), jackin-agent-brown run 27350691196 PASS (0.1.26) — zero
+  worse-than-GitHub rows on the repos Velnor actually serves.

@@ -1,0 +1,284 @@
+2026-06-11T13:36:08.8385866Z ##[group]Set up job
+2026-06-11T13:36:08.8385866Z Current runner version: 'Velnor Runner/0.1.26 (protocol: 2.335.1)'
+2026-06-11T13:36:08.8385866Z ##[group]Operating System
+2026-06-11T13:36:08.8385866Z Ubuntu
+2026-06-11T13:36:08.8385866Z 24.04.2
+2026-06-11T13:36:08.8385866Z LTS
+2026-06-11T13:36:08.8385866Z ##[endgroup]
+2026-06-11T13:36:08.8385866Z ##[group]Runner Image
+2026-06-11T13:36:08.8385866Z Image: velnor/job-ubuntu:24.04
+2026-06-11T13:36:08.8385866Z ##[endgroup]
+2026-06-11T13:36:08.8385866Z ##[group]GITHUB_TOKEN Permissions
+2026-06-11T13:36:08.8385866Z   Contents: read
+2026-06-11T13:36:08.8385866Z   Metadata: read
+2026-06-11T13:36:08.8385866Z ##[endgroup]
+2026-06-11T13:36:08.8385866Z Secret source: Actions
+2026-06-11T13:36:08.8385866Z Prepare workflow directory
+2026-06-11T13:36:08.8385866Z ##[group]Prepare all required actions
+2026-06-11T13:36:08.8385866Z Getting action download info
+2026-06-11T13:36:08.8385866Z Download action repository 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' (SHA:df4cb1c069e1874edd31b4311f1884172cec0e10)
+2026-06-11T13:36:08.8385866Z Download action repository 'docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee' (SHA:650006c6eb7dba73a995cc03b0b2d7f5ca915bee)
+2026-06-11T13:36:08.8385866Z Download action repository 'jackin-project/jackin-role-action@918e0958a2f695087b8e262ed90d3ed7c09c787a' (SHA:918e0958a2f695087b8e262ed90d3ed7c09c787a)
+2026-06-11T13:36:08.8385866Z ##[endgroup]
+2026-06-11T13:36:08.8385866Z Complete job name: validate (Velnor)
+2026-06-11T13:36:08.8385866Z ##[endgroup]
+2026-06-11T13:36:09.4594362Z ##[group]Run actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+2026-06-11T13:36:09.4594362Z Syncing repository: https://github.com/ChainArgos/jackin-agent-brown.git
+2026-06-11T13:36:09.4594362Z Setting up ref '62114c9b313ffdb535e95e1ca893448f0c3265f8'
+2026-06-11T13:36:09.4594362Z Fetch depth: 1
+2026-06-11T13:36:09.4594362Z Repository path: /var/lib/velnor-jackin-agent-brown/work/slot-1/5247116c-6ac4-5798-9b48-4c80d61e5c70/workspace/.
+2026-06-11T13:36:09.4594362Z [command]git init /var/lib/velnor-jackin-agent-brown/work/slot-1/5247116c-6ac4-5798-9b48-4c80d61e5c70/workspace/.
+2026-06-11T13:36:09.4594362Z Initialized empty Git repository in /var/lib/velnor-jackin-agent-brown/work/slot-1/5247116c-6ac4-5798-9b48-4c80d61e5c70/workspace/.git/
+2026-06-11T13:36:09.4594362Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-06-11T13:36:09.4594362Z hint: is subject to change. To configure the initial branch name to use in all
+2026-06-11T13:36:09.4594362Z hint: of your new repositories, which will suppress this warning, call:
+2026-06-11T13:36:09.4594362Z hint:
+2026-06-11T13:36:09.4594362Z hint: 	git config --global init.defaultBranch <name>
+2026-06-11T13:36:09.4594362Z hint:
+2026-06-11T13:36:09.4594362Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-06-11T13:36:09.4594362Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-06-11T13:36:09.4594362Z hint:
+2026-06-11T13:36:09.4594362Z hint: 	git branch -m <name>
+2026-06-11T13:36:09.4594362Z [command]git -C /var/lib/velnor-jackin-agent-brown/work/slot-1/5247116c-6ac4-5798-9b48-4c80d61e5c70/workspace/. remote remove origin
+2026-06-11T13:36:09.4594362Z error: No such remote: 'origin'
+2026-06-11T13:36:09.4594362Z [command]git -C /var/lib/velnor-jackin-agent-brown/work/slot-1/5247116c-6ac4-5798-9b48-4c80d61e5c70/workspace/. remote add origin https://github.com/ChainArgos/jackin-agent-brown.git
+2026-06-11T13:36:09.4594362Z [command]git -C /var/lib/velnor-jackin-agent-brown/work/slot-1/5247116c-6ac4-5798-9b48-4c80d61e5c70/workspace/. -c protocol.version=2 -c http.extraheader=AUTHORIZATION: *** fetch --prune --no-tags --depth=1 origin 62114c9b313ffdb535e95e1ca893448f0c3265f8
+2026-06-11T13:36:09.4594362Z From https://github.com/ChainArgos/jackin-agent-brown
+2026-06-11T13:36:09.4594362Z  * branch            62114c9b313ffdb535e95e1ca893448f0c3265f8 -> FETCH_HEAD
+2026-06-11T13:36:09.4594362Z [command]git -C /var/lib/velnor-jackin-agent-brown/work/slot-1/5247116c-6ac4-5798-9b48-4c80d61e5c70/workspace/. -c filter.lfs.smudge=git-lfs smudge --skip -- %f -c filter.lfs.process=git-lfs filter-process --skip -c filter.lfs.required=false checkout --force FETCH_HEAD
+2026-06-11T13:36:09.4594362Z Note: switching to 'FETCH_HEAD'.
+2026-06-11T13:36:09.4594362Z You are in 'detached HEAD' state. You can look around, make experimental
+2026-06-11T13:36:09.4594362Z changes and commit them, and you can discard any commits you make in this
+2026-06-11T13:36:09.4594362Z state without impacting any branches by switching back to a branch.
+2026-06-11T13:36:09.4594362Z If you want to create a new branch to retain commits you create, you may
+2026-06-11T13:36:09.4594362Z do so (now or later) by using -c with the switch command. Example:
+2026-06-11T13:36:09.4594362Z   git switch -c <new-branch-name>
+2026-06-11T13:36:09.4594362Z Or undo this operation with:
+2026-06-11T13:36:09.4594362Z   git switch -
+2026-06-11T13:36:09.4594362Z Turn off this advice by setting config variable advice.detachedHead to false
+2026-06-11T13:36:09.4594362Z HEAD is now at 62114c9 ci: default to the GitHub-hosted lane (#91)
+2026-06-11T13:36:09.4594362Z [command]git -C /var/lib/velnor-jackin-agent-brown/work/slot-1/5247116c-6ac4-5798-9b48-4c80d61e5c70/workspace/. -c filter.lfs.smudge=git-lfs smudge --skip -- %f -c filter.lfs.process=git-lfs filter-process --skip -c filter.lfs.required=false reset --hard HEAD
+2026-06-11T13:36:09.4594362Z HEAD is now at 62114c9 ci: default to the GitHub-hosted lane (#91)
+2026-06-11T13:36:09.4594362Z [command]git -C /var/lib/velnor-jackin-agent-brown/work/slot-1/5247116c-6ac4-5798-9b48-4c80d61e5c70/workspace/. clean -ffdx
+2026-06-11T13:36:09.4594362Z [command]git -C /var/lib/velnor-jackin-agent-brown/work/slot-1/5247116c-6ac4-5798-9b48-4c80d61e5c70/workspace/. config --local http.https://github.com/.extraheader http.extraheader=AUTHORIZATION: ***
+2026-06-11T13:36:09.4594362Z Pinned 25 file and directory mtimes to the commit timestamp (stable cargo fingerprints across jobs)
+2026-06-11T13:36:09.4594362Z Checkout completed successfully
+2026-06-11T13:36:09.4594362Z ##[endgroup]
+2026-06-11T13:36:11.0000000Z ##[group]Login to Docker Hub for base image pulls
+2026-06-11T13:36:11.0000000Z with:
+2026-06-11T13:36:11.0000000Z   password: ***
+2026-06-11T13:36:11.0000000Z   username: ***
+2026-06-11T13:36:11.0000000Z env:
+2026-06-11T13:36:11.0000000Z   DOCKERHUB_USERNAME: ***
+2026-06-11T13:36:11.0000000Z   DOCKERHUB_TOKEN: ***
+2026-06-11T13:36:11.0000000Z ##[endgroup]
+2026-06-11T13:36:11.0000000Z Login Succeeded
+2026-06-11T13:36:11.0000000Z 
+2026-06-11T13:36:11.0000000Z WARNING! Your credentials are stored unencrypted in '/github/home/.docker/config.json'.
+2026-06-11T13:36:11.0000000Z Configure a credential helper to remove this warning. See
+2026-06-11T13:36:11.0000000Z https://docs.docker.com/go/credential-store/
+2026-06-11T13:36:11.0000000Z 
+2026-06-11T13:36:25.0000000Z ##[group]Run jackin-project/jackin-role-action@918e0958a2f695087b8e262ed90d3ed7c09c787a
+2026-06-11T13:36:25.0000000Z with:
+2026-06-11T13:36:25.0000000Z   jackin-version: latest-build
+2026-06-11T13:36:25.0000000Z   registry-cache-image: docker.io/***/jackin-agent-brown
+2026-06-11T13:36:25.0000000Z env:
+2026-06-11T13:36:25.0000000Z   DOCKERHUB_USERNAME: ***
+2026-06-11T13:36:25.0000000Z   DOCKERHUB_TOKEN: ***
+2026-06-11T13:36:25.0000000Z ##[endgroup]
+2026-06-11T13:36:25.0000000Z ##[group]Download jackin-role
+2026-06-11T13:36:25.0000000Z [36;1m/__a/_actions/jackin-project_jackin-role-action/918e0958a2f695087b8e262ed90d3ed7c09c787a/scripts/download-jackin-role.sh "$JACKIN_VERSION"[0m
+2026-06-11T13:36:25.0000000Z shell: bash --noprofile --norc -e -o pipefail {0}
+2026-06-11T13:36:25.0000000Z env:
+2026-06-11T13:36:25.0000000Z   DOCKERHUB_USERNAME: ***
+2026-06-11T13:36:25.0000000Z   DOCKERHUB_TOKEN: ***
+2026-06-11T13:36:25.0000000Z   GH_TOKEN: ***
+2026-06-11T13:36:25.0000000Z   JACKIN_VERSION: latest-build
+2026-06-11T13:36:25.0000000Z   GITHUB_ACTION_PATH: /__a/_actions/jackin-project_jackin-role-action/918e0958a2f695087b8e262ed90d3ed7c09c787a
+2026-06-11T13:36:25.0000000Z ##[endgroup]
+2026-06-11T13:36:25.0000000Z Resolving latest preview validator build for x86_64-unknown-linux-gnu...
+2026-06-11T13:36:25.0000000Z Using artifact jackin-role-x86_64-unknown-linux-gnu from workflow run 27347062723
+2026-06-11T13:36:25.0000000Z jackin-role-x86_64-unknown-linux-gnu.tar.gz: OK
+2026-06-11T13:36:25.0000000Z jackin-role latest-build installed
+2026-06-11T13:36:25.0000000Z ##[group]step
+2026-06-11T13:36:25.0000000Z with:
+2026-06-11T13:36:25.0000000Z   config: ./.hadolint.yaml
+2026-06-11T13:36:25.0000000Z   dockerfile: ./Dockerfile
+2026-06-11T13:36:25.0000000Z   failure-threshold: error
+2026-06-11T13:36:25.0000000Z   ignore: DL3004
+2026-06-11T13:36:25.0000000Z env:
+2026-06-11T13:36:25.0000000Z   DOCKERHUB_USERNAME: ***
+2026-06-11T13:36:25.0000000Z   DOCKERHUB_TOKEN: ***
+2026-06-11T13:36:25.0000000Z ##[endgroup]
+2026-06-11T13:36:25.0000000Z ./Dockerfile:38 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation.
+2026-06-11T13:36:25.0000000Z ./Dockerfile:39 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation.
+2026-06-11T13:36:25.0000000Z ./Dockerfile:108 DL3003 warning: Use WORKDIR to switch to a directory
+2026-06-11T13:36:25.0000000Z Haskell Dockerfile Linter 2.14.0
+2026-06-11T13:36:25.0000000Z ##[group]Validate agent repo
+2026-06-11T13:36:25.0000000Z [36;1mjackin-role validate "$AGENT_PATH"[0m
+2026-06-11T13:36:25.0000000Z shell: bash --noprofile --norc -e -o pipefail {0}
+2026-06-11T13:36:25.0000000Z env:
+2026-06-11T13:36:25.0000000Z   DOCKERHUB_USERNAME: ***
+2026-06-11T13:36:25.0000000Z   DOCKERHUB_TOKEN: ***
+2026-06-11T13:36:25.0000000Z   HADOLINT_RESULTS: ./Dockerfile:38 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation../Dockerfile:39 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation../Dockerfile:108 DL3003 warning: Use WORKDIR to switch to a directory
+2026-06-11T13:36:25.0000000Z   AGENT_PATH: .
+2026-06-11T13:36:25.0000000Z   GITHUB_ACTION_PATH: /__a/_actions/jackin-project_jackin-role-action/918e0958a2f695087b8e262ed90d3ed7c09c787a
+2026-06-11T13:36:25.0000000Z ##[endgroup]
+2026-06-11T13:36:25.0000000Z Role repository is valid: /__w
+2026-06-11T13:36:25.0000000Z ##[group]step
+2026-06-11T13:36:25.0000000Z env:
+2026-06-11T13:36:25.0000000Z   DOCKERHUB_USERNAME: ***
+2026-06-11T13:36:25.0000000Z   DOCKERHUB_TOKEN: ***
+2026-06-11T13:36:25.0000000Z   HADOLINT_RESULTS: ./Dockerfile:38 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation../Dockerfile:39 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation../Dockerfile:108 DL3003 warning: Use WORKDIR to switch to a directory
+2026-06-11T13:36:25.0000000Z ##[endgroup]
+2026-06-11T13:36:25.0000000Z velnor-builder
+2026-06-11T13:36:25.0000000Z ##[group]step
+2026-06-11T13:36:25.0000000Z with:
+2026-06-11T13:36:25.0000000Z   cache-from: type=gha,scope=ChainArgos/jackin-agent-brown-.-linux-amd64
+type=registry,ref=docker.io/***/jackin-agent-brown:buildcache-amd64
+
+2026-06-11T13:36:25.0000000Z   cache-to: type=gha,scope=ChainArgos/jackin-agent-brown-.-linux-amd64,mode=max
+2026-06-11T13:36:25.0000000Z   context: .
+2026-06-11T13:36:25.0000000Z   load: true
+2026-06-11T13:36:25.0000000Z   platforms: linux/amd64
+2026-06-11T13:36:25.0000000Z   push: false
+2026-06-11T13:36:25.0000000Z   secrets: ***
+2026-06-11T13:36:25.0000000Z env:
+2026-06-11T13:36:25.0000000Z   DOCKERHUB_USERNAME: ***
+2026-06-11T13:36:25.0000000Z   DOCKERHUB_TOKEN: ***
+2026-06-11T13:36:25.0000000Z   HADOLINT_RESULTS: ./Dockerfile:38 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation../Dockerfile:39 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation../Dockerfile:108 DL3003 warning: Use WORKDIR to switch to a directory
+2026-06-11T13:36:25.0000000Z   BUILDX_BUILDER: velnor-builder
+2026-06-11T13:36:25.0000000Z ##[endgroup]
+2026-06-11T13:36:25.0000000Z [velnor] dropped 2 type=gha cache option(s): the persistent local builder cache covers them on the Velnor lane
+2026-06-11T13:36:25.0000000Z #0 building with "velnor-builder" instance using docker-container driver
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #1 [internal] load build definition from Dockerfile
+2026-06-11T13:36:25.0000000Z #1 transferring dockerfile: 6.13kB done
+2026-06-11T13:36:25.0000000Z #1 DONE 0.1s
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #2 [internal] load metadata for docker.io/projectjackin/construct:0.5-trixie@sha256:d8d0726c7300615e82ac6c54af486175e6fb3363953831b7a41eea0ab5561fc5
+2026-06-11T13:36:25.0000000Z #2 ...
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #3 [auth] projectjackin/construct:pull token for registry-1.docker.io
+2026-06-11T13:36:25.0000000Z #3 DONE 0.0s
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #2 [internal] load metadata for docker.io/projectjackin/construct:0.5-trixie@sha256:d8d0726c7300615e82ac6c54af486175e6fb3363953831b7a41eea0ab5561fc5
+2026-06-11T13:36:25.0000000Z #2 DONE 0.7s
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #4 [internal] load .dockerignore
+2026-06-11T13:36:25.0000000Z #4 transferring context: 73B done
+2026-06-11T13:36:25.0000000Z #4 DONE 0.1s
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #5 importing cache manifest from docker.io/***/jackin-agent-brown:buildcache-amd64
+2026-06-11T13:36:25.0000000Z #5 ...
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #6 [internal] load build context
+2026-06-11T13:36:25.0000000Z #6 DONE 0.0s
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #7 [internal] setting cache mount permissions
+2026-06-11T13:36:25.0000000Z #7 DONE 0.0s
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #8 [stage-0  1/16] FROM docker.io/projectjackin/construct:0.5-trixie@sha256:d8d0726c7300615e82ac6c54af486175e6fb3363953831b7a41eea0ab5561fc5
+2026-06-11T13:36:25.0000000Z #8 resolve docker.io/projectjackin/construct:0.5-trixie@sha256:d8d0726c7300615e82ac6c54af486175e6fb3363953831b7a41eea0ab5561fc5 0.0s done
+2026-06-11T13:36:25.0000000Z #8 DONE 0.0s
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #9 [auth] ***/jackin-agent-brown:pull token for registry-1.docker.io
+2026-06-11T13:36:25.0000000Z #9 DONE 0.0s
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #5 importing cache manifest from docker.io/***/jackin-agent-brown:buildcache-amd64
+2026-06-11T13:36:25.0000000Z #5 inferred cache manifest type: application/vnd.oci.image.manifest.v1+json done
+2026-06-11T13:36:25.0000000Z #5 DONE 1.3s
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #6 [internal] load build context
+2026-06-11T13:36:25.0000000Z #6 transferring context: 512B done
+2026-06-11T13:36:25.0000000Z #6 DONE 0.1s
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #10 [stage-0  4/16] RUN mkdir -p /home/agent/.gradle
+2026-06-11T13:36:25.0000000Z #10 CACHED
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #11 [stage-0  5/16] RUN mkdir -p "${HOME}/.cache/mise"
+2026-06-11T13:36:25.0000000Z #11 CACHED
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #12 [stage-0 14/16] RUN . ~/.profile &&     mkdir -p "${HOME}/.claude" "${HOME}/.codex" &&     git clone --depth 1 --branch "v1.8.2" https://github.com/JuliusBrussee/caveman.git /tmp/caveman &&     node /tmp/caveman/bin/install.js --only claude --only opencode --no-mcp-shrink &&     test -f "${HOME}/.claude/hooks/caveman-statusline.sh" &&     test -f "${HOME}/.claude/hooks/caveman-activate.js" &&     test -f "${HOME}/.claude/hooks/caveman-mode-tracker.js" &&     test -f "${HOME}/.config/opencode/plugins/caveman/plugin.js" &&     cd "${HOME}" &&     npx -y skills add "JuliusBrussee/caveman#v1.8.2" -a codex --yes --global &&     npx -y skills add "JuliusBrussee/caveman#v1.8.2" -a amp --yes --global &&     test -f "${HOME}/.agents/skills/caveman/SKILL.md" &&     rm -rf /tmp/caveman
+2026-06-11T13:36:25.0000000Z #12 CACHED
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #13 [stage-0  9/16] RUN --mount=type=secret,id=github_token,uid=1000,required=false     --mount=type=cache,target=/home/agent/.cache/mise,uid=1000     GITHUB_TOKEN=${GITHUB_TOKEN:-$(cat /run/secrets/github_token 2>/dev/null)}     mise install "rust@1.96.0" &&     mise use -g --pin "rust@1.96.0" &&     . ~/.profile &&     rustup component add clippy rustfmt rust-analyzer
+2026-06-11T13:36:25.0000000Z #13 CACHED
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #14 [stage-0  8/16] RUN --mount=type=secret,id=github_token,uid=1000,required=false     --mount=type=cache,target=/home/agent/.cache/mise,uid=1000     GITHUB_TOKEN=${GITHUB_TOKEN:-$(cat /run/secrets/github_token 2>/dev/null)}     mise install "node@24.16.0" &&     mise use -g --pin "node@24.16.0"
+2026-06-11T13:36:25.0000000Z #14 CACHED
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #15 [stage-0 11/16] RUN --mount=type=secret,id=github_token,uid=1000,required=false     --mount=type=cache,target=/home/agent/.cargo/registry,uid=1000     --mount=type=cache,target=/home/agent/.cargo/git,uid=1000     GITHUB_TOKEN=${GITHUB_TOKEN:-$(cat /run/secrets/github_token 2>/dev/null)}     . ~/.profile &&     cargo binstall --no-confirm cargo-nextest ast-grep rust-script just bottom
+2026-06-11T13:36:25.0000000Z #15 CACHED
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #16 [stage-0 15/16] COPY --chown=agent:agent zshrc.d/docker-helpers.zsh /home/agent/.zshrc.d/docker-helpers.zsh
+2026-06-11T13:36:25.0000000Z #16 CACHED
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #17 [stage-0  3/16] RUN echo "api.version=1.44" > /home/agent/.docker-java.properties
+2026-06-11T13:36:25.0000000Z #17 CACHED
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #18 [stage-0 12/16] RUN curl -fsSL https://get.tessl.io | TESSL_VERSION="0.77.0" sh
+2026-06-11T13:36:25.0000000Z #18 CACHED
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #19 [stage-0 13/16] RUN --mount=type=secret,id=github_token,uid=1000,required=false     GITHUB_TOKEN=${GITHUB_TOKEN:-$(cat /run/secrets/github_token 2>/dev/null)}     mise exec "node@24.16.0" -- npm install -g "ctx7@0.5.1"
+2026-06-11T13:36:25.0000000Z #19 CACHED
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #20 [stage-0  6/16] RUN --mount=type=secret,id=github_token,uid=1000,required=false     --mount=type=cache,target=/home/agent/.cache/mise,uid=1000     GITHUB_TOKEN=${GITHUB_TOKEN:-$(cat /run/secrets/github_token 2>/dev/null)}     mise install "java@oracle-graalvm-25.0.1" &&     mise use -g --pin "java@oracle-graalvm-25.0.1"
+2026-06-11T13:36:25.0000000Z #20 CACHED
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #21 [stage-0 10/16] RUN --mount=type=secret,id=github_token,uid=1000,required=false     --mount=type=cache,target=/home/agent/.cache/mise,uid=1000     GITHUB_TOKEN=${GITHUB_TOKEN:-$(cat /run/secrets/github_token 2>/dev/null)}     mise install "cargo-binstall@1.20.0" &&     mise use -g --pin "cargo-binstall@1.20.0"
+2026-06-11T13:36:25.0000000Z #21 CACHED
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #22 [stage-0  7/16] RUN --mount=type=secret,id=github_token,uid=1000,required=false     --mount=type=cache,target=/home/agent/.cache/mise,uid=1000     GITHUB_TOKEN=${GITHUB_TOKEN:-$(cat /run/secrets/github_token 2>/dev/null)}     mise install "protoc@34.1" &&     mise use -g --pin "protoc@34.1"
+2026-06-11T13:36:25.0000000Z #22 CACHED
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #23 [stage-0  2/16] RUN --mount=type=cache,target=/var/cache/apt,sharing=locked     --mount=type=cache,target=/var/lib/apt,sharing=locked     sudo apt-get update &&     sudo apt-get install -y --no-install-recommends     build-essential     libclang-dev     libssl-dev     openssl     pkg-config &&     sudo apt-get autoremove -y
+2026-06-11T13:36:25.0000000Z #23 CACHED
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #24 [stage-0 16/16] RUN echo 'source /home/agent/.zshrc.d/docker-helpers.zsh' >> /home/agent/.zshrc
+2026-06-11T13:36:25.0000000Z #24 CACHED
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #25 exporting to docker image format
+2026-06-11T13:36:25.0000000Z #25 exporting layers done
+2026-06-11T13:36:25.0000000Z #25 exporting manifest sha256:39f214ab6b37c63e806c0e7354c437b166a040b2b63ee12b05590835967c6626 0.0s done
+2026-06-11T13:36:25.0000000Z #25 exporting config sha256:a974aab3b31886b8516f6413d17861dbbcc17bb6a956a999fa4a7cfdaec1f19f 0.0s done
+2026-06-11T13:36:25.0000000Z #25 sending tarball
+2026-06-11T13:36:25.0000000Z #25 sending tarball 5.0s done
+2026-06-11T13:36:25.0000000Z #25 DONE 5.0s
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #26 importing to docker
+2026-06-11T13:36:25.0000000Z #26 DONE 0.0s
+2026-06-11T13:36:25.0000000Z 
+2026-06-11T13:36:25.0000000Z #27 resolving provenance for metadata file
+2026-06-11T13:36:25.0000000Z #27 DONE 0.0s
+2026-06-11T13:36:25.0000000Z ##[group]Post Run jackin-project/jackin-role-action@918e0958a2f695087b8e262ed90d3ed7c09c787a
+2026-06-11T13:36:25.0000000Z ##[endgroup]
+2026-06-11T13:36:25.0000000Z ##[group]Post 
+2026-06-11T13:36:25.0000000Z env:
+2026-06-11T13:36:25.0000000Z   DOCKERHUB_USERNAME: ***
+2026-06-11T13:36:25.0000000Z   DOCKERHUB_TOKEN: ***
+2026-06-11T13:36:25.0000000Z   HADOLINT_RESULTS: ./Dockerfile:38 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation../Dockerfile:39 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation../Dockerfile:108 DL3003 warning: Use WORKDIR to switch to a directory
+2026-06-11T13:36:25.0000000Z   BUILDX_BUILDER: velnor-builder
+2026-06-11T13:36:25.0000000Z ##[endgroup]
+2026-06-11T13:36:25.0000000Z Removing builder velnor-builder
+2026-06-11T13:36:25.0000000Z ##[group]Post Login to Docker Hub for base image pulls
+2026-06-11T13:36:25.0000000Z with:
+2026-06-11T13:36:25.0000000Z   password: ***
+2026-06-11T13:36:25.0000000Z   username: ***
+2026-06-11T13:36:25.0000000Z env:
+2026-06-11T13:36:25.0000000Z   DOCKERHUB_USERNAME: ***
+2026-06-11T13:36:25.0000000Z   DOCKERHUB_TOKEN: ***
+2026-06-11T13:36:25.0000000Z   HADOLINT_RESULTS: ./Dockerfile:38 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation../Dockerfile:39 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation../Dockerfile:108 DL3003 warning: Use WORKDIR to switch to a directory
+2026-06-11T13:36:25.0000000Z   BUILDX_BUILDER: velnor-builder
+2026-06-11T13:36:25.0000000Z ##[endgroup]
+2026-06-11T13:36:25.0000000Z Removing login credentials for https://index.docker.io/v1/
+2026-06-11T13:36:26.4117219Z ##[group]Post Run actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+2026-06-11T13:36:26.4117219Z [command]git -C /var/lib/velnor-jackin-agent-brown/work/slot-1/5247116c-6ac4-5798-9b48-4c80d61e5c70/workspace/. config --local --unset-all http.https://github.com/.extraheader
+2026-06-11T13:36:26.4117219Z ##[endgroup]
+2026-06-11T13:36:26.4117479Z ##[group]Post-job cleanup
+2026-06-11T13:36:26.4117479Z Stop job container
+2026-06-11T13:36:26.4117479Z Remove per-job network
+2026-06-11T13:36:26.4117479Z Clean work directory
+2026-06-11T13:36:26.4117479Z Recycle runner slot
+2026-06-11T13:36:26.4117479Z ##[endgroup]
+
