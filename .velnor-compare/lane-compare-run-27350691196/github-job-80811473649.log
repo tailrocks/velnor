@@ -1,0 +1,1231 @@
+﻿2026-06-11T13:36:09.5773833Z Current runner version: '2.335.1'
+2026-06-11T13:36:09.5811360Z ##[group]Runner Image Provisioner
+2026-06-11T13:36:09.5812837Z Hosted Compute Agent
+2026-06-11T13:36:09.5814114Z Version: 20260527.539
+2026-06-11T13:36:09.5815269Z Commit: a891dd388383b896fa6ac04a82c0b75cec981078
+2026-06-11T13:36:09.5816608Z Build Date: 2026-05-27T21:39:57Z
+2026-06-11T13:36:09.5817832Z Worker ID: {29f0c718-51f0-4966-b940-e24a2492eee4}
+2026-06-11T13:36:09.5819019Z Azure Region: westus
+2026-06-11T13:36:09.5820129Z ##[endgroup]
+2026-06-11T13:36:09.5823290Z ##[group]Operating System
+2026-06-11T13:36:09.5824674Z Ubuntu
+2026-06-11T13:36:09.5825638Z 24.04.4
+2026-06-11T13:36:09.5826495Z LTS
+2026-06-11T13:36:09.5827489Z ##[endgroup]
+2026-06-11T13:36:09.5828466Z ##[group]Runner Image
+2026-06-11T13:36:09.5829573Z Image: ubuntu-24.04
+2026-06-11T13:36:09.5830575Z Version: 20260607.184.1
+2026-06-11T13:36:09.5833103Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260607.184/images/ubuntu/Ubuntu2404-Readme.md
+2026-06-11T13:36:09.5835981Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260607.184
+2026-06-11T13:36:09.5837928Z ##[endgroup]
+2026-06-11T13:36:09.5839960Z ##[group]GITHUB_TOKEN Permissions
+2026-06-11T13:36:09.5843471Z Contents: read
+2026-06-11T13:36:09.5844487Z Metadata: read
+2026-06-11T13:36:09.5845442Z ##[endgroup]
+2026-06-11T13:36:09.5848763Z Secret source: Actions
+2026-06-11T13:36:09.5850085Z Prepare workflow directory
+2026-06-11T13:36:09.6662298Z Prepare all required actions
+2026-06-11T13:36:09.6721950Z Getting action download info
+2026-06-11T13:36:10.6246216Z Download action repository 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' (SHA:df4cb1c069e1874edd31b4311f1884172cec0e10)
+2026-06-11T13:36:11.0637883Z Download action repository 'docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee' (SHA:650006c6eb7dba73a995cc03b0b2d7f5ca915bee)
+2026-06-11T13:36:11.5840203Z Download action repository 'jackin-project/jackin-role-action@918e0958a2f695087b8e262ed90d3ed7c09c787a' (SHA:918e0958a2f695087b8e262ed90d3ed7c09c787a)
+2026-06-11T13:36:11.9233682Z Getting action download info
+2026-06-11T13:36:12.3967471Z Download action repository 'hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5' (SHA:2332a7b74a6de0dda2e2221d575162eba76ba5e5)
+2026-06-11T13:36:12.6154538Z Download action repository 'docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5' (SHA:d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5)
+2026-06-11T13:36:13.2147223Z Download action repository 'docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf' (SHA:f9f3042f7e2789586610d6e8b85c8f03e5195baf)
+2026-06-11T13:36:13.8818359Z Complete job name: validate (GitHub)
+2026-06-11T13:36:13.9224258Z ##[group]Build container for action use: '/home/runner/work/_actions/hadolint/hadolint-action/2332a7b74a6de0dda2e2221d575162eba76ba5e5/Dockerfile'.
+2026-06-11T13:36:13.9701881Z ##[command]/usr/bin/docker build -t 1dac0c:052292b7eac2471aba7c15cafc02112c -f "/home/runner/work/_actions/hadolint/hadolint-action/2332a7b74a6de0dda2e2221d575162eba76ba5e5/Dockerfile" "/home/runner/work/_actions/hadolint/hadolint-action/2332a7b74a6de0dda2e2221d575162eba76ba5e5"
+2026-06-11T13:36:14.6520461Z #0 building with "default" instance using docker driver
+2026-06-11T13:36:14.6522187Z 
+2026-06-11T13:36:14.6525261Z #1 [internal] load build definition from Dockerfile
+2026-06-11T13:36:14.6526563Z #1 transferring dockerfile: 221B done
+2026-06-11T13:36:14.6527346Z #1 DONE 0.0s
+2026-06-11T13:36:14.6527605Z 
+2026-06-11T13:36:15.6964987Z #2 [internal] load metadata for ghcr.io/hadolint/hadolint:v2.14.0-debian
+2026-06-11T13:36:15.6965742Z #2 DONE 1.2s
+2026-06-11T13:36:15.8174802Z 
+2026-06-11T13:36:15.8175449Z #3 [internal] load .dockerignore
+2026-06-11T13:36:15.8177040Z #3 transferring context: 2B done
+2026-06-11T13:36:15.8177932Z #3 DONE 0.0s
+2026-06-11T13:36:15.8178457Z 
+2026-06-11T13:36:15.8179168Z #4 [internal] load build context
+2026-06-11T13:36:15.8179912Z #4 transferring context: 9.24kB done
+2026-06-11T13:36:15.8180658Z #4 DONE 0.0s
+2026-06-11T13:36:15.8182073Z 
+2026-06-11T13:36:15.8183051Z #5 [1/3] FROM ghcr.io/hadolint/hadolint:v2.14.0-debian@sha256:158cd0184dcaa18bd8ec20b61f4c1cabdf8b32a592d062f57bdcb8e4c1d312e2
+2026-06-11T13:36:15.8185118Z #5 resolve ghcr.io/hadolint/hadolint:v2.14.0-debian@sha256:158cd0184dcaa18bd8ec20b61f4c1cabdf8b32a592d062f57bdcb8e4c1d312e2 done
+2026-06-11T13:36:15.8187043Z #5 sha256:d9b5485c1cb283f26c0f31a62091636979df1b46a675a588965357da9467e17f 0B / 11.98MB 0.1s
+2026-06-11T13:36:15.8188663Z #5 sha256:158cd0184dcaa18bd8ec20b61f4c1cabdf8b32a592d062f57bdcb8e4c1d312e2 1.61kB / 1.61kB done
+2026-06-11T13:36:15.8190340Z #5 sha256:bb143dee5ef4a59958be7d6315c15ce2a239c7fd6c362f66888aabca123a8059 675B / 675B done
+2026-06-11T13:36:15.8192191Z #5 sha256:d2177d31ee5925b68e8ec1510101f6532efab94d6108280a6bdc4c72445d1853 1.11kB / 1.11kB done
+2026-06-11T13:36:15.8193660Z #5 sha256:d107e437f7299a0db6425d4e37f44fa779f7917ecc8daf1e87128ee91b9ed3d3 0B / 28.23MB 0.1s
+2026-06-11T13:36:15.9983023Z #5 sha256:d107e437f7299a0db6425d4e37f44fa779f7917ecc8daf1e87128ee91b9ed3d3 16.78MB / 28.23MB 0.2s
+2026-06-11T13:36:15.9984463Z #5 extracting sha256:d107e437f7299a0db6425d4e37f44fa779f7917ecc8daf1e87128ee91b9ed3d3
+2026-06-11T13:36:16.0996130Z #5 sha256:d9b5485c1cb283f26c0f31a62091636979df1b46a675a588965357da9467e17f 11.98MB / 11.98MB 0.3s done
+2026-06-11T13:36:16.0997614Z #5 sha256:d107e437f7299a0db6425d4e37f44fa779f7917ecc8daf1e87128ee91b9ed3d3 28.23MB / 28.23MB 0.2s done
+2026-06-11T13:36:17.3109979Z #5 extracting sha256:d107e437f7299a0db6425d4e37f44fa779f7917ecc8daf1e87128ee91b9ed3d3 1.3s done
+2026-06-11T13:36:17.4578902Z #5 extracting sha256:d9b5485c1cb283f26c0f31a62091636979df1b46a675a588965357da9467e17f 0.1s
+2026-06-11T13:36:17.7800250Z #5 extracting sha256:d9b5485c1cb283f26c0f31a62091636979df1b46a675a588965357da9467e17f 0.3s done
+2026-06-11T13:36:18.1312434Z #5 DONE 2.4s
+2026-06-11T13:36:18.3247310Z 
+2026-06-11T13:36:18.3248048Z #6 [2/3] COPY LICENSE README.md problem-matcher.json /
+2026-06-11T13:36:18.3249015Z #6 DONE 0.0s
+2026-06-11T13:36:18.3249490Z 
+2026-06-11T13:36:18.3249930Z #7 [3/3] COPY hadolint.sh /usr/local/bin/hadolint.sh
+2026-06-11T13:36:18.3250487Z #7 DONE 0.0s
+2026-06-11T13:36:18.3250700Z 
+2026-06-11T13:36:18.3251551Z #8 exporting to image
+2026-06-11T13:36:18.3251983Z #8 exporting layers
+2026-06-11T13:36:19.0095996Z #8 exporting layers 0.8s done
+2026-06-11T13:36:19.0324371Z #8 writing image sha256:75594a1010fe1df37d2ad98a8e9105371452a5ecc48e7bcf8b6d2a0c2b51f928 done
+2026-06-11T13:36:19.0325980Z #8 naming to docker.io/library/1dac0c:052292b7eac2471aba7c15cafc02112c done
+2026-06-11T13:36:19.0327794Z #8 DONE 0.8s
+2026-06-11T13:36:19.0419303Z ##[endgroup]
+2026-06-11T13:36:19.0788304Z ##[group]Run actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+2026-06-11T13:36:19.0789031Z with:
+2026-06-11T13:36:19.0789282Z   repository: ChainArgos/jackin-agent-brown
+2026-06-11T13:36:19.0792910Z   token: ***
+2026-06-11T13:36:19.0793140Z   ssh-strict: true
+2026-06-11T13:36:19.0793362Z   ssh-user: git
+2026-06-11T13:36:19.0793579Z   persist-credentials: true
+2026-06-11T13:36:19.0793864Z   clean: true
+2026-06-11T13:36:19.0794087Z   sparse-checkout-cone-mode: true
+2026-06-11T13:36:19.0794354Z   fetch-depth: 1
+2026-06-11T13:36:19.0794564Z   fetch-tags: false
+2026-06-11T13:36:19.0794779Z   show-progress: true
+2026-06-11T13:36:19.0794999Z   lfs: false
+2026-06-11T13:36:19.0795222Z   submodules: false
+2026-06-11T13:36:19.0795446Z   set-safe-directory: true
+2026-06-11T13:36:19.0795916Z env:
+2026-06-11T13:36:19.0796157Z   DOCKERHUB_USERNAME: ***
+2026-06-11T13:36:19.0796485Z   DOCKERHUB_TOKEN: ***
+2026-06-11T13:36:19.0796710Z ##[endgroup]
+2026-06-11T13:36:19.1885929Z Syncing repository: ChainArgos/jackin-agent-brown
+2026-06-11T13:36:19.1887314Z ##[group]Getting Git version info
+2026-06-11T13:36:19.1887800Z Working directory is '/home/runner/work/jackin-agent-brown/jackin-agent-brown'
+2026-06-11T13:36:19.1919242Z [command]/usr/bin/git version
+2026-06-11T13:36:19.1971623Z git version 2.54.0
+2026-06-11T13:36:19.1999122Z ##[endgroup]
+2026-06-11T13:36:19.2031969Z Temporarily overriding HOME='/home/runner/work/_temp/5bf307be-f600-4150-9e51-24fc97243097' before making global git config changes
+2026-06-11T13:36:19.2034511Z Adding repository directory to the temporary git global config as a safe directory
+2026-06-11T13:36:19.2035964Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/jackin-agent-brown/jackin-agent-brown
+2026-06-11T13:36:19.2079733Z Deleting the contents of '/home/runner/work/jackin-agent-brown/jackin-agent-brown'
+2026-06-11T13:36:19.2088238Z ##[group]Determining repository object format
+2026-06-11T13:36:19.2094099Z ##[endgroup]
+2026-06-11T13:36:19.2095086Z ##[group]Initializing the repository
+2026-06-11T13:36:19.2096205Z [command]/usr/bin/git init /home/runner/work/jackin-agent-brown/jackin-agent-brown
+2026-06-11T13:36:19.2266603Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-06-11T13:36:19.2267827Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-06-11T13:36:19.2268716Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-06-11T13:36:19.2269516Z hint: call:
+2026-06-11T13:36:19.2270220Z hint:
+2026-06-11T13:36:19.2270722Z hint: 	git config --global init.defaultBranch <name>
+2026-06-11T13:36:19.2271522Z hint:
+2026-06-11T13:36:19.2272072Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-06-11T13:36:19.2273006Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-06-11T13:36:19.2273715Z hint:
+2026-06-11T13:36:19.2274088Z hint: 	git branch -m <name>
+2026-06-11T13:36:19.2274542Z hint:
+2026-06-11T13:36:19.2275199Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-06-11T13:36:19.2279910Z Initialized empty Git repository in /home/runner/work/jackin-agent-brown/jackin-agent-brown/.git/
+2026-06-11T13:36:19.2294565Z [command]/usr/bin/git remote add origin https://github.com/ChainArgos/jackin-agent-brown
+2026-06-11T13:36:19.2347675Z ##[endgroup]
+2026-06-11T13:36:19.2348751Z ##[group]Disabling automatic garbage collection
+2026-06-11T13:36:19.2352998Z [command]/usr/bin/git config --local gc.auto 0
+2026-06-11T13:36:19.2390627Z ##[endgroup]
+2026-06-11T13:36:19.2391967Z ##[group]Setting up auth
+2026-06-11T13:36:19.2392785Z Removing SSH command configuration
+2026-06-11T13:36:19.2399330Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-06-11T13:36:19.2440850Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-06-11T13:36:19.2865389Z Removing HTTP extra header
+2026-06-11T13:36:19.2871606Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-06-11T13:36:19.2906716Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-06-11T13:36:19.3193141Z Removing includeIf entries pointing to credentials config files
+2026-06-11T13:36:19.3194253Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-06-11T13:36:19.3225761Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-06-11T13:36:19.3471350Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-ea6769a5-3fba-4d11-9271-2d98b09c44d4.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-06-11T13:36:19.3513723Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/jackin-agent-brown/jackin-agent-brown/.git.path /home/runner/work/_temp/git-credentials-ea6769a5-3fba-4d11-9271-2d98b09c44d4.config
+2026-06-11T13:36:19.3545781Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/jackin-agent-brown/jackin-agent-brown/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-ea6769a5-3fba-4d11-9271-2d98b09c44d4.config
+2026-06-11T13:36:19.3577997Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-ea6769a5-3fba-4d11-9271-2d98b09c44d4.config
+2026-06-11T13:36:19.3612045Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-ea6769a5-3fba-4d11-9271-2d98b09c44d4.config
+2026-06-11T13:36:19.3641591Z ##[endgroup]
+2026-06-11T13:36:19.3642563Z ##[group]Fetching the repository
+2026-06-11T13:36:19.3650839Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +62114c9b313ffdb535e95e1ca893448f0c3265f8:refs/remotes/origin/main
+2026-06-11T13:36:19.8597471Z From https://github.com/ChainArgos/jackin-agent-brown
+2026-06-11T13:36:19.8602000Z  * [new ref]         62114c9b313ffdb535e95e1ca893448f0c3265f8 -> origin/main
+2026-06-11T13:36:19.8650499Z [command]/usr/bin/git branch --list --remote origin/main
+2026-06-11T13:36:19.8694096Z   origin/main
+2026-06-11T13:36:19.8712570Z [command]/usr/bin/git rev-parse refs/remotes/origin/main
+2026-06-11T13:36:19.8739519Z 62114c9b313ffdb535e95e1ca893448f0c3265f8
+2026-06-11T13:36:19.8751974Z ##[endgroup]
+2026-06-11T13:36:19.8753081Z ##[group]Determining the checkout info
+2026-06-11T13:36:19.8754019Z ##[endgroup]
+2026-06-11T13:36:19.8754661Z [command]/usr/bin/git sparse-checkout disable
+2026-06-11T13:36:19.8799463Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-06-11T13:36:19.8828176Z ##[group]Checking out the ref
+2026-06-11T13:36:19.8832781Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+2026-06-11T13:36:19.8900898Z Switched to a new branch 'main'
+2026-06-11T13:36:19.8901980Z branch 'main' set up to track 'origin/main'.
+2026-06-11T13:36:19.8913705Z ##[endgroup]
+2026-06-11T13:36:19.8960726Z [command]/usr/bin/git log -1 --format=%H
+2026-06-11T13:36:19.8989119Z 62114c9b313ffdb535e95e1ca893448f0c3265f8
+2026-06-11T13:36:19.9204721Z ##[group]Run docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee
+2026-06-11T13:36:19.9205126Z with:
+2026-06-11T13:36:19.9205360Z   username: ***
+2026-06-11T13:36:19.9205630Z   password: ***
+2026-06-11T13:36:19.9205835Z   logout: true
+2026-06-11T13:36:19.9206029Z env:
+2026-06-11T13:36:19.9206238Z   DOCKERHUB_USERNAME: ***
+2026-06-11T13:36:19.9206540Z   DOCKERHUB_TOKEN: ***
+2026-06-11T13:36:19.9206763Z ##[endgroup]
+2026-06-11T13:36:20.1511561Z Logging into docker.io...
+2026-06-11T13:36:20.7212629Z Login Succeeded!
+2026-06-11T13:36:20.7387583Z ##[group]Run jackin-project/jackin-role-action@918e0958a2f695087b8e262ed90d3ed7c09c787a
+2026-06-11T13:36:20.7388053Z with:
+2026-06-11T13:36:20.7388268Z   jackin-version: latest-build
+2026-06-11T13:36:20.7388675Z   registry-cache-image: docker.io/***/jackin-agent-brown
+2026-06-11T13:36:20.7389009Z   path: .
+2026-06-11T13:36:20.7389207Z   skip-build: false
+2026-06-11T13:36:20.7389414Z env:
+2026-06-11T13:36:20.7389687Z   DOCKERHUB_USERNAME: ***
+2026-06-11T13:36:20.7389993Z   DOCKERHUB_TOKEN: ***
+2026-06-11T13:36:20.7390215Z ##[endgroup]
+2026-06-11T13:36:20.7498656Z ##[group]Run /home/runner/work/_actions/jackin-project/jackin-role-action/918e0958a2f695087b8e262ed90d3ed7c09c787a/scripts/download-jackin-role.sh "$JACKIN_VERSION"
+2026-06-11T13:36:20.7499892Z [36;1m/home/runner/work/_actions/jackin-project/jackin-role-action/918e0958a2f695087b8e262ed90d3ed7c09c787a/scripts/download-jackin-role.sh "$JACKIN_VERSION"[0m
+2026-06-11T13:36:20.7534819Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-06-11T13:36:20.7535181Z env:
+2026-06-11T13:36:20.7535447Z   DOCKERHUB_USERNAME: ***
+2026-06-11T13:36:20.7535787Z   DOCKERHUB_TOKEN: ***
+2026-06-11T13:36:20.7538960Z   GH_TOKEN: ***
+2026-06-11T13:36:20.7539189Z   JACKIN_VERSION: latest-build
+2026-06-11T13:36:20.7539437Z ##[endgroup]
+2026-06-11T13:36:20.7673994Z Resolving latest preview validator build for x86_64-unknown-linux-gnu...
+2026-06-11T13:36:22.5277419Z Using artifact jackin-role-x86_64-unknown-linux-gnu from workflow run 27347062723
+2026-06-11T13:36:24.3654557Z jackin-role-x86_64-unknown-linux-gnu.tar.gz: OK
+2026-06-11T13:36:24.4030792Z jackin-role latest-build installed
+2026-06-11T13:36:24.4146438Z ##[group]Run hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5
+2026-06-11T13:36:24.4146846Z with:
+2026-06-11T13:36:24.4147046Z   dockerfile: ./Dockerfile
+2026-06-11T13:36:24.4147286Z   ignore: DL3004
+2026-06-11T13:36:24.4147501Z   failure-threshold: error
+2026-06-11T13:36:24.4147738Z   config: ./.hadolint.yaml
+2026-06-11T13:36:24.4147969Z   recursive: false
+2026-06-11T13:36:24.4148181Z   output-file: /dev/stdout
+2026-06-11T13:36:24.4148415Z   no-color: false
+2026-06-11T13:36:24.4148620Z   no-fail: false
+2026-06-11T13:36:24.4148820Z   verbose: false
+2026-06-11T13:36:24.4149015Z   format: tty
+2026-06-11T13:36:24.4149206Z env:
+2026-06-11T13:36:24.4149458Z   DOCKERHUB_USERNAME: ***
+2026-06-11T13:36:24.4149766Z   DOCKERHUB_TOKEN: ***
+2026-06-11T13:36:24.4150738Z ##[endgroup]
+2026-06-11T13:36:24.4282161Z ##[command]/usr/bin/docker run --name dac0c052292b7eac2471aba7c15cafc02112c_f83269 --label 1dac0c --workdir /github/workspace --rm -e "DOCKERHUB_USERNAME" -e "DOCKERHUB_TOKEN" -e "INPUT_DOCKERFILE" -e "INPUT_IGNORE" -e "INPUT_FAILURE-THRESHOLD" -e "INPUT_CONFIG" -e "INPUT_RECURSIVE" -e "INPUT_OUTPUT-FILE" -e "INPUT_NO-COLOR" -e "INPUT_NO-FAIL" -e "INPUT_VERBOSE" -e "INPUT_FORMAT" -e "INPUT_OVERRIDE-ERROR" -e "INPUT_OVERRIDE-WARNING" -e "INPUT_OVERRIDE-INFO" -e "INPUT_OVERRIDE-STYLE" -e "INPUT_TRUSTED-REGISTRIES" -e "NO_COLOR" -e "HADOLINT_NOFAIL" -e "HADOLINT_VERBOSE" -e "HADOLINT_FORMAT" -e "HADOLINT_FAILURE_THRESHOLD" -e "HADOLINT_OVERRIDE_ERROR" -e "HADOLINT_OVERRIDE_WARNING" -e "HADOLINT_OVERRIDE_INFO" -e "HADOLINT_OVERRIDE_STYLE" -e "HADOLINT_IGNORE" -e "HADOLINT_TRUSTED_REGISTRIES" -e "HADOLINT_CONFIG" -e "HADOLINT_RECURSIVE" -e "HADOLINT_OUTPUT" -e "HOME" -e "GITHUB_JOB" -e "GITHUB_REF" -e "GITHUB_SHA" -e "GITHUB_REPOSITORY" -e "GITHUB_REPOSITORY_OWNER" -e "GITHUB_REPOSITORY_OWNER_ID" -e "GITHUB_RUN_ID" -e "GITHUB_RUN_NUMBER" -e "GITHUB_RETENTION_DAYS" -e "GITHUB_RUN_ATTEMPT" -e "GITHUB_ACTOR_ID" -e "GITHUB_ACTOR" -e "GITHUB_WORKFLOW" -e "GITHUB_HEAD_REF" -e "GITHUB_BASE_REF" -e "GITHUB_EVENT_NAME" -e "GITHUB_SERVER_URL" -e "GITHUB_API_URL" -e "GITHUB_GRAPHQL_URL" -e "GITHUB_REF_NAME" -e "GITHUB_REF_PROTECTED" -e "GITHUB_REF_TYPE" -e "GITHUB_WORKFLOW_REF" -e "GITHUB_WORKFLOW_SHA" -e "GITHUB_REPOSITORY_ID" -e "GITHUB_TRIGGERING_ACTOR" -e "GITHUB_WORKSPACE" -e "GITHUB_ACTION" -e "GITHUB_EVENT_PATH" -e "GITHUB_ACTION_REPOSITORY" -e "GITHUB_ACTION_REF" -e "GITHUB_PATH" -e "GITHUB_ENV" -e "GITHUB_STEP_SUMMARY" -e "GITHUB_STATE" -e "GITHUB_OUTPUT" -e "GITHUB_ACTION_PATH" -e "RUNNER_OS" -e "RUNNER_ARCH" -e "RUNNER_NAME" -e "RUNNER_ENVIRONMENT" -e "RUNNER_TOOL_CACHE" -e "RUNNER_TEMP" -e "RUNNER_WORKSPACE" -e "ACTIONS_RUNTIME_URL" -e "ACTIONS_RUNTIME_TOKEN" -e "ACTIONS_CACHE_URL" -e "ACTIONS_RESULTS_URL" -e "ACTIONS_ORCHESTRATION_ID" -e GITHUB_ACTIONS=true -e CI=true -v "/var/run/docker.sock":"/var/run/docker.sock" -v "/home/runner/work/_temp":"/github/runner_temp" -v "/home/runner/work/_temp/_github_home":"/github/home" -v "/home/runner/work/_temp/_github_workflow":"/github/workflow" -v "/home/runner/work/_temp/_runner_file_commands":"/github/file_commands" -v "/home/runner/work/jackin-agent-brown/jackin-agent-brown":"/github/workspace" 1dac0c:052292b7eac2471aba7c15cafc02112c  "./Dockerfile"
+2026-06-11T13:36:24.9573209Z ##[error]./Dockerfile:38 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation.
+2026-06-11T13:36:24.9609026Z ##[error]./Dockerfile:39 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation.
+2026-06-11T13:36:24.9610455Z ##[error]./Dockerfile:108 DL3003 warning: Use WORKDIR to switch to a directory
+2026-06-11T13:36:24.9612682Z Hadolint output saved to: /dev/stdout
+2026-06-11T13:36:25.0394982Z ##[group]Run jackin-role validate "$AGENT_PATH"
+2026-06-11T13:36:25.0395357Z [36;1mjackin-role validate "$AGENT_PATH"[0m
+2026-06-11T13:36:25.0428450Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-06-11T13:36:25.0428804Z env:
+2026-06-11T13:36:25.0429073Z   DOCKERHUB_USERNAME: ***
+2026-06-11T13:36:25.0429435Z   DOCKERHUB_TOKEN: ***
+2026-06-11T13:36:25.0430507Z   HADOLINT_RESULTS: ./Dockerfile:38 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation.
+./Dockerfile:39 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation.
+./Dockerfile:108 DL3003 warning: Use WORKDIR to switch to a directory
+2026-06-11T13:36:25.0431899Z   AGENT_PATH: .
+2026-06-11T13:36:25.0432115Z ##[endgroup]
+2026-06-11T13:36:25.0504870Z Role repository is valid: /home/runner/work/jackin-agent-brown/jackin-agent-brown
+2026-06-11T13:36:25.0556087Z ##[group]Run docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5
+2026-06-11T13:36:25.0556507Z with:
+2026-06-11T13:36:25.0556713Z   driver: docker-container
+2026-06-11T13:36:25.0556948Z   use: true
+2026-06-11T13:36:25.0557141Z   keep-state: false
+2026-06-11T13:36:25.0557367Z   cache-binary: true
+2026-06-11T13:36:25.0557580Z   cleanup: true
+2026-06-11T13:36:25.0557773Z env:
+2026-06-11T13:36:25.0558023Z   DOCKERHUB_USERNAME: ***
+2026-06-11T13:36:25.0558327Z   DOCKERHUB_TOKEN: ***
+2026-06-11T13:36:25.0559350Z   HADOLINT_RESULTS: ./Dockerfile:38 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation.
+./Dockerfile:39 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation.
+./Dockerfile:108 DL3003 warning: Use WORKDIR to switch to a directory
+2026-06-11T13:36:25.0560411Z ##[endgroup]
+2026-06-11T13:36:25.3297811Z ##[group]Docker info
+2026-06-11T13:36:25.3335431Z [command]/usr/bin/docker version
+2026-06-11T13:36:25.3570413Z Client: Docker Engine - Community
+2026-06-11T13:36:25.3571936Z  Version:           28.0.4
+2026-06-11T13:36:25.3583578Z  API version:       1.48
+2026-06-11T13:36:25.3584247Z  Go version:        go1.23.7
+2026-06-11T13:36:25.3585596Z  Git commit:        b8034c0
+2026-06-11T13:36:25.3586132Z  Built:             Tue Mar 25 15:07:16 2025
+2026-06-11T13:36:25.3586674Z  OS/Arch:           linux/amd64
+2026-06-11T13:36:25.3587151Z  Context:           default
+2026-06-11T13:36:25.3587419Z 
+2026-06-11T13:36:25.3587613Z Server: Docker Engine - Community
+2026-06-11T13:36:25.3588062Z  Engine:
+2026-06-11T13:36:25.3588406Z   Version:          28.0.4
+2026-06-11T13:36:25.3588881Z   API version:      1.48 (minimum version 1.24)
+2026-06-11T13:36:25.3589407Z   Go version:       go1.23.7
+2026-06-11T13:36:25.3589860Z   Git commit:       6430e49
+2026-06-11T13:36:25.3590695Z   Built:            Tue Mar 25 15:07:16 2025
+2026-06-11T13:36:25.3591798Z   OS/Arch:          linux/amd64
+2026-06-11T13:36:25.3592269Z   Experimental:     false
+2026-06-11T13:36:25.3592688Z  containerd:
+2026-06-11T13:36:25.3593044Z   Version:          v2.2.4
+2026-06-11T13:36:25.3593565Z   GitCommit:        193637f7ee8ae5f5aa5248f49e7baa3e6164966e
+2026-06-11T13:36:25.3594142Z  runc:
+2026-06-11T13:36:25.3594493Z   Version:          1.3.5
+2026-06-11T13:36:25.3594960Z   GitCommit:        v1.3.5-0-g488fc13e
+2026-06-11T13:36:25.3595441Z  docker-init:
+2026-06-11T13:36:25.3595811Z   Version:          0.19.0
+2026-06-11T13:36:25.3596231Z   GitCommit:        de40ad0
+2026-06-11T13:36:25.3643881Z [command]/usr/bin/docker info
+2026-06-11T13:36:25.6722783Z Client: Docker Engine - Community
+2026-06-11T13:36:25.6732228Z  Version:    28.0.4
+2026-06-11T13:36:25.6732751Z  Context:    default
+2026-06-11T13:36:25.6733221Z  Debug Mode: false
+2026-06-11T13:36:25.6733671Z  Plugins:
+2026-06-11T13:36:25.6734140Z   buildx: Docker Buildx (Docker Inc.)
+2026-06-11T13:36:25.6734716Z     Version:  v0.34.1
+2026-06-11T13:36:25.6735522Z     Path:     /usr/libexec/docker/cli-plugins/docker-buildx
+2026-06-11T13:36:25.6736596Z   compose: Docker Compose (Docker Inc.)
+2026-06-11T13:36:25.6737315Z     Version:  v2.38.2
+2026-06-11T13:36:25.6737974Z     Path:     /usr/libexec/docker/cli-plugins/docker-compose
+2026-06-11T13:36:25.6738552Z 
+2026-06-11T13:36:25.6738818Z Server:
+2026-06-11T13:36:25.6739728Z  Containers: 0
+2026-06-11T13:36:25.6740165Z   Running: 0
+2026-06-11T13:36:25.6740605Z   Paused: 0
+2026-06-11T13:36:25.6741455Z   Stopped: 0
+2026-06-11T13:36:25.6741935Z  Images: 7
+2026-06-11T13:36:25.6742412Z  Server Version: 28.0.4
+2026-06-11T13:36:25.6743045Z  Storage Driver: overlay2
+2026-06-11T13:36:25.6743597Z   Backing Filesystem: extfs
+2026-06-11T13:36:25.6744127Z   Supports d_type: true
+2026-06-11T13:36:25.6744647Z   Using metacopy: false
+2026-06-11T13:36:25.6745195Z   Native Overlay Diff: false
+2026-06-11T13:36:25.6745776Z   userxattr: false
+2026-06-11T13:36:25.6746293Z  Logging Driver: json-file
+2026-06-11T13:36:25.6746843Z  Cgroup Driver: systemd
+2026-06-11T13:36:25.6747355Z  Cgroup Version: 2
+2026-06-11T13:36:25.6747851Z  Plugins:
+2026-06-11T13:36:25.6748410Z   Volume: local
+2026-06-11T13:36:25.6749002Z   Network: bridge host ipvlan macvlan null overlay
+2026-06-11T13:36:25.6749733Z   Log: awslogs fluentd gcplogs gelf journald json-file local splunk syslog
+2026-06-11T13:36:25.6750217Z  Swarm: inactive
+2026-06-11T13:36:25.6750482Z  Runtimes: io.containerd.runc.v2 runc
+2026-06-11T13:36:25.6751392Z  Default Runtime: runc
+2026-06-11T13:36:25.6751934Z  Init Binary: docker-init
+2026-06-11T13:36:25.6752583Z  containerd version: 193637f7ee8ae5f5aa5248f49e7baa3e6164966e
+2026-06-11T13:36:25.6753431Z  runc version: v1.3.5-0-g488fc13e
+2026-06-11T13:36:25.6754131Z  init version: de40ad0
+2026-06-11T13:36:25.6754706Z  Security Options:
+2026-06-11T13:36:25.6755247Z   apparmor
+2026-06-11T13:36:25.6755742Z   seccomp
+2026-06-11T13:36:25.6756236Z    Profile: builtin
+2026-06-11T13:36:25.6756792Z   cgroupns
+2026-06-11T13:36:25.6757320Z  Kernel Version: 6.17.0-1018-azure
+2026-06-11T13:36:25.6758067Z  Operating System: Ubuntu 24.04.4 LTS
+2026-06-11T13:36:25.6758691Z  OSType: linux
+2026-06-11T13:36:25.6759253Z  Architecture: x86_64
+2026-06-11T13:36:25.6759813Z  CPUs: 2
+2026-06-11T13:36:25.6760287Z  Total Memory: 7.752GiB
+2026-06-11T13:36:25.6760832Z  Name: runnervm1li68
+2026-06-11T13:36:25.6761787Z  ID: 9eac8dfe-87b8-4fbb-b95c-78918ab76978
+2026-06-11T13:36:25.6762499Z  Docker Root Dir: /var/lib/docker
+2026-06-11T13:36:25.6763114Z  Debug Mode: false
+2026-06-11T13:36:25.6763790Z  Username: ***
+2026-06-11T13:36:25.6764357Z  Experimental: false
+2026-06-11T13:36:25.6764917Z  Insecure Registries:
+2026-06-11T13:36:25.6771976Z   ::1/128
+2026-06-11T13:36:25.6773499Z   127.0.0.0/8
+2026-06-11T13:36:25.6774256Z  Live Restore Enabled: false
+2026-06-11T13:36:25.6774731Z 
+2026-06-11T13:36:25.6775462Z ##[endgroup]
+2026-06-11T13:36:25.7422938Z ##[group]Buildx version
+2026-06-11T13:36:25.7480482Z [command]/usr/bin/docker buildx version
+2026-06-11T13:36:25.8079179Z github.com/docker/buildx v0.34.1 e0b0e77d18d3379bc1e0d55f3b37de288d36fe47
+2026-06-11T13:36:25.8112236Z ##[endgroup]
+2026-06-11T13:36:25.8265143Z ##[group]Inspecting default docker context
+2026-06-11T13:36:25.8427061Z [
+2026-06-11T13:36:25.8427661Z   {
+2026-06-11T13:36:25.8428126Z     "Name": "default",
+2026-06-11T13:36:25.8428685Z     "Metadata": {},
+2026-06-11T13:36:25.8429201Z     "Endpoints": {
+2026-06-11T13:36:25.8429695Z       "docker": {
+2026-06-11T13:36:25.8430517Z         "Host": "unix:///var/run/docker.sock",
+2026-06-11T13:36:25.8431427Z         "SkipTLSVerify": false
+2026-06-11T13:36:25.8432435Z       }
+2026-06-11T13:36:25.8432936Z     },
+2026-06-11T13:36:25.8433698Z     "TLSMaterial": {},
+2026-06-11T13:36:25.8434619Z     "Storage": {
+2026-06-11T13:36:25.8435195Z       "MetadataPath": "<IN MEMORY>",
+2026-06-11T13:36:25.8435922Z       "TLSPath": "<IN MEMORY>"
+2026-06-11T13:36:25.8436753Z     }
+2026-06-11T13:36:25.8437469Z   }
+2026-06-11T13:36:25.8438122Z ]
+2026-06-11T13:36:25.8439458Z ##[endgroup]
+2026-06-11T13:36:25.8440373Z ##[group]Creating a new builder instance
+2026-06-11T13:36:25.9751974Z [command]/usr/bin/docker buildx create --name builder-000a43aa-d224-4467-b8b8-0a7a1f64d237 --driver docker-container --buildkitd-flags --allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host --use
+2026-06-11T13:36:26.0348493Z builder-000a43aa-d224-4467-b8b8-0a7a1f64d237
+2026-06-11T13:36:26.0387573Z ##[endgroup]
+2026-06-11T13:36:26.0402472Z ##[group]Booting builder
+2026-06-11T13:36:26.0474955Z [command]/usr/bin/docker buildx inspect --bootstrap --builder builder-000a43aa-d224-4467-b8b8-0a7a1f64d237
+2026-06-11T13:36:26.1030548Z #1 [internal] booting buildkit
+2026-06-11T13:36:26.2544211Z #1 pulling image moby/buildkit:buildx-stable-1
+2026-06-11T13:36:30.2560482Z #1 pulling image moby/buildkit:buildx-stable-1 4.2s done
+2026-06-11T13:36:30.4115994Z #1 creating container buildx_buildkit_builder-000a43aa-d224-4467-b8b8-0a7a1f64d2370
+2026-06-11T13:36:30.6402404Z #1 creating container buildx_buildkit_builder-000a43aa-d224-4467-b8b8-0a7a1f64d2370 0.4s done
+2026-06-11T13:36:30.6443645Z #1 DONE 4.5s
+2026-06-11T13:36:30.6908774Z Name:          builder-000a43aa-d224-4467-b8b8-0a7a1f64d237
+2026-06-11T13:36:30.6927630Z Driver:        docker-container
+2026-06-11T13:36:30.6928760Z Last Activity: 2026-06-11 13:36:26 +0000 UTC
+2026-06-11T13:36:30.6929609Z 
+2026-06-11T13:36:30.6930175Z Nodes:
+2026-06-11T13:36:30.6932574Z Name:                  builder-000a43aa-d224-4467-b8b8-0a7a1f64d2370
+2026-06-11T13:36:30.6933421Z Endpoint:              unix:///var/run/docker.sock
+2026-06-11T13:36:30.6934084Z Status:                running
+2026-06-11T13:36:30.6935121Z BuildKit daemon flags: --allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host
+2026-06-11T13:36:30.6936209Z BuildKit version:      v0.30.0
+2026-06-11T13:36:30.6936938Z Platforms:             linux/amd64, linux/amd64/v2, linux/amd64/v3, linux/386
+2026-06-11T13:36:30.6937688Z Labels:
+2026-06-11T13:36:30.6938262Z  org.mobyproject.buildkit.worker.executor:         oci
+2026-06-11T13:36:30.6939121Z  org.mobyproject.buildkit.worker.hostname:         1281585dda2b
+2026-06-11T13:36:30.6939972Z  org.mobyproject.buildkit.worker.network:          host
+2026-06-11T13:36:30.6940808Z  org.mobyproject.buildkit.worker.oci.process-mode: sandbox
+2026-06-11T13:36:30.6942137Z  org.mobyproject.buildkit.worker.selinux.enabled:  false
+2026-06-11T13:36:30.6947720Z  org.mobyproject.buildkit.worker.snapshotter:      overlayfs
+2026-06-11T13:36:30.6950059Z GC Policy rule#0:
+2026-06-11T13:36:30.6951659Z  All:            false
+2026-06-11T13:36:30.6953322Z  Filters:        type==source.local,type==exec.cachemount,type==source.git.checkout
+2026-06-11T13:36:30.6956047Z  Keep Duration:  48h0m0s
+2026-06-11T13:36:30.6956701Z  Max Used Space: 488.3MiB
+2026-06-11T13:36:30.6958667Z GC Policy rule#1:
+2026-06-11T13:36:30.6959263Z  All:            false
+2026-06-11T13:36:30.6960719Z  Keep Duration:  1440h0m0s
+2026-06-11T13:36:30.6968193Z  Reserved Space: 7.451GiB
+2026-06-11T13:36:30.6973582Z  Max Used Space: 54.02GiB
+2026-06-11T13:36:30.6981597Z  Min Free Space: 13.97GiB
+2026-06-11T13:36:30.6986131Z GC Policy rule#2:
+2026-06-11T13:36:30.6986794Z  All:            false
+2026-06-11T13:36:30.6987471Z  Reserved Space: 7.451GiB
+2026-06-11T13:36:30.6988147Z  Max Used Space: 54.02GiB
+2026-06-11T13:36:30.6989439Z  Min Free Space: 13.97GiB
+2026-06-11T13:36:30.6990549Z GC Policy rule#3:
+2026-06-11T13:36:30.6991773Z  All:            true
+2026-06-11T13:36:30.6992413Z  Reserved Space: 7.451GiB
+2026-06-11T13:36:30.6993088Z  Max Used Space: 54.02GiB
+2026-06-11T13:36:30.6993824Z  Min Free Space: 13.97GiB
+2026-06-11T13:36:30.6995524Z ##[endgroup]
+2026-06-11T13:36:30.8047186Z ##[group]Inspect builder
+2026-06-11T13:36:30.8048270Z {
+2026-06-11T13:36:30.8048935Z   "nodes": [
+2026-06-11T13:36:30.8049533Z     {
+2026-06-11T13:36:30.8050255Z       "name": "builder-000a43aa-d224-4467-b8b8-0a7a1f64d2370",
+2026-06-11T13:36:30.8051410Z       "endpoint": "unix:///var/run/docker.sock",
+2026-06-11T13:36:30.8052246Z       "status": "running",
+2026-06-11T13:36:30.8053427Z       "buildkitd-flags": "--allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host",
+2026-06-11T13:36:30.8054687Z       "buildkit": "v0.30.0",
+2026-06-11T13:36:30.8055630Z       "platforms": "linux/amd64,linux/amd64/v2,linux/amd64/v3,linux/386",
+2026-06-11T13:36:30.8056545Z       "features": {
+2026-06-11T13:36:30.8058216Z         "Automatically load images to the Docker Engine image store": true,
+2026-06-11T13:36:30.8059182Z         "Cache export": true,
+2026-06-11T13:36:30.8059885Z         "Direct push": true,
+2026-06-11T13:36:30.8060579Z         "Docker exporter": true,
+2026-06-11T13:36:30.8061523Z         "Multi-platform build": true,
+2026-06-11T13:36:30.8062279Z         "OCI exporter": true
+2026-06-11T13:36:30.8062942Z       },
+2026-06-11T13:36:30.8063530Z       "labels": {
+2026-06-11T13:36:30.8064289Z         "org.mobyproject.buildkit.worker.executor": "oci",
+2026-06-11T13:36:30.8065383Z         "org.mobyproject.buildkit.worker.hostname": "1281585dda2b",
+2026-06-11T13:36:30.8066483Z         "org.mobyproject.buildkit.worker.network": "host",
+2026-06-11T13:36:30.8067427Z         "org.mobyproject.buildkit.worker.oci.process-mode": "sandbox",
+2026-06-11T13:36:30.8068519Z         "org.mobyproject.buildkit.worker.selinux.enabled": "false",
+2026-06-11T13:36:30.8069460Z         "org.mobyproject.buildkit.worker.snapshotter": "overlayfs"
+2026-06-11T13:36:30.8070302Z       },
+2026-06-11T13:36:30.8070902Z       "gcPolicy": [
+2026-06-11T13:36:30.8072229Z         {
+2026-06-11T13:36:30.8072739Z           "all": false,
+2026-06-11T13:36:30.8073303Z           "filter": [
+2026-06-11T13:36:30.8073833Z             "type==source.local",
+2026-06-11T13:36:30.8074586Z             "type==exec.cachemount",
+2026-06-11T13:36:30.8075215Z             "type==source.git.checkout"
+2026-06-11T13:36:30.8075856Z           ],
+2026-06-11T13:36:30.8077581Z           "keepDuration": "48h0m0s",
+2026-06-11T13:36:30.8078488Z           "maxUsedSpace": "488.3MiB"
+2026-06-11T13:36:30.8079390Z         },
+2026-06-11T13:36:30.8079871Z         {
+2026-06-11T13:36:30.8080324Z           "all": false,
+2026-06-11T13:36:30.8080830Z           "keepDuration": "1440h0m0s",
+2026-06-11T13:36:30.8081698Z           "reservedSpace": "7.451GiB",
+2026-06-11T13:36:30.8082277Z           "maxUsedSpace": "54.02GiB",
+2026-06-11T13:36:30.8082855Z           "minFreeSpace": "13.97GiB"
+2026-06-11T13:36:30.8083411Z         },
+2026-06-11T13:36:30.8083841Z         {
+2026-06-11T13:36:30.8084350Z           "all": false,
+2026-06-11T13:36:30.8084870Z           "reservedSpace": "7.451GiB",
+2026-06-11T13:36:30.8085433Z           "maxUsedSpace": "54.02GiB",
+2026-06-11T13:36:30.8086008Z           "minFreeSpace": "13.97GiB"
+2026-06-11T13:36:30.8086537Z         },
+2026-06-11T13:36:30.8086967Z         {
+2026-06-11T13:36:30.8087393Z           "all": true,
+2026-06-11T13:36:30.8087887Z           "reservedSpace": "7.451GiB",
+2026-06-11T13:36:30.8088714Z           "maxUsedSpace": "54.02GiB",
+2026-06-11T13:36:30.8089308Z           "minFreeSpace": "13.97GiB"
+2026-06-11T13:36:30.8089859Z         }
+2026-06-11T13:36:30.8090286Z       ]
+2026-06-11T13:36:30.8090706Z     }
+2026-06-11T13:36:30.8092065Z   ],
+2026-06-11T13:36:30.8092746Z   "name": "builder-000a43aa-d224-4467-b8b8-0a7a1f64d237",
+2026-06-11T13:36:30.8093435Z   "driver": "docker-container",
+2026-06-11T13:36:30.8093981Z   "lastActivity": "2026-06-11T13:36:26.000Z"
+2026-06-11T13:36:30.8094553Z }
+2026-06-11T13:36:30.8095287Z ##[endgroup]
+2026-06-11T13:36:30.8095985Z ##[group]BuildKit version
+2026-06-11T13:36:30.8096779Z builder-000a43aa-d224-4467-b8b8-0a7a1f64d2370: v0.30.0
+2026-06-11T13:36:30.8097676Z ##[endgroup]
+2026-06-11T13:36:30.8247207Z ##[group]Run docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf
+2026-06-11T13:36:30.8247608Z with:
+2026-06-11T13:36:30.8247796Z   context: .
+2026-06-11T13:36:30.8248001Z   platforms: linux/amd64
+2026-06-11T13:36:30.8248233Z   push: false
+2026-06-11T13:36:30.8248438Z   load: true
+2026-06-11T13:36:30.8249085Z   cache-from: type=gha,scope=ChainArgos/jackin-agent-brown-.-linux-amd64
+type=registry,ref=docker.io/***/jackin-agent-brown:buildcache-amd64
+
+2026-06-11T13:36:30.8249877Z   cache-to: type=gha,scope=ChainArgos/jackin-agent-brown-.-linux-amd64,mode=max
+2026-06-11T13:36:30.8253493Z   secrets: github_token=***
+
+2026-06-11T13:36:30.8253766Z   no-cache: false
+2026-06-11T13:36:30.8254170Z   pull: false
+2026-06-11T13:36:30.8257140Z   github-token: ***
+2026-06-11T13:36:30.8257356Z env:
+2026-06-11T13:36:30.8257576Z   DOCKERHUB_USERNAME: ***
+2026-06-11T13:36:30.8257877Z   DOCKERHUB_TOKEN: ***
+2026-06-11T13:36:30.8258882Z   HADOLINT_RESULTS: ./Dockerfile:38 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation.
+./Dockerfile:39 DL3059 info: Multiple consecutive `RUN` instructions. Consider consolidation.
+./Dockerfile:108 DL3003 warning: Use WORKDIR to switch to a directory
+2026-06-11T13:36:30.8259946Z ##[endgroup]
+2026-06-11T13:36:31.1597606Z ##[group]GitHub Actions runtime token ACs
+2026-06-11T13:36:31.1607179Z refs/heads/main: read/write
+2026-06-11T13:36:31.1608248Z ##[endgroup]
+2026-06-11T13:36:31.1609276Z ##[group]Docker info
+2026-06-11T13:36:31.1656094Z [command]/usr/bin/docker version
+2026-06-11T13:36:31.1887794Z Client: Docker Engine - Community
+2026-06-11T13:36:31.1898316Z  Version:           28.0.4
+2026-06-11T13:36:31.1899458Z  API version:       1.48
+2026-06-11T13:36:31.1900574Z  Go version:        go1.23.7
+2026-06-11T13:36:31.1901593Z  Git commit:        b8034c0
+2026-06-11T13:36:31.1902348Z  Built:             Tue Mar 25 15:07:16 2025
+2026-06-11T13:36:31.1903087Z  OS/Arch:           linux/amd64
+2026-06-11T13:36:31.1903762Z  Context:           default
+2026-06-11T13:36:31.1904268Z 
+2026-06-11T13:36:31.1904676Z Server: Docker Engine - Community
+2026-06-11T13:36:31.1905384Z  Engine:
+2026-06-11T13:36:31.1905980Z   Version:          28.0.4
+2026-06-11T13:36:31.1906708Z   API version:      1.48 (minimum version 1.24)
+2026-06-11T13:36:31.1909245Z   Go version:       go1.23.7
+2026-06-11T13:36:31.1909955Z   Git commit:       6430e49
+2026-06-11T13:36:31.1910608Z   Built:            Tue Mar 25 15:07:16 2025
+2026-06-11T13:36:31.1911843Z   OS/Arch:          linux/amd64
+2026-06-11T13:36:31.1912641Z   Experimental:     false
+2026-06-11T13:36:31.1913320Z  containerd:
+2026-06-11T13:36:31.1913930Z   Version:          v2.2.4
+2026-06-11T13:36:31.1914717Z   GitCommit:        193637f7ee8ae5f5aa5248f49e7baa3e6164966e
+2026-06-11T13:36:31.1915588Z  runc:
+2026-06-11T13:36:31.1916194Z   Version:          1.3.5
+2026-06-11T13:36:31.1916870Z   GitCommit:        v1.3.5-0-g488fc13e
+2026-06-11T13:36:31.1917585Z  docker-init:
+2026-06-11T13:36:31.1918208Z   Version:          0.19.0
+2026-06-11T13:36:31.1918907Z   GitCommit:        de40ad0
+2026-06-11T13:36:31.1951942Z [command]/usr/bin/docker info
+2026-06-11T13:36:31.2654814Z Client: Docker Engine - Community
+2026-06-11T13:36:31.2655937Z  Version:    28.0.4
+2026-06-11T13:36:31.2657174Z  Context:    default
+2026-06-11T13:36:31.2658065Z  Debug Mode: false
+2026-06-11T13:36:31.2658546Z  Plugins:
+2026-06-11T13:36:31.2659012Z   buildx: Docker Buildx (Docker Inc.)
+2026-06-11T13:36:31.2659556Z     Version:  v0.34.1
+2026-06-11T13:36:31.2660117Z     Path:     /usr/libexec/docker/cli-plugins/docker-buildx
+2026-06-11T13:36:31.2660814Z   compose: Docker Compose (Docker Inc.)
+2026-06-11T13:36:31.2662137Z     Version:  v2.38.2
+2026-06-11T13:36:31.2662695Z     Path:     /usr/libexec/docker/cli-plugins/docker-compose
+2026-06-11T13:36:31.2663212Z 
+2026-06-11T13:36:31.2663439Z Server:
+2026-06-11T13:36:31.2663842Z  Containers: 1
+2026-06-11T13:36:31.2664262Z   Running: 1
+2026-06-11T13:36:31.2664682Z   Paused: 0
+2026-06-11T13:36:31.2665086Z   Stopped: 0
+2026-06-11T13:36:31.2665545Z  Images: 8
+2026-06-11T13:36:31.2665965Z  Server Version: 28.0.4
+2026-06-11T13:36:31.2666450Z  Storage Driver: overlay2
+2026-06-11T13:36:31.2667030Z   Backing Filesystem: extfs
+2026-06-11T13:36:31.2667563Z   Supports d_type: true
+2026-06-11T13:36:31.2668047Z   Using metacopy: false
+2026-06-11T13:36:31.2668544Z   Native Overlay Diff: false
+2026-06-11T13:36:31.2669046Z   userxattr: false
+2026-06-11T13:36:31.2669493Z  Logging Driver: json-file
+2026-06-11T13:36:31.2669976Z  Cgroup Driver: systemd
+2026-06-11T13:36:31.2670450Z  Cgroup Version: 2
+2026-06-11T13:36:31.2670915Z  Plugins:
+2026-06-11T13:36:31.2671732Z   Volume: local
+2026-06-11T13:36:31.2672319Z   Network: bridge host ipvlan macvlan null overlay
+2026-06-11T13:36:31.2673513Z   Log: awslogs fluentd gcplogs gelf journald json-file local splunk syslog
+2026-06-11T13:36:31.2674371Z  Swarm: inactive
+2026-06-11T13:36:31.2674944Z  Runtimes: io.containerd.runc.v2 runc
+2026-06-11T13:36:31.2675569Z  Default Runtime: runc
+2026-06-11T13:36:31.2676090Z  Init Binary: docker-init
+2026-06-11T13:36:31.2676742Z  containerd version: 193637f7ee8ae5f5aa5248f49e7baa3e6164966e
+2026-06-11T13:36:31.2678732Z  runc version: v1.3.5-0-g488fc13e
+2026-06-11T13:36:31.2679335Z  init version: de40ad0
+2026-06-11T13:36:31.2679863Z  Security Options:
+2026-06-11T13:36:31.2680385Z   apparmor
+2026-06-11T13:36:31.2680826Z   seccomp
+2026-06-11T13:36:31.2681563Z    Profile: builtin
+2026-06-11T13:36:31.2682082Z   cgroupns
+2026-06-11T13:36:31.2682569Z  Kernel Version: 6.17.0-1018-azure
+2026-06-11T13:36:31.2683193Z  Operating System: Ubuntu 24.04.4 LTS
+2026-06-11T13:36:31.2683825Z  OSType: linux
+2026-06-11T13:36:31.2684331Z  Architecture: x86_64
+2026-06-11T13:36:31.2684833Z  CPUs: 2
+2026-06-11T13:36:31.2685323Z  Total Memory: 7.752GiB
+2026-06-11T13:36:31.2685823Z  Name: runnervm1li68
+2026-06-11T13:36:31.2686361Z  ID: 9eac8dfe-87b8-4fbb-b95c-78918ab76978
+2026-06-11T13:36:31.2687289Z  Docker Root Dir: /var/lib/docker
+2026-06-11T13:36:31.2687908Z  Debug Mode: false
+2026-06-11T13:36:31.2688771Z  Username: ***
+2026-06-11T13:36:31.2689630Z  Experimental: false
+2026-06-11T13:36:31.2690203Z  Insecure Registries:
+2026-06-11T13:36:31.2690766Z   ::1/128
+2026-06-11T13:36:31.2691829Z   127.0.0.0/8
+2026-06-11T13:36:31.2692656Z  Live Restore Enabled: false
+2026-06-11T13:36:31.2693269Z 
+2026-06-11T13:36:31.2694019Z ##[endgroup]
+2026-06-11T13:36:31.2694872Z ##[group]Proxy configuration
+2026-06-11T13:36:31.2695697Z No proxy configuration found
+2026-06-11T13:36:31.2696813Z ##[endgroup]
+2026-06-11T13:36:31.3317722Z ##[group]Buildx version
+2026-06-11T13:36:31.3352922Z [command]/usr/bin/docker buildx version
+2026-06-11T13:36:31.3947476Z github.com/docker/buildx v0.34.1 e0b0e77d18d3379bc1e0d55f3b37de288d36fe47
+2026-06-11T13:36:31.3967037Z ##[endgroup]
+2026-06-11T13:36:31.3967929Z ##[group]Builder info
+2026-06-11T13:36:31.5005745Z {
+2026-06-11T13:36:31.5006381Z   "nodes": [
+2026-06-11T13:36:31.5006815Z     {
+2026-06-11T13:36:31.5007404Z       "name": "builder-000a43aa-d224-4467-b8b8-0a7a1f64d2370",
+2026-06-11T13:36:31.5008194Z       "endpoint": "unix:///var/run/docker.sock",
+2026-06-11T13:36:31.5008889Z       "status": "running",
+2026-06-11T13:36:31.5009966Z       "buildkitd-flags": "--allow-insecure-entitlement security.insecure --allow-insecure-entitlement network.host",
+2026-06-11T13:36:31.5014849Z       "buildkit": "v0.30.0",
+2026-06-11T13:36:31.5015588Z       "platforms": "linux/amd64,linux/amd64/v2,linux/amd64/v3,linux/386",
+2026-06-11T13:36:31.5016371Z       "features": {
+2026-06-11T13:36:31.5017073Z         "Automatically load images to the Docker Engine image store": true,
+2026-06-11T13:36:31.5017900Z         "Cache export": true,
+2026-06-11T13:36:31.5018773Z         "Direct push": true,
+2026-06-11T13:36:31.5019409Z         "Docker exporter": true,
+2026-06-11T13:36:31.5025141Z         "Multi-platform build": true,
+2026-06-11T13:36:31.5026562Z         "OCI exporter": true
+2026-06-11T13:36:31.5027309Z       },
+2026-06-11T13:36:31.5027757Z       "labels": {
+2026-06-11T13:36:31.5028406Z         "org.mobyproject.buildkit.worker.executor": "oci",
+2026-06-11T13:36:31.5029329Z         "org.mobyproject.buildkit.worker.hostname": "1281585dda2b",
+2026-06-11T13:36:31.5030227Z         "org.mobyproject.buildkit.worker.network": "host",
+2026-06-11T13:36:31.5031559Z         "org.mobyproject.buildkit.worker.oci.process-mode": "sandbox",
+2026-06-11T13:36:31.5032599Z         "org.mobyproject.buildkit.worker.selinux.enabled": "false",
+2026-06-11T13:36:31.5033588Z         "org.mobyproject.buildkit.worker.snapshotter": "overlayfs"
+2026-06-11T13:36:31.5034384Z       },
+2026-06-11T13:36:31.5034893Z       "gcPolicy": [
+2026-06-11T13:36:31.5035819Z         {
+2026-06-11T13:36:31.5036315Z           "all": false,
+2026-06-11T13:36:31.5036872Z           "filter": [
+2026-06-11T13:36:31.5037687Z             "type==source.local",
+2026-06-11T13:36:31.5038237Z             "type==exec.cachemount",
+2026-06-11T13:36:31.5038840Z             "type==source.git.checkout"
+2026-06-11T13:36:31.5039438Z           ],
+2026-06-11T13:36:31.5040350Z           "keepDuration": "48h0m0s",
+2026-06-11T13:36:31.5041050Z           "maxUsedSpace": "488.3MiB"
+2026-06-11T13:36:31.5042112Z         },
+2026-06-11T13:36:31.5042964Z         {
+2026-06-11T13:36:31.5043461Z           "all": false,
+2026-06-11T13:36:31.5044423Z           "keepDuration": "1440h0m0s",
+2026-06-11T13:36:31.5045529Z           "reservedSpace": "7.451GiB",
+2026-06-11T13:36:31.5049885Z           "maxUsedSpace": "54.02GiB",
+2026-06-11T13:36:31.5052908Z           "minFreeSpace": "13.97GiB"
+2026-06-11T13:36:31.5053999Z         },
+2026-06-11T13:36:31.5054514Z         {
+2026-06-11T13:36:31.5055012Z           "all": false,
+2026-06-11T13:36:31.5055577Z           "reservedSpace": "7.451GiB",
+2026-06-11T13:36:31.5056352Z           "maxUsedSpace": "54.02GiB",
+2026-06-11T13:36:31.5057000Z           "minFreeSpace": "13.97GiB"
+2026-06-11T13:36:31.5057601Z         },
+2026-06-11T13:36:31.5058085Z         {
+2026-06-11T13:36:31.5058569Z           "all": true,
+2026-06-11T13:36:31.5059116Z           "reservedSpace": "7.451GiB",
+2026-06-11T13:36:31.5059781Z           "maxUsedSpace": "54.02GiB",
+2026-06-11T13:36:31.5060398Z           "minFreeSpace": "13.97GiB"
+2026-06-11T13:36:31.5061357Z         }
+2026-06-11T13:36:31.5061879Z       ]
+2026-06-11T13:36:31.5062362Z     }
+2026-06-11T13:36:31.5062823Z   ],
+2026-06-11T13:36:31.5063409Z   "name": "builder-000a43aa-d224-4467-b8b8-0a7a1f64d237",
+2026-06-11T13:36:31.5065147Z   "driver": "docker-container",
+2026-06-11T13:36:31.5065752Z   "lastActivity": "2026-06-11T13:36:26.000Z"
+2026-06-11T13:36:31.5066521Z }
+2026-06-11T13:36:31.5067532Z ##[endgroup]
+2026-06-11T13:36:31.6764044Z [command]/usr/bin/docker buildx build --cache-from type=gha,scope=ChainArgos/jackin-agent-brown-.-linux-amd64 --cache-from type=registry,ref=docker.io/***/jackin-agent-brown:buildcache-amd64 --cache-to type=gha,scope=ChainArgos/jackin-agent-brown-.-linux-amd64,mode=max --iidfile /home/runner/work/_temp/docker-actions-toolkit-D1couV/build-iidfile-2b50582be4.txt --platform linux/amd64 --secret id=github_token,src=/home/runner/work/_temp/docker-actions-toolkit-D1couV/tmp-2751-mwUVBNn772NY --load --metadata-file /home/runner/work/_temp/docker-actions-toolkit-D1couV/build-metadata-91bb0ed78b.json .
+2026-06-11T13:36:31.9759773Z #0 building with "builder-000a43aa-d224-4467-b8b8-0a7a1f64d237" instance using docker-container driver
+2026-06-11T13:36:31.9760692Z 
+2026-06-11T13:36:31.9761402Z #1 [internal] load build definition from Dockerfile
+2026-06-11T13:36:31.9762155Z #1 transferring dockerfile: 6.13kB done
+2026-06-11T13:36:31.9762830Z #1 DONE 0.0s
+2026-06-11T13:36:31.9763037Z 
+2026-06-11T13:36:31.9763859Z #2 [internal] load metadata for docker.io/projectjackin/construct:0.5-trixie@sha256:d8d0726c7300615e82ac6c54af486175e6fb3363953831b7a41eea0ab5561fc5
+2026-06-11T13:36:32.1939330Z #2 ...
+2026-06-11T13:36:32.1939985Z 
+2026-06-11T13:36:32.1940930Z #3 [auth] projectjackin/construct:pull token for registry-1.docker.io
+2026-06-11T13:36:32.1942599Z #3 DONE 0.0s
+2026-06-11T13:36:32.3443031Z 
+2026-06-11T13:36:32.3444723Z #2 [internal] load metadata for docker.io/projectjackin/construct:0.5-trixie@sha256:d8d0726c7300615e82ac6c54af486175e6fb3363953831b7a41eea0ab5561fc5
+2026-06-11T13:36:32.6889842Z #2 DONE 0.9s
+2026-06-11T13:36:32.8696391Z 
+2026-06-11T13:36:32.8697330Z #4 [internal] load .dockerignore
+2026-06-11T13:36:32.8697974Z #4 transferring context: 73B done
+2026-06-11T13:36:32.8698410Z #4 DONE 0.0s
+2026-06-11T13:36:32.8698695Z 
+2026-06-11T13:36:32.8699157Z #5 [internal] load build context
+2026-06-11T13:36:32.8699790Z #5 DONE 0.0s
+2026-06-11T13:36:32.8699991Z 
+2026-06-11T13:36:32.8700181Z #6 [internal] setting cache mount permissions
+2026-06-11T13:36:32.8700602Z #6 DONE 0.0s
+2026-06-11T13:36:32.8700778Z 
+2026-06-11T13:36:32.8701698Z #7 [stage-0  1/16] FROM docker.io/projectjackin/construct:0.5-trixie@sha256:d8d0726c7300615e82ac6c54af486175e6fb3363953831b7a41eea0ab5561fc5
+2026-06-11T13:36:32.8703591Z #7 resolve docker.io/projectjackin/construct:0.5-trixie@sha256:d8d0726c7300615e82ac6c54af486175e6fb3363953831b7a41eea0ab5561fc5 done
+2026-06-11T13:36:32.8704592Z #7 DONE 0.0s
+2026-06-11T13:36:32.8704778Z 
+2026-06-11T13:36:32.8705306Z #8 importing cache manifest from docker.io/***/jackin-agent-brown:buildcache-amd64
+2026-06-11T13:36:33.0635043Z #8 ...
+2026-06-11T13:36:33.0635664Z 
+2026-06-11T13:36:33.0636416Z #9 [auth] ***/jackin-agent-brown:pull token for registry-1.docker.io
+2026-06-11T13:36:33.0637554Z #9 DONE 0.0s
+2026-06-11T13:36:33.2127192Z 
+2026-06-11T13:36:33.2127985Z #10 importing cache manifest from gha:10807017083295803576
+2026-06-11T13:36:33.2833014Z #10 DONE 0.6s
+2026-06-11T13:36:33.2833896Z 
+2026-06-11T13:36:33.2835175Z #8 importing cache manifest from docker.io/***/jackin-agent-brown:buildcache-amd64
+2026-06-11T13:36:33.4198474Z #8 inferred cache manifest type: application/vnd.oci.image.manifest.v1+json done
+2026-06-11T13:36:33.4200441Z #8 DONE 0.7s
+2026-06-11T13:36:33.5864714Z 
+2026-06-11T13:36:33.5865069Z #5 [internal] load build context
+2026-06-11T13:36:33.5865602Z #5 transferring context: 512B done
+2026-06-11T13:36:33.5866218Z #5 DONE 0.0s
+2026-06-11T13:36:33.5866428Z 
+2026-06-11T13:36:33.5867237Z #11 [stage-0  3/16] RUN echo "api.version=1.44" > /home/agent/.docker-java.properties
+2026-06-11T13:36:33.5867942Z #11 CACHED
+2026-06-11T13:36:33.5868127Z 
+2026-06-11T13:36:33.5869914Z #12 [stage-0  6/16] RUN --mount=type=secret,id=github_token,uid=1000,required=false     --mount=type=cache,target=/home/agent/.cache/mise,uid=1000     GITHUB_TOKEN=${GITHUB_TOKEN:-$(cat /run/secrets/github_token 2>/dev/null)}     mise install "java@oracle-graalvm-25.0.1" &&     mise use -g --pin "java@oracle-graalvm-25.0.1"
+2026-06-11T13:36:33.5872214Z #12 CACHED
+2026-06-11T13:36:33.5872417Z 
+2026-06-11T13:36:33.5874283Z #13 [stage-0 11/16] RUN --mount=type=secret,id=github_token,uid=1000,required=false     --mount=type=cache,target=/home/agent/.cargo/registry,uid=1000     --mount=type=cache,target=/home/agent/.cargo/git,uid=1000     GITHUB_TOKEN=${GITHUB_TOKEN:-$(cat /run/secrets/github_token 2>/dev/null)}     . ~/.profile &&     cargo binstall --no-confirm cargo-nextest ast-grep rust-script just bottom
+2026-06-11T13:36:33.5876465Z #13 CACHED
+2026-06-11T13:36:33.5876677Z 
+2026-06-11T13:36:33.5878555Z #14 [stage-0  7/16] RUN --mount=type=secret,id=github_token,uid=1000,required=false     --mount=type=cache,target=/home/agent/.cache/mise,uid=1000     GITHUB_TOKEN=${GITHUB_TOKEN:-$(cat /run/secrets/github_token 2>/dev/null)}     mise install "protoc@34.1" &&     mise use -g --pin "protoc@34.1"
+2026-06-11T13:36:33.5880412Z #14 CACHED
+2026-06-11T13:36:33.5880610Z 
+2026-06-11T13:36:33.5884660Z #15 [stage-0 14/16] RUN . ~/.profile &&     mkdir -p "${HOME}/.claude" "${HOME}/.codex" &&     git clone --depth 1 --branch "v1.8.2" https://github.com/JuliusBrussee/caveman.git /tmp/caveman &&     node /tmp/caveman/bin/install.js --only claude --only opencode --no-mcp-shrink &&     test -f "${HOME}/.claude/hooks/caveman-statusline.sh" &&     test -f "${HOME}/.claude/hooks/caveman-activate.js" &&     test -f "${HOME}/.claude/hooks/caveman-mode-tracker.js" &&     test -f "${HOME}/.config/opencode/plugins/caveman/plugin.js" &&     cd "${HOME}" &&     npx -y skills add "JuliusBrussee/caveman#v1.8.2" -a codex --yes --global &&     npx -y skills add "JuliusBrussee/caveman#v1.8.2" -a amp --yes --global &&     test -f "${HOME}/.agents/skills/caveman/SKILL.md" &&     rm -rf /tmp/caveman
+2026-06-11T13:36:33.5888793Z #15 CACHED
+2026-06-11T13:36:33.5889041Z 
+2026-06-11T13:36:33.5890488Z #16 [stage-0 10/16] RUN --mount=type=secret,id=github_token,uid=1000,required=false     --mount=type=cache,target=/home/agent/.cache/mise,uid=1000     GITHUB_TOKEN=${GITHUB_TOKEN:-$(cat /run/secrets/github_token 2>/dev/null)}     mise install "cargo-binstall@1.20.0" &&     mise use -g --pin "cargo-binstall@1.20.0"
+2026-06-11T13:36:33.5892801Z #16 CACHED
+2026-06-11T13:36:33.5893016Z 
+2026-06-11T13:36:33.5893428Z #17 [stage-0 12/16] RUN curl -fsSL https://get.tessl.io | TESSL_VERSION="0.77.0" sh
+2026-06-11T13:36:33.5894120Z #17 CACHED
+2026-06-11T13:36:33.5894316Z 
+2026-06-11T13:36:33.5895835Z #18 [stage-0  8/16] RUN --mount=type=secret,id=github_token,uid=1000,required=false     --mount=type=cache,target=/home/agent/.cache/mise,uid=1000     GITHUB_TOKEN=${GITHUB_TOKEN:-$(cat /run/secrets/github_token 2>/dev/null)}     mise install "node@24.16.0" &&     mise use -g --pin "node@24.16.0"
+2026-06-11T13:36:33.5897376Z #18 CACHED
+2026-06-11T13:36:33.5897579Z 
+2026-06-11T13:36:33.5897810Z #19 [stage-0  5/16] RUN mkdir -p "${HOME}/.cache/mise"
+2026-06-11T13:36:33.5898117Z #19 CACHED
+2026-06-11T13:36:33.5898305Z 
+2026-06-11T13:36:33.5899433Z #20 [stage-0 13/16] RUN --mount=type=secret,id=github_token,uid=1000,required=false     GITHUB_TOKEN=${GITHUB_TOKEN:-$(cat /run/secrets/github_token 2>/dev/null)}     mise exec "node@24.16.0" -- npm install -g "ctx7@0.5.1"
+2026-06-11T13:36:33.5900709Z #20 CACHED
+2026-06-11T13:36:33.5900878Z 
+2026-06-11T13:36:33.5902823Z #21 [stage-0  9/16] RUN --mount=type=secret,id=github_token,uid=1000,required=false     --mount=type=cache,target=/home/agent/.cache/mise,uid=1000     GITHUB_TOKEN=${GITHUB_TOKEN:-$(cat /run/secrets/github_token 2>/dev/null)}     mise install "rust@1.96.0" &&     mise use -g --pin "rust@1.96.0" &&     . ~/.profile &&     rustup component add clippy rustfmt rust-analyzer
+2026-06-11T13:36:33.5904964Z #21 CACHED
+2026-06-11T13:36:33.5905081Z 
+2026-06-11T13:36:33.5905628Z #22 [stage-0 15/16] COPY --chown=agent:agent zshrc.d/docker-helpers.zsh /home/agent/.zshrc.d/docker-helpers.zsh
+2026-06-11T13:36:33.5906339Z #22 CACHED
+2026-06-11T13:36:33.5906541Z 
+2026-06-11T13:36:33.5908107Z #23 [stage-0  2/16] RUN --mount=type=cache,target=/var/cache/apt,sharing=locked     --mount=type=cache,target=/var/lib/apt,sharing=locked     sudo apt-get update &&     sudo apt-get install -y --no-install-recommends     build-essential     libclang-dev     libssl-dev     openssl     pkg-config &&     sudo apt-get autoremove -y
+2026-06-11T13:36:33.5910029Z #23 CACHED
+2026-06-11T13:36:33.5910222Z 
+2026-06-11T13:36:33.5910451Z #24 [stage-0  4/16] RUN mkdir -p /home/agent/.gradle
+2026-06-11T13:36:33.5911165Z #24 CACHED
+2026-06-11T13:36:33.5911365Z 
+2026-06-11T13:36:33.5911821Z #25 [stage-0 16/16] RUN echo 'source /home/agent/.zshrc.d/docker-helpers.zsh' >> /home/agent/.zshrc
+2026-06-11T13:36:33.6353551Z #25 CACHED
+2026-06-11T13:36:33.8045880Z 
+2026-06-11T13:36:33.8049738Z #26 exporting to docker image format
+2026-06-11T13:36:33.8051892Z #26 exporting layers done
+2026-06-11T13:36:33.8053968Z #26 exporting manifest sha256:39f214ab6b37c63e806c0e7354c437b166a040b2b63ee12b05590835967c6626 done
+2026-06-11T13:36:33.8055576Z #26 exporting config sha256:a974aab3b31886b8516f6413d17861dbbcc17bb6a956a999fa4a7cfdaec1f19f done
+2026-06-11T13:36:39.0015731Z #26 ...
+2026-06-11T13:36:39.0017076Z 
+2026-06-11T13:36:39.0019708Z #25 [stage-0 16/16] RUN echo 'source /home/agent/.zshrc.d/docker-helpers.zsh' >> /home/agent/.zshrc
+2026-06-11T13:36:39.0023090Z #25 sha256:588a3206405e973747b00207fcd39894fc02b2adaaca1ca22c8a0b360abd7b55 1.04kB / 1.04kB 0.1s done
+2026-06-11T13:36:39.0025558Z #25 sha256:ee42891c6e74d5d8957089b4a2e89f3fc03d23c32c768bae4df730c3703347c6 194B / 194B 0.1s done
+2026-06-11T13:36:39.0027336Z #25 sha256:f32f49ce655a9cf7c1fd4ca1417ddb39a54cedf4b7ff35de20f8009c18dd7a96 49.31MB / 49.31MB 0.4s done
+2026-06-11T13:36:39.0029460Z #25 sha256:accc0282a8d544e2dc407ec07d1cf185191e74f718dfb388b0d2af82482ec684 2.76MB / 2.76MB 0.3s done
+2026-06-11T13:36:39.0031385Z #25 sha256:e766ca98b8c9a8b5d8dfb76714fc14ba35c183343f1fde4d06ab4fc40dfa5303 98.02MB / 98.02MB 1.0s done
+2026-06-11T13:36:39.0033135Z #25 sha256:b4fd50b9e3a8c60cec1ffb2961801bae8f9e1472c3439d038132b96e610329a1 211B / 211B 0.1s done
+2026-06-11T13:36:39.0035088Z #25 sha256:1b8f19b770439ed8d7f05a619d44d1bf79d40006804cc075d6378f95a41148c0 5.11MB / 5.11MB 0.1s done
+2026-06-11T13:36:39.0036813Z #25 sha256:e2b5e46ed6a64cda49bfcc4073a8f7c2aebebf09a28407d47e03f382ce093ed1 32.64MB / 32.64MB 1.2s done
+2026-06-11T13:36:39.0038615Z #25 sha256:528eaea9f2b1b55ea5172ada40185eeb4ddd6ac46477dcb72035c09f629d8669 31.59MB / 31.59MB 0.6s done
+2026-06-11T13:36:39.0039510Z #25 sha256:083dc9336a15e2bc8484fa3bb314bc1b8a1ce30d4b5464cad6500ea2485f095b 14.59MB / 14.59MB 0.6s done
+2026-06-11T13:36:39.0040394Z #25 sha256:ec90b3741f332fbbd7072b5ea1c78cc58fe97aa1f849ff84d1f8e3cd7368e27a 3.47kB / 3.47kB 0.1s done
+2026-06-11T13:36:39.0041534Z #25 sha256:ebaec4554605a7b2d22526a74cc1d45286d6a22940c31a42580e60c5fa8a5c02 10.22MB / 10.22MB 0.1s done
+2026-06-11T13:36:39.0042223Z #25 sha256:56f13832e0ba5bafe6f0841a21cf1ac194aa485a04f321cdb588b43472ac9264 7.62MB / 7.62MB 0.1s done
+2026-06-11T13:36:39.0043047Z #25 sha256:695de1648a28e0a530f091836aeb6497ab6a28912d637d9bc6ccf888ee44e837 1.02kB / 1.02kB 0.1s done
+2026-06-11T13:36:39.0043846Z #25 sha256:55d99bedc9144c37e80330ab98efbed8f53a2bfe6d06ef238d6288fd96bb033e 167B / 167B 0.1s done
+2026-06-11T13:36:39.0044538Z #25 sha256:1a21d36595955509786e925d2cb6bcb52ef694833008aad9738249d6d8b25834 1.27kB / 1.27kB 0.1s done
+2026-06-11T13:36:39.0045350Z #25 sha256:714ffe441b85ae16dd326604379d0f4da9fe9aa89fa1b37a71a3ce1a98c3fb31 153B / 153B 0.1s done
+2026-06-11T13:36:39.0046152Z #25 sha256:04a8acde697b3c48f597c12570774c99a552bbb4fe590b1a543cd21203a59d54 234.11MB / 234.11MB 2.3s done
+2026-06-11T13:36:39.0046850Z #25 sha256:4fe797d00bae7d57a306d3655d25a21275b85d0626db6865c8f96764fd2bceb4 26.07MB / 26.07MB 0.2s done
+2026-06-11T13:36:39.0047668Z #25 sha256:a162a274c0b142af2e040bb180c8c63cdde4271300752df6b300de9180c4ea08 167B / 167B 0.1s done
+2026-06-11T13:36:39.0048403Z #25 sha256:e68408c78e1756c66f24722ccff9222db7a33f23ac11f2b5540deb66fd395c11 3.69MB / 3.69MB 0.1s done
+2026-06-11T13:36:39.0049139Z #25 sha256:e0029b02b8a1dc1e3298164187103f2132ece14583489f15d3b529f283dc0035 381.01MB / 381.01MB 3.9s
+2026-06-11T13:36:39.0050091Z #25 sha256:f4a0036352cdfbc7fdeb7fd207173ada790193cc81ab9f1a497e85bcf933ece0 58.83MB / 58.83MB 0.4s done
+2026-06-11T13:36:39.0050905Z #25 sha256:609cd8b1af044c2c26e74a3a964e17aa124d6cf218177148d8ab141233cef2a0 313.88MB / 313.88MB 3.3s done
+2026-06-11T13:36:39.0051791Z #25 sha256:571b3e622ec59c58b05f91e2fa555f93dc08806f41773c2009bedeee890a29f2 8.46MB / 8.46MB 0.1s done
+2026-06-11T13:36:39.0052649Z #25 sha256:e0864c8f303f2a5b90527ddb46c9dc2da7ca027ff3e5cfd292827fe8323b1ffd 382B / 382B 0.1s done
+2026-06-11T13:36:39.0053356Z #25 sha256:60c301c20ac84efa946de491245c8c74cebe31cc17622977dd9f5c713b15b609 46.29MB / 46.29MB 2.1s done
+2026-06-11T13:36:39.0054358Z #25 sha256:aaa0b57721b1b949a2f99d02edcc28d92e64fd83963f4c0a92b9a0c7a0516b25 9.67MB / 9.67MB 1.0s done
+2026-06-11T13:36:39.0055228Z #25 sha256:204336a403952bfc18ca6088922948c5efc3ac52019cd6f840f82a1e55221283 777.02kB / 777.02kB 0.9s
+2026-06-11T13:36:40.4280905Z #25 sha256:e0029b02b8a1dc1e3298164187103f2132ece14583489f15d3b529f283dc0035 381.01MB / 381.01MB 5.2s done
+2026-06-11T13:36:40.4282511Z #25 sha256:204336a403952bfc18ca6088922948c5efc3ac52019cd6f840f82a1e55221283 777.02kB / 777.02kB 2.3s done
+2026-06-11T13:36:40.4290524Z #25 DONE 6.8s
+2026-06-11T13:36:40.4295542Z 
+2026-06-11T13:36:40.4297192Z #26 exporting to docker image format
+2026-06-11T13:36:40.4305576Z #26 sending tarball
+2026-06-11T13:36:54.0216366Z #26 ...
+2026-06-11T13:36:54.0231979Z 
+2026-06-11T13:36:54.0232367Z #27 importing to docker
+2026-06-11T13:36:54.1721793Z #27 loading layer 17d38572a7dc 524.29kB / 49.31MB
+2026-06-11T13:36:55.8884544Z #27 loading layer 533c06c33bb5 32.77kB / 2.76MB
+2026-06-11T13:36:58.5144746Z #27 loading layer 5b194795114b 557.06kB / 98.02MB
+2026-06-11T13:37:00.5484394Z #27 loading layer 5b194795114b 70.19MB / 98.02MB 2.0s
+2026-06-11T13:37:02.5884213Z #27 loading layer 5b194795114b 96.93MB / 98.02MB 4.1s
+2026-06-11T13:37:03.9761765Z #27 loading layer 6663c597d798 211B / 211B
+2026-06-11T13:37:04.1127087Z #27 loading layer f2550a3ed2e2 65.54kB / 5.11MB
+2026-06-11T13:37:04.1128503Z #27 loading layer e6bf1926dfdd 327.68kB / 32.64MB
+2026-06-11T13:37:04.8867157Z #27 loading layer 70c3df5e1c33 327.68kB / 31.59MB
+2026-06-11T13:37:05.5341946Z #27 loading layer 94cd76605e46 163.84kB / 14.59MB
+2026-06-11T13:37:05.9033096Z #27 loading layer dc6c939c749a 3.47kB / 3.47kB
+2026-06-11T13:37:06.0758809Z #27 loading layer 085b782e9b5d 98.30kB / 7.62MB
+2026-06-11T13:37:06.4278373Z #27 loading layer 478662c26973 131.07kB / 10.22MB
+2026-06-11T13:37:06.5551449Z #27 loading layer ad19190b4d12 1.02kB / 1.02kB
+2026-06-11T13:37:06.7802198Z #27 loading layer d3afbf13f324 167B / 167B
+2026-06-11T13:37:06.7803179Z #27 loading layer 903b76ac450e 1.27kB / 1.27kB
+2026-06-11T13:37:06.7804105Z #27 loading layer 801e277c0438 557.06kB / 234.11MB
+2026-06-11T13:37:08.6401989Z #27 loading layer 801e277c0438 34.54MB / 234.11MB 2.0s
+2026-06-11T13:37:10.6830510Z #27 loading layer 801e277c0438 118.10MB / 234.11MB 4.1s
+2026-06-11T13:37:12.8772439Z #27 loading layer 801e277c0438 221.71MB / 234.11MB 6.2s
+2026-06-11T13:37:16.1212273Z #27 loading layer 0c5c1a21ddd2 194B / 194B
+2026-06-11T13:37:16.3467156Z #27 loading layer b00fb353e31f 153B / 153B
+2026-06-11T13:37:16.3467812Z #27 loading layer db5cfbaeecaa 167B / 167B
+2026-06-11T13:37:16.3468319Z #27 loading layer b7e3cc6b1f0c 557.06kB / 381.01MB
+2026-06-11T13:37:18.2145166Z #27 loading layer b7e3cc6b1f0c 195.53MB / 381.01MB 2.0s
+2026-06-11T13:37:20.3093994Z #27 loading layer b7e3cc6b1f0c 329.78MB / 381.01MB 4.1s
+2026-06-11T13:37:24.3757938Z #27 loading layer c583bab1688f 65.54kB / 3.69MB
+2026-06-11T13:37:24.5020341Z #27 loading layer 4c7cd0181bdc 557.06kB / 58.83MB
+2026-06-11T13:37:26.6216302Z #27 loading layer 4c7cd0181bdc 56.82MB / 58.83MB 2.1s
+2026-06-11T13:37:27.9989799Z #27 loading layer de104beb76b8 557.06kB / 313.88MB
+2026-06-11T13:37:30.0943076Z #27 loading layer de104beb76b8 125.89MB / 313.88MB 2.1s
+2026-06-11T13:37:32.1338187Z #27 loading layer de104beb76b8 241.76MB / 313.88MB 4.1s
+2026-06-11T13:37:37.5145215Z #27 loading layer de104beb76b8 255.69MB / 313.88MB 9.5s
+2026-06-11T13:37:44.5125416Z #27 loading layer de104beb76b8 258.47MB / 313.88MB 16.5s
+2026-06-11T13:37:46.5538614Z #27 loading layer de104beb76b8 283.54MB / 313.88MB 18.6s
+2026-06-11T13:37:48.6738279Z #27 loading layer de104beb76b8 303.60MB / 313.88MB 20.7s
+2026-06-11T13:37:51.8305367Z #27 loading layer 4f9337adbcf8 98.30kB / 8.46MB
+2026-06-11T13:37:52.0009502Z #27 loading layer 4b93c91b2d7b 262.14kB / 26.07MB
+2026-06-11T13:37:52.7431819Z #27 loading layer d2efdc8ef96e 491.52kB / 46.29MB
+2026-06-11T13:37:53.7345009Z #27 loading layer 6fedc23fecc3 98.30kB / 9.67MB
+2026-06-11T13:37:54.8382086Z #27 loading layer 5d7211dfad9b 32.77kB / 777.02kB
+2026-06-11T13:37:55.0006237Z #27 loading layer 3f42d783c3a9 382B / 382B
+2026-06-11T13:37:55.2349992Z #27 loading layer 17d38572a7dc 49.31MB / 49.31MB 61.1s done
+2026-06-11T13:37:55.2354478Z #27 loading layer 533c06c33bb5 2.76MB / 2.76MB 59.2s done
+2026-06-11T13:37:55.2355047Z #27 loading layer 5b194795114b 98.02MB / 98.02MB 56.6s done
+2026-06-11T13:37:55.2355424Z #27 loading layer 6663c597d798 211B / 211B 51.1s done
+2026-06-11T13:37:55.2355955Z #27 loading layer f2550a3ed2e2 5.11MB / 5.11MB 51.1s done
+2026-06-11T13:37:55.2356432Z #27 loading layer e6bf1926dfdd 32.64MB / 32.64MB 51.0s done
+2026-06-11T13:37:55.2356813Z #27 loading layer 70c3df5e1c33 31.59MB / 31.59MB 50.2s done
+2026-06-11T13:37:55.2357167Z #27 loading layer 94cd76605e46 14.59MB / 14.59MB 49.5s done
+2026-06-11T13:37:55.2357597Z #27 loading layer dc6c939c749a 3.47kB / 3.47kB 49.2s done
+2026-06-11T13:37:55.2358106Z #27 loading layer 085b782e9b5d 7.62MB / 7.62MB 49.1s done
+2026-06-11T13:37:55.2358452Z #27 loading layer 478662c26973 10.22MB / 10.22MB 48.6s done
+2026-06-11T13:37:55.2358806Z #27 loading layer ad19190b4d12 1.02kB / 1.02kB 48.5s done
+2026-06-11T13:37:55.2359142Z #27 loading layer d3afbf13f324 167B / 167B 48.5s done
+2026-06-11T13:37:55.2359753Z #27 loading layer 903b76ac450e 1.27kB / 1.27kB 48.5s done
+2026-06-11T13:37:55.2360130Z #27 loading layer 801e277c0438 234.11MB / 234.11MB 48.4s done
+2026-06-11T13:37:55.2360507Z #27 loading layer 0c5c1a21ddd2 194B / 194B 39.0s done
+2026-06-11T13:37:55.2360842Z #27 loading layer b00fb353e31f 153B / 153B 38.9s done
+2026-06-11T13:37:55.2361771Z #27 loading layer db5cfbaeecaa 167B / 167B 38.9s done
+2026-06-11T13:37:55.2362156Z #27 loading layer b7e3cc6b1f0c 381.01MB / 381.01MB 38.9s done
+2026-06-11T13:37:55.2362528Z #27 loading layer c583bab1688f 3.69MB / 3.69MB 30.7s done
+2026-06-11T13:37:55.2363059Z #27 loading layer 4c7cd0181bdc 58.83MB / 58.83MB 30.6s done
+2026-06-11T13:37:55.2363461Z #27 loading layer de104beb76b8 313.88MB / 313.88MB 27.1s done
+2026-06-11T13:37:55.2363822Z #27 loading layer 4f9337adbcf8 8.46MB / 8.46MB 3.2s done
+2026-06-11T13:37:55.2364188Z #27 loading layer 4b93c91b2d7b 26.07MB / 26.07MB 3.1s done
+2026-06-11T13:37:55.2364626Z #27 loading layer d2efdc8ef96e 46.29MB / 46.29MB 2.3s done
+2026-06-11T13:37:55.2365193Z #27 loading layer 6fedc23fecc3 9.67MB / 9.67MB 1.3s done
+2026-06-11T13:37:55.2365559Z #27 loading layer 5d7211dfad9b 777.02kB / 777.02kB 0.2s done
+2026-06-11T13:37:55.2365910Z #27 loading layer 3f42d783c3a9 382B / 382B 0.1s done
+2026-06-11T13:37:55.2366330Z #27 loading layer 9d2796e643c5 1.04kB / 1.04kB 0.1s done
+2026-06-11T13:37:55.2366743Z #27 DONE 61.1s
+2026-06-11T13:37:55.2366863Z 
+2026-06-11T13:37:55.2366975Z #26 exporting to docker image format
+2026-06-11T13:37:55.2367258Z #26 sending tarball 74.8s done
+2026-06-11T13:37:55.2367498Z #26 DONE 81.4s
+2026-06-11T13:37:55.2367619Z 
+2026-06-11T13:37:55.2367728Z #28 exporting to GitHub Actions Cache
+2026-06-11T13:37:55.2368104Z #28 preparing build cache for export
+2026-06-11T13:37:55.4636890Z #28 preparing build cache for export 0.4s done
+2026-06-11T13:37:55.4637305Z #28 sending cache export
+2026-06-11T13:38:02.0550344Z #28 sending cache export 6.6s done
+2026-06-11T13:38:02.0550908Z #28 DONE 7.0s
+2026-06-11T13:38:02.0931711Z 
+2026-06-11T13:38:02.0932425Z #29 resolving provenance for metadata file
+2026-06-11T13:38:02.0933001Z #29 DONE 0.0s
+2026-06-11T13:38:02.1046374Z ##[group]ImageID
+2026-06-11T13:38:02.1047150Z sha256:a974aab3b31886b8516f6413d17861dbbcc17bb6a956a999fa4a7cfdaec1f19f
+2026-06-11T13:38:02.1049844Z ##[endgroup]
+2026-06-11T13:38:02.1052426Z ##[group]Digest
+2026-06-11T13:38:02.1053074Z sha256:39f214ab6b37c63e806c0e7354c437b166a040b2b63ee12b05590835967c6626
+2026-06-11T13:38:02.1053916Z ##[endgroup]
+2026-06-11T13:38:02.1054429Z ##[group]Metadata
+2026-06-11T13:38:02.1054759Z {
+2026-06-11T13:38:02.1055064Z   "buildx.build.provenance": {
+2026-06-11T13:38:02.1055469Z     "builder": {
+2026-06-11T13:38:02.1055779Z       "id": ""
+2026-06-11T13:38:02.1056082Z     },
+2026-06-11T13:38:02.1056476Z     "buildType": "https://mobyproject.org/buildkit@v1",
+2026-06-11T13:38:02.1057250Z     "materials": [
+2026-06-11T13:38:02.1057653Z       {
+2026-06-11T13:38:02.1059878Z         "uri": "pkg:docker/projectjackin/construct@0.5-trixie?digest=sha256:d8d0726c7300615e82ac6c54af486175e6fb3363953831b7a41eea0ab5561fc5&platform=linux%2Famd64",
+2026-06-11T13:38:02.1061354Z         "digest": {
+2026-06-11T13:38:02.1061991Z           "sha256": "d8d0726c7300615e82ac6c54af486175e6fb3363953831b7a41eea0ab5561fc5"
+2026-06-11T13:38:02.1062500Z         }
+2026-06-11T13:38:02.1062692Z       }
+2026-06-11T13:38:02.1063006Z     ],
+2026-06-11T13:38:02.1063322Z     "invocation": {
+2026-06-11T13:38:02.1063704Z       "configSource": {
+2026-06-11T13:38:02.1064045Z         "entryPoint": "Dockerfile"
+2026-06-11T13:38:02.1064303Z       },
+2026-06-11T13:38:02.1064509Z       "parameters": {
+2026-06-11T13:38:02.1064749Z         "frontend": "dockerfile.v0",
+2026-06-11T13:38:02.1065011Z         "secrets": [
+2026-06-11T13:38:02.1065375Z           {
+2026-06-11T13:38:02.1065677Z             "id": "github_token",
+2026-06-11T13:38:02.1066141Z             "optional": true
+2026-06-11T13:38:02.1066555Z           }
+2026-06-11T13:38:02.1066774Z         ],
+2026-06-11T13:38:02.1066978Z         "locals": [
+2026-06-11T13:38:02.1067342Z           {
+2026-06-11T13:38:02.1067638Z             "name": "context"
+2026-06-11T13:38:02.1068019Z           },
+2026-06-11T13:38:02.1068321Z           {
+2026-06-11T13:38:02.1068690Z             "name": "dockerfile"
+2026-06-11T13:38:02.1069369Z           }
+2026-06-11T13:38:02.1069665Z         ],
+2026-06-11T13:38:02.1069961Z         "root": {
+2026-06-11T13:38:02.1070312Z           "configSource": {
+2026-06-11T13:38:02.1070697Z             "path": "Dockerfile"
+2026-06-11T13:38:02.1074784Z           },
+2026-06-11T13:38:02.1075176Z           "request": {
+2026-06-11T13:38:02.1075572Z             "args": {
+2026-06-11T13:38:02.1075975Z               "vcs:localdir:context": ".",
+2026-06-11T13:38:02.1076472Z               "vcs:localdir:dockerfile": ".",
+2026-06-11T13:38:02.1077037Z               "vcs:revision": "62114c9b313ffdb535e95e1ca893448f0c3265f8",
+2026-06-11T13:38:02.1077768Z               "vcs:source": "https://github.com/ChainArgos/jackin-agent-brown"
+2026-06-11T13:38:02.1078339Z             }
+2026-06-11T13:38:02.1078633Z           }
+2026-06-11T13:38:02.1078926Z         },
+2026-06-11T13:38:02.1079241Z         "compatibilityVersion": 20
+2026-06-11T13:38:02.1079632Z       },
+2026-06-11T13:38:02.1079987Z       "environment": {
+2026-06-11T13:38:02.1080438Z         "dockerfileVersion": "1.24.0",
+2026-06-11T13:38:02.1081248Z         "github_actor": "donbeave",
+2026-06-11T13:38:02.1081776Z         "github_actor_id": "139017",
+2026-06-11T13:38:02.1082367Z         "github_event_name": "workflow_dispatch",
+2026-06-11T13:38:02.1082928Z         "github_event_payload": {
+2026-06-11T13:38:02.1083361Z           "inputs": {
+2026-06-11T13:38:02.1083746Z             "lanes": "both"
+2026-06-11T13:38:02.1084153Z           },
+2026-06-11T13:38:02.1084513Z           "organization": {
+2026-06-11T13:38:02.1085137Z             "avatar_url": "https://avatars.githubusercontent.com/u/125116999?v=4",
+2026-06-11T13:38:02.1085852Z             "description": "",
+2026-06-11T13:38:02.1086482Z             "events_url": "https://api.github.com/orgs/ChainArgos/events",
+2026-06-11T13:38:02.1087267Z             "hooks_url": "https://api.github.com/orgs/ChainArgos/hooks",
+2026-06-11T13:38:02.1087867Z             "id": 125116999,
+2026-06-11T13:38:02.1088405Z             "issues_url": "https://api.github.com/orgs/ChainArgos/issues",
+2026-06-11T13:38:02.1089065Z             "login": "ChainArgos",
+2026-06-11T13:38:02.1089695Z             "members_url": "https://api.github.com/orgs/ChainArgos/members{/member}",
+2026-06-11T13:38:02.1090387Z             "node_id": "O_kgDOB3UiRw",
+2026-06-11T13:38:02.1091494Z             "public_members_url": "https://api.github.com/orgs/ChainArgos/public_members{/member}",
+2026-06-11T13:38:02.1092640Z             "repos_url": "https://api.github.com/orgs/ChainArgos/repos",
+2026-06-11T13:38:02.1093811Z             "url": "https://api.github.com/orgs/ChainArgos"
+2026-06-11T13:38:02.1094436Z           },
+2026-06-11T13:38:02.1094833Z           "ref": "refs/heads/main",
+2026-06-11T13:38:02.1095329Z           "repository": {
+2026-06-11T13:38:02.1095753Z             "allow_forking": false,
+2026-06-11T13:38:02.1096604Z             "archive_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/{archive_format}{/ref}",
+2026-06-11T13:38:02.1097500Z             "archived": false,
+2026-06-11T13:38:02.1098326Z             "assignees_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/assignees{/user}",
+2026-06-11T13:38:02.1099498Z             "blobs_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/git/blobs{/sha}",
+2026-06-11T13:38:02.1100808Z             "branches_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/branches{/branch}",
+2026-06-11T13:38:02.1102216Z             "clone_url": "https://github.com/ChainArgos/jackin-agent-brown.git",
+2026-06-11T13:38:02.1103408Z             "collaborators_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/collaborators{/collaborator}",
+2026-06-11T13:38:02.1104754Z             "comments_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/comments{/number}",
+2026-06-11T13:38:02.1105933Z             "commits_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/commits{/sha}",
+2026-06-11T13:38:02.1107152Z             "compare_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/compare/{base}...{head}",
+2026-06-11T13:38:02.1108638Z             "contents_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/contents/{+path}",
+2026-06-11T13:38:02.1109870Z             "contributors_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/contributors",
+2026-06-11T13:38:02.1110742Z             "created_at": "2026-04-02T00:41:02Z",
+2026-06-11T13:38:02.1111632Z             "custom_properties": {},
+2026-06-11T13:38:02.1112229Z             "default_branch": "main",
+2026-06-11T13:38:02.1113067Z             "deployments_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/deployments",
+2026-06-11T13:38:02.1114656Z             "description": "Agent Brown — ChainArgos jackin agent role for the Java/Rust monorepo",
+2026-06-11T13:38:02.1115638Z             "disabled": false,
+2026-06-11T13:38:02.1116456Z             "downloads_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/downloads",
+2026-06-11T13:38:02.1117559Z             "events_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/events",
+2026-06-11T13:38:02.1118291Z             "fork": false,
+2026-06-11T13:38:02.1118733Z             "forks": 0,
+2026-06-11T13:38:02.1119140Z             "forks_count": 0,
+2026-06-11T13:38:02.1119819Z             "forks_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/forks",
+2026-06-11T13:38:02.1120686Z             "full_name": "ChainArgos/jackin-agent-brown",
+2026-06-11T13:38:02.1122101Z             "git_commits_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/git/commits{/sha}",
+2026-06-11T13:38:02.1123341Z             "git_refs_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/git/refs{/sha}",
+2026-06-11T13:38:02.1124500Z             "git_tags_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/git/tags{/sha}",
+2026-06-11T13:38:02.1125667Z             "git_url": "git://github.com/ChainArgos/jackin-agent-brown.git",
+2026-06-11T13:38:02.1126648Z             "has_discussions": false,
+2026-06-11T13:38:02.1204059Z             "has_downloads": false,
+2026-06-11T13:38:02.1204605Z             "has_issues": true,
+2026-06-11T13:38:02.1205046Z             "has_pages": false,
+2026-06-11T13:38:02.1205478Z             "has_projects": true,
+2026-06-11T13:38:02.1205919Z             "has_pull_requests": true,
+2026-06-11T13:38:02.1206374Z             "has_wiki": true,
+2026-06-11T13:38:02.1206780Z             "homepage": "",
+2026-06-11T13:38:02.1207733Z             "hooks_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/hooks",
+2026-06-11T13:38:02.1208640Z             "html_url": "https://github.com/ChainArgos/jackin-agent-brown",
+2026-06-11T13:38:02.1209250Z             "id": 1198990520,
+2026-06-11T13:38:02.1209689Z             "is_template": false,
+2026-06-11T13:38:02.1210523Z             "issue_comment_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/issues/comments{/number}",
+2026-06-11T13:38:02.1212042Z             "issue_events_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/issues/events{/number}",
+2026-06-11T13:38:02.1216246Z             "issues_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/issues{/number}",
+2026-06-11T13:38:02.1216973Z             "keys_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/keys{/key_id}",
+2026-06-11T13:38:02.1217621Z             "labels_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/labels{/name}",
+2026-06-11T13:38:02.1218099Z             "language": "Dockerfile",
+2026-06-11T13:38:02.1219231Z             "languages_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/languages",
+2026-06-11T13:38:02.1220672Z             "license": null,
+2026-06-11T13:38:02.1221584Z             "merges_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/merges",
+2026-06-11T13:38:02.1222686Z             "milestones_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/milestones{/number}",
+2026-06-11T13:38:02.1225354Z             "mirror_url": null,
+2026-06-11T13:38:02.1225645Z             "name": "jackin-agent-brown",
+2026-06-11T13:38:02.1225944Z             "node_id": "R_kgDOR3ckuA",
+2026-06-11T13:38:02.1226565Z             "notifications_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/notifications{?since,all,participating}",
+2026-06-11T13:38:02.1227306Z             "open_issues": 1,
+2026-06-11T13:38:02.1227567Z             "open_issues_count": 1,
+2026-06-11T13:38:02.1227824Z             "owner": {
+2026-06-11T13:38:02.1228184Z               "avatar_url": "https://avatars.githubusercontent.com/u/125116999?v=4",
+2026-06-11T13:38:02.1228716Z               "events_url": "https://api.github.com/users/ChainArgos/events{/privacy}",
+2026-06-11T13:38:02.1229221Z               "followers_url": "https://api.github.com/users/ChainArgos/followers",
+2026-06-11T13:38:02.1229751Z               "following_url": "https://api.github.com/users/ChainArgos/following{/other_user}",
+2026-06-11T13:38:02.1230283Z               "gists_url": "https://api.github.com/users/ChainArgos/gists{/gist_id}",
+2026-06-11T13:38:02.1230676Z               "gravatar_id": "",
+2026-06-11T13:38:02.1232279Z               "html_url": "https://github.com/ChainArgos",
+2026-06-11T13:38:02.1232861Z               "id": 125116999,
+2026-06-11T13:38:02.1233203Z               "login": "ChainArgos",
+2026-06-11T13:38:02.1233490Z               "node_id": "O_kgDOB3UiRw",
+2026-06-11T13:38:02.1233907Z               "organizations_url": "https://api.github.com/users/ChainArgos/orgs",
+2026-06-11T13:38:02.1234483Z               "received_events_url": "https://api.github.com/users/ChainArgos/received_events",
+2026-06-11T13:38:02.1235001Z               "repos_url": "https://api.github.com/users/ChainArgos/repos",
+2026-06-11T13:38:02.1235366Z               "site_admin": false,
+2026-06-11T13:38:02.1235777Z               "starred_url": "https://api.github.com/users/ChainArgos/starred{/owner}{/repo}",
+2026-06-11T13:38:02.1236339Z               "subscriptions_url": "https://api.github.com/users/ChainArgos/subscriptions",
+2026-06-11T13:38:02.1236766Z               "type": "Organization",
+2026-06-11T13:38:02.1237083Z               "url": "https://api.github.com/users/ChainArgos",
+2026-06-11T13:38:02.1237410Z               "user_view_type": "public"
+2026-06-11T13:38:02.1237673Z             },
+2026-06-11T13:38:02.1237895Z             "private": true,
+2026-06-11T13:38:02.1238163Z             "pull_request_creation_policy": "all",
+2026-06-11T13:38:02.1238811Z             "pulls_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/pulls{/number}",
+2026-06-11T13:38:02.1239306Z             "pushed_at": "2026-06-11T11:35:05Z",
+2026-06-11T13:38:02.1239775Z             "releases_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/releases{/id}",
+2026-06-11T13:38:02.1240241Z             "size": 156,
+2026-06-11T13:38:02.1240556Z             "ssh_url": "git@github.com:ChainArgos/jackin-agent-brown.git",
+2026-06-11T13:38:02.1240921Z             "stargazers_count": 1,
+2026-06-11T13:38:02.1242093Z             "stargazers_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/stargazers",
+2026-06-11T13:38:02.1243188Z             "statuses_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/statuses/{sha}",
+2026-06-11T13:38:02.1244068Z             "subscribers_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/subscribers",
+2026-06-11T13:38:02.1244723Z             "subscription_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/subscription",
+2026-06-11T13:38:02.1245280Z             "svn_url": "https://github.com/ChainArgos/jackin-agent-brown",
+2026-06-11T13:38:02.1245767Z             "tags_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/tags",
+2026-06-11T13:38:02.1246310Z             "teams_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/teams",
+2026-06-11T13:38:02.1246729Z             "topics": [],
+2026-06-11T13:38:02.1247140Z             "trees_url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown/git/trees{/sha}",
+2026-06-11T13:38:02.1247779Z             "updated_at": "2026-06-11T11:35:07Z",
+2026-06-11T13:38:02.1248172Z             "url": "https://api.github.com/repos/ChainArgos/jackin-agent-brown",
+2026-06-11T13:38:02.1248561Z             "visibility": "private",
+2026-06-11T13:38:02.1248825Z             "watchers": 1,
+2026-06-11T13:38:02.1249062Z             "watchers_count": 1,
+2026-06-11T13:38:02.1249332Z             "web_commit_signoff_required": false
+2026-06-11T13:38:02.1249615Z           },
+2026-06-11T13:38:02.1249813Z           "sender": {
+2026-06-11T13:38:02.1250145Z             "avatar_url": "https://avatars.githubusercontent.com/u/139017?v=4",
+2026-06-11T13:38:02.1250643Z             "events_url": "https://api.github.com/users/donbeave/events{/privacy}",
+2026-06-11T13:38:02.1251805Z             "followers_url": "https://api.github.com/users/donbeave/followers",
+2026-06-11T13:38:02.1252359Z             "following_url": "https://api.github.com/users/donbeave/following{/other_user}",
+2026-06-11T13:38:02.1252890Z             "gists_url": "https://api.github.com/users/donbeave/gists{/gist_id}",
+2026-06-11T13:38:02.1253268Z             "gravatar_id": "",
+2026-06-11T13:38:02.1253552Z             "html_url": "https://github.com/donbeave",
+2026-06-11T13:38:02.1253855Z             "id": 139017,
+2026-06-11T13:38:02.1254096Z             "login": "donbeave",
+2026-06-11T13:38:02.1254368Z             "node_id": "MDQ6VXNlcjEzOTAxNw==",
+2026-06-11T13:38:02.1254753Z             "organizations_url": "https://api.github.com/users/donbeave/orgs",
+2026-06-11T13:38:02.1255275Z             "received_events_url": "https://api.github.com/users/donbeave/received_events",
+2026-06-11T13:38:02.1255764Z             "repos_url": "https://api.github.com/users/donbeave/repos",
+2026-06-11T13:38:02.1256123Z             "site_admin": false,
+2026-06-11T13:38:02.1256510Z             "starred_url": "https://api.github.com/users/donbeave/starred{/owner}{/repo}",
+2026-06-11T13:38:02.1257049Z             "subscriptions_url": "https://api.github.com/users/donbeave/subscriptions",
+2026-06-11T13:38:02.1257457Z             "type": "User",
+2026-06-11T13:38:02.1257737Z             "url": "https://api.github.com/users/donbeave",
+2026-06-11T13:38:02.1258067Z             "user_view_type": "public"
+2026-06-11T13:38:02.1258326Z           },
+2026-06-11T13:38:02.1258551Z           "workflow": ".github/workflows/ci.yml"
+2026-06-11T13:38:02.1258831Z         },
+2026-06-11T13:38:02.1259039Z         "github_job": "validate",
+2026-06-11T13:38:02.1259453Z         "github_ref": "refs/heads/main",
+2026-06-11T13:38:02.1259739Z         "github_ref_name": "main",
+2026-06-11T13:38:02.1260007Z         "github_ref_protected": "true",
+2026-06-11T13:38:02.1260286Z         "github_ref_type": "branch",
+2026-06-11T13:38:02.1260610Z         "github_repository": "ChainArgos/jackin-agent-brown",
+2026-06-11T13:38:02.1261127Z         "github_repository_id": "1198990520",
+2026-06-11T13:38:02.1261437Z         "github_repository_owner": "ChainArgos",
+2026-06-11T13:38:02.1261771Z         "github_repository_owner_id": "125116999",
+2026-06-11T13:38:02.1262068Z         "github_run_attempt": "1",
+2026-06-11T13:38:02.1262324Z         "github_run_id": "27350691196",
+2026-06-11T13:38:02.1262593Z         "github_run_number": "245",
+2026-06-11T13:38:02.1262850Z         "github_runner_arch": "X64",
+2026-06-11T13:38:02.1263150Z         "github_runner_environment": "github-hosted",
+2026-06-11T13:38:02.1263469Z         "github_runner_image_os": "ubuntu24",
+2026-06-11T13:38:02.1263788Z         "github_runner_image_version": "20260607.184.1",
+2026-06-11T13:38:02.1264132Z         "github_runner_name": "GitHub Actions 1000041830",
+2026-06-11T13:38:02.1264444Z         "github_runner_os": "Linux",
+2026-06-11T13:38:02.1264818Z         "github_runner_tracking_id": "github_42c892cb-d835-4d35-a29f-20a8d3767079",
+2026-06-11T13:38:02.1265245Z         "github_server_url": "https://github.com",
+2026-06-11T13:38:02.1265565Z         "github_triggering_actor": "donbeave",
+2026-06-11T13:38:02.1266000Z         "github_workflow": "CI",
+2026-06-11T13:38:02.1266455Z         "github_workflow_ref": "ChainArgos/jackin-agent-brown/.github/workflows/ci.yml@refs/heads/main",
+2026-06-11T13:38:02.1267022Z         "github_workflow_sha": "62114c9b313ffdb535e95e1ca893448f0c3265f8",
+2026-06-11T13:38:02.1267391Z         "platform": "linux/amd64"
+2026-06-11T13:38:02.1267632Z       }
+2026-06-11T13:38:02.1267819Z     }
+2026-06-11T13:38:02.1267997Z   },
+2026-06-11T13:38:02.1268548Z   "buildx.build.ref": "builder-000a43aa-d224-4467-b8b8-0a7a1f64d237/builder-000a43aa-d224-4467-b8b8-0a7a1f64d2370/8x63ml50w2l680i7s0o6hpw0v",
+2026-06-11T13:38:02.1269425Z   "containerimage.config.digest": "sha256:a974aab3b31886b8516f6413d17861dbbcc17bb6a956a999fa4a7cfdaec1f19f",
+2026-06-11T13:38:02.1269955Z   "containerimage.descriptor": {
+2026-06-11T13:38:02.1270379Z     "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+2026-06-11T13:38:02.1270910Z     "digest": "sha256:39f214ab6b37c63e806c0e7354c437b166a040b2b63ee12b05590835967c6626",
+2026-06-11T13:38:02.1271472Z     "size": 6026,
+2026-06-11T13:38:02.1271687Z     "annotations": {
+2026-06-11T13:38:02.1271982Z       "org.opencontainers.image.created": "2026-06-11T13:36:33Z"
+2026-06-11T13:38:02.1272317Z     },
+2026-06-11T13:38:02.1272506Z     "platform": {
+2026-06-11T13:38:02.1272723Z       "architecture": "amd64",
+2026-06-11T13:38:02.1272964Z       "os": "linux"
+2026-06-11T13:38:02.1273169Z     }
+2026-06-11T13:38:02.1273355Z   },
+2026-06-11T13:38:02.1273749Z   "containerimage.digest": "sha256:39f214ab6b37c63e806c0e7354c437b166a040b2b63ee12b05590835967c6626"
+2026-06-11T13:38:02.1274214Z }
+2026-06-11T13:38:02.1274626Z ##[endgroup]
+2026-06-11T13:38:02.1274981Z ##[group]Reference
+2026-06-11T13:38:02.1275466Z builder-000a43aa-d224-4467-b8b8-0a7a1f64d237/builder-000a43aa-d224-4467-b8b8-0a7a1f64d2370/8x63ml50w2l680i7s0o6hpw0v
+2026-06-11T13:38:02.1276144Z ##[endgroup]
+2026-06-11T13:38:02.1276484Z ##[group]Check build summary support
+2026-06-11T13:38:02.1276894Z Build summary supported!
+2026-06-11T13:38:02.1277253Z ##[endgroup]
+2026-06-11T13:38:02.1596570Z Post job cleanup.
+2026-06-11T13:38:02.1657926Z Post job cleanup.
+2026-06-11T13:38:02.4983140Z ##[group]Generating build summary
+2026-06-11T13:38:02.5739836Z exporting build record to /home/runner/work/_temp/docker-actions-toolkit-qTa9TX/export
+2026-06-11T13:38:02.7097774Z [command]/usr/bin/docker buildx history export --builder builder-000a43aa-d224-4467-b8b8-0a7a1f64d237 --output /home/runner/work/_temp/docker-actions-toolkit-qTa9TX/export/ChainArgos~jackin-agent-brown~8X63ML.dockerbuild 8x63ml50w2l680i7s0o6hpw0v --finalize
+2026-06-11T13:38:03.0694225Z Build record written to /home/runner/work/_temp/docker-actions-toolkit-qTa9TX/export/ChainArgos~jackin-agent-brown~8X63ML.dockerbuild (69.54 KB)
+2026-06-11T13:38:03.0696299Z Uploading ChainArgos~jackin-agent-brown~8X63ML.dockerbuild as an artifact
+2026-06-11T13:38:03.0738633Z Artifact name is valid!
+2026-06-11T13:38:03.0739125Z Root directory input is valid!
+2026-06-11T13:38:03.5266861Z Uploading artifact: ChainArgos~jackin-agent-brown~8X63ML.dockerbuild
+2026-06-11T13:38:03.5269391Z Beginning upload of artifact content to blob storage
+2026-06-11T13:38:03.9765035Z Uploaded bytes 71212
+2026-06-11T13:38:04.0604012Z Finished uploading artifact content to blob storage!
+2026-06-11T13:38:04.0605247Z SHA256 digest of uploaded artifact is 009fbf3c392d8da45ee6ef2aee8e3ed91bd792032f0500d9cde19ed007cf6bb1
+2026-06-11T13:38:04.0606164Z Finalizing artifact upload
+2026-06-11T13:38:04.4999936Z Artifact ChainArgos~jackin-agent-brown~8X63ML.dockerbuild successfully finalized. Artifact ID 7565912792
+2026-06-11T13:38:04.5002279Z Artifact download URL: https://github.com/ChainArgos/jackin-agent-brown/actions/runs/27350691196/artifacts/7565912792
+2026-06-11T13:38:04.5047753Z Writing summary
+2026-06-11T13:38:04.5080385Z ##[endgroup]
+2026-06-11T13:38:04.5084673Z ##[group]Removing temp folder /home/runner/work/_temp/docker-actions-toolkit-D1couV
+2026-06-11T13:38:04.5101896Z ##[endgroup]
+2026-06-11T13:38:04.5107593Z ##[group]Post cache
+2026-06-11T13:38:04.5131784Z State not set
+2026-06-11T13:38:04.5136799Z ##[endgroup]
+2026-06-11T13:38:04.5269512Z Post job cleanup.
+2026-06-11T13:38:04.7833135Z ##[group]Removing builder
+2026-06-11T13:38:04.8848792Z [command]/usr/bin/docker buildx rm builder-000a43aa-d224-4467-b8b8-0a7a1f64d237
+2026-06-11T13:38:05.0932947Z builder-000a43aa-d224-4467-b8b8-0a7a1f64d237 removed
+2026-06-11T13:38:05.0953923Z ##[endgroup]
+2026-06-11T13:38:05.0956295Z ##[group]Cleaning up certificates
+2026-06-11T13:38:05.0962779Z ##[endgroup]
+2026-06-11T13:38:05.0964276Z ##[group]Post cache
+2026-06-11T13:38:05.0965832Z State not set
+2026-06-11T13:38:05.0968153Z ##[endgroup]
+2026-06-11T13:38:05.1161570Z Post job cleanup.
+2026-06-11T13:38:05.3428096Z ##[group]Logout from docker.io
+2026-06-11T13:38:05.3477601Z [command]/usr/bin/docker logout docker.io
+2026-06-11T13:38:05.3627759Z Removing login credentials for docker.io
+2026-06-11T13:38:05.3654063Z ##[endgroup]
+2026-06-11T13:38:05.3655121Z ##[group]Post cache
+2026-06-11T13:38:05.3655932Z State not set
+2026-06-11T13:38:05.3656791Z ##[endgroup]
+2026-06-11T13:38:05.3865371Z Post job cleanup.
+2026-06-11T13:38:05.4866073Z [command]/usr/bin/git version
+2026-06-11T13:38:05.4911548Z git version 2.54.0
+2026-06-11T13:38:05.4959489Z Temporarily overriding HOME='/home/runner/work/_temp/ef6377cb-4c09-49ba-83ac-329bcecc6c43' before making global git config changes
+2026-06-11T13:38:05.4961696Z Adding repository directory to the temporary git global config as a safe directory
+2026-06-11T13:38:05.4967387Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/jackin-agent-brown/jackin-agent-brown
+2026-06-11T13:38:05.5013893Z Removing SSH command configuration
+2026-06-11T13:38:05.5024370Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-06-11T13:38:05.5069063Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-06-11T13:38:05.5384583Z Removing HTTP extra header
+2026-06-11T13:38:05.5392482Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-06-11T13:38:05.5434940Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-06-11T13:38:05.5675925Z Removing includeIf entries pointing to credentials config files
+2026-06-11T13:38:05.5686161Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-06-11T13:38:05.5718954Z includeif.gitdir:/home/runner/work/jackin-agent-brown/jackin-agent-brown/.git.path
+2026-06-11T13:38:05.5720216Z includeif.gitdir:/home/runner/work/jackin-agent-brown/jackin-agent-brown/.git/worktrees/*.path
+2026-06-11T13:38:05.5729968Z includeif.gitdir:/github/workspace/.git.path
+2026-06-11T13:38:05.5732836Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-06-11T13:38:05.5735550Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/jackin-agent-brown/jackin-agent-brown/.git.path
+2026-06-11T13:38:05.5759146Z /home/runner/work/_temp/git-credentials-ea6769a5-3fba-4d11-9271-2d98b09c44d4.config
+2026-06-11T13:38:05.5774438Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/jackin-agent-brown/jackin-agent-brown/.git.path /home/runner/work/_temp/git-credentials-ea6769a5-3fba-4d11-9271-2d98b09c44d4.config
+2026-06-11T13:38:05.5821894Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/jackin-agent-brown/jackin-agent-brown/.git/worktrees/*.path
+2026-06-11T13:38:05.5839198Z /home/runner/work/_temp/git-credentials-ea6769a5-3fba-4d11-9271-2d98b09c44d4.config
+2026-06-11T13:38:05.5852989Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/jackin-agent-brown/jackin-agent-brown/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-ea6769a5-3fba-4d11-9271-2d98b09c44d4.config
+2026-06-11T13:38:05.5889704Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+2026-06-11T13:38:05.5914211Z /github/runner_temp/git-credentials-ea6769a5-3fba-4d11-9271-2d98b09c44d4.config
+2026-06-11T13:38:05.5925979Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-ea6769a5-3fba-4d11-9271-2d98b09c44d4.config
+2026-06-11T13:38:05.5962021Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-06-11T13:38:05.5985199Z /github/runner_temp/git-credentials-ea6769a5-3fba-4d11-9271-2d98b09c44d4.config
+2026-06-11T13:38:05.6000050Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-ea6769a5-3fba-4d11-9271-2d98b09c44d4.config
+2026-06-11T13:38:05.6058889Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-06-11T13:38:05.6513658Z Removing credentials config '/home/runner/work/_temp/git-credentials-ea6769a5-3fba-4d11-9271-2d98b09c44d4.config'
+2026-06-11T13:38:05.6567834Z Cleaning up orphan processes
