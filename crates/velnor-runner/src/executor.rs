@@ -290,8 +290,15 @@ pub struct StepLog {
 
 #[derive(Debug, Clone)]
 pub enum ExecutableStep {
+    /// Opens a composite action: registers ONE timeline step (GitHub renders
+    /// a composite as a single step; embedded steps write into the parent's
+    /// record — actions/runner CompositeActionHandler).
     CompositeStart {
         step_id: String,
+        display_name: String,
+        inputs: BTreeMap<String, String>,
+        env: Vec<(String, String)>,
+        condition: Option<String>,
     },
     CompositeEnd {
         step_id: String,
@@ -333,6 +340,97 @@ pub struct StepStartEvent {
     pub order: i32,
 }
 
+/// Aggregates an executing composite action into ONE step record. GitHub
+/// registers a single timeline step per composite; embedded steps append
+/// `##[group]<name>`-headed sections into the parent's log instead of
+/// registering their own steps (actions/runner CompositeActionHandler).
+#[derive(Debug, Default)]
+struct CompositeFrame {
+    backend_step_id: String,
+    display_name: String,
+    order: i32,
+    started_at: String,
+    lines: Vec<String>,
+    masks: Vec<String>,
+    annotations: Vec<StepAnnotation>,
+    telemetry: Vec<crate::script_step::StepCommandTelemetry>,
+    exit_code: i32,
+    skipped: bool,
+    failure_ignored: bool,
+    error_count: i32,
+    warning_count: i32,
+    notice_count: i32,
+    summary: String,
+    /// Nested composite depth: only the outermost frame registers a step.
+    depth: usize,
+}
+
+impl CompositeFrame {
+    fn append_inner(
+        &mut self,
+        display_name: &str,
+        prelude: &[String],
+        result: &StepExecutionResult,
+    ) {
+        self.absorb(result);
+        if result.skipped {
+            return;
+        }
+        let name = if display_name.is_empty() {
+            "step"
+        } else {
+            display_name
+        };
+        self.lines.push(format!("##[group]{name}"));
+        self.lines.extend(prelude.iter().cloned());
+        self.lines.push("##[endgroup]".to_string());
+        self.lines
+            .extend(rendered_output_lines(&result.stdout, &result.stderr));
+    }
+
+    fn absorb(&mut self, result: &StepExecutionResult) {
+        self.masks.extend(result.state.masks.iter().cloned());
+        self.annotations
+            .extend(result.state.annotations.iter().cloned());
+        self.telemetry
+            .extend(result.state.telemetry.iter().cloned());
+        self.error_count += result.state.error_count;
+        self.warning_count += result.state.warning_count;
+        self.notice_count += result.state.notice_count;
+        if !result.state.summary.is_empty() {
+            if !self.summary.is_empty() {
+                self.summary.push('\n');
+            }
+            self.summary.push_str(&result.state.summary);
+        }
+        if result.exit_code != 0 && !result.failure_ignored && self.exit_code == 0 {
+            self.exit_code = result.exit_code;
+        }
+        self.failure_ignored |= result.failure_ignored;
+    }
+
+    fn into_step_log(self, completed_at: &str) -> StepLog {
+        StepLog {
+            step_id: self.backend_step_id,
+            display_name: self.display_name,
+            order: self.order,
+            started_at: self.started_at,
+            completed_at: completed_at.to_string(),
+            lines: if self.skipped { Vec::new() } else { self.lines },
+            masks: self.masks,
+            annotations: self.annotations,
+            telemetry: self.telemetry,
+            exit_code: self.exit_code,
+            skipped: self.skipped,
+            failure_ignored: self.failure_ignored,
+            error_count: self.error_count,
+            warning_count: self.warning_count,
+            notice_count: self.notice_count,
+            summary: self.summary,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PostJavaScriptAction {
     step_id: String,
@@ -354,7 +452,7 @@ struct PostNativeAction {
 impl ExecutableStep {
     fn id(&self) -> &str {
         match self {
-            ExecutableStep::CompositeStart { step_id } => step_id,
+            ExecutableStep::CompositeStart { step_id, .. } => step_id,
             ExecutableStep::CompositeEnd { step_id } => step_id,
             ExecutableStep::Checkout(plan) => &plan.step_id,
             ExecutableStep::Script(step) => &step.id,
@@ -367,7 +465,7 @@ impl ExecutableStep {
 
     fn condition(&self) -> Option<&str> {
         match self {
-            ExecutableStep::CompositeStart { .. } => None,
+            ExecutableStep::CompositeStart { condition, .. } => condition.as_deref(),
             ExecutableStep::CompositeEnd { .. } => None,
             ExecutableStep::Checkout(plan) => plan.condition.as_deref(),
             ExecutableStep::Script(step) => step.condition.as_deref(),
@@ -408,7 +506,7 @@ impl ExecutableStep {
 
     pub fn display_name(&self) -> &str {
         match self {
-            ExecutableStep::CompositeStart { step_id } => step_id,
+            ExecutableStep::CompositeStart { display_name, .. } => display_name,
             ExecutableStep::CompositeEnd { step_id } => step_id,
             ExecutableStep::Checkout(plan) => {
                 if plan.display_name.is_empty() {
@@ -650,14 +748,60 @@ where
         let mut post_actions = Vec::new();
         let mut native_post_actions = Vec::new();
         let mut timeline_order = self.initial_order;
+        let mut composite_frame: Option<CompositeFrame> = None;
         for step in steps {
             match step {
-                ExecutableStep::CompositeStart { step_id } => {
+                ExecutableStep::CompositeStart {
+                    step_id,
+                    display_name,
+                    inputs,
+                    env,
+                    condition,
+                } => {
                     state.push_composite(step_id);
+                    if let Some(frame) = composite_frame.as_mut() {
+                        frame.depth += 1;
+                    } else {
+                        let frame_state = state.with_step_action(step_id);
+                        let resolved_display = frame_state.resolve_expressions(display_name);
+                        let backend_step_id = github_backend_step_id(step_id);
+                        let skipped = !frame_state.evaluate_condition(condition.as_deref());
+                        let started_at = self.emit_step_started(
+                            backend_step_id.clone(),
+                            &resolved_display,
+                            &mut timeline_order,
+                        );
+                        let mut lines = Vec::new();
+                        if !skipped {
+                            lines.push(format!("##[group]{resolved_display}"));
+                            lines.extend(action_log_prelude(inputs, env, &frame_state));
+                            lines.push("##[endgroup]".to_string());
+                        }
+                        composite_frame = Some(CompositeFrame {
+                            backend_step_id,
+                            display_name: resolved_display,
+                            order: timeline_order,
+                            started_at,
+                            lines,
+                            skipped,
+                            ..CompositeFrame::default()
+                        });
+                    }
                     continue;
                 }
                 ExecutableStep::CompositeEnd { step_id } => {
                     state.pop_composite(step_id);
+                    match composite_frame.as_mut() {
+                        Some(frame) if frame.depth > 0 => frame.depth -= 1,
+                        Some(_) => {
+                            if let Some(frame) = composite_frame.take() {
+                                let log = frame.into_step_log(&unix_now_rfc3339());
+                                self.emit_step_log(&log);
+                                step_logs.push(log);
+                            }
+                        }
+                        None => {}
+                    }
                     continue;
                 }
                 _ => {}
@@ -665,12 +809,19 @@ where
             let step_context_id = step.id().to_string();
             let step_backend_id = github_backend_step_id(&step_context_id);
             let step_state = state.with_step_action(&step_context_id);
+            // GitHub evaluates `${{ }}` in step display names at runtime
+            // (ActionRunner.TryUpdateDisplayName); unresolvable expressions
+            // stay raw, matching the upstream prettified-token fallback.
+            let display_name = step_state.resolve_expressions(step.display_name());
             if !step_state.evaluate_condition(step.condition()) {
+                // Embedded composite steps never surface their own rows;
+                // a skipped one simply leaves no trace in the parent's log.
+                let reports = composite_frame.is_none() && step.reports_timeline_start();
                 let mut skipped_started_at = String::new();
-                if step.reports_timeline_start() {
+                if reports {
                     skipped_started_at = self.emit_step_started(
                         step_backend_id.clone(),
-                        step.display_name(),
+                        &display_name,
                         &mut timeline_order,
                     );
                 }
@@ -682,10 +833,10 @@ where
                     stdout: String::new(),
                     stderr: String::new(),
                 };
-                if step.reports_timeline_start() {
+                if reports {
                     let log = step_log_with_name(
                         &step_backend_id,
-                        step.display_name(),
+                        &display_name,
                         timeline_order,
                         &skipped_started_at,
                         &unix_now_rfc3339(),
@@ -712,7 +863,7 @@ where
                         if invocation.post_container_path.is_some() {
                             post_actions.push(PostJavaScriptAction {
                                 step_id: step_id.clone(),
-                                display_name: step.display_name().to_string(),
+                                display_name: display_name.clone(),
                                 invocation: invocation.clone(),
                                 condition: invocation.post_condition.clone(),
                                 continue_on_error: *continue_on_error,
@@ -720,11 +871,15 @@ where
                             post_registered = true;
                         }
                         let pre_step_id = uuid::Uuid::new_v4().to_string();
-                        let pre_started_at = self.emit_step_started(
-                            pre_step_id.clone(),
-                            step.display_name(),
-                            &mut timeline_order,
-                        );
+                        let pre_started_at = if composite_frame.is_none() {
+                            self.emit_step_started(
+                                pre_step_id.clone(),
+                                &display_name,
+                                &mut timeline_order,
+                            )
+                        } else {
+                            unix_now_rfc3339()
+                        };
                         let mut result = self.execute_javascript_action_in_started_container(
                             container,
                             step_id,
@@ -738,17 +893,25 @@ where
                         if failed && *continue_on_error {
                             result.failure_ignored = true;
                         }
-                        let log = step_log_with_name(
-                            &pre_step_id,
-                            step.display_name(),
-                            timeline_order,
-                            &pre_started_at,
-                            &unix_now_rfc3339(),
-                            &result,
-                            &step_log_prelude(step, &step_state),
-                        );
-                        self.emit_step_log(&log);
-                        step_logs.push(log);
+                        if let Some(frame) = composite_frame.as_mut() {
+                            frame.append_inner(
+                                &display_name,
+                                &step_log_prelude(step, &step_state),
+                                &result,
+                            );
+                        } else {
+                            let log = step_log_with_name(
+                                &pre_step_id,
+                                &display_name,
+                                timeline_order,
+                                &pre_started_at,
+                                &unix_now_rfc3339(),
+                                &result,
+                                &step_log_prelude(step, &step_state),
+                            );
+                            self.emit_step_log(&log);
+                            step_logs.push(log);
+                        }
                         state.apply(step_id, &result);
                         results.push(result);
                         if failed {
@@ -758,15 +921,28 @@ where
                 }
             }
             let step_state = state.with_step_action(&step_context_id);
-            let main_started_at = if step.reports_timeline_start() {
-                self.emit_step_started(
-                    step_backend_id.clone(),
-                    step.display_name(),
-                    &mut timeline_order,
-                )
+            let main_started_at = if composite_frame.is_none() && step.reports_timeline_start() {
+                self.emit_step_started(step_backend_id.clone(), &display_name, &mut timeline_order)
             } else {
                 String::new()
             };
+            // Live lines from embedded composite steps stream under the
+            // composite's registered step, not a step of their own.
+            let (live_step_id, live_display_name, live_order, live_started_at) =
+                match composite_frame.as_ref() {
+                    Some(frame) => (
+                        frame.backend_step_id.clone(),
+                        frame.display_name.clone(),
+                        frame.order,
+                        frame.started_at.clone(),
+                    ),
+                    None => (
+                        step_backend_id.clone(),
+                        display_name.clone(),
+                        timeline_order,
+                        main_started_at.clone(),
+                    ),
+                };
             let result = (|| match step {
                 ExecutableStep::CompositeStart { .. } | ExecutableStep::CompositeEnd { .. } => {
                     unreachable!("composite boundary steps are handled before execution")
@@ -791,10 +967,10 @@ where
                     let mut on_output = |_: CommandStream, line: &str| {
                         emit_live_step_log(
                             &live_sender,
-                            &step_backend_id,
-                            &step.display_name,
-                            timeline_order,
-                            &main_started_at,
+                            &live_step_id,
+                            &live_display_name,
+                            live_order,
+                            &live_started_at,
                             line,
                         );
                     };
@@ -874,7 +1050,7 @@ where
                         if invocation.post_container_path.is_some() && !post_registered {
                             post_actions.push(PostJavaScriptAction {
                                 step_id: step_context_id.clone(),
-                                display_name: step.display_name().to_string(),
+                                display_name: display_name.clone(),
                                 invocation: invocation.clone(),
                                 condition: invocation.post_condition.clone(),
                                 continue_on_error: *continue_on_error,
@@ -890,7 +1066,7 @@ where
                         if let Some(condition) = native_post_condition(invocation.adapter) {
                             native_post_actions.push(PostNativeAction {
                                 step_id: step_context_id.clone(),
-                                display_name: step.display_name().to_string(),
+                                display_name: display_name.clone(),
                                 invocation: invocation.clone(),
                                 condition: Some(condition.to_string()),
                                 continue_on_error: *continue_on_error,
@@ -900,10 +1076,16 @@ where
                     if failed && step.continue_on_error() {
                         result.failure_ignored = true;
                     }
-                    if step.reports_timeline_start() {
+                    if let Some(frame) = composite_frame.as_mut() {
+                        frame.append_inner(
+                            &display_name,
+                            &step_log_prelude(step, &step_state),
+                            &result,
+                        );
+                    } else if step.reports_timeline_start() {
                         let log = step_log_with_name(
                             &step_backend_id,
-                            step.display_name(),
+                            &display_name,
                             timeline_order,
                             &main_started_at,
                             &unix_now_rfc3339(),
@@ -921,6 +1103,17 @@ where
                     break;
                 }
             }
+        }
+        // An execution error mid-composite breaks the loop before the
+        // CompositeEnd boundary: flush the frame so the step still closes
+        // (failed) instead of silently disappearing from the UI.
+        if let Some(mut frame) = composite_frame.take() {
+            if frame.exit_code == 0 {
+                frame.exit_code = 1;
+            }
+            let log = frame.into_step_log(&unix_now_rfc3339());
+            self.emit_step_log(&log);
+            step_logs.push(log);
         }
         let native_post_actions = native_post_actions
             .into_iter()
@@ -1545,14 +1738,15 @@ where
         }
         if let Some(stdin) = stdin {
             let env = state.step_env(&[]);
-            // Same HOME as native_shell so client state (e.g. the docker
-            // login written here) lands in the config dir every other
-            // adapter invocation reads (/root/.docker).
-            let wrapped = format!("export HOME=/root; {cmd}");
+            // Docker client state (e.g. the login written here) lands in the
+            // job-home config dir (/github/home/.docker, via the exec base env
+            // HOME=/github/home) — the same dir run steps and every other
+            // adapter invocation read; it persists for the whole job through
+            // the home bind mount.
             let exec_args = container.exec_process_stdin_args(
                 "/__w",
                 &env,
-                &["sh".to_string(), "-c".to_string(), wrapped],
+                &["sh".to_string(), "-c".to_string(), cmd],
             );
             return self.runner.run_with_stdin("docker", &exec_args, stdin);
         }
@@ -1573,11 +1767,15 @@ where
         // Build PATH from accumulated state paths plus the container's default paths.
         // We must set it explicitly because OrbStack (on macOS) injects the host
         // macOS PATH into all container processes, which overrides the Dockerfile ENV.
-        // Use HOME=/root so mise can locate its global config (written to /root at image
-        // build time). RUSTUP_HOME and CARGO_HOME are set explicitly to separate the
-        // toolchain store from the per-job artifact cache.
+        // /root/.cargo/bin (image-baked rustup proxies) stays ahead of the mise
+        // shims so cargo resolves under the truthful CARGO_HOME (the mise rust
+        // shim derives its bin path from $CARGO_HOME, which is an empty bind at
+        // job start). HOME/RUSTUP_HOME/CARGO_HOME come from the exec base env
+        // (JobContainerSpec::append_base_exec_env) — the old HOME=/root +
+        // CARGO_HOME=/root/.cargo exports here redirected cargo downloads into
+        // the unmounted container /root, making `~` caches unsaveable.
         let container_default_path =
-            "/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+            "/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
         let path_entries: Vec<&str> = state
             .path
             .iter()
@@ -1585,9 +1783,7 @@ where
             .chain(std::iter::once(container_default_path))
             .collect();
         let path = path_entries.join(":");
-        let wrapped = format!(
-            "export HOME=/root; export RUSTUP_HOME=/root/.rustup; export CARGO_HOME=/root/.cargo; export PATH={path}; {script}"
-        );
+        let wrapped = format!("export PATH={path}; {script}");
         let args = container.exec_process_args(
             "/__w",
             &env,
@@ -1746,10 +1942,19 @@ where
         for build_arg in input_values(&native_input(action, &action_state, "build-args")) {
             push_arg(&mut args, "--build-arg", &build_arg);
         }
+        let mut dropped_gha_cache = 0usize;
         for cache in input_values(&native_input(action, &action_state, "cache-from")) {
+            if is_gha_cache_value(&cache) {
+                dropped_gha_cache += 1;
+                continue;
+            }
             push_arg(&mut args, "--cache-from", &cache);
         }
         for cache in input_values(&native_input(action, &action_state, "cache-to")) {
+            if is_gha_cache_value(&cache) {
+                dropped_gha_cache += 1;
+                continue;
+            }
             push_arg(&mut args, "--cache-to", &cache);
         }
         // The `outputs` input maps to buildx --output (e.g. the publish
@@ -1778,7 +1983,13 @@ where
             &format!("/tmp/{metadata_name}"),
         );
         args.push(container_context_path(&context));
-        let result = self.container_docker(container, &action_state, &args, None)?;
+        let mut result = self.container_docker(container, &action_state, &args, None)?;
+        if dropped_gha_cache > 0 {
+            result.stdout = format!(
+                "[velnor] dropped {dropped_gha_cache} type=gha cache option(s): the persistent local builder cache covers them on the Velnor lane\n{}",
+                result.stdout
+            );
+        }
         let metadata_path = action_state
             .temp_host
             .clone()
@@ -1825,7 +2036,12 @@ where
         for file in input_values(&native_input(action, &action_state, "files")) {
             push_arg(&mut args, "--file", &file);
         }
+        let mut dropped_gha_cache = 0usize;
         for set in input_values(&native_input(action, &action_state, "set")) {
+            if is_gha_bake_set_entry(&set) {
+                dropped_gha_cache += 1;
+                continue;
+            }
             push_arg(&mut args, "--set", &set);
         }
         if input_truthy(&native_input(action, &action_state, "push")) {
@@ -1836,10 +2052,14 @@ where
             &action_state,
             "targets",
         )));
-        Ok(native_command_result(
-            self.container_docker(container, &action_state, &args, None)?,
-            StepCommandState::default(),
-        ))
+        let mut result = self.container_docker(container, &action_state, &args, None)?;
+        if dropped_gha_cache > 0 {
+            result.stdout = format!(
+                "[velnor] dropped {dropped_gha_cache} type=gha cache option(s): the persistent local builder cache covers them on the Velnor lane\n{}",
+                result.stdout
+            );
+        }
+        Ok(native_command_result(result, StepCommandState::default()))
     }
 
     fn native_paths_filter(
@@ -2132,7 +2352,7 @@ fn post_step_display_name(display_name: &str) -> String {
     format!("Post {display_name}")
 }
 
-fn github_backend_step_id(context_step_id: &str) -> String {
+pub(crate) fn github_backend_step_id(context_step_id: &str) -> String {
     if uuid::Uuid::parse_str(context_step_id).is_ok() {
         context_step_id.to_string()
     } else {
@@ -2501,6 +2721,10 @@ fn native_cache(
         state_values.insert("matchedKey".to_string(), matched_key.clone());
     }
 
+    let persistent_paths = cache_paths(&path)
+        .iter()
+        .filter(|path| velnor_persistent_cache_path(path))
+        .count();
     let mut stdout = String::new();
     if let Some(matched_key) = &matched_key {
         if lookup_only {
@@ -2512,6 +2736,10 @@ fn native_cache(
                 "{ANSI_GREEN}Cache restored from key: {matched_key}{ANSI_RESET} ({restore_ms}ms)\n"
             ));
         }
+    } else if persistent_paths > 0 && persistent_paths == cache_paths(&path).len() {
+        stdout.push_str(&format!(
+            "{ANSI_GREEN}Cache paths live on Velnor host-persistent storage (always warm){ANSI_RESET}\n"
+        ));
     } else {
         stdout.push_str(&format!("{ANSI_YELLOW}Cache not found for input keys: "));
         stdout.push_str(&cache_lookup_keys(&key, &restore_keys).join(", "));
@@ -2619,6 +2847,26 @@ fn native_rust_cache_save(
     save_cache_result(&action_state, &key, &path, exact_hit)
 }
 
+/// `type=gha` buildx cache options pay GitHub's cache API latency from the
+/// self-hosted host while the persistent named builder already keeps a local
+/// layer cache — pure overhead on the Velnor lane (master-plan P3.7). The
+/// docker adapters drop them; all other cache types pass through.
+fn is_gha_cache_value(value: &str) -> bool {
+    value
+        .trim()
+        .split(',')
+        .any(|part| part.trim().eq_ignore_ascii_case("type=gha"))
+}
+
+/// Bake `--set` form: `<target-pattern>.cache-from=type=gha,...`.
+fn is_gha_bake_set_entry(entry: &str) -> bool {
+    let Some((key, value)) = entry.split_once('=') else {
+        return false;
+    };
+    (key.trim().ends_with(".cache-from") || key.trim().ends_with(".cache-to"))
+        && is_gha_cache_value(value)
+}
+
 fn cache_lookup_keys(key: &str, restore_keys: &str) -> Vec<String> {
     std::iter::once(key)
         .chain(restore_keys.lines().map(str::trim))
@@ -2721,6 +2969,12 @@ fn system_time_nanos(time: SystemTime) -> Option<u128> {
 fn restore_cache_paths(state: &JobExecutionState, key: &str, paths: &str) -> Result<()> {
     let cache_dir = cache_store_dir(state)?.join(sanitize_artifact_name(key));
     for (index, path) in cache_paths(paths).into_iter().enumerate() {
+        // Paths that live on Velnor's host-persistent mounts (cargo
+        // registry/git, mise installs, sccache) are always warm — copying
+        // store bytes over them would be pure waste.
+        if velnor_persistent_cache_path(&path) {
+            continue;
+        }
         let source = cache_dir.join(index.to_string());
         if !source.exists() {
             continue;
@@ -2733,6 +2987,25 @@ fn restore_cache_paths(state: &JobExecutionState, key: &str, paths: &str) -> Res
         copy_dir_contents(&source, &destination)?;
     }
     Ok(())
+}
+
+/// True for cache paths whose container locations are backed by Velnor's
+/// host-persistent stores (mounted into every job container): the cargo
+/// registry/git stores, the mise tool store, and the shared sccache dir.
+/// These are always warm; the actions/cache adapter neither tars them into
+/// the store nor copies store bytes back over them.
+fn velnor_persistent_cache_path(path: &str) -> bool {
+    let path = path.trim();
+    let home_relative = path
+        .strip_prefix("~/")
+        .or_else(|| path.strip_prefix("/github/home/"));
+    if let Some(rest) = home_relative {
+        return rest.starts_with(".cargo/registry") || rest.starts_with(".cargo/git");
+    }
+    path == "/opt/mise"
+        || path.starts_with("/opt/mise/")
+        || path == "/var/cache/sccache"
+        || path.starts_with("/var/cache/sccache/")
 }
 
 fn save_cache_result(
@@ -2778,7 +3051,12 @@ fn save_cache_result(
         .with_context(|| format!("write cache timestamp {}", staging_dir.display()))?;
 
     let mut saved = 0usize;
+    let mut persistent = 0usize;
     for (index, path) in cache_paths(paths).into_iter().enumerate() {
+        if velnor_persistent_cache_path(&path) {
+            persistent += 1;
+            continue;
+        }
         let Some(source) = resolve_cache_path(state, &path) else {
             continue;
         };
@@ -2794,6 +3072,15 @@ fn save_cache_result(
     let save_ms = t0.elapsed().as_millis();
     if saved == 0 {
         fs::remove_dir_all(&staging_dir).ok();
+        if persistent > 0 {
+            return Ok(cache_save_step_result(
+                0,
+                &format!(
+                    "{ANSI_GREEN}Cache paths live on Velnor host-persistent storage (always warm); nothing to save for key '{key}'{ANSI_RESET}\n"
+                ),
+                "",
+            ));
+        }
         return Ok(cache_save_step_result(
             0,
             "",
@@ -3385,9 +3672,20 @@ fn resolve_host_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> {
     if let Some(rest) = path.strip_prefix("/tmp/") {
         return state.temp_host.as_ref().map(|base| base.join(rest));
     }
+    if path == "/github/home" {
+        return state_home_host(state);
+    }
+    if let Some(rest) = path.strip_prefix("/github/home/") {
+        return state_home_host(state).map(|home| home.join(rest));
+    }
     let candidate = PathBuf::from(path);
     if candidate.is_absolute() {
-        Some(candidate)
+        // A container-absolute path with no host mapping (e.g. /root/...)
+        // exists only inside the job container. Returning the raw path here
+        // used to read/write the DAEMON HOST's filesystem (observed live: a
+        // workflow cached the host's /root/.cache instead of job output) —
+        // never leak host paths; the caller reports the path as unavailable.
+        None
     } else {
         state
             .workspace_host
@@ -4693,8 +4991,13 @@ fn script_log_prelude(step: &ScriptStep, state: &JobExecutionState) -> Vec<Strin
     let mut lines = Vec::new();
     let script = state.resolve_expressions(&step.script);
     if !script.trim().is_empty() {
-        lines.push(format!("Run {}", script.lines().next().unwrap_or_default()));
-        lines.extend(script.lines().map(ToOwned::to_owned));
+        // GitHub prints the script body in bold cyan inside the header group
+        // (no repeated `Run …` line — the group title already carries it).
+        lines.extend(
+            script
+                .lines()
+                .map(|line| format!("\u{1b}[36;1m{line}\u{1b}[0m")),
+        );
     }
     lines.push(format!("shell: {}", shell_log_name(step.shell)));
     if step.working_directory_container != "/__w" {
@@ -4838,8 +5141,6 @@ fn step_log_with_name(
         display_name,
         &result.stdout,
         &result.stderr,
-        &result.state.log_lines,
-        &result.state.summary,
         result.skipped,
         prelude,
     );
@@ -4911,8 +5212,6 @@ fn step_log_lines(
     display_name: &str,
     stdout: &str,
     stderr: &str,
-    command_lines: &[String],
-    summary: &str,
     skipped: bool,
     prelude: &[String],
 ) -> Vec<String> {
@@ -4924,26 +5223,51 @@ fn step_log_lines(
     } else {
         display_name
     };
+    // GitHub's step log groups ONLY the header (command + with:/env:); output
+    // stays visible below it, with `::group::`/`::warning::`-style workflow
+    // commands converted IN PLACE to `##[...]` markers (actions/runner keeps
+    // their position; reordering them to the end breaks user grouping).
     let mut lines = vec![format!("##[group]{step_name}")];
     lines.extend(prelude.iter().cloned());
-    // Exclude workflow command lines (::command::...) from stdout/stderr: these are
-    // processed into command_lines (as ##[group] markers, set-env, etc.) and would
-    // appear twice in the blob if kept. GitHub's own runner strips them from the log.
-    lines.extend(
-        stdout
-            .lines()
-            .chain(stderr.lines())
-            .filter(|line| !line.starts_with("::"))
-            .map(ToOwned::to_owned),
-    );
-    lines.extend(command_lines.iter().cloned());
-    if !summary.is_empty() {
-        lines.push("Step summary:".to_string());
-        lines.extend(summary.lines().map(ToOwned::to_owned));
-    }
     lines.push("##[endgroup]".to_string());
-    lines.push(format!("Finishing: {step_name}"));
+    lines.extend(rendered_output_lines(stdout, stderr));
     lines
+}
+
+/// Render process output for the uploaded blob the way actions/runner does:
+/// grouping/annotation workflow commands become `##[...]` markers at their
+/// original position, state-changing commands (set-env, add-mask, …) are
+/// consumed invisibly, everything else (including user ANSI) passes verbatim.
+fn rendered_output_lines(stdout: &str, stderr: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .chain(stderr.lines())
+        .filter_map(rendered_output_line)
+        .collect()
+}
+
+fn rendered_output_line(line: &str) -> Option<String> {
+    let Some(rest) = line.strip_prefix("::") else {
+        return Some(line.to_string());
+    };
+    let Some((command, value)) = rest.split_once("::") else {
+        // Not a complete workflow command; GitHub passes such lines through.
+        return Some(line.to_string());
+    };
+    let keyword = command
+        .split_once(' ')
+        .map_or(command, |(keyword, _)| keyword);
+    match keyword {
+        "group" | "endgroup" => Some(if keyword == "group" {
+            format!("##[group]{value}")
+        } else {
+            "##[endgroup]".to_string()
+        }),
+        "error" | "warning" | "notice" | "debug" => Some(format!("##[{keyword}]{value}")),
+        // set-env / set-output / add-mask / save-state / add-path / echo /
+        // stop-commands…: consumed into state, never shown.
+        _ => None,
+    }
 }
 
 fn parse_workflow_commands_from_output(stdout: &str, stderr: &str) -> StepCommandState {
@@ -5620,6 +5944,7 @@ mod tests {
             docker_host_work_dir: None,
             verify_bind_mounts: false,
             daemon_id: "test-daemon".into(),
+            cargo_target_host: None,
         }
     }
 
@@ -6563,20 +6888,21 @@ type=sha,format=long,prefix=,enable=true"
                 && !c.contains("'--load'")
                 && !c.contains("'--push'")
                 && c.contains("'--tag' 'chainargos/rust-bitcoin-processor:abcdef1234567890'")
-                && c.contains("'type=gha,scope=bitcoin-processor-app-pr,mode=max'")
         });
         assert!(build_call.is_some());
+        // type=gha cache options are dropped on the Velnor lane (persistent
+        // local builder cache); the step output records the substitution.
+        assert!(!calls[build_call.unwrap()].contains("type=gha"));
+        assert!(results[3].stdout.contains("[velnor] dropped"));
         // Runtime env reaches the container via docker exec -e flags.
         let build_invocation = &calls[build_call.unwrap()];
         assert!(build_invocation.contains("ACTIONS_RUNTIME_TOKEN=runtime-token"));
         assert!(build_invocation.contains("ACTIONS_CACHE_URL=https://cache.actions"));
-        let bake_call = calls.iter().position(|c| {
-            c.contains("'buildx' 'bake'")
-                && c.contains("'--set'")
-                && c.contains("'*.cache-to=type=gha,scope=rust-workspace,mode=max'")
-                && c.contains("'bitcoin-processor-app'")
-        });
+        let bake_call = calls
+            .iter()
+            .position(|c| c.contains("'buildx' 'bake'") && c.contains("'bitcoin-processor-app'"));
         assert!(bake_call.is_some());
+        assert!(!calls[bake_call.unwrap()].contains("type=gha"));
         let bake_invocation = &calls[bake_call.unwrap()];
         assert!(bake_invocation.contains("PUSH=false"));
         assert!(bake_invocation.contains("SHA=abcdef1234567890"));
@@ -7604,7 +7930,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .and_then(|index| exec_args.get(index))
             .expect("script path should be present");
         let script = fs::read_to_string(host_temp_script_path(script_path, &temp)).unwrap();
-        assert_eq!(script, "export HOME=/root\nexport RUSTUP_HOME=/root/.rustup\nexport CARGO_HOME=/root/.cargo\necho build\n");
+        assert_eq!(script, "echo build\n");
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -7710,7 +8036,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert_eq!(results.len(), 2);
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
-            "export HOME=/root\nexport RUSTUP_HOME=/root/.rustup\nexport CARGO_HOME=/root/.cargo\necho answer=42\n"
+            "echo answer=42\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -7820,7 +8146,7 @@ fi"#
         assert_eq!(results[0].state.outputs["exists"], "false");
         assert_eq!(
             fs::read_to_string(temp.join("build-docker-image.sh")).unwrap(),
-            "export HOME=/root\nexport RUSTUP_HOME=/root/.rustup\nexport CARGO_HOME=/root/.cargo\njust build-bitcoin-processor-app\n"
+            "just build-bitcoin-processor-app\n"
         );
         let node_calls = executor
             .runner()
@@ -7978,7 +8304,7 @@ fi"#
             .contains(&"PAGE_URL=https://jackin-project.github.io/jackin/".into()));
         assert_eq!(
             fs::read_to_string(temp.join("sitemap.sh")).unwrap(),
-            "export HOME=/root\nexport RUSTUP_HOME=/root/.rustup\nexport CARGO_HOME=/root/.cargo\necho \"url=${PAGE_URL%/}/sitemap.xml\" >> \"$GITHUB_OUTPUT\"\n"
+            "echo \"url=${PAGE_URL%/}/sitemap.xml\" >> \"$GITHUB_OUTPUT\"\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -8304,7 +8630,7 @@ fi"#
         assert_eq!(results[1].state.outputs["artifact-id"], "42");
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
-            "export HOME=/root\nexport RUSTUP_HOME=/root/.rustup\nexport CARGO_HOME=/root/.cargo\necho artifact=42\n"
+            "echo artifact=42\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -8462,10 +8788,6 @@ fi"#
             !summary.step_logs[0].lines.is_empty(),
             "executed steps need a log blob even when the command is silent"
         );
-        assert!(summary.step_logs[0]
-            .lines
-            .iter()
-            .any(|line| line == "Finishing: step"));
         assert!(!summary.step_logs[0].skipped);
         assert_uuid(&summary.step_logs[1].step_id);
         assert_eq!(summary.step_logs[1].order, 2);
@@ -8528,7 +8850,7 @@ fi"#
         assert!(!summary.step_logs[0].skipped);
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
-            "export HOME=/root\nexport RUSTUP_HOME=/root/.rustup\nexport CARGO_HOME=/root/.cargo\nexport PATH='/opt/tool':\"$PATH\"\necho answer=42\n"
+            "export PATH='/opt/tool':\"$PATH\"\necho answer=42\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -8581,7 +8903,7 @@ fi"#
         assert_eq!(summary.step_logs[0].warning_count, 1);
         assert_eq!(
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
-            "export HOME=/root\nexport RUSTUP_HOME=/root/.rustup\nexport CARGO_HOME=/root/.cargo\nexport PATH='/opt/tool':\"$PATH\"\necho answer=42\n"
+            "export PATH='/opt/tool':\"$PATH\"\necho answer=42\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -8605,10 +8927,10 @@ fi"#
         let joined = log.lines.join("\n");
         assert!(joined.contains("##[group]step"));
         assert!(joined.contains("done"));
-        assert!(joined.contains("Step summary:"));
-        assert!(joined.contains("### cache stats"));
-        assert!(joined.contains("hit rate: 80%"));
-        assert!(joined.contains("Finishing: step"));
+        // The summary renders in the run Summary tab via its own upload —
+        // never inlined into the step log (GitHub parity).
+        assert!(!joined.contains("### cache stats"));
+        assert_eq!(log.summary, "### cache stats\nhit rate: 80%\n");
     }
 
     #[test]
@@ -10226,6 +10548,10 @@ fi"#
         let steps = vec![
             ExecutableStep::CompositeStart {
                 step_id: "pages-artifact".into(),
+                display_name: "Run actions/upload-pages-artifact@v4".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: None,
             },
             ExecutableStep::Script(ScriptStep {
                 id: "pages-artifact-1".into(),
@@ -12045,44 +12371,34 @@ bitcoin-processor-app.push=true")
     // ── step_log_lines ────────────────────────────────────────────────────
 
     #[test]
-    fn step_log_lines_strips_workflow_command_lines_from_stdout() {
-        // ::group:: / ::endgroup:: / ::set-env:: lines are workflow commands that
-        // get converted to ##[group] markers in command_lines. If they're also
-        // included verbatim in stdout, they appear twice in the blob — once as raw
-        // text and once as the parsed ##[group] marker. GitHub's own runner strips
-        // them from the visible log; Velnor must do the same.
+    fn step_log_lines_renders_workflow_commands_in_place() {
+        // `::group::`/`::endgroup::` convert to ##[group] markers AT THEIR
+        // ORIGINAL POSITION (GitHub keeps user grouping placement); state
+        // commands like ::set-output are consumed invisibly.
         let stdout =
             "::group::Build phase\nsome build output\n::endgroup::\n::set-output name=x::42\n";
         let stderr = "";
-        let command_lines = vec![
-            "##[group]Build phase".to_string(),
-            "##[endgroup]".to_string(),
-        ];
-        let lines = step_log_lines("Run tests", stdout, stderr, &command_lines, "", false, &[]);
+        let lines = step_log_lines("Run tests", stdout, stderr, false, &[]);
 
-        // Raw ::group:: lines must NOT appear.
+        let group_at = lines
+            .iter()
+            .position(|l| l == "##[group]Build phase")
+            .expect("group marker in place");
+        let output_at = lines
+            .iter()
+            .position(|l| l == "some build output")
+            .expect("output present");
+        let endgroup_at = lines
+            .iter()
+            .rposition(|l| l == "##[endgroup]")
+            .expect("endgroup marker in place");
+        assert!(
+            group_at < output_at && output_at < endgroup_at,
+            "group markers must wrap the output they grouped: {lines:?}"
+        );
         assert!(
             !lines.iter().any(|l| l.starts_with("::")),
-            "workflow command lines must be stripped from output: {lines:?}"
-        );
-        // The processed markers from command_lines must still be present.
-        assert!(
-            lines.iter().any(|l| l == "##[group]Build phase"),
-            "##[group] marker from command_lines must be present: {lines:?}"
-        );
-        assert!(
-            lines.iter().any(|l| l == "##[endgroup]"),
-            "##[endgroup] from command_lines must be present: {lines:?}"
-        );
-        // Regular output must pass through.
-        assert!(
-            lines.iter().any(|l| l == "some build output"),
-            "non-command output must pass through: {lines:?}"
-        );
-        // ::set-output:: also stripped (it's a workflow command starting with ::).
-        assert!(
-            !lines.iter().any(|l| l.starts_with("::set-output")),
-            "::set-output must be stripped: {lines:?}"
+            "raw workflow command lines must not leak: {lines:?}"
         );
     }
 
@@ -12090,12 +12406,15 @@ bitcoin-processor-app.push=true")
     fn step_log_lines_passes_through_normal_output() {
         let stdout = "cargo test passed\nall 42 tests passed\n";
         let stderr = "warning: unused import\n";
-        let lines = step_log_lines("Run cargo test", stdout, stderr, &[], "", false, &[]);
+        let lines = step_log_lines("Run cargo test", stdout, stderr, false, &[]);
         assert!(lines.iter().any(|l| l.contains("cargo test passed")));
         assert!(lines.iter().any(|l| l.contains("all 42 tests passed")));
         assert!(lines.iter().any(|l| l.contains("warning: unused import")));
         assert!(lines.iter().any(|l| l == "##[group]Run cargo test"));
-        assert!(lines.iter().any(|l| l == "Finishing: Run cargo test"));
+        // GitHub closes the header group BEFORE the output: output lines stay
+        // visible without expanding a group, and no "Finishing:" line exists.
+        assert_eq!(lines[1], "##[endgroup]");
+        assert!(!lines.iter().any(|l| l.starts_with("Finishing:")));
     }
 
     #[test]
@@ -12106,11 +12425,12 @@ bitcoin-processor-app.push=true")
             "env:".to_string(),
             "  RUN_TESTS: true".to_string(),
         ];
-        let lines = step_log_lines("Run action", "done\n", "", &[], "", false, &prelude);
+        let lines = step_log_lines("Run action", "done\n", "", false, &prelude);
         let joined = lines.join("\n");
         assert!(joined.contains("with:\n  token: ***"));
         assert!(joined.contains("env:\n  RUN_TESTS: true"));
-        assert!(joined.contains("done"));
+        // Header group closes before output: done is OUTSIDE the group.
+        assert!(joined.contains("##[endgroup]\ndone"));
     }
 
     #[test]
@@ -12155,32 +12475,31 @@ bitcoin-processor-app.push=true")
     }
 
     #[test]
-    fn step_log_lines_appends_summary_section() {
+    fn step_log_lines_keeps_summary_out_of_the_log() {
+        // GITHUB_STEP_SUMMARY renders in the run Summary tab via its own
+        // Results Service upload — GitHub never inlines it into the step log.
         let stdout = "output line\n";
-        let summary = "### Results\nAll passed";
-        let lines = step_log_lines("Summarize", stdout, "", &[], summary, false, &[]);
+        let lines = step_log_lines("Summarize", stdout, "", false, &[]);
         let joined = lines.join("\n");
-        assert!(joined.contains("Step summary:"));
-        assert!(joined.contains("### Results"));
-        assert!(joined.contains("All passed"));
+        assert!(!joined.contains("Step summary:"));
+        assert!(joined.contains("output line"));
     }
 
     #[test]
     fn step_log_lines_keeps_silent_executed_steps_expandable() {
-        let lines = step_log_lines("Silent action", "", "", &[], "", false, &[]);
+        let lines = step_log_lines("Silent action", "", "", false, &[]);
         assert_eq!(
             lines,
             vec![
                 "##[group]Silent action".to_string(),
                 "##[endgroup]".to_string(),
-                "Finishing: Silent action".to_string()
             ]
         );
     }
 
     #[test]
     fn step_log_lines_keeps_skipped_steps_empty() {
-        let lines = step_log_lines("Skipped action", "", "", &[], "", true, &[]);
+        let lines = step_log_lines("Skipped action", "", "", true, &[]);
         assert!(lines.is_empty());
     }
 

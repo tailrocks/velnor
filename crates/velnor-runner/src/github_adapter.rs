@@ -28,6 +28,22 @@ pub fn github_job_container_spec(
     node_action_image: &str,
     daemon_id: String,
 ) -> JobContainerSpec {
+    // Opt-in persistent CARGO_TARGET_DIR, bucketed per job class (a daemon's
+    // slots serve one repo, so the display name is the class key). Off by
+    // default: GitHub-hosted runners do not set CARGO_TARGET_DIR, and parity
+    // wins unless the operator enables the speed-up per daemon.
+    let cargo_target_host = std::env::var("VELNOR_CARGO_TARGET_PERSIST")
+        .ok()
+        .filter(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .map(|_| {
+            crate::container::cargo_target_store_host(&paths.temp_host)
+                .join(crate::container::sanitize_store_key(&job.job_display_name))
+        });
     JobContainerSpec {
         name: job_container_name(job),
         image: job_container_image(job).unwrap_or(docker_image).to_string(),
@@ -47,6 +63,7 @@ pub fn github_job_container_spec(
         docker_host_work_dir: paths.docker_host_work_dir,
         verify_bind_mounts: true,
         daemon_id,
+        cargo_target_host,
     }
 }
 
@@ -536,6 +553,7 @@ mod tests {
             docker_host_work_dir: None,
             verify_bind_mounts: true,
             daemon_id: "test-daemon".into(),
+            cargo_target_host: None,
         };
         let plan = github_normalized_job_plan(
             &job,

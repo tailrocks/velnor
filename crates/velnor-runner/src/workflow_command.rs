@@ -54,30 +54,26 @@ pub fn parse_workflow_commands(output: &str) -> StepCommandState {
                     state.masks.push(command.value);
                 }
             }
+            // group/endgroup/debug render in place via
+            // executor::rendered_output_line — no state to record here.
             "error" => {
                 state.error_count += 1;
-                state.log_lines.push(format_annotation("error", &command));
                 state
                     .annotations
                     .push(command_annotation(StepAnnotationLevel::Failure, &command));
             }
             "warning" => {
                 state.warning_count += 1;
-                state.log_lines.push(format_annotation("warning", &command));
                 state
                     .annotations
                     .push(command_annotation(StepAnnotationLevel::Warning, &command));
             }
             "notice" => {
                 state.notice_count += 1;
-                state.log_lines.push(format_annotation("notice", &command));
                 state
                     .annotations
                     .push(command_annotation(StepAnnotationLevel::Notice, &command));
             }
-            "debug" => state.log_lines.push(format!("##[debug]{}", command.value)),
-            "group" => state.log_lines.push(format!("##[group]{}", command.value)),
-            "endgroup" => state.log_lines.push("##[endgroup]".to_string()),
             _ => {}
         }
     }
@@ -252,14 +248,6 @@ mod tests {
         assert_eq!(state.annotations[0].path.as_deref(), Some("src/main.rs"));
         assert_eq!(state.annotations[0].start_line, Some(7));
         assert_eq!(state.annotations[0].end_line, Some(7));
-        assert_eq!(
-            state.log_lines,
-            vec![
-                "Error: broken (src/main.rs:line 7)".to_string(),
-                "Warning: careful".to_string(),
-                "Notice: noted".to_string()
-            ]
-        );
     }
 
     #[test]
@@ -320,15 +308,6 @@ mod tests {
              ::endgroup::\n",
         );
 
-        assert_eq!(
-            state.log_lines,
-            vec![
-                "##[group]Build".to_string(),
-                "Notice: hit rate 80% [sccache stats]".to_string(),
-                "##[debug]resolved key".to_string(),
-                "##[endgroup]".to_string(),
-            ]
-        );
         assert_eq!(state.notice_count, 1);
         assert_eq!(state.annotations[0].title.as_deref(), Some("sccache stats"));
     }

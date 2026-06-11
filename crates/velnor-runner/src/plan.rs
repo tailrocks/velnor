@@ -113,6 +113,7 @@ mod tests {
             docker_host_work_dir: None,
             verify_bind_mounts: true,
             daemon_id: "test-daemon".into(),
+            cargo_target_host: None,
         }
     }
 
