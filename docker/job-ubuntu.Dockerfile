@@ -49,7 +49,12 @@ ENV HOME=/root \
     # Use precompiled python (python-build-standalone) instead of compiling via
     # pyenv. pyenv lacks definitions for brand-new versions (e.g. 3.14) and
     # compiling is slow; GitHub-hosted mise uses precompiled too, so this matches.
-    MISE_PYTHON_COMPILE=0
+    MISE_PYTHON_COMPILE=0 \
+    # crates.io egress from the runner host is intermittently slow/throttled
+    # (observed: curl error 28 "<10 bytes/sec" aborting cargo metadata).
+    # Retry harder and allow slow transfers instead of failing the job.
+    CARGO_NET_RETRY=10 \
+    CARGO_HTTP_TIMEOUT=120
 
 RUN mkdir -p /opt/mise/bin && \
     curl -fsSL https://mise.run | MISE_VERSION="v2026.6.2" MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
