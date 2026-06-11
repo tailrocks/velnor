@@ -44,14 +44,15 @@ use crate::{
     platform,
     protocol::{
         decode_jit_config, AcquireJobOutcome, BrokerClient, DistributedTaskClient,
-        GitHubJitConfigRequest, GitHubScope, OAuthClient, OAuthJwtCredentials, RegistrationClient,
-        RunServiceAnnotation, RunServiceAnnotationLevel, RunServiceClient, RunServiceCompleteJob,
-        RunServiceStepResult, RunServiceTelemetry, RunServiceVariableValue, RunnerJobRequestRef,
-        RunnerStatus, TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines,
-        TimelineRecordState, RUNNER_JOB_REQUEST,
+        GitHubJitConfigRequest, GitHubScope, ListedRunner, OAuthClient, OAuthJwtCredentials,
+        RegistrationClient, RunServiceAnnotation, RunServiceAnnotationLevel, RunServiceClient,
+        RunServiceCompleteJob, RunServiceStepResult, RunServiceTelemetry, RunServiceVariableValue,
+        RunnerJobRequestRef, RunnerStatus, TaskAgentSession, TaskResult, TimelineRecord,
+        TimelineRecordFeedLines, TimelineRecordState, RUNNER_JOB_REQUEST,
     },
     runtime_env::job_runtime_env,
     script_step::{StepAnnotation, StepAnnotationLevel},
+    slot_log::{self, SlotForensics},
 };
 
 const JOB_CANCELLATION_MESSAGE: &str = "JobCancellation";
@@ -65,6 +66,18 @@ const BROKER_POLL_MAX_CONSECUTIVE_ERRORS: u32 = 10;
 const BROKER_POLL_EMPTY_BACKOFF_THRESHOLD: u32 = 50;
 const BROKER_SESSION_CREATE_MAX_ATTEMPTS: u32 = 5;
 const BROKER_SESSION_CREATE_RETRY_SECONDS: u64 = 10;
+
+// Idle-slot health (master-plan P1.9, 2026-06-11 zombie-fleet incident).
+// Broker poll success alone is NOT health: GitHub's runner registry can drop
+// or offline a runner while its broker session still answers 204. Idle slots
+// therefore (a) proactively refresh OAuth credentials well inside the ~1h
+// token lifetime, (b) periodically verify their own registration in GitHub's
+// runner registry and recycle on missing/offline, and (c) recycle outright
+// after a bounded idle age.
+const IDLE_TOKEN_REFRESH_SECONDS: u64 = 40 * 60;
+const REGISTRY_CHECK_INTERVAL_SECONDS: u64 = 180;
+const REGISTRY_OFFLINE_STRIKES_TO_RECYCLE: u32 = 2;
+const DEFAULT_MAX_IDLE_SLOT_AGE_SECONDS: u64 = 4 * 60 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum V2MessageAction {
@@ -122,6 +135,98 @@ impl BrokerPollState {
         }
         let seconds = if self.consecutive_errors <= 5 { 15 } else { 30 };
         Ok(Duration::from_secs(seconds))
+    }
+}
+
+/// Wall-clock state behind the idle-slot health decisions. All decision logic
+/// lives in pure functions over this state so the timing matrix is unit
+/// testable.
+struct IdleSlotHealth {
+    session_started: Instant,
+    token_acquired: Instant,
+    last_registry_check: Instant,
+    registry_offline_strikes: u32,
+}
+
+impl IdleSlotHealth {
+    fn new(now: Instant) -> Self {
+        Self {
+            session_started: now,
+            token_acquired: now,
+            last_registry_check: now,
+            registry_offline_strikes: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdleHealthAction {
+    /// Recycle the slot because it has been idle longer than the configured
+    /// max idle age (fresh JIT registration, fresh session, fresh token).
+    RecycleMaxIdleAge,
+    /// Proactively refresh OAuth credentials before the ~1h token lifetime
+    /// can expire mid-long-poll.
+    RefreshToken,
+    /// Verify this slot's registration is still present and online in
+    /// GitHub's runner registry.
+    CheckRegistry,
+}
+
+fn due_idle_health_actions(
+    health: &IdleSlotHealth,
+    now: Instant,
+    max_idle_age: Option<Duration>,
+) -> Vec<IdleHealthAction> {
+    if let Some(max_age) = max_idle_age {
+        if now.duration_since(health.session_started) >= max_age {
+            return vec![IdleHealthAction::RecycleMaxIdleAge];
+        }
+    }
+    let mut actions = Vec::new();
+    if now.duration_since(health.token_acquired) >= Duration::from_secs(IDLE_TOKEN_REFRESH_SECONDS)
+    {
+        actions.push(IdleHealthAction::RefreshToken);
+    }
+    if now.duration_since(health.last_registry_check)
+        >= Duration::from_secs(REGISTRY_CHECK_INTERVAL_SECONDS)
+    {
+        actions.push(IdleHealthAction::CheckRegistry);
+    }
+    actions
+}
+
+fn max_idle_slot_age(flag_seconds: Option<u64>) -> Option<Duration> {
+    match flag_seconds {
+        Some(0) => None,
+        Some(seconds) => Some(Duration::from_secs(seconds)),
+        None => Some(Duration::from_secs(DEFAULT_MAX_IDLE_SLOT_AGE_SECONDS)),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RegistryVerdict {
+    /// Registration present and online: reset strikes.
+    Healthy,
+    /// Registration present but not online; strike accumulated, not yet fatal.
+    OfflineStrike(u32),
+    /// Registration gone from GitHub (definite 404): recycle immediately.
+    RecycleMissing,
+    /// Registration offline for enough consecutive checks: recycle.
+    RecycleOffline(u32),
+}
+
+fn assess_registry_lookup(lookup: Option<&ListedRunner>, strikes_before: u32) -> RegistryVerdict {
+    let Some(runner) = lookup else {
+        return RegistryVerdict::RecycleMissing;
+    };
+    if runner.status.as_deref() == Some("online") {
+        return RegistryVerdict::Healthy;
+    }
+    let strikes = strikes_before + 1;
+    if strikes >= REGISTRY_OFFLINE_STRIKES_TO_RECYCLE {
+        RegistryVerdict::RecycleOffline(strikes)
+    } else {
+        RegistryVerdict::OfflineStrike(strikes)
     }
 }
 
@@ -369,6 +474,18 @@ pub async fn run(args: RunArgs) -> Result<()> {
     run_v2(args, dir, stored, agent_id, token).await
 }
 
+/// Append one line to the daemon supervisor's forensic log
+/// (`<config-base>/logs/daemon.log`): slot spawns/exits/recycles and pass
+/// failures, so fleet-level incidents are reconstructable from disk.
+fn daemon_forensic_log(config_base: &Path, message: &str) {
+    slot_log::append_log_line(
+        &config_base.join("logs"),
+        slot_log::DAEMON_LOG,
+        &format!("daemon pid={}", std::process::id()),
+        message,
+    );
+}
+
 pub async fn daemon(args: DaemonArgs) -> Result<()> {
     let slots = validate_daemon_slots(args.slots)?;
     if args.complete_noop && args.execute_scripts {
@@ -422,6 +539,12 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
                 let diagnosis = diagnose_github_token(args.pat.as_deref())
                     .map(|d| format!(" GITHUB_TOKEN problem: {d}"))
                     .unwrap_or_default();
+                if let Ok(config_base) = daemon_config_dir(&args) {
+                    daemon_forensic_log(
+                        &config_base,
+                        &format!("daemon pass attempt {attempt} failed: {error:#}"),
+                    );
+                }
                 eprintln!(
                     "daemon attempt {attempt} failed: {error:#}.{diagnosis} Retrying in {}s (the daemon never exits; fix the cause and it recovers).",
                     delay.as_secs()
@@ -469,6 +592,13 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         );
     }
     crate::sd_notify::status(&format!("supervising {slots} runner slot(s)"));
+    daemon_forensic_log(
+        &config_base,
+        &format!(
+            "supervising {slots} slot(s), version={}",
+            env!("CARGO_PKG_VERSION")
+        ),
+    );
 
     let spawn_slot = |slot_tasks: &mut JoinSet<(usize, Result<()>)>, slot_index: usize| {
         let daemon_args = args.clone();
@@ -492,6 +622,10 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
             Ok((_, Ok(()))) => {}
             Ok((slot_index, Err(error))) => {
                 eprintln!("{error:#}");
+                daemon_forensic_log(
+                    &config_base,
+                    &format!("slot-{slot_index} task exited with error: {error:#}"),
+                );
                 if supervised {
                     // A slot returning an error in supervised mode is a bug
                     // (slot loops are supposed to retry internally) — but one
@@ -611,6 +745,10 @@ async fn run_daemon_slot(
             eprintln!(
                 "daemon slot-{slot_index} cycle {cycle} failed; creating a fresh JIT config before retry: {error:#}"
             );
+            daemon_forensic_log(
+                &config_base,
+                &format!("slot-{slot_index} cycle {cycle} failed; fresh JIT config before retry: {error:#}"),
+            );
             reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle).await;
             cycle += 1;
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -619,10 +757,18 @@ async fn run_daemon_slot(
         if args.once {
             return Ok(());
         }
+        daemon_forensic_log(
+            &config_base,
+            &format!("slot-{slot_index} cycle {cycle} completed cleanly; recycling JIT config"),
+        );
         if let Err(error) = recycle_daemon_slot(&args, &config_base, slot_index, slots, cycle).await
         {
             eprintln!(
                 "daemon slot-{slot_index} cycle {cycle} recycle failed: {error:#}; retrying JIT config until it succeeds"
+            );
+            daemon_forensic_log(
+                &config_base,
+                &format!("slot-{slot_index} cycle {cycle} recycle failed: {error:#}"),
             );
             reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle).await;
         }
@@ -832,7 +978,7 @@ fn daemon_should_poll_after_jit_config(args: &DaemonArgs) -> bool {
     !args.dry_run_registration
 }
 
-fn daemon_config_dir(args: &DaemonArgs) -> Result<PathBuf> {
+pub(crate) fn daemon_config_dir(args: &DaemonArgs) -> Result<PathBuf> {
     if args.config_dir.is_some() || env::var_os("VELNOR_CONFIG_DIR").is_some() {
         return config::config_dir(args.config_dir.clone());
     }
@@ -1008,6 +1154,8 @@ fn daemon_slot_run_args(
 
     Ok(RunArgs {
         config_dir: Some(daemon_slot_config_dir(config_base, slot_index, slot_count)),
+        pat: args.pat.clone(),
+        max_idle_slot_age_seconds: args.max_idle_slot_age_seconds,
         once: args.once,
         idle_timeout_seconds: args.idle_timeout_seconds,
         complete_noop: args.complete_noop,
@@ -1129,14 +1277,55 @@ async fn run_v2(
     let owner_name = format!("{} (PID: {})", default_agent_name(), std::process::id());
     let session = TaskAgentSession::new(owner_name, agent_id, stored.settings.agent_name.clone());
     let diagnostic = RunnerConnectionDiagnostic::from_config(&stored, &current_broker_url);
+
+    let mut forensics = SlotForensics::new(
+        config_dir.join("logs"),
+        format!("runner={} agent_id={agent_id}", stored.settings.agent_name),
+    );
+    forensics.lifecycle(&format!(
+        "starting V2 session: version={} pid={} {diagnostic}",
+        env!("CARGO_PKG_VERSION"),
+        std::process::id()
+    ));
+
     let session = create_broker_session_with_retry(&broker, &session, &diagnostic).await?;
     let session_id = session
         .session_id
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("GitHub broker returned session without sessionId"))?;
+    forensics.set_identity(format!(
+        "runner={} agent_id={agent_id} session={}",
+        stored.settings.agent_name,
+        &session_id[..session_id.len().min(8)]
+    ));
+    forensics.lifecycle("broker session created");
+
     let mut poll_state = BrokerPollState::default();
     let idle_timeout = idle_timeout_duration(args.idle_timeout_seconds)?;
     let idle_started = Instant::now();
+    let mut health = IdleSlotHealth::new(Instant::now());
+    let max_idle_age = max_idle_slot_age(args.max_idle_slot_age_seconds);
+
+    let registry_pat = args
+        .pat
+        .as_deref()
+        .map(str::trim)
+        .filter(|pat| !pat.is_empty())
+        .map(String::from);
+    let registry_scope = match GitHubScope::parse(&stored.settings.github_url) {
+        Ok(scope) => Some(scope),
+        Err(error) => {
+            forensics.registry(&format!(
+                "registry health checks disabled: cannot parse github_url: {error:#}"
+            ));
+            None
+        }
+    };
+    if registry_pat.is_none() {
+        let note = "registry health checks disabled: no GITHUB_TOKEN/--pat provided";
+        println!("{note}");
+        forensics.registry(note);
+    }
 
     println!(
         "Runner '{}' ready via broker with labels: {}",
@@ -1146,35 +1335,104 @@ async fn run_v2(
     println!("Created broker runner session {session_id}.");
 
     let run_result = async {
-        loop {
+        'poll: loop {
             let message = poll_broker_message(
                 &broker,
                 session_id,
                 RunnerStatus::Online,
                 stored.settings.disable_update,
                 &mut poll_state,
+                &forensics,
             )
             .await?;
 
             let Some(message) = message else {
                 println!("No broker message received.");
                 fail_if_idle_timeout_elapsed(idle_started, idle_timeout)?;
+
+                for action in due_idle_health_actions(&health, Instant::now(), max_idle_age) {
+                    match action {
+                        IdleHealthAction::RecycleMaxIdleAge => {
+                            let idle_minutes = health.session_started.elapsed().as_secs() / 60;
+                            let note = format!(
+                                "recycling idle slot after {idle_minutes}m (max idle age): fresh JIT registration + session"
+                            );
+                            println!("{note}");
+                            forensics.lifecycle(&note);
+                            break 'poll;
+                        }
+                        IdleHealthAction::RefreshToken => {
+                            refresh_idle_credentials(
+                                &stored,
+                                &current_broker_url,
+                                &mut broker,
+                                &mut run_service,
+                                &mut broker_token,
+                                &mut health,
+                                &forensics,
+                            )
+                            .await;
+                        }
+                        IdleHealthAction::CheckRegistry => {
+                            health.last_registry_check = Instant::now();
+                            if let (Some(pat), Some(scope)) =
+                                (registry_pat.as_deref(), registry_scope.as_ref())
+                            {
+                                if let Some(reason) = check_runner_registry(
+                                    scope,
+                                    pat,
+                                    agent_id,
+                                    &stored.settings.agent_name,
+                                    &mut health,
+                                    &forensics,
+                                )
+                                .await
+                                {
+                                    crate::sd_notify::status(&format!(
+                                        "slot {} recycling: {reason}",
+                                        stored.settings.agent_name
+                                    ));
+                                    return Err(anyhow::anyhow!(
+                                        "registry health check failed for runner '{}' (agent_id={agent_id}): {reason}; recycling slot",
+                                        stored.settings.agent_name
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             };
 
-            let action = handle_v2_message(
-                &broker,
-                &run_service,
-                session_id,
-                &stored,
-                &config_dir,
-                &args,
-                stored.settings.disable_update,
-                &stored.settings.agent_name,
-                message,
-            )
-            .await?;
+            forensics.lifecycle(&format!(
+                "broker message id={} type={}",
+                message.message_id, message.message_type
+            ));
+
+            let message_span = tracing::info_span!(
+                "handle_v2_message",
+                message_id = message.message_id,
+                message_type = %message.message_type,
+                runner = %stored.settings.agent_name
+            );
+            let action = {
+                use tracing::Instrument as _;
+                handle_v2_message(
+                    &broker,
+                    &run_service,
+                    session_id,
+                    &stored,
+                    &config_dir,
+                    &args,
+                    stored.settings.disable_update,
+                    &stored.settings.agent_name,
+                    message,
+                )
+                .instrument(message_span)
+                .await?
+            };
 
             match &action {
                 V2MessageAction::None => {}
@@ -1182,19 +1440,25 @@ async fn run_v2(
                     current_broker_url = migration_url.clone();
                     broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
                     println!("Broker migration applied: {current_broker_url}");
+                    forensics.lifecycle(&format!("broker migration applied: {current_broker_url}"));
                 }
                 V2MessageAction::RefreshToken => {
                     let refreshed_token = oauth_access_token(&stored).await?;
                     broker_token = refreshed_token.clone();
                     broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
                     run_service = RunServiceClient::new(refreshed_token)?;
+                    health.token_acquired = Instant::now();
                     println!("Refreshed broker and run-service credentials.");
+                    forensics.lifecycle("credentials refreshed (ForceTokenRefresh)");
                 }
                 V2MessageAction::Shutdown => {
                     println!("GitHub requested runner shutdown.");
+                    forensics.lifecycle("shutdown requested by GitHub");
                     break;
                 }
-                V2MessageAction::JobHandled => {}
+                V2MessageAction::JobHandled => {
+                    forensics.lifecycle("job handled");
+                }
             }
             if should_stop_after_message(args.once, &action) {
                 break;
@@ -1207,17 +1471,150 @@ async fn run_v2(
     }
     .await;
 
+    if let Err(error) = &run_result {
+        forensics.lifecycle(&format!("run loop ended with error: {error:#}"));
+    }
+
     match broker.delete_session().await {
-        Ok(()) => println!("Deleted broker runner session."),
+        Ok(()) => {
+            println!("Deleted broker runner session.");
+            forensics.lifecycle("broker session deleted");
+        }
         Err(error) if run_result.is_ok() => {
+            forensics.lifecycle(&format!("broker session delete failed: {error:#}"));
             return Err(error).context("delete broker runner session");
         }
         Err(error) => {
             eprintln!("Best-effort broker session delete failed: {error:#}");
+            forensics.lifecycle(&format!(
+                "best-effort broker session delete failed: {error:#}"
+            ));
         }
     }
 
     run_result
+}
+
+/// Proactively refresh OAuth credentials for an idle slot. Best-effort: a
+/// failed refresh keeps the old (still valid) credentials and is retried on
+/// the next interval; if the token does expire anyway, broker polls turn into
+/// classified errors and the slot recycles through the supervised path.
+async fn refresh_idle_credentials(
+    stored: &StoredRunnerConfig,
+    current_broker_url: &str,
+    broker: &mut BrokerClient,
+    run_service: &mut RunServiceClient,
+    broker_token: &mut String,
+    health: &mut IdleSlotHealth,
+    forensics: &SlotForensics,
+) {
+    let token_age_minutes = health.token_acquired.elapsed().as_secs() / 60;
+    match oauth_access_token(stored).await {
+        Ok(refreshed) => {
+            match (
+                BrokerClient::new(current_broker_url, refreshed.clone()),
+                RunServiceClient::new(refreshed.clone()),
+            ) {
+                (Ok(new_broker), Ok(new_run_service)) => {
+                    *broker = new_broker;
+                    *run_service = new_run_service;
+                    *broker_token = refreshed;
+                    health.token_acquired = Instant::now();
+                    let note =
+                        format!("proactive credential refresh ok (token age {token_age_minutes}m)");
+                    println!("{note}");
+                    forensics.lifecycle(&note);
+                }
+                (Err(error), _) | (_, Err(error)) => {
+                    let note = format!(
+                        "proactive credential refresh failed to rebuild clients (token age {token_age_minutes}m): {error:#}"
+                    );
+                    eprintln!("{note}");
+                    forensics.lifecycle(&note);
+                }
+            }
+        }
+        Err(error) => {
+            let note = format!(
+                "proactive credential refresh failed (token age {token_age_minutes}m): {error:#}"
+            );
+            eprintln!("{note}");
+            forensics.lifecycle(&note);
+        }
+    }
+}
+
+/// One registry reconcile check for an idle slot. Returns `Some(reason)` when
+/// the slot must recycle (registration missing or persistently offline);
+/// `None` keeps polling. Lookup errors never recycle a slot — transient API
+/// trouble must not kill a healthy session.
+async fn check_runner_registry(
+    scope: &GitHubScope,
+    pat: &str,
+    agent_id: i64,
+    agent_name: &str,
+    health: &mut IdleSlotHealth,
+    forensics: &SlotForensics,
+) -> Option<String> {
+    let client = match RegistrationClient::new() {
+        Ok(client) => client,
+        Err(error) => {
+            forensics.registry(&format!("lookup skipped: client build failed: {error:#}"));
+            return None;
+        }
+    };
+    let lookup = match client.get_runner(scope, pat, agent_id).await {
+        Ok(lookup) => lookup,
+        Err(error) => {
+            forensics.registry(&format!("lookup error (not counted as strike): {error:#}"));
+            return None;
+        }
+    };
+    match assess_registry_lookup(lookup.as_ref(), health.registry_offline_strikes) {
+        RegistryVerdict::Healthy => {
+            health.registry_offline_strikes = 0;
+            forensics.registry(&format!(
+                "runner online busy={}",
+                lookup
+                    .as_ref()
+                    .and_then(|runner| runner.busy)
+                    .map(|busy| busy.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            ));
+            None
+        }
+        RegistryVerdict::OfflineStrike(strikes) => {
+            health.registry_offline_strikes = strikes;
+            let status = lookup
+                .as_ref()
+                .and_then(|runner| runner.status.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            let note = format!(
+                "runner '{agent_name}' reported {status} by GitHub registry while broker session polls fine (strike {strikes}/{REGISTRY_OFFLINE_STRIKES_TO_RECYCLE})"
+            );
+            eprintln!("{note}");
+            forensics.registry(&note);
+            None
+        }
+        RegistryVerdict::RecycleMissing => {
+            let note = "runner registration MISSING from GitHub registry (404) while broker session polls fine — split-brain detected".to_string();
+            eprintln!("{note}");
+            forensics.registry(&note);
+            Some("registration missing (404)".to_string())
+        }
+        RegistryVerdict::RecycleOffline(strikes) => {
+            let status = lookup
+                .as_ref()
+                .and_then(|runner| runner.status.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            let note = format!(
+                "runner '{agent_name}' {status} in GitHub registry for {strikes} consecutive checks while broker session polls fine — split-brain detected"
+            );
+            eprintln!("{note}");
+            forensics.registry(&note);
+            Some(format!("registration {status} for {strikes} checks"))
+        }
+    }
 }
 
 async fn create_broker_session_with_retry(
@@ -1326,29 +1723,50 @@ async fn poll_broker_message(
     status: RunnerStatus,
     disable_update: bool,
     poll_state: &mut BrokerPollState,
+    forensics: &SlotForensics,
 ) -> Result<Option<crate::protocol::TaskAgentMessage>> {
     loop {
         match broker
             .get_runner_message(session_id, status, disable_update)
             .await
         {
-            Ok(Some(message)) => {
-                poll_state.received_message();
-                return Ok(Some(message));
-            }
-            Ok(None) => {
-                if let Some(delay) = poll_state.received_empty_message() {
-                    println!(
-                        "No broker message after {} consecutive polls; backing off for {}s.",
-                        BROKER_POLL_EMPTY_BACKOFF_THRESHOLD,
-                        delay.as_secs()
-                    );
-                    tokio::time::sleep(delay).await;
-                    continue;
+            Ok(poll) => match poll.message {
+                Some(message) => {
+                    poll_state.received_message();
+                    forensics.broker(&format!(
+                        "poll message status={} id={} type={}",
+                        poll.status, message.message_id, message.message_type
+                    ));
+                    return Ok(Some(message));
                 }
-                return Ok(None);
-            }
+                None => {
+                    let consecutive = poll_state.consecutive_empty_messages + 1;
+                    if let Some(delay) = poll_state.received_empty_message() {
+                        forensics.broker(&format!(
+                            "poll empty status={} consecutive={consecutive} backoff={}s",
+                            poll.status,
+                            delay.as_secs()
+                        ));
+                        println!(
+                            "No broker message after {} consecutive polls; backing off for {}s.",
+                            BROKER_POLL_EMPTY_BACKOFF_THRESHOLD,
+                            delay.as_secs()
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    forensics.broker(&format!(
+                        "poll empty status={} consecutive={consecutive}",
+                        poll.status
+                    ));
+                    return Ok(None);
+                }
+            },
             Err(error) => {
+                forensics.broker(&format!(
+                    "poll ERROR consecutive={}: {error:#}",
+                    poll_state.consecutive_errors + 1
+                ));
                 let delay = poll_state.received_error()?;
                 eprintln!(
                     "Broker message poll failed ({} consecutive error(s)): {error:#}. Retrying in {}s.",
@@ -1937,7 +2355,7 @@ fn start_broker_cancellation_poll(
                 .get_runner_message(&session_id, RunnerStatus::Busy, disable_update)
                 .await
             {
-                Ok(message) => message,
+                Ok(poll) => poll.message,
                 Err(error) => {
                     eprintln!("Broker cancellation poll failed: {error:#}");
                     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -4623,6 +5041,8 @@ mod tests {
     fn run_args(complete_noop: bool, execute_scripts: bool, dry_run_jobs: bool) -> RunArgs {
         RunArgs {
             config_dir: None,
+            pat: None,
+            max_idle_slot_age_seconds: None,
             once: false,
             idle_timeout_seconds: None,
             complete_noop,
@@ -4636,6 +5056,107 @@ mod tests {
             skip_preflight: false,
             require_docker_socket: false,
         }
+    }
+
+    #[test]
+    fn idle_health_no_actions_when_fresh() {
+        let now = Instant::now();
+        let health = IdleSlotHealth::new(now);
+        let later = now + Duration::from_secs(60);
+        assert!(due_idle_health_actions(&health, later, max_idle_slot_age(None)).is_empty());
+    }
+
+    #[test]
+    fn idle_health_token_refresh_due_before_expiry() {
+        let now = Instant::now();
+        let health = IdleSlotHealth::new(now);
+        let later = now + Duration::from_secs(IDLE_TOKEN_REFRESH_SECONDS + 1);
+        let actions = due_idle_health_actions(&health, later, None);
+        assert!(actions.contains(&IdleHealthAction::RefreshToken));
+        assert!(actions.contains(&IdleHealthAction::CheckRegistry));
+    }
+
+    #[test]
+    fn idle_health_registry_check_interval() {
+        let now = Instant::now();
+        let health = IdleSlotHealth::new(now);
+        let later = now + Duration::from_secs(REGISTRY_CHECK_INTERVAL_SECONDS);
+        assert_eq!(
+            due_idle_health_actions(&health, later, None),
+            vec![IdleHealthAction::CheckRegistry]
+        );
+    }
+
+    #[test]
+    fn idle_health_max_age_preempts_everything() {
+        let now = Instant::now();
+        let health = IdleSlotHealth::new(now);
+        let later = now + Duration::from_secs(DEFAULT_MAX_IDLE_SLOT_AGE_SECONDS);
+        assert_eq!(
+            due_idle_health_actions(&health, later, max_idle_slot_age(None)),
+            vec![IdleHealthAction::RecycleMaxIdleAge]
+        );
+    }
+
+    #[test]
+    fn max_idle_slot_age_zero_disables() {
+        assert_eq!(max_idle_slot_age(Some(0)), None);
+        assert_eq!(max_idle_slot_age(Some(60)), Some(Duration::from_secs(60)));
+        assert_eq!(
+            max_idle_slot_age(None),
+            Some(Duration::from_secs(DEFAULT_MAX_IDLE_SLOT_AGE_SECONDS))
+        );
+    }
+
+    fn listed_runner(status: &str) -> ListedRunner {
+        ListedRunner {
+            id: Some(1),
+            name: Some("velnor-test-slot-1".to_string()),
+            status: Some(status.to_string()),
+            busy: Some(false),
+        }
+    }
+
+    #[test]
+    fn registry_online_resets_strikes() {
+        assert_eq!(
+            assess_registry_lookup(Some(&listed_runner("online")), 1),
+            RegistryVerdict::Healthy
+        );
+    }
+
+    #[test]
+    fn registry_missing_recycles_immediately() {
+        assert_eq!(
+            assess_registry_lookup(None, 0),
+            RegistryVerdict::RecycleMissing
+        );
+    }
+
+    #[test]
+    fn registry_offline_needs_consecutive_strikes() {
+        assert_eq!(
+            assess_registry_lookup(Some(&listed_runner("offline")), 0),
+            RegistryVerdict::OfflineStrike(1)
+        );
+        assert_eq!(
+            assess_registry_lookup(Some(&listed_runner("offline")), 1),
+            RegistryVerdict::RecycleOffline(2)
+        );
+    }
+
+    #[test]
+    fn registry_unknown_status_counts_as_offline() {
+        let runner = ListedRunner {
+            id: Some(1),
+            name: Some("velnor-test-slot-1".to_string()),
+            status: None,
+            busy: None,
+        };
+        assert_eq!(
+            assess_registry_lookup(Some(&runner), 0),
+            RegistryVerdict::OfflineStrike(1)
+        );
     }
 
     #[test]
@@ -4783,6 +5304,7 @@ jobs:
             config_dir: None,
             url: None,
             pat: None,
+            max_idle_slot_age_seconds: None,
             name: None,
             labels: Vec::new(),
             target_mvp_labels: false,

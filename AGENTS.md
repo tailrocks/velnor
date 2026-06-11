@@ -101,6 +101,26 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-06-11: **Stability-first directive** (operator, master-plan §3b +
+  P1.9): incident #9 ("zombie fleet" — broker polls kept returning empty
+  success while GitHub's runner registry had the runners offline/missing;
+  jobs queued forever; doctor alerted but nothing healed) proved stability
+  was NOT achieved; stability work outranks new performance features until
+  the P1.9 gates pass. Root causes fixed in 0.1.15: empty-body non-2xx
+  broker responses (expired token 401, curl status 0) were classified as
+  "no message"; idle slots never refreshed OAuth tokens; nothing reconciled
+  local slot state against GitHub's registry. Standing rules: the daemon
+  trusts BOTH health signals (broker poll + runner registry) and self-heals
+  on divergence; every incident class must be diagnosable from on-disk
+  forensic logs alone (per-slot `logs/{broker,registry,lifecycle}.log` +
+  `daemon.log`, identity-prefixed, statuses + control messages recorded) —
+  if logs can't explain an incident, the logging gets fixed too; `tracing`
+  is the standard performance lens (JSON span timings in `logs/trace.jsonl`,
+  `tracing-opentelemetry` OTLP export behind the `otel` feature +
+  `VELNOR_OTLP_ENDPOINT`) — new hot paths get spans, performance claims cite
+  span data; benchmark campaigns verify fleet health (doctor green) before
+  timing anything.
+
 - 2026-06-11: Docs refreshed to current truth: mission/vision rewritten
   (drop-in goal achieved, mandates referenced as law), docs/README index
   updated, runner-usage gains the apt/systemd production section,

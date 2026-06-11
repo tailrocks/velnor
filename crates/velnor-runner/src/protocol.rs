@@ -630,6 +630,21 @@ impl RegistrationClient {
         Ok(page.runners)
     }
 
+    /// Look up one runner registration by id. `Ok(None)` means GitHub no
+    /// longer knows the runner (404). Uses the curl transport because this is
+    /// called periodically from every idle daemon slot (reqwest/hyper draws
+    /// TLS-fingerprint throttling under that load).
+    pub async fn get_runner(
+        &self,
+        scope: &GitHubScope,
+        pat: &str,
+        runner_id: i64,
+    ) -> Result<Option<ListedRunner>> {
+        let url = scope.runner_url(runner_id)?;
+        let (status, body) = curl_json_request("GET", url.as_str(), pat, None, 30).await?;
+        parse_runner_lookup(status, &body)
+    }
+
     pub async fn delete_runner(
         &self,
         scope: &GitHubScope,
@@ -875,6 +890,59 @@ pub struct BrokerClient {
     bearer_token: String,
 }
 
+/// One broker long-poll outcome: HTTP status (for forensic logs) plus the
+/// decoded message, when any.
+#[derive(Debug)]
+pub struct BrokerPoll {
+    pub status: u16,
+    pub message: Option<TaskAgentMessage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrokerPollClass {
+    /// Healthy long-poll cycle with no work (HTTP 204, or 2xx with empty body).
+    Empty,
+    /// 2xx with a message body to decode.
+    Message,
+    /// Transport failure (curl could not produce a status) or non-2xx. An
+    /// expired/unauthorized/deleted session typically answers 401/403/404 with
+    /// an EMPTY body — this MUST classify as an error, never as "no message",
+    /// or an idle slot turns into a zombie that polls forever while GitHub's
+    /// scheduler has already dropped the runner (2026-06-11 fleet incident).
+    Error,
+}
+
+pub fn classify_broker_poll(http_status: u16, body: &str) -> BrokerPollClass {
+    if http_status == 204 {
+        return BrokerPollClass::Empty;
+    }
+    if (200..300).contains(&http_status) {
+        if body.trim().is_empty() {
+            return BrokerPollClass::Empty;
+        }
+        return BrokerPollClass::Message;
+    }
+    BrokerPollClass::Error
+}
+
+/// Decode a GET /actions/runners/{id} response: `Ok(None)` only on a definite
+/// 404 (registration gone); other failures are errors so transient API trouble
+/// is never mistaken for a deleted runner.
+pub fn parse_runner_lookup(status: u16, body: &str) -> Result<Option<ListedRunner>> {
+    if status == 404 {
+        return Ok(None);
+    }
+    if !(200..300).contains(&status) {
+        bail!(
+            "runner lookup failed: status={status}, body={}",
+            body.trim()
+        );
+    }
+    serde_json::from_str(body.trim())
+        .map(Some)
+        .context("parse runner lookup response")
+}
+
 impl BrokerClient {
     pub fn new(server_url_v2: &str, bearer_token: impl Into<String>) -> Result<Self> {
         let http = Client::builder()
@@ -914,19 +982,26 @@ impl BrokerClient {
         session_id: &str,
         status: RunnerStatus,
         disable_update: bool,
-    ) -> Result<Option<TaskAgentMessage>> {
+    ) -> Result<BrokerPoll> {
         let url = broker_message_url(&self.base_url, session_id, status, disable_update)?;
         let (http_status, text) =
             curl_json_request("GET", url.as_str(), &self.bearer_token, None, 70).await?;
-        if http_status == 204 || text.trim().is_empty() {
-            return Ok(None);
+        match classify_broker_poll(http_status, &text) {
+            BrokerPollClass::Empty => Ok(BrokerPoll {
+                status: http_status,
+                message: None,
+            }),
+            BrokerPollClass::Message => serde_json::from_str(text.trim())
+                .map(|message| BrokerPoll {
+                    status: http_status,
+                    message: Some(message),
+                })
+                .context("parse get broker message response"),
+            BrokerPollClass::Error => bail!(
+                "get broker message failed: status={http_status}, body={}",
+                text.trim()
+            ),
         }
-        if !(200..300).contains(&http_status) {
-            bail!("get broker message failed: status={http_status}, body={text}");
-        }
-        serde_json::from_str(text.trim())
-            .map(Some)
-            .context("parse get broker message response")
     }
 
     pub async fn acknowledge_runner_request(
@@ -3136,6 +3211,54 @@ pub fn upload_artifact_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classify_broker_poll_healthy_empty() {
+        assert_eq!(classify_broker_poll(204, ""), BrokerPollClass::Empty);
+        assert_eq!(classify_broker_poll(200, "  \n"), BrokerPollClass::Empty);
+    }
+
+    #[test]
+    fn classify_broker_poll_message() {
+        assert_eq!(classify_broker_poll(200, "{}"), BrokerPollClass::Message);
+    }
+
+    #[test]
+    fn classify_broker_poll_expired_session_is_error_not_idle() {
+        // The 2026-06-11 zombie-fleet incident: 401 with an empty body was
+        // treated as "no message" and idle slots polled a dead session forever.
+        assert_eq!(classify_broker_poll(401, ""), BrokerPollClass::Error);
+        assert_eq!(classify_broker_poll(403, ""), BrokerPollClass::Error);
+        assert_eq!(classify_broker_poll(404, ""), BrokerPollClass::Error);
+        assert_eq!(classify_broker_poll(500, "oops"), BrokerPollClass::Error);
+        // curl transport failure yields status 0 and must be an error too.
+        assert_eq!(classify_broker_poll(0, ""), BrokerPollClass::Error);
+    }
+
+    #[test]
+    fn parse_runner_lookup_missing_runner_is_none() {
+        assert!(parse_runner_lookup(404, "{\"message\":\"Not Found\"}")
+            .expect("404 is a definite answer")
+            .is_none());
+    }
+
+    #[test]
+    fn parse_runner_lookup_online_runner() {
+        let body = r#"{"id":4237,"name":"velnor-fixture-slot-1","status":"online","busy":false}"#;
+        let runner = parse_runner_lookup(200, body)
+            .expect("parse")
+            .expect("runner present");
+        assert_eq!(runner.id, Some(4237));
+        assert_eq!(runner.status.as_deref(), Some("online"));
+        assert_eq!(runner.busy, Some(false));
+    }
+
+    #[test]
+    fn parse_runner_lookup_api_failure_is_error() {
+        assert!(parse_runner_lookup(500, "boom").is_err());
+        assert!(parse_runner_lookup(0, "").is_err());
+        assert!(parse_runner_lookup(401, "bad credentials").is_err());
+    }
     use rsa::{pkcs8::DecodePrivateKey, traits::PrivateKeyParts};
 
     #[test]

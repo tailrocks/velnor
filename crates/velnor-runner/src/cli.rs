@@ -124,6 +124,18 @@ pub struct RunArgs {
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
 
+    /// GitHub token used for idle-slot registry health checks (the runner
+    /// verifies its own registration stays online). Optional: without it the
+    /// registry reconciler is disabled.
+    #[arg(long, env = "GITHUB_TOKEN")]
+    pub pat: Option<String>,
+
+    /// Recycle an idle slot after this many seconds even when it still looks
+    /// healthy, so every slot gets a periodically fresh JIT registration.
+    /// 0 disables the bound. Defaults to 14400 (4 hours).
+    #[arg(long)]
+    pub max_idle_slot_age_seconds: Option<u64>,
+
     /// Exit after one job.
     #[arg(long)]
     pub once: bool,
@@ -222,6 +234,12 @@ pub struct DaemonArgs {
     /// Number of internal GitHub runner slots managed by this daemon.
     #[arg(long, default_value_t = 1)]
     pub slots: usize,
+
+    /// Recycle an idle slot after this many seconds even when it still looks
+    /// healthy, so every slot gets a periodically fresh JIT registration.
+    /// 0 disables the bound. Defaults to 14400 (4 hours).
+    #[arg(long)]
+    pub max_idle_slot_age_seconds: Option<u64>,
 
     /// Exit each internal slot after one job. Useful for bounded live proof runs.
     #[arg(long)]
