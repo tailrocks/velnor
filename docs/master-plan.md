@@ -11,7 +11,13 @@ Decision rule for everything below: work is judged by **correctness against
 the goal**, never by effort or cost. Velnor is allowed to be expensive and
 resource-hungry; it is not allowed to be slow, lossy, or fragile. Every bug
 gets a root-cause analysis (why did the architecture permit it?) and the fix
-removes the enabling structure, not just the symptom.
+removes the enabling structure, not just the symptom. The full normative
+text of both principles — correctness-not-ROI decisions, root-cause-first
+bug fixing — lives in [mission.md](mission.md) §Operating principles and
+binds every feature, fix, and improvement in every estate repo. Two standing
+consequences: (a) a slot death or lost job is always a bug to root-cause,
+never noise; (b) "the GitHub-hosted runner also behaves this way" never
+makes a wrong behavior acceptable.
 
 ---
 
@@ -85,6 +91,8 @@ fixed today, each with the structural defect it exposed:
 | 7 | Fixture compat Velnor lanes failed at planning: "action metadata not found in …/.github/actions/check-fixture-output" | GitHub sets `Condition: "success()"` on every step; `CheckoutPlan::requires_runtime_context` treated any condition as runtime → eager checkout never ran → local composite actions unresolvable (verified at the wire from a job dump) | Trivial default conditions (`success()`/`always()`/empty) now stay eager (0.1.4); longer-term: run checkout as a real ordered executor step (no eager/deferred split) |
 | 8 | jsonwebtoken 10.4 bump would panic OAuth signing at runtime ("could not determine CryptoProvider") | Crate now requires exactly one crypto-provider feature; defaults gave none | Pinned `rust_crypto` + `use_pem`; caught only by the new clean-room test run — CI now gates this class |
 | 9 | **Zombie fleet (2026-06-11)**: daemons alive (NRestarts=0), broker polls returning "no message" forever, while GitHub's runner registry showed the runners offline/missing → jobs queued indefinitely (jm 0/10, brown 0/2, fixture 0/2, bcn 1/4); doctor alerted but nothing healed | Split-brain between the two health signals: `get_runner_message` mapped **any** empty-body response (401 expired-token, 403, 404, even curl status 0) to "no message", so an idle slot's OAuth token expired (~1h) and the slot kept "successfully" polling a dead session; idle slots never refresh tokens (only job/control paths do) and nothing ever reconciled local state against GitHub's runner registry | P1.9: poll classification fixed (non-2xx/status-0 = error → supervised recycle), proactive idle token refresh (40 min), idle registry reconciler (3 min interval, 404 = recycle now, offline 2 strikes = recycle), bounded max idle slot age (4 h), forensic per-slot log files + tracing (full investigation: `docs/velnor-fleet-health-investigation-2026-06-11.md`) |
+| 10 | **Upgrade killed 7 in-flight jobs (2026-06-11 11:24)**: `apt-get install velnor-runner` (0.1.19→0.1.20) restarted the daemons mid-run; GitHub showed "runner lost communication with the server" on every busy slot | The deb postinst restarts units unconditionally and the daemon dies on SIGTERM — the architecture permitted any upgrade/restart to kill running jobs | **Graceful drain (0.1.21)**: SIGTERM/SIGINT sets a drain flag — busy slots finish their job, complete it, deregister, and exit; idle slots exit at the next poll boundary; the supervisor stops respawning and exits 0 when the set drains; units get `TimeoutStopSec=10800` so systemd (and therefore apt) waits for the drain. Restart-class job kills are impossible by construction |
+| 11 | **Dangling mise shims on a fresh shared store (2026-06-11)**: brown's first jobs after the shared-store deploy failed with `mise ERROR gh is not a valid shim` | Mounting an (initially empty) shared store over `/opt/mise/installs` shadows the image-baked tools while the baked shims still point at them — any image-baked tool not yet in the store dangles | **Image seeding (0.1.21)**: before the first job container on a given image id, the daemon copies the image's baked `/opt/mise/{installs,cache}` into the shared store (`cp -an`, marker file per image id) — the store is a superset of the image by construction |
 
 Fixes shipped today: token + labels restored and all three daemons
 re-registered (10+4+2 runners); PR #1380 merged green; release pipeline fixed

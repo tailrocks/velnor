@@ -2278,6 +2278,7 @@ where
                 container.temp_host.display()
             )
         })?;
+        self.seed_mise_store(container)?;
         self.run_docker(&container.create_network_args())?;
         for service in &container.services {
             self.run_docker(&service.start_args())?;
@@ -2287,6 +2288,45 @@ where
         if container.verify_bind_mounts {
             self.verify_bind_mounts(container)?;
         }
+        Ok(())
+    }
+
+    /// Seed the shared mise store from the job image's baked installs, once
+    /// per image id (marker file in the store). An empty shared store mounted
+    /// over /opt/mise/installs dangles the image-baked shims (the `gh is not
+    /// a valid shim` class); seeding makes the store a superset of the image.
+    fn seed_mise_store(&mut self, container: &JobContainerSpec) -> Result<()> {
+        let store = crate::container::mise_store_host(&container.temp_host);
+        let inspect = self.runner.run(
+            "docker",
+            &[
+                "image".to_string(),
+                "inspect".to_string(),
+                "-f".to_string(),
+                "{{.Id}}".to_string(),
+                container.image.clone(),
+            ],
+        )?;
+        if inspect.code != 0 {
+            // Image not present yet — container start will surface the real
+            // error; a missing seed must not mask it.
+            return Ok(());
+        }
+        let image_id = inspect.stdout.trim().to_string();
+        if image_id.is_empty() {
+            return Ok(());
+        }
+        let marker = store.join(".velnor-seeded-image");
+        if fs::read_to_string(&marker)
+            .map(|seeded| seeded.trim() == image_id)
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        self.run_docker(&container.seed_mise_store_args())?;
+        fs::create_dir_all(&store).ok();
+        fs::write(&marker, &image_id)
+            .with_context(|| format!("write mise store seed marker {}", marker.display()))?;
         Ok(())
     }
 
@@ -5729,8 +5769,22 @@ mod tests {
         codes: Vec<i32>,
     }
 
+    /// The per-job mise-store seed probe (`docker image inspect`) is
+    /// infrastructure noise for call-sequence assertions: drop it unrecorded
+    /// with empty stdout, which also short-circuits the seed copy itself.
+    fn is_seed_probe(args: &[String]) -> bool {
+        args.first().is_some_and(|a| a == "image") && args.get(1).is_some_and(|a| a == "inspect")
+    }
+
     impl CommandRunner for RecordingRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            if is_seed_probe(args) {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
             self.calls.push((program.to_string(), args.to_vec()));
             self.stdin.push(String::new());
             self.env.push(Vec::new());

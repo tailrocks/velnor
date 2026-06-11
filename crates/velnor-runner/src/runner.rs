@@ -505,6 +505,48 @@ fn daemon_forensic_log(config_base: &Path, message: &str) {
     );
 }
 
+/// Set on SIGTERM/SIGINT: the daemon drains instead of dying. Idle slots exit
+/// at their next poll boundary and deregister; busy slots finish their job
+/// first. Incident 2026-06-11: an apt upgrade's unit restart killed 7 in-flight
+/// jobs ("runner lost communication") — the architecture must make a restart
+/// wait for running jobs, with systemd's TimeoutStopSec as the only bound.
+static DRAINING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn draining() -> bool {
+    DRAINING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn start_drain_listener(config_base: PathBuf) {
+    tokio::spawn(async move {
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(signal) => signal,
+                Err(error) => {
+                    eprintln!("cannot install SIGTERM drain handler: {error:#}");
+                    return;
+                }
+            };
+        let mut int =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).ok();
+        tokio::select! {
+            _ = term.recv() => {}
+            _ = async {
+                match int.as_mut() {
+                    Some(signal) => { signal.recv().await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {}
+        }
+        DRAINING.store(true, std::sync::atomic::Ordering::Relaxed);
+        let note =
+            "drain requested (SIGTERM/SIGINT): finishing running jobs, idle slots deregister";
+        println!("{note}");
+        crate::sd_notify::notify("STOPPING=1");
+        crate::sd_notify::status("draining: finishing running jobs before exit");
+        daemon_forensic_log(&config_base, note);
+    });
+}
+
 pub async fn daemon(args: DaemonArgs) -> Result<()> {
     let slots = validate_daemon_slots(args.slots)?;
     if args.complete_noop && args.execute_scripts {
@@ -531,6 +573,11 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     // errors. The packaged long-running daemon (url + not once + not dry-run)
     // must never give up — every failure is retried with backoff forever.
     let supervised = args.url.is_some() && !args.once && !args.dry_run_registration;
+    if supervised {
+        if let Ok(config_base) = daemon_config_dir(&args) {
+            start_drain_listener(config_base);
+        }
+    }
 
     crate::sd_notify::ready();
     if let Some(interval) = crate::sd_notify::watchdog_interval() {
@@ -667,14 +714,14 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
                     &config_base,
                     &format!("slot-{slot_index} task exited with error: {error:#}"),
                 );
-                if supervised {
+                if supervised && !draining() {
                     // A slot returning an error in supervised mode is a bug
                     // (slot loops are supposed to retry internally) — but one
                     // broken slot must never take down the others. Respawn it.
                     eprintln!("Respawning daemon slot-{slot_index} in 10s.");
                     tokio::time::sleep(Duration::from_secs(10)).await;
                     spawn_slot(&mut slot_tasks, slot_index);
-                } else {
+                } else if !supervised {
                     failures.push(error);
                 }
             }
@@ -707,6 +754,12 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         bail!("{} daemon slot task(s) failed", failures.len());
     }
     if supervised {
+        if draining() {
+            let note = "drain complete: all slots deregistered, exiting";
+            println!("{note}");
+            daemon_forensic_log(&config_base, note);
+            return Ok(());
+        }
         bail!("all daemon slot tasks stopped");
     }
 
@@ -829,6 +882,15 @@ async fn run_daemon_slot(
     let mut cycle = 1_u64;
     let mut local_failure_streak: u32 = 0;
     loop {
+        if draining() {
+            let note = format!("slot-{slot_index} draining: deleting registration and exiting");
+            println!("{note}");
+            daemon_forensic_log(&config_base, &note);
+            // Reuses the failed-slot cleanup: it deletes this slot's GitHub
+            // registration by id and clears local state — exactly a drain.
+            cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
+            return Ok(());
+        }
         if let Some(note) = disk_space_problem(&config_base, args.work_dir.as_deref()) {
             // Registering runners whose jobs are doomed (and whose curl
             // transport needs temp files) only burns API budget — park.
@@ -883,6 +945,14 @@ async fn run_daemon_slot(
         }
         local_failure_streak = 0;
         if args.once {
+            return Ok(());
+        }
+        if draining() {
+            let note =
+                format!("slot-{slot_index} cycle {cycle} finished during drain: deregistering");
+            println!("{note}");
+            daemon_forensic_log(&config_base, &note);
+            cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
             return Ok(());
         }
         daemon_forensic_log(
@@ -1484,6 +1554,12 @@ async fn run_v2(
 
             let Some(message) = message else {
                 println!("No broker message received.");
+                if draining() {
+                    // Daemon drain (SIGTERM): an idle slot exits at the poll
+                    // boundary; the slot loop above deletes the registration.
+                    forensics.lifecycle("idle slot exiting: daemon drain requested");
+                    break 'poll;
+                }
                 fail_if_idle_timeout_elapsed(idle_started, idle_timeout)?;
 
                 for action in due_idle_health_actions(&health, Instant::now(), max_idle_age) {
