@@ -4890,9 +4890,12 @@ fn artifact_backend_ids_from_token(token: &str) -> Option<(String, String)> {
 
 fn unix_now_rfc3339() -> String {
     use time::{format_description, OffsetDateTime};
-    // GitHub's frontend parses log-blob timestamps with a regex expecting second-precision
-    // RFC3339 (YYYY-MM-DDTHH:MM:SSZ). Sub-second precision causes the timestamp to appear
-    // as plain content text instead of the separate timestamp column.
+    // Second-precision RFC3339 for step START/COMPLETION METADATA fields
+    // (started_at/completed_at) only. This is NOT a log-line prefix: log-line
+    // timestamps live in runner.rs (`blob_log_lines`, 7-digit sub-seconds) —
+    // see docs/log-format-contract.md before touching either. A previous
+    // version of this comment claimed blob-line prefixes need second
+    // precision; that was wrong and caused a UI regression when copied.
     let fmt = format_description::parse("[year]-[month]-[day]T[hour]:[minute]:[second]Z")
         .unwrap_or_else(|_| vec![]);
     OffsetDateTime::now_utc()
