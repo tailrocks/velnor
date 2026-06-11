@@ -84,6 +84,7 @@ fixed today, each with the structural defect it exposed:
 | 6 | The published 0.1.2 deb was 3.7 KB — **no binary**; upgrading removed `/usr/bin/velnor-runner` and took the fleet down again (~13 min, rolled back from the local apt cache) | Current cargo-deb treats an explicit `assets` list as a full replacement of the implicit defaults, silently dropping the `[[bin]]` | Binary listed explicitly + release-deb now fails if the deb lacks `usr/bin/velnor-runner` or is < 1 MB; same heredoc YAML bug also fixed in velnor-apt `publish.yml`; apt signing key had rotated (keyring refreshed on Sentry) |
 | 7 | Fixture compat Velnor lanes failed at planning: "action metadata not found in …/.github/actions/check-fixture-output" | GitHub sets `Condition: "success()"` on every step; `CheckoutPlan::requires_runtime_context` treated any condition as runtime → eager checkout never ran → local composite actions unresolvable (verified at the wire from a job dump) | Trivial default conditions (`success()`/`always()`/empty) now stay eager (0.1.4); longer-term: run checkout as a real ordered executor step (no eager/deferred split) |
 | 8 | jsonwebtoken 10.4 bump would panic OAuth signing at runtime ("could not determine CryptoProvider") | Crate now requires exactly one crypto-provider feature; defaults gave none | Pinned `rust_crypto` + `use_pem`; caught only by the new clean-room test run — CI now gates this class |
+| 9 | **Zombie fleet (2026-06-11)**: daemons alive (NRestarts=0), broker polls returning "no message" forever, while GitHub's runner registry showed the runners offline/missing → jobs queued indefinitely (jm 0/10, brown 0/2, fixture 0/2, bcn 1/4); doctor alerted but nothing healed | Split-brain between the two health signals: `get_runner_message` mapped **any** empty-body response (401 expired-token, 403, 404, even curl status 0) to "no message", so an idle slot's OAuth token expired (~1h) and the slot kept "successfully" polling a dead session; idle slots never refresh tokens (only job/control paths do) and nothing ever reconciled local state against GitHub's runner registry | P1.9: poll classification fixed (non-2xx/status-0 = error → supervised recycle), proactive idle token refresh (40 min), idle registry reconciler (3 min interval, 404 = recycle now, offline 2 strikes = recycle), bounded max idle slot age (4 h), forensic per-slot log files + tracing (full investigation: `docs/velnor-fleet-health-investigation-2026-06-11.md`) |
 
 Fixes shipped today: token + labels restored and all three daemons
 re-registered (10+4+2 runners); PR #1380 merged green; release pipeline fixed
@@ -162,6 +163,33 @@ switched to Velnor at any moment without workflow rewrites. Velnor must
 support the role-action pattern end-to-end for agent-brown (hadolint JS
 action, jackin-role binary download, buildx build with gha/registry caches,
 digest publish + cosign).
+
+## 3b. Stability-first mandate (operator directive, 2026-06-11)
+
+**Stability has NOT been achieved yet** — incident #9 (zombie fleet) proved
+the daemons could look healthy locally while GitHub had no schedulable
+runners. Until the P1.9 gates pass (live split-brain repro heals itself +
+24 h zero-zombie soak), stability work outranks new performance features.
+Standing rules that follow:
+
+- **Two health signals, both trusted**: broker-poll success ("my session can
+  ask for work") and GitHub runner-registry state ("the scheduler can assign
+  to me") are independent; the daemon must continuously reconcile them and
+  self-heal on divergence. Doctor alerts; the daemon heals.
+- **Forensics from logs alone**: every failure mode of this class must be
+  diagnosable purely from on-disk logs (`logs/{broker,registry,lifecycle,
+  daemon}.log` + `trace.jsonl`). Any new daemon behavior ships with log lines
+  detailed enough to reconstruct the incident pattern after the fact —
+  identity-prefixed (slot/agent_id/session), statuses included, control
+  messages enumerated. If an incident cannot be analyzed from the logs, the
+  logging — not just the bug — gets fixed.
+- **Tracing as the performance lens**: `tracing` spans (JSON file layer with
+  busy/idle close timings; OTLP via the `otel` feature +
+  `VELNOR_OTLP_ENDPOINT`) are the standard way to find slow blocks in the
+  runner itself. New hot paths get spans; performance claims cite span data.
+- Every benchmark/timing campaign first verifies fleet health (doctor green
+  across all daemons) so queue time is never silently folded into lane
+  timings.
 
 ## 4. Hard constraints (inherited, non-negotiable)
 
@@ -243,6 +271,40 @@ downstream proof runs.
    GitHub-hosted runners. Gate: `brew install tailrocks/velnor/velnor-runner`
    and `apt install velnor-runner` both install the tagged version with no
    manual steps.
+9. **[CODE DONE 0.1.15 — live repro gate pending] Fleet health
+   reconciliation + forensic observability** (incident #9; operator
+   directive 2026-06-11: *stability was NOT achieved — it is the current
+   focus*). A long-running daemon must survive GitHub-side runner
+   disappearance; broker-poll success alone is not fleet health. Shipped in
+   0.1.15:
+   - **Poll truthfulness**: `classify_broker_poll` — only 204/2xx-empty is
+     "no message"; 401/403/404/5xx/curl-status-0 are errors that feed the
+     supervised error path and recycle the slot with a fresh JIT config.
+   - **Proactive idle token refresh** every 40 min (inside the ~1 h OAuth
+     lifetime), rebuilding broker + run-service clients in place.
+   - **Registry reconciler**: every 3 min an idle slot looks up its own
+     `agent_id` (curl transport): 404 → recycle immediately; not-online for
+     2 consecutive checks → recycle; lookup errors never kill a healthy
+     session. Recycle reasons land in sd_notify STATUS.
+   - **Bounded idle age**: idle slots recycle every 4 h regardless
+     (`--max-idle-slot-age-seconds`, 0 disables) so unknown decay modes
+     cannot accumulate.
+   - **Forensic logs** (per-slot folders, analyzable offline — operator
+     mandate): `<slot-config>/logs/{broker,registry,lifecycle}.log` +
+     `<config-base>/logs/daemon.log`, every line timestamped +
+     identity-prefixed (runner/agent_id/session), 32 MB rotation; every
+     broker poll status, control message type, refresh, reconcile verdict,
+     and recycle reason is recorded.
+   - **Tracing** (operator mandate): `tracing` + JSON file layer
+     (`logs/trace.jsonl`, span-close busy/idle timings for performance
+     analysis; `VELNOR_LOG` filter) + forensic-event bridge; `otel` cargo
+     feature adds `tracing-opentelemetry` OTLP export gated on
+     `VELNOR_OTLP_ENDPOINT`. Next: instrument executor step phases.
+   Gate (the incident's repro, not yet run): delete an idle slot's runner
+   registration via the GitHub API → daemon detects within ≤3 min and
+   recycles without restart → doctor shows full fleet → a Velnor-lane
+   fixture dispatch gets picked up. Then a 24 h zero-zombie soak during the
+   benchmark campaign.
 
 ### Phase 2 — make the GitHub-hosted lane as fast as possible (reference parity baseline)
 

@@ -1,6 +1,6 @@
 [package]
 name = "velnor-runner"
-version = "0.1.14"
+version = "0.1.15"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -71,3 +71,19 @@ uuid.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 zip.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-opentelemetry = { workspace = true, optional = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+
+[features]
+default = []
+# OTLP span export, activated at runtime only when VELNOR_OTLP_ENDPOINT is set.
+otel = [
+  "dep:tracing-opentelemetry",
+  "dep:opentelemetry",
+  "dep:opentelemetry_sdk",
+  "dep:opentelemetry-otlp",
+]
