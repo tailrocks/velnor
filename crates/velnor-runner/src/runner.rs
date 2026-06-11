@@ -4600,12 +4600,8 @@ fn action_step_display_name(step: &crate::job_message::ActionStep) -> String {
     // GitHub's Name field carries the step *id*, never a display name. Match
     // actions/runner ActionRunner.GenerateDisplayName: DisplayName, else
     // `Run <name>[/<path>][@<ref>]` (local actions: path only).
-    let explicit = step
-        .display_name
-        .as_deref()
-        .filter(|n| !n.is_empty() && !n.starts_with("__"));
-    if let Some(name) = explicit {
-        return name.to_string();
+    if let Some(name) = step.display_name_template() {
+        return name;
     }
     if let Some(reference) = &step.reference {
         let action_name = reference.name.as_deref().unwrap_or("");

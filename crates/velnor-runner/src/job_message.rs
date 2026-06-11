@@ -203,6 +203,16 @@ pub struct ActionStep {
         alias = "display_name"
     )]
     pub display_name: Option<String>,
+    /// Template token form of the display name — the broker sends names with
+    /// (or without) expressions here and leaves DisplayName null; the runner
+    /// evaluates it at runtime (actions/runner GenerateDisplayName).
+    #[serde(
+        default,
+        rename = "DisplayNameToken",
+        alias = "displayNameToken",
+        alias = "display_name_token"
+    )]
+    pub display_name_token: Option<Value>,
     #[serde(default = "default_true", rename = "Enabled", alias = "enabled")]
     pub enabled: bool,
     #[serde(default, rename = "Condition", alias = "condition")]
@@ -227,6 +237,23 @@ pub struct ActionStep {
 }
 
 impl ActionStep {
+    /// The display name template: the plain DisplayName when the server sent
+    /// one (legacy/back-compat), else the DisplayNameToken rendered to a
+    /// `${{ ... }}` template string for runtime evaluation.
+    pub fn display_name_template(&self) -> Option<String> {
+        if let Some(name) = self
+            .display_name
+            .as_deref()
+            .filter(|name| !name.is_empty() && !name.starts_with("__"))
+        {
+            return Some(name.to_string());
+        }
+        self.display_name_token
+            .as_ref()
+            .and_then(display_token_template)
+            .filter(|name| !name.is_empty() && !name.starts_with("__"))
+    }
+
     pub fn reference_type(&self) -> Option<ActionReferenceType> {
         self.reference
             .as_ref()
@@ -261,6 +288,31 @@ pub enum ActionReferenceType {
     Repository,
     ContainerRegistry,
     Script,
+}
+
+/// Render a scalar template token to display text: literals verbatim,
+/// expression tokens back to `${{ ... }}` so the executor's resolver
+/// evaluates them with the job contexts.
+fn display_token_template(token: &Value) -> Option<String> {
+    match token {
+        Value::String(value) => Some(value.clone()),
+        Value::Object(object) => {
+            if let Some(expr) = object
+                .get("expr")
+                .or_else(|| object.get("Expr"))
+                .and_then(Value::as_str)
+            {
+                return Some(format!("${{{{ {expr} }}}}"));
+            }
+            object
+                .get("lit")
+                .or_else(|| object.get("Lit"))
+                .or_else(|| object.get("value"))
+                .or_else(|| object.get("Value"))
+                .and_then(display_token_template)
+        }
+        _ => None,
+    }
 }
 
 fn default_true() -> bool {
@@ -306,6 +358,56 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_name_template_prefers_plain_then_token() {
+        // Broker reality (jackin-agent-brown dump 2026-06-11): DisplayName is
+        // null and the explicit `name:` arrives only as DisplayNameToken.
+        let step: ActionStep = serde_json::from_value(serde_json::json!({
+            "id": "s1",
+            "name": "__docker_login-action",
+            "displayName": null,
+            "displayNameToken": { "type": 0, "lit": "Login to Docker Hub for base image pulls" },
+            "reference": { "type": "Repository", "name": "docker/login-action" }
+        }))
+        .unwrap();
+        assert_eq!(
+            step.display_name_template().as_deref(),
+            Some("Login to Docker Hub for base image pulls")
+        );
+
+        // Expression tokens render back to ${{ }} for runtime evaluation.
+        let step: ActionStep = serde_json::from_value(serde_json::json!({
+            "id": "s2",
+            "name": "__run",
+            "displayNameToken": { "type": 3, "expr": "format('Deploy {0}', inputs.env)" },
+            "reference": { "type": "Script" }
+        }))
+        .unwrap();
+        assert_eq!(
+            step.display_name_template().as_deref(),
+            Some("${{ format('Deploy {0}', inputs.env) }}")
+        );
+
+        // Plain DisplayName (legacy servers) wins over the token.
+        let step: ActionStep = serde_json::from_value(serde_json::json!({
+            "id": "s3",
+            "displayName": "Plain name",
+            "displayNameToken": { "type": 0, "lit": "Token name" },
+            "reference": { "type": "Script" }
+        }))
+        .unwrap();
+        assert_eq!(step.display_name_template().as_deref(), Some("Plain name"));
+
+        // Internal placeholders never become display names.
+        let step: ActionStep = serde_json::from_value(serde_json::json!({
+            "id": "s4",
+            "displayName": "__run_2",
+            "reference": { "type": "Script" }
+        }))
+        .unwrap();
+        assert_eq!(step.display_name_template(), None);
+    }
 
     const JOB_ID: &str = "11111111-1111-1111-1111-111111111111";
     const PLAN_ID: &str = "22222222-2222-2222-2222-222222222222";

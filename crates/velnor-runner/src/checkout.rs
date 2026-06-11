@@ -85,20 +85,15 @@ pub fn checkout_plans(
             .as_ref()
             .and_then(|r| r.git_ref.as_deref())
             .unwrap_or("");
-        let display_name = step
-            .display_name
-            .as_deref()
-            .filter(|n| !n.is_empty() && !n.starts_with("__"))
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| {
-                if reference_name.is_empty() {
-                    String::new()
-                } else if reference_ref.is_empty() {
-                    format!("Run {reference_name}")
-                } else {
-                    format!("Run {reference_name}@{reference_ref}")
-                }
-            });
+        let display_name = step.display_name_template().unwrap_or_else(|| {
+            if reference_name.is_empty() {
+                String::new()
+            } else if reference_ref.is_empty() {
+                format!("Run {reference_name}")
+            } else {
+                format!("Run {reference_name}@{reference_ref}")
+            }
+        });
         plans.push(CheckoutPlan {
             step_id: checkout_step_id(step, index),
             display_name,

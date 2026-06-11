@@ -111,6 +111,36 @@ E. **gha strip on the Velnor lane** — the native bake/build-push adapters
 - `kestra-build-publish.yml`: revert the `/root/.cache/rust-script`
   lane-split to plain `~/.cache/rust-script` (correct after fix A).
 
+## Measured results (verified live, 2026-06-11)
+
+0.1.18 (truthful HOME + store mounts + gha strip) and 0.1.19 (mtime pinning,
+shared `.cargo/bin`, image-build caches) deployed to Sentry; java-monorepo
+PR #1405 merged. Same-commit reruns on the warm fleet:
+
+| Job | Before | After (steady state) | Evidence |
+|---|---|---|---|
+| Rust / Format and lint | 1m58 solo (clippy 1m41, ~280 crate downloads every run) | **1m03 under 9-way concurrency** — clippy `Finished in 28.91s`, **0 downloads, 1 compile line**, 6 sccache requests (was 1280), "Pinned 6577 file mtimes" | run 27344555706 |
+| Rust / test jobs ×8 | 1.1–2.3 min solo; 5m54–7m42 when 9 ran concurrently | **1m30–3m21 with all 9 concurrent** (faster than the old solo numbers under full fan-out) | run 27344555706 |
+| Rust Docker / bake | 2m44 (≈100s rebuild + ~40s gha cache export) | **24s** (manifest pushes only; `[velnor] dropped 2 type=gha cache option(s)`) | run 27341437078 |
+| Kestra / docker-jvm-base | 48s (32s of GraalVM+Node+Python downloads per job) | **29s** first warm pass; exists-check seconds once the mise store holds the toolset | run 27341438948 |
+| actions/cache cargo-registry | *never saved once* ("no paths exist") | "Cache paths live on Velnor host-persistent storage (always warm)" both directions, zero tar I/O | run 27341203467 |
+
+Residual structural findings fixed in 0.1.21–0.1.22 (incidents #10/#11 in
+master-plan §3): graceful SIGTERM drain (an apt upgrade restart killed 7
+in-flight jobs) and mise-store image seeding (fresh shared store dangled
+image-baked shims, observed as `gh is not a valid shim` on brown).
+
+## Next performance wave (ranked, from the runner-source review)
+
+1. **Async job finalization**: completion RPC currently gates on log/timeline
+   publishers (up to 30 s best-effort timeouts) and cleanup runs serially on
+   the critical path — report completion, then finalize in the background.
+2. **Parallel cleanup + service start** (needs CommandRunner concurrency).
+3. **Host-side git mirror pool** for checkout (zero-fetch warm clones).
+4. **Per-step docker exec batching** / persistent exec shell.
+5. **Bind-mount verify cache** (per-daemon, not per-job).
+6. Native HTTP client (P3.1), zero-copy log pipeline (P3.2) — unchanged.
+
 ## Deploy + verification gates
 
 1. velnor v0.1.18 tag → deb → apt; Sentry upgraded (all three daemons);
