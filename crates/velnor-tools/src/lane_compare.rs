@@ -486,6 +486,60 @@ fn pair_lane_jobs(jobs: &[Job]) -> Vec<(Job, Job)> {
         .collect()
 }
 
+enum AlignedRow<'a> {
+    Pair(&'a Step, &'a Step),
+    GitHubOnly(&'a Step),
+    VelnorOnly(&'a Step),
+}
+
+/// Longest-common-subsequence alignment of the two lanes' step lists on
+/// lane-normalized display names.
+fn align_steps<'a>(github: &'a [Step], velnor: &'a [Step]) -> Vec<AlignedRow<'a>> {
+    let gh_keys: Vec<String> = github
+        .iter()
+        .map(|step| normalized_step_name(&step.name))
+        .collect();
+    let vl_keys: Vec<String> = velnor
+        .iter()
+        .map(|step| normalized_step_name(&step.name))
+        .collect();
+    let (n, m) = (github.len(), velnor.len());
+    let mut lcs = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i][j] = if gh_keys[i] == vl_keys[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+    let mut rows = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < n && j < m {
+        if gh_keys[i] == vl_keys[j] {
+            rows.push(AlignedRow::Pair(&github[i], &velnor[j]));
+            i += 1;
+            j += 1;
+        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+            rows.push(AlignedRow::GitHubOnly(&github[i]));
+            i += 1;
+        } else {
+            rows.push(AlignedRow::VelnorOnly(&velnor[j]));
+            j += 1;
+        }
+    }
+    rows.extend(github[i..].iter().map(AlignedRow::GitHubOnly));
+    rows.extend(velnor[j..].iter().map(AlignedRow::VelnorOnly));
+    rows
+}
+
+/// Steps the GitHub runner generates around container actions; Velnor's
+/// native adapters execute the same action without a build/pull phase.
+fn runner_generated_step(name: &str) -> bool {
+    name.starts_with("Build ") || name.starts_with("Pull ")
+}
+
 /// Lane-token-insensitive step-name comparison: step names legitimately embed
 /// the matrix lane value (`write-result.py "app-a" "github" …`), so replace
 /// lane tokens before comparing.
@@ -641,25 +695,23 @@ fn compare_pair(
         "|---|---------------|---------------|----------|----------|-----------|-----------|--------|--------|---------|"
     )?;
 
-    let velnor_by_number: BTreeMap<u64, &Step> = velnor
-        .steps
-        .iter()
-        .map(|step| (step.number, step))
-        .collect();
-    let github_numbers: std::collections::BTreeSet<u64> =
-        github.steps.iter().map(|step| step.number).collect();
-
-    for gh_step in &github.steps {
-        match velnor_by_number.get(&gh_step.number) {
-            Some(vl_step) => {
+    // Pair steps by SEQUENCE (longest common subsequence on lane-normalized
+    // names), not by number: GitHub inserts runner-generated container-action
+    // prep steps ("Build <action>", "Pull <image>") and leaves numbering gaps
+    // for reserved pre/post slots, so positions drift between lanes even when
+    // the user-visible step list matches.
+    for row in align_steps(&github.steps, &velnor.steps) {
+        match row {
+            AlignedRow::Pair(gh_step, vl_step) => {
                 let (verdict, is_worse) = step_verdict(gh_step, vl_step, github_html, velnor_html);
                 if is_worse {
                     worse_count += 1;
                 }
                 writeln!(
                     section,
-                    "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                    "| {}/{} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
                     gh_step.number,
+                    vl_step.number,
                     gh_step.name,
                     vl_step.name,
                     gh_step.conclusion.as_deref().unwrap_or("-"),
@@ -671,8 +723,10 @@ fn compare_pair(
                     verdict,
                 )?;
             }
-            None => {
-                let verdict = if executed(gh_step) {
+            AlignedRow::GitHubOnly(gh_step) => {
+                let verdict = if runner_generated_step(&gh_step.name) {
+                    "ok (runner-generated container prep; native adapters need no build step)"
+                } else if executed(gh_step) {
                     worse_count += 1;
                     "WORSE (missing on velnor)"
                 } else {
@@ -680,7 +734,7 @@ fn compare_pair(
                 };
                 writeln!(
                     section,
-                    "| {} | {} | — | {} | — | {} | — | {} | — | {} |",
+                    "| {}/— | {} | — | {} | — | {} | — | {} | — | {} |",
                     gh_step.number,
                     gh_step.name,
                     gh_step.conclusion.as_deref().unwrap_or("-"),
@@ -689,21 +743,18 @@ fn compare_pair(
                     verdict,
                 )?;
             }
+            AlignedRow::VelnorOnly(vl_step) => {
+                writeln!(
+                    section,
+                    "| —/{} | — | {} | — | {} | — | {} | — | {} | velnor-only |",
+                    vl_step.number,
+                    vl_step.name,
+                    vl_step.conclusion.as_deref().unwrap_or("-"),
+                    expandable_cell(velnor_html, vl_step.number),
+                    duration_cell(vl_step),
+                )?;
+            }
         }
-    }
-    for vl_step in &velnor.steps {
-        if github_numbers.contains(&vl_step.number) {
-            continue;
-        }
-        writeln!(
-            section,
-            "| {} | — | {} | — | {} | — | {} | — | {} | velnor-only |",
-            vl_step.number,
-            vl_step.name,
-            vl_step.conclusion.as_deref().unwrap_or("-"),
-            expandable_cell(velnor_html, vl_step.number),
-            duration_cell(vl_step),
-        )?;
     }
 
     writeln!(section)?;
@@ -943,6 +994,39 @@ mod tests {
             &html_with(3, false),
         );
         assert!(!worse);
+    }
+
+    #[test]
+    fn align_steps_handles_runner_generated_prep_and_gaps() {
+        let gh = vec![
+            step(1, "Set up job", "success"),
+            step(2, "Build hadolint/hadolint-action@sha", "success"),
+            step(3, "Run actions/checkout@v6", "success"),
+            step(4, "Login to Docker Hub", "success"),
+            step(8, "Post Run actions/checkout@v6", "success"),
+        ];
+        let vl = vec![
+            step(1, "Set up job", "success"),
+            step(2, "Run actions/checkout@v6", "success"),
+            step(3, "Login to Docker Hub", "skipped"),
+            step(5, "Post Run actions/checkout@v6", "success"),
+        ];
+        let rows = align_steps(&gh, &vl);
+        let summary: Vec<String> = rows
+            .iter()
+            .map(|row| match row {
+                AlignedRow::Pair(g, v) => format!("pair {}={}", g.number, v.number),
+                AlignedRow::GitHubOnly(g) => format!("gh {}", g.number),
+                AlignedRow::VelnorOnly(v) => format!("vl {}", v.number),
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            vec!["pair 1=1", "gh 2", "pair 3=2", "pair 4=3", "pair 8=5"]
+        );
+        assert!(runner_generated_step("Build hadolint/hadolint-action@sha"));
+        assert!(runner_generated_step("Pull node:20"));
+        assert!(!runner_generated_step("Run actions/checkout@v6"));
     }
 
     #[test]

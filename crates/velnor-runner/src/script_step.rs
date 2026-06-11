@@ -128,19 +128,14 @@ fn github_script_step_with_context(
     // internal placeholders such as "__run"; actions/runner then falls back to
     // `Run <first script line>` (ActionRunner.GenerateDisplayName), so any
     // id-based fallback here diverges from the GitHub-hosted lane.
-    let display_name = step
-        .display_name
-        .as_deref()
-        .filter(|n| !n.is_empty() && !n.starts_with("__"))
-        .map(|n| n.to_string())
-        .unwrap_or_else(|| {
-            let first_line = script.lines().next().unwrap_or("").trim();
-            if first_line.is_empty() {
-                String::new()
-            } else {
-                format!("Run {first_line}")
-            }
-        });
+    let display_name = step.display_name_template().unwrap_or_else(|| {
+        let first_line = script.lines().next().unwrap_or("").trim();
+        if first_line.is_empty() {
+            String::new()
+        } else {
+            format!("Run {first_line}")
+        }
+    });
     Ok(ScriptStep {
         id: step_id(step, index),
         display_name,

@@ -141,16 +141,16 @@ rule — if maximum performance is not yet reached, keep iterating.
 Scope (the ten-repo estate, audited and enforced):
 | Repo | Status |
 |---|---|
-| jackin-project/jackin | **pipeline source of truth.** 4-layer stack + sccache; cache-quota eviction fix in PR #563 (bench merge + nextest fallback ladder) |
-| jackin-project/jackin-the-architect | agent role; per-tool layers + cache mounts; PR/publish caches bridged (role-action#57 + PR #113) |
-| jackin-project/jackin-agent-smith | agent role; caching mandate applied (PR #67: registry-warm CI, gitleaks + Renovate caches) |
-| jackin-project/jackin-sentinel | agent role; caching mandate applied (PR #7, identical to smith) |
-| ChainArgos/jackin-agent-brown | agent role; **dual-lane, Velnor default — FULLY PROVEN** (PR #89 + publish-on-Velnor green end-to-end on 0.1.14: digest builds amd64 + arm64-QEMU, artifact fan-in, metadata, imagetools manifest, cosign — 13–32 s/job with warm registry layer cache) |
-| ChainArgos/java-monorepo | registry cache (PR #1382) + sccache + job-level gating (PR #1384) + kestra layer cache (PR #1386) |
-| ChainArgos/blockchain-nodes | registry layer cache + exists-sweep (PR #603); cached-build proof pending next version bump |
-| tailrocks/holla | NOT YET AUDITED |
-| tailrocks/velnor | ci.yml jackin-style stack; release-deb has sccache+registry cache |
-| tailrocks/velnor-actions-fixture | NOT YET AUDITED |
+| jackin-project/jackin | **pipeline source of truth.** 4-layer stack + sccache; cache-quota eviction fix in PR #563; construct xtask jobs + shellfirm image compile gained sccache (PR #575) |
+| jackin-project/jackin-the-architect | agent role; parity restored with smith/sentinel (PR #114: gitleaks/renovate caches, construct 0.5, cargo-binstall before mise so the 8 cargo: tools download prebuilt); job-level permissions (PR #115). Lane plumbing still pending |
+| jackin-project/jackin-agent-smith | agent role; caches (PR #67); **lane plumbing, github default** + job-level permissions (PR #68) |
+| jackin-project/jackin-sentinel | agent role; caches (PR #7); **lane plumbing, github default** + job-level permissions (PR #8) |
+| ChainArgos/jackin-agent-brown | agent role; dual-lane proven on 0.1.14; **default flipped to the GitHub lane** (PR #91, operator: all jackin-family repos default github) + job-level permissions (PR #90) |
+| ChainArgos/java-monorepo | registry cache + sccache + gating + kestra layer cache (PRs #1382/#1384/#1386); **instant-cache verified** (PR #1405 + velnor 0.1.18/0.1.19: zero downloads, clippy 28.9s, bake 24s — `docs/perf-instant-cache-plan-2026-06-11.md`) |
+| ChainArgos/blockchain-nodes | registry layer cache + exists-sweep (PR #603); `/root` cache paths fixed + rust-script pinned (PR #605) |
+| tailrocks/holla | audited; clippy job gained the sccache stack (PR #20) |
+| tailrocks/velnor | ci.yml jackin-style stack; root Dockerfile + job image gained cache mounts/sccache, cargo-deb pinned via mise, release wfs cache registry/src (0.1.19) |
+| tailrocks/velnor-actions-fixture | audited; reusable workflow rust-cache key lane-scoped (PR #2) |
 
 **Estate unification rule (operator mandate):** these repositories share very
 similar dependencies and tooling, so they must share the same techniques,
@@ -160,14 +160,16 @@ anywhere is propagated to every applicable repo. The four agent-role repos
 (jackin-the-architect, jackin-agent-smith, jackin-sentinel,
 jackin-agent-brown) must use the shared `jackin-project/jackin-role-action`
 (composite action + reusable publish workflow) with identical configuration —
-no per-repo drift. **Lane policy (operator, 2026-06-11): exactly three repos are dual-lane —
-ChainArgos/jackin-agent-brown, ChainArgos/java-monorepo,
-ChainArgos/blockchain-nodes. All three default to Velnor, with `github` and
-`both` selectable per run.** Every other estate repo runs GitHub-hosted only
-(the fixture keeps its own both-lanes-by-default contract role) — but all
-repos share the same approaches and code shape, and **Velnor must support
-the full feature surface of every estate repo** so any of them can be
-switched to Velnor at any moment without workflow rewrites. Velnor must
+no per-repo drift. **Lane policy (operator, updated 2026-06-11): ChainArgos/java-monorepo and
+ChainArgos/blockchain-nodes default to the Velnor lane. Every jackin-family
+repo — jackin, the-architect, agent-smith, sentinel, and agent-brown
+(PR #91) — defaults to the GitHub runner.** All repos carry (or are gaining)
+the same lane plumbing (`lanes`/`lane` input: `github | velnor | both`,
+ported verbatim from brown's scaffolding with only the default flipped), so
+any repo can switch to Velnor at any moment without workflow rewrites
+(smith PR #68, sentinel PR #8 shipped; architect + jackin main pending).
+The fixture keeps its own both-lanes-by-default contract role. **Velnor must
+support the full feature surface of every estate repo.** Velnor must
 support the role-action pattern end-to-end for agent-brown (hadolint JS
 action, jackin-role binary download, buildx build with gha/registry caches,
 digest publish + cosign).

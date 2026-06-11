@@ -266,13 +266,28 @@ fn environment_value(value: &Value) -> String {
         Value::String(value) => value.clone(),
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
-        Value::Object(object) => object
-            .get("value")
-            .or_else(|| object.get("Value"))
-            .or_else(|| object.get("lit"))
-            .or_else(|| object.get("Lit"))
-            .map(environment_value)
-            .unwrap_or_default(),
+        Value::Object(object) => {
+            // Expression template tokens ({"expr": "...", "type": 3}) arrive
+            // UNevaluated from the broker — `env: X: ${{ secrets.Y }}` is an
+            // expr token. Render back to `${{ ... }}` so the executor's
+            // expression resolver (which holds the secrets context) evaluates
+            // it; returning "" here silently blanked every such variable and
+            // skipped `if: env.X != ''` steps the GitHub lane runs.
+            if let Some(expr) = object
+                .get("expr")
+                .or_else(|| object.get("Expr"))
+                .and_then(Value::as_str)
+            {
+                return format!("${{{{ {expr} }}}}");
+            }
+            object
+                .get("value")
+                .or_else(|| object.get("Value"))
+                .or_else(|| object.get("lit"))
+                .or_else(|| object.get("Lit"))
+                .map(environment_value)
+                .unwrap_or_default()
+        }
         _ => String::new(),
     }
 }
@@ -420,6 +435,38 @@ impl JobRuntimeExt for AgentJobRequestMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn environment_expr_tokens_render_as_templates_for_runtime_resolution() {
+        // Broker sends `env: X: ${{ secrets.Y }}` as an UNevaluated expr token
+        // (observed live: {"expr":"secrets.DOCKERHUB_USERNAME","type":3}).
+        // Blanking it skipped `if: env.X != ''` steps the GitHub lane runs.
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "p" },
+            "timeline": { "id": "t" },
+            "jobId": "j",
+            "jobName": "__default",
+            "jobDisplayName": "validate",
+            "requestId": 1,
+            "environmentVariables": [{
+                "type": 2,
+                "map": [
+                    { "Key": { "lit": "DOCKERHUB_USERNAME", "type": 0 },
+                      "Value": { "expr": "secrets.DOCKERHUB_USERNAME", "type": 3 } },
+                    { "Key": { "lit": "PLAIN", "type": 0 },
+                      "Value": { "lit": "value", "type": 0 } }
+                ]
+            }]
+        }))
+        .unwrap();
+        let env = job_environment_variables(&job);
+        assert!(env.contains(&(
+            "DOCKERHUB_USERNAME".to_string(),
+            "${{ secrets.DOCKERHUB_USERNAME }}".to_string()
+        )));
+        assert!(env.contains(&("PLAIN".to_string(), "value".to_string())));
+    }
 
     #[test]
     fn builds_github_runtime_env_from_job_message() {
