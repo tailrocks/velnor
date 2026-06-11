@@ -438,6 +438,7 @@ struct PostJavaScriptAction {
     invocation: JavaScriptActionInvocation,
     condition: Option<String>,
     continue_on_error: bool,
+    umbrella_display: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -447,6 +448,10 @@ struct PostNativeAction {
     invocation: NativeActionInvocation,
     condition: Option<String>,
     continue_on_error: bool,
+    /// Display name of the enclosing composite, when the owning step was
+    /// embedded: GitHub runs embedded posts under ONE `Post Run <composite>`
+    /// step (EmbeddedStepsWithPostRegistered).
+    umbrella_display: Option<String>,
 }
 
 impl ExecutableStep {
@@ -894,6 +899,9 @@ where
                                 invocation: invocation.clone(),
                                 condition: invocation.post_condition.clone(),
                                 continue_on_error: *continue_on_error,
+                                umbrella_display: composite_frame
+                                    .as_ref()
+                                    .map(|frame| frame.display_name.clone()),
                             });
                             post_registered = true;
                         }
@@ -1087,6 +1095,9 @@ where
                                 invocation: invocation.clone(),
                                 condition: invocation.post_condition.clone(),
                                 continue_on_error: *continue_on_error,
+                                umbrella_display: composite_frame
+                                    .as_ref()
+                                    .map(|frame| frame.display_name.clone()),
                             });
                         }
                     }
@@ -1103,6 +1114,9 @@ where
                                 invocation: invocation.clone(),
                                 condition: Some(condition.to_string()),
                                 continue_on_error: *continue_on_error,
+                                umbrella_display: composite_frame
+                                    .as_ref()
+                                    .map(|frame| frame.display_name.clone()),
                             });
                         }
                     }
@@ -1171,45 +1185,108 @@ where
             &mut timeline_order,
             native_post_actions.len() + post_actions.len() + self.trailing_post_action_count,
         );
-        for post_action in native_post_actions {
+        // GitHub runs all embedded-composite posts as ONE `Post Run
+        // <composite>` step (EmbeddedStepsWithPostRegistered); consecutive
+        // posts sharing an umbrella collapse into a single step record.
+        let mut native_post_iter = native_post_actions.into_iter().peekable();
+        while let Some(first) = native_post_iter.next() {
+            let mut group = vec![first];
+            if let Some(umbrella) = group[0].umbrella_display.clone() {
+                while native_post_iter
+                    .peek()
+                    .is_some_and(|next| next.umbrella_display.as_deref() == Some(umbrella.as_str()))
+                {
+                    group.push(native_post_iter.next().expect("peeked"));
+                }
+            }
+            let display_base = group[0]
+                .umbrella_display
+                .clone()
+                .unwrap_or_else(|| group[0].display_name.clone());
             let post_step_id = uuid::Uuid::new_v4().to_string();
-            let post_name_native = post_step_display_name(&post_action.display_name);
+            let post_name_native = post_step_display_name(&display_base);
             let native_post_started_at = self.emit_step_started(
                 post_step_id.clone(),
                 post_name_native.clone(),
                 &mut timeline_order,
             );
-            let result = self.execute_native_post_action(
-                container,
-                &post_action.step_id,
-                &post_action.invocation,
-                &state,
-            );
-            match result {
-                Ok(mut result) => {
-                    if result.exit_code != 0 && post_action.continue_on_error {
-                        result.failure_ignored = true;
+            let umbrella_group = group.len() > 1 || group[0].umbrella_display.is_some();
+            let mut combined_lines = vec![format!("##[group]{post_name_native}")];
+            if !umbrella_group {
+                combined_lines.extend(native_post_log_prelude(&group[0].invocation, &state));
+            }
+            combined_lines.push("##[endgroup]".to_string());
+            let mut combined = StepExecutionResult {
+                exit_code: 0,
+                state: StepCommandState::default(),
+                skipped: false,
+                failure_ignored: false,
+                stdout: String::new(),
+                stderr: String::new(),
+            };
+            let mut errored = false;
+            for member in &group {
+                let result = self.execute_native_post_action(
+                    container,
+                    &member.step_id,
+                    &member.invocation,
+                    &state,
+                );
+                match result {
+                    Ok(mut result) => {
+                        if result.exit_code != 0 && member.continue_on_error {
+                            result.failure_ignored = true;
+                        }
+                        if umbrella_group {
+                            combined_lines.push(format!("##[group]Post {}", member.display_name));
+                            combined_lines
+                                .extend(native_post_log_prelude(&member.invocation, &state));
+                            combined_lines.push("##[endgroup]".to_string());
+                        }
+                        combined_lines
+                            .extend(rendered_output_lines(&result.stdout, &result.stderr));
+                        if result.exit_code != 0
+                            && !result.failure_ignored
+                            && combined.exit_code == 0
+                        {
+                            combined.exit_code = result.exit_code;
+                        }
+                        combined.failure_ignored |= result.failure_ignored;
+                        combined.state.merge(result.state.clone());
+                        state.apply(&post_step_id, &result);
+                        results.push(result);
                     }
-                    let log = step_log_with_name(
-                        &post_step_id,
-                        &post_name_native,
-                        timeline_order,
-                        &native_post_started_at,
-                        &unix_now_rfc3339(),
-                        &result,
-                        &native_post_log_prelude(&post_action.invocation, &state),
-                    );
-                    self.emit_step_log(&log);
-                    step_logs.push(log);
-                    state.apply(&post_step_id, &result);
-                    results.push(result);
-                }
-                Err(error) => {
-                    if step_error.is_none() {
-                        step_error = Some(error);
+                    Err(error) => {
+                        errored = true;
+                        if step_error.is_none() {
+                            step_error = Some(error);
+                        }
                     }
                 }
             }
+            if errored && combined.exit_code == 0 {
+                combined.exit_code = 1;
+            }
+            let log = StepLog {
+                step_id: post_step_id.clone(),
+                display_name: post_name_native.clone(),
+                order: timeline_order,
+                started_at: native_post_started_at,
+                completed_at: unix_now_rfc3339(),
+                lines: combined_lines,
+                masks: combined.state.masks.clone(),
+                annotations: combined.state.annotations.clone(),
+                telemetry: combined.state.telemetry.clone(),
+                exit_code: combined.exit_code,
+                skipped: false,
+                failure_ignored: combined.failure_ignored,
+                error_count: combined.state.error_count,
+                warning_count: combined.state.warning_count,
+                notice_count: combined.state.notice_count,
+                summary: combined.state.summary.clone(),
+            };
+            self.emit_step_log(&log);
+            step_logs.push(log);
         }
         for post_action in post_actions {
             let js_post_step_id = uuid::Uuid::new_v4().to_string();
@@ -1510,6 +1587,26 @@ where
                     state,
                     "sccache --show-stats 2>/dev/null || true; sccache --stop-server 2>/dev/null || true",
                 )?;
+                Ok(native_command_result(result, StepCommandState::default()))
+            }
+            NativeActionAdapter::DockerSetupBuildx => {
+                let action_state = state.with_env(state.resolve_env(&action.env));
+                let name = native_input_or(&action_state, action, "name", "velnor-builder");
+                let script = format!(
+                    "docker buildx rm --keep-state {name} 2>/dev/null || true; echo \"Removing builder {name}\""
+                );
+                let result = self.native_shell(_container, state, &script)?;
+                Ok(native_command_result(result, StepCommandState::default()))
+            }
+            NativeActionAdapter::DockerLogin => {
+                let action_state = state.with_env(state.resolve_env(&action.env));
+                let registry = native_input_or(&action_state, action, "registry", "");
+                let script = if registry.is_empty() {
+                    "docker logout 2>/dev/null || true".to_string()
+                } else {
+                    format!("docker logout {registry} 2>/dev/null || true")
+                };
+                let result = self.native_shell(_container, state, &script)?;
                 Ok(native_command_result(result, StepCommandState::default()))
             }
             _ => bail!(
@@ -2793,6 +2890,10 @@ fn native_post_condition(adapter: NativeActionAdapter) -> Option<&'static str> {
         NativeActionAdapter::RustCache => Some("success() || env.CACHE_ON_FAILURE == 'true'"),
         // Sccache post step stops the server (always run, matches GitHub's behavior).
         NativeActionAdapter::Sccache => Some("always()"),
+        // GitHub's setup-buildx post removes the builder it created.
+        NativeActionAdapter::DockerSetupBuildx => Some("always()"),
+        // GitHub's login-action post logs out (drops registry credentials).
+        NativeActionAdapter::DockerLogin => Some("always()"),
         _ => None,
     }
 }
@@ -7064,7 +7165,8 @@ type=sha,format=long,prefix=,enable=true"
             )
             .unwrap();
 
-        assert_eq!(results.len(), 5);
+        // 5 main steps + the login-logout and buildx-rm posts (GitHub parity).
+        assert_eq!(results.len(), 7);
         assert_eq!(
             results[2].state.outputs["tags"],
             "chainargos/rust-bitcoin-processor:abcdef1234567890"

@@ -1,0 +1,1300 @@
+﻿2026-06-11T12:25:11.6869639Z Current runner version: '2.334.0'
+2026-06-11T12:25:11.6906412Z ##[group]Runner Image Provisioner
+2026-06-11T12:25:11.6907974Z Hosted Compute Agent
+2026-06-11T12:25:11.6909010Z Version: 20260520.533
+2026-06-11T12:25:11.6910081Z Commit: 189110e25284a9812c124fd27b339e2fb4f2f9db
+2026-06-11T12:25:11.6911934Z Build Date: 2026-05-20T17:44:04Z
+2026-06-11T12:25:11.6913223Z Worker ID: {373cc63e-4481-492c-9017-d64dcb143daa}
+2026-06-11T12:25:11.6914573Z Azure Region: westus3
+2026-06-11T12:25:11.6915735Z ##[endgroup]
+2026-06-11T12:25:11.6918066Z ##[group]Operating System
+2026-06-11T12:25:11.6919207Z Ubuntu
+2026-06-11T12:25:11.6920090Z 24.04.4
+2026-06-11T12:25:11.6921296Z LTS
+2026-06-11T12:25:11.6922302Z ##[endgroup]
+2026-06-11T12:25:11.6923260Z ##[group]Runner Image
+2026-06-11T12:25:11.6924373Z Image: ubuntu-24.04
+2026-06-11T12:25:11.6925449Z Version: 20260525.161.1
+2026-06-11T12:25:11.6927787Z Included Software: https://github.com/actions/runner-images/blob/ubuntu24/20260525.161/images/ubuntu/Ubuntu2404-Readme.md
+2026-06-11T12:25:11.6930647Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu24%2F20260525.161
+2026-06-11T12:25:11.6932833Z ##[endgroup]
+2026-06-11T12:25:11.6935029Z ##[group]GITHUB_TOKEN Permissions
+2026-06-11T12:25:11.6938148Z Actions: read
+2026-06-11T12:25:11.6939158Z Contents: read
+2026-06-11T12:25:11.6940086Z Metadata: read
+2026-06-11T12:25:11.6941407Z PullRequests: read
+2026-06-11T12:25:11.6942385Z ##[endgroup]
+2026-06-11T12:25:11.6945646Z Secret source: Actions
+2026-06-11T12:25:11.6946954Z Prepare workflow directory
+2026-06-11T12:25:11.7746375Z Prepare all required actions
+2026-06-11T12:25:11.7803771Z Getting action download info
+2026-06-11T12:25:12.4098933Z Download action repository 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' (SHA:df4cb1c069e1874edd31b4311f1884172cec0e10)
+2026-06-11T12:25:13.0998941Z Download action repository 'actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae' (SHA:27d5ce7f107fe9357f9df03efb73ab90386fccae)
+2026-06-11T12:25:13.2136563Z Download action repository 'rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444' (SHA:9c9c13bf4c3f1adef0cc596abc155580bcb04444)
+2026-06-11T12:25:13.4456261Z Download action repository 'mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696' (SHA:9e7fa8a12102821edf02ca5dbea1acd0f89a2696)
+2026-06-11T12:25:14.0000186Z Download action repository 'jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925' (SHA:dba19683ed58901619b14f395a24841710cb4925)
+2026-06-11T12:25:15.0921264Z Complete job name: Test tron-processor-app (GitHub)
+2026-06-11T12:25:15.1621136Z ##[group]Run actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+2026-06-11T12:25:15.1621973Z with:
+2026-06-11T12:25:15.1622253Z   repository: ChainArgos/java-monorepo
+2026-06-11T12:25:15.1625367Z   token: ***
+2026-06-11T12:25:15.1625633Z   ssh-strict: true
+2026-06-11T12:25:15.1625894Z   ssh-user: git
+2026-06-11T12:25:15.1626164Z   persist-credentials: true
+2026-06-11T12:25:15.1626459Z   clean: true
+2026-06-11T12:25:15.1626734Z   sparse-checkout-cone-mode: true
+2026-06-11T12:25:15.1627075Z   fetch-depth: 1
+2026-06-11T12:25:15.1627324Z   fetch-tags: false
+2026-06-11T12:25:15.1627579Z   show-progress: true
+2026-06-11T12:25:15.1627834Z   lfs: false
+2026-06-11T12:25:15.1628073Z   submodules: false
+2026-06-11T12:25:15.1628337Z   set-safe-directory: true
+2026-06-11T12:25:15.1628858Z env:
+2026-06-11T12:25:15.1629114Z   CARGO_TERM_COLOR: always
+2026-06-11T12:25:15.1629402Z   CARGO_INCREMENTAL: 0
+2026-06-11T12:25:15.1629717Z   RUSTFLAGS: -C link-arg=-fuse-ld=mold
+2026-06-11T12:25:15.1630077Z   CARGO_BUILD_JOBS: 6
+2026-06-11T12:25:15.1630343Z   RUSTC_WRAPPER: sccache
+2026-06-11T12:25:15.1630616Z   SCCACHE_GHA_ENABLED: true
+2026-06-11T12:25:15.1631064Z ##[endgroup]
+2026-06-11T12:25:15.2768843Z Syncing repository: ChainArgos/java-monorepo
+2026-06-11T12:25:15.2771375Z ##[group]Getting Git version info
+2026-06-11T12:25:15.2772457Z Working directory is '/home/runner/work/java-monorepo/java-monorepo'
+2026-06-11T12:25:15.2773527Z [command]/usr/bin/git version
+2026-06-11T12:25:15.2828762Z git version 2.54.0
+2026-06-11T12:25:15.2855646Z ##[endgroup]
+2026-06-11T12:25:15.2873417Z Temporarily overriding HOME='/home/runner/work/_temp/26940c53-db29-4ae9-9459-cb8d164ad54a' before making global git config changes
+2026-06-11T12:25:15.2876732Z Adding repository directory to the temporary git global config as a safe directory
+2026-06-11T12:25:15.2880477Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/java-monorepo/java-monorepo
+2026-06-11T12:25:15.2936724Z Deleting the contents of '/home/runner/work/java-monorepo/java-monorepo'
+2026-06-11T12:25:15.2941959Z ##[group]Determining repository object format
+2026-06-11T12:25:15.2945187Z ##[endgroup]
+2026-06-11T12:25:15.2946835Z ##[group]Initializing the repository
+2026-06-11T12:25:15.2950701Z [command]/usr/bin/git init /home/runner/work/java-monorepo/java-monorepo
+2026-06-11T12:25:15.3066827Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-06-11T12:25:15.3069553Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-06-11T12:25:15.3071538Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-06-11T12:25:15.3073111Z hint: call:
+2026-06-11T12:25:15.3074214Z hint:
+2026-06-11T12:25:15.3076805Z hint: 	git config --global init.defaultBranch <name>
+2026-06-11T12:25:15.3079620Z hint:
+2026-06-11T12:25:15.3081204Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-06-11T12:25:15.3082822Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-06-11T12:25:15.3084224Z hint:
+2026-06-11T12:25:15.3086516Z hint: 	git branch -m <name>
+2026-06-11T12:25:15.3087550Z hint:
+2026-06-11T12:25:15.3088833Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-06-11T12:25:15.3090650Z Initialized empty Git repository in /home/runner/work/java-monorepo/java-monorepo/.git/
+2026-06-11T12:25:15.3094489Z [command]/usr/bin/git remote add origin https://github.com/ChainArgos/java-monorepo
+2026-06-11T12:25:15.3150798Z ##[endgroup]
+2026-06-11T12:25:15.3152469Z ##[group]Disabling automatic garbage collection
+2026-06-11T12:25:15.3153862Z [command]/usr/bin/git config --local gc.auto 0
+2026-06-11T12:25:15.3179617Z ##[endgroup]
+2026-06-11T12:25:15.3181490Z ##[group]Setting up auth
+2026-06-11T12:25:15.3183630Z Removing SSH command configuration
+2026-06-11T12:25:15.3188543Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-06-11T12:25:15.3234686Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-06-11T12:25:15.3599522Z Removing HTTP extra header
+2026-06-11T12:25:15.3605941Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-06-11T12:25:15.3653487Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-06-11T12:25:15.3877546Z Removing includeIf entries pointing to credentials config files
+2026-06-11T12:25:15.3883240Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-06-11T12:25:15.3919477Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-06-11T12:25:15.4159526Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-02fdfeae-0e2d-490c-b992-beb9f3f71bb4.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-06-11T12:25:15.4202332Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/java-monorepo/java-monorepo/.git.path /home/runner/work/_temp/git-credentials-02fdfeae-0e2d-490c-b992-beb9f3f71bb4.config
+2026-06-11T12:25:15.4235135Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/java-monorepo/java-monorepo/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-02fdfeae-0e2d-490c-b992-beb9f3f71bb4.config
+2026-06-11T12:25:15.4273390Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-02fdfeae-0e2d-490c-b992-beb9f3f71bb4.config
+2026-06-11T12:25:15.4307787Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-02fdfeae-0e2d-490c-b992-beb9f3f71bb4.config
+2026-06-11T12:25:15.4341297Z ##[endgroup]
+2026-06-11T12:25:15.4343118Z ##[group]Fetching the repository
+2026-06-11T12:25:15.4351434Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +8fa32afa59856d67daf3aa97451afa317f93b26d:refs/remotes/origin/main
+2026-06-11T12:25:18.7840868Z From https://github.com/ChainArgos/java-monorepo
+2026-06-11T12:25:18.7843113Z  * [new ref]         8fa32afa59856d67daf3aa97451afa317f93b26d -> origin/main
+2026-06-11T12:25:18.7893218Z [command]/usr/bin/git branch --list --remote origin/main
+2026-06-11T12:25:18.7921810Z   origin/main
+2026-06-11T12:25:18.7934057Z [command]/usr/bin/git rev-parse refs/remotes/origin/main
+2026-06-11T12:25:18.7962115Z 8fa32afa59856d67daf3aa97451afa317f93b26d
+2026-06-11T12:25:18.7993666Z ##[endgroup]
+2026-06-11T12:25:18.8012507Z ##[group]Determining the checkout info
+2026-06-11T12:25:18.8032496Z ##[endgroup]
+2026-06-11T12:25:18.8037484Z [command]/usr/bin/git sparse-checkout disable
+2026-06-11T12:25:18.8051297Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-06-11T12:25:18.8157236Z ##[group]Checking out the ref
+2026-06-11T12:25:18.8158269Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+2026-06-11T12:25:19.4325807Z Switched to a new branch 'main'
+2026-06-11T12:25:19.4331887Z branch 'main' set up to track 'origin/main'.
+2026-06-11T12:25:19.4931338Z ##[endgroup]
+2026-06-11T12:25:19.4982188Z [command]/usr/bin/git log -1 --format=%H
+2026-06-11T12:25:19.5023251Z 8fa32afa59856d67daf3aa97451afa317f93b26d
+2026-06-11T12:25:20.4083642Z ##[group]Run actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae
+2026-06-11T12:25:20.4084061Z with:
+2026-06-11T12:25:20.4084432Z   path: ~/.cargo/registry/cache
+~/.cargo/registry/index
+~/.cargo/registry/src
+~/.cargo/git/db
+
+2026-06-11T12:25:20.4085132Z   key: cargo-registry-GitHub-Linux-e85c77d0b1218bb1a165b77d4caf81154958cf3a17a59038482fcdaa52f929b0
+2026-06-11T12:25:20.4085712Z   restore-keys: cargo-registry-GitHub-Linux-
+
+2026-06-11T12:25:20.4086027Z   enableCrossOsArchive: false
+2026-06-11T12:25:20.4086279Z   fail-on-cache-miss: false
+2026-06-11T12:25:20.4086528Z   lookup-only: false
+2026-06-11T12:25:20.4086739Z   save-always: false
+2026-06-11T12:25:20.4086935Z env:
+2026-06-11T12:25:20.4087117Z   CARGO_TERM_COLOR: always
+2026-06-11T12:25:20.4087376Z   CARGO_INCREMENTAL: 0
+2026-06-11T12:25:20.4087656Z   RUSTFLAGS: -C link-arg=-fuse-ld=mold
+2026-06-11T12:25:20.4087920Z   CARGO_BUILD_JOBS: 6
+2026-06-11T12:25:20.4088153Z   RUSTC_WRAPPER: sccache
+2026-06-11T12:25:20.4088418Z   SCCACHE_GHA_ENABLED: true
+2026-06-11T12:25:20.4088636Z ##[endgroup]
+2026-06-11T12:25:20.7737375Z Cache hit for: cargo-registry-GitHub-Linux-e85c77d0b1218bb1a165b77d4caf81154958cf3a17a59038482fcdaa52f929b0
+2026-06-11T12:25:22.0365205Z Received 29360128 of 168476502 (17.4%), 28.0 MBs/sec
+2026-06-11T12:25:23.0315011Z Received 168476502 of 168476502 (100.0%), 80.5 MBs/sec
+2026-06-11T12:25:23.0317997Z Cache Size: ~161 MB (168476502 B)
+2026-06-11T12:25:23.0375005Z [command]/usr/bin/tar -xf /home/runner/work/_temp/5fec9937-0d8b-4741-aeda-fc99d79b17d9/cache.tzst -P -C /home/runner/work/java-monorepo/java-monorepo --use-compress-program unzstd
+2026-06-11T12:25:26.7665592Z Cache restored successfully
+2026-06-11T12:25:26.7830545Z Cache restored from key: cargo-registry-GitHub-Linux-e85c77d0b1218bb1a165b77d4caf81154958cf3a17a59038482fcdaa52f929b0
+2026-06-11T12:25:26.7996133Z ##[group]Run rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444
+2026-06-11T12:25:26.7996730Z with:
+2026-06-11T12:25:26.7996933Z   mold-version: 2.41.0
+2026-06-11T12:25:26.7997152Z   make-default: true
+2026-06-11T12:25:26.7997357Z env:
+2026-06-11T12:25:26.7997542Z   CARGO_TERM_COLOR: always
+2026-06-11T12:25:26.7997776Z   CARGO_INCREMENTAL: 0
+2026-06-11T12:25:26.7998013Z   RUSTFLAGS: -C link-arg=-fuse-ld=mold
+2026-06-11T12:25:26.7998281Z   CARGO_BUILD_JOBS: 6
+2026-06-11T12:25:26.7998502Z   RUSTC_WRAPPER: sccache
+2026-06-11T12:25:26.7998731Z   SCCACHE_GHA_ENABLED: true
+2026-06-11T12:25:26.7998959Z ##[endgroup]
+2026-06-11T12:25:26.8100184Z ##[group]Run set -x
+2026-06-11T12:25:26.8100486Z [36;1mset -x[0m
+2026-06-11T12:25:26.8100707Z [36;1mecho "mold 2.41.0"[0m
+2026-06-11T12:25:26.8101256Z [36;1mif [ "$(whoami)" = root ]; then SUDO=; else SUDO=sudo; fi[0m
+2026-06-11T12:25:26.8102447Z [36;1mwget -O- --timeout=10 --waitretry=3 --retry-connrefused --progress=dot:mega https://github.com/rui314/mold/releases/download/v2.41.0/mold-2.41.0-$(uname -m)-linux.tar.gz | $SUDO tar -C /usr/local --strip-components=1 --no-overwrite-dir -xzf -[0m
+2026-06-11T12:25:26.8103786Z [36;1mtest true = true -a "$(realpath /usr/bin/ld)" != /usr/local/bin/mold && $SUDO ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld)"; true[0m
+2026-06-11T12:25:26.8134169Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-06-11T12:25:26.8134535Z env:
+2026-06-11T12:25:26.8134732Z   CARGO_TERM_COLOR: always
+2026-06-11T12:25:26.8134973Z   CARGO_INCREMENTAL: 0
+2026-06-11T12:25:26.8135210Z   RUSTFLAGS: -C link-arg=-fuse-ld=mold
+2026-06-11T12:25:26.8135482Z   CARGO_BUILD_JOBS: 6
+2026-06-11T12:25:26.8135699Z   RUSTC_WRAPPER: sccache
+2026-06-11T12:25:26.8135933Z   SCCACHE_GHA_ENABLED: true
+2026-06-11T12:25:26.8136161Z ##[endgroup]
+2026-06-11T12:25:26.8212214Z + echo 'mold 2.41.0'
+2026-06-11T12:25:26.8213036Z mold 2.41.0
+2026-06-11T12:25:26.8217641Z ++ whoami
+2026-06-11T12:25:26.8272952Z + '[' runner = root ']'
+2026-06-11T12:25:26.8273608Z + SUDO=sudo
+2026-06-11T12:25:26.8291429Z ++ uname -m
+2026-06-11T12:25:26.8297091Z + sudo tar -C /usr/local --strip-components=1 --no-overwrite-dir -xzf -
+2026-06-11T12:25:26.8299068Z + wget -O- --timeout=10 --waitretry=3 --retry-connrefused --progress=dot:mega https://github.com/rui314/mold/releases/download/v2.41.0/mold-2.41.0-x86_64-linux.tar.gz
+2026-06-11T12:25:26.8338299Z --2026-06-11 12:25:26--  https://github.com/rui314/mold/releases/download/v2.41.0/mold-2.41.0-x86_64-linux.tar.gz
+2026-06-11T12:25:26.8625718Z Resolving github.com (github.com)... 140.82.114.3
+2026-06-11T12:25:26.9238421Z Connecting to github.com (github.com)|140.82.114.3|:443... connected.
+2026-06-11T12:25:27.1130846Z HTTP request sent, awaiting response... 302 Found
+2026-06-11T12:25:27.1140122Z Location: https://release-assets.githubusercontent.com/github-production-release-asset/299510783/f4863e5d-1747-433e-8c26-b5a1c1950d2d?sp=r&sv=2018-11-09&sr=b&spr=https&se=2026-06-11T13%3A20%3A48Z&rscd=attachment%3B+filename%3Dmold-2.41.0-x86_64-linux.tar.gz&rsct=application%2Foctet-stream&skoid=96c2d410-5711-43a1-aedd-ab1947aa7ab0&sktid=398a6654-997b-47e9-b12b-9515b896b4de&skt=2026-06-11T12%3A20%3A48Z&ske=2026-06-11T13%3A20%3A48Z&sks=b&skv=2018-11-09&sig=NfZYlAZYAUykGnjHlfQYoWYPUtPiO4%2FXp3fB%2FLgxoDI%3D&jwt=*** [following]
+2026-06-11T12:25:27.1154747Z --2026-06-11 12:25:27--  https://release-assets.githubusercontent.com/github-production-release-asset/299510783/f4863e5d-1747-433e-8c26-b5a1c1950d2d?sp=r&sv=2018-11-09&sr=b&spr=https&se=2026-06-11T13%3A20%3A48Z&rscd=attachment%3B+filename%3Dmold-2.41.0-x86_64-linux.tar.gz&rsct=application%2Foctet-stream&skoid=96c2d410-5711-43a1-aedd-ab1947aa7ab0&sktid=398a6654-997b-47e9-b12b-9515b896b4de&skt=2026-06-11T12%3A20%3A48Z&ske=2026-06-11T13%3A20%3A48Z&sks=b&skv=2018-11-09&sig=NfZYlAZYAUykGnjHlfQYoWYPUtPiO4%2FXp3fB%2FLgxoDI%3D&jwt=***
+2026-06-11T12:25:27.1166816Z Resolving release-assets.githubusercontent.com (release-assets.githubusercontent.com)... 185.199.109.133, 185.199.110.133, 185.199.111.133, ...
+2026-06-11T12:25:27.1245395Z Connecting to release-assets.githubusercontent.com (release-assets.githubusercontent.com)|185.199.109.133|:443... connected.
+2026-06-11T12:25:27.1518550Z HTTP request sent, awaiting response... 200 OK
+2026-06-11T12:25:27.1522780Z Length: 5119986 (4.9M) [application/octet-stream]
+2026-06-11T12:25:27.1524131Z Saving to: ‘STDOUT’
+2026-06-11T12:25:27.1607900Z 
+2026-06-11T12:25:27.2680322Z      0K ........ ........ ........ ........ ........ ........ 61% 26.0M 0s
+2026-06-11T12:25:27.3206792Z   3072K ........ ........ ........ ......                    100% 38.8M=0.2s
+2026-06-11T12:25:27.3207570Z 
+2026-06-11T12:25:27.3208056Z 2026-06-11 12:25:27 (29.8 MB/s) - written to stdout [5119986/5119986]
+2026-06-11T12:25:27.3208531Z 
+2026-06-11T12:25:27.3336751Z ++ realpath /usr/bin/ld
+2026-06-11T12:25:27.3354092Z + test true = true -a /usr/bin/x86_64-linux-gnu-ld.bfd '!=' /usr/local/bin/mold
+2026-06-11T12:25:27.3358829Z ++ realpath /usr/bin/ld
+2026-06-11T12:25:27.3368763Z + sudo ln -sf /usr/local/bin/mold /usr/bin/x86_64-linux-gnu-ld.bfd
+2026-06-11T12:25:27.3448649Z + true
+2026-06-11T12:25:27.3525891Z ##[group]Run mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696
+2026-06-11T12:25:27.3526358Z with:
+2026-06-11T12:25:27.3529151Z   token: ***
+2026-06-11T12:25:27.3529368Z   disable_annotations: false
+2026-06-11T12:25:27.3529609Z env:
+2026-06-11T12:25:27.3529801Z   CARGO_TERM_COLOR: always
+2026-06-11T12:25:27.3530039Z   CARGO_INCREMENTAL: 0
+2026-06-11T12:25:27.3530278Z   RUSTFLAGS: -C link-arg=-fuse-ld=mold
+2026-06-11T12:25:27.3530553Z   CARGO_BUILD_JOBS: 6
+2026-06-11T12:25:27.3530773Z   RUSTC_WRAPPER: sccache
+2026-06-11T12:25:27.3531348Z   SCCACHE_GHA_ENABLED: true
+2026-06-11T12:25:27.3531591Z ##[endgroup]
+2026-06-11T12:25:27.8652283Z try to setup sccache version: v0.15.0
+2026-06-11T12:25:27.8723182Z sccache download from url: https://github.com/mozilla/sccache/releases/download/v0.15.0/sccache-v0.15.0-x86_64-unknown-linux-musl.tar.gz
+2026-06-11T12:25:28.4373252Z Correct checksum: 782d2b5dd7ae0a55ebe368ab258114d0928d019ac2d949ab85d5d02f3926709e
+2026-06-11T12:25:28.4482657Z [command]/usr/bin/tar xz --warning=no-unknown-keyword --overwrite -C /home/runner/work/_temp/48308d43-db5d-479d-83c4-9078990c9e6c -f /home/runner/work/_temp/5795072f-12e4-448f-bf91-80ab935addea
+2026-06-11T12:25:28.6360559Z sccache extracted to: /home/runner/work/_temp/48308d43-db5d-479d-83c4-9078990c9e6c
+2026-06-11T12:25:28.6540377Z sccache cached to: /opt/hostedtoolcache/sccache/0.15.0/x64
+2026-06-11T12:25:28.6768524Z ##[group]Run jdx/mise-action@dba19683ed58901619b14f395a24841710cb4925
+2026-06-11T12:25:28.6769185Z with:
+2026-06-11T12:25:28.6769585Z   install_args: rust protoc cargo:cargo-nextest
+2026-06-11T12:25:28.6775727Z   github_token: ***
+2026-06-11T12:25:28.6776118Z   install: true
+2026-06-11T12:25:28.6776438Z   cache: true
+2026-06-11T12:25:28.6776751Z   cache_save: true
+2026-06-11T12:25:28.6777127Z   cache_key_prefix: mise-v1
+2026-06-11T12:25:28.6777551Z   experimental: false
+2026-06-11T12:25:28.6777918Z   log_level: info
+2026-06-11T12:25:28.6778340Z   reshim: false
+2026-06-11T12:25:28.6778702Z   add_shims_to_path: true
+2026-06-11T12:25:28.6779097Z   fetch_from_github: true
+2026-06-11T12:25:28.6779477Z   env: true
+2026-06-11T12:25:28.6779798Z   wings_enabled: false
+2026-06-11T12:25:28.6780152Z env:
+2026-06-11T12:25:28.6780470Z   CARGO_TERM_COLOR: always
+2026-06-11T12:25:28.6781151Z   CARGO_INCREMENTAL: 0
+2026-06-11T12:25:28.6781609Z   RUSTFLAGS: -C link-arg=-fuse-ld=mold
+2026-06-11T12:25:28.6782129Z   CARGO_BUILD_JOBS: 6
+2026-06-11T12:25:28.6782518Z   RUSTC_WRAPPER: sccache
+2026-06-11T12:25:28.6782921Z   SCCACHE_GHA_ENABLED: true
+2026-06-11T12:25:28.6783475Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.15.0/x64/sccache
+2026-06-11T12:25:28.6784097Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-06-11T12:25:28.6784809Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-06-11T12:25:28.6879003Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-06-11T12:25:28.6879442Z ##[endgroup]
+2026-06-11T12:25:28.8365619Z ##[group]Restoring mise cache
+2026-06-11T12:25:28.8408931Z [command]/usr/bin/ldd --version
+2026-06-11T12:25:28.8463318Z ldd (Ubuntu GLIBC 2.39-0ubuntu8.7) 2.39
+2026-06-11T12:25:28.8466055Z Copyright (C) 2024 Free Software Foundation, Inc.
+2026-06-11T12:25:28.8467085Z This is free software; see the source for copying conditions.  There is NO
+2026-06-11T12:25:28.8468284Z warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+2026-06-11T12:25:28.8469296Z Written by Roland McGrath and Ulrich Drepper.
+2026-06-11T12:25:30.5722803Z Cache hit for: mise-v1-linux-x64-ubuntu24-5d553c0d272ab77f6c479727d9a7a97ef11a3137cc5e7acd6feeb3c85a74fc48-f25160224585da46219cc671ebb565079f37edeec027869984cbb22b39bb8172
+2026-06-11T12:25:31.8104689Z Received 16777216 of 42227166 (39.7%), 16.0 MBs/sec
+2026-06-11T12:25:32.2759280Z Received 42227166 of 42227166 (100.0%), 27.5 MBs/sec
+2026-06-11T12:25:32.2760266Z Cache Size: ~40 MB (42227166 B)
+2026-06-11T12:25:32.2806000Z [command]/usr/bin/tar -xf /home/runner/work/_temp/5dd7dad2-2359-406f-adff-bc10152da372/cache.tzst -P -C /home/runner/work/java-monorepo/java-monorepo --use-compress-program unzstd
+2026-06-11T12:25:32.5468763Z Cache restored successfully
+2026-06-11T12:25:32.5497110Z mise cache restored from key: mise-v1-linux-x64-ubuntu24-5d553c0d272ab77f6c479727d9a7a97ef11a3137cc5e7acd6feeb3c85a74fc48-f25160224585da46219cc671ebb565079f37edeec027869984cbb22b39bb8172
+2026-06-11T12:25:32.5505692Z ##[group]Setting env vars
+2026-06-11T12:25:32.5512066Z Setting MISE_LOG_LEVEL=info
+2026-06-11T12:25:32.5518279Z Setting MISE_GITHUB_TOKEN=***
+2026-06-11T12:25:32.5519334Z Setting MISE_TRUSTED_CONFIG_PATHS=/home/runner/work/java-monorepo/java-monorepo
+2026-06-11T12:25:32.5522220Z Setting MISE_YES=1
+2026-06-11T12:25:32.5523858Z Adding /home/runner/.local/share/mise/shims to PATH
+2026-06-11T12:25:32.5524697Z ##[group]Running mise --version
+2026-06-11T12:25:32.5539751Z [command]/home/runner/.local/share/mise/bin/mise --version
+2026-06-11T12:25:32.5628468Z 2026.6.2 linux-x64 (2026-06-09)
+2026-06-11T12:25:32.5676674Z ##[endgroup]
+2026-06-11T12:25:32.5839252Z ##[group]Running mise install rust protoc cargo:cargo-nextest
+2026-06-11T12:25:32.5858514Z [command]/home/runner/.local/share/mise/bin/mise install rust protoc cargo:cargo-nextest
+2026-06-11T12:25:34.7610318Z ##[endgroup]
+2026-06-11T12:25:34.7611797Z ##[group]Running mise ls
+2026-06-11T12:25:34.7625917Z [command]/home/runner/.local/share/mise/bin/mise ls
+2026-06-11T12:25:34.7832424Z cargo:cargo-nextest  0.9.137                          ~/work/java-monorepo/java-monorepo/mise.toml            0.9.137
+2026-06-11T12:25:34.7834367Z java                 oracle-graalvm-25.0.1 (missing)  ~/work/java-monorepo/java-monorepo/mise.toml            oracle-graalvm-25.0.1
+2026-06-11T12:25:34.7835981Z node                 24.16.0 (missing)                ~/work/java-monorepo/java-monorepo/mise.toml            24.16.0
+2026-06-11T12:25:34.7837184Z protoc               35.0                             ~/work/java-monorepo/java-monorepo/mise.toml            latest
+2026-06-11T12:25:34.7838410Z python               3.14.6 (missing)                 ~/work/java-monorepo/java-monorepo/mise.toml            3.14
+2026-06-11T12:25:34.7839630Z rust                 1.96.0 (symlink)                 ~/work/java-monorepo/java-monorepo/rust-toolchain.toml  1.96.0
+2026-06-11T12:25:34.7855881Z ##[endgroup]
+2026-06-11T12:25:34.7858739Z ##[group]Exporting mise environment variables
+2026-06-11T12:25:34.8141705Z [command]/home/runner/.local/share/mise/bin/mise env --json
+2026-06-11T12:25:34.8350334Z {
+2026-06-11T12:25:34.8361536Z   "CARGO_HOME": "/home/runner/.cargo",
+2026-06-11T12:25:34.8394657Z   "PATH": "/home/runner/.local/share/mise/installs/cargo-cargo-nextest/0.9.137/bin:/home/runner/.local/share/mise/installs/protoc/latest/bin:/home/runner/.cargo/bin:/home/runner/.local/share/mise/shims:/home/runner/.local/share/mise/bin:/opt/hostedtoolcache/sccache/0.15.0/x64:/snap/bin:/home/runner/.local/bin:/opt/pipx_bin:/home/runner/.cargo/bin:/home/runner/.config/composer/vendor/bin:/usr/local/.ghcup/bin:/home/runner/.dotnet/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+2026-06-11T12:25:34.8401626Z   "RUSTUP_HOME": "/home/runner/.rustup",
+2026-06-11T12:25:34.8402169Z   "RUSTUP_TOOLCHAIN": "1.96.0"
+2026-06-11T12:25:34.8402601Z }
+2026-06-11T12:25:34.8403335Z ##[endgroup]
+2026-06-11T12:25:34.8574080Z ##[group]Run cargo nextest run -p tron-processor-app --profile ci
+2026-06-11T12:25:34.8574614Z [36;1mcargo nextest run -p tron-processor-app --profile ci[0m
+2026-06-11T12:25:34.8602576Z shell: /usr/bin/bash -e {0}
+2026-06-11T12:25:34.8602852Z env:
+2026-06-11T12:25:34.8603055Z   CARGO_TERM_COLOR: always
+2026-06-11T12:25:34.8603305Z   CARGO_INCREMENTAL: 0
+2026-06-11T12:25:34.8603556Z   RUSTFLAGS: -C link-arg=-fuse-ld=mold
+2026-06-11T12:25:34.8603832Z   CARGO_BUILD_JOBS: 6
+2026-06-11T12:25:34.8604058Z   RUSTC_WRAPPER: sccache
+2026-06-11T12:25:34.8604290Z   SCCACHE_GHA_ENABLED: true
+2026-06-11T12:25:34.8604623Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.15.0/x64/sccache
+2026-06-11T12:25:34.8604990Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-06-11T12:25:34.8605423Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-06-11T12:25:34.8649354Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-06-11T12:25:34.8649638Z   MISE_LOG_LEVEL: info
+2026-06-11T12:25:34.8652639Z   MISE_GITHUB_TOKEN: ***
+2026-06-11T12:25:34.8653008Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/java-monorepo/java-monorepo
+2026-06-11T12:25:34.8653402Z   MISE_YES: 1
+2026-06-11T12:25:34.8653618Z   CARGO_HOME: /home/runner/.cargo
+2026-06-11T12:25:34.8655549Z   PATH: /home/runner/.local/share/mise/installs/cargo-cargo-nextest/0.9.137/bin:/home/runner/.local/share/mise/installs/protoc/latest/bin:/home/runner/.cargo/bin:/home/runner/.local/share/mise/shims:/home/runner/.local/share/mise/bin:/opt/hostedtoolcache/sccache/0.15.0/x64:/snap/bin:/home/runner/.local/bin:/opt/pipx_bin:/home/runner/.cargo/bin:/home/runner/.config/composer/vendor/bin:/usr/local/.ghcup/bin:/home/runner/.dotnet/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+2026-06-11T12:25:34.8657507Z   RUSTUP_HOME: /home/runner/.rustup
+2026-06-11T12:25:34.8657780Z   RUSTUP_TOOLCHAIN: 1.96.0
+2026-06-11T12:25:34.8658021Z ##[endgroup]
+2026-06-11T12:25:34.9370512Z info: syncing channel updates for 1.96.0-x86_64-unknown-linux-gnu
+2026-06-11T12:25:35.4265951Z info: latest update on 2026-05-28 for version 1.96.0 (ac68faa20 2026-05-25)
+2026-06-11T12:25:35.4683215Z info: downloading 3 components
+2026-06-11T12:25:45.9612969Z [1m[92m   Compiling[0m proc-macro2 v1.0.106
+2026-06-11T12:25:45.9613713Z [1m[92m   Compiling[0m quote v1.0.45
+2026-06-11T12:25:45.9614342Z [1m[92m   Compiling[0m unicode-ident v1.0.24
+2026-06-11T12:25:45.9614925Z [1m[92m   Compiling[0m libc v0.2.186
+2026-06-11T12:25:45.9615498Z [1m[92m   Compiling[0m serde_core v1.0.228
+2026-06-11T12:25:45.9616004Z [1m[92m   Compiling[0m cfg-if v1.0.4
+2026-06-11T12:25:46.4173332Z [1m[92m   Compiling[0m memchr v2.8.1
+2026-06-11T12:25:46.4484902Z [1m[92m   Compiling[0m serde v1.0.228
+2026-06-11T12:25:46.5832830Z [1m[92m   Compiling[0m once_cell v1.21.4
+2026-06-11T12:25:46.6593268Z [1m[92m   Compiling[0m itoa v1.0.18
+2026-06-11T12:25:47.2512871Z [1m[92m   Compiling[0m pin-project-lite v0.2.17
+2026-06-11T12:25:47.3015962Z [1m[92m   Compiling[0m smallvec v1.15.1
+2026-06-11T12:25:47.5112577Z [1m[92m   Compiling[0m shlex v2.0.1
+2026-06-11T12:25:47.6644180Z [1m[92m   Compiling[0m find-msvc-tools v0.1.9
+2026-06-11T12:25:47.7055390Z [1m[92m   Compiling[0m futures-core v0.3.32
+2026-06-11T12:25:47.8712708Z [1m[92m   Compiling[0m percent-encoding v2.3.2
+2026-06-11T12:25:47.9326223Z [1m[92m   Compiling[0m log v0.4.32
+2026-06-11T12:25:47.9559047Z [1m[92m   Compiling[0m jobserver v0.1.34
+2026-06-11T12:25:48.0330111Z [1m[92m   Compiling[0m errno v0.3.14
+2026-06-11T12:25:48.1786401Z [1m[92m   Compiling[0m socket2 v0.6.4
+2026-06-11T12:25:48.3880845Z [1m[92m   Compiling[0m syn v2.0.117
+2026-06-11T12:25:48.4142775Z [1m[92m   Compiling[0m mio v1.2.1
+2026-06-11T12:25:48.4468980Z [1m[92m   Compiling[0m signal-hook-registry v1.4.8
+2026-06-11T12:25:48.5783355Z [1m[92m   Compiling[0m cc v1.2.63
+2026-06-11T12:25:48.6012613Z [1m[92m   Compiling[0m futures-sink v0.3.32
+2026-06-11T12:25:48.9696373Z [1m[92m   Compiling[0m zmij v1.0.21
+2026-06-11T12:25:49.1152941Z [1m[92m   Compiling[0m slab v0.4.12
+2026-06-11T12:25:49.1523876Z [1m[92m   Compiling[0m serde_json v1.0.150
+2026-06-11T12:25:49.2330385Z [1m[92m   Compiling[0m equivalent v1.0.2
+2026-06-11T12:25:49.3313002Z [1m[92m   Compiling[0m futures-io v0.3.32
+2026-06-11T12:25:49.3351878Z [1m[92m   Compiling[0m hashbrown v0.17.1
+2026-06-11T12:25:49.4319124Z [1m[92m   Compiling[0m futures-channel v0.3.32
+2026-06-11T12:25:49.4653028Z [1m[92m   Compiling[0m stable_deref_trait v1.2.1
+2026-06-11T12:25:49.5387595Z [1m[92m   Compiling[0m futures-task v0.3.32
+2026-06-11T12:25:49.7503423Z [1m[92m   Compiling[0m tracing-core v0.1.36
+2026-06-11T12:25:49.8945398Z [1m[92m   Compiling[0m form_urlencoded v1.2.2
+2026-06-11T12:25:49.8946192Z [1m[92m   Compiling[0m synstructure v0.13.2
+2026-06-11T12:25:49.8991651Z [1m[92m   Compiling[0m serde_derive v1.0.228
+2026-06-11T12:25:49.9362907Z [1m[92m   Compiling[0m tokio-macros v2.7.0
+2026-06-11T12:25:50.1410495Z [1m[92m   Compiling[0m indexmap v2.14.0
+2026-06-11T12:25:50.2346021Z [1m[92m   Compiling[0m futures-macro v0.3.32
+2026-06-11T12:25:50.6757437Z [1m[92m   Compiling[0m zerovec-derive v0.11.3
+2026-06-11T12:25:50.6763339Z [1m[92m   Compiling[0m tracing-attributes v0.1.31
+2026-06-11T12:25:50.7137560Z [1m[92m   Compiling[0m zerofrom-derive v0.1.7
+2026-06-11T12:25:50.7632675Z [1m[92m   Compiling[0m yoke-derive v0.8.2
+2026-06-11T12:25:51.4652359Z [1m[92m   Compiling[0m futures-util v0.3.32
+2026-06-11T12:25:52.8532708Z [1m[92m   Compiling[0m zerofrom v0.1.8
+2026-06-11T12:25:53.3006350Z [1m[92m   Compiling[0m displaydoc v0.2.6
+2026-06-11T12:25:53.4102450Z [1m[92m   Compiling[0m yoke v0.8.3
+2026-06-11T12:25:53.5362413Z [1m[92m   Compiling[0m aho-corasick v1.1.4
+2026-06-11T12:25:53.9195875Z [1m[92m   Compiling[0m tracing v0.1.44
+2026-06-11T12:25:54.1500517Z [1m[92m   Compiling[0m zerovec v0.11.6
+2026-06-11T12:25:54.3414064Z [1m[92m   Compiling[0m either v1.16.0
+2026-06-11T12:25:54.5642339Z [1m[92m   Compiling[0m regex-syntax v0.8.11
+2026-06-11T12:25:54.8122335Z [1m[92m   Compiling[0m anyhow v1.0.102
+2026-06-11T12:25:54.8832617Z [1m[92m   Compiling[0m base64 v0.22.1
+2026-06-11T12:25:54.9442416Z [1m[92m   Compiling[0m tinystr v0.8.3
+2026-06-11T12:25:55.3042585Z [1m[92m   Compiling[0m bitflags v2.13.0
+2026-06-11T12:25:55.4172416Z [1m[92m   Compiling[0m litemap v0.8.2
+2026-06-11T12:25:55.4242734Z [1m[92m   Compiling[0m writeable v0.6.3
+2026-06-11T12:25:55.6778296Z [1m[92m   Compiling[0m potential_utf v0.1.5
+2026-06-11T12:25:55.6852890Z [1m[92m   Compiling[0m zerotrie v0.2.4
+2026-06-11T12:25:55.7212996Z [1m[92m   Compiling[0m icu_locale_core v2.2.0
+2026-06-11T12:25:55.8482981Z [1m[92m   Compiling[0m utf8_iter v1.0.4
+2026-06-11T12:25:55.8799958Z [1m[92m   Compiling[0m icu_normalizer_data v2.2.0
+2026-06-11T12:25:55.9403312Z [1m[92m   Compiling[0m icu_properties_data v2.2.0
+2026-06-11T12:25:56.0411662Z [1m[92m   Compiling[0m bytes v1.11.1
+2026-06-11T12:25:56.1482777Z [1m[92m   Compiling[0m icu_provider v2.2.0
+2026-06-11T12:25:56.1552555Z [1m[92m   Compiling[0m icu_collections v2.2.0
+2026-06-11T12:25:56.2588320Z [1m[92m   Compiling[0m itertools v0.14.0
+2026-06-11T12:25:56.3663097Z [1m[92m   Compiling[0m rand_core v0.10.1
+2026-06-11T12:25:56.5325002Z [1m[92m   Compiling[0m getrandom v0.4.2
+2026-06-11T12:25:56.5625075Z [1m[92m   Compiling[0m icu_normalizer v2.2.0
+2026-06-11T12:25:56.5702643Z [1m[92m   Compiling[0m icu_properties v2.2.0
+2026-06-11T12:25:56.6273434Z [1m[92m   Compiling[0m tokio v1.52.3
+2026-06-11T12:25:56.6993133Z [1m[92m   Compiling[0m http v1.4.1
+2026-06-11T12:25:57.2205548Z [1m[92m   Compiling[0m autocfg v1.5.1
+2026-06-11T12:25:57.2624110Z [1m[92m   Compiling[0m thiserror v2.0.18
+2026-06-11T12:25:57.2883116Z [1m[92m   Compiling[0m typenum v1.20.1
+2026-06-11T12:25:57.3222513Z [1m[92m   Compiling[0m thiserror-impl v2.0.18
+2026-06-11T12:25:57.4702408Z [1m[92m   Compiling[0m fs_extra v1.3.0
+2026-06-11T12:25:57.7383096Z [1m[92m   Compiling[0m httparse v1.10.1
+2026-06-11T12:25:57.8243701Z [1m[92m   Compiling[0m pkg-config v0.3.33
+2026-06-11T12:25:57.9844630Z [1m[92m   Compiling[0m num-traits v0.2.19
+2026-06-11T12:25:58.0355868Z [1m[92m   Compiling[0m idna_adapter v1.2.2
+2026-06-11T12:25:58.1543469Z [1m[92m   Compiling[0m http-body v1.0.1
+2026-06-11T12:25:58.2900560Z [1m[92m   Compiling[0m idna v1.1.0
+2026-06-11T12:25:58.3283539Z [1m[92m   Compiling[0m tokio-util v0.7.18
+2026-06-11T12:25:58.4233761Z [1m[92m   Compiling[0m tower-service v0.3.3
+2026-06-11T12:25:58.7337358Z [1m[92m   Compiling[0m linux-raw-sys v0.12.1
+2026-06-11T12:25:58.7643643Z [1m[92m   Compiling[0m getrandom v0.3.4
+2026-06-11T12:25:58.8312653Z [1m[92m   Compiling[0m async-trait v0.1.89
+2026-06-11T12:25:58.8942436Z [1m[92m   Compiling[0m url v2.5.8
+2026-06-11T12:25:59.0390330Z [1m[92m   Compiling[0m atomic-waker v1.1.2
+2026-06-11T12:25:59.1383039Z [1m[92m   Compiling[0m zerocopy v0.8.50
+2026-06-11T12:25:59.6392755Z [1m[92m   Compiling[0m fnv v1.0.7
+2026-06-11T12:25:59.9052329Z [1m[92m   Compiling[0m httpdate v1.0.3
+2026-06-11T12:26:00.1012672Z [1m[92m   Compiling[0m zeroize v1.8.2
+2026-06-11T12:26:00.4452786Z [1m[92m   Compiling[0m try-lock v0.2.5
+2026-06-11T12:26:00.6492368Z [1m[92m   Compiling[0m h2 v0.4.14
+2026-06-11T12:26:00.7104231Z [1m[92m   Compiling[0m uuid v1.23.3
+2026-06-11T12:26:00.8749732Z [1m[92m   Compiling[0m crossbeam-utils v0.8.21
+2026-06-11T12:26:00.9022101Z [1m[92m   Compiling[0m heck v0.5.0
+2026-06-11T12:26:00.9222828Z [1m[92m   Compiling[0m want v0.3.1
+2026-06-11T12:26:00.9942592Z [1m[92m   Compiling[0m rand_core v0.9.5
+2026-06-11T12:26:01.0803338Z [1m[92m   Compiling[0m rustls-pki-types v1.14.1
+2026-06-11T12:26:01.2771560Z [1m[92m   Compiling[0m regex-automata v0.4.14
+2026-06-11T12:26:01.2872175Z [1m[92m   Compiling[0m ipnet v2.12.0
+2026-06-11T12:26:01.3798325Z [1m[92m   Compiling[0m vcpkg v0.2.15
+2026-06-11T12:26:01.9172111Z [1m[92m   Compiling[0m openssl-sys v0.9.116
+2026-06-11T12:26:02.1082745Z [1m[92m   Compiling[0m http-body-util v0.1.3
+2026-06-11T12:26:02.1552645Z [1m[92m   Compiling[0m regex v1.12.4
+2026-06-11T12:26:02.2227098Z [1m[92m   Compiling[0m lazy_static v1.5.0
+2026-06-11T12:26:02.2352554Z [1m[92m   Compiling[0m hyper v1.10.1
+2026-06-11T12:26:02.5142388Z [1m[92m   Compiling[0m prettyplease v0.2.37
+2026-06-11T12:26:02.5172165Z [1m[92m   Compiling[0m powerfmt v0.2.0
+2026-06-11T12:26:02.6450326Z [1m[92m   Compiling[0m ppv-lite86 v0.2.21
+2026-06-11T12:26:02.6562856Z [1m[92m   Compiling[0m hybrid-array v0.4.12
+2026-06-11T12:26:02.7645707Z [1m[92m   Compiling[0m deranged v0.5.8
+2026-06-11T12:26:02.8154297Z [1m[92m   Compiling[0m cmake v0.1.58
+2026-06-11T12:26:03.0392140Z [1m[92m   Compiling[0m hyper-util v0.1.20
+2026-06-11T12:26:03.0603171Z [1m[92m   Compiling[0m sync_wrapper v1.0.2
+2026-06-11T12:26:03.1375115Z [1m[92m   Compiling[0m rand_chacha v0.9.0
+2026-06-11T12:26:03.2656858Z [1m[92m   Compiling[0m cpufeatures v0.3.0
+2026-06-11T12:26:03.3254963Z [1m[92m   Compiling[0m openssl-probe v0.2.1
+2026-06-11T12:26:03.3285932Z [1m[92m   Compiling[0m num-conv v0.2.2
+2026-06-11T12:26:03.3803928Z [1m[92m   Compiling[0m rand v0.9.4
+2026-06-11T12:26:03.4633644Z [1m[92m   Compiling[0m rustix v1.1.4
+2026-06-11T12:26:03.5477138Z [1m[92m   Compiling[0m time-core v0.1.8
+2026-06-11T12:26:03.5802600Z [1m[92m   Compiling[0m dunce v1.0.5
+2026-06-11T12:26:03.5803436Z [1m[92m   Compiling[0m tower-layer v0.3.3
+2026-06-11T12:26:03.7000000Z [1m[92m   Compiling[0m tokio-stream v0.1.18
+2026-06-11T12:26:03.8354945Z [1m[92m   Compiling[0m prost-derive v0.14.4
+2026-06-11T12:26:03.8355884Z [1m[92m   Compiling[0m fixedbitset v0.5.7
+2026-06-11T12:26:03.8462074Z [1m[92m   Compiling[0m aws-lc-sys v0.41.0
+2026-06-11T12:26:03.8713142Z [1m[92m   Compiling[0m time v0.3.47
+2026-06-11T12:26:03.8811949Z [1m[92m   Compiling[0m cmov v0.5.4
+2026-06-11T12:26:04.0893129Z [1m[92m   Compiling[0m scopeguard v1.2.0
+2026-06-11T12:26:04.2442474Z [1m[92m   Compiling[0m hex v0.4.3
+2026-06-11T12:26:04.2762586Z [1m[92m   Compiling[0m ctutils v0.4.2
+2026-06-11T12:26:04.3732308Z [1m[92m   Compiling[0m lock_api v0.4.14
+2026-06-11T12:26:04.6002028Z [1m[92m   Compiling[0m tower v0.5.3
+2026-06-11T12:26:04.9002568Z [1m[92m   Compiling[0m chacha20 v0.10.0
+2026-06-11T12:26:05.5192727Z [1m[92m   Compiling[0m crypto-common v0.2.2
+2026-06-11T12:26:05.6132640Z [1m[92m   Compiling[0m block-buffer v0.12.0
+2026-06-11T12:26:05.8407361Z [1m[92m   Compiling[0m const-oid v0.10.2
+2026-06-11T12:26:05.8582417Z [1m[92m   Compiling[0m mime v0.3.17
+2026-06-11T12:26:05.9076405Z [1m[92m   Compiling[0m openssl v0.10.80
+2026-06-11T12:26:05.9702602Z [1m[92m   Compiling[0m home v0.5.12
+2026-06-11T12:26:06.0411749Z [1m[92m   Compiling[0m fastrand v2.4.1
+2026-06-11T12:26:06.1252212Z [1m[92m   Compiling[0m glob v0.3.3
+2026-06-11T12:26:06.1563484Z [1m[92m   Compiling[0m foreign-types-shared v0.1.1
+2026-06-11T12:26:06.1622805Z [1m[92m   Compiling[0m digest v0.11.3
+2026-06-11T12:26:06.1917280Z [1m[92m   Compiling[0m rand v0.10.1
+2026-06-11T12:26:06.2186448Z [1m[92m   Compiling[0m tempfile v3.27.0
+2026-06-11T12:26:06.3678485Z [1m[92m   Compiling[0m clang-sys v1.8.1
+2026-06-11T12:26:06.3809376Z [1m[92m   Compiling[0m foreign-types v0.3.2
+2026-06-11T12:26:06.5062634Z [1m[92m   Compiling[0m prost-derive v0.13.5
+2026-06-11T12:26:06.5290553Z [1m[92m   Compiling[0m openssl-macros v0.1.1
+2026-06-11T12:26:06.6472428Z [1m[92m   Compiling[0m rustix v0.38.44
+2026-06-11T12:26:06.6632160Z [1m[92m   Compiling[0m aws-lc-rs v1.17.0
+2026-06-11T12:26:06.9572389Z [1m[92m   Compiling[0m parking_lot_core v0.9.12
+2026-06-11T12:26:07.1492322Z [1m[92m   Compiling[0m strsim v0.11.1
+2026-06-11T12:26:07.1702777Z [1m[92m   Compiling[0m tinyvec_macros v0.1.1
+2026-06-11T12:26:07.2162883Z [1m[92m   Compiling[0m ryu v1.0.23
+2026-06-11T12:26:07.4152433Z [1m[92m   Compiling[0m version_check v0.9.5
+2026-06-11T12:26:07.4223579Z [1m[92m   Compiling[0m native-tls v0.2.18
+2026-06-11T12:26:07.4692382Z [1m[92m   Compiling[0m multimap v0.10.1
+2026-06-11T12:26:07.6382393Z [1m[92m   Compiling[0m tinyvec v1.11.0
+2026-06-11T12:26:07.7112696Z [1m[92m   Compiling[0m generic-array v0.14.9
+2026-06-11T12:26:07.9422934Z [1m[92m   Compiling[0m num-integer v0.1.46
+2026-06-11T12:26:08.6122776Z [1m[92m   Compiling[0m minimal-lexical v0.2.1
+2026-06-11T12:26:08.6536929Z [1m[92m   Compiling[0m linux-raw-sys v0.4.15
+2026-06-11T12:26:08.6863118Z [1m[92m   Compiling[0m prost v0.13.5
+2026-06-11T12:26:08.8677466Z [1m[92m   Compiling[0m unicode-normalization v0.1.25
+2026-06-11T12:26:09.1120617Z [1m[92m   Compiling[0m nom v7.1.3
+2026-06-11T12:26:09.4303168Z [1m[92m   Compiling[0m serde_urlencoded v0.7.1
+2026-06-11T12:26:09.6222741Z [1m[92m   Compiling[0m axum-core v0.5.6
+2026-06-11T12:26:09.6895157Z [1m[92m   Compiling[0m debugid v0.8.0
+2026-06-11T12:26:09.8682803Z [1m[92m   Compiling[0m serde_path_to_error v0.1.20
+2026-06-11T12:26:09.9008585Z [1m[92m   Compiling[0m libloading v0.8.9
+2026-06-11T12:26:09.9022290Z [1m[92m   Compiling[0m matchit v0.8.4
+2026-06-11T12:26:09.9090389Z [1m[92m   Compiling[0m unicode-bidi v0.3.18
+2026-06-11T12:26:10.1720552Z [1m[92m   Compiling[0m bindgen v0.66.1
+2026-06-11T12:26:10.1902499Z [1m[92m   Compiling[0m unicode-properties v0.1.4
+2026-06-11T12:26:10.2006989Z [1m[92m   Compiling[0m crunchy v0.2.4
+2026-06-11T12:26:10.3115689Z [1m[92m   Compiling[0m axum v0.8.9
+2026-06-11T12:26:10.4375680Z [1m[92m   Compiling[0m sentry-types v0.48.2
+2026-06-11T12:26:10.4802461Z [1m[92m   Compiling[0m which v4.4.2
+2026-06-11T12:26:10.5209394Z [1m[92m   Compiling[0m stringprep v0.1.5
+2026-06-11T12:26:10.9866573Z [1m[92m   Compiling[0m cexpr v0.6.0
+2026-06-11T12:26:11.0782250Z [1m[92m   Compiling[0m parking_lot v0.12.5
+2026-06-11T12:26:11.2177737Z [1m[92m   Compiling[0m prost-types v0.13.5
+2026-06-11T12:26:11.5109109Z [1m[92m   Compiling[0m num-bigint v0.4.6
+2026-06-11T12:26:11.7227483Z [1m[92m   Compiling[0m md-5 v0.11.0
+2026-06-11T12:26:11.7331959Z [1m[92m   Compiling[0m hmac v0.13.0
+2026-06-11T12:26:11.7922380Z [1m[92m   Compiling[0m sha2 v0.11.0
+2026-06-11T12:26:11.9629748Z [1m[92m   Compiling[0m petgraph v0.7.1
+2026-06-11T12:26:11.9846395Z [1m[92m   Compiling[0m concurrent-queue v2.5.0
+2026-06-11T12:26:12.1395368Z [1m[92m   Compiling[0m rustc-hash v1.1.0
+2026-06-11T12:26:12.1889665Z [1m[92m   Compiling[0m iana-time-zone v0.1.65
+2026-06-11T12:26:12.2525956Z [1m[92m   Compiling[0m parking v2.2.1
+2026-06-11T12:26:12.2832447Z [1m[92m   Compiling[0m tiny-keccak v2.0.2
+2026-06-11T12:26:12.3169496Z [1m[92m   Compiling[0m rustversion v1.0.22
+2026-06-11T12:26:12.3602331Z [1m[92m   Compiling[0m fallible-iterator v0.2.0
+2026-06-11T12:26:12.3936654Z [1m[92m   Compiling[0m untrusted v0.9.0
+2026-06-11T12:26:12.4499713Z [1m[92m   Compiling[0m lazycell v1.3.0
+2026-06-11T12:26:12.4688841Z [1m[92m   Compiling[0m object v0.37.3
+2026-06-11T12:26:12.5868869Z [1m[92m   Compiling[0m shlex v1.3.0
+2026-06-11T12:26:12.6289661Z [1m[92m   Compiling[0m rustls v0.23.40
+2026-06-11T12:26:12.6654333Z [1m[92m   Compiling[0m peeking_take_while v0.1.2
+2026-06-11T12:26:12.6778803Z [1m[92m   Compiling[0m byteorder v1.5.0
+2026-06-11T12:26:12.7732314Z [1m[92m   Compiling[0m event-listener v5.4.1
+2026-06-11T12:26:12.7924424Z [1m[92m   Compiling[0m chrono v0.4.45
+2026-06-11T12:26:12.8364186Z [1m[92m   Compiling[0m prost-build v0.13.5
+2026-06-11T12:26:12.9482303Z [1m[92m   Compiling[0m postgres-protocol v0.6.11
+2026-06-11T12:26:13.0942935Z [1m[92m   Compiling[0m sentry-core v0.48.2
+2026-06-11T12:26:13.3768614Z [1m[92m   Compiling[0m prost v0.14.4
+2026-06-11T12:26:13.4776848Z [1m[92m   Compiling[0m postgres-derive v0.4.8
+2026-06-11T12:26:13.6338486Z [1m[92m   Compiling[0m adler2 v2.0.1
+2026-06-11T12:26:13.6422191Z [1m[92m   Compiling[0m gimli v0.32.3
+2026-06-11T12:26:13.6511944Z [1m[92m   Compiling[0m siphasher v1.0.3
+2026-06-11T12:26:13.8192921Z [1m[92m   Compiling[0m subtle v2.6.1
+2026-06-11T12:26:14.0125972Z [1m[92m   Compiling[0m thiserror v1.0.69
+2026-06-11T12:26:14.0127300Z [1m[92m   Compiling[0m portable-atomic v1.13.1
+2026-06-11T12:26:14.2745349Z [1m[92m   Compiling[0m postgres-types v0.2.13
+2026-06-11T12:26:14.5265949Z [1m[92m   Compiling[0m phf_shared v0.13.1
+2026-06-11T12:26:14.5782318Z [1m[92m   Compiling[0m miniz_oxide v0.8.9
+2026-06-11T12:26:14.7965390Z [1m[92m   Compiling[0m pg_query v6.1.1
+2026-06-11T12:26:16.3824438Z [1m[92m   Compiling[0m crypto-common v0.1.6
+2026-06-11T12:26:16.5480610Z [1m[92m   Compiling[0m block-buffer v0.10.4
+2026-06-11T12:26:17.1725764Z [1m[92m   Compiling[0m thiserror-impl v1.0.69
+2026-06-11T12:26:17.5352654Z [1m[92m   Compiling[0m pin-project-internal v1.1.13
+2026-06-11T12:26:17.6212320Z [1m[92m   Compiling[0m addr2line v0.25.1
+2026-06-11T12:26:17.7002599Z [1m[92m   Compiling[0m getrandom v0.2.17
+2026-06-11T12:26:18.5682676Z [1m[92m   Compiling[0m owo-colors v4.3.0
+2026-06-11T12:26:18.9723114Z [1m[92m   Compiling[0m utf8parse v0.2.2
+2026-06-11T12:26:18.9856953Z [1m[92m   Compiling[0m rustc-demangle v0.1.27
+2026-06-11T12:26:19.1802361Z [1m[92m   Compiling[0m ucd-trie v0.1.7
+2026-06-11T12:26:19.3722618Z [1m[92m   Compiling[0m typeid v1.0.3
+2026-06-11T12:26:19.5092925Z [1m[92m   Compiling[0m foldhash v0.2.0
+2026-06-11T12:26:19.6722930Z [1m[92m   Compiling[0m anstyle-parse v1.0.0
+2026-06-11T12:26:20.0262815Z [1m[92m   Compiling[0m pin-project v1.1.13
+2026-06-11T12:26:20.2392763Z [1m[92m   Compiling[0m pest v2.8.6
+2026-06-11T12:26:20.7142579Z [1m[92m   Compiling[0m hashbrown v0.16.1
+2026-06-11T12:26:20.8295906Z [1m[92m   Compiling[0m const-random-macro v0.1.16
+2026-06-11T12:26:21.1512998Z [1m[92m   Compiling[0m digest v0.10.7
+2026-06-11T12:26:22.2582557Z [1m[92m   Compiling[0m backtrace v0.3.76
+2026-06-11T12:26:22.5282570Z [1m[92m   Compiling[0m phf v0.13.1
+2026-06-11T12:26:22.8743115Z [1m[92m   Compiling[0m prost-types v0.14.4
+2026-06-11T12:26:23.3023002Z [1m[92m   Compiling[0m event-listener-strategy v0.5.4
+2026-06-11T12:26:24.9862546Z [1m[92m   Compiling[0m hyper-timeout v0.5.2
+2026-06-11T12:26:25.2652808Z [1m[92m   Compiling[0m async-compat v0.2.5
+2026-06-11T12:26:25.2909326Z [1m[92m   Compiling[0m deadpool-runtime v0.1.4
+2026-06-11T12:26:25.4872583Z [1m[92m   Compiling[0m itertools v0.10.5
+2026-06-11T12:26:25.6932115Z [1m[92m   Compiling[0m num_cpus v1.17.0
+2026-06-11T12:26:26.0291300Z [1m[92m   Compiling[0m whoami v2.1.2
+2026-06-11T12:26:26.1112832Z [1m[92m   Compiling[0m nom v8.0.0
+2026-06-11T12:26:27.5712426Z [1m[92m   Compiling[0m unicode-segmentation v1.13.3
+2026-06-11T12:26:27.7512637Z [1m[92m   Compiling[0m ident_case v1.0.1
+2026-06-11T12:26:27.8874927Z [1m[92m   Compiling[0m foldhash v0.1.5
+2026-06-11T12:26:28.8113042Z [1m[92m   Compiling[0m cpufeatures v0.2.17
+2026-06-11T12:26:28.8452456Z [1m[92m   Compiling[0m semver v1.0.28
+2026-06-11T12:26:28.9542845Z [1m[92m   Compiling[0m anstyle v1.0.14
+2026-06-11T12:26:29.3832406Z [1m[92m   Compiling[0m crc32fast v1.5.0
+2026-06-11T12:26:29.5782721Z [1m[92m   Compiling[0m unicode-width v0.2.2
+2026-06-11T12:26:29.6912317Z [1m[92m   Compiling[0m is_terminal_polyfill v1.70.2
+2026-06-11T12:26:29.8535529Z [1m[92m   Compiling[0m anstyle-query v1.1.5
+2026-06-11T12:26:30.9702440Z [1m[92m   Compiling[0m colorchoice v1.0.5
+2026-06-11T12:26:31.1542440Z [1m[92m   Compiling[0m cookie-factory v0.3.3
+2026-06-11T12:26:31.1725832Z [1m[92m   Compiling[0m litrs v1.0.0
+2026-06-11T12:26:31.2115926Z [1m[92m   Compiling[0m rustc_version v0.4.1
+2026-06-11T12:26:31.6802964Z [1m[92m   Compiling[0m anstream v1.0.0
+2026-06-11T12:26:31.9122514Z [1m[92m   Compiling[0m amq-protocol-types v10.6.2
+2026-06-11T12:26:31.9462236Z [1m[92m   Compiling[0m hashbrown v0.15.5
+2026-06-11T12:26:32.2652997Z [1m[92m   Compiling[0m document-features v0.2.12
+2026-06-11T12:26:32.7752695Z [1m[92m   Compiling[0m darling_core v0.23.0
+2026-06-11T12:26:32.8330870Z [1m[92m   Compiling[0m tokio-postgres v0.7.17
+2026-06-11T12:26:33.3992427Z [1m[92m   Compiling[0m deadpool v0.12.3
+2026-06-11T12:26:33.8942991Z [1m[92m   Compiling[0m async-rs v0.8.11
+2026-06-11T12:26:34.4773185Z [1m[92m   Compiling[0m tonic v0.14.6
+2026-06-11T12:26:34.7242141Z [1m[92m   Compiling[0m async-lock v3.4.2
+2026-06-11T12:26:37.0645491Z [1m[92m   Compiling[0m sentry-backtrace v0.48.2
+2026-06-11T12:26:37.7502228Z [1m[92m   Compiling[0m pest_meta v2.8.6
+2026-06-11T12:26:38.3386391Z [1m[92m   Compiling[0m const-random v0.1.18
+2026-06-11T12:26:42.1834040Z [1m[92m   Compiling[0m async-native-tls v0.6.0
+2026-06-11T12:26:42.4267891Z [1m[92m   Compiling[0m matchers v0.2.0
+2026-06-11T12:26:42.6251777Z [1m[92m   Compiling[0m sharded-slab v0.1.7
+2026-06-11T12:26:42.7202322Z [1m[92m   Compiling[0m ureq-proto v0.6.0
+2026-06-11T12:26:42.7772280Z [1m[92m   Compiling[0m tracing-log v0.2.0
+2026-06-11T12:26:43.0030725Z [1m[92m   Compiling[0m findshlibs v0.10.2
+2026-06-11T12:26:43.1172356Z [1m[92m   Compiling[0m thread_local v1.1.9
+2026-06-11T12:26:43.7052415Z [1m[92m   Compiling[0m libm v0.2.16
+2026-06-11T12:26:43.8772443Z [1m[92m   Compiling[0m nu-ansi-term v0.50.3
+2026-06-11T12:26:43.9382522Z [1m[92m   Compiling[0m bollard-buildkit-proto v0.7.0
+2026-06-11T12:26:44.0882425Z [1m[92m   Compiling[0m erased-serde v0.4.10
+2026-06-11T12:26:44.0971603Z [1m[92m   Compiling[0m clap_lex v1.1.0
+2026-06-11T12:26:44.2842748Z [1m[92m   Compiling[0m utf8-zero v0.8.1
+2026-06-11T12:26:44.6562703Z [1m[92m   Compiling[0m tracing-subscriber v0.3.23
+2026-06-11T12:26:44.7332806Z [1m[92m   Compiling[0m clap_builder v4.6.0
+2026-06-11T12:26:44.7562240Z [1m[92m   Compiling[0m tcp-stream v0.34.14
+2026-06-11T12:26:46.3143080Z [1m[92m   Compiling[0m tonic-prost v0.14.6
+2026-06-11T12:26:46.7462683Z [1m[92m   Compiling[0m dlv-list v0.5.2
+2026-06-11T12:26:48.7012622Z [1m[92m   Compiling[0m pest_generator v2.8.6
+2026-06-11T12:26:49.5556902Z [1m[92m   Compiling[0m deadpool-postgres v0.14.1
+2026-06-11T12:26:50.3872810Z [1m[92m   Compiling[0m darling_macro v0.23.0
+2026-06-11T12:26:50.4332487Z [1m[92m   Compiling[0m petgraph v0.8.3
+2026-06-11T12:26:50.7422493Z [1m[92m   Compiling[0m amq-protocol-uri v10.6.2
+2026-06-11T12:26:51.2412552Z [1m[92m   Compiling[0m crossterm v0.29.0
+2026-06-11T12:26:52.7132370Z [1m[92m   Compiling[0m sentry-contexts v0.48.2
+2026-06-11T12:26:52.8929261Z [1m[92m   Compiling[0m rapidhash v4.4.1
+2026-06-11T12:26:53.2803288Z [1m[92m   Compiling[0m tokio-native-tls v0.3.1
+2026-06-11T12:26:53.4412653Z [1m[92m   Compiling[0m crossbeam-epoch v0.9.18
+2026-06-11T12:26:53.6082777Z [1m[92m   Compiling[0m clap_derive v4.6.1
+2026-06-11T12:26:53.6672513Z [1m[92m   Compiling[0m zstd-sys v2.0.16+zstd.1.5.7
+2026-06-11T12:26:53.9929027Z [1m[92m   Compiling[0m bigdecimal v0.4.10
+2026-06-11T12:26:54.1022345Z [1m[92m   Compiling[0m raw-cpuid v11.6.0
+2026-06-11T12:26:54.3043159Z [1m[92m   Compiling[0m schemalane-macros v0.1.0 (https://github.com/donbeave/schemalane?branch=main#dd0d79d8)
+2026-06-11T12:26:54.3862350Z [1m[92m   Compiling[0m structmeta-derive v0.3.0
+2026-06-11T12:26:55.1032382Z [1m[92m   Compiling[0m winnow v1.0.3
+2026-06-11T12:26:56.0732900Z [1m[92m   Compiling[0m amq-protocol v10.6.2
+2026-06-11T12:26:56.7942320Z [1m[92m   Compiling[0m cfg_aliases v0.2.1
+2026-06-11T12:26:57.7922259Z [1m[92m   Compiling[0m hashbrown v0.14.5
+2026-06-11T12:26:58.7272632Z [1m[92m   Compiling[0m sentry v0.48.2
+2026-06-11T12:26:58.8972379Z [1m[92m   Compiling[0m quanta v0.12.6
+2026-06-11T12:26:58.9822545Z [1m[92m   Compiling[0m toml_parser v1.1.2+spec-1.1.0
+2026-06-11T12:26:59.0292350Z [1m[92m   Compiling[0m backon v1.6.0
+2026-06-11T12:26:59.3819241Z [1m[92m   Compiling[0m ordered-multimap v0.7.3
+2026-06-11T12:26:59.7152196Z [1m[92m   Compiling[0m clap v4.6.1
+2026-06-11T12:26:59.8715019Z [1m[92m   Compiling[0m structmeta v0.3.0
+2026-06-11T12:27:00.2482940Z [1m[92m   Compiling[0m metrics v0.24.6
+2026-06-11T12:27:00.2565452Z [1m[92m   Compiling[0m hyper-tls v0.6.0
+2026-06-11T12:27:00.2704075Z [1m[92m   Compiling[0m prost-build v0.14.4
+2026-06-11T12:27:00.6082529Z [1m[92m   Compiling[0m comfy-table v7.2.2
+2026-06-11T12:27:00.6702834Z [1m[92m   Compiling[0m amq-protocol-tcp v10.6.2
+2026-06-11T12:27:00.8853995Z [1m[92m   Compiling[0m pest_derive v2.8.6
+2026-06-11T12:27:00.9799458Z [1m[92m   Compiling[0m darling v0.23.0
+2026-06-11T12:27:01.4461652Z [1m[92m   Compiling[0m hashlink v0.11.1
+2026-06-11T12:27:01.4988435Z [1m[92m   Compiling[0m num-rational v0.4.2
+2026-06-11T12:27:01.5182535Z [1m[92m   Compiling[0m num-iter v0.1.45
+2026-06-11T12:27:01.7654031Z [1m[92m   Compiling[0m tower-http v0.6.11
+2026-06-11T12:27:01.7712162Z [1m[92m   Compiling[0m spin v0.9.8
+2026-06-11T12:27:01.7882494Z [1m[92m   Compiling[0m left-right v0.11.7
+2026-06-11T12:27:02.1373599Z [1m[92m   Compiling[0m rand_xoshiro v0.7.0
+2026-06-11T12:27:02.1679019Z [1m[92m   Compiling[0m num-complex v0.4.6
+2026-06-11T12:27:02.1872730Z [1m[92m   Compiling[0m async-stream-impl v0.3.6
+2026-06-11T12:27:02.4322890Z [1m[92m   Compiling[0m serde_repr v0.1.20
+2026-06-11T12:27:02.5222333Z [1m[92m   Compiling[0m toml_datetime v1.1.1+spec-1.1.0
+2026-06-11T12:27:02.5464025Z [1m[92m   Compiling[0m serde_spanned v1.1.1
+2026-06-11T12:27:02.7599966Z [1m[92m   Compiling[0m uname v0.1.1
+2026-06-11T12:27:02.8702986Z [1m[92m   Compiling[0m hostname v0.4.2
+2026-06-11T12:27:02.9462868Z [1m[92m   Compiling[0m encoding_rs v0.8.35
+2026-06-11T12:27:03.0302573Z [1m[92m   Compiling[0m sketches-ddsketch v0.3.1
+2026-06-11T12:27:03.1516733Z [1m[92m   Compiling[0m metrics-exporter-prometheus v0.18.3
+2026-06-11T12:27:03.2773520Z [1m[92m   Compiling[0m lapin v4.10.0
+2026-06-11T12:27:03.2934363Z [1m[92m   Compiling[0m hashbag v0.1.13
+2026-06-11T12:27:03.3562721Z [1m[92m   Compiling[0m arraydeque v0.5.1
+2026-06-11T12:27:03.5167544Z [1m[92m   Compiling[0m evmap v11.0.0
+2026-06-11T12:27:03.5882753Z [1m[92m   Compiling[0m metrics-util v0.20.4
+2026-06-11T12:27:03.6222458Z [1m[92m   Compiling[0m yaml-rust2 v0.11.0
+2026-06-11T12:27:03.8949507Z [1m[92m   Compiling[0m toml v1.1.2+spec-1.1.0
+2026-06-11T12:27:03.9505473Z [1m[92m   Compiling[0m async-stream v0.3.6
+2026-06-11T12:27:04.1795403Z [1m[92m   Compiling[0m num v0.4.3
+2026-06-11T12:27:04.1933749Z [1m[92m   Compiling[0m flume v0.12.0
+2026-06-11T12:27:04.2726506Z [1m[92m   Compiling[0m reqwest v0.13.4
+2026-06-11T12:27:04.3736169Z [1m[92m   Compiling[0m sentry-debug-images v0.48.2
+2026-06-11T12:27:04.4216414Z [1m[92m   Compiling[0m serde-untagged v0.1.9
+2026-06-11T12:27:04.6922748Z [1m[92m   Compiling[0m serde_with_macros v3.21.0
+2026-06-11T12:27:04.8691291Z [1m[92m   Compiling[0m json5 v0.4.1
+2026-06-11T12:27:05.5533259Z [1m[92m   Compiling[0m tron-processor-app v0.1.0 (/home/runner/work/java-monorepo/java-monorepo/backend-rust/tron-processor-app)
+2026-06-11T12:27:05.5753201Z [1m[92m   Compiling[0m parse-display-derive v0.9.1
+2026-06-11T12:27:05.7402171Z [1m[92m   Compiling[0m rust-ini v0.21.3
+2026-06-11T12:27:06.2202306Z [1m[92m   Compiling[0m sentry-tracing v0.48.2
+2026-06-11T12:27:06.5373144Z [1m[92m   Compiling[0m ron v0.12.1
+2026-06-11T12:27:06.5772330Z [1m[92m   Compiling[0m sentry-anyhow v0.48.2
+2026-06-11T12:27:06.9516560Z [1m[92m   Compiling[0m sentry-panic v0.48.2
+2026-06-11T12:27:07.1316991Z [1m[92m   Compiling[0m sha2 v0.10.9
+2026-06-11T12:27:07.2323324Z [1m[92m   Compiling[0m convert_case v0.6.0
+2026-06-11T12:27:07.3656902Z [1m[92m   Compiling[0m arc-swap v1.9.1
+2026-06-11T12:27:07.4519186Z [1m[92m   Compiling[0m xattr v1.6.1
+2026-06-11T12:27:07.4893957Z [1m[92m   Compiling[0m hyperlocal v0.9.1
+2026-06-11T12:27:07.5952357Z [1m[92m   Compiling[0m rustls-native-certs v0.8.4
+2026-06-11T12:27:07.7257303Z [1m[92m   Compiling[0m crossbeam-channel v0.5.15
+2026-06-11T12:27:07.7927104Z [1m[92m   Compiling[0m combine v4.6.7
+2026-06-11T12:27:07.9123275Z [1m[92m   Compiling[0m futures-executor v0.3.32
+2026-06-11T12:27:07.9819541Z [1m[92m   Compiling[0m filetime v0.2.29
+2026-06-11T12:27:08.1582780Z [1m[92m   Compiling[0m arcstr v1.2.0
+2026-06-11T12:27:08.2113489Z [1m[92m   Compiling[0m pathdiff v0.2.3
+2026-06-11T12:27:08.4432291Z [1m[92m   Compiling[0m rustc-hash v2.1.2
+2026-06-11T12:27:08.4569751Z [1m[92m   Compiling[0m tagptr v0.2.0
+2026-06-11T12:27:08.5707203Z [1m[92m   Compiling[0m zstd-safe v7.2.4
+2026-06-11T12:27:08.6371829Z [1m[92m   Compiling[0m xxhash-rust v0.8.15
+2026-06-11T12:27:08.6952438Z [1m[92m   Compiling[0m sha1_smol v1.0.1
+2026-06-11T12:27:08.7207651Z [1m[92m   Compiling[0m moka v0.12.15
+2026-06-11T12:27:08.8325081Z [1m[92m   Compiling[0m astral-tokio-tar v0.6.2
+2026-06-11T12:27:08.9583562Z [1m[92m   Compiling[0m redis v1.2.2
+2026-06-11T12:27:09.1482359Z [1m[92m   Compiling[0m config v0.15.23
+2026-06-11T12:27:09.1602316Z [1m[92m   Compiling[0m futures v0.3.32
+2026-06-11T12:27:09.5181285Z [1m[92m   Compiling[0m bs58 v0.5.1
+2026-06-11T12:27:09.7262911Z [1m[92m   Compiling[0m parse-display v0.9.1
+2026-06-11T12:27:10.1227456Z [1m[92m   Compiling[0m pg-bigdecimal v0.1.0 (https://github.com/donbeave/pg-bigdecimal?rev=4ec9df0fb27d114debfe8cd444106400b496741e#4ec9df0f)
+2026-06-11T12:27:10.2622331Z [1m[92m   Compiling[0m serde_with v3.21.0
+2026-06-11T12:27:10.7632799Z [1m[92m   Compiling[0m tracing-request-level v0.1.0 (https://github.com/donbeave/tracing-request-level?rev=aeaca706ae0485066cdfc20c65f999a3d2980b96#aeaca706)
+2026-06-11T12:27:10.7972465Z [1m[92m   Compiling[0m sha1 v0.10.6
+2026-06-11T12:27:10.9012216Z [1m[92m   Compiling[0m ferroid v2.0.0
+2026-06-11T12:27:11.1442542Z [1m[92m   Compiling[0m headers-core v0.3.0
+2026-06-11T12:27:11.1692571Z [1m[92m   Compiling[0m docker_credential v1.4.0
+2026-06-11T12:27:11.1790010Z [1m[92m   Compiling[0m etcetera v0.11.0
+2026-06-11T12:27:11.3845869Z [1m[92m   Compiling[0m dotenvy v0.15.7
+2026-06-11T12:27:11.4219300Z [1m[92m   Compiling[0m headers v0.4.1
+2026-06-11T12:27:11.4842040Z [1m[92m   Compiling[0m async-object-pool v0.2.0
+2026-06-11T12:27:11.6055859Z [1m[92m   Compiling[0m tabwriter v1.4.1
+2026-06-11T12:27:11.7192934Z [1m[92m   Compiling[0m serde_regex v1.2.0
+2026-06-11T12:27:11.7313077Z [1m[92m   Compiling[0m assert-json-diff v2.0.2
+2026-06-11T12:27:11.7963066Z [1m[92m   Compiling[0m path-tree v0.8.3
+2026-06-11T12:27:11.9836707Z [1m[92m   Compiling[0m stringmetrics v2.2.2
+2026-06-11T12:27:11.9881918Z [1m[92m   Compiling[0m similar v2.7.0
+2026-06-11T12:27:12.0772576Z [1m[92m   Compiling[0m futures-timer v3.0.4
+2026-06-11T12:27:12.2744156Z [1m[92m   Compiling[0m httpmock v0.8.3
+2026-06-11T12:27:14.4142892Z [1m[92m   Compiling[0m zstd v0.13.3
+2026-06-11T12:27:34.4256972Z [1m[92m   Compiling[0m pg_query_fmt v0.1.3 (https://github.com/donbeave/schemalane?branch=main#dd0d79d8)
+2026-06-11T12:27:35.9842773Z [1m[92m   Compiling[0m schemalane-core v0.1.20 (https://github.com/donbeave/schemalane?branch=main#dd0d79d8)
+2026-06-11T12:27:37.3252996Z [1m[92m   Compiling[0m schemalane-cli v0.1.26 (https://github.com/donbeave/schemalane?branch=main#dd0d79d8)
+2026-06-11T12:27:39.9462749Z [1m[92m   Compiling[0m tron-migration v0.1.0 (/home/runner/work/java-monorepo/java-monorepo/backend-rust/tron-migration)
+2026-06-11T12:28:04.5685332Z [1m[92m   Compiling[0m rustls-webpki v0.103.13
+2026-06-11T12:28:05.4563888Z [1m[92m   Compiling[0m ureq v3.3.0
+2026-06-11T12:28:05.4572085Z [1m[92m   Compiling[0m tokio-rustls v0.26.4
+2026-06-11T12:28:05.6612815Z [1m[92m   Compiling[0m hyper-rustls v0.27.9
+2026-06-11T12:28:06.5829526Z [1m[92m   Compiling[0m bollard-stubs v1.52.1-rc.29.1.3
+2026-06-11T12:28:08.6592579Z [1m[92m   Compiling[0m bollard v0.20.2
+2026-06-11T12:28:09.3131144Z [1m[92m   Compiling[0m testcontainers v0.27.3
+2026-06-11T12:28:09.7712887Z [1m[92m   Compiling[0m testcontainers-modules v0.15.0
+2026-06-11T12:28:24.8979489Z [1m[92m    Finished[0m `test` profile [unoptimized + debuginfo] target(s) in 2m 39s
+2026-06-11T12:28:25.0446177Z ────────────
+2026-06-11T12:28:25.0447411Z [32;1m Nextest run[0m ID [1m92c17bbc-67f2-4b4c-9ceb-6110d8c6cc41[0m with nextest profile: [1mci[0m
+2026-06-11T12:28:25.0448781Z [32;1m    Starting[0m [1m404[0m tests across [1m3[0m binaries
+2026-06-11T12:28:25.0582022Z [32;1m        PASS[0m [   0.010s] (  1/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mauto_import_java_env_vars_absent_add_no_override[0m
+2026-06-11T12:28:25.0584306Z [32;1m        PASS[0m [   0.010s] (  2/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mauto_import_java_env_vars_map_to_config[0m
+2026-06-11T12:28:25.0649020Z [32;1m        PASS[0m [   0.009s] (  3/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mbackfill_missing_java_env_vars_map_to_config[0m
+2026-06-11T12:28:25.0668998Z [32;1m        PASS[0m [   0.011s] (  4/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mbackfill_missing_java_env_vars_absent_use_java_defaults[0m
+2026-06-11T12:28:25.0732811Z [32;1m        PASS[0m [   0.009s] (  5/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mconnection_uri_java_env_vars_map_to_config[0m
+2026-06-11T12:28:25.0783072Z [32;1m        PASS[0m [   0.010s] (  6/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mdatabase_java_env_vars_map_to_config[0m
+2026-06-11T12:28:25.0831540Z [32;1m        PASS[0m [   0.010s] (  7/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mdatasource_java_env_vars_map_to_database_url[0m
+2026-06-11T12:28:25.0893386Z [32;1m        PASS[0m [   0.011s] (  8/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mdefault_database_pool_settings_match_java_application_yml[0m
+2026-06-11T12:28:25.0954522Z [32;1m        PASS[0m [   0.012s] (  9/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mdefault_server_port_matches_java_application_yml[0m
+2026-06-11T12:28:25.1003785Z [32;1m        PASS[0m [   0.010s] ( 10/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mdefault_slow_query_threshold_matches_java_application_yml[0m
+2026-06-11T12:28:25.1075698Z [32;1m        PASS[0m [   0.012s] ( 11/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mdefault_tron_rpc_url_matches_java_application_yml[0m
+2026-06-11T12:28:25.1078023Z [32;1m        PASS[0m [   0.009s] ( 12/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mmicronaut_tron_rpc_java_env_var_maps_to_config[0m
+2026-06-11T12:28:25.1182885Z [32;1m        PASS[0m [   0.010s] ( 13/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mrabbit_queue_monitor_java_env_vars_absent_add_no_threshold_override[0m
+2026-06-11T12:28:25.1203196Z [32;1m        PASS[0m [   0.011s] ( 14/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mrabbit_queue_monitor_java_env_vars_map_to_threshold_config[0m
+2026-06-11T12:28:25.1283503Z [32;1m        PASS[0m [   0.008s] ( 15/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mredis_cache_ttl_java_env_vars_map_to_redis_config[0m
+2026-06-11T12:28:25.1302747Z [32;1m        PASS[0m [   0.010s] ( 16/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mredis_cache_ttl_java_env_vars_absent_add_no_override[0m
+2026-06-11T12:28:25.1381854Z [32;1m        PASS[0m [   0.011s] ( 17/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mscheduled_task_java_env_vars_absent_add_no_feature_override[0m
+2026-06-11T12:28:25.1412956Z [32;1m        PASS[0m [   0.010s] ( 18/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mscheduled_task_java_env_vars_map_to_feature_flags[0m
+2026-06-11T12:28:25.1472350Z [32;1m        PASS[0m [   0.009s] ( 19/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mslow_query_threshold_java_env_var_maps_to_config[0m
+2026-06-11T12:28:25.1499785Z [32;1m        PASS[0m [   0.012s] ( 20/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1msentry_java_env_vars_map_to_config[0m
+2026-06-11T12:28:25.1573087Z [32;1m        PASS[0m [   0.009s] ( 21/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mstage_listener_consumer_java_env_vars_map_to_rabbitmq_config[0m
+2026-06-11T12:28:25.1586224Z [32;1m        PASS[0m [   0.009s] ( 22/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mstage_listener_enabled_java_env_vars_map_to_feature_flags[0m
+2026-06-11T12:28:25.1652051Z [32;1m        PASS[0m [   0.009s] ( 23/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mstage_listener_prefetch_defaults_match_java_queue_annotations[0m
+2026-06-11T12:28:25.1692740Z [32;1m        PASS[0m [   0.009s] ( 24/404) [35;1mtron-processor-app[0m [36mconfig::tests[0m[36m::[0m[34;1mtron_rpc_java_env_var_maps_to_config[0m
+2026-06-11T12:28:25.1752822Z [32;1m        PASS[0m [   0.010s] ( 25/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mblock3112940_contract_tx6_hex_to_base58check[0m
+2026-06-11T12:28:25.1776717Z [32;1m        PASS[0m [   0.010s] ( 26/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mblock3112940_owner_tx6_hex_to_base58check[0m
+2026-06-11T12:28:25.1864323Z [32;1m        PASS[0m [   0.011s] ( 27/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mblock5209277_contract_tx2_hex_to_base58check[0m
+2026-06-11T12:28:25.1903247Z [32;1m        PASS[0m [   0.009s] ( 28/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mblock5209277_owner_tx2_hex_to_base58check[0m
+2026-06-11T12:28:25.1958032Z [32;1m        PASS[0m [   0.009s] ( 29/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mblock8898629_contract_tx3_hex_to_base58check[0m
+2026-06-11T12:28:25.1973420Z [32;1m        PASS[0m [   0.010s] ( 30/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mblock5209277_trigger_smart_contract_maps_java_accounts_and_data[0m
+2026-06-11T12:28:25.2046701Z [32;1m        PASS[0m [   0.008s] ( 31/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mblock9570923_contract_tx10_hex_to_base58check[0m
+2026-06-11T12:28:25.2063871Z [32;1m        PASS[0m [   0.011s] ( 32/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mblock8898629_owner_tx3_hex_to_base58check[0m
+2026-06-11T12:28:25.2127462Z [32;1m        PASS[0m [   0.008s] ( 33/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mblock9570923_owner_tx10_hex_to_base58check[0m
+2026-06-11T12:28:25.2171702Z [32;1m        PASS[0m [   0.010s] ( 34/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mblock9570923_trigger_smart_contract_maps_java_accounts_and_data[0m
+2026-06-11T12:28:25.2221414Z [32;1m        PASS[0m [   0.009s] ( 35/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mblock9572184_contract_tx0_hex_to_base58check[0m
+2026-06-11T12:28:25.2271437Z [32;1m        PASS[0m [   0.010s] ( 36/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mblock9572184_owner_tx0_hex_to_base58check[0m
+2026-06-11T12:28:25.2322192Z [32;1m        PASS[0m [   0.010s] ( 37/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mblock9572184_owner_tx12_hex_to_base58check[0m
+2026-06-11T12:28:25.2363238Z [32;1m        PASS[0m [   0.009s] ( 38/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mblock9572184_owner_tx27_hex_to_base58check[0m
+2026-06-11T12:28:25.2422400Z [32;1m        PASS[0m [   0.010s] ( 39/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mblock9572184_to_tx12_hex_to_base58check[0m
+2026-06-11T12:28:25.2450872Z [32;1m        PASS[0m [   0.009s] ( 40/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mblock9572184_to_tx27_event_log_hex_to_base58check[0m
+2026-06-11T12:28:25.2517042Z [32;1m        PASS[0m [   0.009s] ( 41/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mempty_contract_result_errors_like_java_mapper[0m
+2026-06-11T12:28:25.2572969Z [32;1m        PASS[0m [   0.011s] ( 42/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mempty_contract_type_errors_like_java_mapper[0m
+2026-06-11T12:28:25.2603222Z [32;1m        PASS[0m [   0.009s] ( 43/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mevent_log_mapper_fields_match_java[0m
+2026-06-11T12:28:25.2663031Z [32;1m        PASS[0m [   0.009s] ( 44/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mevent_log_mapper_null_fields_match_java_defaults[0m
+2026-06-11T12:28:25.2700612Z [32;1m        PASS[0m [   0.010s] ( 45/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mgenesis_account2_hex_to_base58check[0m
+2026-06-11T12:28:25.2740639Z [32;1m        PASS[0m [   0.009s] ( 46/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mgenesis_account3_hex_to_base58check[0m
+2026-06-11T12:28:25.2803049Z [32;1m        PASS[0m [   0.009s] ( 47/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mgenesis_account4_hex_to_base58check[0m
+2026-06-11T12:28:25.2840676Z [32;1m        PASS[0m [   0.010s] ( 48/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mgenesis_internal_account_hex_to_base58check[0m
+2026-06-11T12:28:25.2900143Z [32;1m        PASS[0m [   0.011s] ( 49/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mgenesis_native_transfer_amounts_match_java_scaling[0m
+2026-06-11T12:28:25.2935147Z [32;1m        PASS[0m [   0.009s] ( 50/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block0_genesis_transfers_match_java[0m
+2026-06-11T12:28:25.3003352Z [32;1m        PASS[0m [   0.010s] ( 51/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block1038811_unfreeze_asset_first_tx_matches_java[0m
+2026-06-11T12:28:25.3148544Z [32;1m        PASS[0m [   0.014s] ( 52/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block10795006_trigger_transfer_failed_tx33_matches_java[0m
+2026-06-11T12:28:25.3263632Z [32;1m        PASS[0m [   0.010s] ( 53/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block1102553_transfer_with_unspecified_result_matches_java[0m
+2026-06-11T12:28:25.3453629Z [32;1m        PASS[0m [   0.050s] ( 54/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block10794999_clear_abi_tx22_matches_java[0m
+2026-06-11T12:28:25.3487327Z [32;1m        PASS[0m [   0.018s] ( 55/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block14092251_update_brokerage_tx61_matches_java[0m
+2026-06-11T12:28:25.3545028Z [32;1m        PASS[0m [   0.010s] ( 56/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block1990_account_update_matches_java[0m
+2026-06-11T12:28:25.3552805Z [32;1m        PASS[0m [   0.012s] ( 57/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block1785_witness_create_matches_java[0m
+2026-06-11T12:28:25.3643160Z [32;1m        PASS[0m [   0.009s] ( 58/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block2142_freeze_balance_matches_java[0m
+2026-06-11T12:28:25.3648894Z [32;1m        PASS[0m [   0.010s] ( 59/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block1_empty_block_matches_java[0m
+2026-06-11T12:28:25.3729218Z [32;1m        PASS[0m [   0.009s] ( 60/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block2153_vote_witness_matches_java[0m
+2026-06-11T12:28:25.3818638Z [32;1m        PASS[0m [   0.009s] ( 61/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block236710_update_asset_matches_java[0m
+2026-06-11T12:28:25.3863531Z [32;1m        PASS[0m [   0.021s] ( 62/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block22631158_trigger_stack_too_large_tx17_matches_java[0m
+2026-06-11T12:28:25.3933369Z [32;1m        PASS[0m [   0.010s] ( 63/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block26580_participate_asset_issue_matches_java[0m
+2026-06-11T12:28:25.3963456Z [32;1m        PASS[0m [   0.010s] ( 64/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block3019021_proposal_create_tx9_matches_java[0m
+2026-06-11T12:28:25.4022550Z [32;1m        PASS[0m [   0.010s] ( 65/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block3019054_proposal_approve_tx2_matches_java[0m
+2026-06-11T12:28:25.4064008Z [32;1m        PASS[0m [   0.010s] ( 66/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block3111682_create_smart_contract_matches_java[0m
+2026-06-11T12:28:25.4126699Z [32;1m        PASS[0m [   0.010s] ( 67/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block3112900_create_smart_contract_out_of_energy_matches_java[0m
+2026-06-11T12:28:25.4183493Z [32;1m        PASS[0m [   0.012s] ( 68/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block3112940_transfer_asset_and_trigger_match_java[0m
+2026-06-11T12:28:25.4233203Z [32;1m        PASS[0m [   0.010s] ( 69/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block3117806_reverted_trigger_tx1_matches_java[0m
+2026-06-11T12:28:25.4294382Z [32;1m        PASS[0m [   0.011s] ( 70/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block3164047_update_setting_tx0_matches_java[0m
+2026-06-11T12:28:25.4332963Z [32;1m        PASS[0m [   0.009s] ( 71/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block3188_asset_issue_matches_java[0m
+2026-06-11T12:28:25.4412158Z [32;1m        PASS[0m [   0.011s] ( 72/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block3242162_exchange_create_tx13_matches_java[0m
+2026-06-11T12:28:25.4453199Z [32;1m        PASS[0m [   0.012s] ( 73/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block3243954_exchange_transaction_tx4_matches_java[0m
+2026-06-11T12:28:25.4523885Z [32;1m        PASS[0m [   0.011s] ( 74/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block3307928_trigger_out_of_time_tx6_matches_java[0m
+2026-06-11T12:28:25.4557179Z [32;1m        PASS[0m [   0.012s] ( 75/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block3422904_trigger_unknown_tx4_matches_java[0m
+2026-06-11T12:28:25.4683542Z [32;1m        PASS[0m [   0.016s] ( 76/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block3906767_set_account_id_tx29_matches_java[0m
+2026-06-11T12:28:25.4742968Z [32;1m        PASS[0m [   0.017s] ( 77/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block3909044_exchange_inject_tx40_matches_java[0m
+2026-06-11T12:28:25.4824458Z [32;1m        PASS[0m [   0.014s] ( 78/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block3909094_exchange_withdraw_tx26_matches_java[0m
+2026-06-11T12:28:25.4903874Z [32;1m        PASS[0m [   0.016s] ( 79/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block4106644_trigger_illegal_operation_tx36_matches_java[0m
+2026-06-11T12:28:25.4924348Z [32;1m        PASS[0m [   0.010s] ( 80/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block4386_owner_only_transactions_match_java[0m
+2026-06-11T12:28:25.5061944Z [32;1m        PASS[0m [   0.017s] ( 81/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block4743556_proposal_delete_tx23_matches_java[0m
+2026-06-11T12:28:25.5113099Z [32;1m        PASS[0m [   0.019s] ( 82/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block4844557_update_energy_limit_tx73_matches_java[0m
+2026-06-11T12:28:25.5368824Z [32;1m        PASS[0m [   0.031s] ( 83/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block50241141_resource_contracts_match_java[0m
+2026-06-11T12:28:25.5592152Z [32;1m        PASS[0m [   0.048s] ( 84/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block50252192_freeze_balance_v2_tx280_matches_java[0m
+2026-06-11T12:28:25.5744060Z [32;1m        PASS[0m [   0.036s] ( 85/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block55232675_withdraw_expire_unfreeze_tx2_matches_java[0m
+2026-06-11T12:28:25.5828193Z [32;1m        PASS[0m [   0.010s] ( 86/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block5584_transfer_asset_matches_java[0m
+2026-06-11T12:28:25.5863764Z [32;1m        PASS[0m [   0.025s] ( 87/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block55369803_cancel_all_unfreeze_v2_tx32_matches_java[0m
+2026-06-11T12:28:25.5987293Z [32;1m        PASS[0m [   0.015s] ( 88/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block6067074_trigger_out_of_memory_tx24_matches_java[0m
+2026-06-11T12:28:25.6043332Z [32;1m        PASS[0m [   0.018s] ( 89/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block7674756_account_permission_update_tx33_matches_java[0m
+2026-06-11T12:28:25.6122938Z [32;1m        PASS[0m [   0.008s] ( 90/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block8905_withdraw_balance_matches_java[0m
+2026-06-11T12:28:25.6142083Z [32;1m        PASS[0m [   0.015s] ( 91/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block8898629_trigger_missing_data_tx3_matches_java[0m
+2026-06-11T12:28:25.6199391Z [32;1m        PASS[0m [   0.009s] ( 92/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block91041_unfreeze_balance_matches_java[0m
+2026-06-11T12:28:25.6283740Z [32;1m        PASS[0m [   0.008s] ( 93/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block9441_account_create_first_tx_matches_java[0m
+2026-06-11T12:28:25.6293899Z [32;1m        PASS[0m [   0.015s] ( 94/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block9416745_create_smart_contract_stack_too_small_tx21_matches_java[0m
+2026-06-11T12:28:25.6381366Z [32;1m        PASS[0m [   0.008s] ( 95/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mto_tron_account_plain_hex_converts_to_base58check[0m
+2026-06-11T12:28:25.6432097Z [32;1m        PASS[0m [   0.014s] ( 96/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mmapper_to_proto_block9570916_trigger_bad_jump_destination_tx18_matches_java[0m
+2026-06-11T12:28:25.6492978Z [32;1m        PASS[0m [   0.009s] ( 97/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mto_tron_account_rejects_0x_prefix_like_java[0m
+2026-06-11T12:28:25.6537849Z [32;1m        PASS[0m [   0.011s] ( 98/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mto_tron_account_rejects_blank_hex_like_java[0m
+2026-06-11T12:28:25.6572709Z [32;1m        PASS[0m [   0.008s] ( 99/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mto_tron_account_to_address_block4817962[0m
+2026-06-11T12:28:25.6644071Z [32;1m        PASS[0m [   0.010s] (100/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mtransfer_asset_contract_no_amount_when_asset_name_absent[0m
+2026-06-11T12:28:25.6679018Z [32;1m        PASS[0m [   0.008s] (101/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mtransfer_asset_contract_no_amount_when_asset_name_blank[0m
+2026-06-11T12:28:25.6733138Z [32;1m        PASS[0m [   0.010s] (102/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mtransfer_asset_contract_populates_trc10_amount_when_asset_name_present[0m
+2026-06-11T12:28:25.6753552Z [32;1m        PASS[0m [   0.010s] (103/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mtransfer_contract_maps_owner_and_to_and_trx_amount[0m
+2026-06-11T12:28:25.6842907Z [32;1m        PASS[0m [   0.011s] (104/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mtrigger_smart_contract_missing_contract_address_keeps_default[0m
+2026-06-11T12:28:25.6845854Z [32;1m        PASS[0m [   0.011s] (105/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mtrigger_smart_contract_maps_contract_address_and_data[0m
+2026-06-11T12:28:25.6936525Z [32;1m        PASS[0m [   0.009s] (106/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mtrigger_smart_contract_missing_data_produces_none_data[0m
+2026-06-11T12:28:25.6944011Z [32;1m        PASS[0m [   0.010s] (107/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1mtrigger_smart_contract_preserves_empty_data_like_java[0m
+2026-06-11T12:28:25.7023358Z [32;1m        PASS[0m [   0.009s] (108/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1munrecognized_contract_result_errors_like_java_mapper[0m
+2026-06-11T12:28:25.7039473Z [32;1m        PASS[0m [   0.008s] (109/404) [35;1mtron-processor-app[0m [36mpipeline::mapper::tests[0m[36m::[0m[34;1munrecognized_contract_type_errors_like_java_mapper[0m
+2026-06-11T12:28:25.7117964Z [32;1m        PASS[0m [   0.009s] (110/404) [35;1mtron-processor-app[0m [36mpipeline::stage0::tests[0m[36m::[0m[34;1mattaches_event_logs_to_matching_transaction[0m
+2026-06-11T12:28:25.7136226Z [32;1m        PASS[0m [   0.011s] (111/404) [35;1mtron-processor-app[0m [36mpipeline::stage0::tests[0m[36m::[0m[34;1mblock3112940_stage0_rabbit_payload_size_matches_java_evidence[0m
+2026-06-11T12:28:25.7319814Z [32;1m        PASS[0m [   0.018s] (112/404) [35;1mtron-processor-app[0m [36mpipeline::stage0::tests[0m[36m::[0m[34;1mblock5209277_stage0_rabbit_payload_size_matches_java_evidence[0m
+2026-06-11T12:28:25.7337898Z [32;1m        PASS[0m [   0.022s] (113/404) [35;1mtron-processor-app[0m [36mpipeline::stage0::tests[0m[36m::[0m[34;1mblock4817962_stage0_rabbit_payload_size_matches_java_evidence[0m
+2026-06-11T12:28:25.7493181Z [32;1m        PASS[0m [   0.017s] (114/404) [35;1mtron-processor-app[0m [36mpipeline::stage0::tests[0m[36m::[0m[34;1mblock8898629_focused_transaction_stage0_has_no_event_logs[0m
+2026-06-11T12:28:25.7522958Z [32;1m        PASS[0m [   0.017s] (115/404) [35;1mtron-processor-app[0m [36mpipeline::stage0::tests[0m[36m::[0m[34;1mblock8898629_stage0_rabbit_payload_size_matches_java_evidence[0m
+2026-06-11T12:28:25.7660492Z [32;1m        PASS[0m [   0.017s] (116/404) [35;1mtron-processor-app[0m [36mpipeline::stage0::tests[0m[36m::[0m[34;1mblock9570923_stage0_rabbit_payload_size_matches_java_evidence[0m
+2026-06-11T12:28:25.7700544Z [32;1m        PASS[0m [   0.019s] (117/404) [35;1mtron-processor-app[0m [36mpipeline::stage0::tests[0m[36m::[0m[34;1mblock9572184_stage0_rabbit_payload_size_matches_java_evidence[0m
+2026-06-11T12:28:25.7792639Z [32;1m        PASS[0m [   0.009s] (118/404) [35;1mtron-processor-app[0m [36mpipeline::stage0::tests[0m[36m::[0m[34;1mduplicate_tx_id_returns_error[0m
+2026-06-11T12:28:25.7860162Z [32;1m        PASS[0m [   0.020s] (119/404) [35;1mtron-processor-app[0m [36mpipeline::stage0::tests[0m[36m::[0m[34;1mblock9572184_tx27_event_log_list_mapping_matches_java[0m
+2026-06-11T12:28:25.7887492Z [32;1m        PASS[0m [   0.009s] (120/404) [35;1mtron-processor-app[0m [36mpipeline::stage0::tests[0m[36m::[0m[34;1mgenesis_block_stage0_shape_matches_java[0m
+2026-06-11T12:28:25.7956146Z [32;1m        PASS[0m [   0.009s] (121/404) [35;1mtron-processor-app[0m [36mpipeline::stage0::tests[0m[36m::[0m[34;1mgenesis_stage0_rabbit_payload_size_matches_java_evidence[0m
+2026-06-11T12:28:25.8011376Z [32;1m        PASS[0m [   0.012s] (122/404) [35;1mtron-processor-app[0m [36mpipeline::stage0::tests[0m[36m::[0m[34;1msets_event_logs_loaded_when_no_logs_present[0m
+2026-06-11T12:28:25.8043071Z [32;1m        PASS[0m [   0.008s] (123/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1madd_account_row_id_deduplicates[0m
+2026-06-11T12:28:25.8109739Z [32;1m        PASS[0m [   0.010s] (124/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock3112940_block_stage1_row_tuple_matches_java[0m
+2026-06-11T12:28:25.8124273Z [32;1m        PASS[0m [   0.008s] (125/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock3112940_stage1_account_rows_match_java_evidence[0m
+2026-06-11T12:28:25.8188516Z [32;1m        PASS[0m [   0.007s] (126/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock3112940_stage1_proto_ids_match_java_shape[0m
+2026-06-11T12:28:25.8230708Z [32;1m        PASS[0m [   0.010s] (127/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock3112940_stage1_signature_tuples_match_java_evidence[0m
+2026-06-11T12:28:25.8267618Z [32;1m        PASS[0m [   0.008s] (128/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock3112940_transaction6_stage1_tuple_matches_java[0m
+2026-06-11T12:28:25.8329559Z [32;1m        PASS[0m [   0.009s] (129/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock4817962_block_stage1_row_tuple_matches_java[0m
+2026-06-11T12:28:25.8353657Z [32;1m        PASS[0m [   0.009s] (130/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock4817962_stage1_proto_ids_match_java_shape[0m
+2026-06-11T12:28:25.8426244Z [32;1m        PASS[0m [   0.009s] (131/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock4817962_transaction54_stage1_tuple_matches_java[0m
+2026-06-11T12:28:25.8449679Z [32;1m        PASS[0m [   0.010s] (132/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock5209277_block_stage1_row_tuple_matches_java[0m
+2026-06-11T12:28:25.8504223Z [32;1m        PASS[0m [   0.009s] (133/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock5209277_stage1_proto_ids_match_java_shape[0m
+2026-06-11T12:28:25.8534240Z [32;1m        PASS[0m [   0.008s] (134/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock5209277_stage1_signature_tuples_match_java_evidence[0m
+2026-06-11T12:28:25.8589981Z [32;1m        PASS[0m [   0.008s] (135/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock5209277_transaction2_stage1_tuple_matches_java[0m
+2026-06-11T12:28:25.8628080Z [32;1m        PASS[0m [   0.009s] (136/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock8898629_block_stage1_row_tuple_matches_java[0m
+2026-06-11T12:28:25.8691475Z [32;1m        PASS[0m [   0.010s] (137/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock8898629_stage1_proto_ids_match_java_shape[0m
+2026-06-11T12:28:25.8729147Z [32;1m        PASS[0m [   0.010s] (138/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock8898629_transaction3_stage1_tuple_matches_java[0m
+2026-06-11T12:28:25.8800418Z [32;1m        PASS[0m [   0.011s] (139/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock9570923_block_stage1_row_tuple_matches_java[0m
+2026-06-11T12:28:25.8806226Z [32;1m        PASS[0m [   0.008s] (140/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock9570923_stage1_proto_ids_match_java_shape[0m
+2026-06-11T12:28:25.8888641Z [32;1m        PASS[0m [   0.008s] (141/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock9570923_stage1_signature_tuples_match_java_evidence[0m
+2026-06-11T12:28:25.8942889Z [32;1m        PASS[0m [   0.012s] (142/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock9570923_transaction10_stage1_tuple_matches_java[0m
+2026-06-11T12:28:25.8982738Z [32;1m        PASS[0m [   0.008s] (143/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock9572184_block_stage1_row_tuple_matches_java[0m
+2026-06-11T12:28:25.9020270Z [32;1m        PASS[0m [   0.009s] (144/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock9572184_existing_state_precreates_block_and_focused_transaction[0m
+2026-06-11T12:28:25.9068714Z [32;1m        PASS[0m [   0.010s] (145/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock9572184_existing_transaction_fallback_sets_stage1_processed_on_retry[0m
+2026-06-11T12:28:25.9111720Z [32;1m        PASS[0m [   0.009s] (146/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock9572184_stage1_proto_ids_match_java_shape[0m
+2026-06-11T12:28:25.9166198Z [32;1m        PASS[0m [   0.010s] (147/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock9572184_transaction0_stage1_tuple_matches_java[0m
+2026-06-11T12:28:25.9213336Z [32;1m        PASS[0m [   0.009s] (148/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock9572184_transaction12_stage1_tuple_matches_java[0m
+2026-06-11T12:28:25.9278548Z [32;1m        PASS[0m [   0.011s] (149/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock9572184_transaction27_event_log_stage1_tuple_matches_java[0m
+2026-06-11T12:28:25.9294839Z [32;1m        PASS[0m [   0.008s] (150/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mblock9572184_transaction27_stage1_tuple_matches_java[0m
+2026-06-11T12:28:25.9421751Z [32;1m        PASS[0m [   0.014s] (151/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_result_bad_jump_destination[0m
+2026-06-11T12:28:25.9452907Z [32;1m        PASS[0m [   0.015s] (152/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_result_db_invalid_value_errors[0m
+2026-06-11T12:28:25.9536819Z [32;1m        PASS[0m [   0.012s] (153/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_result_db_success[0m
+2026-06-11T12:28:25.9539475Z [32;1m        PASS[0m [   0.010s] (154/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_result_db_unspecified_is_none[0m
+2026-06-11T12:28:25.9633021Z [32;1m        PASS[0m [   0.009s] (155/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_result_illegal_operation[0m
+2026-06-11T12:28:25.9647863Z [32;1m        PASS[0m [   0.009s] (156/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_result_out_of_energy[0m
+2026-06-11T12:28:25.9727639Z [32;1m        PASS[0m [   0.009s] (157/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_result_out_of_memory[0m
+2026-06-11T12:28:25.9753816Z [32;1m        PASS[0m [   0.010s] (158/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_result_out_of_time[0m
+2026-06-11T12:28:25.9828704Z [32;1m        PASS[0m [   0.009s] (159/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_result_stack_too_large[0m
+2026-06-11T12:28:25.9853133Z [32;1m        PASS[0m [   0.010s] (160/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_result_revert[0m
+2026-06-11T12:28:25.9924348Z [32;1m        PASS[0m [   0.009s] (161/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_result_stack_too_small[0m
+2026-06-11T12:28:25.9929132Z [32;1m        PASS[0m [   0.009s] (162/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_result_transfer_failed[0m
+2026-06-11T12:28:26.0026384Z [32;1m        PASS[0m [   0.010s] (163/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_result_unknown[0m
+2026-06-11T12:28:26.0030558Z [32;1m        PASS[0m [   0.010s] (164/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_type_account_update[0m
+2026-06-11T12:28:26.0132380Z [32;1m        PASS[0m [   0.009s] (165/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_type_db_invalid_value_errors[0m
+2026-06-11T12:28:26.0146760Z [32;1m        PASS[0m [   0.009s] (166/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_type_asset_issue[0m
+2026-06-11T12:28:26.0218132Z [32;1m        PASS[0m [   0.010s] (167/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_type_db_unspecified_errors[0m
+2026-06-11T12:28:26.0229202Z [32;1m        PASS[0m [   0.010s] (168/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_type_db_roundtrip_transfer_contract[0m
+2026-06-11T12:28:26.0314447Z [32;1m        PASS[0m [   0.009s] (169/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_type_transfer_asset[0m
+2026-06-11T12:28:26.0316840Z [32;1m        PASS[0m [   0.009s] (170/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_type_freeze_balance[0m
+2026-06-11T12:28:26.0409103Z [32;1m        PASS[0m [   0.009s] (171/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_type_vote_witness[0m
+2026-06-11T12:28:26.0411861Z [32;1m        PASS[0m [   0.009s] (172/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_type_trigger_smart_contract[0m
+2026-06-11T12:28:26.0495210Z [32;1m        PASS[0m [   0.008s] (173/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_type_witness_create[0m
+2026-06-11T12:28:26.0522931Z [32;1m        PASS[0m [   0.008s] (174/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mcontract_type_witness_update[0m
+2026-06-11T12:28:26.0588620Z [32;1m        PASS[0m [   0.009s] (175/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mgenesis_block_stage1_row_tuple_matches_java[0m
+2026-06-11T12:28:26.0593854Z [32;1m        PASS[0m [   0.008s] (176/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mgenesis_stage1_proto_ids_match_java_shape[0m
+2026-06-11T12:28:26.0680722Z [32;1m        PASS[0m [   0.009s] (177/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mgenesis_transaction_stage1_rows_match_java[0m
+2026-06-11T12:28:26.0696987Z [32;1m        PASS[0m [   0.009s] (178/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mgenesis_stage1_rabbit_payload_size_matches_java_evidence[0m
+2026-06-11T12:28:26.0780301Z [32;1m        PASS[0m [   0.010s] (179/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mget_method_id_block5209277_transaction2[0m
+2026-06-11T12:28:26.0803995Z [32;1m        PASS[0m [   0.010s] (180/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mget_method_id_block3112940_transaction6[0m
+2026-06-11T12:28:26.0875945Z [32;1m        PASS[0m [   0.008s] (181/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mget_method_id_block9572184_transaction0[0m
+2026-06-11T12:28:26.0892574Z [32;1m        PASS[0m [   0.010s] (182/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mget_method_id_block9570923_transaction10[0m
+2026-06-11T12:28:26.0959621Z [32;1m        PASS[0m [   0.009s] (183/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mget_method_id_block9572184_transaction27[0m
+2026-06-11T12:28:26.0992766Z [32;1m        PASS[0m [   0.010s] (184/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mget_method_id_too_short_returns_none[0m
+2026-06-11T12:28:26.1059886Z [32;1m        PASS[0m [   0.009s] (185/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mget_method_id_with_hex_prefix[0m
+2026-06-11T12:28:26.1081594Z [32;1m        PASS[0m [   0.010s] (186/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mget_method_id_without_hex_prefix[0m
+2026-06-11T12:28:26.1150300Z [32;1m        PASS[0m [   0.010s] (187/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mstage1_already_processed_selects_individual_path[0m
+2026-06-11T12:28:26.1164672Z [32;1m        PASS[0m [   0.008s] (188/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mstage1_not_processed_selects_batch_path[0m
+2026-06-11T12:28:26.1239418Z [32;1m        PASS[0m [   0.009s] (189/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mtron_model_utils_block_date_default_matches_java[0m
+2026-06-11T12:28:26.1250301Z [32;1m        PASS[0m [   0.008s] (190/404) [35;1mtron-processor-app[0m [36mpipeline::stage1::tests[0m[36m::[0m[34;1mtron_model_utils_transaction_date_default_matches_java[0m
+2026-06-11T12:28:26.1329948Z [32;1m        PASS[0m [   0.008s] (191/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mbatch_path_is_default[0m
+2026-06-11T12:28:26.1333302Z [32;1m        PASS[0m [   0.009s] (192/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mapprove_method_id_not_recognized_as_transfer[0m
+2026-06-11T12:28:26.1442733Z [32;1m        PASS[0m [   0.009s] (193/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock3112940_method_id_not_recognized_as_transfer[0m
+2026-06-11T12:28:26.1462667Z [32;1m        PASS[0m [   0.010s] (194/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock3112940_rabbit_payload_sizes_match_java_evidence[0m
+2026-06-11T12:28:26.1513904Z [32;1m        PASS[0m [   0.008s] (195/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock3112940_transaction6_stage2_status_tuple_matches_java[0m
+2026-06-11T12:28:26.1552724Z [32;1m        PASS[0m [   0.011s] (196/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock3112940_transfer6_absent_after_stage0_matches_java[0m
+2026-06-11T12:28:26.1611803Z [32;1m        PASS[0m [   0.010s] (197/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock4817962_native_transfer_stage2_tuple_matches_java[0m
+2026-06-11T12:28:26.1642792Z [32;1m        PASS[0m [   0.008s] (198/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock4817962_native_transfer_uses_java_source_and_no_event_log_index[0m
+2026-06-11T12:28:26.1722504Z [32;1m        PASS[0m [   0.009s] (199/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock4817962_rabbit_payload_sizes_match_java_evidence[0m
+2026-06-11T12:28:26.1743016Z [32;1m        PASS[0m [   0.009s] (200/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock4817962_transaction54_stage2_status_tuple_matches_java[0m
+2026-06-11T12:28:26.1806212Z [32;1m        PASS[0m [   0.010s] (201/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock5209277_rabbit_payload_sizes_match_java_evidence[0m
+2026-06-11T12:28:26.1818206Z [32;1m        PASS[0m [   0.010s] (202/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock5209277_method_id_not_recognized_as_transfer[0m
+2026-06-11T12:28:26.1896332Z [32;1m        PASS[0m [   0.009s] (203/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock5209277_transaction2_stage2_status_tuple_matches_java[0m
+2026-06-11T12:28:26.1907354Z [32;1m        PASS[0m [   0.009s] (204/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock5209277_transfer2_absent_in_all_stages_matches_java[0m
+2026-06-11T12:28:26.1994160Z [32;1m        PASS[0m [   0.009s] (205/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock8898629_transaction3_stage2_status_tuple_matches_java[0m
+2026-06-11T12:28:26.2023003Z [32;1m        PASS[0m [   0.011s] (206/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock8898629_rabbit_payload_sizes_match_java_evidence[0m
+2026-06-11T12:28:26.2073765Z [32;1m        PASS[0m [   0.008s] (207/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock8898629_transfer3_absent_in_all_stages_matches_java[0m
+2026-06-11T12:28:26.2097445Z [32;1m        PASS[0m [   0.008s] (208/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9570923_rabbit_payload_sizes_match_java_evidence[0m
+2026-06-11T12:28:26.2172506Z [32;1m        PASS[0m [   0.008s] (209/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9570923_transaction10_stage2_status_tuple_matches_java[0m
+2026-06-11T12:28:26.2192779Z [32;1m        PASS[0m [   0.009s] (210/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9570923_transfer10_absent_in_all_stages_matches_java[0m
+2026-06-11T12:28:26.2251622Z [32;1m        PASS[0m [   0.009s] (211/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9572184_baseline_transfer_sources_indexes_and_amounts_match_java[0m
+2026-06-11T12:28:26.2264542Z [32;1m        PASS[0m [   0.008s] (212/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9572184_existing_transaction_rabbit_payload_sizes_match_java_evidence[0m
+2026-06-11T12:28:26.2363682Z [32;1m        PASS[0m [   0.009s] (213/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9572184_existing_transfer_precreate_flow_matches_java[0m
+2026-06-11T12:28:26.2382850Z [32;1m        PASS[0m [   0.010s] (214/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9572184_existing_transaction_tx0_remains_transfer_free[0m
+2026-06-11T12:28:26.2450715Z [32;1m        PASS[0m [   0.010s] (215/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9572184_existing_trx_transfer_lookup_key_matches_java[0m
+2026-06-11T12:28:26.2463744Z [32;1m        PASS[0m [   0.010s] (216/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9572184_existing_trx_transfer_rabbit_payload_sizes_match_java_evidence[0m
+2026-06-11T12:28:26.2548114Z [32;1m        PASS[0m [   0.009s] (217/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9572184_existing_usdt_transfer_lookup_key_matches_java[0m
+2026-06-11T12:28:26.2552134Z [32;1m        PASS[0m [   0.010s] (218/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9572184_existing_trx_transfer_stage1_tuple_matches_java[0m
+2026-06-11T12:28:26.2634535Z [32;1m        PASS[0m [   0.008s] (219/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9572184_existing_usdt_transfer_rabbit_payload_sizes_match_java_evidence[0m
+2026-06-11T12:28:26.2653783Z [32;1m        PASS[0m [   0.009s] (220/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9572184_existing_usdt_transfer_stage1_tuple_matches_java[0m
+2026-06-11T12:28:26.2714145Z [32;1m        PASS[0m [   0.008s] (221/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9572184_rabbit_payload_sizes_match_java_evidence[0m
+2026-06-11T12:28:26.2738957Z [32;1m        PASS[0m [   0.009s] (222/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9572184_transaction0_stage2_status_tuple_matches_java[0m
+2026-06-11T12:28:26.2801470Z [32;1m        PASS[0m [   0.009s] (223/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9572184_transaction12_stage2_status_tuple_matches_java[0m
+2026-06-11T12:28:26.2830606Z [32;1m        PASS[0m [   0.009s] (224/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9572184_transaction27_stage2_status_tuple_matches_java[0m
+2026-06-11T12:28:26.2894691Z [32;1m        PASS[0m [   0.009s] (225/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9572184_transfer0_absent_after_stage0_matches_java[0m
+2026-06-11T12:28:26.2926457Z [32;1m        PASS[0m [   0.010s] (226/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9572184_transfer12_stage2_tuple_matches_java[0m
+2026-06-11T12:28:26.3003396Z [32;1m        PASS[0m [   0.010s] (227/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mblock9572184_transfer27_stage2_tuple_matches_java[0m
+2026-06-11T12:28:26.3011737Z [32;1m        PASS[0m [   0.008s] (228/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mdecode_transfer_event_log_amount[0m
+2026-06-11T12:28:26.3096066Z [32;1m        PASS[0m [   0.008s] (229/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mgenesis_native_transfer_account_routes_match_java[0m
+2026-06-11T12:28:26.3123557Z [32;1m        PASS[0m [   0.010s] (230/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mdecode_transfer_params_address_conversion[0m
+2026-06-11T12:28:26.3192395Z [32;1m        PASS[0m [   0.010s] (231/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mgenesis_native_transfer_stage2_tuples_match_java[0m
+2026-06-11T12:28:26.3203290Z [32;1m        PASS[0m [   0.009s] (232/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mgenesis_native_transfers_use_java_source_and_no_event_log_index[0m
+2026-06-11T12:28:26.3287165Z [32;1m        PASS[0m [   0.008s] (233/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mgenesis_transaction_stage2_status_tuples_match_java[0m
+2026-06-11T12:28:26.3303396Z [32;1m        PASS[0m [   0.010s] (234/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mgenesis_stage2_rabbit_payload_size_matches_java_evidence[0m
+2026-06-11T12:28:26.3382540Z [32;1m        PASS[0m [   0.008s] (235/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mgenesis_transfers_are_absent_before_stage2[0m
+2026-06-11T12:28:26.3400332Z [32;1m        PASS[0m [   0.009s] (236/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1minvalid_trx_native_transfer_amount_errors[0m
+2026-06-11T12:28:26.3471524Z [32;1m        PASS[0m [   0.010s] (237/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mis_transfer_event_recognizes_transfer_signature[0m
+2026-06-11T12:28:26.3490486Z [32;1m        PASS[0m [   0.008s] (238/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mis_transfer_method_id_recognizes_a9059cbb[0m
+2026-06-11T12:28:26.3573751Z [32;1m        PASS[0m [   0.010s] (239/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mmissing_trx_native_transfer_amount_defaults_to_zero[0m
+2026-06-11T12:28:26.3578594Z [32;1m        PASS[0m [   0.010s] (240/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mnon_transfer_method_id_not_recognized[0m
+2026-06-11T12:28:26.3660836Z [32;1m        PASS[0m [   0.008s] (241/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mtransfer_event_has_three_topics[0m
+2026-06-11T12:28:26.3674224Z [32;1m        PASS[0m [   0.010s] (242/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1mtrx_native_transfer_amount_from_money_string[0m
+2026-06-11T12:28:26.3757794Z [32;1m        PASS[0m [   0.010s] (243/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1musdt_contract_address_base58check[0m
+2026-06-11T12:28:26.3789620Z [32;1m        PASS[0m [   0.011s] (244/404) [35;1mtron-processor-app[0m [36mpipeline::stage2::tests[0m[36m::[0m[34;1musdt_transfer_event_log_data_raw_amount[0m
+2026-06-11T12:28:26.3844223Z [32;1m        PASS[0m [   0.008s] (245/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1maccount_import_status_gate_matches_java_equals[0m
+2026-06-11T12:28:26.3905095Z [32;1m        PASS[0m [   0.011s] (246/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1maccount_name_hex_decoded_to_utf8[0m
+2026-06-11T12:28:26.3949921Z [32;1m        PASS[0m [   0.011s] (247/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mblock3112940_block_stage3_status_tuple_matches_java[0m
+2026-06-11T12:28:26.3979138Z [32;1m        PASS[0m [   0.008s] (248/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mblock3112940_focused_account_stage_lifecycle_matches_java[0m
+2026-06-11T12:28:26.4052900Z [32;1m        PASS[0m [   0.009s] (249/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mblock3112940_focused_accounts_map_to_java_stage3_values[0m
+2026-06-11T12:28:26.4068449Z [32;1m        PASS[0m [   0.009s] (250/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mblock4817962_block_stage3_status_tuple_matches_java[0m
+2026-06-11T12:28:26.4128253Z [32;1m        PASS[0m [   0.009s] (251/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mblock4817962_focused_account_stage_lifecycle_matches_java[0m
+2026-06-11T12:28:26.4168795Z [32;1m        PASS[0m [   0.010s] (252/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mblock4817962_focused_accounts_map_to_java_stage3_values[0m
+2026-06-11T12:28:26.4215072Z [32;1m        PASS[0m [   0.008s] (253/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mblock5209277_block_stage3_status_tuple_matches_java[0m
+2026-06-11T12:28:26.4283018Z [32;1m        PASS[0m [   0.009s] (254/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mblock5209277_focused_account_stage_lifecycle_matches_java[0m
+2026-06-11T12:28:26.4306830Z [32;1m        PASS[0m [   0.009s] (255/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mblock5209277_focused_accounts_map_to_java_stage3_values[0m
+2026-06-11T12:28:26.4382356Z [32;1m        PASS[0m [   0.010s] (256/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mblock8898629_block_stage3_status_tuple_matches_java[0m
+2026-06-11T12:28:26.4404168Z [32;1m        PASS[0m [   0.010s] (257/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mblock8898629_focused_account_stage_lifecycle_matches_java[0m
+2026-06-11T12:28:26.4450571Z [32;1m        PASS[0m [   0.008s] (258/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mblock8898629_focused_accounts_map_to_java_stage3_values[0m
+2026-06-11T12:28:26.4510272Z [32;1m        PASS[0m [   0.010s] (259/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mblock9570923_block_stage3_status_tuple_matches_java[0m
+2026-06-11T12:28:26.4542530Z [32;1m        PASS[0m [   0.009s] (260/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mblock9570923_focused_account_stage_lifecycle_matches_java[0m
+2026-06-11T12:28:26.4603109Z [32;1m        PASS[0m [   0.008s] (261/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mblock9570923_focused_accounts_map_to_java_stage3_values[0m
+2026-06-11T12:28:26.4639398Z [32;1m        PASS[0m [   0.009s] (262/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mblock9572184_block_stage3_status_tuple_matches_java[0m
+2026-06-11T12:28:26.4689967Z [32;1m        PASS[0m [   0.009s] (263/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mblock9572184_focused_account_stage_lifecycle_matches_java[0m
+2026-06-11T12:28:26.4739295Z [32;1m        PASS[0m [   0.010s] (264/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mblock9572184_focused_accounts_map_to_java_stage3_values[0m
+2026-06-11T12:28:26.4791275Z [32;1m        PASS[0m [   0.010s] (265/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mcreate_time_none_produces_none[0m
+2026-06-11T12:28:26.4843462Z [32;1m        PASS[0m [   0.010s] (266/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mcreate_time_some_is_mapped[0m
+2026-06-11T12:28:26.4875827Z [32;1m        PASS[0m [   0.008s] (267/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mempty_account_name_produces_none[0m
+2026-06-11T12:28:26.4925886Z [32;1m        PASS[0m [   0.009s] (268/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mgenesis_block_stage3_status_tuple_matches_java[0m
+2026-06-11T12:28:26.4969624Z [32;1m        PASS[0m [   0.009s] (269/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mgenesis_recipient_account_names_decode_to_java_values[0m
+2026-06-11T12:28:26.5033162Z [32;1m        PASS[0m [   0.010s] (270/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mgenesis_recipient_account_stage_lifecycle_matches_java[0m
+2026-06-11T12:28:26.5057995Z [32;1m        PASS[0m [   0.009s] (271/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1minvalid_account_name_hex_errors[0m
+2026-06-11T12:28:26.5127461Z [32;1m        PASS[0m [   0.010s] (272/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mrpc_account_null_address_maps_to_not_found[0m
+2026-06-11T12:28:26.5162929Z [32;1m        PASS[0m [   0.009s] (273/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mrpc_account_type_asset_issue_maps_to_asset_issue[0m
+2026-06-11T12:28:26.5218452Z [32;1m        PASS[0m [   0.009s] (274/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mrpc_account_type_contract_maps_to_contract[0m
+2026-06-11T12:28:26.5229159Z [32;1m        PASS[0m [   0.008s] (275/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mrpc_account_type_null_maps_to_normal[0m
+2026-06-11T12:28:26.5320461Z [32;1m        PASS[0m [   0.009s] (276/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mto_naive_date_time_microseconds[0m
+2026-06-11T12:28:26.5352714Z [32;1m        PASS[0m [   0.010s] (277/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mrpc_account_unsupported_type_errors[0m
+2026-06-11T12:28:26.5414546Z [32;1m        PASS[0m [   0.009s] (278/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mto_naive_date_time_milliseconds[0m
+2026-06-11T12:28:26.5417096Z [32;1m        PASS[0m [   0.009s] (279/404) [35;1mtron-processor-app[0m [36mpipeline::stage3::tests[0m[36m::[0m[34;1mto_naive_date_time_nanoseconds[0m
+2026-06-11T12:28:26.5514393Z [32;1m        PASS[0m [   0.010s] (280/404) [35;1mtron-processor-app[0m [36mqueue::consumer::tests[0m[36m::[0m[34;1mconsumer_tag_format_is_queue_name_dash_consumer[0m
+2026-06-11T12:28:26.5526139Z [32;1m        PASS[0m [   0.011s] (281/404) [35;1mtron-processor-app[0m [36mqueue::consumer::tests[0m[36m::[0m[34;1mconsumer_nack_does_not_requeue_like_java_dead_letter_routing[0m
+2026-06-11T12:28:26.5613001Z [32;1m        PASS[0m [   0.009s] (282/404) [35;1mtron-processor-app[0m [36mqueue::publisher::tests[0m[36m::[0m[34;1mpublish_properties_match_java_micronaut_defaults[0m
+2026-06-11T12:28:26.5627221Z [32;1m        PASS[0m [   0.009s] (283/404) [35;1mtron-processor-app[0m [36mqueue::topology::tests[0m[36m::[0m[34;1mrabbit_dead_letter_topology_matches_java[0m
+2026-06-11T12:28:26.5709757Z [32;1m        PASS[0m [   0.009s] (284/404) [35;1mtron-processor-app[0m [36mqueue::topology::tests[0m[36m::[0m[34;1mrabbit_stage_queue_names_match_java[0m
+2026-06-11T12:28:26.5719881Z [32;1m        PASS[0m [   0.009s] (285/404) [35;1mtron-processor-app[0m [36mqueue::topology::tests[0m[36m::[0m[34;1mrabbit_exchange_name_matches_java[0m
+2026-06-11T12:28:26.5800472Z [32;1m        PASS[0m [   0.009s] (286/404) [35;1mtron-processor-app[0m [36mrepository::account_repo::tests[0m[36m::[0m[34;1maccount_address_precondition_matches_java_check_not_blank[0m
+2026-06-11T12:28:26.5817158Z [32;1m        PASS[0m [   0.010s] (287/404) [35;1mtron-processor-app[0m [36mrepository::account_repo::tests[0m[36m::[0m[34;1mfind_base58check_by_row_id_query_matches_java_projection[0m
+2026-06-11T12:28:26.5880817Z [32;1m        PASS[0m [   0.008s] (288/404) [35;1mtron-processor-app[0m [36mrepository::account_repo::tests[0m[36m::[0m[34;1mfind_by_address_base58check_query_matches_java_record_lookup[0m
+2026-06-11T12:28:26.5920686Z [32;1m        PASS[0m [   0.010s] (289/404) [35;1mtron-processor-app[0m [36mrepository::account_repo::tests[0m[36m::[0m[34;1mfind_or_create_insert_sql_matches_java_pending_create[0m
+2026-06-11T12:28:26.5969824Z [32;1m        PASS[0m [   0.009s] (290/404) [35;1mtron-processor-app[0m [36mrepository::account_repo::tests[0m[36m::[0m[34;1mfind_row_id_by_address_base58check_query_matches_java_projection[0m
+2026-06-11T12:28:26.6023140Z [32;1m        PASS[0m [   0.009s] (291/404) [35;1mtron-processor-app[0m [36mrepository::account_repo::tests[0m[36m::[0m[34;1mget_by_row_id_query_matches_java_record_lookup[0m
+2026-06-11T12:28:26.6059092Z [32;1m        PASS[0m [   0.009s] (292/404) [35;1mtron-processor-app[0m [36mrepository::account_repo::tests[0m[36m::[0m[34;1mget_import_status_by_row_id_query_matches_java_projection[0m
+2026-06-11T12:28:26.6095730Z [32;1m        PASS[0m [   0.008s] (293/404) [35;1mtron-processor-app[0m [36mrepository::account_repo::tests[0m[36m::[0m[34;1mrow_id_precondition_matches_java_check_positive[0m
+2026-06-11T12:28:26.6153055Z [32;1m        PASS[0m [   0.009s] (294/404) [35;1mtron-processor-app[0m [36mrepository::account_repo::tests[0m[36m::[0m[34;1mset_data_query_requires_existing_row[0m
+2026-06-11T12:28:26.6178384Z [32;1m        PASS[0m [   0.008s] (295/404) [35;1mtron-processor-app[0m [36mrepository::account_repo::tests[0m[36m::[0m[34;1mtruncate_query_matches_java_restart_identity[0m
+2026-06-11T12:28:26.6246924Z [32;1m        PASS[0m [   0.010s] (296/404) [35;1mtron-processor-app[0m [36mrepository::account_repo::tests[0m[36m::[0m[34;1mzero_account_constants_match_java_internal_account[0m
+2026-06-11T12:28:26.6278167Z [32;1m        PASS[0m [   0.010s] (297/404) [35;1mtron-processor-app[0m [36mrepository::account_repo::tests[0m[36m::[0m[34;1mzero_account_init_uses_java_create_then_set_data_steps[0m
+2026-06-11T12:28:26.6329541Z [32;1m        PASS[0m [   0.008s] (298/404) [35;1mtron-processor-app[0m [36mrepository::asset_repo::tests[0m[36m::[0m[34;1masset_row_id_precondition_matches_java_check_positive[0m
+2026-06-11T12:28:26.6368962Z [32;1m        PASS[0m [   0.009s] (299/404) [35;1mtron-processor-app[0m [36mrepository::asset_repo::tests[0m[36m::[0m[34;1masset_text_precondition_matches_java_check_not_blank[0m
+2026-06-11T12:28:26.6421996Z [32;1m        PASS[0m [   0.009s] (300/404) [35;1mtron-processor-app[0m [36mrepository::asset_repo::tests[0m[36m::[0m[34;1mcreate_asset_query_accepts_java_nullable_account[0m
+2026-06-11T12:28:26.6456233Z [32;1m        PASS[0m [   0.009s] (301/404) [35;1mtron-processor-app[0m [36mrepository::asset_repo::tests[0m[36m::[0m[34;1mfind_all_trc20_for_tracking_query_matches_java_filter[0m
+2026-06-11T12:28:26.6530056Z [32;1m        PASS[0m [   0.011s] (302/404) [35;1mtron-processor-app[0m [36mrepository::asset_repo::tests[0m[36m::[0m[34;1mfind_by_ticker_query_matches_java_lookup[0m
+2026-06-11T12:28:26.6543657Z [32;1m        PASS[0m [   0.009s] (303/404) [35;1mtron-processor-app[0m [36mrepository::asset_repo::tests[0m[36m::[0m[34;1mget_by_row_id_query_matches_java_lookup[0m
+2026-06-11T12:28:26.6633700Z [32;1m        PASS[0m [   0.009s] (304/404) [35;1mtron-processor-app[0m [36mrepository::asset_repo::tests[0m[36m::[0m[34;1mset_tron_account_row_id_query_matches_java_single_column_update[0m
+2026-06-11T12:28:26.6636459Z [32;1m        PASS[0m [   0.010s] (305/404) [35;1mtron-processor-app[0m [36mrepository::asset_repo::tests[0m[36m::[0m[34;1mset_tron_account_row_id_accepts_java_nullable_value[0m
+2026-06-11T12:28:26.6723485Z [32;1m        PASS[0m [   0.008s] (306/404) [35;1mtron-processor-app[0m [36mrepository::block_repo::tests[0m[36m::[0m[34;1mblock_hash_precondition_matches_java_check_not_blank[0m
+2026-06-11T12:28:26.6736424Z [32;1m        PASS[0m [   0.010s] (307/404) [35;1mtron-processor-app[0m [36mrepository::block_repo::tests[0m[36m::[0m[34;1mblock_row_id_precondition_matches_java_check_positive[0m
+2026-06-11T12:28:26.6797916Z [32;1m        PASS[0m [   0.008s] (308/404) [35;1mtron-processor-app[0m [36mrepository::block_repo::tests[0m[36m::[0m[34;1mdefault_block_row_id_matches_java_index_plus_one[0m
+2026-06-11T12:28:26.6835060Z [32;1m        PASS[0m [   0.010s] (309/404) [35;1mtron-processor-app[0m [36mrepository::block_repo::tests[0m[36m::[0m[34;1mfind_by_hash_query_matches_java_record_lookup[0m
+2026-06-11T12:28:26.6890652Z [32;1m        PASS[0m [   0.009s] (310/404) [35;1mtron-processor-app[0m [36mrepository::block_repo::tests[0m[36m::[0m[34;1mfind_row_id_by_hash_query_matches_java_projection[0m
+2026-06-11T12:28:26.6930502Z [32;1m        PASS[0m [   0.009s] (311/404) [35;1mtron-processor-app[0m [36mrepository::block_repo::tests[0m[36m::[0m[34;1mget_by_row_id_query_matches_java_record_lookup[0m
+2026-06-11T12:28:26.6984714Z [32;1m        PASS[0m [   0.009s] (312/404) [35;1mtron-processor-app[0m [36mrepository::block_repo::tests[0m[36m::[0m[34;1mmissing_or_pending_blocks_query_orders_by_index[0m
+2026-06-11T12:28:26.7011751Z [32;1m        PASS[0m [   0.008s] (313/404) [35;1mtron-processor-app[0m [36mrepository::block_repo::tests[0m[36m::[0m[34;1mset_import_status_processed_query_requires_existing_row[0m
+2026-06-11T12:28:26.7083090Z [32;1m        PASS[0m [   0.008s] (314/404) [35;1mtron-processor-app[0m [36mrepository::block_repo::tests[0m[36m::[0m[34;1mset_stage1_processed_query_matches_java_update[0m
+2026-06-11T12:28:26.7096087Z [32;1m        PASS[0m [   0.008s] (315/404) [35;1mtron-processor-app[0m [36mrepository::block_repo::tests[0m[36m::[0m[34;1mtip_index_query_matches_java_max_index_lookup[0m
+2026-06-11T12:28:26.7163430Z [32;1m        PASS[0m [   0.009s] (316/404) [35;1mtron-processor-app[0m [36mrepository::block_repo::tests[0m[36m::[0m[34;1mtruncate_query_matches_java_restart_identity[0m
+2026-06-11T12:28:26.7193740Z [32;1m        PASS[0m [   0.008s] (317/404) [35;1mtron-processor-app[0m [36mrepository::event_log_repo::tests[0m[36m::[0m[34;1mevent_log_index_lookup_precondition_matches_java_check_positive_or_zero[0m
+2026-06-11T12:28:26.7253199Z [32;1m        PASS[0m [   0.008s] (318/404) [35;1mtron-processor-app[0m [36mrepository::event_log_repo::tests[0m[36m::[0m[34;1mevent_log_row_preconditions_match_java_checks[0m
+2026-06-11T12:28:26.7263940Z [32;1m        PASS[0m [   0.008s] (319/404) [35;1mtron-processor-app[0m [36mrepository::event_log_repo::tests[0m[36m::[0m[34;1mfind_by_tx_row_id_and_index_query_matches_java_lookup[0m
+2026-06-11T12:28:26.7338299Z [32;1m        PASS[0m [   0.009s] (320/404) [35;1mtron-processor-app[0m [36mrepository::event_log_repo::tests[0m[36m::[0m[34;1mfind_by_tx_row_id_query_orders_by_event_index[0m
+2026-06-11T12:28:26.7344397Z [32;1m        PASS[0m [   0.008s] (321/404) [35;1mtron-processor-app[0m [36mrepository::event_log_repo::tests[0m[36m::[0m[34;1mget_by_row_id_query_matches_java_lookup[0m
+2026-06-11T12:28:26.7425298Z [32;1m        PASS[0m [   0.008s] (322/404) [35;1mtron-processor-app[0m [36mrepository::event_log_repo::tests[0m[36m::[0m[34;1minsert_event_log_query_matches_java_record_fields[0m
+2026-06-11T12:28:26.7432029Z [32;1m        PASS[0m [   0.008s] (323/404) [35;1mtron-processor-app[0m [36mrepository::event_log_repo::tests[0m[36m::[0m[34;1mtruncate_query_matches_java_restart_identity[0m
+2026-06-11T12:28:26.7504286Z [32;1m        PASS[0m [   0.008s] (324/404) [35;1mtron-processor-app[0m [36mrepository::signature_repo::tests[0m[36m::[0m[34;1mfind_by_method_id_query_matches_java_method_only_lookup[0m
+2026-06-11T12:28:26.7523800Z [32;1m        PASS[0m [   0.009s] (325/404) [35;1mtron-processor-app[0m [36mrepository::signature_repo::tests[0m[36m::[0m[34;1mfind_or_create_conflict_target_matches_java_unique_method_id[0m
+2026-06-11T12:28:26.7600546Z [32;1m        PASS[0m [   0.008s] (326/404) [35;1mtron-processor-app[0m [36mrepository::signature_repo::tests[0m[36m::[0m[34;1mfind_row_id_by_method_id_query_matches_java_source_predicate[0m
+2026-06-11T12:28:26.7620161Z [32;1m        PASS[0m [   0.010s] (327/404) [35;1mtron-processor-app[0m [36mrepository::signature_repo::tests[0m[36m::[0m[34;1mfind_or_create_insert_sql_matches_java_no_existing_update[0m
+2026-06-11T12:28:26.7695482Z [32;1m        PASS[0m [   0.009s] (328/404) [35;1mtron-processor-app[0m [36mrepository::signature_repo::tests[0m[36m::[0m[34;1mget_by_row_id_query_matches_java_lookup[0m
+2026-06-11T12:28:26.7698280Z [32;1m        PASS[0m [   0.009s] (329/404) [35;1mtron-processor-app[0m [36mrepository::signature_repo::tests[0m[36m::[0m[34;1msignature_method_id_precondition_matches_java_check_not_blank[0m
+2026-06-11T12:28:26.7795192Z [32;1m        PASS[0m [   0.010s] (330/404) [35;1mtron-processor-app[0m [36mrepository::signature_repo::tests[0m[36m::[0m[34;1msignature_row_id_precondition_matches_java_check_positive[0m
+2026-06-11T12:28:26.7812181Z [32;1m        PASS[0m [   0.010s] (331/404) [35;1mtron-processor-app[0m [36mrepository::transaction_repo::tests[0m[36m::[0m[34;1mcount_by_tron_block_row_id_query_matches_java_fetch_count[0m
+2026-06-11T12:28:26.7891702Z [32;1m        PASS[0m [   0.009s] (332/404) [35;1mtron-processor-app[0m [36mrepository::transaction_repo::tests[0m[36m::[0m[34;1mfind_by_hash_query_matches_java_record_lookup[0m
+2026-06-11T12:28:26.7913793Z [32;1m        PASS[0m [   0.010s] (333/404) [35;1mtron-processor-app[0m [36mrepository::transaction_repo::tests[0m[36m::[0m[34;1mfind_all_by_row_id_query_matches_java_row_id_list_lookup[0m
+2026-06-11T12:28:26.7977867Z [32;1m        PASS[0m [   0.008s] (334/404) [35;1mtron-processor-app[0m [36mrepository::transaction_repo::tests[0m[36m::[0m[34;1mget_by_row_id_query_matches_java_lookup[0m
+2026-06-11T12:28:26.7985742Z [32;1m        PASS[0m [   0.009s] (335/404) [35;1mtron-processor-app[0m [36mrepository::transaction_repo::tests[0m[36m::[0m[34;1mfind_row_id_by_hash_query_matches_java_projection[0m
+2026-06-11T12:28:26.8062079Z [32;1m        PASS[0m [   0.008s] (336/404) [35;1mtron-processor-app[0m [36mrepository::transaction_repo::tests[0m[36m::[0m[34;1mset_processed_import_status_query_matches_java_update[0m
+2026-06-11T12:28:26.8073665Z [32;1m        PASS[0m [   0.009s] (337/404) [35;1mtron-processor-app[0m [36mrepository::transaction_repo::tests[0m[36m::[0m[34;1mtransaction_block_row_id_precondition_matches_java_check_positive[0m
+2026-06-11T12:28:26.8147222Z [32;1m        PASS[0m [   0.008s] (338/404) [35;1mtron-processor-app[0m [36mrepository::transaction_repo::tests[0m[36m::[0m[34;1mtransaction_hash_precondition_matches_java_check_not_blank[0m
+2026-06-11T12:28:26.8155941Z [32;1m        PASS[0m [   0.008s] (339/404) [35;1mtron-processor-app[0m [36mrepository::transaction_repo::tests[0m[36m::[0m[34;1mtruncate_query_matches_java_restart_identity[0m
+2026-06-11T12:28:26.8230394Z [32;1m        PASS[0m [   0.009s] (340/404) [35;1mtron-processor-app[0m [36mrepository::transfer_repo::tests[0m[36m::[0m[34;1mfind_by_source_and_event_index_queries_match_java_predicates[0m
+2026-06-11T12:28:26.8235188Z [32;1m        PASS[0m [   0.008s] (341/404) [35;1mtron-processor-app[0m [36mrepository::transfer_repo::tests[0m[36m::[0m[34;1mfind_by_tron_transaction_row_id_query_matches_java_fetch_optional[0m
+2026-06-11T12:28:26.8311426Z [32;1m        PASS[0m [   0.008s] (342/404) [35;1mtron-processor-app[0m [36mrepository::transfer_repo::tests[0m[36m::[0m[34;1mfind_row_id_by_tron_transaction_row_id_query_matches_java_projection[0m
+2026-06-11T12:28:26.8323780Z [32;1m        PASS[0m [   0.008s] (343/404) [35;1mtron-processor-app[0m [36mrepository::transfer_repo::tests[0m[36m::[0m[34;1minsert_transfer_query_matches_java_record_fields[0m
+2026-06-11T12:28:26.8399272Z [32;1m        PASS[0m [   0.009s] (344/404) [35;1mtron-processor-app[0m [36mrepository::transfer_repo::tests[0m[36m::[0m[34;1mstage2_transaction_status_update_matches_java_batch_store[0m
+2026-06-11T12:28:26.8417464Z [32;1m        PASS[0m [   0.008s] (345/404) [35;1mtron-processor-app[0m [36mrepository::transfer_repo::tests[0m[36m::[0m[34;1mtransfer_row_id_preconditions_match_java_check_positive[0m
+2026-06-11T12:28:26.8500279Z [32;1m        PASS[0m [   0.010s] (346/404) [35;1mtron-processor-app[0m [36mrepository::transfer_repo::tests[0m[36m::[0m[34;1mtruncate_query_matches_java_restart_identity[0m
+2026-06-11T12:28:26.8502976Z [32;1m        PASS[0m [   0.010s] (347/404) [35;1mtron-processor-app[0m [36mrpc::client::tests[0m[36m::[0m[34;1maccount_address_validation_matches_java_precondition[0m
+2026-06-11T12:28:26.8608899Z [32;1m        PASS[0m [   0.009s] (348/404) [35;1mtron-processor-app[0m [36mrpc::client::tests[0m[36m::[0m[34;1mblock_num_validation_matches_java_precondition[0m
+2026-06-11T12:28:26.8632866Z [32;1m        PASS[0m [   0.009s] (349/404) [35;1mtron-processor-app[0m [36mrpc::client::tests[0m[36m::[0m[34;1mblock_response_json_field_names_match_java_records[0m
+2026-06-11T12:28:26.8685190Z [32;1m        PASS[0m [   0.009s] (350/404) [35;1mtron-processor-app[0m [36mrpc::client::tests[0m[36m::[0m[34;1mcontract_parameter_receiver_address_field_matches_java_record[0m
+2026-06-11T12:28:26.8770471Z [32;1m        PASS[0m [   0.008s] (351/404) [35;1mtron-processor-app[0m [36mrpc::client::tests[0m[36m::[0m[34;1mget_account_request_json_matches_java_record[0m
+2026-06-11T12:28:26.9593415Z [32;1m        PASS[0m [   0.098s] (352/404) [35;1mtron-processor-app[0m [36mrpc::client::tests[0m[36m::[0m[34;1mget_account_not_found_returns_empty_account_like_java[0m
+2026-06-11T12:28:26.9672801Z [32;1m        PASS[0m [   0.009s] (353/404) [35;1mtron-processor-app[0m [36mrpc::client::tests[0m[36m::[0m[34;1mget_block_by_num_request_json_matches_java_record[0m
+2026-06-11T12:28:26.9752940Z [32;1m        PASS[0m [   0.096s] (354/404) [35;1mtron-processor-app[0m [36mrpc::client::tests[0m[36m::[0m[34;1mget_block_by_num_propagates_http_error_like_java[0m
+2026-06-11T12:28:26.9755523Z [32;1m        PASS[0m [   0.008s] (355/404) [35;1mtron-processor-app[0m [36mrpc::client::tests[0m[36m::[0m[34;1mget_transaction_info_request_json_matches_java_record[0m
+2026-06-11T12:28:26.9824187Z [32;1m        PASS[0m [   0.009s] (356/404) [35;1mtron-processor-app[0m [36mrpc::client::tests[0m[36m::[0m[34;1mrpc_endpoint_paths_match_java_http_client[0m
+2026-06-11T12:28:26.9837806Z [32;1m        PASS[0m [   0.009s] (357/404) [35;1mtron-processor-app[0m [36mrpc::client::tests[0m[36m::[0m[34;1mrpc_timeout_constants_match_java_application_yml[0m
+2026-06-11T12:28:26.9911243Z [32;1m        PASS[0m [   0.009s] (358/404) [35;1mtron-processor-app[0m [36mrpc::client::tests[0m[36m::[0m[34;1mtransaction_info_and_account_response_fields_match_java_records[0m
+2026-06-11T12:28:27.0003406Z [32;1m        PASS[0m [   0.008s] (359/404) [35;1mtron-processor-app[0m [36mservice::account_cache::tests[0m[36m::[0m[34;1mredis_key_matches_java_account_key_shape[0m
+2026-06-11T12:28:27.0083088Z [32;1m        PASS[0m [   0.008s] (360/404) [35;1mtron-processor-app[0m [36mservice::auto_import::tests[0m[36m::[0m[34;1mbatch_size_uses_java_bootstrap_boundary[0m
+2026-06-11T12:28:27.0158048Z [32;1m        PASS[0m [   0.008s] (361/404) [35;1mtron-processor-app[0m [36mservice::auto_import::tests[0m[36m::[0m[34;1mfirst_auto_import_batch_uses_pre_initialized_current_index[0m
+2026-06-11T12:28:27.0240272Z [32;1m        PASS[0m [   0.008s] (362/404) [35;1mtron-processor-app[0m [36mservice::auto_import::tests[0m[36m::[0m[34;1mnext_current_block_index_advances_by_batch_size[0m
+2026-06-11T12:28:27.0343486Z [32;1m        PASS[0m [   0.008s] (363/404) [35;1mtron-processor-app[0m [36mservice::backfill_missing::tests[0m[36m::[0m[34;1mbackfill_batch_end_index_matches_java_inclusive_range[0m
+2026-06-11T12:28:27.0423179Z [32;1m        PASS[0m [   0.008s] (364/404) [35;1mtron-processor-app[0m [36mservice::backfill_missing::tests[0m[36m::[0m[34;1mbackfill_next_current_index_advances_past_end_index[0m
+2026-06-11T12:28:27.0503111Z [32;1m        PASS[0m [   0.008s] (365/404) [35;1mtron-processor-app[0m [36mservice::backfill_missing::tests[0m[36m::[0m[34;1mbackfill_stops_at_java_current_max_boundary[0m
+2026-06-11T12:28:27.0573725Z [32;1m        PASS[0m [   0.008s] (366/404) [35;1mtron-processor-app[0m [36mservice::block_import::tests[0m[36m::[0m[34;1mblock_header_number_for_log_matches_java_source_field[0m
+2026-06-11T12:28:27.0658140Z [32;1m        PASS[0m [   0.008s] (367/404) [35;1mtron-processor-app[0m [36mservice::block_import::tests[0m[36m::[0m[34;1mempty_block_detection_matches_java_block_id_null_check[0m
+2026-06-11T12:28:27.0741832Z [32;1m        PASS[0m [   0.008s] (368/404) [35;1mtron-processor-app[0m [36mservice::block_import::tests[0m[36m::[0m[34;1mstage0_routing_key_matches_java_rabbit_binding[0m
+2026-06-11T12:28:27.0824772Z [32;1m        PASS[0m [   0.008s] (369/404) [35;1mtron-processor-app[0m [36mservice::rabbit_queue_monitor::tests[0m[36m::[0m[34;1mall_stage_queues_matches_java_constant[0m
+2026-06-11T12:28:27.0852767Z [32;1m        PASS[0m [   0.100s] (370/404) [35;1mtron-processor-app[0m [36mrpc::client::tests[0m[36m::[0m[34;1mtransaction_info_block_zero_returns_empty_without_http_like_java[0m
+2026-06-11T12:28:27.0916237Z [32;1m        PASS[0m [   0.009s] (371/404) [35;1mtron-processor-app[0m [36mservice::rabbit_queue_monitor::tests[0m[36m::[0m[34;1mqueue_depth_threshold_pauses_at_java_boundary[0m
+2026-06-11T12:28:27.0922299Z [32;1m        PASS[0m [   0.008s] (372/404) [35;1mtron-processor-app[0m [36mservice::rabbit_queue_monitor::tests[0m[36m::[0m[34;1mrefresh_updates_one_cached_queue_without_clearing_others[0m
+2026-06-11T12:28:27.0998445Z [32;1m        PASS[0m [   0.008s] (373/404) [35;1mtron-processor-app[0m [36mservice::rabbit_queue_monitor::tests[0m[36m::[0m[34;1mtotal_depth_threshold_is_ored_with_queue_depth[0m
+2026-06-11T12:28:27.1030554Z [32;1m        PASS[0m [   0.011s] (374/404) [35;1mtron-processor-app[0m [36mservice::signature_cache::tests[0m[36m::[0m[34;1mcaffeine_max_size_matches_java_per_source_cache[0m
+2026-06-11T12:28:27.1102921Z [32;1m        PASS[0m [   0.009s] (375/404) [35;1mtron-processor-app[0m [36mservice::signature_cache::tests[0m[36m::[0m[34;1mredis_keys_match_java_source_ordinals[0m
+2026-06-11T12:28:27.1120146Z [32;1m        PASS[0m [   0.009s] (376/404) [35;1mtron-processor-app[0m [36mservice::token_registry::tests[0m[36m::[0m[34;1mtracked_token_map_rejects_duplicate_addresses_like_java[0m
+2026-06-11T12:28:27.1192319Z [32;1m        PASS[0m [   0.009s] (377/404) [35;1mtron-processor-app[0m [36mservice::token_registry::tests[0m[36m::[0m[34;1musdt_startup_contract_address_matches_java[0m
+2026-06-11T12:28:27.1210428Z [32;1m        PASS[0m [   0.009s] (378/404) [35;1mtron-processor-app[0m [36mtasks::scheduler::tests[0m[36m::[0m[34;1mscheduled_task_timing_constants_match_java[0m
+2026-06-11T12:28:27.1284109Z [32;1m        PASS[0m [   0.007s] (379/404) [35;1mtron-processor-app[0m [36mtasks::scheduler::tests[0m[36m::[0m[34;1mstartup_shedlock_clear_sql_matches_java[0m
+2026-06-11T12:28:27.1288584Z [32;1m        PASS[0m [   0.011s] (380/404) [35;1mtron-processor-app[0m [36mtasks::scheduler::tests[0m[36m::[0m[34;1mstage_consumer_global_listener_flag_gates_all_stages[0m
+2026-06-11T12:28:27.1375172Z [32;1m        PASS[0m [   0.009s] (381/404) [35;1mtron-processor-app[0m [36mtasks::shedlock::tests[0m[36m::[0m[34;1mlock_names_match_java[0m
+2026-06-11T12:28:27.1377326Z [32;1m        PASS[0m [   0.009s] (382/404) [35;1mtron-processor-app[0m [36mtasks::shedlock::tests[0m[36m::[0m[34;1minstance_id_format[0m
+2026-06-11T12:28:27.1464255Z [32;1m        PASS[0m [   0.009s] (383/404) [35;1mtron-processor-app[0m [36mtasks::shedlock::tests[0m[36m::[0m[34;1mtry_acquire_sql_matches_java_shedlock_provider_semantics[0m
+2026-06-11T12:28:27.1468248Z [32;1m        PASS[0m [   0.008s] (384/404) [35;1mtron-processor-app[0m [36mtasks::shedlock::tests[0m[36m::[0m[34;1mrelease_sql_matches_java_shedlock_unlock_semantics[0m
+2026-06-11T12:28:27.1562894Z [32;1m        PASS[0m [   0.010s] (385/404) [35;1mtron-processor-app[0m [36mweb::import::tests[0m[36m::[0m[34;1mimport_blocks_success_body_is_bare_boolean_json[0m
+2026-06-11T12:28:27.1579590Z [32;1m        PASS[0m [   0.009s] (386/404) [35;1mtron-processor-app[0m [36mweb::import::tests[0m[36m::[0m[34;1mimport_range_inverted_guard_matches_java_bad_request_condition[0m
+2026-06-11T12:28:27.1661650Z [32;1m        PASS[0m [   0.009s] (387/404) [35;1mtron-processor-app[0m [36mweb::import::tests[0m[36m::[0m[34;1mimport_range_total_requested_is_inclusive_matches_java[0m
+2026-06-11T12:28:27.1670105Z [32;1m        PASS[0m [   0.010s] (388/404) [35;1mtron-processor-app[0m [36mweb::import::tests[0m[36m::[0m[34;1mimport_range_result_json_matches_java_record_fields[0m
+2026-06-11T12:28:27.1773556Z [32;1m        PASS[0m [   0.010s] (389/404) [35;1mtron-processor-app[0m [36mweb::metrics::tests[0m[36m::[0m[34;1mmetrics_content_type_is_prometheus_text[0m
+2026-06-11T12:28:27.1775644Z [32;1m        PASS[0m [   0.010s] (390/404) [35;1mtron-processor-app[0m [36mweb::routes::tests[0m[36m::[0m[34;1mhealth_route_matches_java[0m
+2026-06-11T12:28:27.1873287Z [32;1m        PASS[0m [   0.009s] (391/404) [35;1mtron-processor-app[0m [36mweb::routes::tests[0m[36m::[0m[34;1mimport_blocks_range_route_matches_java[0m
+2026-06-11T12:28:27.1883240Z [32;1m        PASS[0m [   0.009s] (392/404) [35;1mtron-processor-app[0m [36mweb::routes::tests[0m[36m::[0m[34;1mimport_blocks_route_matches_java[0m
+2026-06-11T12:28:27.1948226Z [32;1m        PASS[0m [   0.010s] (393/404) [35;1mtron-processor-app[0m [36mweb::routes::tests[0m[36m::[0m[34;1mmetrics_route_matches_java[0m
+2026-06-11T12:28:27.1956598Z [32;1m        PASS[0m [   0.010s] (394/404) [35;1mtron-processor-app[0m [36mweb::routes::tests[0m[36m::[0m[34;1mready_route_is_stable[0m
+2026-06-11T12:28:42.6324133Z [32;1m        PASS[0m [  15.436s] (395/404) [35;1mtron-processor-app::pipeline[0m [36mtron_block_3112940[0m[36m::[0m[34;1mtest_tron_block_3112940[0m
+2026-06-11T12:28:42.6797710Z [32;1m        PASS[0m [  15.485s] (396/404) [35;1mtron-processor-app::pipeline[0m [36mtron_block_0[0m[36m::[0m[34;1mtest_tron_block_0_genesis[0m
+2026-06-11T12:28:46.8025596Z [32;1m        PASS[0m [   4.170s] (397/404) [35;1mtron-processor-app::pipeline[0m [36mtron_block_4817962[0m[36m::[0m[34;1mtest_tron_block_4817962[0m
+2026-06-11T12:28:46.9326508Z [32;1m        PASS[0m [   4.253s] (398/404) [35;1mtron-processor-app::pipeline[0m [36mtron_block_5209277[0m[36m::[0m[34;1mtest_tron_block_5209277[0m
+2026-06-11T12:28:51.0673522Z [32;1m        PASS[0m [   4.265s] (399/404) [35;1mtron-processor-app::pipeline[0m [36mtron_block_8898629[0m[36m::[0m[34;1mtest_tron_block_8898629[0m
+2026-06-11T12:28:51.1139251Z [32;1m        PASS[0m [   4.180s] (400/404) [35;1mtron-processor-app::pipeline[0m [36mtron_block_9570923[0m[36m::[0m[34;1mtest_tron_block_9570923[0m
+2026-06-11T12:28:55.5883773Z [32;1m        PASS[0m [   4.520s] (401/404) [35;1mtron-processor-app::pipeline[0m [36mtron_block_9572184[0m[36m::[0m[34;1mtest_tron_block_9572184_baseline[0m
+2026-06-11T12:28:56.2067375Z [32;1m        PASS[0m [   5.093s] (402/404) [35;1mtron-processor-app::pipeline[0m [36mtron_block_9572184[0m[36m::[0m[34;1mtest_tron_block_9572184_with_existing_transaction[0m
+2026-06-11T12:29:00.4296730Z [32;1m        PASS[0m [   4.841s] (403/404) [35;1mtron-processor-app::pipeline[0m [36mtron_block_9572184[0m[36m::[0m[34;1mtest_tron_block_9572184_with_existing_trx_transfer[0m
+2026-06-11T12:29:00.8409668Z [32;1m        PASS[0m [   4.634s] (404/404) [35;1mtron-processor-app::pipeline[0m [36mtron_block_9572184[0m[36m::[0m[34;1mtest_tron_block_9572184_with_existing_usdt_transfer[0m
+2026-06-11T12:29:00.8414196Z ────────────
+2026-06-11T12:29:00.8415189Z [32;1m     Summary[0m [  35.796s] [1m404[0m tests run: [1m404[0m [32;1mpassed[0m, [1m0[0m [33;1mskipped[0m
+2026-06-11T12:29:00.8539717Z Post job cleanup.
+2026-06-11T12:29:01.0559630Z ##[group]Get human-readable stats
+2026-06-11T12:29:01.0600813Z [command]/opt/hostedtoolcache/sccache/0.15.0/x64/sccache --show-stats
+2026-06-11T12:29:01.0674241Z Compile requests                   1002
+2026-06-11T12:29:01.0675147Z Compile requests executed           886
+2026-06-11T12:29:01.0675989Z Cache hits                          496
+2026-06-11T12:29:01.0676749Z Cache hits (Assembler)               58
+2026-06-11T12:29:01.0677565Z Cache hits (C/C++)                  126
+2026-06-11T12:29:01.0678288Z Cache hits (Rust)                   312
+2026-06-11T12:29:01.0679013Z Cache misses                        386
+2026-06-11T12:29:01.0679742Z Cache misses (Assembler)             45
+2026-06-11T12:29:01.0680469Z Cache misses (C/C++)                236
+2026-06-11T12:29:01.0681630Z Cache misses (Rust)                 105
+2026-06-11T12:29:01.0682389Z Cache hits rate                   56.24 %
+2026-06-11T12:29:01.0683209Z Cache hits rate (Assembler)       56.31 %
+2026-06-11T12:29:01.0683953Z Cache hits rate (C/C++)           34.81 %
+2026-06-11T12:29:01.0684692Z Cache hits rate (Rust)            74.82 %
+2026-06-11T12:29:01.0685444Z Cache timeouts                        0
+2026-06-11T12:29:01.0686162Z Cache read errors                     0
+2026-06-11T12:29:01.0686895Z Forced recaches                       0
+2026-06-11T12:29:01.0687619Z Cache write errors                  386
+2026-06-11T12:29:01.0688343Z Cache errors                          0
+2026-06-11T12:29:01.0689079Z Compilations                        386
+2026-06-11T12:29:01.0689766Z Compilation failures                  4
+2026-06-11T12:29:01.0690504Z Non-cacheable compilations            0
+2026-06-11T12:29:01.0691552Z Non-cacheable calls                 112
+2026-06-11T12:29:01.0692263Z Non-compilation calls                 4
+2026-06-11T12:29:01.0693021Z Unsupported compiler calls            0
+2026-06-11T12:29:01.0693543Z Average cache write               0.000 s
+2026-06-11T12:29:01.0694077Z Average compiler                  0.604 s
+2026-06-11T12:29:01.0694575Z Average cache read hit            0.248 s
+2026-06-11T12:29:01.0695095Z Failed distributed compilations       0
+2026-06-11T12:29:01.0695450Z 
+2026-06-11T12:29:01.0695623Z Non-cacheable reasons:
+2026-06-11T12:29:01.0696032Z crate-type                           87
+2026-06-11T12:29:01.0696513Z missing input                        10
+2026-06-11T12:29:01.0696965Z -                                     7
+2026-06-11T12:29:01.0697726Z -o                                    7
+2026-06-11T12:29:01.0698169Z -E                                    1
+2026-06-11T12:29:01.0698469Z 
+2026-06-11T12:29:01.0699133Z Cache location                  ghac, name: 7e0726055e1e4f1baa01c3967c5cfadc05877ea5de0f1b2d553463f71b5d0d86, prefix: /sccache/
+2026-06-11T12:29:01.0700132Z Base directories                (none)
+2026-06-11T12:29:01.0700606Z Version (client)                0.15.0
+2026-06-11T12:29:01.0710502Z ##[endgroup]
+2026-06-11T12:29:01.0711883Z ##[group]Get JSON stats
+2026-06-11T12:29:01.0715888Z [command]/opt/hostedtoolcache/sccache/0.15.0/x64/sccache --show-stats --stats-format=json
+2026-06-11T12:29:01.0763002Z {"stats":{"compile_requests":1002,"requests_unsupported_compiler":0,"requests_not_compile":4,"requests_not_cacheable":112,"requests_executed":886,"cache_errors":{"counts":{},"adv_counts":{}},"cache_hits":{"counts":{"Assembler":58,"Rust":312,"C/C++":126},"adv_counts":{"c [gcc]":126,"assemblerToPreprocess [gcc]":58,"rust":312}},"cache_misses":{"counts":{"C/C++":236,"Assembler":45,"Rust":105},"adv_counts":{"c [gcc]":236,"rust":105,"assemblerToPreprocess [gcc]":45}},"cache_timeouts":0,"cache_read_errors":0,"non_cacheable_compilations":0,"forced_recaches":0,"cache_write_errors":386,"cache_writes":0,"cache_write_duration":{"secs":0,"nanos":0},"cache_read_hit_duration":{"secs":123,"nanos":347473844},"compilations":386,"compiler_write_duration":{"secs":233,"nanos":305321805},"compile_fails":4,"not_cached":{"-E":1,"-":7,"missing input":10,"-o":7,"crate-type":87},"dist_compiles":{},"dist_errors":0,"multi_level":null},"cache_location":"ghac, name: 7e0726055e1e4f1baa01c3967c5cfadc05877ea5de0f1b2d553463f71b5d0d86, prefix: /sccache/","cache_size":null,"max_cache_size":null,"use_preprocessor_cache_mode":false,"version":"0.15.0","basedirs":[]}
+2026-06-11T12:29:01.0770563Z ##[endgroup]
+2026-06-11T12:29:01.0795405Z ##[notice]56% - 496 hits, 386 misses, 0 errors
+2026-06-11T12:29:01.0805290Z 
+2026-06-11T12:29:01.0805502Z Full human-readable stats:
+2026-06-11T12:29:01.0806040Z Compile requests                   1002
+2026-06-11T12:29:01.0806560Z Compile requests executed           886
+2026-06-11T12:29:01.0807095Z Cache hits                          496
+2026-06-11T12:29:01.0807586Z Cache hits (Assembler)               58
+2026-06-11T12:29:01.0808062Z Cache hits (C/C++)                  126
+2026-06-11T12:29:01.0808530Z Cache hits (Rust)                   312
+2026-06-11T12:29:01.0809030Z Cache misses                        386
+2026-06-11T12:29:01.0809513Z Cache misses (Assembler)             45
+2026-06-11T12:29:01.0810037Z Cache misses (C/C++)                236
+2026-06-11T12:29:01.0810523Z Cache misses (Rust)                 105
+2026-06-11T12:29:01.0811479Z Cache hits rate                   56.24 %
+2026-06-11T12:29:01.0812075Z Cache hits rate (Assembler)       56.31 %
+2026-06-11T12:29:01.0812594Z Cache hits rate (C/C++)           34.81 %
+2026-06-11T12:29:01.0813125Z Cache hits rate (Rust)            74.82 %
+2026-06-11T12:29:01.0813634Z Cache timeouts                        0
+2026-06-11T12:29:01.0814161Z Cache read errors                     0
+2026-06-11T12:29:01.0814652Z Forced recaches                       0
+2026-06-11T12:29:01.0815165Z Cache write errors                  386
+2026-06-11T12:29:01.0815706Z Cache errors                          0
+2026-06-11T12:29:01.0816192Z Compilations                        386
+2026-06-11T12:29:01.0816665Z Compilation failures                  4
+2026-06-11T12:29:01.0817185Z Non-cacheable compilations            0
+2026-06-11T12:29:01.0817740Z Non-cacheable calls                 112
+2026-06-11T12:29:01.0818209Z Non-compilation calls                 4
+2026-06-11T12:29:01.0818694Z Unsupported compiler calls            0
+2026-06-11T12:29:01.0819145Z Average cache write               0.000 s
+2026-06-11T12:29:01.0819592Z Average compiler                  0.604 s
+2026-06-11T12:29:01.0820103Z Average cache read hit            0.248 s
+2026-06-11T12:29:01.0820636Z Failed distributed compilations       0
+2026-06-11T12:29:01.0821313Z 
+2026-06-11T12:29:01.0821725Z Non-cacheable reasons:
+2026-06-11T12:29:01.0822123Z crate-type                           87
+2026-06-11T12:29:01.0822658Z missing input                        10
+2026-06-11T12:29:01.0823093Z -                                     7
+2026-06-11T12:29:01.0823570Z -o                                    7
+2026-06-11T12:29:01.0824023Z -E                                    1
+2026-06-11T12:29:01.0824316Z 
+2026-06-11T12:29:01.0824993Z Cache location                  ghac, name: 7e0726055e1e4f1baa01c3967c5cfadc05877ea5de0f1b2d553463f71b5d0d86, prefix: /sccache/
+2026-06-11T12:29:01.0826049Z Base directories                (none)
+2026-06-11T12:29:01.0826575Z Version (client)                0.15.0
+2026-06-11T12:29:01.0826886Z 
+2026-06-11T12:29:02.4454815Z Post job cleanup.
+2026-06-11T12:29:02.6019507Z Cache hit occurred on the primary key cargo-registry-GitHub-Linux-e85c77d0b1218bb1a165b77d4caf81154958cf3a17a59038482fcdaa52f929b0, not saving cache.
+2026-06-11T12:29:02.6165967Z Post job cleanup.
+2026-06-11T12:29:02.7171900Z [command]/usr/bin/git version
+2026-06-11T12:29:02.7210135Z git version 2.54.0
+2026-06-11T12:29:02.7264110Z Temporarily overriding HOME='/home/runner/work/_temp/0ddfe674-1c22-45ca-9912-7dc45e7c5b2d' before making global git config changes
+2026-06-11T12:29:02.7265918Z Adding repository directory to the temporary git global config as a safe directory
+2026-06-11T12:29:02.7271390Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/java-monorepo/java-monorepo
+2026-06-11T12:29:02.7307410Z Removing SSH command configuration
+2026-06-11T12:29:02.7315916Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-06-11T12:29:02.7379780Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-06-11T12:29:02.7680401Z Removing HTTP extra header
+2026-06-11T12:29:02.7681875Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-06-11T12:29:02.7719301Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-06-11T12:29:02.7961253Z Removing includeIf entries pointing to credentials config files
+2026-06-11T12:29:02.7968987Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-06-11T12:29:02.7996339Z includeif.gitdir:/home/runner/work/java-monorepo/java-monorepo/.git.path
+2026-06-11T12:29:02.7997810Z includeif.gitdir:/home/runner/work/java-monorepo/java-monorepo/.git/worktrees/*.path
+2026-06-11T12:29:02.7999068Z includeif.gitdir:/github/workspace/.git.path
+2026-06-11T12:29:02.8000040Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-06-11T12:29:02.8006224Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/java-monorepo/java-monorepo/.git.path
+2026-06-11T12:29:02.8029394Z /home/runner/work/_temp/git-credentials-02fdfeae-0e2d-490c-b992-beb9f3f71bb4.config
+2026-06-11T12:29:02.8045234Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/java-monorepo/java-monorepo/.git.path /home/runner/work/_temp/git-credentials-02fdfeae-0e2d-490c-b992-beb9f3f71bb4.config
+2026-06-11T12:29:02.8092325Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/java-monorepo/java-monorepo/.git/worktrees/*.path
+2026-06-11T12:29:02.8109716Z /home/runner/work/_temp/git-credentials-02fdfeae-0e2d-490c-b992-beb9f3f71bb4.config
+2026-06-11T12:29:02.8133273Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/java-monorepo/java-monorepo/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-02fdfeae-0e2d-490c-b992-beb9f3f71bb4.config
+2026-06-11T12:29:02.8158063Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+2026-06-11T12:29:02.8180757Z /github/runner_temp/git-credentials-02fdfeae-0e2d-490c-b992-beb9f3f71bb4.config
+2026-06-11T12:29:02.8192447Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-02fdfeae-0e2d-490c-b992-beb9f3f71bb4.config
+2026-06-11T12:29:02.8227130Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-06-11T12:29:02.8249721Z /github/runner_temp/git-credentials-02fdfeae-0e2d-490c-b992-beb9f3f71bb4.config
+2026-06-11T12:29:02.8261607Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-02fdfeae-0e2d-490c-b992-beb9f3f71bb4.config
+2026-06-11T12:29:02.8297351Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-06-11T12:29:02.8547368Z Removing credentials config '/home/runner/work/_temp/git-credentials-02fdfeae-0e2d-490c-b992-beb9f3f71bb4.config'
+2026-06-11T12:29:02.8716581Z Cleaning up orphan processes
+2026-06-11T12:29:02.9134518Z Terminate orphan process: pid (2333) (sccache)
