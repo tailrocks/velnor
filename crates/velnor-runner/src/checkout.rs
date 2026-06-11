@@ -219,10 +219,21 @@ where
                 }
             }
         }
+        // Directories too: cargo's `rerun-if-changed=<dir>` fingerprints the
+        // directory mtime, so an unpinned dir re-runs build scripts (and
+        // recompiles their crates) on every fresh checkout — observed live as
+        // blockchain-explorer rebuilding 28s of clippy per warm run because
+        // its build.rs tracks the proto include directories. Setting file
+        // times does not touch the parent dir, so order is irrelevant.
+        if let Ok(handle) = std::fs::File::open(&dir) {
+            if handle.set_modified(commit_time).is_ok() {
+                touched += 1;
+            }
+        }
     }
     if touched > 0 {
         log.push(format!(
-            "Pinned {touched} file mtimes to the commit timestamp (stable cargo fingerprints across jobs)"
+            "Pinned {touched} file and directory mtimes to the commit timestamp (stable cargo fingerprints across jobs)"
         ));
     }
 }
