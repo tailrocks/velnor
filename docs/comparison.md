@@ -134,6 +134,31 @@ Expandability was already at parity in the baseline (every executed step on
 both lanes expandable; skipped steps non-expandable on both). External ids
 are clean UUIDs (`data-external-id` verified via HTML).
 
+### Round-2 deep diff (run 27341195843, 0.1.18 → fixed in 0.1.20)
+
+After the structural gate passed, a per-step *content* diff (Velnor blobs
+reconstructed from the job-log artifact's group wrappers vs the GitHub
+per-job log) found a second layer of divergences:
+
+| Finding | Severity | Fix |
+|---------|----------|-----|
+| `shell: bash` executed as `bash --noprofile --norc -e` — **no `-o pipefail`** (GitHub: `-e -o pipefail`); failing pipes passed silently | execution correctness | `Shell::Bash` runs+displays the pipefail form; new `Shell::BashDefault` = `bash -e {0}` for steps with no shell anywhere (GitHub's fallback) |
+| Step header `env:` block missing entirely (GitHub prints workflow env + GITHUB_ENV-accumulated env + step env on every step) | content parity | `JobExecutionState::prelude_env`: workflow env first, dynamic (set-env/GITHUB_ENV) in set order, step env last; wired into script/action/checkout preludes |
+| `##[group]<uuid>` leaked inside composite logs | bug (round-1 regression) | non-reporting bookkeeping steps (CompositeOutputs) absorb state without a visible section |
+| Checkout `with:` block thin + alphabetized (GitHub shows full default set in declaration order) | content parity | ordered input list incl. ssh-strict/ssh-user/sparse-checkout-cone-mode/show-progress + env block |
+| Checkout step missing from the job-log artifact (only the live channel got it) | artifact parity | eager-checkout StepLogs included in the artifact source |
+| Artifact doubled every step header (wrapper group + the blob's own header group) | artifact cosmetics | wrapper skipped when the blob already opens with `##[group]` |
+| `Finishing: Complete job` trailer line | format parity | dropped (GitHub has none) |
+| mise adapter dumped ungrouped `--verbose` DEBUG spam (≈750 extra lines vs GitHub's grouped mise-action output) | readability | verbose off; install output wrapped in a `::group::mise install` section |
+| Native adapter steps (mise/sccache/mold/just/…) streamed **nothing** live — a cold 115 s `mise install` looked frozen while GitHub streams everything | live parity | `native_shell` now streams via `run_streaming` and feeds the live WebSocket under the executing step's identity (internal `__VELNOR_MISE_BIN__` markers filtered) |
+
+Accepted divergences (documented, not gated): `Download action repository`
+lines omit the `(SHA:…)` suffix — native adapters never clone the action
+repo, so the SHA would cost a network round-trip per action (omit-don't-
+fabricate per the goal prompt); native steps with no `with:` in the workflow
+render an empty header group where GitHub prints the action's declared
+defaults; the node-sidecar (diagnostic fallback) does not live-stream.
+
 ## Status (2026-06-11)
 
 - [x] Improvement plan items implemented (§1–§10 above).
@@ -155,3 +180,7 @@ are clean UUIDs (`data-external-id` verified via HTML).
       `.velnor-compare/lane-compare-run-27319103370/` (before),
       `.velnor-compare/lane-compare-run-27341195843/` (after),
       `.velnor-live-evidence/tailrocks_velnor-actions-fixture-existing-run-27341195843.md`.
+- [ ] Round-2 content-parity fixes (table above) re-verified live on a
+      0.1.20 fixture run: lane-compare PASS, artifact shows `env:` blocks +
+      pipefail shell line + grouped mise output, no doubled headers, no
+      UUID groups, checkout step present in the artifact.

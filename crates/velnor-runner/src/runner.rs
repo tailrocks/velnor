@@ -3132,6 +3132,10 @@ fn execute_script_job_inner(
         .map(|plan| resolve_checkout_plan_context(plan, &base_env, &context_data))
         .collect::<Vec<_>>();
     let mut checkout_order: i32 = 1;
+    // Eager checkout logs also belong in the downloadable job-log artifact —
+    // they only travelled the live channel before, so the artifact was the one
+    // place the checkout step was missing.
+    let mut eager_checkout_step_logs: Vec<StepLog> = Vec::new();
     for plan in &eager_checkout_plans {
         checkout_order += 1;
         // The Results Service only accepts GUID external ids — a raw plan id
@@ -3153,9 +3157,9 @@ fn execute_script_job_inner(
         if let Err(ref e) = checkout_result {
             eprintln!("Checkout failed: {e:#}");
         }
-        if let Some(sender) = &step_log_sender {
+        {
             let checkout_lines = checkout_step_lines(plan, exit_code, &checkout_trace);
-            let _ = sender.send(StepLog {
+            let log = StepLog {
                 step_id: backend_step_id.clone(),
                 display_name: plan.display_name.clone(),
                 order: checkout_order,
@@ -3172,7 +3176,11 @@ fn execute_script_job_inner(
                 warning_count: 0,
                 notice_count: 0,
                 summary: String::new(),
-            });
+            };
+            if let Some(sender) = &step_log_sender {
+                let _ = sender.send(log.clone());
+            }
+            eager_checkout_step_logs.push(log);
         }
         checkout_result?;
         configure_safe_directory(&home, &workspace, &plan.destination)?;
@@ -3247,7 +3255,8 @@ fn execute_script_job_inner(
     let post_step_log_sender = step_log_sender.clone();
     let mut executor = DockerScriptExecutor::new(command_runner)
         .with_initial_order(checkout_order)
-        .with_trailing_post_action_count(cleanup_checkout_plans.len());
+        .with_trailing_post_action_count(cleanup_checkout_plans.len())
+        .with_workflow_env(crate::runtime_env::job_environment_variables(job));
     if let Some(sender) = step_start_sender {
         executor = executor.with_step_start_sender(sender);
     }
@@ -3399,6 +3408,7 @@ fn execute_script_job_inner(
     extra_step_logs.push(complete_log);
 
     let mut all_step_logs = vec![setup_log];
+    all_step_logs.extend(eager_checkout_step_logs);
     all_step_logs.extend(summary.step_logs);
     all_step_logs.extend(extra_step_logs);
     Ok(ScriptJobResult {
@@ -4443,7 +4453,6 @@ fn complete_job_lines() -> Vec<String> {
         "Clean work directory".to_string(),
         "Recycle runner slot".to_string(),
         "##[endgroup]".to_string(),
-        "Finishing: Complete job".to_string(),
     ]
 }
 
@@ -4495,22 +4504,33 @@ fn build_combined_job_log(job: &AgentJobRequestMessage, step_logs: &[StepLog]) -
         if log.skipped {
             continue;
         }
-        let name = if log.display_name.is_empty() {
-            log.step_id.as_str()
-        } else {
-            log.display_name.as_str()
-        };
         let timestamp = if log.completed_at.is_empty() {
             unix_now_iso8601()
         } else {
             iso8601_with_blob_precision(&log.completed_at)
         };
-        out.push_str(&format!("{timestamp} ##[group]{name}\n"));
+        // Step blobs now open with their own `##[group]<name>` header; only
+        // wrap steps that don't (otherwise the artifact shows the header
+        // doubled).
+        let already_grouped = log
+            .lines
+            .first()
+            .is_some_and(|line| line.starts_with("##[group]"));
+        if !already_grouped {
+            let name = if log.display_name.is_empty() {
+                log.step_id.as_str()
+            } else {
+                log.display_name.as_str()
+            };
+            out.push_str(&format!("{timestamp} ##[group]{name}\n"));
+        }
         for line in &log.lines {
             let masked = mask_value(&mask_single_value(line, &secret_masks), &log.masks);
             out.push_str(&format!("{timestamp} {masked}\n"));
         }
-        out.push_str(&format!("{timestamp} ##[endgroup]\n"));
+        if !already_grouped {
+            out.push_str(&format!("{timestamp} ##[endgroup]\n"));
+        }
     }
     out
 }
@@ -7917,7 +7937,8 @@ runs:
         let joined = lines.join("\n");
         assert!(joined.contains("##[group]Post-job cleanup"));
         assert!(joined.contains("Stop job container"));
-        assert!(joined.contains("Finishing: Complete job"));
+        // GitHub's Complete job blob has no "Finishing:" trailer line.
+        assert!(!joined.contains("Finishing: Complete job"));
     }
 
     #[test]

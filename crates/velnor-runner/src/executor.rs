@@ -530,6 +530,21 @@ pub struct DockerScriptExecutor<R> {
     step_log_sender: Option<UnboundedSender<StepLog>>,
     initial_order: i32,
     trailing_post_action_count: usize,
+    /// Workflow-level env from the job message — shown first in every step's
+    /// `env:` prelude block, the way GitHub renders it.
+    workflow_env: Vec<(String, String)>,
+    /// Identity of the step currently executing — lets native adapters stream
+    /// their output to the live feed (GitHub streams every step live, not
+    /// just `run:` steps).
+    live_step: Option<LiveStepIdentity>,
+}
+
+#[derive(Debug, Clone)]
+struct LiveStepIdentity {
+    step_id: String,
+    display_name: String,
+    order: i32,
+    started_at: String,
 }
 
 impl<R> DockerScriptExecutor<R>
@@ -543,7 +558,14 @@ where
             step_log_sender: None,
             initial_order: 0,
             trailing_post_action_count: 0,
+            workflow_env: Vec::new(),
+            live_step: None,
         }
+    }
+
+    pub fn with_workflow_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.workflow_env = env;
+        self
     }
 
     pub fn with_initial_order(mut self, order: i32) -> Self {
@@ -744,6 +766,11 @@ where
             &container.workspace_host,
             temp_host,
         );
+        state.workflow_env = self
+            .workflow_env
+            .iter()
+            .map(|(name, value)| (name.clone(), state.resolve_expressions(value)))
+            .collect();
         let mut step_error = None;
         let mut post_actions = Vec::new();
         let mut native_post_actions = Vec::new();
@@ -943,6 +970,12 @@ where
                         main_started_at.clone(),
                     ),
                 };
+            self.live_step = Some(LiveStepIdentity {
+                step_id: live_step_id.clone(),
+                display_name: live_display_name.clone(),
+                order: live_order,
+                started_at: live_started_at.clone(),
+            });
             let result = (|| match step {
                 ExecutableStep::CompositeStart { .. } | ExecutableStep::CompositeEnd { .. } => {
                     unreachable!("composite boundary steps are handled before execution")
@@ -1077,11 +1110,18 @@ where
                         result.failure_ignored = true;
                     }
                     if let Some(frame) = composite_frame.as_mut() {
-                        frame.append_inner(
-                            &display_name,
-                            &step_log_prelude(step, &step_state),
-                            &result,
-                        );
+                        // Bookkeeping steps (CompositeOutputs) contribute state
+                        // but never a visible section — otherwise their raw
+                        // step id leaks as a `##[group]<uuid>` header.
+                        if step.reports_timeline_start() {
+                            frame.append_inner(
+                                &display_name,
+                                &step_log_prelude(step, &step_state),
+                                &result,
+                            );
+                        } else {
+                            frame.absorb(&result);
+                        }
                     } else if step.reports_timeline_start() {
                         let log = step_log_with_name(
                             &step_backend_id,
@@ -1103,7 +1143,9 @@ where
                     break;
                 }
             }
+            self.live_step = None;
         }
+        self.live_step = None;
         // An execution error mid-composite breaks the loop before the
         // CompositeEnd boundary: flush the frame so the step still closes
         // (failed) instead of silently disappearing from the UI.
@@ -1789,7 +1831,29 @@ where
             &env,
             &["sh".to_string(), "-c".to_string(), wrapped],
         );
-        self.runner.run("docker", &args)
+        // Stream adapter output to the live feed as it happens — a minutes-long
+        // native step (mise install on a cold store) must not look frozen in
+        // the live view while the GitHub lane streams continuously.
+        let live_sender = self.step_log_sender.clone();
+        let live_step = self.live_step.clone();
+        let mut on_output = |_: CommandStream, line: &str| {
+            // Internal adapter markers are stripped from the blob after the
+            // run; keep them out of the live feed too.
+            if line.starts_with("__VELNOR_MISE_BIN__") {
+                return;
+            }
+            if let Some(live) = live_step.as_ref() {
+                emit_live_step_log(
+                    &live_sender,
+                    &live.step_id,
+                    &live.display_name,
+                    live.order,
+                    &live.started_at,
+                    line,
+                );
+            }
+        };
+        self.runner.run_streaming("docker", &args, &mut on_output)
     }
 
     fn native_renovate(
@@ -2445,11 +2509,13 @@ if [ -n "{install_flag}" ]; then
     [ -f "$f" ] && mise trust "$f" 2>/dev/null || true
   done
   mise trust --all 2>/dev/null || true
+  echo "::group::mise install"
   if [ -n "$install_args" ]; then
-    mise install --verbose $install_args
+    mise install $install_args
   else
-    mise install --verbose
+    mise install
   fi
+  echo "::endgroup::"
 else
   command -v mise >/dev/null 2>&1
 fi
@@ -4215,6 +4281,11 @@ fn paths_filter_head_ref(state: &JobExecutionState) -> Option<String> {
 #[derive(Debug, Default)]
 struct JobExecutionState {
     env: BTreeMap<String, String>,
+    /// Workflow-level env (display: first lines of each `env:` block).
+    workflow_env: Vec<(String, String)>,
+    /// Env accumulated at runtime via GITHUB_ENV / ::set-env, in set order —
+    /// GitHub appends these after the workflow env in the `env:` block.
+    dynamic_env: Vec<(String, String)>,
     context_data: BTreeMap<String, Value>,
     workspace_host: Option<PathBuf>,
     temp_host: Option<PathBuf>,
@@ -4275,6 +4346,8 @@ impl JobExecutionState {
     ) -> Self {
         let mut state = Self {
             env: base_env.iter().cloned().collect(),
+            workflow_env: Vec::new(),
+            dynamic_env: Vec::new(),
             context_data: context_data.iter().cloned().collect(),
             workspace_host,
             temp_host,
@@ -4307,6 +4380,8 @@ impl JobExecutionState {
     fn with_step_action(&self, step_id: &str) -> Self {
         let mut state = Self {
             env: self.env.clone(),
+            workflow_env: self.workflow_env.clone(),
+            dynamic_env: self.dynamic_env.clone(),
             context_data: self.context_data.clone(),
             workspace_host: self.workspace_host.clone(),
             temp_host: self.temp_host.clone(),
@@ -4327,6 +4402,8 @@ impl JobExecutionState {
     fn with_env(&self, env: Vec<(String, String)>) -> Self {
         let mut state = Self {
             env: self.env.clone(),
+            workflow_env: self.workflow_env.clone(),
+            dynamic_env: self.dynamic_env.clone(),
             context_data: self.context_data.clone(),
             workspace_host: self.workspace_host.clone(),
             temp_host: self.temp_host.clone(),
@@ -4386,6 +4463,15 @@ impl JobExecutionState {
         }
         for (name, value) in &result.state.env {
             self.env.insert(name.clone(), value.clone());
+            if let Some(existing) = self
+                .dynamic_env
+                .iter_mut()
+                .find(|(existing_name, _)| existing_name == name)
+            {
+                existing.1 = value.clone();
+            } else {
+                self.dynamic_env.push((name.clone(), value.clone()));
+            }
         }
         for path in result.state.path.iter().rev() {
             self.path.insert(0, path.clone());
@@ -4417,6 +4503,30 @@ impl JobExecutionState {
             condition: step.condition.clone(),
             continue_on_error: step.continue_on_error,
         }
+    }
+
+    /// The `env:` block GitHub prints in a step's header group: workflow env
+    /// first, then runtime-accumulated env (GITHUB_ENV / ::set-env) in set
+    /// order, then the step's own env — first position wins, latest value.
+    fn prelude_env(&self, step_env: &[(String, String)]) -> Vec<(String, String)> {
+        let mut ordered: Vec<(String, String)> = Vec::new();
+        let mut upsert = |name: &String, value: &String| {
+            if let Some(existing) = ordered.iter_mut().find(|(n, _)| n == name) {
+                existing.1 = value.clone();
+            } else {
+                ordered.push((name.clone(), value.clone()));
+            }
+        };
+        for (name, value) in &self.workflow_env {
+            upsert(name, value);
+        }
+        for (name, value) in &self.dynamic_env {
+            upsert(name, value);
+        }
+        for (name, value) in step_env {
+            upsert(name, value);
+        }
+        self.resolve_env(&ordered)
     }
 
     fn resolve_env(&self, env: &[(String, String)]) -> Vec<(String, String)> {
@@ -5019,38 +5129,62 @@ fn script_log_prelude(step: &ScriptStep, state: &JobExecutionState) -> Vec<Strin
             step.working_directory_container
         ));
     }
-    append_env_lines(&mut lines, &state.resolve_env(&step.env));
+    append_env_lines(&mut lines, &state.prelude_env(&step.env));
     lines
 }
 
 fn checkout_log_prelude(plan: &CheckoutPlan, state: &JobExecutionState) -> Vec<String> {
-    let mut inputs = BTreeMap::new();
-    inputs.insert(
+    // Input order and default set mirror the GitHub-hosted actions/checkout
+    // header (which prints declared defaults for unset inputs too).
+    let mut inputs: Vec<(String, String)> = Vec::new();
+    inputs.push((
         "repository".to_string(),
         checkout_repository_for_log(&plan.clone_url),
-    );
+    ));
     if let Some(version) = &plan.version {
-        inputs.insert("ref".to_string(), state.resolve_expressions(version));
+        inputs.push(("ref".to_string(), state.resolve_expressions(version)));
     }
-    inputs.insert("token".to_string(), "***".to_string());
-    inputs.insert(
+    inputs.push(("token".to_string(), "***".to_string()));
+    inputs.push(("ssh-strict".to_string(), "true".to_string()));
+    inputs.push(("ssh-user".to_string(), "git".to_string()));
+    inputs.push((
         "persist-credentials".to_string(),
         plan.persist_credentials.to_string(),
-    );
-    inputs.insert("clean".to_string(), plan.clean.to_string());
-    inputs.insert(
+    ));
+    inputs.push(("clean".to_string(), plan.clean.to_string()));
+    inputs.push(("sparse-checkout-cone-mode".to_string(), "true".to_string()));
+    inputs.push((
         "fetch-depth".to_string(),
         plan.fetch_depth
             .map_or_else(|| "0".to_string(), |depth| depth.to_string()),
-    );
-    inputs.insert("fetch-tags".to_string(), plan.fetch_tags.to_string());
-    inputs.insert("lfs".to_string(), plan.lfs.to_string());
-    inputs.insert("submodules".to_string(), "false".to_string());
-    inputs.insert("set-safe-directory".to_string(), "true".to_string());
+    ));
+    inputs.push(("fetch-tags".to_string(), plan.fetch_tags.to_string()));
+    inputs.push(("show-progress".to_string(), "true".to_string()));
+    inputs.push(("lfs".to_string(), plan.lfs.to_string()));
+    inputs.push(("submodules".to_string(), "false".to_string()));
+    inputs.push(("set-safe-directory".to_string(), "true".to_string()));
 
     let mut lines = Vec::new();
-    append_with_lines(&mut lines, &inputs, state);
+    append_with_pairs(&mut lines, &inputs, state);
+    append_env_lines(&mut lines, &state.prelude_env(&[]));
     lines
+}
+
+fn append_with_pairs(
+    lines: &mut Vec<String>,
+    inputs: &[(String, String)],
+    state: &JobExecutionState,
+) {
+    if inputs.is_empty() {
+        return;
+    }
+    lines.push("with:".to_string());
+    for (name, value) in inputs {
+        lines.push(format!(
+            "  {name}: {}",
+            redact_log_value(name, &state.resolve_expressions(value))
+        ));
+    }
 }
 
 fn action_log_prelude(
@@ -5071,7 +5205,7 @@ fn action_log_prelude(
         })
         .cloned()
         .collect::<Vec<_>>();
-    append_env_lines(&mut lines, &state.resolve_env(&explicit_env));
+    append_env_lines(&mut lines, &state.prelude_env(&explicit_env));
     lines
 }
 
@@ -12445,6 +12579,64 @@ bitcoin-processor-app.push=true")
         assert!(joined.contains("env:\n  RUN_TESTS: true"));
         // Header group closes before output: done is OUTSIDE the group.
         assert!(joined.contains("##[endgroup]\ndone"));
+    }
+
+    #[test]
+    fn prelude_env_orders_workflow_then_dynamic_then_step() {
+        let mut state = JobExecutionState::new(&[]);
+        state.workflow_env = vec![
+            ("SCCACHE_GHA_ENABLED".into(), "true".into()),
+            ("RUSTC_WRAPPER".into(), "sccache".into()),
+        ];
+        let mut result = StepExecutionResult {
+            exit_code: 0,
+            state: StepCommandState::default(),
+            skipped: false,
+            failure_ignored: false,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        result
+            .state
+            .env
+            .insert("SCCACHE_PATH".into(), "/usr/bin/sccache".into());
+        result
+            .state
+            .env
+            .insert("RUSTC_WRAPPER".into(), "sccache2".into());
+        state.apply("s1", &result);
+
+        let env = state.prelude_env(&[("STEP_ONLY".into(), "1".into())]);
+        let names: Vec<&str> = env.iter().map(|(n, _)| n.as_str()).collect();
+        // Workflow env keeps first position even when re-set dynamically;
+        // dynamic additions follow in set order; step env last.
+        assert_eq!(
+            names,
+            vec![
+                "SCCACHE_GHA_ENABLED",
+                "RUSTC_WRAPPER",
+                "SCCACHE_PATH",
+                "STEP_ONLY"
+            ]
+        );
+        let rustc_wrapper = env
+            .iter()
+            .find(|(n, _)| n == "RUSTC_WRAPPER")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(rustc_wrapper, Some("sccache2"));
+    }
+
+    #[test]
+    fn explicit_bash_shell_runs_and_displays_pipefail_form() {
+        // GitHub's explicit `shell: bash` is
+        // `bash --noprofile --norc -e -o pipefail {0}` — omitting pipefail
+        // masks pipeline failures the hosted lane would catch.
+        assert_eq!(
+            shell_log_name(Shell::Bash),
+            "bash --noprofile --norc -e -o pipefail {0}"
+        );
+        assert_eq!(shell_log_name(Shell::BashDefault), "bash -e {0}");
+        assert_eq!(shell_log_name(Shell::Sh), "sh -e {0}");
     }
 
     #[test]
