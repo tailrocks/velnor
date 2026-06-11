@@ -109,7 +109,7 @@ fn github_script_step_with_context(
         .or(defaults.shell.as_deref())
         .map(github_shell)
         .transpose()?
-        .unwrap_or(Shell::Bash);
+        .unwrap_or(Shell::BashDefault);
     let working_directory = string_input_field(
         inputs,
         &[

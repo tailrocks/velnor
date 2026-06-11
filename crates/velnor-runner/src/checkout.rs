@@ -169,7 +169,67 @@ where
         plan.clean,
         plan.lfs,
         log,
-    )
+    )?;
+    normalize_checkout_mtimes(runner, &plan.destination, log);
+    Ok(())
+}
+
+/// Pin every checked-out file's mtime to the commit timestamp, so two jobs
+/// checking out the SAME commit see identical mtimes. Cargo fingerprints path
+/// dependencies by mtime: with fresh per-job checkouts every workspace crate
+/// looked dirty on every job, recompiling the whole workspace even when
+/// sccache and the persistent target dir were warm. Best-effort: any failure
+/// (no git, odd fs) leaves mtimes as checked out.
+fn normalize_checkout_mtimes<R>(runner: &mut R, destination: &Path, log: &mut Vec<String>)
+where
+    R: CommandRunner,
+{
+    let args = [
+        "-C".to_string(),
+        path_arg(destination),
+        "log".to_string(),
+        "-1".to_string(),
+        "--format=%ct".to_string(),
+    ];
+    let Ok(result) = runner.run("git", &args) else {
+        return;
+    };
+    if result.code != 0 {
+        return;
+    }
+    let Ok(commit_secs) = result.stdout.trim().parse::<u64>() else {
+        return;
+    };
+    let commit_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(commit_secs);
+    let mut pending = vec![destination.to_path_buf()];
+    let mut touched = 0usize;
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                if entry.file_name() != ".git" {
+                    pending.push(path);
+                }
+            } else if file_type.is_file() {
+                if let Ok(file) = std::fs::File::options().append(true).open(&path) {
+                    if file.set_modified(commit_time).is_ok() {
+                        touched += 1;
+                    }
+                }
+            }
+        }
+    }
+    if touched > 0 {
+        log.push(format!(
+            "Pinned {touched} file mtimes to the commit timestamp (stable cargo fingerprints across jobs)"
+        ));
+    }
 }
 
 /// Run the post-checkout credential cleanup for each plan, returning the

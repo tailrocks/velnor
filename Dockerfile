@@ -1,9 +1,30 @@
 FROM rust:1.96-bookworm@sha256:13c186980fa33cc12759b429662a1322939dbe697484b7c33b47dd2698d28460 AS build
 
+# sccache: object-level compiler cache in a BuildKit cache mount so source
+# changes rebuild from warm objects (estate instant-cache mandate).
+RUN ver="v0.15.0" && \
+    case "$(uname -m)" in \
+      x86_64) arch="x86_64-unknown-linux-musl" ;; \
+      aarch64|arm64) arch="aarch64-unknown-linux-musl" ;; \
+      *) echo "unsupported arch $(uname -m) for sccache" >&2; exit 1 ;; \
+    esac && \
+    tmp="$(mktemp -d)" && \
+    curl -fsSL "https://github.com/mozilla/sccache/releases/download/${ver}/sccache-${ver}-${arch}.tar.gz" -o "$tmp/sccache.tar.gz" && \
+    tar -xzf "$tmp/sccache.tar.gz" -C "$tmp" && \
+    install -m 0755 "$tmp/sccache-${ver}-${arch}/sccache" /usr/local/bin/sccache && \
+    rm -rf "$tmp" && \
+    sccache --version
+ENV RUSTC_WRAPPER=sccache \
+    SCCACHE_DIR=/sccache
+
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN cargo build --release --bin velnor-runner --bin velnor-tools
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/sccache \
+    cargo build --release --bin velnor-runner --bin velnor-tools \
+    && sccache --show-stats
 
 FROM ubuntu:26.04@sha256:f3d28607ddd78734bb7f71f117f3c6706c666b8b76cbff7c9ff6e5718d46ff64
 

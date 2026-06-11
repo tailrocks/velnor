@@ -3082,6 +3082,7 @@ fn execute_script_job_inner(
     for path in [
         cargo_store.join("registry"),
         cargo_store.join("git"),
+        cargo_store.join("bin"),
         mise_store.join("installs"),
         mise_store.join("cache"),
     ] {

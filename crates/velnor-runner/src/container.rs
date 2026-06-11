@@ -67,6 +67,15 @@ impl JobContainerSpec {
                 &cargo_store_host(&self.temp_host).join("git"),
                 "/github/home/.cargo/git",
             ),
+            // Shared $CARGO_HOME/bin: mise's rust backend keys "installed" off
+            // this dir, so with a per-job-fresh home every job re-ran
+            // rustup-init (network!) to reinstall the proxies. Shared, they
+            // install once per fleet.
+            "-v".into(),
+            self.mount_arg(
+                &cargo_store_host(&self.temp_host).join("bin"),
+                "/github/home/.cargo/bin",
+            ),
             // Host-persistent mise tool store: only `installs` + `cache` are
             // mounted (the mise binary, shims and global config stay baked in
             // the image). A tool a job installs (GraalVM, node, python, cargo
@@ -463,7 +472,12 @@ impl ServiceContainerSpec {
 
 #[derive(Debug, Clone, Copy)]
 pub enum Shell {
+    /// Explicit `shell: bash` — GitHub runs `bash --noprofile --norc -e -o
+    /// pipefail {0}` (actions/runner ScriptHandlerHelpers); omitting pipefail
+    /// silently masks pipeline failures the hosted lane would catch.
     Bash,
+    /// No shell specified anywhere — GitHub's fallback is plain `bash -e {0}`.
+    BashDefault,
     Sh,
 }
 
@@ -475,8 +489,11 @@ impl Shell {
                 "--noprofile".into(),
                 "--norc".into(),
                 "-e".into(),
+                "-o".into(),
+                "pipefail".into(),
                 script_path.into(),
             ],
+            Self::BashDefault => vec!["bash".into(), "-e".into(), script_path.into()],
             Self::Sh => vec!["sh".into(), "-e".into(), script_path.into()],
         }
     }
@@ -762,6 +779,8 @@ mod tests {
                 "--noprofile",
                 "--norc",
                 "-e",
+                "-o",
+                "pipefail",
                 "/__t/step.sh"
             ]
         );
