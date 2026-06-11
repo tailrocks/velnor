@@ -1,3 +1,5 @@
+mod lane_compare;
+
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use clap::{ArgAction, Args, Parser, Subcommand};
@@ -60,6 +62,8 @@ enum CommandKind {
     TargetSmoke(TargetSmokeArgs),
     /// Check fixture lane pattern: matrix.config has both lanes, runs-on uses matrix variable, steps are lane-agnostic.
     CheckFixtureLanes(CheckFixtureLanesArgs),
+    /// Diff the GitHub-hosted and Velnor lanes of one run via the GitHub API (equal-or-better gate).
+    LaneCompare(lane_compare::LaneCompareArgs),
 }
 
 #[derive(Debug, Args)]
@@ -498,6 +502,7 @@ async fn main() -> Result<()> {
         CommandKind::FixtureSmoke(args) => fixture_smoke(&root, args),
         CommandKind::TargetSmoke(args) => target_smoke(&root, args),
         CommandKind::CheckFixtureLanes(args) => check_fixture_lanes(args).await,
+        CommandKind::LaneCompare(args) => lane_compare::lane_compare(&root, args),
     }
 }
 

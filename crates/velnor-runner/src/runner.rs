@@ -3073,6 +3073,21 @@ fn execute_script_job_inner(
     for path in [&workspace, &temp, &home, &actions, &tools] {
         fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
     }
+    // Host-persistent daemon-shared stores mounted into every job container
+    // (cargo registry/git + mise installs/cache; see container.rs). Created
+    // here so the first job doesn't depend on docker's implicit host-dir
+    // creation semantics.
+    let cargo_store = crate::container::cargo_store_host(&temp);
+    let mise_store = crate::container::mise_store_host(&temp);
+    for path in [
+        cargo_store.join("registry"),
+        cargo_store.join("git"),
+        mise_store.join("installs"),
+        mise_store.join("cache"),
+    ] {
+        fs::create_dir_all(&path)
+            .with_context(|| format!("create persistent store {}", path.display()))?;
+    }
     let context_data = job_context_data(job);
     // Synthetic "Set up job" step matching GitHub-hosted runner output.
     let setup_step_id = uuid::Uuid::new_v4().to_string();
@@ -3118,10 +3133,14 @@ fn execute_script_job_inner(
     let mut checkout_order: i32 = 1;
     for plan in &eager_checkout_plans {
         checkout_order += 1;
+        // The Results Service only accepts GUID external ids — a raw plan id
+        // such as `checkout1` makes it drop the step record entirely, leaving
+        // the checkout step invisible in the Checks UI (observed live).
+        let backend_step_id = crate::executor::github_backend_step_id(&plan.step_id);
         // Emit step events so GitHub shows the checkout step in the job's step list.
         if let Some(sender) = &step_start_sender {
             let _ = sender.send(StepStartEvent {
-                step_id: plan.step_id.clone(),
+                step_id: backend_step_id.clone(),
                 display_name: plan.display_name.clone(),
                 order: checkout_order,
             });
@@ -3136,7 +3155,7 @@ fn execute_script_job_inner(
         if let Some(sender) = &step_log_sender {
             let checkout_lines = checkout_step_lines(plan, exit_code, &checkout_trace);
             let _ = sender.send(StepLog {
-                step_id: plan.step_id.clone(),
+                step_id: backend_step_id.clone(),
                 display_name: plan.display_name.clone(),
                 order: checkout_order,
                 started_at: unix_now_iso8601(),
@@ -3937,6 +3956,10 @@ fn ordered_executable_steps(
                     let parent_continue_on_error = crate::script_step::step_continue_on_error(step);
                     ordered.push(ExecutableStep::CompositeStart {
                         step_id: plan.step_id.clone(),
+                        display_name: action_step_display_name(step),
+                        inputs: plan.inputs.clone(),
+                        env: crate::script_step::step_environment(step)?,
+                        condition: parent_condition.map(ToOwned::to_owned),
                     });
                     for invocation in
                         composite_action_invocations(plan, metadata, "/__w", actions_host)?
@@ -4088,8 +4111,17 @@ fn append_resolved_action_steps(
         ActionRuntime::Composite => {
             let action_condition =
                 combine_conditions(parent_condition, action.plan.condition.as_deref());
+            let composite_display = if display_name.is_empty() {
+                format!("Run {}@{}", action.plan.repository, action.plan.git_ref)
+            } else {
+                display_name.to_string()
+            };
             ordered.push(ExecutableStep::CompositeStart {
                 step_id: action.plan.step_id.clone(),
+                display_name: composite_display,
+                inputs: action.plan.inputs.clone(),
+                env: action.plan.env.clone(),
+                condition: action_condition.clone(),
             });
             for invocation in action.composite_invocations("/__w", actions_host)? {
                 match invocation {
@@ -4415,22 +4447,33 @@ fn complete_job_lines() -> Vec<String> {
 }
 
 fn action_step_display_name(step: &crate::job_message::ActionStep) -> String {
+    // GitHub's Name field carries the step *id*, never a display name. Match
+    // actions/runner ActionRunner.GenerateDisplayName: DisplayName, else
+    // `Run <name>[/<path>][@<ref>]` (local actions: path only).
     let explicit = step
         .display_name
         .as_deref()
-        .or(step.name.as_deref())
         .filter(|n| !n.is_empty() && !n.starts_with("__"));
     if let Some(name) = explicit {
         return name.to_string();
     }
     if let Some(reference) = &step.reference {
-        if let Some(action_name) = reference.name.as_deref() {
-            if !action_name.is_empty() {
-                return match reference.git_ref.as_deref() {
-                    Some(r) if !r.is_empty() => format!("Run {action_name}@{r}"),
-                    _ => format!("Run {action_name}"),
-                };
+        let action_name = reference.name.as_deref().unwrap_or("");
+        let path = reference.path.as_deref().unwrap_or("");
+        let mut repo_string = action_name.to_string();
+        if !path.is_empty() {
+            if action_name.is_empty() {
+                repo_string.push_str(path);
+            } else {
+                repo_string.push('/');
+                repo_string.push_str(path);
             }
+        }
+        if !repo_string.is_empty() {
+            return match reference.git_ref.as_deref() {
+                Some(r) if !r.is_empty() => format!("Run {repo_string}@{r}"),
+                _ => format!("Run {repo_string}"),
+            };
         }
     }
     String::new()
@@ -4442,6 +4485,8 @@ fn post_step_display_name(display_name: &str) -> String {
 
 /// Build one masked, GitHub-style text blob of the whole job — each step wrapped
 /// in `##[group]<name>` … `##[endgroup]` — for the downloadable `job-log.txt`.
+/// Lines carry the same 7-digit timestamp prefix as GitHub's raw log download
+/// (docs/log-format-contract.md), stamped with the step's completion time.
 fn build_combined_job_log(job: &AgentJobRequestMessage, step_logs: &[StepLog]) -> String {
     let secret_masks = job_secret_mask_values(job);
     let mut out = String::new();
@@ -4454,15 +4499,38 @@ fn build_combined_job_log(job: &AgentJobRequestMessage, step_logs: &[StepLog]) -
         } else {
             log.display_name.as_str()
         };
-        out.push_str(&format!("##[group]{name}\n"));
+        let timestamp = if log.completed_at.is_empty() {
+            unix_now_iso8601()
+        } else {
+            iso8601_with_blob_precision(&log.completed_at)
+        };
+        out.push_str(&format!("{timestamp} ##[group]{name}\n"));
         for line in &log.lines {
             let masked = mask_value(&mask_single_value(line, &secret_masks), &log.masks);
-            out.push_str(&masked);
-            out.push('\n');
+            out.push_str(&format!("{timestamp} {masked}\n"));
         }
-        out.push_str("##[endgroup]\n");
+        out.push_str(&format!("{timestamp} ##[endgroup]\n"));
     }
     out
+}
+
+/// Convert an RFC3339 step timestamp into the 7-digit `.NET "o"` form GitHub
+/// uses on raw log lines (`YYYY-MM-DDTHH:MM:SS.fffffffZ`).
+fn iso8601_with_blob_precision(rfc3339: &str) -> String {
+    match rfc3339.split_once('Z') {
+        Some((head, _)) => match head.split_once('.') {
+            Some((seconds, fraction)) => {
+                let mut fraction = fraction.to_string();
+                fraction.truncate(7);
+                while fraction.len() < 7 {
+                    fraction.push('0');
+                }
+                format!("{seconds}.{fraction}Z")
+            }
+            None => format!("{head}.0000000Z"),
+        },
+        None => rfc3339.to_string(),
+    }
 }
 
 /// Upload the combined job log as a `job-log.txt` artifact (best-effort). Gives a
@@ -6763,7 +6831,7 @@ runs:
         assert!(matches!(ordered[0], ExecutableStep::Script(_)));
         assert!(matches!(
             &ordered[1],
-            ExecutableStep::CompositeStart { step_id } if step_id == "aggregate"
+            ExecutableStep::CompositeStart { step_id, .. } if step_id == "aggregate"
         ));
         let ExecutableStep::Script(step) = &ordered[2] else {
             panic!("local composite should expand to script step")
@@ -7005,7 +7073,7 @@ runs:
         assert_eq!(ordered.len(), 3);
         assert!(matches!(
             &ordered[0],
-            ExecutableStep::CompositeStart { step_id } if step_id == "docs"
+            ExecutableStep::CompositeStart { step_id, .. } if step_id == "docs"
         ));
         let ExecutableStep::Native {
             step_id,
@@ -7923,6 +7991,63 @@ runs:
             "2026-06-11T02:11:32.4623816Z ##[group]Run cargo nextest"
         );
         assert_eq!(blob.len(), lines.len());
+    }
+
+    #[test]
+    fn combined_job_log_lines_carry_blob_timestamps() {
+        // The job-log artifact replaces GitHub's raw-log download (absent for
+        // V2 jobs); GitHub's raw download timestamps EVERY line in the 7-digit
+        // blob form, so the artifact must too (lane-compare gates on it).
+        assert_eq!(
+            iso8601_with_blob_precision("2026-06-11T07:34:33Z"),
+            "2026-06-11T07:34:33.0000000Z"
+        );
+        assert_eq!(
+            iso8601_with_blob_precision("2026-06-11T07:34:33.91Z"),
+            "2026-06-11T07:34:33.9100000Z"
+        );
+        assert_eq!(
+            iso8601_with_blob_precision("2026-06-11T07:34:33.123456789Z"),
+            "2026-06-11T07:34:33.1234567Z"
+        );
+
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan-1" },
+            "timeline": { "id": "timeline-1" },
+            "jobId": "job-1",
+            "jobName": "__default",
+            "jobDisplayName": "compat",
+            "requestId": 1,
+        }))
+        .unwrap();
+        let logs = vec![StepLog {
+            step_id: "s1".into(),
+            display_name: "Run tests".into(),
+            order: 2,
+            started_at: "2026-06-11T07:34:30Z".into(),
+            completed_at: "2026-06-11T07:34:33Z".into(),
+            lines: vec!["hello".into()],
+            masks: Vec::new(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        }];
+        let combined = build_combined_job_log(&job, &logs);
+        for line in combined.lines() {
+            assert!(
+                line.starts_with("2026-06-11T07:34:33.0000000Z "),
+                "every artifact line must carry the blob timestamp prefix: {line}"
+            );
+        }
+        assert!(combined.contains("##[group]Run tests"));
+        assert!(combined.contains("hello"));
     }
 
     #[test]

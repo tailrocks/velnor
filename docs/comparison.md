@@ -97,9 +97,42 @@ should *improve*:
 
 | # | Area | Status |
 |---|------|--------|
-| 1 | External step IDs with `-check` suffix | Cosmetic; composite step naming from `action.rs:1278` |
-| 2 | Step numbering parity (GitHub post steps at #37–40) | Cosmetic for Phase 0 |
-| 3 | API-based lane comparison (live re-capture) | Needs live Sentry run |
+| 1 | Per-`job-log` artifact naming (`job-log-<job>`) | master-plan P4.4 |
+| 2 | Raw-log download 404s on Velnor V2 jobs (no v1 archive) | Documented; `job-log` artifact is the workaround (master-plan P4.3) |
+
+## The repeatable comparison: `velnor-tools lane-compare` (P4.1)
+
+```sh
+cargo run -q -p velnor-tools -- lane-compare                  # latest compat.yml run
+cargo run -q -p velnor-tools -- lane-compare --run-id <id>    # specific run
+cargo run -q -p velnor-tools -- lane-compare --repo owner/x --workflow ci.yml
+```
+
+Pairs the `github`/`velnor` lane jobs of one run by job name, diffs every
+step by number (display name, conclusion, duration, **expandability** from
+the job-page `<check-step data-log-url>` attributes — exactly what the UI
+renders), and checks lane log content (timestamps / `##[group]` / ANSI) from
+the GitHub per-job log download vs the Velnor `job-log` artifact. Exit code
+enforces the gate: **zero rows where GitHub shows information Velnor lacks**
+(`--strict false` to report without failing). Report + raw evidence land in
+`.velnor-compare/lane-compare-run-<id>/`.
+
+### lane-compare baseline findings (run 27319103370, runner 0.1.17)
+
+The first tool run found 12 WORSE rows — all fixed in the same pass:
+
+| Finding | Root cause | Fix |
+|---------|-----------|-----|
+| Main `actions/checkout` step missing from the step list (#2) | Eager-checkout step events carried a non-GUID external id (`checkout1`); the Results Service drops such records | Route through `github_backend_step_id` (UUID) for start+log events |
+| `${{ inputs.packages }}` raw in a step name | Display names never expression-evaluated | Resolve `${{ }}` at emit time with job contexts (upstream `TryUpdateDisplayName`) |
+| `msrv` / `command-files` ids shown as step names | `step.name` (= YAML id) used as display-name fallback; GitHub never does | Match `ActionRunner.GenerateDisplayName`: DisplayName else `Run <first script line>` |
+| Composite shown as inner step (`Run set -euo pipefail` instead of `Run ./.github/actions/check-fixture-output`) | Each embedded step registered its own timeline step | One step per composite (CompositeFrame); embedded output appends as `##[group]<inner>` sections — upstream CompositeActionHandler semantics |
+| `job-log` artifact lines untimestamped | Artifact built without blob prefixes | Every artifact line now carries the 7-digit blob timestamp |
+| Whole step log wrapped in one collapsed group + trailing `Finishing:` line | Velnor-invented format | GitHub format: group wraps ONLY the header (command, `with:`/`env:`); output visible below; `::group::`→`##[group]` converted **in place**; script body bold-cyan; summaries upload separately, never inline |
+
+Expandability was already at parity in the baseline (every executed step on
+both lanes expandable; skipped steps non-expandable on both). External ids
+are clean UUIDs (`data-external-id` verified via HTML).
 
 ## Status (2026-06-11)
 
@@ -110,7 +143,8 @@ should *improve*:
       vs actions/runner).
 - [x] Downloadable-archive workaround shipped: the full masked job log is
       uploaded as a `job-log` artifact (per-job naming still pending,
-      master-plan P4).
-- [ ] Full API-driven lane comparison matrix re-run across every workflow of
-      the three dual-lane repos (master-plan P4.1) — make it a `velnor-tools`
-      subcommand so it is repeatable.
+      master-plan P4); artifact lines carry blob timestamps as of 0.1.18.
+- [x] API-driven lane comparison shipped as `velnor-tools lane-compare`
+      (master-plan P4.1) — repeatable, CI-runnable, equal-or-better gate.
+- [ ] Post-0.1.18 fixture re-run: lane-compare must report **PASS** (0 worse
+      rows); capture before/after evidence under `.velnor-live-evidence/`.

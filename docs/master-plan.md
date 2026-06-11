@@ -407,6 +407,18 @@ volumes, per-job target volumes, local buildx cache, git mirrors, async
 finalization, boot∥checkout pre-warm, reflink cache copies) projecting
 −47…−70% wall per pipeline. Items below incorporate it.
 
+**Instant-cache root-cause sweep (2026-06-11, 0.1.18):**
+`docs/perf-instant-cache-plan-2026-06-11.md` — the "registry-cache silent
+no-op" was traced to the run-step prelude exporting HOME=/root +
+CARGO_HOME=/root/.cargo (cargo downloads landed in the unmounted container
+/root → the `~/.cargo` cache could never save; restores were invisible).
+Fixed by truthful exec base env (HOME=/github/home) + mount-based caching:
+daemon-shared host stores for cargo registry/git and mise installs/cache
+mounted into every job container, actions/cache adapter no-ops for
+always-warm paths, type=gha buildx cache options dropped on the Velnor
+lane, opt-in persistent CARGO_TARGET_DIR buckets, and the host-path leak
+(unknown absolute paths resolving to the daemon host FS) closed.
+
 1. **Native HTTP client, kill the curl subprocesses.** Today every GitHub
    call (OAuth, broker poll, acquire/renew/complete, Twirp, artifact upload)
    spawns `curl` with temp-file config (TLS-fingerprint throttle workaround)

@@ -123,26 +123,24 @@ fn github_script_step_with_context(
     .map(|path| workspace_path(workspace_container, path))
     .unwrap_or_else(|| workspace_container.to_string());
 
-    // Prefer DisplayName, but GitHub can send explicit script-step names in Name
-    // or in the script inputs map while unnamed script steps use internal names
-    // such as "__run".
-    let display_name = [
-        step.display_name.as_deref(),
-        step.name.as_deref(),
-        string_input_field(inputs, &["displayName", "DisplayName", "name", "Name"]),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|n| !n.is_empty() && !n.starts_with("__"))
-    .map(|n| n.to_string())
-    .unwrap_or_else(|| {
-        let first_line = script.lines().next().unwrap_or("").trim();
-        if first_line.is_empty() {
-            String::new()
-        } else {
-            format!("Run {first_line}")
-        }
-    });
+    // Prefer the broker-sent DisplayName. GitHub's Name/ContextName fields
+    // carry the step *id*, never a display name, and unnamed steps arrive as
+    // internal placeholders such as "__run"; actions/runner then falls back to
+    // `Run <first script line>` (ActionRunner.GenerateDisplayName), so any
+    // id-based fallback here diverges from the GitHub-hosted lane.
+    let display_name = step
+        .display_name
+        .as_deref()
+        .filter(|n| !n.is_empty() && !n.starts_with("__"))
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| {
+            let first_line = script.lines().next().unwrap_or("").trim();
+            if first_line.is_empty() {
+                String::new()
+            } else {
+                format!("Run {first_line}")
+            }
+        });
     Ok(ScriptStep {
         id: step_id(step, index),
         display_name,
@@ -829,7 +827,6 @@ impl CommandFileSet {
             state: commands_to_map(parse_command_file(&self.state.host)?),
             summary: fs::read_to_string(&self.summary.host)?,
             masks: Vec::new(),
-            log_lines: Vec::new(),
             annotations: Vec::new(),
             telemetry: Vec::new(),
             error_count: 0,
@@ -863,7 +860,6 @@ pub struct StepCommandState {
     pub state: BTreeMap<String, String>,
     pub summary: String,
     pub masks: Vec<String>,
-    pub log_lines: Vec<String>,
     pub annotations: Vec<StepAnnotation>,
     pub telemetry: Vec<StepCommandTelemetry>,
     pub error_count: i32,
@@ -909,7 +905,6 @@ impl StepCommandState {
         self.path.extend(other.path);
         self.state.extend(other.state);
         self.masks.extend(other.masks);
-        self.log_lines.extend(other.log_lines);
         self.annotations.extend(other.annotations);
         for telemetry in other.telemetry {
             if !self.telemetry.contains(&telemetry) {
@@ -954,20 +949,18 @@ fn fix_script(script: &str) -> String {
 
 fn script_with_path_prelude(script: &str, path_prepend: &[String]) -> String {
     let fixed = fix_script(script);
-    // Always reset HOME and Rust env vars to the container's expected values.
-    // OrbStack (on macOS developer hosts) injects the host user's HOME and PATH
-    // into every exec'd process, which breaks mise toolchain lookups (RUSTUP_HOME
-    // ends up pointing at a macOS path that doesn't exist in the container).
-    let mut prelude = vec![
-        // HOME=/root and CARGO_HOME=/root/.cargo: mise shims canonicalize these paths.
-        // OrbStack (on macOS) injects the host user's HOME and the container sets
-        // CARGO_HOME=/github/home/.cargo (a bind-mounted path). Both cause mise's
-        // canonicalize to fail, breaking the cargo/rustc shims.
-        // Using /root paths avoids bind-mount canonicalize failures.
-        "export HOME=/root".to_string(),
-        "export RUSTUP_HOME=/root/.rustup".to_string(),
-        "export CARGO_HOME=/root/.cargo".to_string(),
-    ];
+    // HOME/RUSTUP_HOME/CARGO_HOME are asserted as explicit `docker exec -e`
+    // base env (JobContainerSpec::append_base_exec_env): HOME=/github/home is
+    // the bind-mounted job home, so `~` state written by steps persists on the
+    // host and the actions/cache adapter sees it. The old prelude here
+    // exported HOME=/root + CARGO_HOME=/root/.cargo (an OrbStack dev-host
+    // workaround), which silently redirected every cargo download into the
+    // unmounted container /root — the cargo-registry cache could never save
+    // and warm restores were invisible to steps. PATH keeps /root/.cargo/bin
+    // (image-baked rustup proxies) ahead of the mise shims, so cargo resolves
+    // even though mise's rust backend derives its bin path from $CARGO_HOME
+    // (empty bind at job start).
+    let mut prelude = Vec::new();
     if !path_prepend.is_empty() {
         let joined = path_prepend
             .iter()
@@ -975,6 +968,9 @@ fn script_with_path_prelude(script: &str, path_prepend: &[String]) -> String {
             .collect::<Vec<_>>()
             .join(":");
         prelude.push(format!("export PATH={joined}:\"$PATH\""));
+    }
+    if prelude.is_empty() {
+        return fixed;
     }
     format!("{}\n{fixed}", prelude.join("\n"))
 }
@@ -1013,7 +1009,7 @@ mod tests {
 
         assert_eq!(
             fs::read_to_string(&plan.script_host_path).unwrap(),
-            "export HOME=/root\nexport RUSTUP_HOME=/root/.rustup\nexport CARGO_HOME=/root/.cargo\necho hello\n"
+            "echo hello\n"
         );
         assert!(plan
             .env
@@ -1087,7 +1083,7 @@ mod tests {
 
         assert_eq!(
             fs::read_to_string(&plan.script_host_path).unwrap(),
-            "export HOME=/root\nexport RUSTUP_HOME=/root/.rustup\nexport CARGO_HOME=/root/.cargo\nexport PATH='/opt/bin':'/path/with'\\''quote':\"$PATH\"\ntool --version\n"
+            "export PATH='/opt/bin':'/path/with'\\''quote':\"$PATH\"\ntool --version\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -1147,47 +1143,38 @@ mod tests {
     }
 
     #[test]
-    fn script_step_uses_non_internal_name_as_display_name() {
+    fn script_step_ignores_step_id_in_name_for_display_name() {
+        // GitHub's Name field carries the YAML step id (e.g. `msrv`), never a
+        // display name; actions/runner shows `Run <first script line>` for
+        // unnamed steps (verified against the live GitHub-hosted lane).
         let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
             {
                 "id": "tests",
-                "name": "Tests",
+                "name": "msrv",
                 "reference": { "type": "Script" },
-                "inputs": { "script": "cargo nextest run -p app --profile ci" }
+                "inputs": { "script": "set -euo pipefail\ncargo check" }
             },
             {
                 "id": "fallback",
                 "name": "__run",
                 "reference": { "type": "Script" },
                 "inputs": { "script": "echo fallback" }
-            }
-        ]))
-        .unwrap();
-
-        let mapped = github_script_steps(&steps, "/__w/repo").unwrap();
-
-        assert_eq!(mapped[0].display_name, "Tests");
-        assert_eq!(mapped[1].display_name, "Run echo fallback");
-    }
-
-    #[test]
-    fn script_step_uses_input_name_as_display_name() {
-        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            },
             {
-                "id": "install",
-                "name": "__run",
+                "id": "named",
+                "name": "__run_2",
+                "displayName": "Tests",
                 "reference": { "type": "Script" },
-                "inputs": {
-                    "script": "pip install ansible-core",
-                    "name": "Install Ansible"
-                }
+                "inputs": { "script": "cargo nextest run -p app --profile ci" }
             }
         ]))
         .unwrap();
 
         let mapped = github_script_steps(&steps, "/__w/repo").unwrap();
 
-        assert_eq!(mapped[0].display_name, "Install Ansible");
+        assert_eq!(mapped[0].display_name, "Run set -euo pipefail");
+        assert_eq!(mapped[1].display_name, "Run echo fallback");
+        assert_eq!(mapped[2].display_name, "Tests");
     }
 
     #[test]

@@ -1,18 +1,20 @@
 # Latest GitHub Runner V2 Refresh
 
-Date: 2026-06-01
+Date: 2026-06-11 (previous refresh: 2026-06-01, `v2.334.0`)
 
 Reference source:
 
-- `actions/runner` latest release checked: `v2.334.0`
-- tag commit: `f1995ede5d885c997d13d8eca5467c4ce97fe69c`
-- `main` at check time: `c6a124e18496a6e5d2357415052d1799afc64b63`
-- `main` rechecked on 2026-06-01: `c6a124e18496a6e5d2357415052d1799afc64b63`
-- `main` rechecked again on 2026-06-01 during implementation planning:
-  `c6a124e18496a6e5d2357415052d1799afc64b63`
-- latest release rechecked on 2026-06-01 during scope cleanup:
-  `v2.334.0`
-- release page: <https://github.com/actions/runner/releases/tag/v2.334.0>
+- `actions/runner` latest release checked: `v2.335.1`
+- tag commit: `7d737449ef346f6524f75688d0c9c95fa10ba10a`
+- `main` at check time: `16c52e389da99f4d21d142c8c87f34a1e0767823`
+- previous release: `v2.334.0`
+  (`f1995ede5d885c997d13d8eca5467c4ce97fe69c`)
+- v2.334.0 → v2.335.1 delta over the V2 anchor files: only
+  `src/Runner.Worker/JobRunner.cs` changed — the DAP-debugger lifecycle moved
+  into a StepsRunner hook (`OnJobStepsInitializedAsync`). No broker,
+  run-service, container, or step/log protocol change; all anchors below
+  remain valid (re-audited 2026-06-11).
+- release page: <https://github.com/actions/runner/releases/tag/v2.335.1>
 
 Drift check:
 
@@ -32,7 +34,8 @@ source reference only; the Velnor runner path targets broker/run-service V2.
 
 ## Upstream V2 Control Flow
 
-Source anchors in `actions/runner` `v2.334.0`:
+Source anchors in `actions/runner` `v2.335.1` (unchanged from `v2.334.0`
+except `JobRunner.cs`; line anchors below re-checked against the new tag):
 
 - `src/Runner.Listener/Runner.cs:393-403`: listener selection uses
   `BrokerMessageListener` when `RunnerSettings.UseV2Flow` is true.

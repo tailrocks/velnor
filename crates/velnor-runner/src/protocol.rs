@@ -24,8 +24,8 @@ use url::Url;
 use uuid::Uuid;
 
 /// GitHub Actions runner protocol version Velnor implements.
-pub const RUNNER_VERSION: &str = "2.334.0";
-pub const RUNNER_USER_AGENT: &str = "actions-runner/2.334.0 (velnor)";
+pub const RUNNER_VERSION: &str = "2.335.1";
+pub const RUNNER_USER_AGENT: &str = "actions-runner/2.335.1 (velnor)";
 /// Velnor's own version, sourced from Cargo.toml.
 pub const VELNOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Display name shown in "Set up job" log: "Velnor Runner/<version> (protocol: <runner_version>)"

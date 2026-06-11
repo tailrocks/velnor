@@ -22,6 +22,10 @@ pub struct JobContainerSpec {
     pub docker_host_work_dir: Option<PathBuf>,
     pub verify_bind_mounts: bool,
     pub daemon_id: String,
+    /// Host-persistent incremental-build store mounted as CARGO_TARGET_DIR
+    /// (opt-in via VELNOR_CARGO_TARGET_PERSIST; GitHub-hosted runners do not
+    /// set CARGO_TARGET_DIR, so this stays off unless the operator enables it).
+    pub cargo_target_host: Option<PathBuf>,
 }
 
 impl JobContainerSpec {
@@ -49,6 +53,35 @@ impl JobContainerSpec {
             self.mount_arg(&sccache_host(&self.temp_host), "/var/cache/sccache"),
             "-v".into(),
             self.mount_arg(&self.home_host, "/github/home"),
+            // Host-persistent cargo registry/git stores (daemon-shared, like
+            // sccache): downloads land on the host once and every later job —
+            // on any slot — starts with a warm registry. Cargo's own file
+            // locking makes concurrent jobs on the shared store safe.
+            "-v".into(),
+            self.mount_arg(
+                &cargo_store_host(&self.temp_host).join("registry"),
+                "/github/home/.cargo/registry",
+            ),
+            "-v".into(),
+            self.mount_arg(
+                &cargo_store_host(&self.temp_host).join("git"),
+                "/github/home/.cargo/git",
+            ),
+            // Host-persistent mise tool store: only `installs` + `cache` are
+            // mounted (the mise binary, shims and global config stay baked in
+            // the image). A tool a job installs (GraalVM, node, python, cargo
+            // backends) persists for the whole fleet instead of re-downloading
+            // per job. mise installs under its own file locks.
+            "-v".into(),
+            self.mount_arg(
+                &mise_store_host(&self.temp_host).join("installs"),
+                "/opt/mise/installs",
+            ),
+            "-v".into(),
+            self.mount_arg(
+                &mise_store_host(&self.temp_host).join("cache"),
+                "/opt/mise/cache",
+            ),
             "-v".into(),
             self.mount_arg(&workflow_host(&self.temp_host), "/github/workflow"),
             "-v".into(),
@@ -68,6 +101,14 @@ impl JobContainerSpec {
             "-e".into(),
             "AGENT_TOOLSDIRECTORY=/__tool".into(),
         ];
+        if let Some(target_host) = &self.cargo_target_host {
+            args.extend([
+                "-v".into(),
+                self.mount_arg(target_host, "/__cargo_target"),
+                "-e".into(),
+                "CARGO_TARGET_DIR=/__cargo_target".into(),
+            ]);
+        }
         for (name, value) in &self.env {
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
@@ -119,6 +160,7 @@ impl JobContainerSpec {
         command: &[String],
     ) -> Vec<String> {
         let mut args = vec!["exec".into(), "--workdir".into(), working_directory.into()];
+        self.append_base_exec_env(&mut args);
         for (name, value) in env {
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
@@ -141,12 +183,32 @@ impl JobContainerSpec {
             "--workdir".into(),
             working_directory.into(),
         ];
+        self.append_base_exec_env(&mut args);
         for (name, value) in env {
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
         args.push(self.name.clone());
         args.extend(command.iter().cloned());
         args
+    }
+
+    /// Truthful base env for every exec'd process: the job home is the
+    /// bind-mounted /github/home (so `~` caches and docker client state
+    /// persist on the host), the rustup toolchain store stays at the
+    /// image-baked /root/.rustup, and cargo's registry/git live under the
+    /// job home (backed by the host-persistent cargo store mounts).
+    /// Re-asserted per exec because OrbStack (macOS dev hosts) injects the
+    /// host user's HOME into exec'd processes; explicit -e wins. Step env
+    /// (GITHUB_ENV and `env:` blocks) is appended after these, and docker
+    /// applies the last duplicate -e, so steps can still override.
+    fn append_base_exec_env(&self, args: &mut Vec<String>) {
+        for kv in [
+            "HOME=/github/home",
+            "RUSTUP_HOME=/root/.rustup",
+            "CARGO_HOME=/github/home/.cargo",
+        ] {
+            args.extend(["-e".into(), kv.into()]);
+        }
     }
 
     pub fn run_node_action_args(
@@ -448,6 +510,28 @@ pub(crate) fn daemon_shared_root(root: PathBuf) -> PathBuf {
 }
 
 pub(crate) fn sccache_host(temp_host: &Path) -> PathBuf {
+    daemon_store_root(temp_host).join("_velnor_sccache")
+}
+
+/// Host-persistent cargo registry + git store, daemon-shared like sccache.
+/// Mounted at /github/home/.cargo/{registry,git} in every job container.
+pub(crate) fn cargo_store_host(temp_host: &Path) -> PathBuf {
+    daemon_store_root(temp_host).join("_velnor_cargo")
+}
+
+/// Host-persistent mise tool store (installs + cache subdirs are mounted).
+pub(crate) fn mise_store_host(temp_host: &Path) -> PathBuf {
+    daemon_store_root(temp_host).join("_velnor_mise")
+}
+
+/// Root for opt-in persistent CARGO_TARGET_DIR buckets (one per job class).
+pub(crate) fn cargo_target_store_host(temp_host: &Path) -> PathBuf {
+    daemon_store_root(temp_host).join("_velnor_targets")
+}
+
+/// Resolve the daemon-shared store root from a job temp dir
+/// (`…/work/slot-N/<job>/temp` → `…/work`).
+fn daemon_store_root(temp_host: &Path) -> PathBuf {
     let per_slot_root = if temp_host.file_name().is_some_and(|name| name == "temp") {
         if let Some(job_dir) = temp_host.parent() {
             if job_dir.file_name().is_some_and(|name| name == "tmp") {
@@ -461,7 +545,26 @@ pub(crate) fn sccache_host(temp_host: &Path) -> PathBuf {
     } else {
         temp_host.to_path_buf()
     };
-    daemon_shared_root(per_slot_root).join("_velnor_sccache")
+    daemon_shared_root(per_slot_root)
+}
+
+/// Sanitize a job/store key into a filesystem-safe directory name.
+pub(crate) fn sanitize_store_key(name: &str) -> String {
+    let mut key: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    key.truncate(128);
+    if key.is_empty() {
+        key.push_str("default");
+    }
+    key
 }
 
 fn node_action_shell_command(path_prepend: &[String], entrypoint_container_path: &str) -> String {
@@ -543,6 +646,7 @@ mod tests {
             docker_host_work_dir: None,
             verify_bind_mounts: false,
             daemon_id: "test-daemon".into(),
+            cargo_target_host: None,
         }
     }
 
@@ -646,6 +750,12 @@ mod tests {
                 "--workdir",
                 "/__w/repo",
                 "-e",
+                "HOME=/github/home",
+                "-e",
+                "RUSTUP_HOME=/root/.rustup",
+                "-e",
+                "CARGO_HOME=/github/home/.cargo",
+                "-e",
                 "GITHUB_OUTPUT=/__t/out",
                 "velnor-job-1",
                 "bash",
@@ -671,6 +781,12 @@ mod tests {
                 "exec",
                 "--workdir",
                 "/__w/repo",
+                "-e",
+                "HOME=/github/home",
+                "-e",
+                "RUSTUP_HOME=/root/.rustup",
+                "-e",
+                "CARGO_HOME=/github/home/.cargo",
                 "-e",
                 "INPUT_NAME=value",
                 "velnor-job-1",

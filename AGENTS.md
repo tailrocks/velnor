@@ -101,6 +101,23 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-06-11: **Truthful step env + host-persistent stores**
+  ([docs/perf-instant-cache-plan-2026-06-11.md](docs/perf-instant-cache-plan-2026-06-11.md)):
+  run steps and adapters see HOME=/github/home (the bind-mounted job home) —
+  never a fake HOME=/root — so `~` caches, docker login state and GITHUB_ENV
+  overrides behave exactly like GitHub-hosted. The old prelude redirected
+  cargo downloads into the unmounted container /root, making the
+  cargo-registry cache unsaveable forever (root cause of "still downloading
+  and compiling on a warm fleet"). Velnor-lane caching is mount-based, not
+  tarball-based: host-persistent daemon-shared stores for the cargo
+  registry/git (`_velnor_cargo`), mise tool installs (`_velnor_mise`),
+  sccache (existing), and opt-in per-job-class CARGO_TARGET_DIR buckets
+  (`_velnor_targets`, VELNOR_CARGO_TARGET_PERSIST). The actions/cache
+  adapter treats those paths as always-warm no-ops, docker bake/build-push
+  adapters drop type=gha cache options (persistent local builder covers
+  them), and absolute container paths with no host mapping resolve to None
+  instead of leaking the daemon host's filesystem.
+
 - 2026-06-11: **Log format contract is law**
   ([docs/log-format-contract.md](docs/log-format-contract.md)): live
   WebSocket feed lines are RAW (the UI adds its own timestamp column);
