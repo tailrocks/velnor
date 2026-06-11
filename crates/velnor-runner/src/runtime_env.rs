@@ -187,7 +187,7 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
     env
 }
 
-fn job_environment_variables(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
+pub(crate) fn job_environment_variables(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
     job.environment_variables
         .iter()
         .flat_map(environment_token_pairs)
