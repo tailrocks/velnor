@@ -3089,6 +3089,7 @@ fn execute_script_job_inner(
         fs::create_dir_all(&path)
             .with_context(|| format!("create persistent store {}", path.display()))?;
     }
+    seed_mise_store_from_image(docker_image, &mise_store);
     let context_data = job_context_data(job);
     // Synthetic "Set up job" step matching GitHub-hosted runner output.
     let setup_step_id = uuid::Uuid::new_v4().to_string();
@@ -4411,6 +4412,69 @@ fn setup_job_lines(job: &AgentJobRequestMessage, docker_image: &str) -> Vec<Stri
 
     lines.push(format!("Complete job name: {}", job.job_display_name));
     lines
+}
+
+/// The job image bakes the CI toolchain (rust, cargo-nextest, just, protoc,
+/// gh, …) into `/opt/mise/installs`, but the host-persistent mise store is
+/// bind-mounted OVER that path — shadowing every baked tool. On repos with a
+/// mise.toml the first job re-installs them into the store (slow); on repos
+/// without one the baked shims dangle ("gh is not a valid shim", observed on
+/// jackin-agent-brown). Seed the store from the image once per daemon work
+/// dir so jobs start with the baked toolset and only add tools on top.
+fn seed_mise_store_from_image(docker_image: &str, mise_store: &std::path::Path) {
+    let marker = mise_store.join(".image-seeded");
+    // Re-seed when the job image changes so a new image's toolset (or tool
+    // versions) reaches the store; docker cp merges over the existing tree.
+    if fs::read_to_string(&marker)
+        .map(|content| content == docker_image)
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let installs = mise_store.join("installs");
+    let result = (|| -> Result<()> {
+        let created = std::process::Command::new("docker")
+            .args(["create", docker_image, "true"])
+            .output()
+            .context("docker create for mise store seed")?;
+        if !created.status.success() {
+            bail!(
+                "docker create {docker_image}: {}",
+                String::from_utf8_lossy(&created.stderr).trim()
+            );
+        }
+        let container_id = String::from_utf8_lossy(&created.stdout).trim().to_string();
+        let copied = std::process::Command::new("docker")
+            .args([
+                "cp",
+                &format!("{container_id}:/opt/mise/installs/."),
+                &installs.to_string_lossy(),
+            ])
+            .output()
+            .context("docker cp mise installs")?;
+        let _ = std::process::Command::new("docker")
+            .args(["rm", "-f", &container_id])
+            .output();
+        if !copied.status.success() {
+            bail!(
+                "docker cp mise installs: {}",
+                String::from_utf8_lossy(&copied.stderr).trim()
+            );
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            println!("Seeded mise tool store from {docker_image}.");
+            let _ = fs::write(&marker, docker_image);
+        }
+        Err(error) => {
+            // Best-effort: an image without /opt/mise/installs just leaves the
+            // store empty (pre-store behavior). Marked so we don't retry per job.
+            eprintln!("Warning: mise store seed from {docker_image} failed: {error:#}");
+            let _ = fs::write(&marker, format!("seed-failed: {error:#}"));
+        }
+    }
 }
 
 /// Build log lines for a checkout step from the checkout plan.
