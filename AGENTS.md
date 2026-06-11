@@ -101,6 +101,20 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-06-11: **Operating principles are law** (operator doctrine, full text
+  in [docs/mission.md](docs/mission.md) §Operating principles): (1) judge
+  work by correctness against the goal, never by ROI/cost/effort — "low
+  value", "edge case", "not worth it" are forbidden justifications; only a
+  *proven* impossibility stops the right fix, and unproven limits must be
+  tested before being declared. (2) Every bug gets a root-cause analysis
+  first — why did the architecture permit it, what class does it belong to —
+  and the fix removes the enabling structure, not the symptom; symptom
+  patches require naming the deferred root cause. Every slot death / lost
+  job / fleet degradation is a bug in this sense. Applied same day:
+  upgrade-restart job kills → graceful SIGTERM drain + TimeoutStopSec
+  (master-plan incident #10); empty-shared-store dangling shims → image
+  seeding (incident #11).
+
 - 2026-06-11: **Truthful step env + host-persistent stores**
   ([docs/perf-instant-cache-plan-2026-06-11.md](docs/perf-instant-cache-plan-2026-06-11.md)):
   run steps and adapters see HOME=/github/home (the bind-mounted job home) —

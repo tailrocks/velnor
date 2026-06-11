@@ -50,6 +50,42 @@ than GitHub-hosted runners — proven in production: 2.5–3× faster Rust jobs 
    the same (or better) capability. Faster + warm caches + parallelism
    compound the savings.
 
+## Operating principles (operator doctrine, 2026-06-11 — apply to every change)
+
+**How to decide what to do.** Judge every piece of work by whether it
+*should* be done — is it correct, is the current state wrong or inconsistent,
+does it serve the goal — and **never by ROI, cost, effort, or "is it worth
+it."** Do not label a known-wrong thing "low-value," "marginal," "an edge
+case," or "not worth it" to justify leaving it unfixed; reasoning by ROI is
+exactly what keeps work mediocre. ("The reference / competitor also gets it
+wrong" is a *gap* argument, not a correctness one — it never makes a wrong
+thing acceptable.) The only valid reason to stop short of doing the right
+thing is that it **provably cannot** be done — a demonstrated limit of the
+model or tools, not an assumed or cost-based one. "Hard," "heavy,"
+"expensive," or "a lot of work" is never a reason to stop; "proven
+impossible / blocked" is. When unsure which it is, find out — try it,
+measure it, prove it — before deciding, and never declare a limit that has
+not been proven. Choices are presented to the operator by correctness and
+feasibility (real impossibilities, real capability tradeoffs like
+portability or expressiveness), never by ROI.
+
+**Fixing bugs.** Assume a correct architecture has no bugs — every bug is
+evidence that the architecture *permits* it to exist, not merely that one
+code path is wrong. Before fixing any bug, first diagnose the root cause:
+ask why the architecture allowed this bug to exist at all, and whether it is
+one instance of a whole *class* of bugs the same structure would keep
+producing. Prefer fixes that remove the structural condition that let the
+bug exist — so this bug and others like it can no longer occur — over
+patches at the symptom layer (a guard, a special case, or a workaround that
+leaves the enabling structure in place). Reach for a symptom-layer patch
+only when the root-cause fix is **provably** infeasible or genuinely belongs
+in a separate change, never merely because it is larger or harder; when you
+do, say so and name the root cause being deferred. The root-cause analysis
+is **always** required; reshaping the architecture to act on it is frequent
+but conditional on its being the right and feasible move. Every slot death,
+lost job, or fleet degradation is a bug in this sense and gets this
+treatment.
+
 ## Hard rules (inherited by every prompt and change)
 
 - **The mandates in [master-plan.md](master-plan.md) §3a are law**: universal

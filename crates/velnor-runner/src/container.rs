@@ -148,6 +148,31 @@ impl JobContainerSpec {
         args
     }
 
+    /// `docker run` args that copy the job image's baked /opt/mise installs +
+    /// cache into the shared host store without clobbering newer entries.
+    /// Mounting an (initially empty) shared store over /opt/mise/installs
+    /// shadows the image-baked tools while the baked shims keep pointing at
+    /// them — observed live as `mise ERROR gh is not a valid shim` on a fresh
+    /// store. Seeding once per image digest removes that class.
+    pub fn seed_mise_store_args(&self) -> Vec<String> {
+        let store = mise_store_host(&self.temp_host);
+        vec![
+            "run".into(),
+            "--rm".into(),
+            "--entrypoint".into(),
+            "sh".into(),
+            "-v".into(),
+            self.mount_arg(&store.join("installs"), "/__velnor_seed/installs"),
+            "-v".into(),
+            self.mount_arg(&store.join("cache"), "/__velnor_seed/cache"),
+            self.image.clone(),
+            "-c".into(),
+            "cp -an /opt/mise/installs/. /__velnor_seed/installs/ 2>/dev/null || true; \
+             cp -an /opt/mise/cache/. /__velnor_seed/cache/ 2>/dev/null || true"
+                .into(),
+        ]
+    }
+
     pub fn exec_script_args(
         &self,
         script_path_in_container: &str,

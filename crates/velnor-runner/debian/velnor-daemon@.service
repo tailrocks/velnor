@@ -26,6 +26,12 @@ ExecStart=/usr/bin/velnor-runner daemon \
   --require-docker-socket
 Restart=always
 RestartSec=5
+# Graceful drain: on stop/restart (including apt upgrades) the daemon finishes
+# running jobs and deregisters idle slots instead of dying mid-job (incident
+# 2026-06-11: an upgrade restart killed 7 in-flight jobs). The stop timeout
+# bounds the longest job we wait for (3h, matching the estate's largest
+# timeout-minutes); systemd escalates to SIGKILL after that.
+TimeoutStopSec=10800
 User=root
 StateDirectory=velnor-%i
 WorkingDirectory=/var/lib/velnor-%i
