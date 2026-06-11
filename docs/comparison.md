@@ -146,5 +146,12 @@ are clean UUIDs (`data-external-id` verified via HTML).
       master-plan P4); artifact lines carry blob timestamps as of 0.1.18.
 - [x] API-driven lane comparison shipped as `velnor-tools lane-compare`
       (master-plan P4.1) — repeatable, CI-runnable, equal-or-better gate.
-- [ ] Post-0.1.18 fixture re-run: lane-compare must report **PASS** (0 worse
-      rows); capture before/after evidence under `.velnor-live-evidence/`.
+- [x] Post-0.1.18 fixture re-run: lane-compare reports **PASS — 0 worse
+      rows** on run `27341195843` (both app-a and app-b pairs: every
+      executed step expandable on both lanes, names/conclusions/numbering
+      identical, Velnor lane content 1569/1571 lines timestamped with 92
+      `##[group]` sections and ANSI vs GitHub's 805/806 with 40 groups).
+      Before: run `27319103370` on 0.1.17 — 12 WORSE rows. Evidence:
+      `.velnor-compare/lane-compare-run-27319103370/` (before),
+      `.velnor-compare/lane-compare-run-27341195843/` (after),
+      `.velnor-live-evidence/tailrocks_velnor-actions-fixture-existing-run-27341195843.md`.
