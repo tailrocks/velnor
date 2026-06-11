@@ -181,3 +181,64 @@ Once the fleet is healthy, the next benchmark should run three repeats for
 each dual-lane workflow with `lanes=both` or `lane=both`, including full
 package/image paths where safe, and should keep publish/release workflows on a
 separate operator-approved pass.
+
+---
+
+## FINAL NUMBERS — 3-round campaign on a healthy fleet (2026-06-11)
+
+Fleet verified healthy before every round (doctor 18/18 online; incident #9
+fixed in 0.1.15, hardened in 0.1.16). Rounds: r1 = 2026-06-10T21:53Z
+(0.1.14, per-slot caches), r2 = 02:00Z (0.1.16, shared cache store — COLD
+first fill), r3 = 02:10Z (0.1.16, shared store WARM). All dispatched with
+both lanes where dual-lane. **Rounds 2 and 3: 22/22 runs green** (r1 had 3
+failures, all diagnosed and fixed: sentry crates.io egress flake → cargo
+retry env baked into the job image; jackin mise apt pin gone stale → PR
+#567; construct publish guard → PR #568).
+
+Per-workflow, per-lane execution totals (sum of job exec seconds; max = the
+critical-path job; maxq = worst queue wait):
+
+```
+workflow          lane    r  jobs  sum_s max_s maxq_s
+ansible.yml       velnor  r1/r2/r3   81 / 85 / 119   (github: 256 / 35 / 31)
+build-publish.yml velnor  r1/r2/r3  150 / 179 / 205  (github: 48 / 39 / 29)
+compat.yml        velnor  r1/r2/r3   65 / 156 / 110  (github: 73 / 58 / 71)
+rust-docker.yml   velnor  r1/r2/r3  376 / 452 / 62   (github bake: 615 / 607 / 519)
+rust.yml          velnor  r1/r2/r3  3461 / 5185 / 2651, max 477/643/382
+                  github  r1/r2/r3  6008 / 3187 / 3191, max 721/528/564
+```
+
+Run wall clocks (seconds): rust.yml 749 → 664 → 571 (−24% r1→r3);
+rust-docker.yml 643 → 635 → 539; ansible 263 → 93 → 127; docs 215 → 223 →
+148.
+
+### Headline results
+
+1. **rust-docker (jm): Velnor bake job 62s warm vs GitHub 519–607s — 8.5×
+   faster.** Velnor's own trajectory: 376s (r1, per-slot cache) → 452s (r2,
+   cold shared store) → **62s** (r3, warm shared store). The 0.1.16
+   host-shared cache + local buildx layers deliver exactly the projected
+   class of win.
+2. **rust.yml (jm): Velnor critical path 382s warm vs GitHub 564s (−32%)**;
+   Velnor exec total dropped 5185 → 2651 (−49%) in one warm round as the
+   shared sccache filled. r2's regression vs r1 was the expected cold
+   refill after the store moved to the shared path.
+3. **Pickup latency parity**: Velnor queue waits are 1–3s, identical to
+   GitHub-hosted, whenever a slot is free. The 87–100s outliers are pure
+   capacity contention (10 jm slots saturated by the benchmark itself) —
+   the P3.4 dynamic-slot case, not protocol latency.
+4. **Remaining Velnor-lane gaps match the P3 design doc 1:1** (and are the
+   queued work, ranks 2/5/8 of
+   `docs/p3-performance-design-2026-06-11.md`): ansible (galaxy/mise state
+   not persisted), build-publish (rust-script cache restoring to a
+   container-invisible path), compat (MSRV rustup redownload). Each is a
+   persistent-volume / cache-path-correctness item, not a protocol cost.
+
+### Stability during the campaign
+
+Zero zombie events, zero queue-forever events, zero restarts across all
+three rounds; the P1.9 live split-brain repro self-healed in 3m35s before
+the campaign; 24h zero-zombie soak continues. Stability and the measured
+warm-cache trajectory together satisfy the campaign goal: the remaining
+performance work is enumerated, ranked, and measurable against these
+baselines.
