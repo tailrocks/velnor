@@ -119,7 +119,7 @@ PR #1405 merged. Same-commit reruns on the warm fleet:
 
 | Job | Before | After (steady state) | Evidence |
 |---|---|---|---|
-| Rust / Format and lint | 1m58 solo (clippy 1m41, ~280 crate downloads every run) | **1m03 under 9-way concurrency** — clippy `Finished in 28.91s`, **0 downloads, 1 compile line**, 6 sccache requests (was 1280), "Pinned 6577 file mtimes" | run 27344555706 |
+| Rust / Format and lint | 1m58 solo (clippy 1m41, ~280 crate downloads every run) | **26s under 9-way concurrency — clippy `Finished in 0.61s`, 0 compiles, 0 downloads** (0.1.24 pins directory mtimes too: `rerun-if-changed=<dir>` build scripts no longer re-run per checkout) | run 27348311958 |
 | Rust / test jobs ×8 | 1.1–2.3 min solo; 5m54–7m42 when 9 ran concurrently | **1m30–3m21 with all 9 concurrent** (faster than the old solo numbers under full fan-out) | run 27344555706 |
 | Rust Docker / bake | 2m44 (≈100s rebuild + ~40s gha cache export) | **24s** (manifest pushes only; `[velnor] dropped 2 type=gha cache option(s)`) | run 27341437078 |
 | Kestra / docker-jvm-base | 48s (32s of GraalVM+Node+Python downloads per job) | **29s** first warm pass; exists-check seconds once the mise store holds the toolset | run 27341438948 |
