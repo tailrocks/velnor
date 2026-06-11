@@ -300,11 +300,25 @@ downstream proof runs.
      analysis; `VELNOR_LOG` filter) + forensic-event bridge; `otel` cargo
      feature adds `tracing-opentelemetry` OTLP export gated on
      `VELNOR_OTLP_ENDPOINT`. Next: instrument executor step phases.
-   Gate (the incident's repro, not yet run): delete an idle slot's runner
-   registration via the GitHub API → daemon detects within ≤3 min and
-   recycles without restart → doctor shows full fleet → a Velnor-lane
-   fixture dispatch gets picked up. Then a 24 h zero-zombie soak during the
+   Gate **PASSED live 2026-06-11 01:11–01:18 UTC**: deleted idle fixture
+   slot-2's registration via the API → broker polls turned into classified
+   errors → slot recycled itself in 3m35s with zero restarts (forensic logs
+   reconstruct the whole sequence) → doctor 2/2 → a `lanes=velnor-only`
+   fixture dispatch ran green. Remaining: 24 h zero-zombie soak during the
    benchmark campaign.
+   **0.1.16 hardening** (proactive gap audit,
+   `docs/stability-gap-audit-2026-06-11.md`): local-failure classification
+   (docker/OAuth/preflight faults keep the registration + back off per-slot
+   instead of delete+re-JIT churn that could exhaust the PAT budget in
+   ~20 min), durable job completion (bounded retry + lock renewal alive
+   until accepted — a finished job's result survives transient 5xx),
+   cancellation poller survives token expiry and broker migrations mid-job
+   (with error backoff + log rate cap), clean recycles delete the
+   registration by id first (no orphan → no 409 dance), `list_runners`
+   paginates (doctor/orphan-cleanup were blind past 30 runners), per-slot
+   salted retry jitter (no same-PID lockstep), disk-space guard parks slots
+   below 2 GiB free, trace.jsonl rotation, OAuth assertion window backdated
+   120 s against clock skew, panicked slot tasks respawn by index.
 
 ### Phase 2 — make the GitHub-hosted lane as fast as possible (reference parity baseline)
 
@@ -382,6 +396,16 @@ never remove testing/release correctness while speeding things up.
 Ordered by measured impact on queue-to-first-log and job wall time; all are
 "correct architecture" items, not micro-optimizations. Full refactoring is
 explicitly in scope.
+
+**Measured design input (2026-06-11):**
+`docs/p3-performance-design-2026-06-11.md` — pipeline-structure analysis
+with real Velnor-lane step timings, four cache-layer defects found
+(per-slot sccache/cache-store fragmentation, registry-cache silent no-op,
+empty `hashFiles()` key collapse, container-internal cache paths restoring
+to the host), and a ranked top-10 (host-shared stores, persistent per-repo
+volumes, per-job target volumes, local buildx cache, git mirrors, async
+finalization, boot∥checkout pre-warm, reflink cache copies) projecting
+−47…−70% wall per pipeline. Items below incorporate it.
 
 1. **Native HTTP client, kill the curl subprocesses.** Today every GitHub
    call (OAuth, broker poll, acquire/renew/complete, Twirp, artifact upload)
