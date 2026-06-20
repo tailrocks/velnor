@@ -56,7 +56,7 @@ ENV HOME=/root \
     CARGO_NET_RETRY=10 \
     CARGO_HTTP_TIMEOUT=120
 
-RUN ver="v0.15.0" && \
+RUN ver="v0.16.0" && \
     case "$(uname -m)" in \
       x86_64) arch="x86_64-unknown-linux-musl" ;; \
       aarch64|arm64) arch="aarch64-unknown-linux-musl" ;; \
