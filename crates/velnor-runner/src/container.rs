@@ -14,6 +14,9 @@ pub struct JobContainerSpec {
     pub tools_host: PathBuf,
     pub mount_docker_socket: bool,
     pub env: Vec<(String, String)>,
+    /// Daemon-enforced Docker resource limits. Appended after workflow
+    /// createOptions so operator policy wins for shared warm-runner hosts.
+    pub resource_options: Vec<String>,
     pub options: Vec<String>,
     pub services: Vec<ServiceContainerSpec>,
     pub node_action_image: String,
@@ -126,6 +129,7 @@ impl JobContainerSpec {
             format!("velnor.daemon-id={}", self.daemon_id),
         ]);
         args.extend(self.options.iter().cloned());
+        args.extend(self.resource_options.iter().cloned());
 
         if self.mount_docker_socket {
             args.extend([
@@ -680,6 +684,7 @@ mod tests {
             tools_host: "/tmp/tools".into(),
             mount_docker_socket: true,
             env: vec![("NODE_OPTIONS".into(), "--max-old-space-size=4096".into())],
+            resource_options: vec!["--memory".into(), "8g".into()],
             options: vec!["--cpus".into(), "2".into()],
             services: Vec::new(),
             node_action_image: "node:24-bookworm".into(),
@@ -747,6 +752,10 @@ mod tests {
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"NODE_OPTIONS=--max-old-space-size=4096".into()));
         assert!(args.windows(2).any(|pair| pair == ["--cpus", "2"]));
+        assert!(args.windows(2).any(|pair| pair == ["--memory", "8g"]));
+        let cpus_pos = args.iter().position(|arg| arg == "--cpus").unwrap();
+        let memory_pos = args.iter().position(|arg| arg == "--memory").unwrap();
+        assert!(cpus_pos < memory_pos);
         assert!(args.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
         // PID 1 tails the live console file (so `docker logs` mirrors the UI).
         assert_eq!(

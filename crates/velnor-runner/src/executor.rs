@@ -6239,6 +6239,7 @@ mod tests {
             tools_host: temp.join("tools"),
             mount_docker_socket: false,
             env: Vec::new(),
+            resource_options: Vec::new(),
             options: Vec::new(),
             services: Vec::new(),
             node_action_image: String::new(),

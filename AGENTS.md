@@ -139,6 +139,13 @@ Never let a prompt, README, or doc describe a direction that the current vision/
   target scope; repository, workflow, and job class are all part of the warm
   cache boundary.
 
+- 2026-06-22: **Warm-runner jobs get daemon resource caps**
+  ([docs/runner-usage.md](docs/runner-usage.md)): package daemons default job
+  containers to `VELNOR_JOB_CPUS=4` and `VELNOR_JOB_MEMORY=12g`. The runner
+  appends those Docker limits after workflow `container.options`, so operator
+  policy wins for shared warm hosts. Tune or blank either env var per trusted
+  daemon scope.
+
 - 2026-06-11: **Log format contract is law**
   ([docs/log-format-contract.md](docs/log-format-contract.md)): live
   WebSocket feed lines are RAW (the UI adds its own timestamp column);

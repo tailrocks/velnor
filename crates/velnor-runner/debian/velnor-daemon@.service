@@ -14,6 +14,8 @@ Requires=docker.service
 # semantics of Type=notify/WatchdogSec and the never-exit retry behavior.
 Type=notify
 WatchdogSec=180
+Environment=VELNOR_JOB_CPUS=4
+Environment=VELNOR_JOB_MEMORY=12g
 EnvironmentFile=/etc/velnor/%i.env
 EnvironmentFile=-/etc/velnor/%i.secrets.env
 ExecStart=/usr/bin/velnor-runner daemon \

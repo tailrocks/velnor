@@ -105,6 +105,7 @@ mod tests {
             tools_host: root.join("tools"),
             mount_docker_socket: false,
             env: Vec::new(),
+            resource_options: Vec::new(),
             options: Vec::new(),
             services: Vec::new(),
             node_action_image: "node:24-bookworm".into(),
