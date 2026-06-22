@@ -71,12 +71,27 @@ fn github_cargo_target_store_host(
 ) -> PathBuf {
     crate::container::cargo_target_store_host(temp_host)
         .join(crate::container::sanitize_store_key(
+            &cargo_target_trust_scope(),
+        ))
+        .join(crate::container::sanitize_store_key(
             job_variable(job, "github.repository").unwrap_or("unknown-repository"),
         ))
         .join(crate::container::sanitize_store_key(
             job_variable(job, "github.workflow").unwrap_or("unknown-workflow"),
         ))
         .join(crate::container::sanitize_store_key(&job.job_display_name))
+}
+
+fn cargo_target_trust_scope() -> String {
+    cargo_target_trust_scope_from(std::env::var("VELNOR_TRUST_SCOPE").ok().as_deref())
+}
+
+fn cargo_target_trust_scope_from(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("trusted")
+        .to_string()
 }
 
 pub fn github_normalized_job_plan(
@@ -616,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn github_cargo_target_store_is_scoped_by_repo_workflow_and_job() {
+    fn github_cargo_target_store_is_scoped_by_trust_repo_workflow_and_job() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "RunnerJobRequest",
             "plan": { "planId": "plan-1" },
@@ -637,8 +652,18 @@ mod tests {
         assert_eq!(
             host,
             std::path::PathBuf::from(
-                "/velnor/work/_velnor_targets/ChainArgos_java-monorepo/CI___Preview/Rust___test__ubuntu_"
+                "/velnor/work/_velnor_targets/trusted/ChainArgos_java-monorepo/CI___Preview/Rust___test__ubuntu_"
             )
+        );
+    }
+
+    #[test]
+    fn cargo_target_trust_scope_defaults_and_trims() {
+        assert_eq!(cargo_target_trust_scope_from(None), "trusted");
+        assert_eq!(cargo_target_trust_scope_from(Some("   ")), "trusted");
+        assert_eq!(
+            cargo_target_trust_scope_from(Some(" public-forks ")),
+            "public-forks"
         );
     }
 
