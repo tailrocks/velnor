@@ -1373,6 +1373,8 @@ fn daemon_slot_run_args(
             slot_count,
         ),
         docker_image: args.docker_image.clone(),
+        job_cpus: args.job_cpus.clone(),
+        job_memory: args.job_memory.clone(),
         node_action_image: args.node_action_image.clone(),
         work_dir: daemon_slot_child_path(args.work_dir.as_deref(), slot_index, slot_count),
         docker_host_work_dir: daemon_slot_child_path(
@@ -1455,6 +1457,19 @@ fn preflight_args_for_run(args: &RunArgs, config_dir: &Path) -> PreflightArgs {
         require_docker_socket: args.require_docker_socket,
         require_buildx: true,
     }
+}
+
+fn job_resource_options(cpus: &str, memory: &str) -> Vec<String> {
+    let mut options = Vec::new();
+    let cpus = cpus.trim();
+    if !cpus.is_empty() {
+        options.extend(["--cpus".to_string(), cpus.to_string()]);
+    }
+    let memory = memory.trim();
+    if !memory.is_empty() {
+        options.extend(["--memory".to_string(), memory.to_string()]);
+    }
+    options
 }
 
 fn ensure_v2_runner_settings(stored: &StoredRunnerConfig) -> Result<()> {
@@ -2232,6 +2247,7 @@ async fn handle_job_request(
         let work_dir = args.work_dir.clone();
         let docker_host_work_dir = args.docker_host_work_dir.clone();
         let docker_image = args.docker_image.clone();
+        let resource_options = job_resource_options(&args.job_cpus, &args.job_memory);
         let node_action_image = args.node_action_image.clone();
         let run_service_url = run_service_job.run_service_url.clone();
         let billing_owner_id = run_service_job.billing_owner_id.clone();
@@ -2248,6 +2264,7 @@ async fn handle_job_request(
                 work_dir,
                 docker_host_work_dir,
                 &docker_image,
+                resource_options,
                 &node_action_image,
                 &run_service_url,
                 billing_owner_id,
@@ -3095,6 +3112,7 @@ fn execute_script_job(
     work_dir: Option<PathBuf>,
     docker_host_work_dir: Option<PathBuf>,
     docker_image: &str,
+    resource_options: Vec<String>,
     node_action_image: &str,
     run_service_url: &str,
     billing_owner_id: Option<String>,
@@ -3109,6 +3127,7 @@ fn execute_script_job(
         &job_dir,
         docker_host_work_dir,
         docker_image,
+        resource_options,
         node_action_image,
         run_service_url,
         billing_owner_id,
@@ -3132,6 +3151,7 @@ fn execute_script_job_inner(
     job_dir: &std::path::Path,
     docker_host_work_dir: Option<PathBuf>,
     docker_image: &str,
+    resource_options: Vec<String>,
     node_action_image: &str,
     run_service_url: &str,
     billing_owner_id: Option<String>,
@@ -3305,6 +3325,7 @@ fn execute_script_job_inner(
             docker_host_work_dir,
         },
         docker_image,
+        resource_options,
         node_action_image,
         daemon_id,
     );
@@ -5527,6 +5548,8 @@ mod tests {
             dry_run_jobs,
             dump_job_message: None,
             docker_image: "ubuntu:24.04".into(),
+            job_cpus: String::new(),
+            job_memory: String::new(),
             node_action_image: String::new(),
             work_dir: None,
             docker_host_work_dir: None,
@@ -5819,6 +5842,15 @@ jobs:
         assert!(preflight.require_buildx);
     }
 
+    #[test]
+    fn job_resource_options_are_daemon_policy_flags() {
+        assert_eq!(job_resource_options("", ""), Vec::<String>::new());
+        assert_eq!(
+            job_resource_options(" 4 ", " 12g "),
+            vec!["--cpus", "4", "--memory", "12g"]
+        );
+    }
+
     fn daemon_args(slots: usize) -> DaemonArgs {
         DaemonArgs {
             config_dir: None,
@@ -5841,6 +5873,8 @@ jobs:
             dry_run_jobs: false,
             dump_job_message: None,
             docker_image: "ubuntu:24.04".into(),
+            job_cpus: String::new(),
+            job_memory: String::new(),
             node_action_image: String::new(),
             work_dir: None,
             docker_host_work_dir: None,
@@ -6057,6 +6091,18 @@ jobs:
         assert!(preflight
             .iter()
             .all(|args| args.docker_image == "velnor/job-ubuntu:24.04"));
+    }
+
+    #[test]
+    fn daemon_slot_run_args_preserve_job_resource_caps() {
+        let mut args = daemon_args(2);
+        args.job_cpus = "4".into();
+        args.job_memory = "12g".into();
+
+        let run_args = daemon_slot_run_args(&args, Path::new("/config"), 2, 2).unwrap();
+
+        assert_eq!(run_args.job_cpus, "4");
+        assert_eq!(run_args.job_memory, "12g");
     }
 
     #[test]

@@ -20,6 +20,11 @@ Configuration (one daemon per target scope):
   `velnor.env` automatically).
 - Additional instances: `/etc/velnor/<name>.env` + `<name>.secrets.env`,
   then `systemctl enable --now velnor-daemon@<name>`.
+- Job container resource caps: package units default to
+  `VELNOR_JOB_CPUS=4` and `VELNOR_JOB_MEMORY=12g`, appended after workflow
+  `container.options` so daemon policy wins on shared warm-runner hosts.
+  Set either value empty in the daemon env to disable that cap for a trusted
+  scope, or tune per instance.
 - Optional Rust target persistence: set `VELNOR_CARGO_TARGET_PERSIST=true` in
   the daemon env only for trusted target scopes. Velnor stores targets under
   `_velnor_targets/<repo>/<workflow>/<job-bucket>` so warm state is shared only

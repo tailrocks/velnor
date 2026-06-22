@@ -164,6 +164,14 @@ pub struct RunArgs {
     #[arg(long, default_value = "velnor/job-ubuntu:24.04")]
     pub docker_image: String,
 
+    /// Docker --cpus limit appended to every job container. Empty disables the daemon-level CPU cap.
+    #[arg(long, env = "VELNOR_JOB_CPUS", default_value = "")]
+    pub job_cpus: String,
+
+    /// Docker --memory limit appended to every job container. Empty disables the daemon-level memory cap.
+    #[arg(long, env = "VELNOR_JOB_MEMORY", default_value = "")]
+    pub job_memory: String,
+
     /// Override Docker image used to run JavaScript actions. By default Velnor uses the action's declared Node runtime image.
     #[arg(long, default_value = "")]
     pub node_action_image: String,
@@ -268,6 +276,14 @@ pub struct DaemonArgs {
     /// Docker image for executable jobs.
     #[arg(long, default_value = "velnor/job-ubuntu:24.04")]
     pub docker_image: String,
+
+    /// Docker --cpus limit appended to every job container. Empty disables the daemon-level CPU cap.
+    #[arg(long, env = "VELNOR_JOB_CPUS", default_value = "")]
+    pub job_cpus: String,
+
+    /// Docker --memory limit appended to every job container. Empty disables the daemon-level memory cap.
+    #[arg(long, env = "VELNOR_JOB_MEMORY", default_value = "")]
+    pub job_memory: String,
 
     /// Override Docker image used to run JavaScript actions. By default Velnor uses the action's declared Node runtime image.
     #[arg(long, default_value = "")]

@@ -25,6 +25,7 @@ pub fn github_job_container_spec(
     job: &AgentJobRequestMessage,
     paths: GitHubJobContainerPaths,
     docker_image: &str,
+    resource_options: Vec<String>,
     node_action_image: &str,
     daemon_id: String,
 ) -> JobContainerSpec {
@@ -51,6 +52,7 @@ pub fn github_job_container_spec(
         tools_host: paths.tools_host,
         mount_docker_socket: true,
         env: job_container_env(job),
+        resource_options,
         options: job_container_options(job),
         services: service_containers(job),
         node_action_image: node_action_image.to_string(),
@@ -555,6 +557,7 @@ mod tests {
             tools_host: root.join("tools"),
             mount_docker_socket: true,
             env: Vec::new(),
+            resource_options: Vec::new(),
             options: Vec::new(),
             services: Vec::new(),
             node_action_image: "node:24-bookworm".into(),

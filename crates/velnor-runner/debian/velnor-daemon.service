@@ -16,6 +16,8 @@ WatchdogSec=180
 # shipped or touched by the package) so config tooling cannot wipe it.
 # velnor.env is still read first for backward compatibility — values in
 # secrets.env win. The token is read from the GITHUB_TOKEN env var, never argv.
+Environment=VELNOR_JOB_CPUS=4
+Environment=VELNOR_JOB_MEMORY=12g
 EnvironmentFile=/etc/velnor/velnor.env
 EnvironmentFile=-/etc/velnor/secrets.env
 ExecStart=/usr/bin/velnor-runner daemon \
