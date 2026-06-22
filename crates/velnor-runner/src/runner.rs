@@ -1375,6 +1375,7 @@ fn daemon_slot_run_args(
         docker_image: args.docker_image.clone(),
         job_cpus: args.job_cpus.clone(),
         job_memory: args.job_memory.clone(),
+        trust_scope: args.trust_scope.clone(),
         node_action_image: args.node_action_image.clone(),
         work_dir: daemon_slot_child_path(args.work_dir.as_deref(), slot_index, slot_count),
         docker_host_work_dir: daemon_slot_child_path(
@@ -2249,6 +2250,8 @@ async fn handle_job_request(
         let docker_image = args.docker_image.clone();
         let resource_options = job_resource_options(&args.job_cpus, &args.job_memory);
         let node_action_image = args.node_action_image.clone();
+        validate_job_trust_policy(&job, &args.trust_scope)?;
+        let trust_scope = args.trust_scope.clone();
         let run_service_url = run_service_job.run_service_url.clone();
         let billing_owner_id = run_service_job.billing_owner_id.clone();
         let daemon_id = args
@@ -2266,6 +2269,7 @@ async fn handle_job_request(
                 &docker_image,
                 resource_options,
                 &node_action_image,
+                &trust_scope,
                 &run_service_url,
                 billing_owner_id,
                 &job_to_execute,
@@ -2385,6 +2389,35 @@ async fn handle_job_request(
 
 fn should_execute_job(args: &RunArgs) -> bool {
     args.execute_scripts || (!args.complete_noop && !args.dry_run_jobs)
+}
+
+fn validate_job_trust_policy(job: &AgentJobRequestMessage, trust_scope: &str) -> Result<()> {
+    if crate::github_adapter::github_trust_scope_allows_host_docker(trust_scope) {
+        return Ok(());
+    }
+    let secret_names = job_user_secret_names(job);
+    if !secret_names.is_empty() {
+        bail!(
+            "refusing to execute job '{}' in Velnor trust scope '{}' because GitHub sent user secret(s): {}",
+            job.job_display_name,
+            trust_scope,
+            secret_names.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn job_user_secret_names(job: &AgentJobRequestMessage) -> Vec<String> {
+    job.variables
+        .iter()
+        .filter(|(name, variable)| variable.is_secret && is_user_secret_variable(name))
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+fn is_user_secret_variable(name: &str) -> bool {
+    let normalized = name.trim();
+    normalized.starts_with("secrets.") || normalized.starts_with("secret.")
 }
 
 fn write_sanitized_job_message_dump(
@@ -3114,6 +3147,7 @@ fn execute_script_job(
     docker_image: &str,
     resource_options: Vec<String>,
     node_action_image: &str,
+    trust_scope: &str,
     run_service_url: &str,
     billing_owner_id: Option<String>,
     job: &AgentJobRequestMessage,
@@ -3129,6 +3163,7 @@ fn execute_script_job(
         docker_image,
         resource_options,
         node_action_image,
+        trust_scope,
         run_service_url,
         billing_owner_id,
         job,
@@ -3153,6 +3188,7 @@ fn execute_script_job_inner(
     docker_image: &str,
     resource_options: Vec<String>,
     node_action_image: &str,
+    trust_scope: &str,
     run_service_url: &str,
     billing_owner_id: Option<String>,
     job: &AgentJobRequestMessage,
@@ -3328,6 +3364,7 @@ fn execute_script_job_inner(
         resource_options,
         node_action_image,
         daemon_id,
+        trust_scope,
     );
     let plan = github_normalized_job_plan(
         job,
@@ -5550,12 +5587,49 @@ mod tests {
             docker_image: "ubuntu:24.04".into(),
             job_cpus: String::new(),
             job_memory: String::new(),
+            trust_scope: "trusted".into(),
             node_action_image: String::new(),
             work_dir: None,
             docker_host_work_dir: None,
             skip_preflight: false,
             require_docker_socket: false,
         }
+    }
+
+    fn minimal_job_with_variables(
+        variables: serde_json::Value,
+    ) -> crate::job_message::AgentJobRequestMessage {
+        serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Policy check",
+            "requestId": 1,
+            "variables": variables
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn untrusted_scope_rejects_user_secrets() {
+        let job = minimal_job_with_variables(serde_json::json!({
+            "secrets.DOCKERHUB_TOKEN": { "value": "secret", "isSecret": true },
+            "system.github.token": { "value": "ghs", "isSecret": true }
+        }));
+
+        let error = validate_job_trust_policy(&job, "public-forks").unwrap_err();
+
+        assert!(error.to_string().contains("secrets.DOCKERHUB_TOKEN"));
+    }
+
+    #[test]
+    fn untrusted_scope_allows_protocol_token_without_user_secrets() {
+        let job = minimal_job_with_variables(serde_json::json!({
+            "system.github.token": { "value": "ghs", "isSecret": true }
+        }));
+
+        validate_job_trust_policy(&job, "public-forks").unwrap();
     }
 
     #[test]
@@ -5875,6 +5949,7 @@ jobs:
             docker_image: "ubuntu:24.04".into(),
             job_cpus: String::new(),
             job_memory: String::new(),
+            trust_scope: "trusted".into(),
             node_action_image: String::new(),
             work_dir: None,
             docker_host_work_dir: None,
@@ -6098,11 +6173,13 @@ jobs:
         let mut args = daemon_args(2);
         args.job_cpus = "4".into();
         args.job_memory = "12g".into();
+        args.trust_scope = "public-forks".into();
 
         let run_args = daemon_slot_run_args(&args, Path::new("/config"), 2, 2).unwrap();
 
         assert_eq!(run_args.job_cpus, "4");
         assert_eq!(run_args.job_memory, "12g");
+        assert_eq!(run_args.trust_scope, "public-forks");
     }
 
     #[test]

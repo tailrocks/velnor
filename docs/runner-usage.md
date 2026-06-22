@@ -32,6 +32,13 @@ Configuration (one daemon per target scope):
   classes. Set `VELNOR_TRUST_SCOPE` per daemon/pool (`trusted` by default;
   use a distinct value such as `public-forks` for untrusted lanes) before
   enabling target persistence.
+- Trust scopes are enforced at runtime. The `trusted` scope keeps the current
+  full-capability lane, including the host Docker socket for Docker/buildx
+  jobs. Any other `VELNOR_TRUST_SCOPE` refuses jobs when GitHub sends
+  user/repository secrets such as `secrets.*`, and job/action containers do not
+  receive the host Docker socket. Use separate runner labels and runner groups
+  for trusted and untrusted daemons so fork PRs cannot land on a trusted warm
+  pool by accident.
 
 Units (all shipped by the package):
 

@@ -28,6 +28,7 @@ pub fn github_job_container_spec(
     resource_options: Vec<String>,
     node_action_image: &str,
     daemon_id: String,
+    trust_scope: &str,
 ) -> JobContainerSpec {
     // Opt-in persistent CARGO_TARGET_DIR. Buckets are scoped by the GitHub
     // trust boundary plus workflow/job class so warm state cannot cross repos
@@ -40,7 +41,7 @@ pub fn github_job_container_spec(
                 "1" | "true" | "yes" | "on"
             )
         })
-        .map(|_| github_cargo_target_store_host(job, &paths.temp_host));
+        .map(|_| github_cargo_target_store_host(job, &paths.temp_host, trust_scope));
     JobContainerSpec {
         name: job_container_name(job),
         image: job_container_image(job).unwrap_or(docker_image).to_string(),
@@ -50,7 +51,7 @@ pub fn github_job_container_spec(
         home_host: paths.home_host,
         actions_host: paths.actions_host,
         tools_host: paths.tools_host,
-        mount_docker_socket: true,
+        mount_docker_socket: github_trust_scope_allows_host_docker(trust_scope),
         env: job_container_env(job),
         resource_options,
         options: job_container_options(job),
@@ -68,10 +69,11 @@ pub fn github_job_container_spec(
 fn github_cargo_target_store_host(
     job: &AgentJobRequestMessage,
     temp_host: &std::path::Path,
+    trust_scope: &str,
 ) -> PathBuf {
     crate::container::cargo_target_store_host(temp_host)
         .join(crate::container::sanitize_store_key(
-            &cargo_target_trust_scope(),
+            &cargo_target_trust_scope_from(Some(trust_scope)),
         ))
         .join(crate::container::sanitize_store_key(
             job_variable(job, "github.repository").unwrap_or("unknown-repository"),
@@ -92,6 +94,10 @@ fn cargo_target_trust_scope_from(value: Option<&str>) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or("trusted")
         .to_string()
+}
+
+pub(crate) fn github_trust_scope_allows_host_docker(trust_scope: &str) -> bool {
+    cargo_target_trust_scope_from(Some(trust_scope)).eq_ignore_ascii_case("trusted")
 }
 
 pub fn github_normalized_job_plan(
@@ -647,7 +653,8 @@ mod tests {
         }))
         .unwrap();
 
-        let host = github_cargo_target_store_host(&job, std::path::Path::new("/velnor/work"));
+        let host =
+            github_cargo_target_store_host(&job, std::path::Path::new("/velnor/work"), "trusted");
 
         assert_eq!(
             host,
@@ -665,6 +672,37 @@ mod tests {
             cargo_target_trust_scope_from(Some(" public-forks ")),
             "public-forks"
         );
+    }
+
+    #[test]
+    fn non_trusted_scope_disables_host_docker_socket() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Public fork check",
+            "requestId": 1
+        }))
+        .unwrap();
+        let spec = github_job_container_spec(
+            &job,
+            GitHubJobContainerPaths {
+                workspace_host: "/tmp/workspace".into(),
+                temp_host: "/tmp/temp".into(),
+                home_host: "/tmp/home".into(),
+                actions_host: "/tmp/actions".into(),
+                tools_host: "/tmp/tools".into(),
+                docker_host_work_dir: None,
+            },
+            "ubuntu:24.04",
+            Vec::new(),
+            "",
+            "daemon".into(),
+            "public-forks",
+        );
+
+        assert!(!spec.mount_docker_socket);
     }
 
     #[test]
