@@ -27,8 +27,11 @@ Configuration (one daemon per target scope):
   scope, or tune per instance.
 - Optional Rust target persistence: set `VELNOR_CARGO_TARGET_PERSIST=true` in
   the daemon env only for trusted target scopes. Velnor stores targets under
-  `_velnor_targets/<repo>/<workflow>/<job-bucket>` so warm state is shared only
-  across matching repository, workflow, and job classes.
+  `_velnor_targets/<trust-scope>/<repo>/<workflow>/<job-bucket>` so warm state
+  is shared only across matching trust scope, repository, workflow, and job
+  classes. Set `VELNOR_TRUST_SCOPE` per daemon/pool (`trusted` by default;
+  use a distinct value such as `public-forks` for untrusted lanes) before
+  enabling target persistence.
 
 Units (all shipped by the package):
 

@@ -135,9 +135,11 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 - 2026-06-22: **Persistent target buckets stay in their trust lane**
   ([docs/runner-usage.md](docs/runner-usage.md)): opt-in
   `VELNOR_CARGO_TARGET_PERSIST` now stores Rust targets under
-  `_velnor_targets/<repo>/<workflow>/<job-bucket>`. Keep one daemon per trusted
-  target scope; repository, workflow, and job class are all part of the warm
-  cache boundary.
+  `_velnor_targets/<trust-scope>/<repo>/<workflow>/<job-bucket>`.
+  `VELNOR_TRUST_SCOPE` defaults to `trusted`; set it explicitly per daemon/pool
+  (for example `public-forks`) before enabling persistent targets outside a
+  trusted lane. Keep one daemon per trusted target scope; trust scope,
+  repository, workflow, and job class are all part of the warm cache boundary.
 
 - 2026-06-22: **Warm-runner jobs get daemon resource caps**
   ([docs/runner-usage.md](docs/runner-usage.md)): package daemons default job
