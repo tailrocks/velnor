@@ -154,6 +154,15 @@ Never let a prompt, README, or doc describe a direction that the current vision/
   policy wins for shared warm hosts. Tune or blank either env var per trusted
   daemon scope.
 
+- 2026-06-23: **Trust scopes are runtime-enforced**
+  ([docs/runner-usage.md](docs/runner-usage.md)): `trusted` daemons keep full
+  capability, including the shared host Docker socket. Any other
+  `VELNOR_TRUST_SCOPE` rejects jobs when GitHub sends user/repository secrets
+  (`secrets.*`) and omits the host Docker socket from job/action containers.
+  Operators still run separate labels/groups per trust lane; the runner now
+  enforces the boundary so a public-fork pool cannot accidentally inherit
+  trusted warm-runner capabilities.
+
 - 2026-06-11: **Log format contract is law**
   ([docs/log-format-contract.md](docs/log-format-contract.md)): live
   WebSocket feed lines are RAW (the UI adds its own timestamp column);

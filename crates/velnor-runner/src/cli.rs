@@ -215,6 +215,10 @@ pub struct RunArgs {
     #[arg(long, env = "VELNOR_JOB_MEMORY", default_value = "")]
     pub job_memory: String,
 
+    /// Trust boundary for this daemon/pool. "trusted" keeps full capabilities; any other value disables shared Docker socket access and rejects user secrets.
+    #[arg(long, env = "VELNOR_TRUST_SCOPE", default_value = "trusted")]
+    pub trust_scope: String,
+
     /// Override Docker image used to run JavaScript actions. By default Velnor uses the action's declared Node runtime image.
     #[arg(long, default_value = "")]
     pub node_action_image: String,
@@ -327,6 +331,10 @@ pub struct DaemonArgs {
     /// Docker --memory limit appended to every job container. Empty disables the daemon-level memory cap.
     #[arg(long, env = "VELNOR_JOB_MEMORY", default_value = "")]
     pub job_memory: String,
+
+    /// Trust boundary for this daemon/pool. "trusted" keeps full capabilities; any other value disables shared Docker socket access and rejects user secrets.
+    #[arg(long, env = "VELNOR_TRUST_SCOPE", default_value = "trusted")]
+    pub trust_scope: String,
 
     /// Override Docker image used to run JavaScript actions. By default Velnor uses the action's declared Node runtime image.
     #[arg(long, default_value = "")]
