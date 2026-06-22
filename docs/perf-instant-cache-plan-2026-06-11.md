@@ -84,7 +84,7 @@ B. **Host-persistent stores mounted into every job container** (under the
    - `_velnor_mise`           → `/opt/mise` (seeded from the job image's
      baked `/opt/mise` once per image digest, then accretes job-installed
      tools: GraalVM installs once per fleet, not per job)
-   - `_velnor_targets/<repo>/<job-bucket>` → `CARGO_TARGET_DIR`
+   - `_velnor_targets/<repo>/<workflow>/<job-bucket>` → `CARGO_TARGET_DIR`
      (per-job-class persistent incremental state; cargo's own build-dir
      lock serializes the rare same-bucket concurrency)
    Cargo registry/git are concurrency-safe by cargo's own file locking.

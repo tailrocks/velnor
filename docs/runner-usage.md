@@ -20,6 +20,10 @@ Configuration (one daemon per target scope):
   `velnor.env` automatically).
 - Additional instances: `/etc/velnor/<name>.env` + `<name>.secrets.env`,
   then `systemctl enable --now velnor-daemon@<name>`.
+- Optional Rust target persistence: set `VELNOR_CARGO_TARGET_PERSIST=true` in
+  the daemon env only for trusted target scopes. Velnor stores targets under
+  `_velnor_targets/<repo>/<workflow>/<job-bucket>` so warm state is shared only
+  across matching repository, workflow, and job classes.
 
 Units (all shipped by the package):
 
