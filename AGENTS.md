@@ -132,6 +132,13 @@ Never let a prompt, README, or doc describe a direction that the current vision/
   them), and absolute container paths with no host mapping resolve to None
   instead of leaking the daemon host's filesystem.
 
+- 2026-06-22: **Persistent target buckets stay in their trust lane**
+  ([docs/runner-usage.md](docs/runner-usage.md)): opt-in
+  `VELNOR_CARGO_TARGET_PERSIST` now stores Rust targets under
+  `_velnor_targets/<repo>/<workflow>/<job-bucket>`. Keep one daemon per trusted
+  target scope; repository, workflow, and job class are all part of the warm
+  cache boundary.
+
 - 2026-06-11: **Log format contract is law**
   ([docs/log-format-contract.md](docs/log-format-contract.md)): live
   WebSocket feed lines are RAW (the UI adds its own timestamp column);

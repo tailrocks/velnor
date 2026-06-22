@@ -28,10 +28,9 @@ pub fn github_job_container_spec(
     node_action_image: &str,
     daemon_id: String,
 ) -> JobContainerSpec {
-    // Opt-in persistent CARGO_TARGET_DIR, bucketed per job class (a daemon's
-    // slots serve one repo, so the display name is the class key). Off by
-    // default: GitHub-hosted runners do not set CARGO_TARGET_DIR, and parity
-    // wins unless the operator enables the speed-up per daemon.
+    // Opt-in persistent CARGO_TARGET_DIR. Buckets are scoped by the GitHub
+    // trust boundary plus workflow/job class so warm state cannot cross repos
+    // or unrelated workflows when an operator enables the speed-up per daemon.
     let cargo_target_host = std::env::var("VELNOR_CARGO_TARGET_PERSIST")
         .ok()
         .filter(|value| {
@@ -40,10 +39,7 @@ pub fn github_job_container_spec(
                 "1" | "true" | "yes" | "on"
             )
         })
-        .map(|_| {
-            crate::container::cargo_target_store_host(&paths.temp_host)
-                .join(crate::container::sanitize_store_key(&job.job_display_name))
-        });
+        .map(|_| github_cargo_target_store_host(job, &paths.temp_host));
     JobContainerSpec {
         name: job_container_name(job),
         image: job_container_image(job).unwrap_or(docker_image).to_string(),
@@ -65,6 +61,20 @@ pub fn github_job_container_spec(
         daemon_id,
         cargo_target_host,
     }
+}
+
+fn github_cargo_target_store_host(
+    job: &AgentJobRequestMessage,
+    temp_host: &std::path::Path,
+) -> PathBuf {
+    crate::container::cargo_target_store_host(temp_host)
+        .join(crate::container::sanitize_store_key(
+            job_variable(job, "github.repository").unwrap_or("unknown-repository"),
+        ))
+        .join(crate::container::sanitize_store_key(
+            job_variable(job, "github.workflow").unwrap_or("unknown-workflow"),
+        ))
+        .join(crate::container::sanitize_store_key(&job.job_display_name))
 }
 
 pub fn github_normalized_job_plan(
@@ -599,6 +609,33 @@ mod tests {
                 .get("image")
                 .map(|output| output.value.as_str()),
             Some("${{ steps.meta.outputs.tags }}")
+        );
+    }
+
+    #[test]
+    fn github_cargo_target_store_is_scoped_by_repo_workflow_and_job() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "RunnerJobRequest",
+            "plan": { "planId": "plan-1" },
+            "timeline": { "id": "timeline-1" },
+            "jobId": "job-1",
+            "jobName": "test",
+            "jobDisplayName": "Rust / test (ubuntu)",
+            "requestId": 42,
+            "variables": {
+                "github.workflow": { "value": "CI / Preview", "isSecret": false },
+                "github.repository": { "value": "ChainArgos/java-monorepo", "isSecret": false }
+            }
+        }))
+        .unwrap();
+
+        let host = github_cargo_target_store_host(&job, std::path::Path::new("/velnor/work"));
+
+        assert_eq!(
+            host,
+            std::path::PathBuf::from(
+                "/velnor/work/_velnor_targets/ChainArgos_java-monorepo/CI___Preview/Rust___test__ubuntu_"
+            )
         );
     }
 
