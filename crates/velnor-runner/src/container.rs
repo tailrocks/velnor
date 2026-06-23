@@ -64,6 +64,19 @@ impl JobContainerSpec {
             "-v".into(),
             self.mount_arg(&self.temp_host, "/tmp"),
             "-v".into(),
+            self.mount_arg(
+                &self.temp_host,
+                &self.docker_host_path(&self.temp_host).display().to_string(),
+            ),
+            "-v".into(),
+            self.mount_arg(
+                &self.workspace_host,
+                &self
+                    .docker_host_path(&self.workspace_host)
+                    .display()
+                    .to_string(),
+            ),
+            "-v".into(),
             self.mount_arg(&sccache_host(&self.temp_host), "/var/cache/sccache"),
             "-v".into(),
             self.mount_arg(&self.home_host, "/github/home"),
@@ -123,6 +136,16 @@ impl JobContainerSpec {
             "RUNNER_TOOL_CACHE=/__tool".into(),
             "-e".into(),
             "AGENT_TOOLSDIRECTORY=/__tool".into(),
+            "-e".into(),
+            format!(
+                "VELNOR_DOCKER_HOST_TEMP={}",
+                self.docker_host_path(&self.temp_host).display()
+            ),
+            "-e".into(),
+            format!(
+                "VELNOR_DOCKER_HOST_WORKSPACE={}",
+                self.docker_host_path(&self.workspace_host).display()
+            ),
         ];
         if let Some(target_host) = &self.cargo_target_host {
             args.extend([
@@ -334,11 +357,19 @@ impl JobContainerSpec {
     /// applies the last duplicate -e, so steps can still override.
     fn append_base_exec_env(&self, args: &mut Vec<String>) {
         for kv in [
-            "HOME=/github/home",
-            "RUSTUP_HOME=/root/.rustup",
-            "CARGO_HOME=/github/home/.cargo",
+            "HOME=/github/home".to_string(),
+            "RUSTUP_HOME=/root/.rustup".to_string(),
+            "CARGO_HOME=/github/home/.cargo".to_string(),
+            format!(
+                "VELNOR_DOCKER_HOST_TEMP={}",
+                self.docker_host_path(&self.temp_host).display()
+            ),
+            format!(
+                "VELNOR_DOCKER_HOST_WORKSPACE={}",
+                self.docker_host_path(&self.workspace_host).display()
+            ),
         ] {
-            args.extend(["-e".into(), kv.into()]);
+            args.extend(["-e".into(), kv]);
         }
     }
 
@@ -1061,11 +1092,15 @@ mod tests {
 
         assert!(args.contains(&"/daemon/work/job-1/workspace:/__w".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp:/__t".into()));
+        assert!(args.contains(&"/daemon/work/job-1/temp:/daemon/work/job-1/temp".into()));
+        assert!(args.contains(&"/daemon/work/job-1/workspace:/daemon/work/job-1/workspace".into()));
         assert!(args.contains(&"/daemon/work/_velnor_sccache:/var/cache/sccache".into()));
         assert!(args.contains(&"/daemon/work/job-1/home:/github/home".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"/daemon/work/job-1/actions:/__a".into()));
         assert!(args.contains(&"/daemon/work/job-1/tools:/__tool".into()));
+        assert!(args.contains(&"VELNOR_DOCKER_HOST_TEMP=/daemon/work/job-1/temp".into()));
+        assert!(args.contains(&"VELNOR_DOCKER_HOST_WORKSPACE=/daemon/work/job-1/workspace".into()));
     }
 
     #[test]
@@ -1089,6 +1124,10 @@ mod tests {
                 "RUSTUP_HOME=/root/.rustup",
                 "-e",
                 "CARGO_HOME=/github/home/.cargo",
+                "-e",
+                "VELNOR_DOCKER_HOST_TEMP=/tmp/temp",
+                "-e",
+                "VELNOR_DOCKER_HOST_WORKSPACE=/tmp/work",
                 "-e",
                 "GITHUB_OUTPUT=/__t/out",
                 "velnor-job-1",
@@ -1123,6 +1162,10 @@ mod tests {
                 "RUSTUP_HOME=/root/.rustup",
                 "-e",
                 "CARGO_HOME=/github/home/.cargo",
+                "-e",
+                "VELNOR_DOCKER_HOST_TEMP=/tmp/temp",
+                "-e",
+                "VELNOR_DOCKER_HOST_WORKSPACE=/tmp/work",
                 "-e",
                 "INPUT_NAME=value",
                 "velnor-job-1",
