@@ -3513,20 +3513,29 @@ fn restore_cache_paths(state: &JobExecutionState, key: &str, paths: &str) -> Res
 }
 
 /// True for cache paths whose container locations are backed by Velnor's
-/// host-persistent stores (mounted into every job container): the cargo
-/// registry/git stores, the mise tool store, and the shared sccache dir.
-/// These are always warm; the actions/cache adapter neither tars them into
-/// the store nor copies store bytes back over them.
+/// host-persistent or image-provided stores (mounted into every job container):
+/// the cargo registry/git stores, the mise tool store, the image-baked rustup
+/// toolchain store, and the shared sccache dir. These are always warm; the
+/// actions/cache adapter neither tars them into the store nor copies store bytes
+/// back over them.
 fn velnor_persistent_cache_path(path: &str) -> bool {
     let path = path.trim();
     let home_relative = path
         .strip_prefix("~/")
         .or_else(|| path.strip_prefix("/github/home/"));
     if let Some(rest) = home_relative {
-        return rest.starts_with(".cargo/registry") || rest.starts_with(".cargo/git");
+        return rest.starts_with(".cargo/registry")
+            || rest.starts_with(".cargo/git")
+            // Workflows usually cache ~/.rustup on GitHub-hosted runners. Velnor
+            // points RUSTUP_HOME at the image-baked /root/.rustup store instead,
+            // so a ~/.rustup cache restore is pure hosted-runner compatibility
+            // noise on the Velnor lane.
+            || rest.starts_with(".rustup");
     }
     path == "/opt/mise"
         || path.starts_with("/opt/mise/")
+        || path == "/root/.rustup"
+        || path.starts_with("/root/.rustup/")
         || path == "/var/cache/sccache"
         || path.starts_with("/var/cache/sccache/")
 }
@@ -7451,6 +7460,53 @@ mod tests {
         assert_eq!(partial_results[0].state.outputs["cache-hit"], "false");
         assert_eq!(miss_results[0].state.outputs["cache-hit"], "false");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_cache_treats_rustup_paths_as_velnor_provided() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "cache".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::Cache,
+                inputs: [
+                    (
+                        "path".into(),
+                        "~/.rustup/toolchains\n~/.rustup/update-hashes\n".into(),
+                    ),
+                    ("key".into(), "rustup-Linux-X64-lock".into()),
+                    ("restore-keys".into(), "rustup-Linux-X64-\n".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].exit_code, 0);
+        assert_eq!(results[0].state.outputs["cache-hit"], "");
+        assert!(results[0]
+            .stdout
+            .contains("Cache paths live on Velnor host-persistent storage (always warm)"));
+        assert!(!results[0].stdout.contains("Cache not found"));
+        assert!(results[1].stdout.contains("nothing to save"));
+        assert!(results[1].stderr.is_empty());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_cache_treats_root_rustup_path_as_velnor_provided() {
+        assert!(velnor_persistent_cache_path("/root/.rustup/toolchains"));
+        assert!(velnor_persistent_cache_path("/root/.rustup/update-hashes"));
+    }
     }
 
     #[test]
