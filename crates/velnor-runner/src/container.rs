@@ -120,6 +120,8 @@ impl JobContainerSpec {
             "-e".into(),
             "CARGO_HOME=/github/home/.cargo".into(),
             "-e".into(),
+            "SCCACHE_DIR=/var/cache/sccache".into(),
+            "-e".into(),
             "RUNNER_TEMP=/__t".into(),
             "-e".into(),
             "RUNNER_TOOL_CACHE=/__tool".into(),
@@ -779,6 +781,7 @@ mod tests {
         assert!(args.contains(&"/tmp/home:/github/home".into()));
         assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"HOME=/github/home".into()));
+        assert!(args.contains(&"SCCACHE_DIR=/var/cache/sccache".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"NODE_OPTIONS=--max-old-space-size=4096".into()));
