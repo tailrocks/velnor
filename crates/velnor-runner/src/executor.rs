@@ -1899,9 +1899,10 @@ where
         ];
         // Add the active mise tool install bin dirs (emitted by setup_mise_script)
         // so executables installed into a mise-managed tool (e.g. ansible-galaxy
-        // from `pip install ansible-core` into mise's python) are on PATH for
-        // subsequent steps. Strip the marker lines from the logged output so the
-        // step log stays clean (UI parity with the GitHub-hosted lane).
+        // from `pip install ansible-core` into mise's python, or cargo-audit from
+        // mise's cargo backend) are on PATH for subsequent steps. Strip the marker
+        // lines from the logged output so the step log stays clean (UI parity with
+        // the GitHub-hosted lane).
         for line in result.stdout.lines() {
             if let Some(dir) = line.strip_prefix("__VELNOR_MISE_BIN__") {
                 let dir = dir.trim();
@@ -2958,11 +2959,14 @@ else
 fi
 # Emit active mise tool bin dirs as markers. native_mise parses these and adds
 # them to PATH for subsequent steps. Velnor only puts the shims dir on the step
-# PATH, but executables installed INTO a mise-managed tool — e.g. `pip install
-# ansible-core` into mise's python (ansible-galaxy/ansible-playbook land in the
-# python tool's bin) — live in the tool's install bin, not the shims. This makes
-# them findable in later steps, matching jdx/mise-action.
-mise bin-paths 2>/dev/null | while IFS= read -r p; do [ -n "$p" ] && echo "__VELNOR_MISE_BIN__$p"; done || true
+# PATH, but executables installed INTO a mise-managed tool (python/cargo
+# backends, etc.) live in the tool's install bin, not always in shims. This makes
+# ansible-galaxy, cargo-audit, cargo-shear, and similar tools findable in later
+# steps, matching jdx/mise-action.
+{{
+  mise bin-paths 2>/dev/null || true
+  find "$mise_home/installs" -mindepth 3 -maxdepth 3 -type d -name bin 2>/dev/null || true
+}} | awk 'NF && !seen[$0]++ {{ print "__VELNOR_MISE_BIN__" $0 }}'
 echo "mise install completed, cargo: $(command -v cargo 2>/dev/null || echo 'not found')"
 mise --version
 "#,
@@ -6867,6 +6871,17 @@ mod tests {
 
     fn assert_uuid(value: &str) {
         uuid::Uuid::parse_str(value).unwrap_or_else(|_| panic!("expected UUID, got {value}"));
+    }
+
+    #[test]
+    fn mise_setup_exports_cargo_backend_tool_bins() {
+        let script = setup_mise_script(true, "", "");
+
+        assert!(script.contains("mise bin-paths"));
+        assert!(script.contains(r#"find "$mise_home/installs" -mindepth 3 -maxdepth 3"#));
+        assert!(script.contains("__VELNOR_MISE_BIN__"));
+        assert!(script.contains("cargo-audit"));
+        assert!(script.contains("cargo-shear"));
     }
 
     fn host_temp_script_path(container_path: &str, temp: &Path) -> PathBuf {
