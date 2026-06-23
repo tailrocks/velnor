@@ -1931,6 +1931,7 @@ where
                         "MISE_CONFIG_DIR".to_string(),
                         "/opt/mise/config".to_string(),
                     ),
+                    ("MISE_TRUSTED_CONFIG_PATHS".to_string(), "/__w".to_string()),
                 ]
                 .into(),
                 path,
@@ -2930,6 +2931,7 @@ fi
 export MISE_DATA_DIR="$mise_home"
 export MISE_CACHE_DIR="$mise_home/cache"
 export MISE_CONFIG_DIR="$mise_home/config"
+export MISE_TRUSTED_CONFIG_PATHS="/__w"
 # Ensure mise itself can find cargo for 'cargo:' backend tools.
 export CARGO_HOME=/github/home/.cargo
 export RUSTUP_HOME=/root/.rustup
@@ -6959,8 +6961,8 @@ mod tests {
     #[test]
     fn selects_node_action_image_from_runtime() {
         assert_eq!(
-            node_action_image("node24", "velnor/job-ubuntu:24.04"),
-            "velnor/job-ubuntu:24.04"
+            node_action_image("node24", "velnor/job-ubuntu:26.04"),
+            "velnor/job-ubuntu:26.04"
         );
         assert_eq!(node_action_image("node20", ""), "node:20-bookworm");
         assert_eq!(node_action_image("node24", ""), "node:24-bookworm");
