@@ -969,12 +969,13 @@ where
     ) -> Result<JobExecutionSummary> {
         let mut results = Vec::new();
         let mut step_logs = Vec::new();
-        let mut base_env = base_env.to_vec();
+        let mut effective_base_env = container_runtime_env(container);
+        effective_base_env.extend_from_slice(base_env);
         if let Some(event_path) = prepare_github_event_path(temp_host, context_data)? {
-            base_env.push(("GITHUB_EVENT_PATH".to_string(), event_path));
+            effective_base_env.push(("GITHUB_EVENT_PATH".to_string(), event_path));
         }
         let mut state = JobExecutionState::new_with_workspace(
-            &base_env,
+            &effective_base_env,
             context_data,
             &container.workspace_host,
             temp_host,
@@ -3557,6 +3558,14 @@ fn rust_cache_covered_by_persistent_storage(
         .env
         .get("CARGO_TARGET_DIR")
         .is_some_and(|path| velnor_persistent_cache_path(path))
+}
+
+fn container_runtime_env(container: &JobContainerSpec) -> Vec<(String, String)> {
+    let mut env = container.env.clone();
+    if container.cargo_target_host.is_some() {
+        env.push(("CARGO_TARGET_DIR".into(), "/__cargo_target".into()));
+    }
+    env
 }
 
 fn save_cache_result(
@@ -7561,6 +7570,36 @@ mod tests {
             .contains("Rust cache paths live on Velnor host-persistent storage"));
         assert!(!results[0].stdout.contains("Rust cache miss"));
         assert!(results[1].stdout.contains("Cache hit occurred"));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_rust_cache_sees_container_persistent_cargo_target() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        spec.cargo_target_host = Some(temp.join("target-store"));
+        let steps = vec![ExecutableStep::Native {
+            step_id: "rust-cache".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::RustCache,
+                inputs: [("shared-key".into(), "ci-default-dev-workspace-v2".into())].into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&spec, &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results[0].state.outputs["cache-hit"], "true");
+        assert!(results[0]
+            .stdout
+            .contains("Rust cache paths live on Velnor host-persistent storage"));
+        assert!(!results[0].stdout.contains("Rust cache miss"));
         fs::remove_dir_all(temp).unwrap();
     }
 
