@@ -1642,10 +1642,10 @@ where
         ];
         // Add the active mise tool install bin dirs (emitted by setup_mise_script)
         // so executables installed into a mise-managed tool (e.g. ansible-galaxy
-        // from `pip install ansible-core` into mise's python, or cargo-audit from
-        // mise's cargo backend) are on PATH for subsequent steps. Strip the marker
-        // lines from the logged output so the step log stays clean (UI parity with
-        // the GitHub-hosted lane).
+        // from `pip install ansible-core` into mise's python, cargo-deny from
+        // mise's GitHub backend, or cargo-audit from mise's cargo backend) are on
+        // PATH for subsequent steps. Strip the marker lines from the logged output
+        // so the step log stays clean (UI parity with the GitHub-hosted lane).
         for line in result.stdout.lines() {
             if let Some(dir) = line.strip_prefix("__VELNOR_MISE_BIN__") {
                 let dir = dir.trim();
@@ -2649,6 +2649,10 @@ if [ -n "{install_flag}" ]; then
     [ -f "$f" ] && mise trust "$f" 2>/dev/null || true
   done
   mise trust --all 2>/dev/null || true
+  # Velnor shares the mise store across jobs. If a previous interrupted install
+  # left an empty version dir, mise can treat it as installed and skip the real
+  # download. Drop those poisoned entries before installing.
+  find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d -empty -exec rm -rf {{}} + 2>/dev/null || true
   echo "::group::mise install"
   if [ -n "$install_args" ]; then
     mise install $install_args
@@ -2662,11 +2666,12 @@ fi
 # Emit active mise tool bin dirs as markers. native_mise parses these and adds
 # them to PATH for subsequent steps. Velnor only puts the shims dir on the step
 # PATH, but executables installed INTO a mise-managed tool (python/cargo
-# backends, etc.) live in the tool's install bin, not always in shims. This makes
-# ansible-galaxy, cargo-audit, cargo-shear, and similar tools findable in later
-# steps, matching jdx/mise-action.
+# and GitHub backends, etc.) live in the tool's install root or bin, not always
+# in shims. This makes ansible-galaxy, cargo-audit, cargo-shear, cargo-deny, and
+# similar tools findable in later steps, matching jdx/mise-action.
 {{
   mise bin-paths 2>/dev/null || true
+  find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d 2>/dev/null || true
   find "$mise_home/installs" -mindepth 3 -maxdepth 3 -type d -name bin 2>/dev/null || true
 }} | awk 'NF && !seen[$0]++ {{ print "__VELNOR_MISE_BIN__" $0 }}'
 echo "mise install completed, cargo: $(command -v cargo 2>/dev/null || echo 'not found')"
@@ -6227,9 +6232,12 @@ mod tests {
         let script = setup_mise_script(true, "", "");
 
         assert!(script.contains("mise bin-paths"));
+        assert!(script.contains("-type d -empty -exec rm -rf"));
+        assert!(script.contains(r#"find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d"#));
         assert!(script.contains(r#"find "$mise_home/installs" -mindepth 3 -maxdepth 3"#));
         assert!(script.contains("__VELNOR_MISE_BIN__"));
         assert!(script.contains("cargo-audit"));
+        assert!(script.contains("cargo-deny"));
         assert!(script.contains("cargo-shear"));
     }
 
