@@ -3016,11 +3016,25 @@ fn native_rust_cache(
         restore_cache_paths(&action_state, matched_key, &cache_directories)?;
     }
     let restore_ms = t0.elapsed().as_millis();
+    let persistent_target =
+        rust_cache_covered_by_persistent_storage(&action_state, &cache_directories);
+    let cache_hit = matched.is_some() || persistent_target;
     let mut outputs = BTreeMap::new();
-    outputs.insert("cache-hit".to_string(), matched.is_some().to_string());
+    outputs.insert("cache-hit".to_string(), cache_hit.to_string());
     if !shared_key.is_empty() {
         outputs.insert("cache-primary-key".to_string(), shared_key.clone());
     }
+    let stdout = if let Some(key) = matched {
+        format!(
+            "{ANSI_GREEN}Rust cache restored from shared key '{key}'{ANSI_RESET} ({restore_ms}ms)\n"
+        )
+    } else if persistent_target {
+        format!(
+            "{ANSI_GREEN}Rust cache paths live on Velnor host-persistent storage (always warm){ANSI_RESET}\n"
+        )
+    } else {
+        format!("{ANSI_YELLOW}Rust cache miss for shared key '{shared_key}'{ANSI_RESET}\n")
+    };
     Ok(StepExecutionResult {
         exit_code: 0,
         state: StepCommandState {
@@ -3030,18 +3044,7 @@ fn native_rust_cache(
         },
         skipped: false,
         failure_ignored: false,
-        stdout: matched.map_or_else(
-            || {
-                format!(
-                    "{ANSI_YELLOW}Rust cache miss for shared key '{shared_key}'{ANSI_RESET}\n"
-                )
-            },
-            |key| {
-                format!(
-                    "{ANSI_GREEN}Rust cache restored from shared key '{key}'{ANSI_RESET} ({restore_ms}ms)\n"
-                )
-            },
-        ),
+        stdout,
         stderr: String::new(),
     })
 }
@@ -3242,10 +3245,26 @@ fn velnor_persistent_cache_path(path: &str) -> bool {
     }
     path == "/opt/mise"
         || path.starts_with("/opt/mise/")
+        || path == "/__cargo_target"
+        || path.starts_with("/__cargo_target/")
         || path == "/root/.rustup"
         || path.starts_with("/root/.rustup/")
         || path == "/var/cache/sccache"
         || path.starts_with("/var/cache/sccache/")
+}
+
+fn rust_cache_covered_by_persistent_storage(
+    state: &JobExecutionState,
+    cache_directories: &str,
+) -> bool {
+    let paths = cache_paths(cache_directories);
+    if !paths.is_empty() {
+        return paths.iter().all(|path| velnor_persistent_cache_path(path));
+    }
+    state
+        .env
+        .get("CARGO_TARGET_DIR")
+        .is_some_and(|path| velnor_persistent_cache_path(path))
 }
 
 fn save_cache_result(
@@ -6734,6 +6753,77 @@ mod tests {
     fn native_cache_treats_root_rustup_path_as_velnor_provided() {
         assert!(velnor_persistent_cache_path("/root/.rustup/toolchains"));
         assert!(velnor_persistent_cache_path("/root/.rustup/update-hashes"));
+    }
+
+    #[test]
+    fn native_rust_cache_treats_persistent_cargo_target_as_warm() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "rust-cache".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::RustCache,
+                inputs: [("shared-key".into(), "ci-default-dev-workspace-v2".into())].into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&temp),
+                &steps,
+                &[("CARGO_TARGET_DIR".into(), "/__cargo_target".into())],
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].exit_code, 0);
+        assert_eq!(results[0].state.outputs["cache-hit"], "true");
+        assert!(results[0]
+            .stdout
+            .contains("Rust cache paths live on Velnor host-persistent storage"));
+        assert!(!results[0].stdout.contains("Rust cache miss"));
+        assert!(results[1].stdout.contains("Cache hit occurred"));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_rust_cache_treats_persistent_cache_directories_as_warm() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "rust-cache".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::RustCache,
+                inputs: [
+                    ("shared-key".into(), "ci-custom-dir".into()),
+                    (
+                        "cache-directories".into(),
+                        "/__cargo_target\n/var/cache/sccache\n".into(),
+                    ),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results[0].state.outputs["cache-hit"], "true");
+        assert!(results[0]
+            .stdout
+            .contains("Rust cache paths live on Velnor host-persistent storage"));
+        assert!(velnor_persistent_cache_path("/__cargo_target/debug"));
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
