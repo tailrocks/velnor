@@ -9776,9 +9776,12 @@ fi"#
         assert!(calls[2]
             .1
             .contains(&"GITHUB_OUTPUT=/github/file_commands/action1_output".into()));
+        assert!(calls[2]
+            .1
+            .windows(2)
+            .any(|pair| pair == ["--entrypoint", "node"]));
         assert!(calls[2].1.ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/acme_action/v1/dist/index.js".into()
         ]));
 
@@ -11603,12 +11606,14 @@ bitcoin-processor-app.push=true")
             })
             .map(|(_, args)| args)
             .unwrap();
-        assert!(node_call
-            .last()
-            .is_some_and(|arg| arg.contains("export PATH='/root/.cargo/bin':\"$PATH\"")));
-        assert!(node_call.last().is_some_and(
-            |arg| arg.contains("exec node '/__a/_actions/cargo-install/dist/index.js'")
+        assert!(node_call.contains(
+            &"PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                .into()
         ));
+        assert!(node_call.ends_with(&[
+            "node:20-bookworm".into(),
+            "/__a/_actions/cargo-install/dist/index.js".into()
+        ]));
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -11711,14 +11716,17 @@ bitcoin-processor-app.push=true")
         assert!(
             node_calls[1].contains(&"GITHUB_PATH=/github/file_commands/setup-python_path".into())
         );
-        assert!(node_calls[1]
-            .last()
-            .is_some_and(|arg| { arg.contains("export PATH='/opt/mise/shims':\"$PATH\"") }));
+        assert!(node_calls[1].contains(
+            &"PATH=/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                .into()
+        ));
+        assert!(node_calls[2].contains(
+            &"PATH=/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                .into()
+        ));
         assert!(node_calls[2].ends_with(&[
             "node:24-bookworm".into(),
-            "sh".into(),
-            "-lc".into(),
-            "export PATH='/opt/mise/shims':\"$PATH\"\nexec node '/__a/_actions/actions_setup-python/dist/cache-save/index.js'".into()
+            "/__a/_actions/actions_setup-python/dist/cache-save/index.js".into()
         ]));
         fs::remove_dir_all(temp).unwrap();
     }
@@ -11834,9 +11842,7 @@ bitcoin-processor-app.push=true")
             assert!(call.contains(&"GITHUB_REPOSITORY=ChainArgos/java-monorepo".into()));
             assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
-            assert!(call
-                .last()
-                .is_some_and(|arg| { arg.contains("export PATH='/root/.cargo/bin':\"$PATH\"") }));
+            assert!(call.contains(&"PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()));
         }
         assert!(node_calls[0].contains(&"INPUT_REPO=casey/just".into()));
         assert!(node_calls[0].contains(&"INPUT_GITHUB-TOKEN=ghs_token".into()));
@@ -11914,22 +11920,18 @@ bitcoin-processor-app.push=true")
             .collect::<Vec<_>>();
         assert!(exec_calls[0].ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/cache/dist/restore.js".into()
         ]));
         assert!(exec_calls[1].ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/docker_login/dist/main.js".into()
         ]));
         assert!(exec_calls[2].ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/docker_login/dist/post.js".into()
         ]));
         assert!(exec_calls[3].ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/cache/dist/save.js".into()
         ]));
         assert!(exec_calls[3].contains(&"STATE_primaryKey=linux-cache".into()));
@@ -11995,12 +11997,10 @@ bitcoin-processor-app.push=true")
             .collect::<Vec<_>>();
         assert!(node_calls[0].ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/cache/dist/pre.js".into()
         ]));
         assert!(node_calls[1].ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/cache/dist/restore.js".into()
         ]));
         assert!(node_calls[1].contains(&"STATE_primaryKey=linux-cache".into()));
@@ -12099,12 +12099,10 @@ bitcoin-processor-app.push=true")
         assert_eq!(node_calls.len(), 2);
         assert!(node_calls[0].ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/wrapped/dist/pre.js".into()
         ]));
         assert!(node_calls[1].ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/wrapped/dist/post.js".into()
         ]));
         fs::remove_dir_all(temp).unwrap();
@@ -12288,12 +12286,10 @@ bitcoin-processor-app.push=true")
         }
         assert!(node_calls[0].ends_with(&[
             "node:24-bookworm".into(),
-            "node".into(),
             "/__a/_actions/mozilla-actions_sccache-action/dist/setup/index.js".into()
         ]));
         assert!(node_calls[1].ends_with(&[
             "node:24-bookworm".into(),
-            "node".into(),
             "/__a/_actions/mozilla-actions_sccache-action/dist/show_stats/index.js".into()
         ]));
         fs::remove_dir_all(temp).unwrap();
@@ -12366,7 +12362,6 @@ bitcoin-processor-app.push=true")
         assert_eq!(node_calls.len(), 2);
         assert!(node_calls[1].ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/rust-cache/dist/save/index.js".into()
         ]));
         fs::remove_dir_all(temp).unwrap();
@@ -12472,7 +12467,6 @@ bitcoin-processor-app.push=true")
         assert!(node_calls[1].contains(&"CACHE_ON_FAILURE=true".into()));
         assert!(node_calls[1].ends_with(&[
             "node:24-bookworm".into(),
-            "node".into(),
             "/__a/_actions/Swatinem_rust-cache/dist/save/index.js".into()
         ]));
         fs::remove_dir_all(temp).unwrap();

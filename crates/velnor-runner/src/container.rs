@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+const NODE_ACTION_BASE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
 #[derive(Debug, Clone)]
 pub struct JobContainerSpec {
     pub name: String,
@@ -327,6 +329,10 @@ impl JobContainerSpec {
             "RUNNER_TOOL_CACHE=/__tool".into(),
             "-e".into(),
             "AGENT_TOOLSDIRECTORY=/__tool".into(),
+            // The Node image entrypoint/shell drops env names with '-', but
+            // @actions/core reads inputs like INPUT_PUSH-TO-REGISTRY.
+            "--entrypoint".into(),
+            "node".into(),
         ];
         if self.mount_docker_socket {
             args.extend([
@@ -338,16 +344,17 @@ impl JobContainerSpec {
         for (name, value) in env {
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
-        args.push(node_image.into());
-        if path_prepend.is_empty() {
-            args.extend(["node".into(), entrypoint_container_path.into()]);
-        } else {
-            args.extend([
-                "sh".into(),
-                "-lc".into(),
-                node_action_shell_command(path_prepend, entrypoint_container_path),
-            ]);
+        if !path_prepend.is_empty() {
+            let path = path_prepend
+                .iter()
+                .cloned()
+                .chain(std::iter::once(NODE_ACTION_BASE_PATH.to_string()))
+                .collect::<Vec<_>>()
+                .join(":");
+            args.extend(["-e".into(), format!("PATH={path}")]);
         }
+        args.push(node_image.into());
+        args.push(entrypoint_container_path.into());
         args
     }
 
@@ -646,18 +653,6 @@ pub(crate) fn sanitize_store_key(name: &str) -> String {
     key
 }
 
-fn node_action_shell_command(path_prepend: &[String], entrypoint_container_path: &str) -> String {
-    let joined = path_prepend
-        .iter()
-        .map(|path| shell_single_quote(path))
-        .collect::<Vec<_>>()
-        .join(":");
-    format!(
-        "export PATH={joined}:\"$PATH\"\nexec node {}",
-        shell_single_quote(entrypoint_container_path)
-    )
-}
-
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -924,9 +919,10 @@ mod tests {
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"GITHUB_OUTPUT=/__t/out".into()));
+        assert!(args.windows(2).any(|pair| pair == ["--entrypoint", "node"]));
         assert_eq!(
-            &args[args.len() - 3..],
-            ["node:20-bookworm", "node", "/__a/action/dist/index.js"]
+            &args[args.len() - 2..],
+            ["node:20-bookworm", "/__a/action/dist/index.js"]
         );
     }
 
@@ -940,13 +936,11 @@ mod tests {
             "/__a/action/dist/index.js",
         );
 
+        assert!(args.windows(2).any(|pair| pair == ["--entrypoint", "node"]));
+        assert!(args.contains(&"PATH=/github/home/.cargo/bin:/path/with'quote:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()));
         assert_eq!(
-            &args[args.len() - 4..args.len() - 1],
-            ["node:20-bookworm", "sh", "-lc"]
-        );
-        assert_eq!(
-            args.last().unwrap(),
-            "export PATH='/github/home/.cargo/bin':'/path/with'\\''quote':\"$PATH\"\nexec node '/__a/action/dist/index.js'"
+            &args[args.len() - 2..],
+            ["node:20-bookworm", "/__a/action/dist/index.js"]
         );
     }
 
