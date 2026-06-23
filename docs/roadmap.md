@@ -300,8 +300,8 @@ Required Docker behavior:
 - Docker bind-mount preflight before acquiring jobs
 - Docker socket mount when target jobs need Docker/Buildx
 - no host Docker CLI binary mount by default
-- default job image is project-owned `velnor/job-ubuntu:24.04`, built from
-  official `ubuntu:24.04`
+- default job image is project-owned `velnor/job-ubuntu:26.04`, built from
+  official `ubuntu:26.04`
 - job image includes Docker CLI and Buildx, so Docker-heavy workflow steps can
   use the mounted Docker socket
 
@@ -387,7 +387,7 @@ Required checks:
 cargo fmt --check
 cargo test -q
 cargo run -q -p velnor-tools -- check-runner-reference
-docker build -f docker/job-ubuntu.Dockerfile -t velnor/job-ubuntu:24.04 .
+docker build -f docker/job-ubuntu.Dockerfile -t velnor/job-ubuntu:26.04 .
 docker build -t velnor-runner:local .
 ```
 
@@ -452,7 +452,7 @@ ssh sentry
 On the server:
 
 - verify Docker daemon and Velnor workdir visibility
-- build or pull `velnor/job-ubuntu:24.04`
+- build or pull `velnor/job-ubuntu:26.04`
 - run Velnor preflight
 - run public fixture smoke through V2 JIT
 - compare fixture outputs, artifacts, logs, conclusions, and timing against the
@@ -640,7 +640,7 @@ Open naming choice:
 
 ### 7. Run public fixture proof
 
-- build `velnor/job-ubuntu:24.04`
+- build `velnor/job-ubuntu:26.04`
 - run readiness
 - dispatch or use queued fixture run
 - start Velnor daemon with JIT slots

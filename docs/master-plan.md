@@ -27,7 +27,7 @@ A Rust (tokio) daemon (`crates/velnor-runner`, ~33k LOC + `velnor-tools` ~4.7k)
 that impersonates GitHub's official runner over the **V2 protocol only**:
 JIT runner configuration → broker long-poll session → run-service
 acquire/renew/complete → Results Service (Twirp + WebSocket live log feed).
-Each assigned job runs in a fresh Docker container (`velnor/job-ubuntu:24.04`,
+Each assigned job runs in a fresh Docker container (`velnor/job-ubuntu:26.04`,
 Rust 1.96 + mise + sccache + mold + buildx preinstalled) on a per-job Docker
 network, with the host Docker socket mounted for Docker/Buildx workloads.
 Known marketplace actions are executed by **19 native Rust adapters**

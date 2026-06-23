@@ -5884,7 +5884,7 @@ jobs:
         let mut args = run_args(false, false, false);
         args.work_dir = Some(Path::new("/runner/work").to_path_buf());
         args.docker_host_work_dir = Some(Path::new("/daemon/work").to_path_buf());
-        args.docker_image = "velnor/job-ubuntu:24.04".into();
+        args.docker_image = "velnor/job-ubuntu:26.04".into();
         args.require_docker_socket = true;
 
         let preflight = preflight_args_for_run(&args, Path::new("/config"));
@@ -5897,7 +5897,7 @@ jobs:
             preflight.docker_host_work_dir,
             Some(Path::new("/daemon/work").to_path_buf())
         );
-        assert_eq!(preflight.docker_image, "velnor/job-ubuntu:24.04");
+        assert_eq!(preflight.docker_image, "velnor/job-ubuntu:26.04");
         assert!(preflight.require_docker_socket);
         assert!(preflight.require_buildx);
     }
@@ -6139,7 +6139,7 @@ jobs:
         args.url = Some("https://github.com/owner/repo".into());
         args.work_dir = Some(Path::new("/runner/work").to_path_buf());
         args.docker_host_work_dir = Some(Path::new("/daemon/work").to_path_buf());
-        args.docker_image = "velnor/job-ubuntu:24.04".into();
+        args.docker_image = "velnor/job-ubuntu:26.04".into();
         args.require_docker_socket = true;
 
         let preflight = daemon_preflight_args(&args, Path::new("/config"), 2).unwrap();
@@ -6165,7 +6165,7 @@ jobs:
         assert!(preflight.iter().all(|args| args.require_buildx));
         assert!(preflight
             .iter()
-            .all(|args| args.docker_image == "velnor/job-ubuntu:24.04"));
+            .all(|args| args.docker_image == "velnor/job-ubuntu:26.04"));
     }
 
     #[test]
@@ -8068,10 +8068,10 @@ runs:
             "RequestId": 1
         }))
         .unwrap();
-        let lines = setup_job_lines(&job, "velnor/job-ubuntu:24.04");
+        let lines = setup_job_lines(&job, "velnor/job-ubuntu:26.04");
         let joined = lines.join("\n");
         assert!(joined.contains("Current runner version:"));
-        assert!(joined.contains("velnor/job-ubuntu:24.04"));
+        assert!(joined.contains("velnor/job-ubuntu:26.04"));
         assert!(joined.contains("Complete job name: build (app-a)"));
         assert!(joined.contains("##[group]Operating System"));
         assert!(joined.contains("##[endgroup]"));
@@ -8100,7 +8100,7 @@ runs:
             }
         }))
         .unwrap();
-        let lines = setup_job_lines(&job, "velnor/job-ubuntu:24.04");
+        let lines = setup_job_lines(&job, "velnor/job-ubuntu:26.04");
         let joined = lines.join("\n");
         assert!(
             joined.contains("##[group]GITHUB_TOKEN Permissions"),
@@ -8148,7 +8148,7 @@ runs:
             ]
         }))
         .unwrap();
-        let lines = setup_job_lines(&job, "velnor/job-ubuntu:24.04");
+        let lines = setup_job_lines(&job, "velnor/job-ubuntu:26.04");
         let joined = lines.join("\n");
         // Tag ref: no SHA suffix.
         assert!(
@@ -8181,7 +8181,7 @@ runs:
             }]
         }))
         .unwrap();
-        let lines = setup_job_lines(&job, "velnor/job-ubuntu:24.04");
+        let lines = setup_job_lines(&job, "velnor/job-ubuntu:26.04");
         let joined = lines.join("\n");
         // Full 40-char SHA ref: show SHA suffix matching GitHub UI format.
         assert!(

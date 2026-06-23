@@ -197,7 +197,7 @@ both the container-visible work directory and the Docker-daemon-visible host wor
 directory:
 
 ```sh
-docker build -f docker/job-ubuntu.Dockerfile -t velnor/job-ubuntu:24.04 .
+docker build -f docker/job-ubuntu.Dockerfile -t velnor/job-ubuntu:26.04 .
 docker build -t velnor-runner:local .
 mkdir -p "$PWD/.velnor-work" "$PWD/.velnor-config" "$PWD/.velnor-job-dumps"
 
@@ -340,7 +340,7 @@ remote Docker daemon without a local `/var/run/docker.sock`, set
 
 For target jobs, Velnor runs the job in a Docker container and mounts
 `/var/run/docker.sock` into that container when the socket is present. The
-default `velnor/job-ubuntu:24.04` image is built from official `ubuntu:24.04` and
+default `velnor/job-ubuntu:26.04` image is built from official `ubuntu:26.04` and
 contains the Docker CLI and Buildx plugin, so workflow steps inside the job
 container can run `docker`/`docker buildx` without relying on host binary mounts.
 Service containers share the per-job Docker network with GitHub-style aliases.
