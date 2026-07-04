@@ -538,11 +538,10 @@ adapters: `actions/attest-build-provenance`,
    side-by-side capture, no gaps/stalls.
 3. Remaining known gaps to close from the outstanding checklist: step
    display names for `run:` steps (broker sends `__run_N`; decide on the
-   YAML-match recovery or GitHub-format fallback), downloadable log archive
-   (v1 store absent from V2 messages — keep `job-log.txt` artifact
-   workaround, document), step numbering parity (cosmetic), adapter output
-   polish (group headers, key→value lines, cache hit/miss + bytes + ms,
-   sccache stats — make Velnor's speed visible in the log).
+   YAML-match recovery or GitHub-format fallback), step numbering parity
+   (cosmetic), adapter output polish (group headers, key→value lines, cache
+   hit/miss + bytes + ms, sccache stats — make Velnor's speed visible in the
+   log).
 4. Name the `job-log` artifact per job (`job-log-<job-name>`): a run with 9
    Velnor jobs currently uploads 9 artifacts all named `job-log`,
    indistinguishable in the UI (observed 2026-06-10).

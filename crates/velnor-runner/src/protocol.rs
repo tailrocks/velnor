@@ -2940,6 +2940,144 @@ impl TwirpResultsClient {
         bail!("upload_step_log failed after 3 attempts: {last_err}");
     }
 
+    /// Upload the combined job log to Results Service blob storage.
+    ///
+    /// Flow matches official runner `UploadResultsJobLogAsync`:
+    ///   1. Get a signed blob URL from `GetJobLogsSignedBlobURL`
+    ///   2. PUT the log content to that URL as `text/plain`
+    ///   3. Finalise with `CreateJobLogsMetadata`
+    pub async fn upload_job_log(
+        &self,
+        plan_id: &str,
+        job_id: &str,
+        content: &[u8],
+        line_count: i64,
+    ) -> Result<()> {
+        const RECEIVER: &str = "twirp/results.services.receiver.Receiver";
+
+        #[derive(serde::Serialize)]
+        struct GetUrlReq<'a> {
+            workflow_run_backend_id: &'a str,
+            workflow_job_run_backend_id: &'a str,
+        }
+
+        let get_url = format!(
+            "{}/{RECEIVER}/GetJobLogsSignedBlobURL",
+            self.results_service_url
+        );
+        let meta_url = format!(
+            "{}/{RECEIVER}/CreateJobLogsMetadata",
+            self.results_service_url
+        );
+        let get_body = serde_json::to_string(&GetUrlReq {
+            workflow_run_backend_id: plan_id,
+            workflow_job_run_backend_id: job_id,
+        })
+        .context("serialize GetJobLogsSignedBlobURL")?;
+
+        let mut last_err = String::new();
+        for attempt in 0..3 {
+            match self
+                .upload_job_log_once(
+                    &get_url, &meta_url, &get_body, content, line_count, plan_id, job_id,
+                )
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) => last_err = format!("{e:#}"),
+            }
+            if attempt < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(200 * (attempt + 1))).await;
+            }
+        }
+        bail!("upload_job_log failed after 3 attempts: {last_err}");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn upload_job_log_once(
+        &self,
+        get_url: &str,
+        meta_url: &str,
+        get_body: &str,
+        content: &[u8],
+        line_count: i64,
+        plan_id: &str,
+        job_id: &str,
+    ) -> Result<()> {
+        #[derive(serde::Deserialize)]
+        struct GetUrlResp {
+            logs_url: Option<String>,
+        }
+        #[derive(serde::Serialize)]
+        struct MetaReq<'a> {
+            workflow_run_backend_id: &'a str,
+            workflow_job_run_backend_id: &'a str,
+            uploaded_at: String,
+            line_count: i64,
+        }
+        #[derive(serde::Deserialize)]
+        struct MetaResp {
+            ok: bool,
+        }
+
+        let (status, body) =
+            curl_json_request("POST", get_url, &self.token, Some(get_body.to_string()), 30)
+                .await
+                .context("GetJobLogsSignedBlobURL request")?;
+        if !(200..300).contains(&status) {
+            bail!("GetJobLogsSignedBlobURL failed: status={status}, body={body}");
+        }
+        let resp: GetUrlResp =
+            serde_json::from_str(&body).context("GetJobLogsSignedBlobURL parse")?;
+        let logs_url = resp
+            .logs_url
+            .filter(|u| !u.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("GetJobLogsSignedBlobURL returned empty URL"))?;
+
+        let put_resp = self
+            .http
+            .put(&logs_url)
+            .header("Content-Type", "text/plain")
+            .header("Content-Length", content.len().to_string())
+            .header("x-ms-blob-type", "BlockBlob")
+            .body(content.to_vec())
+            .send()
+            .await
+            .context("job log PUT")?;
+        let put_status = put_resp.status();
+        if !put_status.is_success() {
+            let body = put_resp.text().await.unwrap_or_default();
+            bail!("job log PUT failed: status={put_status}, body={body}");
+        }
+
+        let ts = {
+            use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+            OffsetDateTime::now_utc()
+                .format(&Rfc3339)
+                .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+        };
+        let meta_body = serde_json::to_string(&MetaReq {
+            workflow_run_backend_id: plan_id,
+            workflow_job_run_backend_id: job_id,
+            uploaded_at: ts,
+            line_count,
+        })
+        .context("serialize CreateJobLogsMetadata")?;
+        let (meta_status, meta_body_resp) =
+            curl_json_request("POST", meta_url, &self.token, Some(meta_body), 30)
+                .await
+                .context("CreateJobLogsMetadata request")?;
+        if !(200..300).contains(&meta_status) {
+            bail!("CreateJobLogsMetadata failed: status={meta_status}, body={meta_body_resp}");
+        }
+        let meta_resp: MetaResp =
+            serde_json::from_str(&meta_body_resp).context("CreateJobLogsMetadata parse")?;
+        if !meta_resp.ok {
+            bail!("CreateJobLogsMetadata returned ok=false: body={meta_body_resp}");
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn upload_step_log_once(
         &self,
