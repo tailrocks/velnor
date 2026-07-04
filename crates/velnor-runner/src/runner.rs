@@ -1990,6 +1990,12 @@ async fn poll_broker_message(
                 }
             },
             Err(error) => {
+                if draining() {
+                    forensics.lifecycle(&format!(
+                        "idle slot exiting after broker poll error during daemon drain: {error:#}"
+                    ));
+                    return Ok(None);
+                }
                 forensics.broker(&format!(
                     "poll ERROR consecutive={}: {error:#}",
                     poll_state.consecutive_errors + 1
