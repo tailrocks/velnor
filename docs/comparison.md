@@ -98,7 +98,7 @@ should *improve*:
 | # | Area | Status |
 |---|------|--------|
 | 1 | Per-`job-log` artifact naming (`job-log-<job>`) | master-plan P4.4 |
-| 2 | Raw-log download 404s on Velnor V2 jobs (no v1 archive) | Documented; `job-log` artifact is the workaround (master-plan P4.3) |
+| 2 | Per-job native raw-log download | Results Service job-log blob upload; `job-log` artifact remains fallback |
 
 ## The repeatable comparison: `velnor-tools lane-compare` (P4.1)
 
@@ -166,8 +166,9 @@ defaults; the node-sidecar (diagnostic fallback) does not live-stream.
       step lines appear in the UI while the step runs; per-step feed line
       numbering fixed in 0.1.6 (was a job-global counter — protocol mismatch
       vs actions/runner).
-- [x] Downloadable-archive workaround shipped: the full masked job log is
-      uploaded as a `job-log` artifact (per-job naming still pending,
+- [x] Downloadable logs shipped: the full masked job log is uploaded to the
+      Results Service job-log blob for GitHub's native log endpoint, with a
+      `job-log` artifact fallback (per-job naming still pending,
       master-plan P4); artifact lines carry blob timestamps as of 0.1.18.
 - [x] API-driven lane comparison shipped as `velnor-tools lane-compare`
       (master-plan P4.1) — repeatable, CI-runnable, equal-or-better gate.
