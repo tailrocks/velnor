@@ -3736,9 +3736,20 @@ fn native_upload_artifact(
                     &name,
                     &zip_files,
                 ) {
-                    eprintln!(
-                        "Best-effort Results Service artifact upload failed for '{name}': {e:#}"
-                    );
+                    let message =
+                        format!("Results Service artifact upload failed for '{name}': {e:#}\n");
+                    eprintln!("{message}");
+                    return Ok(StepExecutionResult {
+                        exit_code: 1,
+                        state: StepCommandState::default(),
+                        skipped: false,
+                        failure_ignored: false,
+                        stdout: format!(
+                            "Saved local artifact '{name}' with {} path(s)\n",
+                            uploaded.len()
+                        ),
+                        stderr: message,
+                    });
                 }
             }
         }
@@ -6864,6 +6875,18 @@ mod tests {
             arg == &format!("{name}=/__t/{file_name}")
                 || arg == &format!("{name}=/github/file_commands/{file_name}")
         })
+    }
+
+    fn runtime_token_with_results_scope(plan_id: &str, job_id: &str) -> String {
+        use base64::Engine;
+
+        let payload = serde_json::json!({
+            "scp": format!("Actions.Results:{plan_id}:{job_id}")
+        });
+        format!(
+            "e30.{}.sig",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
+        )
     }
 
     fn container(temp: &Path) -> JobContainerSpec {
@@ -11920,6 +11943,57 @@ fi"#
             )
             .unwrap(),
             "sha256:abc\n"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_upload_artifact_fails_when_results_service_upload_fails() {
+        let temp = temp_dir();
+        fs::create_dir_all(temp.join("work")).unwrap();
+        fs::write(temp.join("work/result.json"), "{\"ok\":true}\n").unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "upload".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::UploadArtifact,
+                inputs: [
+                    ("name".into(), "result-velnor-app".into()),
+                    ("path".into(), "result.json".into()),
+                    ("if-no-files-found".into(), "error".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+        let runtime_env = [
+            ("ACTIONS_RESULTS_URL".into(), "http://127.0.0.1:9".into()),
+            (
+                "ACTIONS_RUNTIME_TOKEN".into(),
+                runtime_token_with_results_scope("plan-1", "job-1"),
+            ),
+        ];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &runtime_env, &temp)
+            .unwrap();
+
+        assert_eq!(results[0].exit_code, 1);
+        assert!(results[0]
+            .stdout
+            .contains("Saved local artifact 'result-velnor-app'"));
+        assert!(results[0]
+            .stderr
+            .contains("Results Service artifact upload failed"));
+        assert_eq!(
+            fs::read_to_string(
+                temp.join("_velnor_artifacts/local-1/result-velnor-app/result.json")
+            )
+            .unwrap(),
+            "{\"ok\":true}\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }
