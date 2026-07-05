@@ -1,5 +1,5 @@
 use crate::{
-    executor::CommandRunner,
+    executor::{CommandRunner, StepLogicFailure},
     job_message::{
         ActionReferenceType, ActionStep, AgentJobRequestMessage, RepositoryResource,
         ServiceEndpoint,
@@ -523,12 +523,17 @@ where
         }
     }
     if result.code != 0 {
-        bail!(
-            "git {} failed with code {}: {}",
-            format_git_args(args),
+        return Err(StepLogicFailure::new(
             result.code,
-            result.stderr
-        );
+            "",
+            format!(
+                "git {} failed with code {}: {}",
+                format_git_args(args),
+                result.code,
+                result.stderr
+            ),
+        )
+        .into());
     }
     Ok(())
 }

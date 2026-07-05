@@ -30,7 +30,7 @@ Independent plans can run in parallel; respect the "Depends on" column.
 | 006 | Repo/trust-scope the `actions/cache` store + `..` hardening | P1 | M | — | security | DONE |
 | 007 | Trust-scope the writable executable tool stores | P2 | L | 006 | security | DONE |
 | 008 | Secret env via 0600 `--env-file`, not exec argv | P2 | M | — | security | DONE |
-| 009 | Step-logic failures = failed steps, not job aborts | P1 | M | — | bug | TODO |
+| 009 | Step-logic failures = failed steps, not job aborts | P1 | M | — | bug | DONE |
 | 010 | Enforce `timeout-minutes` (kill hung steps) | P1 | M | — | bug | TODO |
 | 011 | Never abandon an acquired job (complete on panic/setup err) | P1 | M | — | bug | TODO |
 | 012 | Typed `GitHubApiError`; classify by status not string | P2 | M | — | tech-debt | TODO |

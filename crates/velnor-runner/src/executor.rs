@@ -273,6 +273,53 @@ pub struct StepExecutionResult {
     pub stderr: String,
 }
 
+#[derive(Debug)]
+pub(crate) struct StepLogicFailure {
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+impl StepLogicFailure {
+    pub(crate) fn new(
+        exit_code: i32,
+        stdout: impl Into<String>,
+        stderr: impl Into<String>,
+    ) -> Self {
+        Self {
+            exit_code,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
+
+    fn to_step_result(&self, stdout_prefix: Option<String>) -> StepExecutionResult {
+        let mut stdout = stdout_prefix.unwrap_or_default();
+        if !self.stdout.is_empty() {
+            if !stdout.is_empty() {
+                stdout.push('\n');
+            }
+            stdout.push_str(&self.stdout);
+        }
+        StepExecutionResult {
+            exit_code: self.exit_code,
+            state: StepCommandState::default(),
+            skipped: false,
+            failure_ignored: false,
+            stdout,
+            stderr: self.stderr.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for StepLogicFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.stderr)
+    }
+}
+
+impl std::error::Error for StepLogicFailure {}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobExecutionSummary {
     pub step_results: Vec<StepExecutionResult>,
@@ -1467,7 +1514,12 @@ where
             *version = state.resolve_expressions(version);
         }
         let mut trace = Vec::new();
-        execute_checkout(&mut self.runner, &plan, &mut trace)?;
+        if let Err(error) = execute_checkout(&mut self.runner, &plan, &mut trace) {
+            if let Some(failure) = error.downcast_ref::<StepLogicFailure>() {
+                return Ok(failure.to_step_result(Some(trace.join("\n"))));
+            }
+            return Err(error);
+        }
         configure_safe_directory(
             &container.home_host,
             &container.workspace_host,
@@ -6095,6 +6147,33 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FailingCheckoutRunner {
+        calls: Vec<(String, Vec<String>)>,
+    }
+
+    impl CommandRunner for FailingCheckoutRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            if is_seed_probe(args) {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: if program == "git" { 128 } else { 0 },
+                stdout: String::new(),
+                stderr: if program == "git" {
+                    "fatal: couldn't find remote ref missing".into()
+                } else {
+                    String::new()
+                },
+            })
+        }
+    }
+
     struct OutputWritingRunner {
         calls: Vec<(String, Vec<String>)>,
         temp: PathBuf,
@@ -9787,6 +9866,126 @@ fi"#
             })
             .count();
         assert_eq!(exec_count, 2);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn failed_checkout_runs_always_step() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Checkout(CheckoutPlan {
+                step_id: "checkout".into(),
+                display_name: "Checkout".into(),
+                clone_url: "https://github.com/acme/missing.git".into(),
+                version: Some("missing".into()),
+                destination: temp.join("workspace"),
+                token: None,
+                fetch_depth: Some(1),
+                fetch_tags: false,
+                persist_credentials: false,
+                clean: true,
+                lfs: false,
+                condition: None,
+                continue_on_error: false,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "always".into(),
+                display_name: "Always".into(),
+                script: "echo always".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w".into(),
+                env: Vec::new(),
+                condition: Some("always()".into()),
+                continue_on_error: false,
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(FailingCheckoutRunner::default());
+
+        let summary = executor
+            .execute_ordered_steps_with_completion(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(summary.step_results.len(), 2);
+        assert_eq!(summary.step_results[0].exit_code, 128);
+        assert!(!summary.step_results[0].failure_ignored);
+        assert_eq!(summary.step_results[1].exit_code, 0);
+        assert_eq!(summary.step_logs.len(), 2);
+        assert_eq!(summary.step_logs[0].display_name, "Checkout");
+        assert_eq!(summary.step_logs[0].exit_code, 128);
+        assert!(summary.step_logs[0]
+            .lines
+            .iter()
+            .any(|line| line.contains("couldn't find remote ref")));
+        assert_eq!(summary.step_logs[1].display_name, "Always");
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn failed_native_action_honors_continue_on_error() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Native {
+                step_id: "upload".into(),
+                display_name: "Upload".into(),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::UploadArtifact,
+                    inputs: [
+                        ("path".into(), "missing-file".into()),
+                        ("if-no-files-found".into(), "error".into()),
+                    ]
+                    .into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: true,
+            },
+            ExecutableStep::Script(ScriptStep {
+                id: "next".into(),
+                display_name: "Next".into(),
+                script: "echo next".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        let summary = executor
+            .execute_ordered_steps_with_completion(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(summary.step_results.len(), 2);
+        assert_eq!(summary.step_results[0].exit_code, 1);
+        assert!(summary.step_results[0].failure_ignored);
+        assert_eq!(summary.step_results[1].exit_code, 0);
+        assert_eq!(summary.step_logs.len(), 2);
+        assert_eq!(summary.step_logs[0].display_name, "Upload");
+        assert_eq!(summary.step_logs[0].exit_code, 1);
+        assert!(summary.step_logs[0]
+            .lines
+            .iter()
+            .any(|line| line.contains("No files were found")));
+        assert_eq!(summary.step_logs[1].display_name, "Next");
         fs::remove_dir_all(temp).unwrap();
     }
 
