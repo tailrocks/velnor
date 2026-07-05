@@ -4970,14 +4970,14 @@ impl JobExecutionState {
         if let Some(inner) = strip_wrapping_parentheses(expression) {
             return self.evaluate_condition_expr(inner);
         }
-        if let Some(inner) = expression.strip_prefix('!') {
-            return !self.evaluate_condition_expr(inner);
-        }
         if let Some((left, right)) = split_top_level(expression, "||") {
             return self.evaluate_condition_expr(left) || self.evaluate_condition_expr(right);
         }
         if let Some((left, right)) = split_top_level(expression, "&&") {
             return self.evaluate_condition_expr(left) && self.evaluate_condition_expr(right);
+        }
+        if let Some(inner) = expression.strip_prefix('!') {
+            return !self.evaluate_condition_expr(inner);
         }
         if let Some((value, needle)) = parse_contains(expression) {
             return self
@@ -9663,6 +9663,30 @@ fi"#
             ignored_state.resolve_expressions("${{ job.status }}"),
             "success"
         );
+    }
+
+    #[test]
+    fn not_precedence_binds_tighter_than_and() {
+        let mut state = JobExecutionState::default();
+        state.apply(
+            "failed",
+            &StepExecutionResult {
+                exit_code: 1,
+                skipped: false,
+                failure_ignored: false,
+                state: StepCommandState::default(),
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+
+        assert!(
+            !state.evaluate_condition(Some("!cancelled() && steps.failed.outcome == 'success'"))
+        );
+        assert!(state.evaluate_condition(Some("!cancelled() && steps.failed.outcome == 'failure'")));
+        assert!(state.evaluate_condition(Some("!cancelled()")));
+        assert!(state.evaluate_condition(Some("failure() && !cancelled()")));
+        assert!(!state.evaluate_condition(Some("!failure()")));
     }
 
     #[test]
