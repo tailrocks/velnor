@@ -32,7 +32,7 @@ Independent plans can run in parallel; respect the "Depends on" column.
 | 008 | Secret env via 0600 `--env-file`, not exec argv | P2 | M | — | security | DONE |
 | 009 | Step-logic failures = failed steps, not job aborts | P1 | M | — | bug | DONE |
 | 010 | Enforce `timeout-minutes` (kill hung steps) | P1 | M | — | bug | DONE |
-| 011 | Never abandon an acquired job (complete on panic/setup err) | P1 | M | — | bug | TODO |
+| 011 | Never abandon an acquired job (complete on panic/setup err) | P1 | M | — | bug | DONE |
 | 012 | Typed `GitHubApiError`; classify by status not string | P2 | M | — | tech-debt | TODO |
 | 013 | Refresh token on renewal/completion/idle auth errors | P2 | M | 012 | bug | TODO |
 | 014 | Harden the systemd unit (sandboxing) | P2 | S | — | security | TODO |

@@ -95,6 +95,21 @@ struct RunServiceJobContext {
     billing_owner_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AcquiredJobIdentity {
+    plan_id: String,
+    job_id: String,
+}
+
+impl AcquiredJobIdentity {
+    fn from_job(job: &AgentJobRequestMessage) -> Self {
+        Self {
+            plan_id: job.plan.plan_id.clone(),
+            job_id: job.job_id.clone(),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct BrokerCancellationContext {
     broker: BrokerClient,
@@ -2131,14 +2146,42 @@ async fn handle_v2_message(
             return Ok(V2MessageAction::None);
         }
     };
-    let job: AgentJobRequestMessage =
-        serde_json::from_value(job_value).context("parse acquired run-service job")?;
-    let job_run_service = job
+    let acquired_identity = acquired_job_identity(&job_value)
+        .ok_or_else(|| anyhow::anyhow!("acquired run-service job missing plan/job identity"))?;
+    let fallback_run_service_job = RunServiceJobContext {
+        client: run_service.clone(),
+        run_service_url: run_service_url.to_string(),
+        billing_owner_id: reference.billing_owner_id.clone(),
+    };
+    let job: AgentJobRequestMessage = match serde_json::from_value(job_value) {
+        Ok(job) => job,
+        Err(error) => {
+            complete_acquired_job_failure(
+                &fallback_run_service_job,
+                &acquired_identity,
+                Some("job_parse".to_string()),
+            )
+            .await?;
+            return Err(error).context("parse acquired run-service job");
+        }
+    };
+    let job_run_service = match job
         .system_connection()
         .and_then(system_connection_access_token)
         .map(RunServiceClient::new)
-        .transpose()?
-        .unwrap_or_else(|| run_service.clone());
+        .transpose()
+    {
+        Ok(client) => client.unwrap_or_else(|| run_service.clone()),
+        Err(error) => {
+            complete_acquired_job_failure(
+                &fallback_run_service_job,
+                &acquired_identity,
+                Some("run_service_client".to_string()),
+            )
+            .await?;
+            return Err(error).context("build run-service client from acquired job");
+        }
+    };
     let run_service_job = RunServiceJobContext {
         client: job_run_service,
         run_service_url: run_service_url.to_string(),
@@ -2280,7 +2323,14 @@ async fn handle_job_request(
         let job_result = match job_result {
             Ok(job_result) => job_result,
             Err(join_error) => {
+                let completion = complete_acquired_job_failure(
+                    &run_service_job,
+                    &AcquiredJobIdentity::from_job(&job),
+                    Some("executor_panic".to_string()),
+                )
+                .await;
                 renewal.abort();
+                completion?;
                 return Err(join_error).context("join Docker job execution task");
             }
         };
@@ -4865,6 +4915,60 @@ async fn complete_run_service_job(
         .context("complete run-service job")
 }
 
+fn acquired_job_identity(value: &Value) -> Option<AcquiredJobIdentity> {
+    let plan = acquired_object_field(value, &["plan", "Plan"])?;
+    Some(AcquiredJobIdentity {
+        plan_id: acquired_string_field(plan, &["planId", "PlanId"])?.to_string(),
+        job_id: acquired_string_field(value, &["jobId", "JobId"])?.to_string(),
+    })
+}
+
+fn acquired_object_field<'a>(value: &'a Value, names: &[&str]) -> Option<&'a Value> {
+    names.iter().find_map(|name| value.get(*name))
+}
+
+fn acquired_string_field<'a>(value: &'a Value, names: &[&str]) -> Option<&'a str> {
+    acquired_object_field(value, names).and_then(Value::as_str)
+}
+
+fn failed_acquired_job_completion(
+    identity: &AcquiredJobIdentity,
+    billing_owner_id: Option<String>,
+    infrastructure_failure_category: Option<String>,
+) -> RunServiceCompleteJob {
+    RunServiceCompleteJob {
+        plan_id: identity.plan_id.clone(),
+        job_id: identity.job_id.clone(),
+        conclusion: TaskResult::Failed,
+        outputs: BTreeMap::new(),
+        step_results: Vec::new(),
+        annotations: Vec::new(),
+        telemetry: Vec::new(),
+        environment_url: None,
+        billing_owner_id,
+        infrastructure_failure_category,
+    }
+}
+
+async fn complete_acquired_job_failure(
+    run_service_job: &RunServiceJobContext,
+    identity: &AcquiredJobIdentity,
+    infrastructure_failure_category: Option<String>,
+) -> Result<()> {
+    run_service_job
+        .client
+        .complete_job(
+            &run_service_job.run_service_url,
+            failed_acquired_job_completion(
+                identity,
+                run_service_job.billing_owner_id.clone(),
+                infrastructure_failure_category,
+            ),
+        )
+        .await
+        .context("complete acquired run-service job after infrastructure failure")
+}
+
 fn run_service_telemetry(
     job: &AgentJobRequestMessage,
     step_logs: &[StepLog],
@@ -6522,6 +6626,62 @@ jobs:
             infrastructure_failure_category(&anyhow::anyhow!("user script failed")),
             None
         );
+    }
+
+    #[test]
+    fn acquired_job_identity_reads_raw_job_ids() {
+        let lower = serde_json::json!({
+            "plan": { "planId": "plan-lower" },
+            "jobId": "job-lower"
+        });
+        let upper = serde_json::json!({
+            "Plan": { "PlanId": "plan-upper" },
+            "JobId": "job-upper"
+        });
+
+        assert_eq!(
+            acquired_job_identity(&lower),
+            Some(AcquiredJobIdentity {
+                plan_id: "plan-lower".into(),
+                job_id: "job-lower".into(),
+            })
+        );
+        assert_eq!(
+            acquired_job_identity(&upper),
+            Some(AcquiredJobIdentity {
+                plan_id: "plan-upper".into(),
+                job_id: "job-upper".into(),
+            })
+        );
+        assert_eq!(acquired_job_identity(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn complete_acquired_job_failure_builds_failed_completion() {
+        let completion = failed_acquired_job_completion(
+            &AcquiredJobIdentity {
+                plan_id: "plan-1".into(),
+                job_id: "job-1".into(),
+            },
+            Some("billing-owner".into()),
+            Some("executor_panic".into()),
+        );
+
+        assert_eq!(completion.plan_id, "plan-1");
+        assert_eq!(completion.job_id, "job-1");
+        assert_eq!(completion.conclusion, TaskResult::Failed);
+        assert_eq!(
+            completion.infrastructure_failure_category.as_deref(),
+            Some("executor_panic")
+        );
+        assert_eq!(
+            completion.billing_owner_id.as_deref(),
+            Some("billing-owner")
+        );
+        assert!(completion.outputs.is_empty());
+        assert!(completion.step_results.is_empty());
+        assert!(completion.annotations.is_empty());
+        assert!(completion.telemetry.is_empty());
     }
 
     #[test]
