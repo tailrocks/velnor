@@ -4214,6 +4214,7 @@ fn append_resolved_action_steps(
             invocation,
             condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
             continue_on_error,
+            timeout_minutes: action.plan.timeout_minutes,
         });
         return Ok(());
     }
@@ -4227,6 +4228,7 @@ fn append_resolved_action_steps(
             invocation: action.javascript_invocation(actions_host)?,
             condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
             continue_on_error,
+            timeout_minutes: action.plan.timeout_minutes,
         }),
         ActionRuntime::Docker { .. } => ordered.push(ExecutableStep::Docker {
             step_id: action.plan.step_id.clone(),
@@ -4234,6 +4236,7 @@ fn append_resolved_action_steps(
             invocation: action.docker_invocation(actions_host)?,
             condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
             continue_on_error,
+            timeout_minutes: action.plan.timeout_minutes,
         }),
         ActionRuntime::Composite => {
             let action_condition =
@@ -4322,6 +4325,7 @@ fn append_native_action_step_from_plan(
         invocation,
         condition: combine_conditions(parent_condition, plan.condition.as_deref()),
         continue_on_error: parent_continue_on_error || plan.continue_on_error,
+        timeout_minutes: plan.timeout_minutes,
     });
     true
 }
@@ -7231,6 +7235,7 @@ runs:
             lfs: false,
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let context_data = vec![(
             "needs".to_string(),
@@ -7265,6 +7270,7 @@ runs:
             lfs: false,
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
 
         let resolved = resolve_checkout_plan_context(plan, &[], &[]);
@@ -7292,6 +7298,7 @@ runs:
             lfs: false,
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let base_env = vec![("GITHUB_SHA".to_string(), "abc123".to_string())];
 
@@ -7351,6 +7358,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let resolved = ResolvedAction {
             plan: nested_plan,
@@ -7431,6 +7439,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let sub_plan = RepositoryActionPlan {
             step_id: "sub".into(),
@@ -7443,6 +7452,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let root_metadata =
             parse_action_metadata("runs:\n  using: node20\n  main: root.js\n").unwrap();
@@ -7509,6 +7519,7 @@ runs:
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             };
             let resolved = vec![ResolvedAction {
                 plan: plan.clone(),
@@ -7637,6 +7648,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let metadata = parse_action_metadata(
             r#"
@@ -7794,6 +7806,7 @@ runs:
             env: Vec::new(),
             condition: Some("runner.os == 'Linux'".into()),
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let metadata = parse_action_metadata(
             r#"
@@ -7872,6 +7885,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: true,
+            timeout_minutes: None,
         };
         let pages_metadata = parse_action_metadata(
             r#"
@@ -7894,6 +7908,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let upload_metadata =
             parse_action_metadata("runs:\n  using: node20\n  main: dist/upload/index.js\n")
@@ -8240,6 +8255,7 @@ runs:
             lfs: false,
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let trace = vec![
             "[command]git init /work".to_string(),

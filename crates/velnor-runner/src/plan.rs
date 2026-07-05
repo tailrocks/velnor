@@ -131,6 +131,7 @@ mod tests {
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         });
         let plan = NormalizedJobPlan {
             identity: JobIdentity {

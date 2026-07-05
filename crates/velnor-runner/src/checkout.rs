@@ -33,6 +33,7 @@ pub struct CheckoutPlan {
     pub lfs: bool,
     pub condition: Option<String>,
     pub continue_on_error: bool,
+    pub timeout_minutes: Option<u64>,
 }
 
 impl CheckoutPlan {
@@ -134,6 +135,7 @@ pub fn checkout_plans(
             lfs: checkout_lfs(step),
             condition: step.condition.clone(),
             continue_on_error: crate::script_step::step_continue_on_error(step),
+            timeout_minutes: crate::script_step::step_timeout_minutes(step),
         });
     }
     Ok(plans)
@@ -993,6 +995,7 @@ mod tests {
             lfs: false,
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let mut runner = RecordingRunner::default();
 
@@ -1051,6 +1054,7 @@ mod tests {
             lfs: false,
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let mut runner = RecordingRunner::default();
 
@@ -1082,6 +1086,7 @@ mod tests {
             lfs: false,
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let mut runner = RecordingRunner::default();
 
@@ -1110,6 +1115,7 @@ mod tests {
             lfs: false,
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let mut runner = RecordingRunner::default();
 
