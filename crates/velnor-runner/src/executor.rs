@@ -1022,7 +1022,9 @@ where
                         &env,
                     );
                     let live_sender = self.step_log_sender.clone();
+                    let mut live_masks = Vec::new();
                     let mut on_output = |_: CommandStream, line: &str| {
+                        live_masks.extend(parse_workflow_commands(line).masks);
                         emit_live_step_log(
                             &live_sender,
                             &live_step_id,
@@ -1030,6 +1032,7 @@ where
                             live_order,
                             &live_started_at,
                             line,
+                            &live_masks,
                         );
                     };
                     let step_result =
@@ -1950,12 +1953,14 @@ where
         // the live view while the GitHub lane streams continuously.
         let live_sender = self.step_log_sender.clone();
         let live_step = self.live_step.clone();
+        let mut live_masks = Vec::new();
         let mut on_output = |_: CommandStream, line: &str| {
             // Internal adapter markers are stripped from the blob after the
             // run; keep them out of the live feed too.
             if line.starts_with("__VELNOR_MISE_BIN__") {
                 return;
             }
+            live_masks.extend(parse_workflow_commands(line).masks);
             if let Some(live) = live_step.as_ref() {
                 emit_live_step_log(
                     &live_sender,
@@ -1964,6 +1969,7 @@ where
                     live.order,
                     &live.started_at,
                     line,
+                    &live_masks,
                 );
             }
         };
@@ -2555,6 +2561,7 @@ fn emit_live_step_log(
     order: i32,
     started_at: &str,
     line: &str,
+    masks: &[String],
 ) {
     let Some(sender) = sender else {
         return;
@@ -2566,7 +2573,7 @@ fn emit_live_step_log(
         started_at: started_at.to_string(),
         completed_at: String::new(),
         lines: vec![line.to_string()],
-        masks: Vec::new(),
+        masks: masks.to_vec(),
         annotations: Vec::new(),
         telemetry: Vec::new(),
         exit_code: 0,
@@ -6200,6 +6207,38 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct StreamingMaskRunner {
+        calls: Vec<(String, Vec<String>)>,
+    }
+
+    impl CommandRunner for StreamingMaskRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_streaming(
+            &mut self,
+            program: &str,
+            args: &[String],
+            on_output: &mut dyn FnMut(CommandStream, &str),
+        ) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            on_output(CommandStream::Stdout, "::add-mask::dynsecret");
+            on_output(CommandStream::Stdout, "echo dynsecret");
+            Ok(CommandResult {
+                code: 0,
+                stdout: "::add-mask::dynsecret\necho dynsecret\n".into(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[derive(Default)]
     struct SilentCommandRunner {
         calls: Vec<(String, Vec<String>)>,
     }
@@ -9176,6 +9215,42 @@ fi"#
         assert_eq!(logs[0].order, 1);
         assert_uuid(&logs[1].step_id);
         assert_eq!(logs[1].order, 2);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn live_stream_carries_add_mask_values_after_registration() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Script(ScriptStep {
+            id: "masker".into(),
+            display_name: String::new(),
+            script: "echo mask".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+        })];
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut executor =
+            DockerScriptExecutor::new(StreamingMaskRunner::default()).with_step_log_sender(sender);
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+        let mut logs = Vec::new();
+        while let Ok(log) = receiver.try_recv() {
+            logs.push(log);
+        }
+        let live_logs: Vec<_> = logs
+            .iter()
+            .filter(|log| log.completed_at.is_empty() && !log.lines.is_empty())
+            .collect();
+
+        assert_eq!(live_logs.len(), 2);
+        assert_eq!(live_logs[1].lines, vec!["echo dynsecret".to_string()]);
+        assert_eq!(live_logs[1].masks, vec!["dynsecret".to_string()]);
         fs::remove_dir_all(temp).unwrap();
     }
 

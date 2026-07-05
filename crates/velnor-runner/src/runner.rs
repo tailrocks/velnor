@@ -2857,12 +2857,7 @@ fn start_step_log_publisher(
                     continue;
                 }
             };
-            let masks = job_secret_mask_values(&job);
-            let lines: Vec<String> = log
-                .lines
-                .iter()
-                .map(|l| mask_single_value(l, &masks))
-                .collect();
+            let lines = live_masked_lines(&job, &log);
             let line_count = lines.len() as i64;
             let live_chunk = log.completed_at.is_empty() && !log.skipped;
             if live_chunk {
@@ -3041,6 +3036,15 @@ fn mask_single_value(line: &str, masks: &[String]) -> String {
         }
     }
     result
+}
+
+fn live_masked_lines(job: &AgentJobRequestMessage, log: &StepLog) -> Vec<String> {
+    let mut masks = job_secret_mask_values(job);
+    masks.extend(log.masks.iter().cloned());
+    log.lines
+        .iter()
+        .map(|line| mask_single_value(line, &masks))
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -3549,16 +3553,29 @@ fn safe_environment_url(
 }
 
 fn job_secret_mask_values(job: &AgentJobRequestMessage) -> Vec<String> {
-    job.mask
-        .iter()
-        .filter_map(|mask| mask.value.clone())
-        .chain(
-            job.variables
-                .values()
-                .filter(|variable| variable.is_secret)
-                .filter_map(|variable| variable.value.clone()),
-        )
-        .collect()
+    let mut values = Vec::new();
+    let raw = job.mask.iter().filter_map(|mask| mask.value.clone()).chain(
+        job.variables
+            .values()
+            .filter(|variable| variable.is_secret)
+            .filter_map(|variable| variable.value.clone()),
+    );
+    for value in raw {
+        if value.contains('\n') || value.contains('\r') {
+            for line in value.split(['\n', '\r']) {
+                let line = line.trim();
+                if line.len() >= 3 {
+                    values.push(line.to_string());
+                }
+            }
+        }
+        if !value.is_empty() {
+            values.push(value);
+        }
+    }
+    values.sort();
+    values.dedup();
+    values
 }
 
 fn resolve_checkout_plan_context(
@@ -6639,6 +6656,88 @@ jobs:
             mask_log_lines(&lines, &["secret-value".into()]),
             vec!["token=***".to_string(), "ordinary line".to_string()]
         );
+    }
+
+    #[test]
+    fn multiline_secret_is_masked_per_line() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "variables": {
+                "MULTILINE_SECRET": {
+                    "value": "line-one-secret\nline-two-secret",
+                    "isSecret": true
+                }
+            }
+        }))
+        .unwrap();
+
+        let masks = job_secret_mask_values(&job);
+
+        assert!(masks.contains(&"line-one-secret".to_string()));
+        assert!(masks.contains(&"line-two-secret".to_string()));
+        assert_eq!(mask_single_value("line-two-secret", &masks), "***");
+    }
+
+    #[test]
+    fn short_secret_lines_do_not_overmask() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "variables": {
+                "MULTILINE_SECRET": {
+                    "value": "ab\nverylongsecretvalue",
+                    "isSecret": true
+                }
+            }
+        }))
+        .unwrap();
+
+        let masks = job_secret_mask_values(&job);
+
+        assert!(!masks.contains(&"ab".to_string()));
+        assert!(masks.contains(&"verylongsecretvalue".to_string()));
+    }
+
+    #[test]
+    fn live_feed_masks_add_mask_values() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1
+        }))
+        .unwrap();
+        let log = StepLog {
+            step_id: "step-1".into(),
+            display_name: String::new(),
+            order: 1,
+            started_at: String::new(),
+            completed_at: String::new(),
+            lines: vec!["echo dynsecret".into()],
+            masks: vec!["dynsecret".into()],
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        };
+
+        assert_eq!(live_masked_lines(&job, &log), vec!["echo ***".to_string()]);
     }
 
     #[test]
