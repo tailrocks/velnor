@@ -5904,8 +5904,9 @@ fn unix_now_rfc3339() -> String {
     // see docs/log-format-contract.md before touching either. A previous
     // version of this comment claimed blob-line prefixes need second
     // precision; that was wrong and caused a UI regression when copied.
-    let fmt = format_description::parse("[year]-[month]-[day]T[hour]:[minute]:[second]Z")
-        .unwrap_or_else(|_| vec![]);
+    let fmt =
+        format_description::parse_borrowed::<1>("[year]-[month]-[day]T[hour]:[minute]:[second]Z")
+            .unwrap_or_else(|_| vec![]);
     OffsetDateTime::now_utc()
         .replace_nanosecond(0)
         .map(|t| {

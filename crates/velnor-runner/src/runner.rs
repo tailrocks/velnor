@@ -4724,7 +4724,7 @@ fn unix_now_iso8601() -> String {
     // be raw (`live_feed_lines`). Guard tests:
     // `unix_now_iso8601_is_github_strippable`,
     // `live_feed_lines_are_raw_and_blob_lines_are_timestamped`.
-    let fmt = format_description::parse(
+    let fmt = format_description::parse_borrowed::<1>(
         "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:7]Z",
     )
     .unwrap_or_else(|_| vec![]);
