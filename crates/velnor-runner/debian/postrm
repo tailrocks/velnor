@@ -4,6 +4,10 @@ set -e
 case "$1" in
   remove|purge)
     if [ -d /run/systemd/system ]; then
+      for unit in $(systemctl list-unit-files --no-legend --plain 'velnor-doctor*.timer' 'velnor-doctor*.service' 2>/dev/null | awk '{print $1}'); do
+        systemctl disable "$unit" || true
+        systemctl reset-failed "$unit" || true
+      done
       systemctl disable velnor-daemon.service || true
       systemctl daemon-reload || true
     fi

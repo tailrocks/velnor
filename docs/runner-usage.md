@@ -43,6 +43,11 @@ Units (all shipped by the package):
 - `velnor-doctor.timer` / `velnor-doctor@<name>.timer` — every 10 minutes,
   lists the daemon's registered runners on GitHub and **fails loudly when
   none are online** (`velnor-runner doctor --url ... --name ... --slots N`).
+  The matching `velnor-doctor.service` / `velnor-doctor@<name>.service` units
+  are `Type=oneshot`; seeing them as `loaded inactive dead` in
+  `systemctl list-units --type=service --all` is the normal completed state
+  after a timer run. Inspect `systemctl list-timers 'velnor-doctor*'` and
+  failed units instead of treating inactive one-shot services as stale daemons.
 
 ## Current runner state
 
