@@ -4779,7 +4779,14 @@ struct JobExecutionState {
     path: Vec<String>,
     masks: Vec<String>,
     composite_stack: Vec<String>,
+    composite_conclusion_stack: Vec<CompositeConclusionFrame>,
     hash_files_cache: Arc<Mutex<HashMap<HashFilesCacheKey, String>>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CompositeConclusionFrame {
+    step_id: String,
+    conclusions: BTreeMap<String, StepOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -4848,6 +4855,7 @@ impl JobExecutionState {
             path: Vec::new(),
             masks: Vec::new(),
             composite_stack: Vec::new(),
+            composite_conclusion_stack: Vec::new(),
             hash_files_cache: Arc::new(Mutex::new(HashMap::new())),
         };
         state.env = state
@@ -4889,6 +4897,7 @@ impl JobExecutionState {
             path: self.path.clone(),
             masks: self.masks.clone(),
             composite_stack: self.composite_stack.clone(),
+            composite_conclusion_stack: self.composite_conclusion_stack.clone(),
             hash_files_cache: Arc::clone(&self.hash_files_cache),
         };
         state
@@ -4912,6 +4921,7 @@ impl JobExecutionState {
             path: self.path.clone(),
             masks: self.masks.clone(),
             composite_stack: self.composite_stack.clone(),
+            composite_conclusion_stack: self.composite_conclusion_stack.clone(),
             hash_files_cache: Arc::clone(&self.hash_files_cache),
         };
         for (name, value) in env {
@@ -4922,6 +4932,11 @@ impl JobExecutionState {
 
     fn push_composite(&mut self, step_id: &str) {
         self.composite_stack.push(step_id.to_string());
+        self.composite_conclusion_stack
+            .push(CompositeConclusionFrame {
+                step_id: step_id.to_string(),
+                conclusions: BTreeMap::new(),
+            });
     }
 
     fn pop_composite(&mut self, step_id: &str) {
@@ -4931,6 +4946,13 @@ impl JobExecutionState {
             .is_some_and(|scope| scope == step_id)
         {
             self.composite_stack.pop();
+        }
+        if self
+            .composite_conclusion_stack
+            .last()
+            .is_some_and(|frame| frame.step_id == step_id)
+        {
+            self.composite_conclusion_stack.pop();
         }
     }
 
@@ -4949,6 +4971,9 @@ impl JobExecutionState {
         };
         self.outcomes.insert(step_id.to_string(), outcome);
         self.conclusions.insert(step_id.to_string(), conclusion);
+        if let Some(frame) = self.composite_conclusion_stack.last_mut() {
+            frame.conclusions.insert(step_id.to_string(), conclusion);
+        }
 
         if !result.state.outputs.is_empty() {
             self.outputs
@@ -5278,15 +5303,7 @@ impl JobExecutionState {
     }
 
     fn action_status(&self) -> &'static str {
-        let Some(scope) = self.composite_stack.last() else {
-            return self.job_status();
-        };
-        if self.conclusions.iter().any(|(step_id, outcome)| {
-            *outcome == StepOutcome::Failure
-                && step_id
-                    .strip_prefix(scope)
-                    .is_some_and(|suffix| suffix.starts_with('-'))
-        }) {
+        if self.status_scope_has_failure() {
             "failure"
         } else {
             "success"
@@ -5327,16 +5344,10 @@ impl JobExecutionState {
             return true;
         }
         if expression == "success()" {
-            return !self
-                .conclusions
-                .values()
-                .any(|outcome| *outcome == StepOutcome::Failure);
+            return !self.status_scope_has_failure();
         }
         if expression == "failure()" {
-            return self
-                .conclusions
-                .values()
-                .any(|outcome| *outcome == StepOutcome::Failure);
+            return self.status_scope_has_failure();
         }
         if expression == "cancelled()" {
             return false;
@@ -5386,6 +5397,19 @@ impl JobExecutionState {
             return expression_truthy(&value);
         }
         true
+    }
+
+    fn status_scope_has_failure(&self) -> bool {
+        if let Some(frame) = self.composite_conclusion_stack.last() {
+            frame
+                .conclusions
+                .values()
+                .any(|outcome| *outcome == StepOutcome::Failure)
+        } else {
+            self.conclusions
+                .values()
+                .any(|outcome| *outcome == StepOutcome::Failure)
+        }
     }
 
     fn resolve_condition_comparison_value(&self, expression: &str) -> Option<String> {
@@ -9709,6 +9733,104 @@ fi"#
             fs::read_to_string(temp.join("consumer.sh")).unwrap(),
             "echo artifact=42\n"
         );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn composite_status_ignores_prior_job_failure() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "prior-failure".into(),
+                display_name: String::new(),
+                script: "exit 1".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+            ExecutableStep::CompositeStart {
+                step_id: "composite".into(),
+                display_name: "Run local composite".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: Some("always()".into()),
+            },
+            ExecutableStep::Script(ScriptStep {
+                id: "composite-first".into(),
+                display_name: String::new(),
+                script: "echo first".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "composite-success".into(),
+                display_name: String::new(),
+                script: "echo success".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: Some("success()".into()),
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "composite-failure".into(),
+                display_name: String::new(),
+                script: "echo failure".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: Some("failure()".into()),
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+            ExecutableStep::CompositeEnd {
+                step_id: "composite".into(),
+            },
+        ];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            codes: vec![0, 0, 1, 0, 0],
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[0].exit_code, 1);
+        assert_eq!(results[1].exit_code, 0);
+        assert_eq!(results[2].exit_code, 0);
+        assert!(results[3].skipped);
+        let exec_scripts = executor
+            .runner()
+            .calls
+            .iter()
+            .filter_map(|(_, args)| {
+                (args.first().is_some_and(|arg| arg == "exec"))
+                    .then(|| args.last().cloned())
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            exec_scripts,
+            vec![
+                "/__t/prior-failure.sh",
+                "/__t/composite-first.sh",
+                "/__t/composite-success.sh",
+            ]
+        );
+        assert!(!temp.join("composite-failure.sh").exists());
         fs::remove_dir_all(temp).unwrap();
     }
 
