@@ -12,7 +12,7 @@
 //! layer.
 
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -27,7 +27,7 @@ use tracing_subscriber::{EnvFilter, Layer};
 const TRACE_ROTATE_BYTES: u64 = 32 * 1024 * 1024;
 
 struct RotatingFile {
-    file: File,
+    file: BufWriter<File>,
     path: PathBuf,
     written: u64,
 }
@@ -40,7 +40,7 @@ impl RotatingFile {
             .open(&path)?;
         let written = file.metadata().map(|m| m.len()).unwrap_or(0);
         Ok(Self {
-            file,
+            file: BufWriter::new(file),
             path,
             written,
         })
@@ -50,6 +50,7 @@ impl RotatingFile {
         if self.written < TRACE_ROTATE_BYTES {
             return;
         }
+        let _ = self.file.flush();
         let mut rotated = self.path.file_name().unwrap_or_default().to_os_string();
         rotated.push(".1");
         let rotated = self.path.with_file_name(rotated);
@@ -59,7 +60,7 @@ impl RotatingFile {
                 .append(true)
                 .open(&self.path)
             {
-                self.file = fresh;
+                self.file = BufWriter::new(fresh);
                 self.written = 0;
             }
         }
@@ -78,9 +79,9 @@ impl Write for SharedFileWriter {
             return Ok(buf.len());
         };
         inner.rotate_if_needed();
-        let written = inner.file.write(buf)?;
-        inner.written += written as u64;
-        Ok(written)
+        inner.file.write_all(buf)?;
+        inner.written += buf.len() as u64;
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -179,5 +180,57 @@ mod tests {
     fn env_filter_falls_back_to_default() {
         let filter = env_filter("info");
         assert!(!format!("{filter}").is_empty());
+    }
+
+    #[test]
+    fn shared_file_writer_flushes_buffered_line() {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-telemetry-flush-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("trace.jsonl");
+        let file = RotatingFile::open(path.clone()).expect("open trace");
+        let mut writer = SharedFileWriter(Arc::new(Mutex::new(file)));
+
+        writer.write_all(b"{\"message\":\"hello\"}\n").unwrap();
+        writer.flush().unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read trace"),
+            "{\"message\":\"hello\"}\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rotating_file_flushes_before_renaming() {
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-telemetry-rotate-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("trace.jsonl");
+        let mut file = RotatingFile::open(path.clone()).expect("open trace");
+        file.file.write_all(b"before\n").unwrap();
+        file.written = TRACE_ROTATE_BYTES;
+        let mut writer = SharedFileWriter(Arc::new(Mutex::new(file)));
+
+        writer.write_all(b"after\n").unwrap();
+        writer.flush().unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("trace.jsonl.1")).expect("read rotated"),
+            "before\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read current"),
+            "after\n"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

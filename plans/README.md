@@ -43,7 +43,7 @@ Independent plans can run in parallel; respect the "Depends on" column.
 | 019 | Drain/SIGTERM regression tests | P2 | M | — | tests | DONE |
 | 020 | Batch live log feed + hoist masks + aho-corasick | P2 | M | 005 | perf | DONE |
 | 021 | `hashFiles()` streaming/parallel/memoized | P3 | M | — | perf | DONE |
-| 022 | Buffer trace/forensic writers + CI `fmt` rustup cache | P3 | S | — | perf | TODO |
+| 022 | Buffer trace/forensic writers + CI `fmt` rustup cache | P3 | S | — | perf | DONE |
 | 023 | Scope `success()`/`failure()` to the composite's steps | P3 | M | — | bug | TODO |
 | 024 | Clean up docker resources on double start-failure | P3 | S | — | bug | TODO |
 | 025 | Runner credential file 0600 / dir 0700 | P3 | S | — | security | TODO |
