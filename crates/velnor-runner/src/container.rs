@@ -607,8 +607,8 @@ pub(crate) fn sanitize_store_key(name: &str) -> String {
         })
         .collect();
     key.truncate(128);
-    if key.is_empty() {
-        key.push_str("default");
+    if key.is_empty() || matches!(key.as_str(), "." | "..") {
+        key = "default".to_string();
     }
     key
 }
@@ -720,6 +720,14 @@ mod tests {
             daemon_shared_root(PathBuf::from("/work/slot-abc")),
             PathBuf::from("/work/slot-abc")
         );
+    }
+
+    #[test]
+    fn sanitize_store_key_neutralizes_traversal() {
+        assert_eq!(sanitize_store_key(".."), "default");
+        assert_eq!(sanitize_store_key("."), "default");
+        assert_eq!(sanitize_store_key(""), "default");
+        assert_eq!(sanitize_store_key("normal-key.v2"), "normal-key.v2");
     }
 
     #[test]

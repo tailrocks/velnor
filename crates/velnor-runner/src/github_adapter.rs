@@ -82,7 +82,7 @@ fn github_cargo_target_store_host(
         .join(crate::container::sanitize_store_key(&job.job_display_name))
 }
 
-fn cargo_target_trust_scope() -> String {
+pub(crate) fn cargo_target_trust_scope() -> String {
     cargo_target_trust_scope_from(std::env::var("VELNOR_TRUST_SCOPE").ok().as_deref())
 }
 

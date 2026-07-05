@@ -3711,7 +3711,16 @@ fn cache_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("cache actions require a temp directory"))?;
     // Daemon-shared (across slots), not per-slot: cold slots must hit the
     // caches their siblings saved (see container::daemon_shared_root).
-    Ok(crate::container::daemon_shared_root(shared_work_root(temp)).join("_velnor_caches"))
+    let repository = state
+        .resolve_context_expression("github.repository")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown-repository".to_string());
+    Ok(crate::container::daemon_shared_root(shared_work_root(temp))
+        .join("_velnor_caches")
+        .join(crate::container::sanitize_store_key(
+            &crate::github_adapter::cargo_target_trust_scope(),
+        ))
+        .join(crate::container::sanitize_store_key(&repository)))
 }
 
 fn shared_work_root(temp: &Path) -> PathBuf {
@@ -4202,7 +4211,8 @@ fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 fn sanitize_artifact_name(name: &str) -> String {
-    name.chars()
+    let mapped: String = name
+        .chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
                 ch
@@ -4210,7 +4220,11 @@ fn sanitize_artifact_name(name: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    match mapped.as_str() {
+        "" | "." | ".." => "_".to_string(),
+        _ => mapped,
+    }
 }
 
 fn pages_url_for_repository(repository: &str) -> String {
@@ -6747,9 +6761,36 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_artifact_name_neutralizes_traversal() {
+        assert_eq!(sanitize_artifact_name(".."), "_");
+        assert_eq!(sanitize_artifact_name("."), "_");
+        assert_eq!(sanitize_artifact_name(""), "_");
+        assert_eq!(sanitize_artifact_name("normal-key.v2"), "normal-key.v2");
+    }
+
+    #[test]
+    fn cache_store_dir_is_scoped_by_trust_and_repo() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        fs::create_dir_all(&temp).unwrap();
+        let state = JobExecutionState::new_internal(
+            &[("GITHUB_REPOSITORY".into(), "Org/Repo.Name".into())],
+            &[],
+            None,
+            Some(temp.clone()),
+        );
+
+        let store = cache_store_dir(&state).unwrap();
+
+        assert!(store.ends_with("_velnor_caches/trusted/Org_Repo.Name"));
+        assert!(store.starts_with(root.join("_velnor_caches")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn cache_hit_output_matches_actions_cache() {
         let root = temp_dir();
-        let store = root.join("_velnor_caches");
+        let store = root.join("_velnor_caches/trusted/unknown-repository");
         let exact_cache = store.join("linux-rust-exact");
         let partial_cache = store.join("linux-rust-prefix-new");
         fs::create_dir_all(exact_cache.join("0")).unwrap();
@@ -6946,7 +6987,9 @@ mod tests {
             "rust-script-Linux-deadbeef"
         );
         assert!(root
-            .join("_velnor_caches/rust-script-Linux-deadbeef/0/state.bin")
+            .join(
+                "_velnor_caches/trusted/unknown-repository/rust-script-Linux-deadbeef/0/state.bin"
+            )
             .exists());
 
         let restore = vec![ExecutableStep::Native {
@@ -7024,7 +7067,7 @@ mod tests {
             .stdout
             .contains("Saved cache 'linux-rust-script-abc'"));
         assert!(root
-            .join("_velnor_caches/linux-rust-script-abc/0/state.bin")
+            .join("_velnor_caches/trusted/unknown-repository/linux-rust-script-abc/0/state.bin")
             .exists());
 
         let restore = vec![ExecutableStep::Native {
@@ -7126,7 +7169,7 @@ mod tests {
     fn native_cache_restore_key_uses_newest_prefix_match() {
         let root = temp_dir();
         let restore_temp = root.join("restore-job/temp");
-        let store = root.join("_velnor_caches");
+        let store = root.join("_velnor_caches/trusted/unknown-repository");
         let old_cache = store.join("rust-linux-a-old");
         let new_cache = store.join("rust-linux-z-new");
         fs::create_dir_all(old_cache.join("0")).unwrap();
