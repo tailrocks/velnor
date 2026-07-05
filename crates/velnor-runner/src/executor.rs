@@ -240,12 +240,25 @@ fn stream_reader<R: std::io::Read + Send + 'static>(
     stream: CommandStream,
     sender: mpsc::Sender<(CommandStream, String)>,
 ) {
-    for line in BufReader::new(reader).lines() {
-        let Ok(line) = line else {
-            break;
-        };
-        if sender.send((stream, line)).is_err() {
-            break;
+    let mut reader = BufReader::new(reader);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break,
+            Ok(_) => {
+                if buf.last() == Some(&b'\n') {
+                    buf.pop();
+                }
+                if buf.last() == Some(&b'\r') {
+                    buf.pop();
+                }
+                let line = String::from_utf8_lossy(&buf).into_owned();
+                if sender.send((stream, line)).is_err() {
+                    break;
+                }
+            }
+            Err(_) => break,
         }
     }
 }
@@ -6237,6 +6250,23 @@ mod tests {
             .as_nanos();
         let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("velnor-executor-test-{nonce}-{sequence}"))
+    }
+
+    #[test]
+    fn stream_reader_survives_invalid_utf8() {
+        let bytes = b"first\n\xff\xfebad\nafter\n";
+        let (sender, receiver) = mpsc::channel();
+
+        stream_reader(std::io::Cursor::new(bytes), CommandStream::Stdout, sender);
+
+        let lines: Vec<_> = receiver.iter().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines
+            .iter()
+            .all(|(stream, _)| *stream == CommandStream::Stdout));
+        assert_eq!(lines[0].1, "first");
+        assert!(lines[1].1.contains('\u{fffd}'));
+        assert_eq!(lines[2].1, "after");
     }
 
     fn assert_uuid(value: &str) {

@@ -24,7 +24,7 @@ Independent plans can run in parallel; respect the "Depends on" column.
 |------|-------|----------|--------|------------|----------|--------|
 | 001 | Unary `!` precedence in `if:` conditions | P1 | S | — | bug | DONE |
 | 002 | Cache-save staging unique per slot, non-fatal on contention | P1 | S | — | bug | DONE |
-| 003 | Stop dropping stream on invalid UTF-8 line | P1 | S | — | bug | TODO |
+| 003 | Stop dropping stream on invalid UTF-8 line | P1 | S | — | bug | DONE |
 | 004 | `cache-hit: 'false'` on total miss | P2 | S | — | bug | TODO |
 | 005 | Secret masking parity (multi-line + add-mask live feed) | P1 | M | — | security | TODO |
 | 006 | Repo/trust-scope the `actions/cache` store + `..` hardening | P1 | M | — | security | TODO |
