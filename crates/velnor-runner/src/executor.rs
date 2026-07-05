@@ -4457,7 +4457,8 @@ fn hash_artifact_dir(path: &Path) -> Result<String> {
     for file in files {
         aggregate.update(Sha256::digest(fs::read(file)?));
     }
-    Ok(hex_digest(aggregate.finalize().as_slice()))
+    let digest = aggregate.finalize();
+    Ok(hex_digest(&digest))
 }
 
 fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
@@ -5989,7 +5990,8 @@ fn hash_files(workspace: &Path, patterns: &[String]) -> String {
         };
         aggregate.update(Sha256::digest(bytes));
     }
-    hex_digest(aggregate.finalize().as_slice())
+    let digest = aggregate.finalize();
+    hex_digest(&digest)
 }
 
 fn build_globs(patterns: &[String]) -> Result<globset::GlobSet> {
@@ -7168,7 +7170,8 @@ mod tests {
         }];
         let mut expected_hash = Sha256::new();
         expected_hash.update(Sha256::digest(b"pub fn answer() -> u8 { 42 }\n"));
-        let expected_hash = hex_digest(expected_hash.finalize().as_slice());
+        let digest = expected_hash.finalize();
+        let expected_hash = hex_digest(&digest);
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
         let results = executor
@@ -10026,7 +10029,8 @@ fi"#
         expected_hash.update(Sha256::digest(b"image = 'app'\n"));
         expected_hash.update(Sha256::digest(b"fn main() {}\n"));
         expected_hash.update(Sha256::digest(b"build:\n"));
-        let expected = hex_digest(expected_hash.finalize().as_slice());
+        let digest = expected_hash.finalize();
+        let expected = hex_digest(&digest);
         let steps = vec![ExecutableStep::JavaScript {
             step_id: "cache".into(),
             display_name: String::new(),
@@ -11060,7 +11064,8 @@ fi"#
         expected_hash.update(Sha256::digest(b"image = 'app'\n"));
         expected_hash.update(Sha256::digest(b"fn main() {}\n"));
         expected_hash.update(Sha256::digest(b"build:\n"));
-        let expected_hash = hex_digest(expected_hash.finalize().as_slice());
+        let digest = expected_hash.finalize();
+        let expected_hash = hex_digest(&digest);
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
         let results = executor

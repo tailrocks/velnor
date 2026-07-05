@@ -38,7 +38,7 @@ Independent plans can run in parallel; respect the "Depends on" column.
 | 014 | Harden the systemd unit (sandboxing) | P2 | S | — | security | BLOCKED: needs live systemd smoke/security score |
 | 015 | Purge committed run-log HTML with channel tokens | P2 | S | — | security | BLOCKED: history purge needs operator confirmation |
 | 016 | Migrate off unmaintained `serde_yaml` | P3 | M | — | migration | DONE |
-| 017 | `cargo-deny` advisory gate + sha2 dedup | P3 | S | 016 | dx | TODO |
+| 017 | `cargo-deny` advisory gate + sha2 dedup | P3 | S | 016 | dx | DONE |
 | 018 | Broker/run-service HTTP test harness | P2 | L | (012 soft) | tests | TODO |
 | 019 | Drain/SIGTERM regression tests | P2 | M | — | tests | TODO |
 | 020 | Batch live log feed + hoist masks + aho-corasick | P2 | M | 005 | perf | TODO |
