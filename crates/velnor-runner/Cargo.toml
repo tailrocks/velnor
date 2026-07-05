@@ -53,6 +53,7 @@ assets = [
 
 [dependencies]
 anyhow.workspace = true
+aho-corasick = "1.1.4"
 base64.workspace = true
 clap.workspace = true
 jsonwebtoken.workspace = true

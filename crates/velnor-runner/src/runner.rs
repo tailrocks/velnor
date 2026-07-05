@@ -1,3 +1,4 @@
+use aho_corasick::{AhoCorasick, MatchKind};
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use serde::Deserialize;
@@ -5,6 +6,7 @@ use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
+    io::{BufWriter, Write},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -13,6 +15,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{
     sync::mpsc::UnboundedReceiver,
     task::{JoinHandle, JoinSet},
@@ -2983,14 +2986,22 @@ fn start_step_log_publisher(
         let mut streamed_steps = BTreeSet::new();
 
         // Prepare the live console file that the job container tails as PID 1
-        // (so `docker logs <job-container>` mirrors the GitHub UI). Create it
-        // fresh for this job; the container's `tail -F` picks it up.
-        if let Some(path) = &console_log_path {
+        // (so `docker logs <job-container>` mirrors the GitHub UI). Keep one
+        // writer open for the job and flush after each append so tail sees
+        // live output without open/write/close per line.
+        let mut console_writer = console_log_path.as_ref().and_then(|path| {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let _ = std::fs::write(path, b"");
-        }
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(path)
+                .ok()
+                .map(BufWriter::new)
+        });
+        let job_masks = MaskPatterns::new(job_secret_mask_values(&job));
 
         // Open ONE persistent WebSocket connection for the entire job (matching the
         // official GitHub runner which keeps a single connection open per job).
@@ -3017,7 +3028,7 @@ fn start_step_log_publisher(
         let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
         ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            let log = tokio::select! {
+            let first_log = tokio::select! {
                 maybe = receiver.recv() => match maybe {
                     Some(log) => log,
                     None => break,
@@ -3034,168 +3045,128 @@ fn start_step_log_publisher(
                     continue;
                 }
             };
-            let lines = live_masked_lines(&job, &log);
-            let line_count = lines.len() as i64;
-            let live_chunk = log.completed_at.is_empty() && !log.skipped;
-            if live_chunk {
-                streamed_steps.insert(log.step_id.clone());
-            }
-            let already_streamed = !live_chunk && streamed_steps.contains(&log.step_id);
-
-            // Mirror this step to the container's live console file (docker logs).
-            if !already_streamed {
-                if let Some(path) = &console_log_path {
-                    append_job_console(path, &log.display_name, &lines, &log.masks);
+            let logs = step_log_batch(first_log, &mut receiver);
+            let mut processed = Vec::with_capacity(logs.len());
+            let mut live_batches = Vec::new();
+            for log in logs {
+                let masker = job_masks.with_extra(&log.masks);
+                let lines = mask_log_lines_with(&log.lines, &masker);
+                let line_count = lines.len() as i64;
+                let live_chunk = log.completed_at.is_empty() && !log.skipped;
+                if live_chunk {
+                    streamed_steps.insert(log.step_id.clone());
                 }
-            }
+                let already_streamed = !live_chunk && streamed_steps.contains(&log.step_id);
 
-            if !already_streamed && !lines.is_empty() {
-                // GitHub may close the feed WebSocket between steps / after idle, so a
-                // later send hits a Broken pipe. Reconnect (lazily, and once on send
-                // failure) so the live console does not go dark for the rest of the job.
-                if ws_conn.is_none() {
-                    if let Some(client) = &feed_client {
-                        if let Ok(ws) = client.connect().await {
-                            eprintln!("[feed] WebSocket reconnected.");
-                            ws_conn = Some(ws);
-                        }
+                // Mirror this step to the container's live console file (docker logs).
+                if !already_streamed {
+                    if let Some(writer) = console_writer.as_mut() {
+                        append_job_console(writer, &log.display_name, &lines);
                     }
                 }
-                if let Some(ws) = ws_conn.as_mut() {
+
+                if !already_streamed && !lines.is_empty() {
                     let start_line = *step_line_counters.entry(log.step_id.clone()).or_insert(1);
-                    eprintln!(
-                        "[feed] Sending {} lines for step {} (from line {start_line})",
-                        lines.len(),
-                        &log.step_id[..log.step_id.len().min(8)]
-                    );
-                    // LOG FORMAT CONTRACT (docs/log-format-contract.md): live
-                    // feed frames are rendered VERBATIM by the GitHub UI,
-                    // which adds its own timestamp column — lines must be RAW
-                    // content. Only the uploaded log blob gets timestamps.
-                    let feed_lines = live_feed_lines(&lines);
-                    if let Err(e) = crate::protocol::FeedStreamClient::send_log_lines(
-                        ws,
-                        &log.step_id,
-                        feed_lines.clone(),
-                        Some(start_line),
-                        Some(&plan_id),
-                        Some(&job_id),
-                    )
-                    .await
+                    push_live_feed_batch(&mut live_batches, &log.step_id, start_line, &lines);
+                    *step_line_counters.entry(log.step_id.clone()).or_insert(1) += line_count;
+                }
+
+                processed.push(ProcessedStepLog {
+                    log,
+                    lines,
+                    live_chunk,
+                });
+            }
+
+            for batch in live_batches {
+                send_live_feed_batch(&mut ws_conn, &feed_client, &plan_id, &job_id, batch).await;
+            }
+
+            for processed_log in processed {
+                if processed_log.live_chunk {
+                    continue;
+                }
+                let log = processed_log.log;
+                let lines = processed_log.lines;
+
+                // Send step completion via Twirp Results Service.
+                if let Some(client) = &twirp_client {
+                    let conclusion = if log.skipped {
+                        crate::protocol::StepConclusion::Skipped
+                    } else if log.exit_code != 0 && !log.failure_ignored {
+                        crate::protocol::StepConclusion::Failure
+                    } else {
+                        crate::protocol::StepConclusion::Success
+                    };
+                    let step = crate::protocol::TwirpStep {
+                        external_id: log.step_id.clone(),
+                        number: log.order as usize,
+                        name: if log.display_name.is_empty() {
+                            log.step_id.clone()
+                        } else {
+                            log.display_name.clone()
+                        },
+                        status: crate::protocol::StepStatus::Completed as u8,
+                        started_at: if log.started_at.is_empty() {
+                            None
+                        } else {
+                            Some(log.started_at.clone())
+                        },
+                        completed_at: Some(if log.completed_at.is_empty() {
+                            unix_now_iso8601()
+                        } else {
+                            log.completed_at.clone()
+                        }),
+                        conclusion: conclusion as u8,
+                    };
+                    if let Err(e) = client
+                        .update_steps(&[step], &plan_id, &job_id, change_order)
+                        .await
                     {
                         eprintln!(
-                            "Best-effort WebSocket feed send failed for '{}': {e:#}; reconnecting",
+                            "Best-effort Twirp step completion failed for '{}': {e:#}",
                             log.step_id
                         );
-                        ws_conn = None;
-                        // Reconnect once and resend this batch so no step's live log is lost.
-                        if let Some(client) = &feed_client {
-                            if let Ok(mut ws2) = client.connect().await {
-                                if crate::protocol::FeedStreamClient::send_log_lines(
-                                    &mut ws2,
-                                    &log.step_id,
-                                    feed_lines,
-                                    Some(start_line),
-                                    Some(&plan_id),
-                                    Some(&job_id),
-                                )
+                    }
+                    change_order += 1;
+
+                    // Upload step log blob to Results Service (populates data-log-url in GitHub UI).
+                    // Upload for every non-skipped step — even empty — so it is expandable.
+                    // LOG FORMAT CONTRACT (docs/log-format-contract.md): blob lines
+                    // MUST carry the 7-digit timestamp prefix — the UI strips it
+                    // into the "Show timestamps" toggle column.
+                    if !log.skipped {
+                        let timestamped = blob_log_lines(&unix_now_iso8601(), &lines);
+                        if let Err(e) = client
+                            .upload_step_log(&plan_id, &job_id, &log.step_id, &timestamped)
+                            .await
+                        {
+                            eprintln!(
+                                "Best-effort Results Service log upload failed for '{}': {e:#}",
+                                log.step_id
+                            );
+                        }
+                        // Upload GITHUB_STEP_SUMMARY content so it renders in the Summary tab.
+                        if !log.summary.is_empty() {
+                            if let Err(e) = client
+                                .upload_step_summary(&plan_id, &job_id, &log.step_id, &log.summary)
                                 .await
-                                .is_ok()
-                                {
-                                    eprintln!(
-                                        "[feed] resent {} lines after reconnect.",
-                                        line_count
-                                    );
-                                    ws_conn = Some(ws2);
-                                }
+                            {
+                                eprintln!(
+                                    "Best-effort step summary upload failed for '{}': {e:#}",
+                                    log.step_id
+                                );
                             }
                         }
                     }
                 }
-                *step_line_counters.entry(log.step_id.clone()).or_insert(1) += line_count;
-            }
 
-            if live_chunk {
-                continue;
-            }
-
-            // Send step completion via Twirp Results Service.
-            if let Some(client) = &twirp_client {
-                let conclusion = if log.skipped {
-                    crate::protocol::StepConclusion::Skipped
-                } else if log.exit_code != 0 && !log.failure_ignored {
-                    crate::protocol::StepConclusion::Failure
-                } else {
-                    crate::protocol::StepConclusion::Success
-                };
-                let step = crate::protocol::TwirpStep {
-                    external_id: log.step_id.clone(),
-                    number: log.order as usize,
-                    name: if log.display_name.is_empty() {
-                        log.step_id.clone()
-                    } else {
-                        log.display_name.clone()
-                    },
-                    status: crate::protocol::StepStatus::Completed as u8,
-                    started_at: if log.started_at.is_empty() {
-                        None
-                    } else {
-                        Some(log.started_at.clone())
-                    },
-                    completed_at: Some(if log.completed_at.is_empty() {
-                        unix_now_iso8601()
-                    } else {
-                        log.completed_at.clone()
-                    }),
-                    conclusion: conclusion as u8,
-                };
-                if let Err(e) = client
-                    .update_steps(&[step], &plan_id, &job_id, change_order)
-                    .await
-                {
+                if let Err(error) = publish_timeline_step_log(&job, &log).await {
                     eprintln!(
-                        "Best-effort Twirp step completion failed for '{}': {e:#}",
+                        "Best-effort timeline step log upload failed for '{}': {error:#}",
                         log.step_id
                     );
                 }
-                change_order += 1;
-
-                // Upload step log blob to Results Service (populates data-log-url in GitHub UI).
-                // Upload for every non-skipped step — even empty — so it is expandable.
-                // LOG FORMAT CONTRACT (docs/log-format-contract.md): blob lines
-                // MUST carry the 7-digit timestamp prefix — the UI strips it
-                // into the "Show timestamps" toggle column.
-                if !log.skipped {
-                    let timestamped = blob_log_lines(&unix_now_iso8601(), &lines);
-                    if let Err(e) = client
-                        .upload_step_log(&plan_id, &job_id, &log.step_id, &timestamped)
-                        .await
-                    {
-                        eprintln!(
-                            "Best-effort Results Service log upload failed for '{}': {e:#}",
-                            log.step_id
-                        );
-                    }
-                    // Upload GITHUB_STEP_SUMMARY content so it renders in the Summary tab.
-                    if !log.summary.is_empty() {
-                        if let Err(e) = client
-                            .upload_step_summary(&plan_id, &job_id, &log.step_id, &log.summary)
-                            .await
-                        {
-                            eprintln!(
-                                "Best-effort step summary upload failed for '{}': {e:#}",
-                                log.step_id
-                            );
-                        }
-                    }
-                }
-            }
-
-            if let Err(error) = publish_timeline_step_log(&job, &log).await {
-                eprintln!(
-                    "Best-effort timeline step log upload failed for '{}': {error:#}",
-                    log.step_id
-                );
             }
         }
         // Close persistent WebSocket after all logs sent.
@@ -3205,23 +3176,185 @@ fn start_step_log_publisher(
     })
 }
 
-fn mask_single_value(line: &str, masks: &[String]) -> String {
-    let mut result = line.to_string();
-    for mask in masks {
-        if !mask.is_empty() {
-            result = result.replace(mask.as_str(), "***");
-        }
-    }
-    result
+type FeedWebSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+struct ProcessedStepLog {
+    log: StepLog,
+    lines: Vec<String>,
+    live_chunk: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveFeedBatch {
+    step_id: String,
+    lines: Vec<String>,
+    start_line: i64,
+}
+
+fn step_log_batch(first: StepLog, receiver: &mut UnboundedReceiver<StepLog>) -> Vec<StepLog> {
+    let mut logs = vec![first];
+    loop {
+        match receiver.try_recv() {
+            Ok(log) => logs.push(log),
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => break,
+        }
+    }
+    logs
+}
+
+fn push_live_feed_batch(
+    batches: &mut Vec<LiveFeedBatch>,
+    step_id: &str,
+    start_line: i64,
+    lines: &[String],
+) {
+    if let Some(batch) = batches.iter_mut().find(|batch| {
+        batch.step_id == step_id && batch.start_line + batch.lines.len() as i64 == start_line
+    }) {
+        batch.lines.extend(lines.iter().cloned());
+        return;
+    }
+    batches.push(LiveFeedBatch {
+        step_id: step_id.to_string(),
+        lines: lines.to_vec(),
+        start_line,
+    });
+}
+
+async fn send_live_feed_batch(
+    ws_conn: &mut Option<FeedWebSocket>,
+    feed_client: &Option<crate::protocol::FeedStreamClient>,
+    plan_id: &str,
+    job_id: &str,
+    batch: LiveFeedBatch,
+) {
+    if ws_conn.is_none() {
+        if let Some(client) = feed_client {
+            if let Ok(ws) = client.connect().await {
+                eprintln!("[feed] WebSocket reconnected.");
+                *ws_conn = Some(ws);
+            }
+        }
+    }
+    let Some(ws) = ws_conn.as_mut() else {
+        return;
+    };
+
+    // LOG FORMAT CONTRACT (docs/log-format-contract.md): live feed frames are
+    // rendered VERBATIM by the GitHub UI, which adds its own timestamp column.
+    let feed_lines = live_feed_lines(&batch.lines);
+    if let Err(e) = crate::protocol::FeedStreamClient::send_log_lines(
+        ws,
+        &batch.step_id,
+        feed_lines.clone(),
+        Some(batch.start_line),
+        Some(plan_id),
+        Some(job_id),
+    )
+    .await
+    {
+        eprintln!(
+            "Best-effort WebSocket feed send failed for '{}': {e:#}; reconnecting",
+            batch.step_id
+        );
+        *ws_conn = None;
+        // Reconnect once and resend this batch so no step's live log is lost.
+        if let Some(client) = feed_client {
+            if let Ok(mut ws2) = client.connect().await {
+                if crate::protocol::FeedStreamClient::send_log_lines(
+                    &mut ws2,
+                    &batch.step_id,
+                    feed_lines,
+                    Some(batch.start_line),
+                    Some(plan_id),
+                    Some(job_id),
+                )
+                .await
+                .is_ok()
+                {
+                    eprintln!("[feed] resent {} lines after reconnect.", batch.lines.len());
+                    *ws_conn = Some(ws2);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MaskPatterns {
+    masks: Vec<String>,
+}
+
+impl MaskPatterns {
+    fn new<I>(masks: I) -> Self
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut masks: Vec<_> = masks.into_iter().filter(|mask| !mask.is_empty()).collect();
+        masks.sort();
+        masks.dedup();
+        Self { masks }
+    }
+
+    fn with_extra(&self, extra: &[String]) -> Masker {
+        let mut masks = self.masks.clone();
+        masks.extend(extra.iter().filter(|mask| !mask.is_empty()).cloned());
+        Masker::new(masks)
+    }
+}
+
+#[derive(Debug)]
+struct Masker {
+    automaton: Option<AhoCorasick>,
+    masks: Vec<String>,
+}
+
+impl Masker {
+    fn new<I>(masks: I) -> Self
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut masks: Vec<_> = masks.into_iter().filter(|mask| !mask.is_empty()).collect();
+        masks.sort();
+        masks.dedup();
+        let automaton = if masks.is_empty() {
+            None
+        } else {
+            AhoCorasick::builder()
+                .match_kind(MatchKind::LeftmostLongest)
+                .build(masks.clone())
+                .ok()
+        };
+        Self { automaton, masks }
+    }
+
+    fn mask(&self, value: &str) -> String {
+        let Some(automaton) = &self.automaton else {
+            return self
+                .masks
+                .iter()
+                .fold(value.to_string(), |value, mask| value.replace(mask, "***"));
+        };
+        let mut masked = String::with_capacity(value.len());
+        automaton.replace_all_with(value, &mut masked, |_mat, _text, dst| {
+            dst.push_str("***");
+            true
+        });
+        masked
+    }
+}
+
+#[cfg(test)]
+fn mask_single_value(line: &str, masks: &[String]) -> String {
+    Masker::new(masks.iter().cloned()).mask(line)
+}
+
+#[cfg(test)]
 fn live_masked_lines(job: &AgentJobRequestMessage, log: &StepLog) -> Vec<String> {
-    let mut masks = job_secret_mask_values(job);
-    masks.extend(log.masks.iter().cloned());
-    log.lines
-        .iter()
-        .map(|line| mask_single_value(line, &masks))
-        .collect()
+    let masks = MaskPatterns::new(job_secret_mask_values(job));
+    mask_log_lines_with(&log.lines, &masks.with_extra(&log.masks))
 }
 
 #[derive(Debug, Deserialize)]
@@ -4556,26 +4689,19 @@ fn job_console_log_path(
         .join("console.log")
 }
 
-/// Append one completed step's masked output to the live console file. `lines`
-/// are already job-secret-masked; `step_masks` adds any per-step `::add-mask::`
-/// values so nothing secret reaches `docker logs`.
-fn append_job_console(path: &Path, display_name: &str, lines: &[String], step_masks: &[String]) {
-    use std::io::Write;
+/// Append one step's masked output to the live console file tailed by the job
+/// container. `lines` are already job-secret and step-mask redacted.
+fn append_job_console(writer: &mut BufWriter<fs::File>, display_name: &str, lines: &[String]) {
     let mut out = String::new();
     if !display_name.is_empty() {
         out.push_str(&format!("\n=== {display_name} ===\n"));
     }
     for line in lines {
-        out.push_str(&mask_value(line, step_masks));
+        out.push_str(line);
         out.push('\n');
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = file.write_all(out.as_bytes());
-    }
+    let _ = writer.write_all(out.as_bytes());
+    let _ = writer.flush();
 }
 
 fn unix_now_iso8601() -> String {
@@ -4854,7 +4980,7 @@ fn post_step_display_name(display_name: &str) -> String {
 /// Lines carry the same 7-digit timestamp prefix as GitHub's raw log download
 /// (docs/log-format-contract.md), stamped with the step's completion time.
 fn build_combined_job_log(job: &AgentJobRequestMessage, step_logs: &[StepLog]) -> String {
-    let secret_masks = job_secret_mask_values(job);
+    let secret_masks = MaskPatterns::new(job_secret_mask_values(job));
     let mut out = String::new();
     for log in step_logs {
         if log.skipped {
@@ -4880,8 +5006,9 @@ fn build_combined_job_log(job: &AgentJobRequestMessage, step_logs: &[StepLog]) -
             };
             out.push_str(&format!("{timestamp} ##[group]{name}\n"));
         }
+        let masker = secret_masks.with_extra(&log.masks);
         for line in &log.lines {
-            let masked = mask_value(&mask_single_value(line, &secret_masks), &log.masks);
+            let masked = masker.mask(line);
             out.push_str(&format!("{timestamp} {masked}\n"));
         }
         if !already_grouped {
@@ -5155,16 +5282,15 @@ fn run_service_telemetry(
     job: &AgentJobRequestMessage,
     step_logs: &[StepLog],
 ) -> Vec<RunServiceTelemetry> {
-    let masks = job_secret_mask_values(job);
+    let masks = MaskPatterns::new(job_secret_mask_values(job));
     let mut seen = BTreeSet::new();
     step_logs
         .iter()
         .flat_map(|log| log.telemetry.iter().map(move |telemetry| (log, telemetry)))
         .map(|(log, telemetry)| {
-            let mut all_masks = masks.clone();
-            all_masks.extend(log.masks.iter().cloned());
+            let masker = masks.with_extra(&log.masks);
             RunServiceTelemetry {
-                message: mask_value(&telemetry.message, &all_masks),
+                message: masker.mask(&telemetry.message),
                 kind: telemetry.kind.clone(),
             }
         })
@@ -5235,12 +5361,9 @@ async fn publish_timeline_logs(job: &AgentJobRequestMessage, step_logs: &[StepLo
             records,
         )
         .await?;
+    let job_masks = MaskPatterns::new(job_secret_mask_values(job));
     for log in step_logs {
-        let masks = job_secret_mask_values(job)
-            .into_iter()
-            .chain(log.masks.iter().cloned())
-            .collect::<Vec<_>>();
-        let lines = mask_log_lines(&log.lines, &masks);
+        let lines = mask_log_lines_with(&log.lines, &job_masks.with_extra(&log.masks));
         if lines.is_empty() {
             continue;
         }
@@ -5276,11 +5399,8 @@ async fn publish_timeline_step_log(job: &AgentJobRequestMessage, log: &StepLog) 
         )
         .await?;
 
-    let masks = job_secret_mask_values(job)
-        .into_iter()
-        .chain(log.masks.iter().cloned())
-        .collect::<Vec<_>>();
-    let lines = mask_log_lines(&log.lines, &masks);
+    let job_masks = MaskPatterns::new(job_secret_mask_values(job));
+    let lines = mask_log_lines_with(&log.lines, &job_masks.with_extra(&log.masks));
     if !lines.is_empty() {
         context
             .client
@@ -5380,15 +5500,18 @@ fn timeline_records_for_step_logs(
         .collect()
 }
 
+#[cfg(test)]
 fn mask_log_lines(lines: &[String], masks: &[String]) -> Vec<String> {
-    lines.iter().map(|line| mask_value(line, masks)).collect()
+    mask_log_lines_with(lines, &Masker::new(masks.iter().cloned()))
 }
 
+#[cfg(test)]
 fn mask_value(value: &str, masks: &[String]) -> String {
-    masks
-        .iter()
-        .filter(|mask| !mask.is_empty())
-        .fold(value.to_string(), |value, mask| value.replace(mask, "***"))
+    Masker::new(masks.iter().cloned()).mask(value)
+}
+
+fn mask_log_lines_with(lines: &[String], masker: &Masker) -> Vec<String> {
+    lines.iter().map(|line| masker.mask(line)).collect()
 }
 
 fn current_time_rfc3339() -> Result<String> {
@@ -7168,6 +7291,64 @@ jobs:
     }
 
     #[test]
+    fn feed_batches_multiple_lines_in_one_frame() {
+        let mut batches = Vec::new();
+        push_live_feed_batch(&mut batches, "step-1", 1, &["one".into(), "two".into()]);
+        push_live_feed_batch(&mut batches, "step-1", 3, &["three".into()]);
+        push_live_feed_batch(&mut batches, "step-2", 1, &["other".into()]);
+
+        assert_eq!(
+            batches,
+            vec![
+                LiveFeedBatch {
+                    step_id: "step-1".into(),
+                    start_line: 1,
+                    lines: vec!["one".into(), "two".into(), "three".into()],
+                },
+                LiveFeedBatch {
+                    step_id: "step-2".into(),
+                    start_line: 1,
+                    lines: vec!["other".into()],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn aho_masking_matches_legacy_for_non_prefix_masks() {
+        let masks = vec!["alpha-secret".to_string(), "omega-secret".to_string()];
+        for input in [
+            "alpha-secret",
+            "prefix alpha-secret suffix omega-secret",
+            "ordinary line",
+        ] {
+            assert_eq!(mask_value(input, &masks), legacy_mask_value(input, &masks));
+        }
+    }
+
+    #[test]
+    fn aho_masking_prefers_longest_prefix_secret() {
+        let masks = vec!["token".to_string(), "token-long".to_string()];
+        let masked = mask_value("value=token-long", &masks);
+
+        assert_eq!(masked, "value=***");
+        assert!(!masked.contains("long"));
+    }
+
+    #[test]
+    fn aho_masking_preserves_multiline_and_add_mask_coverage() {
+        let masks = vec![
+            "line-one-secret".to_string(),
+            "line-two-secret".to_string(),
+            "dynsecret".to_string(),
+        ];
+
+        assert_eq!(mask_value("line-one-secret", &masks), "***");
+        assert_eq!(mask_value("line-two-secret", &masks), "***");
+        assert_eq!(mask_value("echo dynsecret", &masks), "echo ***");
+    }
+
+    #[test]
     fn run_service_telemetry_masks_step_and_job_secrets() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
@@ -7221,6 +7402,13 @@ jobs:
             "DeprecatedCommand: set-output *** ***"
         );
         assert_eq!(telemetry[0].kind, "ActionCommand");
+    }
+
+    fn legacy_mask_value(value: &str, masks: &[String]) -> String {
+        masks
+            .iter()
+            .filter(|mask| !mask.is_empty())
+            .fold(value.to_string(), |value, mask| value.replace(mask, "***"))
     }
 
     #[test]
