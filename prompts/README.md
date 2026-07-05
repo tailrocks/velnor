@@ -23,37 +23,23 @@ docs win — fix the prompt. **When the vision/plan/roadmap changes, update
 > [`../docs/master-plan.md`](../docs/master-plan.md) for live status and the
 > current phases). New goal prompts should be cut from master-plan phases.
 
-## Run sequence
+## Completed Sequence Archive
 
-Run **one prompt per day** with `/goal`, in this order. Do not start the next
-until the previous one's definition of done is met (its checklist fully checked
-and gates green).
+The table below is the historical Phase 0 execution sequence. These prompts are
+not active work items; do not start a new `/goal` run from them unless the
+master plan explicitly reopens that phase.
 
-| # | Prompt | Owns | Depends on | Run with |
+| # | Prompt | Owns | Depends on | Status |
 |---|--------|------|------------|----------|
-| 1 | **Target workflow coverage** | Native Rust adapters + runtime features so target jobs *execute correctly*; Rust-first performance (parallelism, aggressive caches). | — (foundation) | `/goal prompts/target-workflow-coverage.md` |
-| 2 | **GitHub UI parity** | Equal-or-better Checks UI experience: expandable steps, grouping, ANSI color, timestamps, synthetic steps, conclusions. | #1 (jobs must run before their output can be made faithful) | `/goal prompts/github-ui-parity.md` |
-| 3 | **Fixture proof completion** | End-to-end green fixture proof via JIT/V2 + compare + timing/cache evidence; the Phase 0 gate. | #1 and #2 | `/goal prompts/fixture-proof.md` |
-| 4 | **ChainArgos runner parity** | Real-target proof. Phase A: repoint `ChainArgos/java-monorepo` from self-hosted to GitHub-hosted runners and make every pipeline green (fix the project where infra masked breakage). Phase B: run the *same* jobs on GitHub + Velnor lanes in parallel; fix Velnor for any divergence, never the job. | Phase A: none. Phase B: #1, #2, #3 | `/goal prompts/chainargos-runner-parity.md` |
+| 1 | **Target workflow coverage** | Native Rust adapters + runtime features so target jobs *execute correctly*; Rust-first performance (parallelism, aggressive caches). | — (foundation) | Complete / superseded |
+| 2 | **GitHub UI parity** | Equal-or-better Checks UI experience: expandable steps, grouping, ANSI color, timestamps, synthetic steps, conclusions. | #1 (jobs must run before their output can be made faithful) | Complete |
+| 3 | **Fixture proof completion** | End-to-end green fixture proof via JIT/V2 + compare + timing/cache evidence; the Phase 0 gate. | #1 and #2 | Complete |
+| 4 | **ChainArgos runner parity** | Real-target proof. Phase A: repoint `ChainArgos/java-monorepo` from self-hosted to GitHub-hosted runners and make every pipeline green (fix the project where infra masked breakage). Phase B: run the *same* jobs on GitHub + Velnor lanes in parallel; fix Velnor for any divergence, never the job. | Phase A: none. Phase B: #1, #2, #3 | Complete / superseded |
 
-Copy-paste, in order:
-
-```text
-/goal prompts/target-workflow-coverage.md
-```
-```text
-/goal prompts/github-ui-parity.md
-```
-```text
-/goal prompts/fixture-proof.md
-```
-```text
-/goal prompts/chainargos-runner-parity.md
-```
-
-> Why this order: make jobs **run correctly** first (coverage), then make their
-> **output faithful** (UI parity), then **prove it green end-to-end** with
-> evidence (fixture proof). The fixture proof depends on both predecessors.
+> Why this order existed: make jobs **run correctly** first (coverage), then
+> make their **output faithful** (UI parity), then **prove it green end-to-end**
+> with evidence (fixture proof). New work starts from
+> [`../docs/master-plan.md`](../docs/master-plan.md), not this archive.
 
 ## Adding a new prompt
 
@@ -65,19 +51,18 @@ Keep it simple and keep the sequence authoritative. Every new prompt:
 2. In the goal file, add the standard header block: a **Mission** callout
    (→ `../docs/mission.md`), a **Direction** pointer (→ `../docs/`), and a
    **Run order** line stating its position and dependencies.
-3. **Update the Run sequence table above**: insert the prompt at its correct
-   position, set Owns / Depends on, and add its `/goal` line to the copy-paste
-   block in order.
+3. **Update this README**: add the prompt to the active sequence for current
+   master-plan work, or note why it is intentionally standalone.
 4. Confirm it does not contradict `docs/`; if it implies a direction change,
    update `docs/` and `../AGENTS.md` first.
 
 ## How `/goal` runs a prompt
 
 The workflow is the same for Claude Code or Codex — both expose `/goal`, which
-takes a goal file and executes it. The agent reads the goal, opens the linked
-checklist, works top-to-bottom (backfilling anything the goal implies), runs the
-verification gates, records evidence, and stops when everything is checked and
-green. Nothing in a prompt assumes a specific agent.
+takes a goal file and executes it. For an active prompt, the agent reads the
+goal, opens the linked checklist, works top-to-bottom (backfilling anything the
+goal implies), runs the verification gates, records evidence, and stops when
+everything is checked and green. Nothing in a prompt assumes a specific agent.
 
 ## Inherited hard rules
 

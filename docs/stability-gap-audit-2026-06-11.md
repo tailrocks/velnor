@@ -23,7 +23,10 @@ fixed in 0.1.16 (marked ✅); the remainder are tracked for follow-up.
 | 15 | **Fast local-failure churn** (docker down/clock skew → delete+re-JIT every 5s × slots → PAT exhausted in ~20min) | GAP (worst) | ✅ `LocalRunnerFailure` classification: local faults keep the registration and back off per-slot 5s→10min |
 | 16 | Misc: renewal-failure streak, no container memory caps, poller log spam | GAP-minor | ✅ poller log rate-capped; renewal/mem-caps follow-up |
 
-Follow-ups (not yet implemented): per-cycle docker prune (#4), renewal-failure
-streak cancels local job (#16), container memory caps (#16), dedicated
-watchdog ping thread (#9), pull backoff (#11), completion payload spill-replay
-across slot recycle (#3 extension).
+Follow-ups as of 0.1.16; later status is tracked in
+[`docs/master-plan.md`](master-plan.md). Shipped after this audit: per-cycle
+Docker prune (`runner.rs::prune_stale_velnor_docker_resources`) and daemon job
+container CPU/memory caps (`VELNOR_JOB_CPUS` / `VELNOR_JOB_MEMORY`, 0.1.28
+`533a5c4`). Remaining follow-ups: renewal-failure streak cancels local job
+(#16), dedicated watchdog ping thread (#9), pull backoff (#11), completion
+payload spill-replay across slot recycle (#3 extension).

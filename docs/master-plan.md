@@ -275,12 +275,13 @@ downstream proof runs.
    tailrocks/holla v0.4.2): every `v*` tag publishes (a) `tar.gz` + sha256 for
    macOS arm64/x86_64 and Linux arm64/x86_64 (release.yml — already built this
    way), (b) the `.deb` for latest Debian via velnor-apt (release-deb.yml),
-   and (c) a Homebrew formula in `tailrocks/homebrew-velnor` (job currently
-   stubbed `if: false` — needs the tap repo + a push token, modeled on
-   holla's release.yml/homebrew-holla). Velnor's own CI/release always runs on
-   GitHub-hosted runners. Gate: `brew install tailrocks/velnor/velnor-runner`
-   and `apt install velnor-runner` both install the tagged version with no
-   manual steps.
+   and (c) a Homebrew formula in `tailrocks/homebrew-velnor` (currently a
+   commented placeholder in `release.yml` — needs the tap repo + a push token,
+   modeled on holla's release.yml/homebrew-holla). Velnor's own CI/release
+   always runs on GitHub-hosted runners. Gate:
+   `brew install tailrocks/velnor/velnor-runner` and
+   `apt install velnor-runner` both install the tagged version with no manual
+   steps.
 9. **[CODE DONE 0.1.15 — live repro gate pending] Fleet health
    reconciliation + forensic observability** (incident #9; operator
    directive 2026-06-11: *stability was NOT achieved — it is the current
