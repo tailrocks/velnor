@@ -114,6 +114,7 @@ mod tests {
             docker_host_work_dir: None,
             verify_bind_mounts: true,
             daemon_id: "test-daemon".into(),
+            repository: Some("ChainArgos/java-monorepo".into()),
             cargo_target_host: None,
         }
     }
@@ -130,6 +131,7 @@ mod tests {
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         });
         let plan = NormalizedJobPlan {
             identity: JobIdentity {

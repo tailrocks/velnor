@@ -1,5 +1,11 @@
 # Checklist: ChainArgos Runner Parity
 
+> **Superseded — shipped.** This checklist is archived with the completed
+> real-target parity prompt; do not work unchecked items top-to-bottom. Current
+> production status and follow-ups live in
+> [`../docs/master-plan.md`](../docs/master-plan.md) and
+> [`../docs/comparison.md`](../docs/comparison.md).
+
 Work top-to-bottom. Phase A first, fully green and merged, before Phase B.
 Goal + context: [chainargos-runner-parity.md](chainargos-runner-parity.md).
 All work happens against `ChainArgos/java-monorepo` (Phase A/B workflow edits)
@@ -337,6 +343,6 @@ For each workflow that should run on both runners, introduce the fixture pattern
 - [ ] Add the 2026-06-04 direction-log entry in `AGENTS.md` (real-target work on
       ChainArgos now authorized; the "stop at fixture" guard is scoped to
       *unattended Velnor execution*, not to GitHub-hosted CI hygiene).
-- [ ] Verify `prompts/README.md` lists this prompt (row #4 + copy-paste block) —
-      **already added**; keep it accurate if the run order changes.
+- [ ] Verify `prompts/README.md` lists this prompt in the completed sequence
+      archive — **already added**; keep it accurate if the run order changes.
 - [ ] Note the prerequisite baseline in `docs/roadmap.md` if it affects the plan.

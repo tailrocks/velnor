@@ -53,10 +53,12 @@ assets = [
 
 [dependencies]
 anyhow.workspace = true
+aho-corasick = "1.1.4"
 base64.workspace = true
 clap.workspace = true
 jsonwebtoken.workspace = true
 reqwest.workspace = true
+rayon.workspace = true
 rsa.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -77,6 +79,9 @@ tracing-opentelemetry = { workspace = true, optional = true }
 opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
+
+[dev-dependencies]
+wiremock = "0.6.5"
 
 [features]
 default = []

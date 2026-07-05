@@ -1,3 +1,4 @@
+use aho_corasick::{AhoCorasick, MatchKind};
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use serde::Deserialize;
@@ -5,6 +6,7 @@ use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
+    io::{BufWriter, Write},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -13,6 +15,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{
     sync::mpsc::UnboundedReceiver,
     task::{JoinHandle, JoinSet},
@@ -43,12 +46,12 @@ use crate::{
     job_message::{ActionReferenceType, AgentJobRequestMessage},
     platform,
     protocol::{
-        decode_jit_config, AcquireJobOutcome, BrokerClient, DistributedTaskClient,
-        GitHubJitConfigRequest, GitHubScope, ListedRunner, OAuthClient, OAuthJwtCredentials,
-        RegistrationClient, RunServiceAnnotation, RunServiceAnnotationLevel, RunServiceClient,
-        RunServiceCompleteJob, RunServiceStepResult, RunServiceTelemetry, RunServiceVariableValue,
-        RunnerJobRequestRef, RunnerStatus, TaskAgentSession, TaskResult, TimelineRecord,
-        TimelineRecordFeedLines, TimelineRecordState, RUNNER_JOB_REQUEST,
+        decode_jit_config, AcquireJobOutcome, BrokerClient, DistributedTaskClient, GitHubApiError,
+        GitHubJitConfigRequest, GitHubScope, ListedRunner, OAuthAccessToken, OAuthClient,
+        OAuthJwtCredentials, RegistrationClient, RunServiceAnnotation, RunServiceAnnotationLevel,
+        RunServiceClient, RunServiceCompleteJob, RunServiceStepResult, RunServiceTelemetry,
+        RunServiceVariableValue, RunnerJobRequestRef, RunnerStatus, TaskAgentSession, TaskResult,
+        TimelineRecord, TimelineRecordFeedLines, TimelineRecordState, RUNNER_JOB_REQUEST,
     },
     runtime_env::job_runtime_env,
     script_step::{StepAnnotation, StepAnnotationLevel},
@@ -93,6 +96,21 @@ struct RunServiceJobContext {
     client: RunServiceClient,
     run_service_url: String,
     billing_owner_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AcquiredJobIdentity {
+    plan_id: String,
+    job_id: String,
+}
+
+impl AcquiredJobIdentity {
+    fn from_job(job: &AgentJobRequestMessage) -> Self {
+        Self {
+            plan_id: job.plan.plan_id.clone(),
+            job_id: job.job_id.clone(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -148,6 +166,7 @@ impl BrokerPollState {
 struct IdleSlotHealth {
     session_started: Instant,
     token_acquired: Instant,
+    token_expires_in: Option<Duration>,
     last_registry_check: Instant,
     registry_offline_strikes: u32,
 }
@@ -157,6 +176,7 @@ impl IdleSlotHealth {
         Self {
             session_started: now,
             token_acquired: now,
+            token_expires_in: None,
             last_registry_check: now,
             registry_offline_strikes: 0,
         }
@@ -187,7 +207,7 @@ fn due_idle_health_actions(
         }
     }
     let mut actions = Vec::new();
-    if now.duration_since(health.token_acquired) >= Duration::from_secs(IDLE_TOKEN_REFRESH_SECONDS)
+    if now.duration_since(health.token_acquired) >= token_refresh_deadline(health.token_expires_in)
     {
         actions.push(IdleHealthAction::RefreshToken);
     }
@@ -197,6 +217,13 @@ fn due_idle_health_actions(
         actions.push(IdleHealthAction::CheckRegistry);
     }
     actions
+}
+
+fn token_refresh_deadline(expires_in: Option<Duration>) -> Duration {
+    expires_in
+        .map(|lifetime| lifetime.mul_f64(0.66))
+        .filter(|deadline| *deadline > Duration::from_secs(0))
+        .unwrap_or_else(|| Duration::from_secs(IDLE_TOKEN_REFRESH_SECONDS))
 }
 
 fn max_idle_slot_age(flag_seconds: Option<u64>) -> Option<Duration> {
@@ -282,7 +309,7 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
             .await
         {
             Ok(r) => r,
-            Err(e) if e.to_string().contains("409") => {
+            Err(e) if github_api_error_status(&e) == Some(409) => {
                 // Orphaned runner from a previous failed run — delete by name and retry once.
                 eprintln!(
                     "JIT 409: deleting orphaned runner '{}' and retrying",
@@ -514,6 +541,21 @@ static DRAINING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::
 
 pub(crate) fn draining() -> bool {
     DRAINING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotAction {
+    Continue,
+    DeregisterAndExit,
+    FinishJobThenExit,
+}
+
+fn slot_action_on_poll(draining: bool, busy: bool) -> SlotAction {
+    match (draining, busy) {
+        (false, _) => SlotAction::Continue,
+        (true, false) => SlotAction::DeregisterAndExit,
+        (true, true) => SlotAction::FinishJobThenExit,
+    }
 }
 
 fn start_drain_listener(config_base: PathBuf) {
@@ -882,7 +924,7 @@ async fn run_daemon_slot(
     let mut cycle = 1_u64;
     let mut local_failure_streak: u32 = 0;
     loop {
-        if draining() {
+        if slot_action_on_poll(draining(), false) == SlotAction::DeregisterAndExit {
             let note = format!("slot-{slot_index} draining: deleting registration and exiting");
             println!("{note}");
             daemon_forensic_log(&config_base, &note);
@@ -947,7 +989,7 @@ async fn run_daemon_slot(
         if args.once {
             return Ok(());
         }
-        if draining() {
+        if slot_action_on_poll(draining(), true) == SlotAction::FinishJobThenExit {
             let note =
                 format!("slot-{slot_index} cycle {cycle} finished during drain: deregistering");
             println!("{note}");
@@ -1486,15 +1528,15 @@ async fn run_v2(
     config_dir: PathBuf,
     stored: StoredRunnerConfig,
     agent_id: i64,
-    token: String,
+    token: OAuthAccessToken,
 ) -> Result<()> {
     let server_url_v2 = stored.settings.server_url_v2.as_deref().ok_or_else(|| {
         anyhow::anyhow!("runner config enables V2 flow but missing server_url_v2")
     })?;
-    let mut broker_token = token.clone();
+    let mut broker_token = token.token.clone();
     let mut current_broker_url = server_url_v2.to_string();
     let mut broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
-    let mut run_service = RunServiceClient::new(token.clone())?;
+    let mut run_service = RunServiceClient::new(token.token.clone())?;
     let owner_name = format!("{} (PID: {})", default_agent_name(), std::process::id());
     let session = TaskAgentSession::new(owner_name, agent_id, stored.settings.agent_name.clone());
     let diagnostic = RunnerConnectionDiagnostic::from_config(&stored, &current_broker_url);
@@ -1525,6 +1567,7 @@ async fn run_v2(
     let idle_timeout = idle_timeout_duration(args.idle_timeout_seconds)?;
     let idle_started = Instant::now();
     let mut health = IdleSlotHealth::new(Instant::now());
+    health.token_expires_in = token.expires_in;
     let max_idle_age = max_idle_slot_age(args.max_idle_slot_age_seconds);
 
     let registry_pat = args
@@ -1558,18 +1601,23 @@ async fn run_v2(
     let run_result = async {
         'poll: loop {
             let message = poll_broker_message(
-                &broker,
+                &mut broker,
+                &mut run_service,
+                &current_broker_url,
+                &mut broker_token,
+                &stored,
                 session_id,
                 RunnerStatus::Online,
                 stored.settings.disable_update,
                 &mut poll_state,
+                &mut health,
                 &forensics,
             )
             .await?;
 
             let Some(message) = message else {
                 println!("No broker message received.");
-                if draining() {
+                if slot_action_on_poll(draining(), false) == SlotAction::DeregisterAndExit {
                     // Daemon drain (SIGTERM): an idle slot exits at the poll
                     // boundary; the slot loop above deletes the registration.
                     forensics.lifecycle("idle slot exiting: daemon drain requested");
@@ -1671,10 +1719,11 @@ async fn run_v2(
                 }
                 V2MessageAction::RefreshToken => {
                     let refreshed_token = oauth_access_token(&stored).await?;
-                    broker_token = refreshed_token.clone();
+                    broker_token = refreshed_token.token.clone();
                     broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
-                    run_service = RunServiceClient::new(refreshed_token)?;
+                    run_service = RunServiceClient::new(refreshed_token.token)?;
                     health.token_acquired = Instant::now();
+                    health.token_expires_in = refreshed_token.expires_in;
                     println!("Refreshed broker and run-service credentials.");
                     forensics.lifecycle("credentials refreshed (ForceTokenRefresh)");
                 }
@@ -1736,30 +1785,20 @@ async fn refresh_idle_credentials(
     forensics: &SlotForensics,
 ) {
     let token_age_minutes = health.token_acquired.elapsed().as_secs() / 60;
-    match oauth_access_token(stored).await {
-        Ok(refreshed) => {
-            match (
-                BrokerClient::new(current_broker_url, refreshed.clone()),
-                RunServiceClient::new(refreshed.clone()),
-            ) {
-                (Ok(new_broker), Ok(new_run_service)) => {
-                    *broker = new_broker;
-                    *run_service = new_run_service;
-                    *broker_token = refreshed;
-                    health.token_acquired = Instant::now();
-                    let note =
-                        format!("proactive credential refresh ok (token age {token_age_minutes}m)");
-                    println!("{note}");
-                    forensics.lifecycle(&note);
-                }
-                (Err(error), _) | (_, Err(error)) => {
-                    let note = format!(
-                        "proactive credential refresh failed to rebuild clients (token age {token_age_minutes}m): {error:#}"
-                    );
-                    eprintln!("{note}");
-                    forensics.lifecycle(&note);
-                }
-            }
+    match refresh_v2_clients(
+        stored,
+        current_broker_url,
+        broker,
+        run_service,
+        broker_token,
+        health,
+    )
+    .await
+    {
+        Ok(()) => {
+            let note = format!("proactive credential refresh ok (token age {token_age_minutes}m)");
+            println!("{note}");
+            forensics.lifecycle(&note);
         }
         Err(error) => {
             let note = format!(
@@ -1769,6 +1808,25 @@ async fn refresh_idle_credentials(
             forensics.lifecycle(&note);
         }
     }
+}
+
+async fn refresh_v2_clients(
+    stored: &StoredRunnerConfig,
+    current_broker_url: &str,
+    broker: &mut BrokerClient,
+    run_service: &mut RunServiceClient,
+    broker_token: &mut String,
+    health: &mut IdleSlotHealth,
+) -> Result<()> {
+    let refreshed = oauth_access_token(stored).await?;
+    let new_broker = BrokerClient::new(current_broker_url, refreshed.token.clone())?;
+    let new_run_service = RunServiceClient::new(refreshed.token.clone())?;
+    *broker = new_broker;
+    *run_service = new_run_service;
+    *broker_token = refreshed.token;
+    health.token_acquired = Instant::now();
+    health.token_expires_in = refreshed.expires_in;
+    Ok(())
 }
 
 /// One registry reconcile check for an idle slot. Returns `Some(reason)` when
@@ -1944,12 +2002,18 @@ fn idle_timeout_elapsed(elapsed: Duration, timeout: Option<Duration>) -> bool {
     timeout.is_some_and(|timeout| elapsed >= timeout)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn poll_broker_message(
-    broker: &BrokerClient,
+    broker: &mut BrokerClient,
+    run_service: &mut RunServiceClient,
+    current_broker_url: &str,
+    broker_token: &mut String,
+    stored: &StoredRunnerConfig,
     session_id: &str,
     status: RunnerStatus,
     disable_update: bool,
     poll_state: &mut BrokerPollState,
+    health: &mut IdleSlotHealth,
     forensics: &SlotForensics,
 ) -> Result<Option<crate::protocol::TaskAgentMessage>> {
     loop {
@@ -1995,6 +2059,30 @@ async fn poll_broker_message(
                         "idle slot exiting after broker poll error during daemon drain: {error:#}"
                     ));
                     return Ok(None);
+                }
+                if is_credential_poll_error(&error) {
+                    match refresh_v2_clients(
+                        stored,
+                        current_broker_url,
+                        broker,
+                        run_service,
+                        broker_token,
+                        health,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            forensics
+                                .lifecycle("broker poll credentials refreshed after auth error");
+                            poll_state.received_message();
+                            continue;
+                        }
+                        Err(refresh_error) => {
+                            forensics.lifecycle(&format!(
+                                "broker poll credential refresh failed after auth error: {refresh_error:#}"
+                            ));
+                        }
+                    }
                 }
                 forensics.broker(&format!(
                     "poll ERROR consecutive={}: {error:#}",
@@ -2137,14 +2225,42 @@ async fn handle_v2_message(
             return Ok(V2MessageAction::None);
         }
     };
-    let job: AgentJobRequestMessage =
-        serde_json::from_value(job_value).context("parse acquired run-service job")?;
-    let job_run_service = job
+    let acquired_identity = acquired_job_identity(&job_value)
+        .ok_or_else(|| anyhow::anyhow!("acquired run-service job missing plan/job identity"))?;
+    let fallback_run_service_job = RunServiceJobContext {
+        client: run_service.clone(),
+        run_service_url: run_service_url.to_string(),
+        billing_owner_id: reference.billing_owner_id.clone(),
+    };
+    let job: AgentJobRequestMessage = match serde_json::from_value(job_value) {
+        Ok(job) => job,
+        Err(error) => {
+            complete_acquired_job_failure(
+                &fallback_run_service_job,
+                &acquired_identity,
+                Some("job_parse".to_string()),
+            )
+            .await?;
+            return Err(error).context("parse acquired run-service job");
+        }
+    };
+    let job_run_service = match job
         .system_connection()
         .and_then(system_connection_access_token)
         .map(RunServiceClient::new)
-        .transpose()?
-        .unwrap_or_else(|| run_service.clone());
+        .transpose()
+    {
+        Ok(client) => client.unwrap_or_else(|| run_service.clone()),
+        Err(error) => {
+            complete_acquired_job_failure(
+                &fallback_run_service_job,
+                &acquired_identity,
+                Some("run_service_client".to_string()),
+            )
+            .await?;
+            return Err(error).context("build run-service client from acquired job");
+        }
+    };
     let run_service_job = RunServiceJobContext {
         client: job_run_service,
         run_service_url: run_service_url.to_string(),
@@ -2222,11 +2338,13 @@ async fn handle_job_request(
         if let Err(error) = publish_timeline_job_started(&job, runner_name).await {
             eprintln!("Best-effort timeline job start update failed: {error:#}");
         }
+        let stored_for_refresh = broker_cancellation.stored.clone();
         let renewal = start_run_service_lock_renewal(
             run_service_job.client.clone(),
             run_service_job.run_service_url.clone(),
             job.plan.plan_id.clone(),
             job.job_id.clone(),
+            stored_for_refresh.clone(),
         )
         .await?;
         let canceled = Arc::new(AtomicBool::new(false));
@@ -2286,7 +2404,14 @@ async fn handle_job_request(
         let job_result = match job_result {
             Ok(job_result) => job_result,
             Err(join_error) => {
+                let completion = complete_acquired_job_failure(
+                    &run_service_job,
+                    &AcquiredJobIdentity::from_job(&job),
+                    Some("executor_panic".to_string()),
+                )
+                .await;
                 renewal.abort();
+                completion?;
                 return Err(join_error).context("join Docker job execution task");
             }
         };
@@ -2326,8 +2451,9 @@ async fn handle_job_request(
                 } else {
                     let infrastructure_failure_category =
                         infrastructure_failure_category(&error).map(ToOwned::to_owned);
-                    let completion = complete_run_service_job(
+                    let completion = complete_run_service_job_refreshing(
                         &run_service_job.client,
+                        &stored_for_refresh,
                         &run_service_job.run_service_url,
                         &job,
                         TaskResult::Failed,
@@ -2347,8 +2473,9 @@ async fn handle_job_request(
         };
         let outputs = job_result.outputs;
         let step_logs = job_result.step_logs;
-        let completion = complete_run_service_job(
+        let completion = complete_run_service_job_refreshing(
             &run_service_job.client,
+            &stored_for_refresh,
             &run_service_job.run_service_url,
             &job,
             job_result.result,
@@ -2367,8 +2494,9 @@ async fn handle_job_request(
             job_result.result
         );
     } else if args.complete_noop {
-        complete_run_service_job(
+        complete_run_service_job_refreshing(
             &run_service_job.client,
+            &broker_cancellation.stored,
             &run_service_job.run_service_url,
             &job,
             TaskResult::Succeeded,
@@ -2558,7 +2686,9 @@ async fn start_run_service_lock_renewal(
     run_service_url: String,
     plan_id: String,
     job_id: String,
+    stored: StoredRunnerConfig,
 ) -> Result<JoinHandle<()>> {
+    let mut client = client;
     match client.renew_job(&run_service_url, &plan_id, &job_id).await {
         Ok(response) => {
             println!(
@@ -2568,16 +2698,32 @@ async fn start_run_service_lock_renewal(
         }
         Err(error) => {
             eprintln!("Initial run-service job lock renewal failed: {error:#}");
+            if is_credential_poll_error(&error) {
+                match refresh_run_service_client(&stored).await {
+                    Ok(refreshed) => {
+                        client = refreshed;
+                        println!("Run-service lock renewal refreshed credentials.");
+                    }
+                    Err(refresh_error) => {
+                        eprintln!(
+                            "Run-service lock renewal credential refresh failed: {refresh_error:#}"
+                        );
+                    }
+                }
+            }
         }
     }
 
     Ok(tokio::spawn(async move {
+        let mut failure_streak = 0u32;
         loop {
-            // Renew every 25 seconds — the run-service validity window is ~30 seconds,
-            // so renewing at 25s keeps safe margin without hammering the API.
-            tokio::time::sleep(Duration::from_secs(25)).await;
+            // Renew every 25 seconds on success; after any failure, retry much
+            // sooner so a single transient miss does not leave the ~30s lock
+            // expired until the next steady cadence.
+            tokio::time::sleep(renewal_retry_delay(failure_streak)).await;
             match client.renew_job(&run_service_url, &plan_id, &job_id).await {
                 Ok(response) => {
+                    failure_streak = 0;
                     println!(
                         "Renewed run-service job {}; valid until {}.",
                         job_id, response.locked_until
@@ -2585,10 +2731,35 @@ async fn start_run_service_lock_renewal(
                 }
                 Err(error) => {
                     eprintln!("Run-service job lock renewal failed: {error:#}");
+                    if is_credential_poll_error(&error) {
+                        match refresh_run_service_client(&stored).await {
+                            Ok(refreshed) => {
+                                client = refreshed;
+                                println!("Run-service lock renewal refreshed credentials.");
+                            }
+                            Err(refresh_error) => eprintln!(
+                                "Run-service lock renewal credential refresh failed: {refresh_error:#}"
+                            ),
+                        }
+                    }
+                    failure_streak = failure_streak.saturating_add(1);
                 }
             }
         }
     }))
+}
+
+fn renewal_retry_delay(failure_streak: u32) -> Duration {
+    if failure_streak == 0 {
+        Duration::from_secs(25)
+    } else {
+        Duration::from_secs(5u64.saturating_mul(1 << failure_streak.saturating_sub(1).min(2)))
+    }
+}
+
+async fn refresh_run_service_client(stored: &StoredRunnerConfig) -> Result<RunServiceClient> {
+    let token = oauth_access_token(stored).await?;
+    RunServiceClient::new(token.token)
 }
 
 /// Backoff for consecutive cancellation-poll errors: 2s doubling to 60s, so
@@ -2603,8 +2774,15 @@ fn cancellation_poll_error_delay(error_streak: u32) -> Duration {
 /// Errors that look like expired/rejected credentials, which a fresh OAuth
 /// exchange can fix mid-job (jobs can outlive the ~1 h token).
 fn is_credential_poll_error(error: &anyhow::Error) -> bool {
-    let text = format!("{error:#}");
-    text.contains("status=401") || text.contains("status=403")
+    github_api_error_status(error).is_some_and(|status| status == 401 || status == 403)
+}
+
+fn github_api_error_status(error: &anyhow::Error) -> Option<u16> {
+    error.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<GitHubApiError>()
+            .map(|error| error.status)
+    })
 }
 
 fn start_broker_cancellation_poll(
@@ -2638,17 +2816,19 @@ fn start_broker_cancellation_poll(
                     }
                     if is_credential_poll_error(&error) {
                         match oauth_access_token(&stored).await {
-                            Ok(token) => match BrokerClient::new(&broker.base_url_str(), token) {
-                                Ok(refreshed) => {
-                                    broker = refreshed;
-                                    println!(
+                            Ok(token) => {
+                                match BrokerClient::new(&broker.base_url_str(), token.token) {
+                                    Ok(refreshed) => {
+                                        broker = refreshed;
+                                        println!(
                                         "Cancellation poller refreshed broker credentials mid-job."
                                     );
-                                }
-                                Err(error) => eprintln!(
+                                    }
+                                    Err(error) => eprintln!(
                                     "Cancellation poller failed to rebuild broker client: {error:#}"
                                 ),
-                            },
+                                }
+                            }
                             Err(error) => eprintln!(
                                 "Cancellation poller credential refresh failed: {error:#}"
                             ),
@@ -2670,7 +2850,7 @@ fn start_broker_cancellation_poll(
                 // cancellation coverage for the rest of the job.
                 match broker_migration_url(&message) {
                     Ok(migration_url) => match oauth_access_token(&stored).await {
-                        Ok(token) => match BrokerClient::new(&migration_url, token) {
+                        Ok(token) => match BrokerClient::new(&migration_url, token.token) {
                             Ok(migrated) => {
                                 broker = migrated;
                                 println!(
@@ -2812,14 +2992,22 @@ fn start_step_log_publisher(
         let mut streamed_steps = BTreeSet::new();
 
         // Prepare the live console file that the job container tails as PID 1
-        // (so `docker logs <job-container>` mirrors the GitHub UI). Create it
-        // fresh for this job; the container's `tail -F` picks it up.
-        if let Some(path) = &console_log_path {
+        // (so `docker logs <job-container>` mirrors the GitHub UI). Keep one
+        // writer open for the job and flush after each append so tail sees
+        // live output without open/write/close per line.
+        let mut console_writer = console_log_path.as_ref().and_then(|path| {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let _ = std::fs::write(path, b"");
-        }
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(path)
+                .ok()
+                .map(BufWriter::new)
+        });
+        let job_masks = MaskPatterns::new(job_secret_mask_values(&job));
 
         // Open ONE persistent WebSocket connection for the entire job (matching the
         // official GitHub runner which keeps a single connection open per job).
@@ -2846,7 +3034,7 @@ fn start_step_log_publisher(
         let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(15));
         ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            let log = tokio::select! {
+            let first_log = tokio::select! {
                 maybe = receiver.recv() => match maybe {
                     Some(log) => log,
                     None => break,
@@ -2863,173 +3051,128 @@ fn start_step_log_publisher(
                     continue;
                 }
             };
-            let masks = job_secret_mask_values(&job);
-            let lines: Vec<String> = log
-                .lines
-                .iter()
-                .map(|l| mask_single_value(l, &masks))
-                .collect();
-            let line_count = lines.len() as i64;
-            let live_chunk = log.completed_at.is_empty() && !log.skipped;
-            if live_chunk {
-                streamed_steps.insert(log.step_id.clone());
-            }
-            let already_streamed = !live_chunk && streamed_steps.contains(&log.step_id);
-
-            // Mirror this step to the container's live console file (docker logs).
-            if !already_streamed {
-                if let Some(path) = &console_log_path {
-                    append_job_console(path, &log.display_name, &lines, &log.masks);
+            let logs = step_log_batch(first_log, &mut receiver);
+            let mut processed = Vec::with_capacity(logs.len());
+            let mut live_batches = Vec::new();
+            for log in logs {
+                let masker = job_masks.with_extra(&log.masks);
+                let lines = mask_log_lines_with(&log.lines, &masker);
+                let line_count = lines.len() as i64;
+                let live_chunk = log.completed_at.is_empty() && !log.skipped;
+                if live_chunk {
+                    streamed_steps.insert(log.step_id.clone());
                 }
-            }
+                let already_streamed = !live_chunk && streamed_steps.contains(&log.step_id);
 
-            if !already_streamed && !lines.is_empty() {
-                // GitHub may close the feed WebSocket between steps / after idle, so a
-                // later send hits a Broken pipe. Reconnect (lazily, and once on send
-                // failure) so the live console does not go dark for the rest of the job.
-                if ws_conn.is_none() {
-                    if let Some(client) = &feed_client {
-                        if let Ok(ws) = client.connect().await {
-                            eprintln!("[feed] WebSocket reconnected.");
-                            ws_conn = Some(ws);
-                        }
+                // Mirror this step to the container's live console file (docker logs).
+                if !already_streamed {
+                    if let Some(writer) = console_writer.as_mut() {
+                        append_job_console(writer, &log.display_name, &lines);
                     }
                 }
-                if let Some(ws) = ws_conn.as_mut() {
+
+                if !already_streamed && !lines.is_empty() {
                     let start_line = *step_line_counters.entry(log.step_id.clone()).or_insert(1);
-                    eprintln!(
-                        "[feed] Sending {} lines for step {} (from line {start_line})",
-                        lines.len(),
-                        &log.step_id[..log.step_id.len().min(8)]
-                    );
-                    // LOG FORMAT CONTRACT (docs/log-format-contract.md): live
-                    // feed frames are rendered VERBATIM by the GitHub UI,
-                    // which adds its own timestamp column — lines must be RAW
-                    // content. Only the uploaded log blob gets timestamps.
-                    let feed_lines = live_feed_lines(&lines);
-                    if let Err(e) = crate::protocol::FeedStreamClient::send_log_lines(
-                        ws,
-                        &log.step_id,
-                        feed_lines.clone(),
-                        Some(start_line),
-                        Some(&plan_id),
-                        Some(&job_id),
-                    )
-                    .await
+                    push_live_feed_batch(&mut live_batches, &log.step_id, start_line, &lines);
+                    *step_line_counters.entry(log.step_id.clone()).or_insert(1) += line_count;
+                }
+
+                processed.push(ProcessedStepLog {
+                    log,
+                    lines,
+                    live_chunk,
+                });
+            }
+
+            for batch in live_batches {
+                send_live_feed_batch(&mut ws_conn, &feed_client, &plan_id, &job_id, batch).await;
+            }
+
+            for processed_log in processed {
+                if processed_log.live_chunk {
+                    continue;
+                }
+                let log = processed_log.log;
+                let lines = processed_log.lines;
+
+                // Send step completion via Twirp Results Service.
+                if let Some(client) = &twirp_client {
+                    let conclusion = if log.skipped {
+                        crate::protocol::StepConclusion::Skipped
+                    } else if log.exit_code != 0 && !log.failure_ignored {
+                        crate::protocol::StepConclusion::Failure
+                    } else {
+                        crate::protocol::StepConclusion::Success
+                    };
+                    let step = crate::protocol::TwirpStep {
+                        external_id: log.step_id.clone(),
+                        number: log.order as usize,
+                        name: if log.display_name.is_empty() {
+                            log.step_id.clone()
+                        } else {
+                            log.display_name.clone()
+                        },
+                        status: crate::protocol::StepStatus::Completed as u8,
+                        started_at: if log.started_at.is_empty() {
+                            None
+                        } else {
+                            Some(log.started_at.clone())
+                        },
+                        completed_at: Some(if log.completed_at.is_empty() {
+                            unix_now_iso8601()
+                        } else {
+                            log.completed_at.clone()
+                        }),
+                        conclusion: conclusion as u8,
+                    };
+                    if let Err(e) = client
+                        .update_steps(&[step], &plan_id, &job_id, change_order)
+                        .await
                     {
                         eprintln!(
-                            "Best-effort WebSocket feed send failed for '{}': {e:#}; reconnecting",
+                            "Best-effort Twirp step completion failed for '{}': {e:#}",
                             log.step_id
                         );
-                        ws_conn = None;
-                        // Reconnect once and resend this batch so no step's live log is lost.
-                        if let Some(client) = &feed_client {
-                            if let Ok(mut ws2) = client.connect().await {
-                                if crate::protocol::FeedStreamClient::send_log_lines(
-                                    &mut ws2,
-                                    &log.step_id,
-                                    feed_lines,
-                                    Some(start_line),
-                                    Some(&plan_id),
-                                    Some(&job_id),
-                                )
+                    }
+                    change_order += 1;
+
+                    // Upload step log blob to Results Service (populates data-log-url in GitHub UI).
+                    // Upload for every non-skipped step — even empty — so it is expandable.
+                    // LOG FORMAT CONTRACT (docs/log-format-contract.md): blob lines
+                    // MUST carry the 7-digit timestamp prefix — the UI strips it
+                    // into the "Show timestamps" toggle column.
+                    if !log.skipped {
+                        let timestamped = blob_log_lines(&unix_now_iso8601(), &lines);
+                        if let Err(e) = client
+                            .upload_step_log(&plan_id, &job_id, &log.step_id, &timestamped)
+                            .await
+                        {
+                            eprintln!(
+                                "Best-effort Results Service log upload failed for '{}': {e:#}",
+                                log.step_id
+                            );
+                        }
+                        // Upload GITHUB_STEP_SUMMARY content so it renders in the Summary tab.
+                        if !log.summary.is_empty() {
+                            if let Err(e) = client
+                                .upload_step_summary(&plan_id, &job_id, &log.step_id, &log.summary)
                                 .await
-                                .is_ok()
-                                {
-                                    eprintln!(
-                                        "[feed] resent {} lines after reconnect.",
-                                        line_count
-                                    );
-                                    ws_conn = Some(ws2);
-                                }
+                            {
+                                eprintln!(
+                                    "Best-effort step summary upload failed for '{}': {e:#}",
+                                    log.step_id
+                                );
                             }
                         }
                     }
                 }
-                *step_line_counters.entry(log.step_id.clone()).or_insert(1) += line_count;
-            }
 
-            if live_chunk {
-                continue;
-            }
-
-            // Send step completion via Twirp Results Service.
-            if let Some(client) = &twirp_client {
-                let conclusion = if log.skipped {
-                    crate::protocol::StepConclusion::Skipped
-                } else if log.exit_code != 0 && !log.failure_ignored {
-                    crate::protocol::StepConclusion::Failure
-                } else {
-                    crate::protocol::StepConclusion::Success
-                };
-                let step = crate::protocol::TwirpStep {
-                    external_id: log.step_id.clone(),
-                    number: log.order as usize,
-                    name: if log.display_name.is_empty() {
-                        log.step_id.clone()
-                    } else {
-                        log.display_name.clone()
-                    },
-                    status: crate::protocol::StepStatus::Completed as u8,
-                    started_at: if log.started_at.is_empty() {
-                        None
-                    } else {
-                        Some(log.started_at.clone())
-                    },
-                    completed_at: Some(if log.completed_at.is_empty() {
-                        unix_now_iso8601()
-                    } else {
-                        log.completed_at.clone()
-                    }),
-                    conclusion: conclusion as u8,
-                };
-                if let Err(e) = client
-                    .update_steps(&[step], &plan_id, &job_id, change_order)
-                    .await
-                {
+                if let Err(error) = publish_timeline_step_log(&job, &log).await {
                     eprintln!(
-                        "Best-effort Twirp step completion failed for '{}': {e:#}",
+                        "Best-effort timeline step log upload failed for '{}': {error:#}",
                         log.step_id
                     );
                 }
-                change_order += 1;
-
-                // Upload step log blob to Results Service (populates data-log-url in GitHub UI).
-                // Upload for every non-skipped step — even empty — so it is expandable.
-                // LOG FORMAT CONTRACT (docs/log-format-contract.md): blob lines
-                // MUST carry the 7-digit timestamp prefix — the UI strips it
-                // into the "Show timestamps" toggle column.
-                if !log.skipped {
-                    let timestamped = blob_log_lines(&unix_now_iso8601(), &lines);
-                    if let Err(e) = client
-                        .upload_step_log(&plan_id, &job_id, &log.step_id, &timestamped)
-                        .await
-                    {
-                        eprintln!(
-                            "Best-effort Results Service log upload failed for '{}': {e:#}",
-                            log.step_id
-                        );
-                    }
-                    // Upload GITHUB_STEP_SUMMARY content so it renders in the Summary tab.
-                    if !log.summary.is_empty() {
-                        if let Err(e) = client
-                            .upload_step_summary(&plan_id, &job_id, &log.step_id, &log.summary)
-                            .await
-                        {
-                            eprintln!(
-                                "Best-effort step summary upload failed for '{}': {e:#}",
-                                log.step_id
-                            );
-                        }
-                    }
-                }
-            }
-
-            if let Err(error) = publish_timeline_step_log(&job, &log).await {
-                eprintln!(
-                    "Best-effort timeline step log upload failed for '{}': {error:#}",
-                    log.step_id
-                );
             }
         }
         // Close persistent WebSocket after all logs sent.
@@ -3039,14 +3182,185 @@ fn start_step_log_publisher(
     })
 }
 
-fn mask_single_value(line: &str, masks: &[String]) -> String {
-    let mut result = line.to_string();
-    for mask in masks {
-        if !mask.is_empty() {
-            result = result.replace(mask.as_str(), "***");
+type FeedWebSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+struct ProcessedStepLog {
+    log: StepLog,
+    lines: Vec<String>,
+    live_chunk: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LiveFeedBatch {
+    step_id: String,
+    lines: Vec<String>,
+    start_line: i64,
+}
+
+fn step_log_batch(first: StepLog, receiver: &mut UnboundedReceiver<StepLog>) -> Vec<StepLog> {
+    let mut logs = vec![first];
+    loop {
+        match receiver.try_recv() {
+            Ok(log) => logs.push(log),
+            Err(TryRecvError::Empty) => break,
+            Err(TryRecvError::Disconnected) => break,
         }
     }
-    result
+    logs
+}
+
+fn push_live_feed_batch(
+    batches: &mut Vec<LiveFeedBatch>,
+    step_id: &str,
+    start_line: i64,
+    lines: &[String],
+) {
+    if let Some(batch) = batches.iter_mut().find(|batch| {
+        batch.step_id == step_id && batch.start_line + batch.lines.len() as i64 == start_line
+    }) {
+        batch.lines.extend(lines.iter().cloned());
+        return;
+    }
+    batches.push(LiveFeedBatch {
+        step_id: step_id.to_string(),
+        lines: lines.to_vec(),
+        start_line,
+    });
+}
+
+async fn send_live_feed_batch(
+    ws_conn: &mut Option<FeedWebSocket>,
+    feed_client: &Option<crate::protocol::FeedStreamClient>,
+    plan_id: &str,
+    job_id: &str,
+    batch: LiveFeedBatch,
+) {
+    if ws_conn.is_none() {
+        if let Some(client) = feed_client {
+            if let Ok(ws) = client.connect().await {
+                eprintln!("[feed] WebSocket reconnected.");
+                *ws_conn = Some(ws);
+            }
+        }
+    }
+    let Some(ws) = ws_conn.as_mut() else {
+        return;
+    };
+
+    // LOG FORMAT CONTRACT (docs/log-format-contract.md): live feed frames are
+    // rendered VERBATIM by the GitHub UI, which adds its own timestamp column.
+    let feed_lines = live_feed_lines(&batch.lines);
+    if let Err(e) = crate::protocol::FeedStreamClient::send_log_lines(
+        ws,
+        &batch.step_id,
+        feed_lines.clone(),
+        Some(batch.start_line),
+        Some(plan_id),
+        Some(job_id),
+    )
+    .await
+    {
+        eprintln!(
+            "Best-effort WebSocket feed send failed for '{}': {e:#}; reconnecting",
+            batch.step_id
+        );
+        *ws_conn = None;
+        // Reconnect once and resend this batch so no step's live log is lost.
+        if let Some(client) = feed_client {
+            if let Ok(mut ws2) = client.connect().await {
+                if crate::protocol::FeedStreamClient::send_log_lines(
+                    &mut ws2,
+                    &batch.step_id,
+                    feed_lines,
+                    Some(batch.start_line),
+                    Some(plan_id),
+                    Some(job_id),
+                )
+                .await
+                .is_ok()
+                {
+                    eprintln!("[feed] resent {} lines after reconnect.", batch.lines.len());
+                    *ws_conn = Some(ws2);
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MaskPatterns {
+    masks: Vec<String>,
+}
+
+impl MaskPatterns {
+    fn new<I>(masks: I) -> Self
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut masks: Vec<_> = masks.into_iter().filter(|mask| !mask.is_empty()).collect();
+        masks.sort();
+        masks.dedup();
+        Self { masks }
+    }
+
+    fn with_extra(&self, extra: &[String]) -> Masker {
+        let mut masks = self.masks.clone();
+        masks.extend(extra.iter().filter(|mask| !mask.is_empty()).cloned());
+        Masker::new(masks)
+    }
+}
+
+#[derive(Debug)]
+struct Masker {
+    automaton: Option<AhoCorasick>,
+    masks: Vec<String>,
+}
+
+impl Masker {
+    fn new<I>(masks: I) -> Self
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut masks: Vec<_> = masks.into_iter().filter(|mask| !mask.is_empty()).collect();
+        masks.sort();
+        masks.dedup();
+        let automaton = if masks.is_empty() {
+            None
+        } else {
+            AhoCorasick::builder()
+                .match_kind(MatchKind::LeftmostLongest)
+                .build(masks.clone())
+                .ok()
+        };
+        Self { automaton, masks }
+    }
+
+    fn mask(&self, value: &str) -> String {
+        let Some(automaton) = &self.automaton else {
+            return self
+                .masks
+                .iter()
+                .fold(value.to_string(), |value, mask| value.replace(mask, "***"));
+        };
+        let mut masked = String::with_capacity(value.len());
+        automaton.replace_all_with(value, &mut masked, |_mat, _text, dst| {
+            dst.push_str("***");
+            true
+        });
+        masked
+    }
+}
+
+#[cfg(test)]
+fn mask_single_value(line: &str, masks: &[String]) -> String {
+    Masker::new(masks.iter().cloned()).mask(line)
+}
+
+#[cfg(test)]
+fn live_masked_lines(job: &AgentJobRequestMessage, log: &StepLog) -> Vec<String> {
+    let masks = MaskPatterns::new(job_secret_mask_values(job));
+    mask_log_lines_with(&log.lines, &masks.with_extra(&log.masks))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3360,7 +3674,8 @@ fn execute_script_job_inner(
     let mut executor = DockerScriptExecutor::new(command_runner)
         .with_initial_order(checkout_order)
         .with_trailing_post_action_count(cleanup_checkout_plans.len())
-        .with_workflow_env(crate::runtime_env::job_environment_variables(job));
+        .with_workflow_env(crate::runtime_env::job_environment_variables(job))
+        .with_secret_masks(job_secret_mask_values(job));
     if let Some(sender) = step_start_sender {
         executor = executor.with_step_start_sender(sender);
     }
@@ -3555,16 +3870,29 @@ fn safe_environment_url(
 }
 
 fn job_secret_mask_values(job: &AgentJobRequestMessage) -> Vec<String> {
-    job.mask
-        .iter()
-        .filter_map(|mask| mask.value.clone())
-        .chain(
-            job.variables
-                .values()
-                .filter(|variable| variable.is_secret)
-                .filter_map(|variable| variable.value.clone()),
-        )
-        .collect()
+    let mut values = Vec::new();
+    let raw = job.mask.iter().filter_map(|mask| mask.value.clone()).chain(
+        job.variables
+            .values()
+            .filter(|variable| variable.is_secret)
+            .filter_map(|variable| variable.value.clone()),
+    );
+    for value in raw {
+        if value.contains('\n') || value.contains('\r') {
+            for line in value.split(['\n', '\r']) {
+                let line = line.trim();
+                if line.len() >= 3 {
+                    values.push(line.to_string());
+                }
+            }
+        }
+        if !value.is_empty() {
+            values.push(value);
+        }
+    }
+    values.sort();
+    values.dedup();
+    values
 }
 
 fn resolve_checkout_plan_context(
@@ -4202,6 +4530,7 @@ fn append_resolved_action_steps(
             invocation,
             condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
             continue_on_error,
+            timeout_minutes: action.plan.timeout_minutes,
         });
         return Ok(());
     }
@@ -4215,6 +4544,7 @@ fn append_resolved_action_steps(
             invocation: action.javascript_invocation(actions_host)?,
             condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
             continue_on_error,
+            timeout_minutes: action.plan.timeout_minutes,
         }),
         ActionRuntime::Docker { .. } => ordered.push(ExecutableStep::Docker {
             step_id: action.plan.step_id.clone(),
@@ -4222,6 +4552,7 @@ fn append_resolved_action_steps(
             invocation: action.docker_invocation(actions_host)?,
             condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
             continue_on_error,
+            timeout_minutes: action.plan.timeout_minutes,
         }),
         ActionRuntime::Composite => {
             let action_condition =
@@ -4310,6 +4641,7 @@ fn append_native_action_step_from_plan(
         invocation,
         condition: combine_conditions(parent_condition, plan.condition.as_deref()),
         continue_on_error: parent_continue_on_error || plan.continue_on_error,
+        timeout_minutes: plan.timeout_minutes,
     });
     true
 }
@@ -4363,26 +4695,19 @@ fn job_console_log_path(
         .join("console.log")
 }
 
-/// Append one completed step's masked output to the live console file. `lines`
-/// are already job-secret-masked; `step_masks` adds any per-step `::add-mask::`
-/// values so nothing secret reaches `docker logs`.
-fn append_job_console(path: &Path, display_name: &str, lines: &[String], step_masks: &[String]) {
-    use std::io::Write;
+/// Append one step's masked output to the live console file tailed by the job
+/// container. `lines` are already job-secret and step-mask redacted.
+fn append_job_console(writer: &mut BufWriter<fs::File>, display_name: &str, lines: &[String]) {
     let mut out = String::new();
     if !display_name.is_empty() {
         out.push_str(&format!("\n=== {display_name} ===\n"));
     }
     for line in lines {
-        out.push_str(&mask_value(line, step_masks));
+        out.push_str(line);
         out.push('\n');
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = file.write_all(out.as_bytes());
-    }
+    let _ = writer.write_all(out.as_bytes());
+    let _ = writer.flush();
 }
 
 fn unix_now_iso8601() -> String {
@@ -4661,7 +4986,7 @@ fn post_step_display_name(display_name: &str) -> String {
 /// Lines carry the same 7-digit timestamp prefix as GitHub's raw log download
 /// (docs/log-format-contract.md), stamped with the step's completion time.
 fn build_combined_job_log(job: &AgentJobRequestMessage, step_logs: &[StepLog]) -> String {
-    let secret_masks = job_secret_mask_values(job);
+    let secret_masks = MaskPatterns::new(job_secret_mask_values(job));
     let mut out = String::new();
     for log in step_logs {
         if log.skipped {
@@ -4687,8 +5012,9 @@ fn build_combined_job_log(job: &AgentJobRequestMessage, step_logs: &[StepLog]) -
             };
             out.push_str(&format!("{timestamp} ##[group]{name}\n"));
         }
+        let masker = secret_masks.with_extra(&log.masks);
         for line in &log.lines {
-            let masked = mask_value(&mask_single_value(line, &secret_masks), &log.masks);
+            let masked = masker.mask(line);
             out.push_str(&format!("{timestamp} {masked}\n"));
         }
         if !already_grouped {
@@ -4886,20 +5212,128 @@ async fn complete_run_service_job(
         .context("complete run-service job")
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn complete_run_service_job_refreshing(
+    client: &RunServiceClient,
+    stored: &StoredRunnerConfig,
+    run_service_url: &str,
+    job: &AgentJobRequestMessage,
+    result: TaskResult,
+    job_outputs: BTreeMap<String, String>,
+    step_logs: Vec<StepLog>,
+    environment_url: Option<String>,
+    billing_owner_id: Option<String>,
+    infrastructure_failure_category: Option<String>,
+    publish_completion_timeline_logs: bool,
+) -> Result<()> {
+    let first = complete_run_service_job(
+        client,
+        run_service_url,
+        job,
+        result,
+        job_outputs.clone(),
+        step_logs.clone(),
+        environment_url.clone(),
+        billing_owner_id.clone(),
+        infrastructure_failure_category.clone(),
+        publish_completion_timeline_logs,
+    )
+    .await;
+    if !first
+        .as_ref()
+        .err()
+        .is_some_and(|error| should_refresh_completion_after_error(error, false))
+    {
+        return first;
+    }
+
+    let refreshed = refresh_run_service_client(stored).await?;
+    complete_run_service_job(
+        &refreshed,
+        run_service_url,
+        job,
+        result,
+        job_outputs,
+        step_logs,
+        environment_url,
+        billing_owner_id,
+        infrastructure_failure_category,
+        publish_completion_timeline_logs,
+    )
+    .await
+}
+
+fn should_refresh_completion_after_error(error: &anyhow::Error, already_refreshed: bool) -> bool {
+    !already_refreshed && is_credential_poll_error(error)
+}
+
+fn acquired_job_identity(value: &Value) -> Option<AcquiredJobIdentity> {
+    let plan = acquired_object_field(value, &["plan", "Plan"])?;
+    Some(AcquiredJobIdentity {
+        plan_id: acquired_string_field(plan, &["planId", "PlanId"])?.to_string(),
+        job_id: acquired_string_field(value, &["jobId", "JobId"])?.to_string(),
+    })
+}
+
+fn acquired_object_field<'a>(value: &'a Value, names: &[&str]) -> Option<&'a Value> {
+    names.iter().find_map(|name| value.get(*name))
+}
+
+fn acquired_string_field<'a>(value: &'a Value, names: &[&str]) -> Option<&'a str> {
+    acquired_object_field(value, names).and_then(Value::as_str)
+}
+
+fn failed_acquired_job_completion(
+    identity: &AcquiredJobIdentity,
+    billing_owner_id: Option<String>,
+    infrastructure_failure_category: Option<String>,
+) -> RunServiceCompleteJob {
+    RunServiceCompleteJob {
+        plan_id: identity.plan_id.clone(),
+        job_id: identity.job_id.clone(),
+        conclusion: TaskResult::Failed,
+        outputs: BTreeMap::new(),
+        step_results: Vec::new(),
+        annotations: Vec::new(),
+        telemetry: Vec::new(),
+        environment_url: None,
+        billing_owner_id,
+        infrastructure_failure_category,
+    }
+}
+
+async fn complete_acquired_job_failure(
+    run_service_job: &RunServiceJobContext,
+    identity: &AcquiredJobIdentity,
+    infrastructure_failure_category: Option<String>,
+) -> Result<()> {
+    run_service_job
+        .client
+        .complete_job(
+            &run_service_job.run_service_url,
+            failed_acquired_job_completion(
+                identity,
+                run_service_job.billing_owner_id.clone(),
+                infrastructure_failure_category,
+            ),
+        )
+        .await
+        .context("complete acquired run-service job after infrastructure failure")
+}
+
 fn run_service_telemetry(
     job: &AgentJobRequestMessage,
     step_logs: &[StepLog],
 ) -> Vec<RunServiceTelemetry> {
-    let masks = job_secret_mask_values(job);
+    let masks = MaskPatterns::new(job_secret_mask_values(job));
     let mut seen = BTreeSet::new();
     step_logs
         .iter()
         .flat_map(|log| log.telemetry.iter().map(move |telemetry| (log, telemetry)))
         .map(|(log, telemetry)| {
-            let mut all_masks = masks.clone();
-            all_masks.extend(log.masks.iter().cloned());
+            let masker = masks.with_extra(&log.masks);
             RunServiceTelemetry {
-                message: mask_value(&telemetry.message, &all_masks),
+                message: masker.mask(&telemetry.message),
                 kind: telemetry.kind.clone(),
             }
         })
@@ -4970,12 +5404,9 @@ async fn publish_timeline_logs(job: &AgentJobRequestMessage, step_logs: &[StepLo
             records,
         )
         .await?;
+    let job_masks = MaskPatterns::new(job_secret_mask_values(job));
     for log in step_logs {
-        let masks = job_secret_mask_values(job)
-            .into_iter()
-            .chain(log.masks.iter().cloned())
-            .collect::<Vec<_>>();
-        let lines = mask_log_lines(&log.lines, &masks);
+        let lines = mask_log_lines_with(&log.lines, &job_masks.with_extra(&log.masks));
         if lines.is_empty() {
             continue;
         }
@@ -5011,11 +5442,8 @@ async fn publish_timeline_step_log(job: &AgentJobRequestMessage, log: &StepLog) 
         )
         .await?;
 
-    let masks = job_secret_mask_values(job)
-        .into_iter()
-        .chain(log.masks.iter().cloned())
-        .collect::<Vec<_>>();
-    let lines = mask_log_lines(&log.lines, &masks);
+    let job_masks = MaskPatterns::new(job_secret_mask_values(job));
+    let lines = mask_log_lines_with(&log.lines, &job_masks.with_extra(&log.masks));
     if !lines.is_empty() {
         context
             .client
@@ -5115,15 +5543,18 @@ fn timeline_records_for_step_logs(
         .collect()
 }
 
+#[cfg(test)]
 fn mask_log_lines(lines: &[String], masks: &[String]) -> Vec<String> {
-    lines.iter().map(|line| mask_value(line, masks)).collect()
+    mask_log_lines_with(lines, &Masker::new(masks.iter().cloned()))
 }
 
+#[cfg(test)]
 fn mask_value(value: &str, masks: &[String]) -> String {
-    masks
-        .iter()
-        .filter(|mask| !mask.is_empty())
-        .fold(value.to_string(), |value, mask| value.replace(mask, "***"))
+    Masker::new(masks.iter().cloned()).mask(value)
+}
+
+fn mask_log_lines_with(lines: &[String], masker: &Masker) -> Vec<String> {
+    lines.iter().map(|line| masker.mask(line)).collect()
 }
 
 fn current_time_rfc3339() -> Result<String> {
@@ -5192,7 +5623,7 @@ fn step_log_result(step_log: &StepLog) -> TaskResult {
     }
 }
 
-async fn oauth_access_token(stored: &StoredRunnerConfig) -> Result<String> {
+async fn oauth_access_token(stored: &StoredRunnerConfig) -> Result<OAuthAccessToken> {
     let credentials = stored
         .credentials
         .as_ref()
@@ -5203,7 +5634,10 @@ async fn oauth_access_token(stored: &StoredRunnerConfig) -> Result<String> {
             .data
             .get("token")
             .and_then(|value| value.as_str())
-            .map(ToOwned::to_owned)
+            .map(|token| OAuthAccessToken {
+                token: token.to_string(),
+                expires_in: None,
+            })
             .ok_or_else(|| anyhow::anyhow!("OAuthAccessToken credentials missing token")),
         CredentialScheme::OAuth => {
             let oauth = OAuthJwtCredentials {
@@ -5571,6 +6005,21 @@ mod tests {
         );
         assert!(huge <= 600 + 14, "cap plus bounded jitter: {huge}");
     }
+
+    #[test]
+    fn drain_slot_decisions_keep_busy_jobs_running() {
+        assert_eq!(slot_action_on_poll(false, false), SlotAction::Continue);
+        assert_eq!(slot_action_on_poll(false, true), SlotAction::Continue);
+        assert_eq!(
+            slot_action_on_poll(true, false),
+            SlotAction::DeregisterAndExit
+        );
+        assert_eq!(
+            slot_action_on_poll(true, true),
+            SlotAction::FinishJobThenExit
+        );
+    }
+
     use crate::protocol::TaskAgentMessage;
     use crate::script_step::StepCommandTelemetry;
     use std::{
@@ -5617,6 +6066,30 @@ mod tests {
         let actions = due_idle_health_actions(&health, later, None);
         assert!(actions.contains(&IdleHealthAction::RefreshToken));
         assert!(actions.contains(&IdleHealthAction::CheckRegistry));
+    }
+
+    #[test]
+    fn refresh_deadline_scales_with_expires_in() {
+        assert_eq!(
+            token_refresh_deadline(Some(Duration::from_secs(1800))),
+            Duration::from_secs(1188)
+        );
+        assert_eq!(
+            token_refresh_deadline(None),
+            Duration::from_secs(IDLE_TOKEN_REFRESH_SECONDS)
+        );
+    }
+
+    #[test]
+    fn idle_health_token_refresh_uses_expires_in() {
+        let now = Instant::now();
+        let mut health = IdleSlotHealth::new(now);
+        health.token_expires_in = Some(Duration::from_secs(1800));
+        let later = now + Duration::from_secs(1188);
+
+        assert!(
+            due_idle_health_actions(&health, later, None).contains(&IdleHealthAction::RefreshToken)
+        );
     }
 
     #[test]
@@ -5705,16 +6178,54 @@ mod tests {
     }
 
     #[test]
-    fn credential_poll_errors_detected_by_status() {
-        assert!(is_credential_poll_error(&anyhow::anyhow!(
-            "get broker message failed: status=401, body="
-        )));
-        assert!(is_credential_poll_error(&anyhow::anyhow!(
-            "get broker message failed: status=403, body=denied"
-        )));
-        assert!(!is_credential_poll_error(&anyhow::anyhow!(
-            "get broker message failed: status=500, body=oops"
-        )));
+    fn renew_fast_retry_delay_is_short() {
+        assert_eq!(renewal_retry_delay(0), Duration::from_secs(25));
+        assert_eq!(renewal_retry_delay(1), Duration::from_secs(5));
+        assert_eq!(renewal_retry_delay(2), Duration::from_secs(10));
+        assert!(renewal_retry_delay(1) < Duration::from_secs(25));
+    }
+
+    #[test]
+    fn github_api_error_classifies_by_status() {
+        let auth_error = anyhow::Error::from(GitHubApiError {
+            status: 401,
+            action: "get broker message".into(),
+            body: String::new(),
+        });
+        let forbidden_error = anyhow::Error::from(GitHubApiError {
+            status: 403,
+            action: "get broker message".into(),
+            body: "denied".into(),
+        });
+        let server_error = anyhow::Error::from(GitHubApiError {
+            status: 500,
+            action: "get broker message".into(),
+            body: "oops".into(),
+        });
+        let string_error = anyhow::anyhow!("get broker message failed: status=401, body=");
+
+        assert!(is_credential_poll_error(&auth_error));
+        assert!(is_credential_poll_error(&forbidden_error));
+        assert!(!is_credential_poll_error(&server_error));
+        assert!(!is_credential_poll_error(&string_error));
+    }
+
+    #[test]
+    fn completion_retries_after_refresh_on_401() {
+        let auth_error = anyhow::Error::from(GitHubApiError {
+            status: 401,
+            action: "complete run-service job".into(),
+            body: String::new(),
+        });
+        let server_error = anyhow::Error::from(GitHubApiError {
+            status: 500,
+            action: "complete run-service job".into(),
+            body: String::new(),
+        });
+
+        assert!(should_refresh_completion_after_error(&auth_error, false));
+        assert!(!should_refresh_completion_after_error(&auth_error, true));
+        assert!(!should_refresh_completion_after_error(&server_error, false));
     }
 
     #[test]
@@ -6546,6 +7057,62 @@ jobs:
     }
 
     #[test]
+    fn acquired_job_identity_reads_raw_job_ids() {
+        let lower = serde_json::json!({
+            "plan": { "planId": "plan-lower" },
+            "jobId": "job-lower"
+        });
+        let upper = serde_json::json!({
+            "Plan": { "PlanId": "plan-upper" },
+            "JobId": "job-upper"
+        });
+
+        assert_eq!(
+            acquired_job_identity(&lower),
+            Some(AcquiredJobIdentity {
+                plan_id: "plan-lower".into(),
+                job_id: "job-lower".into(),
+            })
+        );
+        assert_eq!(
+            acquired_job_identity(&upper),
+            Some(AcquiredJobIdentity {
+                plan_id: "plan-upper".into(),
+                job_id: "job-upper".into(),
+            })
+        );
+        assert_eq!(acquired_job_identity(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn complete_acquired_job_failure_builds_failed_completion() {
+        let completion = failed_acquired_job_completion(
+            &AcquiredJobIdentity {
+                plan_id: "plan-1".into(),
+                job_id: "job-1".into(),
+            },
+            Some("billing-owner".into()),
+            Some("executor_panic".into()),
+        );
+
+        assert_eq!(completion.plan_id, "plan-1");
+        assert_eq!(completion.job_id, "job-1");
+        assert_eq!(completion.conclusion, TaskResult::Failed);
+        assert_eq!(
+            completion.infrastructure_failure_category.as_deref(),
+            Some("executor_panic")
+        );
+        assert_eq!(
+            completion.billing_owner_id.as_deref(),
+            Some("billing-owner")
+        );
+        assert!(completion.outputs.is_empty());
+        assert!(completion.step_results.is_empty());
+        assert!(completion.annotations.is_empty());
+        assert!(completion.telemetry.is_empty());
+    }
+
+    #[test]
     fn timeline_records_include_step_issue_counts() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
@@ -6685,6 +7252,146 @@ jobs:
     }
 
     #[test]
+    fn multiline_secret_is_masked_per_line() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "variables": {
+                "MULTILINE_SECRET": {
+                    "value": "line-one-secret\nline-two-secret",
+                    "isSecret": true
+                }
+            }
+        }))
+        .unwrap();
+
+        let masks = job_secret_mask_values(&job);
+
+        assert!(masks.contains(&"line-one-secret".to_string()));
+        assert!(masks.contains(&"line-two-secret".to_string()));
+        assert_eq!(mask_single_value("line-two-secret", &masks), "***");
+    }
+
+    #[test]
+    fn short_secret_lines_do_not_overmask() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1,
+            "variables": {
+                "MULTILINE_SECRET": {
+                    "value": "ab\nverylongsecretvalue",
+                    "isSecret": true
+                }
+            }
+        }))
+        .unwrap();
+
+        let masks = job_secret_mask_values(&job);
+
+        assert!(!masks.contains(&"ab".to_string()));
+        assert!(masks.contains(&"verylongsecretvalue".to_string()));
+    }
+
+    #[test]
+    fn live_feed_masks_add_mask_values() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Check",
+            "requestId": 1
+        }))
+        .unwrap();
+        let log = StepLog {
+            step_id: "step-1".into(),
+            display_name: String::new(),
+            order: 1,
+            started_at: String::new(),
+            completed_at: String::new(),
+            lines: vec!["echo dynsecret".into()],
+            masks: vec!["dynsecret".into()],
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        };
+
+        assert_eq!(live_masked_lines(&job, &log), vec!["echo ***".to_string()]);
+    }
+
+    #[test]
+    fn feed_batches_multiple_lines_in_one_frame() {
+        let mut batches = Vec::new();
+        push_live_feed_batch(&mut batches, "step-1", 1, &["one".into(), "two".into()]);
+        push_live_feed_batch(&mut batches, "step-1", 3, &["three".into()]);
+        push_live_feed_batch(&mut batches, "step-2", 1, &["other".into()]);
+
+        assert_eq!(
+            batches,
+            vec![
+                LiveFeedBatch {
+                    step_id: "step-1".into(),
+                    start_line: 1,
+                    lines: vec!["one".into(), "two".into(), "three".into()],
+                },
+                LiveFeedBatch {
+                    step_id: "step-2".into(),
+                    start_line: 1,
+                    lines: vec!["other".into()],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn aho_masking_matches_legacy_for_non_prefix_masks() {
+        let masks = vec!["alpha-secret".to_string(), "omega-secret".to_string()];
+        for input in [
+            "alpha-secret",
+            "prefix alpha-secret suffix omega-secret",
+            "ordinary line",
+        ] {
+            assert_eq!(mask_value(input, &masks), legacy_mask_value(input, &masks));
+        }
+    }
+
+    #[test]
+    fn aho_masking_prefers_longest_prefix_secret() {
+        let masks = vec!["token".to_string(), "token-long".to_string()];
+        let masked = mask_value("value=token-long", &masks);
+
+        assert_eq!(masked, "value=***");
+        assert!(!masked.contains("long"));
+    }
+
+    #[test]
+    fn aho_masking_preserves_multiline_and_add_mask_coverage() {
+        let masks = vec![
+            "line-one-secret".to_string(),
+            "line-two-secret".to_string(),
+            "dynsecret".to_string(),
+        ];
+
+        assert_eq!(mask_value("line-one-secret", &masks), "***");
+        assert_eq!(mask_value("line-two-secret", &masks), "***");
+        assert_eq!(mask_value("echo dynsecret", &masks), "echo ***");
+    }
+
+    #[test]
     fn run_service_telemetry_masks_step_and_job_secrets() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
@@ -6738,6 +7445,13 @@ jobs:
             "DeprecatedCommand: set-output *** ***"
         );
         assert_eq!(telemetry[0].kind, "ActionCommand");
+    }
+
+    fn legacy_mask_value(value: &str, masks: &[String]) -> String {
+        masks
+            .iter()
+            .filter(|mask| !mask.is_empty())
+            .fold(value.to_string(), |value, mask| value.replace(mask, "***"))
     }
 
     #[test]
@@ -7174,6 +7888,7 @@ runs:
             lfs: false,
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let context_data = vec![(
             "needs".to_string(),
@@ -7208,6 +7923,7 @@ runs:
             lfs: false,
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
 
         let resolved = resolve_checkout_plan_context(plan, &[], &[]);
@@ -7235,6 +7951,7 @@ runs:
             lfs: false,
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let base_env = vec![("GITHUB_SHA".to_string(), "abc123".to_string())];
 
@@ -7294,6 +8011,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let resolved = ResolvedAction {
             plan: nested_plan,
@@ -7374,6 +8092,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let sub_plan = RepositoryActionPlan {
             step_id: "sub".into(),
@@ -7386,6 +8105,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let root_metadata =
             parse_action_metadata("runs:\n  using: node20\n  main: root.js\n").unwrap();
@@ -7452,6 +8172,7 @@ runs:
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             };
             let resolved = vec![ResolvedAction {
                 plan: plan.clone(),
@@ -7580,6 +8301,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let metadata = parse_action_metadata(
             r#"
@@ -7737,6 +8459,7 @@ runs:
             env: Vec::new(),
             condition: Some("runner.os == 'Linux'".into()),
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let metadata = parse_action_metadata(
             r#"
@@ -7815,6 +8538,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: true,
+            timeout_minutes: None,
         };
         let pages_metadata = parse_action_metadata(
             r#"
@@ -7837,6 +8561,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let upload_metadata =
             parse_action_metadata("runs:\n  using: node20\n  main: dist/upload/index.js\n")
@@ -7892,7 +8617,7 @@ runs:
         match value {
             serde_yaml::Value::Mapping(mapping) => {
                 for (key, value) in mapping {
-                    if key.as_str() == Some("uses") {
+                    if key == "uses" {
                         if let Some(reference) = target_repository_uses(value) {
                             references.insert(
                                 format!(
@@ -8183,6 +8908,7 @@ runs:
             lfs: false,
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let trace = vec![
             "[command]git init /work".to_string(),

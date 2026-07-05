@@ -1,5 +1,9 @@
 # Checklist: Target Workflow Coverage
 
+> **Superseded — shipped.** This checklist is archived with the completed Phase
+> 0 prompt; do not work unchecked items top-to-bottom. Current direction and
+> follow-ups live in [`../docs/master-plan.md`](../docs/master-plan.md).
+
 Goal: [target-workflow-coverage.md](target-workflow-coverage.md). Work
 top-to-bottom. Prove every fix against the fixture (never edit the fixture).
 

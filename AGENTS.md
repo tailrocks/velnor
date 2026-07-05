@@ -57,6 +57,12 @@ The fixture defines the contract. Velnor must meet it — not the other way arou
 
 Also applies to: `fixture_required_snippets` audits, `check-fixture-lanes` checks, and all fixture-related tooling. Strengthen coverage; never weaken it.
 
+## HARD RULE: Never commit rendered GitHub HTML captures
+
+Lane-comparison evidence under `.velnor-compare/` may include sanitized `.log`,
+`.json`, `.md`, and archive artifacts. Never commit saved/rendered GitHub HTML
+pages there: those pages embed live channel/visitor tokens in attributes.
+
 ## HARD RULE: Always use the latest protocol version and approach
 
 When comparing to `actions/runner` or any GitHub Actions protocol: **always target the latest implementation, never legacy approaches.**

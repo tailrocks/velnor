@@ -1,5 +1,9 @@
 # Goal: Target Workflow Coverage
 
+> **Superseded — shipped.** This Phase 0 goal is complete; do not start a new
+> `/goal` run from this prompt. Current direction and any follow-up work live in
+> [`../docs/master-plan.md`](../docs/master-plan.md).
+
 > **Mission:** see [`../docs/mission.md`](../docs/mission.md). Coverage is not generic — it is
 > **Rust-first**. Adapters should be pre-cached and pre-optimized for the latest
 > Rust toolchain/tools, exploit the beefy self-hosted host (parallelism,

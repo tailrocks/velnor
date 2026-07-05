@@ -1,4 +1,5 @@
 mod action;
+mod cache;
 mod checkout;
 mod cli;
 mod command_files;
@@ -42,6 +43,7 @@ async fn main() -> Result<()> {
     telemetry::init(telemetry_dir.as_deref());
 
     match cli.command {
+        Command::Cache(args) => cache::run(args),
         Command::Configure(args) => runner::configure(args).await,
         Command::Daemon(args) => runner::daemon(args).await,
         Command::Preflight(args) => preflight::preflight(args),

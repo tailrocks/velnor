@@ -23,6 +23,7 @@ pub struct ScriptStep {
     pub env: Vec<(String, String)>,
     pub condition: Option<String>,
     pub continue_on_error: bool,
+    pub timeout_minutes: Option<u64>,
 }
 
 pub fn github_script_steps(
@@ -145,6 +146,7 @@ fn github_script_step_with_context(
         env: step_environment(step)?,
         condition: step.condition.clone(),
         continue_on_error: step_continue_on_error(step),
+        timeout_minutes: step_timeout_minutes(step),
     })
 }
 
@@ -579,6 +581,26 @@ pub(crate) fn step_continue_on_error(step: &ActionStep) -> bool {
     step.continue_on_error.as_ref().is_some_and(value_truthy)
 }
 
+pub(crate) fn step_timeout_minutes(step: &ActionStep) -> Option<u64> {
+    step.timeout_in_minutes
+        .as_ref()
+        .and_then(timeout_minutes_value)
+}
+
+pub(crate) fn timeout_minutes_value(value: &Value) -> Option<u64> {
+    match value {
+        Value::Number(value) => value.as_u64().filter(|value| *value > 0),
+        Value::String(value) => value.trim().parse::<u64>().ok().filter(|value| *value > 0),
+        Value::Object(object) => object
+            .get("value")
+            .or_else(|| object.get("Value"))
+            .or_else(|| object.get("lit"))
+            .or_else(|| object.get("Lit"))
+            .and_then(timeout_minutes_value),
+        _ => None,
+    }
+}
+
 pub(crate) fn value_truthy(value: &Value) -> bool {
     match value {
         Value::Bool(value) => *value,
@@ -998,6 +1020,7 @@ mod tests {
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
 
         let plan = ScriptStepPlan::prepare(&step, &temp).unwrap();
@@ -1024,6 +1047,7 @@ mod tests {
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let plan = ScriptStepPlan::prepare(&step, &temp).unwrap();
 
@@ -1068,6 +1092,7 @@ mod tests {
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let plan = ScriptStepPlan::prepare_with_path(
             &step,
@@ -1091,6 +1116,7 @@ mod tests {
                 "displayName": "Run tests",
                 "enabled": true,
                 "continueOnError": true,
+                "timeoutInMinutes": { "value": "7" },
                 "reference": { "type": "Script" },
                 "inputs": {
                     "script": "cargo test",
@@ -1135,6 +1161,22 @@ mod tests {
             ]
         );
         assert!(mapped[0].continue_on_error);
+        assert_eq!(mapped[0].timeout_minutes, Some(7));
+    }
+
+    #[test]
+    fn maps_timeout_minutes_from_run_service_value_shapes() {
+        assert_eq!(timeout_minutes_value(&serde_json::json!(12)), Some(12));
+        assert_eq!(timeout_minutes_value(&serde_json::json!("15")), Some(15));
+        assert_eq!(
+            timeout_minutes_value(&serde_json::json!({"Value": 30})),
+            Some(30)
+        );
+        assert_eq!(timeout_minutes_value(&serde_json::json!("0")), None);
+        assert_eq!(
+            timeout_minutes_value(&serde_json::json!("not-a-number")),
+            None
+        );
     }
 
     #[test]

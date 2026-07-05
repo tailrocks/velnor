@@ -20,7 +20,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{ArgAction, Args};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
@@ -39,6 +39,15 @@ pub struct LaneCompareArgs {
     /// Workflow file used to resolve the latest run when --run-id is omitted.
     #[arg(long, default_value = "compat.yml")]
     pub workflow: String,
+    /// Compare recent both-lane runs against a timing/parity baseline.
+    #[arg(long)]
+    pub watch: bool,
+    /// Velnor-vs-GitHub slowdown percentage tolerated above the baseline.
+    #[arg(long, default_value_t = 25.0)]
+    pub regress_threshold: f64,
+    /// Number of recent completed both-lane runs to inspect in --watch mode.
+    #[arg(long, default_value_t = 5)]
+    pub since: usize,
     /// Compare exactly this GitHub-lane job id (skips name-based pairing).
     #[arg(long, requires = "velnor_job")]
     pub github_job: Option<u64>,
@@ -106,6 +115,9 @@ struct LaneLogStats {
 
 pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
     super::validate_repo_slug("--repo", &args.repo)?;
+    if args.watch {
+        return lane_compare_watch(root, args);
+    }
     let run_id = match args.run_id {
         Some(id) => id,
         None => super::latest_fixture_run_id(&args.repo, &args.workflow)?,
@@ -241,6 +253,107 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
         bail!("lane-compare gate failed: {worse_total} worse row(s); see report above");
     }
     Ok(())
+}
+
+fn lane_compare_watch(root: &Path, args: LaneCompareArgs) -> Result<()> {
+    if args.github_job.is_some() || args.velnor_job.is_some() {
+        bail!("--watch compares paired jobs discovered from runs; omit --github-job/--velnor-job");
+    }
+    if args.run_id.is_some() {
+        bail!("--watch selects recent runs from --workflow; omit --run-id");
+    }
+    if args.since < 2 {
+        bail!("--watch requires --since >= 2 so one current run can be checked against a baseline");
+    }
+    if args.regress_threshold < 0.0 {
+        bail!("--regress-threshold must be non-negative");
+    }
+
+    let run_ids = recent_completed_run_ids(&args.repo, &args.workflow, args.since)?;
+    if run_ids.len() < 2 {
+        bail!(
+            "need at least two completed both-lane runs for --watch; found {}",
+            run_ids.len()
+        );
+    }
+
+    let out_dir = if args.output_dir.is_absolute() {
+        args.output_dir.clone()
+    } else {
+        root.join(&args.output_dir)
+    };
+    let watch_dir = out_dir.join("lane-compare-watch");
+    fs::create_dir_all(&watch_dir)
+        .with_context(|| format!("create output directory {}", watch_dir.display()))?;
+
+    let mut samples = Vec::new();
+    for run_id in run_ids {
+        samples.push(lane_stats_for_run(&args.repo, run_id)?);
+    }
+    let current = samples
+        .first()
+        .cloned()
+        .context("recent run sample unexpectedly empty")?;
+    let baseline = baseline_from_samples(&samples[1..])
+        .context("recent run sample did not contain a usable baseline")?;
+    let verdict = is_regression(&baseline, &current, args.regress_threshold);
+
+    let report = regression_report(&args.repo, &args.workflow, &baseline, &current, &verdict)?;
+    let report_path = watch_dir.join("report.md");
+    fs::write(&report_path, &report).with_context(|| format!("write {}", report_path.display()))?;
+    let json_path = watch_dir.join("latest-stats.json");
+    fs::write(&json_path, serde_json::to_vec_pretty(&current)?)
+        .with_context(|| format!("write {}", json_path.display()))?;
+
+    println!("{report}");
+    println!("report: {}", report_path.display());
+    println!("stats: {}", json_path.display());
+
+    if verdict.regression {
+        bail!(
+            "lane-compare regression gate failed: {}",
+            verdict.reasons.join("; ")
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct RunListItem {
+    #[serde(rename = "databaseId")]
+    database_id: u64,
+    status: String,
+}
+
+fn recent_completed_run_ids(repo: &str, workflow: &str, limit: usize) -> Result<Vec<u64>> {
+    let output = Command::new("gh")
+        .args([
+            "run",
+            "list",
+            "--repo",
+            repo,
+            "--workflow",
+            workflow,
+            "--limit",
+            &limit.max(2).to_string(),
+            "--json",
+            "databaseId,status",
+        ])
+        .output()
+        .with_context(|| format!("spawn gh run list for {repo} {workflow}"))?;
+    if !output.status.success() {
+        bail!(
+            "gh run list failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let runs: Vec<RunListItem> =
+        serde_json::from_slice(&output.stdout).context("parse gh run list output")?;
+    Ok(runs
+        .into_iter()
+        .filter(|run| run.status == "completed")
+        .map(|run| run.database_id)
+        .collect())
 }
 
 fn save_jobs_json(run_dir: &Path, jobs: &[Job]) -> Result<()> {
@@ -486,6 +599,227 @@ fn pair_lane_jobs(jobs: &[Job]) -> Vec<(Job, Job)> {
         .collect()
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct LaneStats {
+    pub run_id: u64,
+    pub baseline_runs: usize,
+    pub parity_worse_rows: usize,
+    pub jobs: BTreeMap<String, JobClassStats>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct JobClassStats {
+    pub github_seconds: f64,
+    pub velnor_seconds: f64,
+}
+
+impl JobClassStats {
+    fn velnor_ratio(self) -> Option<f64> {
+        if self.github_seconds > 0.0 && self.velnor_seconds >= 0.0 {
+            Some(self.velnor_seconds / self.github_seconds)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegressionVerdict {
+    pub regression: bool,
+    pub reasons: Vec<String>,
+}
+
+pub fn is_regression(
+    baseline: &LaneStats,
+    current: &LaneStats,
+    threshold_pct: f64,
+) -> RegressionVerdict {
+    let mut reasons = Vec::new();
+    if current.parity_worse_rows > 0 {
+        reasons.push(format!(
+            "parity diff: {} worse row(s)",
+            current.parity_worse_rows
+        ));
+    }
+
+    let multiplier = 1.0 + threshold_pct.max(0.0) / 100.0;
+    for (job_class, current_stats) in &current.jobs {
+        let Some(current_ratio) = current_stats.velnor_ratio() else {
+            continue;
+        };
+        let baseline_ratio = baseline
+            .jobs
+            .get(job_class)
+            .and_then(|stats| stats.velnor_ratio())
+            .unwrap_or(1.0);
+        if current_ratio > baseline_ratio * multiplier {
+            reasons.push(format!(
+                "{job_class}: velnor/github ratio {:.2} exceeds baseline {:.2} by >{threshold_pct:.1}%",
+                current_ratio, baseline_ratio
+            ));
+        }
+    }
+
+    RegressionVerdict {
+        regression: !reasons.is_empty(),
+        reasons,
+    }
+}
+
+fn lane_stats_for_run(repo: &str, run_id: u64) -> Result<LaneStats> {
+    let jobs = fetch_run_jobs(repo, run_id)?;
+    let pairs = pair_lane_jobs(&jobs);
+    if pairs.is_empty() {
+        bail!("run {run_id} has no both-lane job pairs");
+    }
+
+    let mut stats = LaneStats {
+        run_id,
+        baseline_runs: 1,
+        parity_worse_rows: 0,
+        jobs: BTreeMap::new(),
+    };
+    for (github, velnor) in &pairs {
+        let github_html = fetch_job_html_steps(github).unwrap_or_default();
+        let velnor_html = fetch_job_html_steps(velnor).unwrap_or_default();
+        let (_section, worse) = compare_pair(
+            github,
+            velnor,
+            &github_html,
+            &velnor_html,
+            LaneLogStats::default(),
+            LaneLogStats::default(),
+        )?;
+        stats.parity_worse_rows += worse;
+        stats.jobs.insert(
+            pair_key(&github.name),
+            JobClassStats {
+                github_seconds: job_duration_seconds(github).unwrap_or_default() as f64,
+                velnor_seconds: job_duration_seconds(velnor).unwrap_or_default() as f64,
+            },
+        );
+    }
+    Ok(stats)
+}
+
+fn baseline_from_samples(samples: &[LaneStats]) -> Option<LaneStats> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sums: BTreeMap<String, (f64, f64, usize)> = BTreeMap::new();
+    for sample in samples {
+        for (job_class, stats) in &sample.jobs {
+            let entry = sums.entry(job_class.clone()).or_default();
+            entry.0 += stats.github_seconds;
+            entry.1 += stats.velnor_seconds;
+            entry.2 += 1;
+        }
+    }
+    let jobs = sums
+        .into_iter()
+        .filter_map(|(job_class, (github, velnor, count))| {
+            (count > 0).then_some((
+                job_class,
+                JobClassStats {
+                    github_seconds: github / count as f64,
+                    velnor_seconds: velnor / count as f64,
+                },
+            ))
+        })
+        .collect();
+    Some(LaneStats {
+        run_id: 0,
+        baseline_runs: samples.len(),
+        parity_worse_rows: samples
+            .iter()
+            .map(|sample| sample.parity_worse_rows)
+            .sum::<usize>()
+            / samples.len(),
+        jobs,
+    })
+}
+
+fn regression_report(
+    repo: &str,
+    workflow: &str,
+    baseline: &LaneStats,
+    current: &LaneStats,
+    verdict: &RegressionVerdict,
+) -> Result<String> {
+    let mut report = String::new();
+    writeln!(report, "# Lane Compare Watch")?;
+    writeln!(report)?;
+    writeln!(report, "Repository: `{repo}`")?;
+    writeln!(report, "Workflow: `{workflow}`")?;
+    writeln!(report, "Current run: `{}`", current.run_id)?;
+    writeln!(report, "Baseline sample size: `{}`", baseline.baseline_runs)?;
+    writeln!(report)?;
+    writeln!(
+        report,
+        "| job class | baseline gh | baseline velnor | current gh | current velnor | ratio delta |"
+    )?;
+    writeln!(
+        report,
+        "|-----------|-------------|-----------------|------------|----------------|-------------|"
+    )?;
+    for (job_class, current_stats) in &current.jobs {
+        let baseline_stats = baseline.jobs.get(job_class).copied().unwrap_or_default();
+        let baseline_ratio = baseline_stats.velnor_ratio().unwrap_or_default();
+        let current_ratio = current_stats.velnor_ratio().unwrap_or_default();
+        writeln!(
+            report,
+            "| {job_class} | {:.1}s | {:.1}s | {:.1}s | {:.1}s | {:.2} -> {:.2} |",
+            baseline_stats.github_seconds,
+            baseline_stats.velnor_seconds,
+            current_stats.github_seconds,
+            current_stats.velnor_seconds,
+            baseline_ratio,
+            current_ratio,
+        )?;
+    }
+    writeln!(report)?;
+    writeln!(
+        report,
+        "Parity worse rows in current run: `{}`",
+        current.parity_worse_rows
+    )?;
+    writeln!(report)?;
+    if verdict.regression {
+        writeln!(report, "## Result")?;
+        writeln!(report)?;
+        writeln!(report, "**FAIL**")?;
+        for reason in &verdict.reasons {
+            writeln!(report, "- {reason}")?;
+        }
+    } else {
+        writeln!(report, "## Result")?;
+        writeln!(report)?;
+        writeln!(
+            report,
+            "**PASS** — no parity or timing regression detected."
+        )?;
+    }
+    Ok(report)
+}
+
+fn job_duration_seconds(job: &Job) -> Option<i64> {
+    let mut started = None;
+    let mut completed = None;
+    for step in &job.steps {
+        let step_start = parse_rfc3339(step.started_at.as_deref()?);
+        let step_end = parse_rfc3339(step.completed_at.as_deref()?);
+        if let (Some(step_start), Some(step_end)) = (step_start, step_end) {
+            started = Some(started.map_or(step_start, |current: time::OffsetDateTime| {
+                current.min(step_start)
+            }));
+            completed = Some(completed.map_or(step_end, |current: time::OffsetDateTime| {
+                current.max(step_end)
+            }));
+        }
+    }
+    Some((completed? - started?).whole_seconds())
+}
+
 enum AlignedRow<'a> {
     Pair(&'a Step, &'a Step),
     GitHubOnly(&'a Step),
@@ -605,12 +939,13 @@ fn strip_blob_timestamp(line: &str) -> Option<&str> {
 }
 
 fn step_duration_seconds(step: &Step) -> Option<i64> {
-    let parse = |value: &str| {
-        time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()
-    };
-    let started = parse(step.started_at.as_deref()?)?;
-    let completed = parse(step.completed_at.as_deref()?)?;
+    let started = parse_rfc3339(step.started_at.as_deref()?)?;
+    let completed = parse_rfc3339(step.completed_at.as_deref()?)?;
     Some((completed - started).whole_seconds())
+}
+
+fn parse_rfc3339(value: &str) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339).ok()
 }
 
 fn executed(step: &Step) -> bool {
@@ -1036,5 +1371,62 @@ mod tests {
         let mut open_ended = step.clone();
         open_ended.completed_at = None;
         assert_eq!(step_duration_seconds(&open_ended), None);
+    }
+
+    fn lane_stats(gh: f64, vl: f64, worse_rows: usize) -> LaneStats {
+        LaneStats {
+            run_id: 42,
+            baseline_runs: 1,
+            parity_worse_rows: worse_rows,
+            jobs: BTreeMap::from([(
+                "compat (app-a".to_string(),
+                JobClassStats {
+                    github_seconds: gh,
+                    velnor_seconds: vl,
+                },
+            )]),
+        }
+    }
+
+    #[test]
+    fn is_regression_accepts_within_threshold() {
+        let baseline = lane_stats(100.0, 110.0, 0);
+        let current = lane_stats(100.0, 120.0, 0);
+
+        let verdict = is_regression(&baseline, &current, 10.0);
+
+        assert!(!verdict.regression, "{:?}", verdict.reasons);
+    }
+
+    #[test]
+    fn is_regression_flags_velnor_slowdown_beyond_threshold() {
+        let baseline = lane_stats(100.0, 100.0, 0);
+        let current = lane_stats(100.0, 140.0, 0);
+
+        let verdict = is_regression(&baseline, &current, 25.0);
+
+        assert!(verdict.regression);
+        assert!(verdict.reasons[0].contains("velnor/github ratio"));
+    }
+
+    #[test]
+    fn is_regression_flags_parity_diff() {
+        let baseline = lane_stats(100.0, 100.0, 0);
+        let current = lane_stats(100.0, 100.0, 2);
+
+        let verdict = is_regression(&baseline, &current, 25.0);
+
+        assert!(verdict.regression);
+        assert!(verdict.reasons[0].contains("parity diff"));
+    }
+
+    #[test]
+    fn is_regression_accepts_velnor_faster() {
+        let baseline = lane_stats(100.0, 120.0, 0);
+        let current = lane_stats(100.0, 80.0, 0);
+
+        let verdict = is_regression(&baseline, &current, 0.0);
+
+        assert!(!verdict.regression, "{:?}", verdict.reasons);
     }
 }
