@@ -41,19 +41,6 @@ TimeoutStopSec=10800
 User=root
 StateDirectory=velnor
 WorkingDirectory=/var/lib/velnor
-# Conservative sandboxing: Velnor writes state, forensic logs, and default job
-# work dirs below /var/lib/velnor, and talks to Docker through the host socket.
-# Operators who set VELNOR_WORK_DIR outside /var/lib/velnor must add a matching
-# ReadWritePaths= drop-in for that host path.
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=full
-ProtectHome=read-only
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictSUIDSGID=true
-ReadWritePaths=/var/lib/velnor /run/docker.sock /var/run/docker.sock
 
 [Install]
 WantedBy=multi-user.target
