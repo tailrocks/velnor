@@ -84,7 +84,7 @@ cargo run --bin velnor-runner -- configure \
   --url https://github.com/OWNER/REPO \
   --pat "$GITHUB_TOKEN" \
   --labels velnor \
-  --dry-run-jit-config
+  --dry-run
 
 cargo run --bin velnor-runner -- status --slots 2
 cargo run --bin velnor-runner -- daemon \

@@ -8,3 +8,21 @@ zig = "0.16.0"
 
 [settings]
 idiomatic_version_file_enable_tools = ["rust"]
+
+[tasks.fmt]
+run = "cargo fmt --all --check"
+
+[tasks.lint]
+run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
+
+[tasks.test]
+run = "cargo nextest run --workspace --locked --color=always"
+
+[tasks.actionlint]
+run = "actionlint"
+
+[tasks.deny]
+run = "cargo deny check advisories"
+
+[tasks.check]
+depends = ["fmt", "actionlint", "deny", "lint", "test"]
