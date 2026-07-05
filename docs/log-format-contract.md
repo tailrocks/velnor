@@ -13,6 +13,7 @@ lines.
 |---|---|---|---|
 | **Live WebSocket feed** (`FeedStreamClient::send_log_lines`, powers the in-progress job view / `live_logs`) | `runner.rs` `live_feed_lines` in the step-log publisher | **RAW content — NO timestamp prefix** | The UI renders live frames verbatim and supplies its own timestamp column. An embedded prefix shows as doubled timestamps on every line. |
 | **Uploaded step log blob** (Results Service `upload_step_log`, powers the completed-job view / `data-log-url` and the raw log download) | `runner.rs` `blob_log_lines` + `unix_now_iso8601` | **`YYYY-MM-DDTHH:MM:SS.fffffffZ <content>`** — .NET "o" round-trip prefix with EXACTLY 7 fractional digits, single space, then content | The UI strips this prefix into the "Show timestamps" toggle. Wrong precision (e.g. second-only) is not recognised and leaks into visible content. Missing prefix breaks the toggle. |
+| **Uploaded job log blob** (Results Service `upload_job_log`, powers GitHub's native per-job log download / `gh run view --log`) | `runner.rs` `build_combined_job_log` + `iso8601_with_blob_precision` | **`YYYY-MM-DDTHH:MM:SS.fffffffZ <content>`** — same raw-download format as step blobs | GitHub's native log archive expects the official runner job-log blob. The `job-log.txt` artifact is only a fallback, not the primary path. |
 | **V1 timeline feed** (`append_timeline_record_feed`) | `runner.rs` timeline publishers | RAW content (masked) | Same rendering rule as the live feed. |
 | **Step metadata times** (`started_at`/`completed_at` on Twirp steps, timeline records) | `executor.rs` `unix_now_rfc3339`, `runner.rs` `unix_now_iso8601` call sites assigning fields | RFC3339 field values, never prefixed onto lines | These are struct fields, not line content. |
 | **Local console mirror** (`append_job_console`, `docker logs`) | `runner.rs` | Velnor's own format (free) | Not rendered by GitHub. |
@@ -34,8 +35,10 @@ lines.
 
 - Lines destined for `FeedStreamClient::send_log_lines` go through
   `live_feed_lines` (raw). Lines destined for `upload_step_log` go through
-  `blob_log_lines` (7-digit prefix). Never inline either transformation at a
-  call site; never route one helper's output into the other channel.
+  `blob_log_lines` (7-digit prefix). Lines destined for `upload_job_log` go
+  through `build_combined_job_log` (7-digit prefix). Never inline these
+  transformations at a call site; never route one helper's output into the
+  other channel.
 - Guard tests (must stay green, must not be weakened):
   - `runner::tests::live_feed_lines_are_raw_and_blob_lines_are_timestamped`
   - `runner::tests::unix_now_iso8601_is_github_strippable`

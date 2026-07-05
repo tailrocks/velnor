@@ -2054,6 +2054,12 @@ async fn poll_broker_message(
                 }
             },
             Err(error) => {
+                if draining() {
+                    forensics.lifecycle(&format!(
+                        "idle slot exiting after broker poll error during daemon drain: {error:#}"
+                    ));
+                    return Ok(None);
+                }
                 if is_credential_poll_error(&error) {
                     match refresh_v2_clients(
                         stored,
@@ -5037,9 +5043,47 @@ fn iso8601_with_blob_precision(rfc3339: &str) -> String {
     }
 }
 
-/// Upload the combined job log as a `job-log.txt` artifact (best-effort). Gives a
-/// real "download the logs" path since GitHub doesn't serve the v1 /logs archive
-/// for Velnor's V2 jobs.
+/// Upload the combined job log to Results Service so GitHub's native job-log
+/// download endpoint has the same backing blob the official runner publishes.
+async fn upload_results_job_log(job: &AgentJobRequestMessage, step_logs: &[StepLog]) {
+    if step_logs.is_empty() {
+        return;
+    }
+    let Some(endpoint) = job.system_connection() else {
+        return;
+    };
+    let Some(token) = system_connection_access_token(endpoint) else {
+        return;
+    };
+    let Some(client) =
+        crate::protocol::TwirpResultsClient::from_endpoint_data(&endpoint.data, &token)
+            .and_then(|r| r.ok())
+    else {
+        return;
+    };
+
+    let content = build_combined_job_log(job, step_logs);
+    let line_count = content.lines().count() as i64;
+    if line_count == 0 {
+        return;
+    }
+
+    match client
+        .upload_job_log(
+            &job.plan.plan_id,
+            &job.job_id,
+            content.as_bytes(),
+            line_count,
+        )
+        .await
+    {
+        Ok(()) => println!("Uploaded Results Service job log."),
+        Err(e) => eprintln!("Best-effort Results Service job log upload failed: {e:#}"),
+    }
+}
+
+/// Upload the combined job log as a `job-log.txt` artifact (best-effort). This
+/// stays as an explicit fallback even when GitHub's native log endpoint works.
 async fn upload_job_log_artifact(job: &AgentJobRequestMessage, step_logs: &[StepLog]) {
     if step_logs.is_empty() {
         return;
@@ -5092,10 +5136,9 @@ async fn complete_run_service_job(
             eprintln!("Best-effort timeline log upload failed: {error:#}");
         }
     }
-    // Best-effort: publish the whole job log as a downloadable artifact
-    // ("job-log.txt"). GitHub does not expose the v1 /logs archive ("Download
-    // log archive" / `gh run view --log`) for Velnor's V2 jobs, so this gives a
-    // real way to download the full log — it shows up under the run's Artifacts.
+    // Best-effort: publish the whole job log to the same Results Service job-log
+    // blob used by official runners, then keep a `job-log.txt` artifact fallback.
+    upload_results_job_log(job, &step_logs).await;
     upload_job_log_artifact(job, &step_logs).await;
     let step_results = step_logs
         .iter()
@@ -8925,9 +8968,8 @@ runs:
 
     #[test]
     fn combined_job_log_lines_carry_blob_timestamps() {
-        // The job-log artifact replaces GitHub's raw-log download (absent for
-        // V2 jobs); GitHub's raw download timestamps EVERY line in the 7-digit
-        // blob form, so the artifact must too (lane-compare gates on it).
+        // Results Service job-log blobs and the artifact fallback both use the
+        // raw-download format: EVERY line gets the 7-digit blob timestamp.
         assert_eq!(
             iso8601_with_blob_precision("2026-06-11T07:34:33Z"),
             "2026-06-11T07:34:33.0000000Z"

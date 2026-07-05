@@ -4,6 +4,9 @@ set -e
 case "$1" in
   remove|deconfigure)
     if [ -d /run/systemd/system ]; then
+      for unit in $(systemctl list-units --all --no-legend --plain 'velnor-doctor*.timer' 'velnor-doctor*.service' 2>/dev/null | awk '{print $1}'); do
+        systemctl stop "$unit" || true
+      done
       systemctl stop velnor-daemon.service || true
     fi
     ;;
