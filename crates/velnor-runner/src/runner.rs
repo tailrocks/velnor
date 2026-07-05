@@ -43,7 +43,7 @@ use crate::{
     job_message::{ActionReferenceType, AgentJobRequestMessage},
     platform,
     protocol::{
-        decode_jit_config, AcquireJobOutcome, BrokerClient, DistributedTaskClient,
+        decode_jit_config, AcquireJobOutcome, BrokerClient, DistributedTaskClient, GitHubApiError,
         GitHubJitConfigRequest, GitHubScope, ListedRunner, OAuthClient, OAuthJwtCredentials,
         RegistrationClient, RunServiceAnnotation, RunServiceAnnotationLevel, RunServiceClient,
         RunServiceCompleteJob, RunServiceStepResult, RunServiceTelemetry, RunServiceVariableValue,
@@ -297,7 +297,7 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
             .await
         {
             Ok(r) => r,
-            Err(e) if e.to_string().contains("409") => {
+            Err(e) if github_api_error_status(&e) == Some(409) => {
                 // Orphaned runner from a previous failed run — delete by name and retry once.
                 eprintln!(
                     "JIT 409: deleting orphaned runner '{}' and retrying",
@@ -2647,8 +2647,15 @@ fn cancellation_poll_error_delay(error_streak: u32) -> Duration {
 /// Errors that look like expired/rejected credentials, which a fresh OAuth
 /// exchange can fix mid-job (jobs can outlive the ~1 h token).
 fn is_credential_poll_error(error: &anyhow::Error) -> bool {
-    let text = format!("{error:#}");
-    text.contains("status=401") || text.contains("status=403")
+    github_api_error_status(error).is_some_and(|status| status == 401 || status == 403)
+}
+
+fn github_api_error_status(error: &anyhow::Error) -> Option<u16> {
+    error.chain().find_map(|cause| {
+        cause
+            .downcast_ref::<GitHubApiError>()
+            .map(|error| error.status)
+    })
 }
 
 fn start_broker_cancellation_poll(
@@ -5788,16 +5795,28 @@ mod tests {
     }
 
     #[test]
-    fn credential_poll_errors_detected_by_status() {
-        assert!(is_credential_poll_error(&anyhow::anyhow!(
-            "get broker message failed: status=401, body="
-        )));
-        assert!(is_credential_poll_error(&anyhow::anyhow!(
-            "get broker message failed: status=403, body=denied"
-        )));
-        assert!(!is_credential_poll_error(&anyhow::anyhow!(
-            "get broker message failed: status=500, body=oops"
-        )));
+    fn github_api_error_classifies_by_status() {
+        let auth_error = anyhow::Error::from(GitHubApiError {
+            status: 401,
+            action: "get broker message".into(),
+            body: String::new(),
+        });
+        let forbidden_error = anyhow::Error::from(GitHubApiError {
+            status: 403,
+            action: "get broker message".into(),
+            body: "denied".into(),
+        });
+        let server_error = anyhow::Error::from(GitHubApiError {
+            status: 500,
+            action: "get broker message".into(),
+            body: "oops".into(),
+        });
+        let string_error = anyhow::anyhow!("get broker message failed: status=401, body=");
+
+        assert!(is_credential_poll_error(&auth_error));
+        assert!(is_credential_poll_error(&forbidden_error));
+        assert!(!is_credential_poll_error(&server_error));
+        assert!(!is_credential_poll_error(&string_error));
     }
 
     #[test]
