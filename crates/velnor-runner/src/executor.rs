@@ -2937,13 +2937,7 @@ fn native_cache(
     let exact_hit = matched_key.as_deref() == Some(key.as_str());
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(
-        "cache-hit".to_string(),
-        matched_key
-            .as_ref()
-            .map(|_| exact_hit.to_string())
-            .unwrap_or_default(),
-    );
+    outputs.insert("cache-hit".to_string(), exact_hit.to_string());
     outputs.insert("cache-primary-key".to_string(), key.clone());
     outputs.insert(
         "cache-matched-key".to_string(),
@@ -6681,7 +6675,7 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].exit_code, 0);
-        assert_eq!(results[0].state.outputs["cache-hit"], "");
+        assert_eq!(results[0].state.outputs["cache-hit"], "false");
         assert_eq!(
             results[0].state.outputs["cache-primary-key"],
             format!("rust-script-Linux-{expected_hash}")
@@ -6714,6 +6708,78 @@ mod tests {
     }
 
     #[test]
+    fn cache_hit_output_matches_actions_cache() {
+        let root = temp_dir();
+        let store = root.join("_velnor_caches");
+        let exact_cache = store.join("linux-rust-exact");
+        let partial_cache = store.join("linux-rust-prefix-new");
+        fs::create_dir_all(exact_cache.join("0")).unwrap();
+        fs::create_dir_all(partial_cache.join("0")).unwrap();
+        fs::write(exact_cache.join(".velnor-key"), "linux-rust-exact").unwrap();
+        fs::write(exact_cache.join(".velnor-created"), "1").unwrap();
+        fs::write(exact_cache.join("0/state.bin"), "exact\n").unwrap();
+        fs::write(partial_cache.join(".velnor-key"), "linux-rust-prefix-new").unwrap();
+        fs::write(partial_cache.join(".velnor-created"), "2").unwrap();
+        fs::write(partial_cache.join("0/state.bin"), "partial\n").unwrap();
+
+        let cache_step = |key: &str, restore_keys: &str| {
+            vec![ExecutableStep::Native {
+                step_id: "cache".into(),
+                display_name: String::new(),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::Cache,
+                    inputs: [
+                        ("path".into(), "~/.cache/rust-script".into()),
+                        ("key".into(), key.into()),
+                        ("restore-keys".into(), restore_keys.into()),
+                    ]
+                    .into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+            }]
+        };
+
+        let exact_temp = root.join("exact-job/temp");
+        let partial_temp = root.join("partial-job/temp");
+        let miss_temp = root.join("miss-job/temp");
+        fs::create_dir_all(root.join("exact-job/home")).unwrap();
+        fs::create_dir_all(root.join("partial-job/home")).unwrap();
+        fs::create_dir_all(root.join("miss-job/home")).unwrap();
+
+        let exact_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&exact_temp),
+                &cache_step("linux-rust-exact", ""),
+                &[],
+                &exact_temp,
+            )
+            .unwrap();
+        let partial_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&partial_temp),
+                &cache_step("linux-rust-prefix-miss", "linux-rust-prefix-\n"),
+                &[],
+                &partial_temp,
+            )
+            .unwrap();
+        let miss_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&miss_temp),
+                &cache_step("linux-rust-total-miss", "linux-rust-missing-\n"),
+                &[],
+                &miss_temp,
+            )
+            .unwrap();
+
+        assert_eq!(exact_results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(partial_results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(miss_results[0].state.outputs["cache-hit"], "false");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn native_cache_can_fail_on_miss() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -6740,7 +6806,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(results[0].exit_code, 1);
-        assert_eq!(results[0].state.outputs["cache-hit"], "");
+        assert_eq!(results[0].state.outputs["cache-hit"], "false");
         assert!(results[0].stderr.contains("fail-on-cache-miss"));
 
         fs::remove_dir_all(temp).unwrap();
@@ -6914,7 +6980,7 @@ mod tests {
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
-        assert_eq!(save_results[0].state.outputs["cache-hit"], "");
+        assert_eq!(save_results[0].state.outputs["cache-hit"], "false");
         assert!(save_results[1]
             .stdout
             .contains("Saved cache 'linux-rust-script-abc'"));
@@ -10246,7 +10312,7 @@ fi"#
             .map(|(_, args)| args)
             .collect::<Vec<_>>();
         assert_eq!(node_calls.len(), 0);
-        assert_eq!(results[0].state.outputs["cache-hit"], "");
+        assert_eq!(results[0].state.outputs["cache-hit"], "false");
         assert_eq!(
             results[0].state.outputs["cache-primary-key"],
             format!("rust-script-Linux-{expected_hash}")
