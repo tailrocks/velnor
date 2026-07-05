@@ -12,19 +12,20 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use globset::{Glob, GlobSetBuilder};
+use rayon::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc,
+        mpsc, Arc, Mutex,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -4453,12 +4454,36 @@ fn hash_artifact_dir(path: &Path) -> Result<String> {
     let mut files = Vec::new();
     collect_files(path, &mut files)?;
     files.sort();
+    let digest_results: Vec<_> = files
+        .par_iter()
+        .enumerate()
+        .map(|(index, file)| sha256_file_digest(file).map(|digest| (index, digest)))
+        .collect();
+    let mut digests: Vec<_> = digest_results.into_iter().collect::<Result<_>>()?;
+    digests.sort_by_key(|(index, _)| *index);
+
     let mut aggregate = Sha256::new();
-    for file in files {
-        aggregate.update(Sha256::digest(fs::read(file)?));
+    for (_, digest) in digests {
+        aggregate.update(digest);
     }
     let digest = aggregate.finalize();
     Ok(hex_digest(&digest))
+}
+
+fn sha256_file_digest(path: &Path) -> Result<[u8; 32]> {
+    let mut file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
 }
 
 fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
@@ -4754,6 +4779,13 @@ struct JobExecutionState {
     path: Vec<String>,
     masks: Vec<String>,
     composite_stack: Vec<String>,
+    hash_files_cache: Arc<Mutex<HashMap<HashFilesCacheKey, String>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HashFilesCacheKey {
+    workspace: PathBuf,
+    patterns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4816,6 +4848,7 @@ impl JobExecutionState {
             path: Vec::new(),
             masks: Vec::new(),
             composite_stack: Vec::new(),
+            hash_files_cache: Arc::new(Mutex::new(HashMap::new())),
         };
         state.env = state
             .env
@@ -4856,6 +4889,7 @@ impl JobExecutionState {
             path: self.path.clone(),
             masks: self.masks.clone(),
             composite_stack: self.composite_stack.clone(),
+            hash_files_cache: Arc::clone(&self.hash_files_cache),
         };
         state
             .env
@@ -4878,6 +4912,7 @@ impl JobExecutionState {
             path: self.path.clone(),
             masks: self.masks.clone(),
             composite_stack: self.composite_stack.clone(),
+            hash_files_cache: Arc::clone(&self.hash_files_cache),
         };
         for (name, value) in env {
             state.env.insert(name, value);
@@ -5113,10 +5148,7 @@ impl JobExecutionState {
                 .and_then(|value| serde_json::to_string(value).ok());
         }
         if let Some(patterns) = parse_hash_files(expression) {
-            return self
-                .workspace_host
-                .as_deref()
-                .map(|workspace| hash_files(workspace, &patterns));
+            return self.resolve_hash_files_expression(patterns);
         }
         if expression.trim().starts_with("format(") {
             // Resolve format() args through the full state resolver so that runtime
@@ -5125,6 +5157,24 @@ impl JobExecutionState {
             return self.resolve_format_expression(expression.trim());
         }
         self.resolve_context_expression(expression)
+    }
+
+    fn resolve_hash_files_expression(&self, patterns: Vec<String>) -> Option<String> {
+        let workspace = self.workspace_host.as_ref()?;
+        let key = HashFilesCacheKey {
+            workspace: workspace.clone(),
+            patterns,
+        };
+        if let Ok(cache) = self.hash_files_cache.lock() {
+            if let Some(value) = cache.get(&key).cloned() {
+                return Some(value);
+            }
+        }
+        let value = hash_files(&key.workspace, &key.patterns);
+        if let Ok(mut cache) = self.hash_files_cache.lock() {
+            cache.insert(key, value.clone());
+        }
+        Some(value)
     }
 
     /// Evaluate `format('template', arg0, arg1, ...)` using the full state resolver
@@ -5983,12 +6033,16 @@ fn hash_files(workspace: &Path, patterns: &[String]) -> String {
         return String::new();
     }
 
+    let mut digests: Vec<_> = matches
+        .par_iter()
+        .enumerate()
+        .filter_map(|(index, path)| sha256_file_digest(path).ok().map(|digest| (index, digest)))
+        .collect();
+    digests.sort_by_key(|(index, _)| *index);
+
     let mut aggregate = Sha256::new();
-    for path in matches {
-        let Ok(bytes) = fs::read(&path) else {
-            continue;
-        };
-        aggregate.update(Sha256::digest(bytes));
+    for (_, digest) in digests {
+        aggregate.update(digest);
     }
     let digest = aggregate.finalize();
     hex_digest(&digest)
@@ -10075,6 +10129,52 @@ fi"#
         assert!(cache_args.contains(&"INPUT_PATH=~/.cache/rust-script".into()));
         assert!(cache_args.contains(&format!("INPUT_KEY=rust-script-Linux-{expected}")));
         assert!(cache_args.contains(&"INPUT_RESTORE-KEYS=rust-script-Linux-\n".into()));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn hash_files_digest_is_stable_for_sorted_streamed_files() {
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(workspace.join("nested")).unwrap();
+        fs::write(workspace.join("alpha.txt"), "alpha\n").unwrap();
+        fs::write(workspace.join("nested/beta.txt"), "beta\n").unwrap();
+        fs::write(
+            workspace.join("nested/gamma.bin"),
+            vec![b'x'; 128 * 1024 + 17],
+        )
+        .unwrap();
+
+        let digest = hash_files(
+            &workspace,
+            &["**/*.txt".to_string(), "nested/gamma.bin".to_string()],
+        );
+
+        assert_eq!(
+            digest,
+            "04ffe0aff7d100a890dfec2e0c951e89fa45e2afb6b9f96bafabf15f15ba1c35"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn hash_files_resolution_memoizes_identical_patterns_per_job() {
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+        let state = JobExecutionState::new_internal(&[], &[], Some(workspace), None);
+
+        let expression = "hash=${{ hashFiles('Cargo.toml') }}";
+        let first = state.resolve_expressions(expression);
+        let second = state.resolve_expressions(expression);
+
+        assert_eq!(first, second);
+        assert!(!first.ends_with("hash="));
+        let cache = state.hash_files_cache.lock().unwrap();
+        assert_eq!(cache.len(), 1);
+        let key = cache.keys().next().unwrap();
+        assert_eq!(key.patterns, vec!["Cargo.toml".to_string()]);
         fs::remove_dir_all(temp).unwrap();
     }
 

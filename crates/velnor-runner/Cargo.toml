@@ -58,6 +58,7 @@ base64.workspace = true
 clap.workspace = true
 jsonwebtoken.workspace = true
 reqwest.workspace = true
+rayon.workspace = true
 rsa.workspace = true
 serde.workspace = true
 serde_json.workspace = true
