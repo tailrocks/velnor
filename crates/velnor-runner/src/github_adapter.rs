@@ -340,10 +340,12 @@ fn job_container_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
 }
 
 fn job_container_options(job: &AgentJobRequestMessage) -> Vec<String> {
-    job.job_container
+    let options = job
+        .job_container
         .as_ref()
         .and_then(container_options)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    filter_privileged_container_options(options, privileged_container_options_allowed_from_env())
 }
 
 fn service_containers(job: &AgentJobRequestMessage) -> Vec<ServiceContainerSpec> {
@@ -432,6 +434,197 @@ fn container_options(value: &Value) -> Option<Vec<String>> {
         })
         .and_then(Value::as_str)
         .map(split_container_options)
+}
+
+fn privileged_container_options_allowed_from_env() -> bool {
+    std::env::var("VELNOR_ALLOW_PRIVILEGED_OPTIONS")
+        .ok()
+        .is_some_and(|value| env_truthy(&value))
+}
+
+fn env_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn filter_privileged_container_options(
+    options: Vec<String>,
+    allow_privileged: bool,
+) -> Vec<String> {
+    if allow_privileged {
+        return options;
+    }
+
+    let mut filtered = Vec::with_capacity(options.len());
+    let mut index = 0;
+    while index < options.len() {
+        let option = options[index].as_str();
+        match option {
+            "--privileged" => {
+                log_dropped_container_option(option, "privileged container");
+                index += 1;
+            }
+            "--cap-add" | "--device" | "--security-opt" => {
+                let consumed = option_with_optional_value(&options, index);
+                log_dropped_container_option(&consumed, "host privilege or security relaxation");
+                index += consumed_option_count(&options, index);
+            }
+            "--pid" => {
+                if option_value_is(&options, index, "host") {
+                    log_dropped_container_option(
+                        &format!("{} {}", options[index], options[index + 1]),
+                        "host PID namespace",
+                    );
+                    index += 2;
+                } else {
+                    filtered.push(options[index].clone());
+                    index += 1;
+                }
+            }
+            "--network" | "--net" => {
+                if option_value_is(&options, index, "host") {
+                    log_dropped_container_option(
+                        &format!("{} {}", options[index], options[index + 1]),
+                        "host network namespace",
+                    );
+                    index += 2;
+                } else {
+                    filtered.push(options[index].clone());
+                    index += 1;
+                }
+            }
+            "-v" | "--volume" => {
+                if let Some(value) = options.get(index + 1) {
+                    if volume_mount_has_host_source(value) {
+                        log_dropped_container_option(
+                            &format!("{} {}", options[index], value),
+                            "host bind mount",
+                        );
+                        index += 2;
+                    } else {
+                        filtered.push(options[index].clone());
+                        index += 1;
+                    }
+                } else {
+                    filtered.push(options[index].clone());
+                    index += 1;
+                }
+            }
+            "--mount" => {
+                if let Some(value) = options.get(index + 1) {
+                    if mount_option_has_host_source(value) {
+                        log_dropped_container_option(
+                            &format!("{} {}", options[index], value),
+                            "host bind mount",
+                        );
+                        index += 2;
+                    } else {
+                        filtered.push(options[index].clone());
+                        index += 1;
+                    }
+                } else {
+                    filtered.push(options[index].clone());
+                    index += 1;
+                }
+            }
+            _ if option.starts_with("--cap-add=")
+                || option.starts_with("--device=")
+                || option.starts_with("--security-opt=") =>
+            {
+                log_dropped_container_option(option, "host privilege or security relaxation");
+                index += 1;
+            }
+            _ if option == "--pid=host" => {
+                log_dropped_container_option(option, "host PID namespace");
+                index += 1;
+            }
+            _ if option == "--network=host" || option == "--net=host" => {
+                log_dropped_container_option(option, "host network namespace");
+                index += 1;
+            }
+            _ if option.starts_with("--volume=") => {
+                let value = option.trim_start_matches("--volume=");
+                if volume_mount_has_host_source(value) {
+                    log_dropped_container_option(option, "host bind mount");
+                } else {
+                    filtered.push(options[index].clone());
+                }
+                index += 1;
+            }
+            _ if option.starts_with("-v") && option.len() > 2 => {
+                let value = option.trim_start_matches("-v").trim_start_matches('=');
+                if volume_mount_has_host_source(value) {
+                    log_dropped_container_option(option, "host bind mount");
+                } else {
+                    filtered.push(options[index].clone());
+                }
+                index += 1;
+            }
+            _ if option.starts_with("--mount=") => {
+                let value = option.trim_start_matches("--mount=");
+                if mount_option_has_host_source(value) {
+                    log_dropped_container_option(option, "host bind mount");
+                } else {
+                    filtered.push(options[index].clone());
+                }
+                index += 1;
+            }
+            _ => {
+                filtered.push(options[index].clone());
+                index += 1;
+            }
+        }
+    }
+    filtered
+}
+
+fn option_with_optional_value(options: &[String], index: usize) -> String {
+    if consumed_option_count(options, index) == 2 {
+        format!("{} {}", options[index], options[index + 1])
+    } else {
+        options[index].clone()
+    }
+}
+
+fn consumed_option_count(options: &[String], index: usize) -> usize {
+    if options
+        .get(index + 1)
+        .is_some_and(|value| !value.starts_with('-'))
+    {
+        2
+    } else {
+        1
+    }
+}
+
+fn option_value_is(options: &[String], index: usize, expected: &str) -> bool {
+    options
+        .get(index + 1)
+        .is_some_and(|value| value.eq_ignore_ascii_case(expected))
+}
+
+fn volume_mount_has_host_source(value: &str) -> bool {
+    value
+        .split_once(':')
+        .map(|(source, _)| source.trim().starts_with('/'))
+        .unwrap_or(false)
+}
+
+fn mount_option_has_host_source(value: &str) -> bool {
+    value.split(',').any(|part| {
+        let Some((key, source)) = part.split_once('=') else {
+            return false;
+        };
+        matches!(key.trim(), "source" | "src") && source.trim().starts_with('/')
+    })
+}
+
+fn log_dropped_container_option(option: &str, reason: &str) {
+    eprintln!(
+        "Velnor dropped privilege-granting container.options entry `{option}` ({reason}); set VELNOR_ALLOW_PRIVILEGED_OPTIONS=true only for trusted scopes to pass it through."
+    );
 }
 
 fn container_env(value: &Value) -> Vec<(String, String)> {
@@ -790,6 +983,50 @@ mod tests {
         assert_eq!(
             job_container_options(&job),
             vec!["--cpus", "2", "--memory", "4g"]
+        );
+    }
+
+    #[test]
+    fn container_options_drops_privileged() {
+        let options = vec![
+            "--hostname".to_string(),
+            "job-host".to_string(),
+            "--privileged".to_string(),
+            "-v".to_string(),
+            "/:/host".to_string(),
+            "--mount".to_string(),
+            "type=bind,source=/etc,target=/host-etc".to_string(),
+            "--cap-add=ALL".to_string(),
+            "--device".to_string(),
+            "/dev/kvm".to_string(),
+            "--pid".to_string(),
+            "host".to_string(),
+            "--network=host".to_string(),
+            "--security-opt".to_string(),
+            "seccomp=unconfined".to_string(),
+            "--cpus".to_string(),
+            "2".to_string(),
+        ];
+
+        assert_eq!(
+            filter_privileged_container_options(options, false),
+            vec!["--hostname", "job-host", "--cpus", "2"]
+        );
+    }
+
+    #[test]
+    fn container_options_allowed_when_trusted() {
+        let options = vec![
+            "--privileged".to_string(),
+            "-v".to_string(),
+            "/:/host".to_string(),
+            "--hostname".to_string(),
+            "job-host".to_string(),
+        ];
+
+        assert_eq!(
+            filter_privileged_container_options(options.clone(), true),
+            options
         );
     }
 

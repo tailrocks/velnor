@@ -35,6 +35,8 @@ use tokio::sync::mpsc::UnboundedSender;
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
 const DEFAULT_STEP_TIMEOUT_MINUTES: u64 = 360;
 const DEFAULT_STEP_TIMEOUT: Duration = Duration::from_secs(DEFAULT_STEP_TIMEOUT_MINUTES * 60);
+const SETUP_QEMU_BINFMT_IMAGE: &str =
+    "docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0";
 static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
 // ANSI color helpers for Velnor-authored adapter output.
@@ -2024,10 +2026,10 @@ where
         ))
     }
 
-    /// Native `docker/setup-qemu-action`: installs binfmt handlers via the
-    /// QEMU static-binaries image (exactly what the JS action runs). The
-    /// `cache-image` input is GHA-cache-specific and ignored — the image is
-    /// pulled through the host Docker daemon, which caches it locally.
+    /// Native `docker/setup-qemu-action`: installs binfmt handlers via a pinned
+    /// QEMU static-binaries image. This still needs `--privileged` because it
+    /// mutates host-global binfmt_misc state; workflow-supplied image overrides
+    /// are ignored so that privileged container is not attacker-controlled.
     fn native_setup_qemu(
         &mut self,
         action: &NativeActionInvocation,
@@ -2035,12 +2037,16 @@ where
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
-        let image = native_input_or(
-            &action_state,
-            action,
-            "image",
-            "docker.io/tonistiigi/binfmt:latest",
-        );
+        let requested_image =
+            native_input_or(&action_state, action, "image", SETUP_QEMU_BINFMT_IMAGE);
+        if requested_image.trim() != SETUP_QEMU_BINFMT_IMAGE {
+            eprintln!(
+                "Velnor ignored docker/setup-qemu-action image override `{}`; using pinned {}",
+                requested_image.trim(),
+                SETUP_QEMU_BINFMT_IMAGE
+            );
+        }
+        let image = SETUP_QEMU_BINFMT_IMAGE.to_string();
         let platforms = native_input_or(&action_state, action, "platforms", "all");
         let reset = native_input_or(&action_state, action, "reset", "false");
         if reset.trim() == "true" {
@@ -14314,6 +14320,38 @@ bitcoin-processor-app.push=true")
             crate::action::native_action_adapter("docker/setup-qemu-action"),
             Some(NativeActionAdapter::SetupQemu)
         );
+    }
+
+    #[test]
+    fn setup_qemu_uses_pinned_image() {
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut inputs = BTreeMap::new();
+        inputs.insert(
+            "image".to_string(),
+            "evil.example/binfmt:latest".to_string(),
+        );
+        inputs.insert("platforms".to_string(), "arm64".to_string());
+        let result = executor
+            .native_setup_qemu(
+                &NativeActionInvocation {
+                    adapter: NativeActionAdapter::SetupQemu,
+                    inputs,
+                    env: Vec::new(),
+                },
+                &JobExecutionState::default(),
+                DEFAULT_STEP_TIMEOUT,
+            )
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let calls = &executor.runner().calls;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "docker");
+        assert!(calls[0].1.contains(&"--privileged".to_string()));
+        assert!(calls[0].1.contains(&SETUP_QEMU_BINFMT_IMAGE.to_string()));
+        assert!(!calls[0]
+            .1
+            .contains(&"evil.example/binfmt:latest".to_string()));
     }
 
     #[test]
