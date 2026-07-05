@@ -8356,7 +8356,7 @@ runs:
         match value {
             serde_yaml::Value::Mapping(mapping) => {
                 for (key, value) in mapping {
-                    if key.as_str() == Some("uses") {
+                    if key == "uses" {
                         if let Some(reference) = target_repository_uses(value) {
                             references.insert(
                                 format!(

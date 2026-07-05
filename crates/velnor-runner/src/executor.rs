@@ -4692,10 +4692,7 @@ fn parse_paths_filter_rules(filters: &str) -> Result<Vec<(String, Vec<String>)>>
     };
     let mut rules = Vec::new();
     for (name, patterns) in mapping {
-        let name = name
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("paths-filter name must be a string"))?
-            .to_string();
+        let name = name.to_string();
         let patterns = paths_filter_patterns(patterns)
             .with_context(|| format!("parse paths-filter patterns for '{name}'"))?;
         rules.push((name, patterns));
@@ -13608,7 +13605,7 @@ bitcoin-processor-app.push=true")
             }
             serde_yaml::Value::Mapping(map) => {
                 for (key, value) in map {
-                    collect_yaml_strings(key, strings);
+                    strings.push(key);
                     collect_yaml_strings(value, strings);
                 }
             }
@@ -13624,7 +13621,7 @@ bitcoin-processor-app.push=true")
         match value {
             serde_yaml::Value::Mapping(map) => {
                 for (key, value) in map {
-                    if key.as_str() == Some(name) {
+                    if key == name {
                         if let Some(value) = value.as_str() {
                             strings.push(value);
                         }

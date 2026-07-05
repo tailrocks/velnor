@@ -3101,7 +3101,7 @@ runs:
         match value {
             serde_yaml::Value::Mapping(map) => {
                 for (key, value) in map {
-                    if key.as_str() == Some("uses") {
+                    if key == "uses" {
                         if let Some(uses) = value.as_str() {
                             values.push(uses.to_string());
                         }

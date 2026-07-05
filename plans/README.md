@@ -37,7 +37,7 @@ Independent plans can run in parallel; respect the "Depends on" column.
 | 013 | Refresh token on renewal/completion/idle auth errors | P2 | M | 012 | bug | DONE |
 | 014 | Harden the systemd unit (sandboxing) | P2 | S | — | security | BLOCKED: needs live systemd smoke/security score |
 | 015 | Purge committed run-log HTML with channel tokens | P2 | S | — | security | BLOCKED: history purge needs operator confirmation |
-| 016 | Migrate off unmaintained `serde_yaml` | P3 | M | — | migration | TODO |
+| 016 | Migrate off unmaintained `serde_yaml` | P3 | M | — | migration | DONE |
 | 017 | `cargo-deny` advisory gate + sha2 dedup | P3 | S | 016 | dx | TODO |
 | 018 | Broker/run-service HTTP test harness | P2 | L | (012 soft) | tests | TODO |
 | 019 | Drain/SIGTERM regression tests | P2 | M | — | tests | TODO |
