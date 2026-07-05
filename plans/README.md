@@ -34,7 +34,7 @@ Independent plans can run in parallel; respect the "Depends on" column.
 | 010 | Enforce `timeout-minutes` (kill hung steps) | P1 | M | — | bug | DONE |
 | 011 | Never abandon an acquired job (complete on panic/setup err) | P1 | M | — | bug | DONE |
 | 012 | Typed `GitHubApiError`; classify by status not string | P2 | M | — | tech-debt | DONE |
-| 013 | Refresh token on renewal/completion/idle auth errors | P2 | M | 012 | bug | TODO |
+| 013 | Refresh token on renewal/completion/idle auth errors | P2 | M | 012 | bug | DONE |
 | 014 | Harden the systemd unit (sandboxing) | P2 | S | — | security | TODO |
 | 015 | Purge committed run-log HTML with channel tokens | P2 | S | — | security | TODO |
 | 016 | Migrate off unmaintained `serde_yaml` | P3 | M | — | migration | TODO |

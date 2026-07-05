@@ -363,6 +363,12 @@ pub struct OAuthTokenResponse {
     pub error_description: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthAccessToken {
+    pub token: String,
+    pub expires_in: Option<std::time::Duration>,
+}
+
 #[derive(Clone)]
 pub struct OAuthClient {
     http: Client,
@@ -380,7 +386,7 @@ impl OAuthClient {
     pub async fn exchange_client_credentials(
         &self,
         credentials: &OAuthJwtCredentials,
-    ) -> Result<String> {
+    ) -> Result<OAuthAccessToken> {
         let assertion = build_client_assertion(credentials)?;
         // Build URL-encoded form body for curl --data
         let body: String = url::form_urlencoded::Serializer::new(String::new())
@@ -445,20 +451,28 @@ impl OAuthClient {
             return Err(github_api_error("OAuth token request", status, text));
         }
 
-        let token: OAuthTokenResponse =
+        let token_response: OAuthTokenResponse =
             serde_json::from_str(text.trim()).context("parse OAuth token response")?;
 
-        if let Some(error) = token.error {
+        if let Some(error) = token_response.error {
             bail!(
                 "OAuth token request failed: error={error}, description={}",
-                token.error_description.unwrap_or_default()
+                token_response.error_description.unwrap_or_default()
             );
         }
 
-        token
+        let token = token_response
             .access_token
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("OAuth token response missing access_token"))
+            .ok_or_else(|| anyhow::anyhow!("OAuth token response missing access_token"))?;
+        Ok(OAuthAccessToken {
+            token,
+            expires_in: token_response
+                .expires_in
+                .and_then(|seconds| u64::try_from(seconds).ok())
+                .filter(|seconds| *seconds > 0)
+                .map(std::time::Duration::from_secs),
+        })
     }
 }
 

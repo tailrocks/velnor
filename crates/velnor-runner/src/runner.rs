@@ -44,11 +44,11 @@ use crate::{
     platform,
     protocol::{
         decode_jit_config, AcquireJobOutcome, BrokerClient, DistributedTaskClient, GitHubApiError,
-        GitHubJitConfigRequest, GitHubScope, ListedRunner, OAuthClient, OAuthJwtCredentials,
-        RegistrationClient, RunServiceAnnotation, RunServiceAnnotationLevel, RunServiceClient,
-        RunServiceCompleteJob, RunServiceStepResult, RunServiceTelemetry, RunServiceVariableValue,
-        RunnerJobRequestRef, RunnerStatus, TaskAgentSession, TaskResult, TimelineRecord,
-        TimelineRecordFeedLines, TimelineRecordState, RUNNER_JOB_REQUEST,
+        GitHubJitConfigRequest, GitHubScope, ListedRunner, OAuthAccessToken, OAuthClient,
+        OAuthJwtCredentials, RegistrationClient, RunServiceAnnotation, RunServiceAnnotationLevel,
+        RunServiceClient, RunServiceCompleteJob, RunServiceStepResult, RunServiceTelemetry,
+        RunServiceVariableValue, RunnerJobRequestRef, RunnerStatus, TaskAgentSession, TaskResult,
+        TimelineRecord, TimelineRecordFeedLines, TimelineRecordState, RUNNER_JOB_REQUEST,
     },
     runtime_env::job_runtime_env,
     script_step::{StepAnnotation, StepAnnotationLevel},
@@ -163,6 +163,7 @@ impl BrokerPollState {
 struct IdleSlotHealth {
     session_started: Instant,
     token_acquired: Instant,
+    token_expires_in: Option<Duration>,
     last_registry_check: Instant,
     registry_offline_strikes: u32,
 }
@@ -172,6 +173,7 @@ impl IdleSlotHealth {
         Self {
             session_started: now,
             token_acquired: now,
+            token_expires_in: None,
             last_registry_check: now,
             registry_offline_strikes: 0,
         }
@@ -202,7 +204,7 @@ fn due_idle_health_actions(
         }
     }
     let mut actions = Vec::new();
-    if now.duration_since(health.token_acquired) >= Duration::from_secs(IDLE_TOKEN_REFRESH_SECONDS)
+    if now.duration_since(health.token_acquired) >= token_refresh_deadline(health.token_expires_in)
     {
         actions.push(IdleHealthAction::RefreshToken);
     }
@@ -212,6 +214,13 @@ fn due_idle_health_actions(
         actions.push(IdleHealthAction::CheckRegistry);
     }
     actions
+}
+
+fn token_refresh_deadline(expires_in: Option<Duration>) -> Duration {
+    expires_in
+        .map(|lifetime| lifetime.mul_f64(0.66))
+        .filter(|deadline| *deadline > Duration::from_secs(0))
+        .unwrap_or_else(|| Duration::from_secs(IDLE_TOKEN_REFRESH_SECONDS))
 }
 
 fn max_idle_slot_age(flag_seconds: Option<u64>) -> Option<Duration> {
@@ -1501,15 +1510,15 @@ async fn run_v2(
     config_dir: PathBuf,
     stored: StoredRunnerConfig,
     agent_id: i64,
-    token: String,
+    token: OAuthAccessToken,
 ) -> Result<()> {
     let server_url_v2 = stored.settings.server_url_v2.as_deref().ok_or_else(|| {
         anyhow::anyhow!("runner config enables V2 flow but missing server_url_v2")
     })?;
-    let mut broker_token = token.clone();
+    let mut broker_token = token.token.clone();
     let mut current_broker_url = server_url_v2.to_string();
     let mut broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
-    let mut run_service = RunServiceClient::new(token.clone())?;
+    let mut run_service = RunServiceClient::new(token.token.clone())?;
     let owner_name = format!("{} (PID: {})", default_agent_name(), std::process::id());
     let session = TaskAgentSession::new(owner_name, agent_id, stored.settings.agent_name.clone());
     let diagnostic = RunnerConnectionDiagnostic::from_config(&stored, &current_broker_url);
@@ -1540,6 +1549,7 @@ async fn run_v2(
     let idle_timeout = idle_timeout_duration(args.idle_timeout_seconds)?;
     let idle_started = Instant::now();
     let mut health = IdleSlotHealth::new(Instant::now());
+    health.token_expires_in = token.expires_in;
     let max_idle_age = max_idle_slot_age(args.max_idle_slot_age_seconds);
 
     let registry_pat = args
@@ -1573,11 +1583,16 @@ async fn run_v2(
     let run_result = async {
         'poll: loop {
             let message = poll_broker_message(
-                &broker,
+                &mut broker,
+                &mut run_service,
+                &current_broker_url,
+                &mut broker_token,
+                &stored,
                 session_id,
                 RunnerStatus::Online,
                 stored.settings.disable_update,
                 &mut poll_state,
+                &mut health,
                 &forensics,
             )
             .await?;
@@ -1686,10 +1701,11 @@ async fn run_v2(
                 }
                 V2MessageAction::RefreshToken => {
                     let refreshed_token = oauth_access_token(&stored).await?;
-                    broker_token = refreshed_token.clone();
+                    broker_token = refreshed_token.token.clone();
                     broker = BrokerClient::new(&current_broker_url, broker_token.clone())?;
-                    run_service = RunServiceClient::new(refreshed_token)?;
+                    run_service = RunServiceClient::new(refreshed_token.token)?;
                     health.token_acquired = Instant::now();
+                    health.token_expires_in = refreshed_token.expires_in;
                     println!("Refreshed broker and run-service credentials.");
                     forensics.lifecycle("credentials refreshed (ForceTokenRefresh)");
                 }
@@ -1751,30 +1767,20 @@ async fn refresh_idle_credentials(
     forensics: &SlotForensics,
 ) {
     let token_age_minutes = health.token_acquired.elapsed().as_secs() / 60;
-    match oauth_access_token(stored).await {
-        Ok(refreshed) => {
-            match (
-                BrokerClient::new(current_broker_url, refreshed.clone()),
-                RunServiceClient::new(refreshed.clone()),
-            ) {
-                (Ok(new_broker), Ok(new_run_service)) => {
-                    *broker = new_broker;
-                    *run_service = new_run_service;
-                    *broker_token = refreshed;
-                    health.token_acquired = Instant::now();
-                    let note =
-                        format!("proactive credential refresh ok (token age {token_age_minutes}m)");
-                    println!("{note}");
-                    forensics.lifecycle(&note);
-                }
-                (Err(error), _) | (_, Err(error)) => {
-                    let note = format!(
-                        "proactive credential refresh failed to rebuild clients (token age {token_age_minutes}m): {error:#}"
-                    );
-                    eprintln!("{note}");
-                    forensics.lifecycle(&note);
-                }
-            }
+    match refresh_v2_clients(
+        stored,
+        current_broker_url,
+        broker,
+        run_service,
+        broker_token,
+        health,
+    )
+    .await
+    {
+        Ok(()) => {
+            let note = format!("proactive credential refresh ok (token age {token_age_minutes}m)");
+            println!("{note}");
+            forensics.lifecycle(&note);
         }
         Err(error) => {
             let note = format!(
@@ -1784,6 +1790,25 @@ async fn refresh_idle_credentials(
             forensics.lifecycle(&note);
         }
     }
+}
+
+async fn refresh_v2_clients(
+    stored: &StoredRunnerConfig,
+    current_broker_url: &str,
+    broker: &mut BrokerClient,
+    run_service: &mut RunServiceClient,
+    broker_token: &mut String,
+    health: &mut IdleSlotHealth,
+) -> Result<()> {
+    let refreshed = oauth_access_token(stored).await?;
+    let new_broker = BrokerClient::new(current_broker_url, refreshed.token.clone())?;
+    let new_run_service = RunServiceClient::new(refreshed.token.clone())?;
+    *broker = new_broker;
+    *run_service = new_run_service;
+    *broker_token = refreshed.token;
+    health.token_acquired = Instant::now();
+    health.token_expires_in = refreshed.expires_in;
+    Ok(())
 }
 
 /// One registry reconcile check for an idle slot. Returns `Some(reason)` when
@@ -1959,12 +1984,18 @@ fn idle_timeout_elapsed(elapsed: Duration, timeout: Option<Duration>) -> bool {
     timeout.is_some_and(|timeout| elapsed >= timeout)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn poll_broker_message(
-    broker: &BrokerClient,
+    broker: &mut BrokerClient,
+    run_service: &mut RunServiceClient,
+    current_broker_url: &str,
+    broker_token: &mut String,
+    stored: &StoredRunnerConfig,
     session_id: &str,
     status: RunnerStatus,
     disable_update: bool,
     poll_state: &mut BrokerPollState,
+    health: &mut IdleSlotHealth,
     forensics: &SlotForensics,
 ) -> Result<Option<crate::protocol::TaskAgentMessage>> {
     loop {
@@ -2005,6 +2036,30 @@ async fn poll_broker_message(
                 }
             },
             Err(error) => {
+                if is_credential_poll_error(&error) {
+                    match refresh_v2_clients(
+                        stored,
+                        current_broker_url,
+                        broker,
+                        run_service,
+                        broker_token,
+                        health,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            forensics
+                                .lifecycle("broker poll credentials refreshed after auth error");
+                            poll_state.received_message();
+                            continue;
+                        }
+                        Err(refresh_error) => {
+                            forensics.lifecycle(&format!(
+                                "broker poll credential refresh failed after auth error: {refresh_error:#}"
+                            ));
+                        }
+                    }
+                }
                 forensics.broker(&format!(
                     "poll ERROR consecutive={}: {error:#}",
                     poll_state.consecutive_errors + 1
@@ -2259,11 +2314,13 @@ async fn handle_job_request(
         if let Err(error) = publish_timeline_job_started(&job, runner_name).await {
             eprintln!("Best-effort timeline job start update failed: {error:#}");
         }
+        let stored_for_refresh = broker_cancellation.stored.clone();
         let renewal = start_run_service_lock_renewal(
             run_service_job.client.clone(),
             run_service_job.run_service_url.clone(),
             job.plan.plan_id.clone(),
             job.job_id.clone(),
+            stored_for_refresh.clone(),
         )
         .await?;
         let canceled = Arc::new(AtomicBool::new(false));
@@ -2370,8 +2427,9 @@ async fn handle_job_request(
                 } else {
                     let infrastructure_failure_category =
                         infrastructure_failure_category(&error).map(ToOwned::to_owned);
-                    let completion = complete_run_service_job(
+                    let completion = complete_run_service_job_refreshing(
                         &run_service_job.client,
+                        &stored_for_refresh,
                         &run_service_job.run_service_url,
                         &job,
                         TaskResult::Failed,
@@ -2391,8 +2449,9 @@ async fn handle_job_request(
         };
         let outputs = job_result.outputs;
         let step_logs = job_result.step_logs;
-        let completion = complete_run_service_job(
+        let completion = complete_run_service_job_refreshing(
             &run_service_job.client,
+            &stored_for_refresh,
             &run_service_job.run_service_url,
             &job,
             job_result.result,
@@ -2411,8 +2470,9 @@ async fn handle_job_request(
             job_result.result
         );
     } else if args.complete_noop {
-        complete_run_service_job(
+        complete_run_service_job_refreshing(
             &run_service_job.client,
+            &broker_cancellation.stored,
             &run_service_job.run_service_url,
             &job,
             TaskResult::Succeeded,
@@ -2602,7 +2662,9 @@ async fn start_run_service_lock_renewal(
     run_service_url: String,
     plan_id: String,
     job_id: String,
+    stored: StoredRunnerConfig,
 ) -> Result<JoinHandle<()>> {
+    let mut client = client;
     match client.renew_job(&run_service_url, &plan_id, &job_id).await {
         Ok(response) => {
             println!(
@@ -2612,16 +2674,32 @@ async fn start_run_service_lock_renewal(
         }
         Err(error) => {
             eprintln!("Initial run-service job lock renewal failed: {error:#}");
+            if is_credential_poll_error(&error) {
+                match refresh_run_service_client(&stored).await {
+                    Ok(refreshed) => {
+                        client = refreshed;
+                        println!("Run-service lock renewal refreshed credentials.");
+                    }
+                    Err(refresh_error) => {
+                        eprintln!(
+                            "Run-service lock renewal credential refresh failed: {refresh_error:#}"
+                        );
+                    }
+                }
+            }
         }
     }
 
     Ok(tokio::spawn(async move {
+        let mut failure_streak = 0u32;
         loop {
-            // Renew every 25 seconds — the run-service validity window is ~30 seconds,
-            // so renewing at 25s keeps safe margin without hammering the API.
-            tokio::time::sleep(Duration::from_secs(25)).await;
+            // Renew every 25 seconds on success; after any failure, retry much
+            // sooner so a single transient miss does not leave the ~30s lock
+            // expired until the next steady cadence.
+            tokio::time::sleep(renewal_retry_delay(failure_streak)).await;
             match client.renew_job(&run_service_url, &plan_id, &job_id).await {
                 Ok(response) => {
+                    failure_streak = 0;
                     println!(
                         "Renewed run-service job {}; valid until {}.",
                         job_id, response.locked_until
@@ -2629,10 +2707,35 @@ async fn start_run_service_lock_renewal(
                 }
                 Err(error) => {
                     eprintln!("Run-service job lock renewal failed: {error:#}");
+                    if is_credential_poll_error(&error) {
+                        match refresh_run_service_client(&stored).await {
+                            Ok(refreshed) => {
+                                client = refreshed;
+                                println!("Run-service lock renewal refreshed credentials.");
+                            }
+                            Err(refresh_error) => eprintln!(
+                                "Run-service lock renewal credential refresh failed: {refresh_error:#}"
+                            ),
+                        }
+                    }
+                    failure_streak = failure_streak.saturating_add(1);
                 }
             }
         }
     }))
+}
+
+fn renewal_retry_delay(failure_streak: u32) -> Duration {
+    if failure_streak == 0 {
+        Duration::from_secs(25)
+    } else {
+        Duration::from_secs(5u64.saturating_mul(1 << failure_streak.saturating_sub(1).min(2)))
+    }
+}
+
+async fn refresh_run_service_client(stored: &StoredRunnerConfig) -> Result<RunServiceClient> {
+    let token = oauth_access_token(stored).await?;
+    RunServiceClient::new(token.token)
 }
 
 /// Backoff for consecutive cancellation-poll errors: 2s doubling to 60s, so
@@ -2689,17 +2792,19 @@ fn start_broker_cancellation_poll(
                     }
                     if is_credential_poll_error(&error) {
                         match oauth_access_token(&stored).await {
-                            Ok(token) => match BrokerClient::new(&broker.base_url_str(), token) {
-                                Ok(refreshed) => {
-                                    broker = refreshed;
-                                    println!(
+                            Ok(token) => {
+                                match BrokerClient::new(&broker.base_url_str(), token.token) {
+                                    Ok(refreshed) => {
+                                        broker = refreshed;
+                                        println!(
                                         "Cancellation poller refreshed broker credentials mid-job."
                                     );
-                                }
-                                Err(error) => eprintln!(
+                                    }
+                                    Err(error) => eprintln!(
                                     "Cancellation poller failed to rebuild broker client: {error:#}"
                                 ),
-                            },
+                                }
+                            }
                             Err(error) => eprintln!(
                                 "Cancellation poller credential refresh failed: {error:#}"
                             ),
@@ -2721,7 +2826,7 @@ fn start_broker_cancellation_poll(
                 // cancellation coverage for the rest of the job.
                 match broker_migration_url(&message) {
                     Ok(migration_url) => match oauth_access_token(&stored).await {
-                        Ok(token) => match BrokerClient::new(&migration_url, token) {
+                        Ok(token) => match BrokerClient::new(&migration_url, token.token) {
                             Ok(migrated) => {
                                 broker = migrated;
                                 println!(
@@ -4922,6 +5027,61 @@ async fn complete_run_service_job(
         .context("complete run-service job")
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn complete_run_service_job_refreshing(
+    client: &RunServiceClient,
+    stored: &StoredRunnerConfig,
+    run_service_url: &str,
+    job: &AgentJobRequestMessage,
+    result: TaskResult,
+    job_outputs: BTreeMap<String, String>,
+    step_logs: Vec<StepLog>,
+    environment_url: Option<String>,
+    billing_owner_id: Option<String>,
+    infrastructure_failure_category: Option<String>,
+    publish_completion_timeline_logs: bool,
+) -> Result<()> {
+    let first = complete_run_service_job(
+        client,
+        run_service_url,
+        job,
+        result,
+        job_outputs.clone(),
+        step_logs.clone(),
+        environment_url.clone(),
+        billing_owner_id.clone(),
+        infrastructure_failure_category.clone(),
+        publish_completion_timeline_logs,
+    )
+    .await;
+    if !first
+        .as_ref()
+        .err()
+        .is_some_and(|error| should_refresh_completion_after_error(error, false))
+    {
+        return first;
+    }
+
+    let refreshed = refresh_run_service_client(stored).await?;
+    complete_run_service_job(
+        &refreshed,
+        run_service_url,
+        job,
+        result,
+        job_outputs,
+        step_logs,
+        environment_url,
+        billing_owner_id,
+        infrastructure_failure_category,
+        publish_completion_timeline_logs,
+    )
+    .await
+}
+
+fn should_refresh_completion_after_error(error: &anyhow::Error, already_refreshed: bool) -> bool {
+    !already_refreshed && is_credential_poll_error(error)
+}
+
 fn acquired_job_identity(value: &Value) -> Option<AcquiredJobIdentity> {
     let plan = acquired_object_field(value, &["plan", "Plan"])?;
     Some(AcquiredJobIdentity {
@@ -5282,7 +5442,7 @@ fn step_log_result(step_log: &StepLog) -> TaskResult {
     }
 }
 
-async fn oauth_access_token(stored: &StoredRunnerConfig) -> Result<String> {
+async fn oauth_access_token(stored: &StoredRunnerConfig) -> Result<OAuthAccessToken> {
     let credentials = stored
         .credentials
         .as_ref()
@@ -5293,7 +5453,10 @@ async fn oauth_access_token(stored: &StoredRunnerConfig) -> Result<String> {
             .data
             .get("token")
             .and_then(|value| value.as_str())
-            .map(ToOwned::to_owned)
+            .map(|token| OAuthAccessToken {
+                token: token.to_string(),
+                expires_in: None,
+            })
             .ok_or_else(|| anyhow::anyhow!("OAuthAccessToken credentials missing token")),
         CredentialScheme::OAuth => {
             let oauth = OAuthJwtCredentials {
@@ -5710,6 +5873,30 @@ mod tests {
     }
 
     #[test]
+    fn refresh_deadline_scales_with_expires_in() {
+        assert_eq!(
+            token_refresh_deadline(Some(Duration::from_secs(1800))),
+            Duration::from_secs(1188)
+        );
+        assert_eq!(
+            token_refresh_deadline(None),
+            Duration::from_secs(IDLE_TOKEN_REFRESH_SECONDS)
+        );
+    }
+
+    #[test]
+    fn idle_health_token_refresh_uses_expires_in() {
+        let now = Instant::now();
+        let mut health = IdleSlotHealth::new(now);
+        health.token_expires_in = Some(Duration::from_secs(1800));
+        let later = now + Duration::from_secs(1188);
+
+        assert!(
+            due_idle_health_actions(&health, later, None).contains(&IdleHealthAction::RefreshToken)
+        );
+    }
+
+    #[test]
     fn idle_health_registry_check_interval() {
         let now = Instant::now();
         let health = IdleSlotHealth::new(now);
@@ -5795,6 +5982,14 @@ mod tests {
     }
 
     #[test]
+    fn renew_fast_retry_delay_is_short() {
+        assert_eq!(renewal_retry_delay(0), Duration::from_secs(25));
+        assert_eq!(renewal_retry_delay(1), Duration::from_secs(5));
+        assert_eq!(renewal_retry_delay(2), Duration::from_secs(10));
+        assert!(renewal_retry_delay(1) < Duration::from_secs(25));
+    }
+
+    #[test]
     fn github_api_error_classifies_by_status() {
         let auth_error = anyhow::Error::from(GitHubApiError {
             status: 401,
@@ -5817,6 +6012,24 @@ mod tests {
         assert!(is_credential_poll_error(&forbidden_error));
         assert!(!is_credential_poll_error(&server_error));
         assert!(!is_credential_poll_error(&string_error));
+    }
+
+    #[test]
+    fn completion_retries_after_refresh_on_401() {
+        let auth_error = anyhow::Error::from(GitHubApiError {
+            status: 401,
+            action: "complete run-service job".into(),
+            body: String::new(),
+        });
+        let server_error = anyhow::Error::from(GitHubApiError {
+            status: 500,
+            action: "complete run-service job".into(),
+            body: String::new(),
+        });
+
+        assert!(should_refresh_completion_after_error(&auth_error, false));
+        assert!(!should_refresh_completion_after_error(&auth_error, true));
+        assert!(!should_refresh_completion_after_error(&server_error, false));
     }
 
     #[test]
