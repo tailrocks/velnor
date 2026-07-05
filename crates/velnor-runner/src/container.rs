@@ -1,6 +1,16 @@
 #![allow(dead_code)]
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{self, OpenOptions},
+    io::{self, Write},
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
+static EXEC_ENV_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
 pub struct JobContainerSpec {
@@ -25,6 +35,7 @@ pub struct JobContainerSpec {
     pub docker_host_work_dir: Option<PathBuf>,
     pub verify_bind_mounts: bool,
     pub daemon_id: String,
+    pub repository: Option<String>,
     /// Host-persistent incremental-build store mounted as CARGO_TARGET_DIR
     /// (opt-in via VELNOR_CARGO_TARGET_PERSIST; GitHub-hosted runners do not
     /// set CARGO_TARGET_DIR, so this stays off unless the operator enables it).
@@ -70,23 +81,23 @@ impl JobContainerSpec {
                 &cargo_store_host(&self.temp_host).join("git"),
                 "/github/home/.cargo/git",
             ),
-            // Shared $CARGO_HOME/bin: mise's rust backend keys "installed" off
-            // this dir, so with a per-job-fresh home every job re-ran
-            // rustup-init (network!) to reinstall the proxies. Shared, they
-            // install once per fleet.
+            // $CARGO_HOME/bin holds executable proxies on PATH, so it is
+            // shared only inside one trust/repository scope. Registry/git data
+            // above stays daemon-shared for warmth because cargo does not
+            // execute files directly from those caches.
             "-v".into(),
             self.mount_arg(
-                &cargo_store_host(&self.temp_host).join("bin"),
+                &cargo_executable_store_host(&self.temp_host, &self.repository_store_key()),
                 "/github/home/.cargo/bin",
             ),
-            // Host-persistent mise tool store: only `installs` + `cache` are
-            // mounted (the mise binary, shims and global config stay baked in
-            // the image). A tool a job installs (GraalVM, node, python, cargo
-            // backends) persists for the whole fleet instead of re-downloading
-            // per job. mise installs under its own file locks.
+            // Host-persistent mise tool store: installed tools are executable,
+            // so `installs` is scoped by trust/repository. The mise binary,
+            // shims and global config stay baked in the image. `cache` is
+            // download data and remains daemon-shared for warmth; mise uses
+            // its own file locks.
             "-v".into(),
             self.mount_arg(
-                &mise_store_host(&self.temp_host).join("installs"),
+                &mise_executable_store_host(&self.temp_host, &self.repository_store_key()),
                 "/opt/mise/installs",
             ),
             "-v".into(),
@@ -166,7 +177,10 @@ impl JobContainerSpec {
             "--entrypoint".into(),
             "sh".into(),
             "-v".into(),
-            self.mount_arg(&store.join("installs"), "/__velnor_seed/installs"),
+            self.mount_arg(
+                &mise_executable_store_host(&self.temp_host, &self.repository_store_key()),
+                "/__velnor_seed/installs",
+            ),
             "-v".into(),
             self.mount_arg(&store.join("cache"), "/__velnor_seed/cache"),
             self.image.clone(),
@@ -191,6 +205,22 @@ impl JobContainerSpec {
         )
     }
 
+    pub fn prepare_exec_script_args(
+        &self,
+        script_path_in_container: &str,
+        shell: Shell,
+        working_directory: &str,
+        env: &[(String, String)],
+        secret_masks: &[String],
+    ) -> io::Result<PreparedDockerArgs> {
+        self.prepare_exec_process_args(
+            working_directory,
+            env,
+            secret_masks,
+            &shell.command_args(script_path_in_container),
+        )
+    }
+
     pub fn exec_process_args(
         &self,
         working_directory: &str,
@@ -205,6 +235,25 @@ impl JobContainerSpec {
         args.push(self.name.clone());
         args.extend(command.iter().cloned());
         args
+    }
+
+    pub fn prepare_exec_process_args(
+        &self,
+        working_directory: &str,
+        env: &[(String, String)],
+        secret_masks: &[String],
+        command: &[String],
+    ) -> io::Result<PreparedDockerArgs> {
+        let mut prepared = PreparedDockerArgs::new(vec![
+            "exec".into(),
+            "--workdir".into(),
+            working_directory.into(),
+        ]);
+        self.append_base_exec_env(&mut prepared.args);
+        self.append_step_env(&mut prepared, env, secret_masks)?;
+        prepared.args.push(self.name.clone());
+        prepared.args.extend(command.iter().cloned());
+        Ok(prepared)
     }
 
     /// Like exec_process_args, but with stdin kept open (`docker exec -i`) so
@@ -228,6 +277,50 @@ impl JobContainerSpec {
         args.push(self.name.clone());
         args.extend(command.iter().cloned());
         args
+    }
+
+    pub fn prepare_exec_process_stdin_args(
+        &self,
+        working_directory: &str,
+        env: &[(String, String)],
+        secret_masks: &[String],
+        command: &[String],
+    ) -> io::Result<PreparedDockerArgs> {
+        let mut prepared = PreparedDockerArgs::new(vec![
+            "exec".into(),
+            "-i".into(),
+            "--workdir".into(),
+            working_directory.into(),
+        ]);
+        self.append_base_exec_env(&mut prepared.args);
+        self.append_step_env(&mut prepared, env, secret_masks)?;
+        prepared.args.push(self.name.clone());
+        prepared.args.extend(command.iter().cloned());
+        Ok(prepared)
+    }
+
+    fn append_step_env(
+        &self,
+        prepared: &mut PreparedDockerArgs,
+        env: &[(String, String)],
+        secret_masks: &[String],
+    ) -> io::Result<()> {
+        for (name, value) in env {
+            if env_value_is_secret(value, secret_masks) && !value.contains('\n') {
+                let env_file = write_exec_env_file(&self.temp_host, name, value)?;
+                prepared
+                    .args
+                    .extend(["--env-file".into(), env_file.path().display().to_string()]);
+                prepared.env_files.push(env_file);
+            } else {
+                // Docker --env-file cannot represent multi-line values; those
+                // stay inline to preserve exact env semantics.
+                prepared
+                    .args
+                    .extend(["-e".into(), format!("{name}={value}")]);
+            }
+        }
+        Ok(())
     }
 
     /// Truthful base env for every exec'd process: the job home is the
@@ -428,6 +521,19 @@ impl JobContainerSpec {
         mount(&self.docker_host_path(host_path), container_path)
     }
 
+    fn repository_store_key(&self) -> String {
+        self.repository
+            .as_deref()
+            .or_else(|| {
+                self.env
+                    .iter()
+                    .find(|(name, _)| name == "GITHUB_REPOSITORY")
+                    .map(|(_, value)| value.as_str())
+            })
+            .map(sanitize_store_key)
+            .unwrap_or_else(|| "unknown-repository".to_string())
+    }
+
     fn docker_host_path(&self, host_path: &Path) -> PathBuf {
         let Some(docker_work_dir) = &self.docker_host_work_dir else {
             return host_path.to_path_buf();
@@ -449,6 +555,64 @@ impl JobContainerSpec {
     fn sidecar_container_name(&self, kind: &str) -> String {
         format!("velnor-{kind}-{}", self.name)
     }
+}
+
+#[derive(Debug)]
+pub struct PreparedDockerArgs {
+    pub args: Vec<String>,
+    env_files: Vec<ExecEnvFile>,
+}
+
+impl PreparedDockerArgs {
+    fn new(args: Vec<String>) -> Self {
+        Self {
+            args,
+            env_files: Vec::new(),
+        }
+    }
+
+    pub fn args(&self) -> &[String] {
+        &self.args
+    }
+}
+
+#[derive(Debug)]
+struct ExecEnvFile {
+    path: PathBuf,
+}
+
+impl ExecEnvFile {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ExecEnvFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn env_value_is_secret(value: &str, secret_masks: &[String]) -> bool {
+    !value.is_empty()
+        && secret_masks
+            .iter()
+            .filter(|mask| mask.len() >= 3)
+            .any(|mask| value.contains(mask))
+}
+
+fn write_exec_env_file(temp_host: &Path, name: &str, value: &str) -> io::Result<ExecEnvFile> {
+    let dir = temp_host.join("_velnor").join("exec-env");
+    fs::create_dir_all(&dir)?;
+    let counter = EXEC_ENV_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = dir.join(format!("env-{}-{counter}", std::process::id()));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&path)?;
+    writeln!(file, "{name}={value}")?;
+    Ok(ExecEnvFile { path })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -565,9 +729,49 @@ pub(crate) fn cargo_store_host(temp_host: &Path) -> PathBuf {
     daemon_store_root(temp_host).join("_velnor_cargo")
 }
 
+/// Host-persistent cargo executable store, scoped by trust + repository.
+pub(crate) fn cargo_executable_store_host(temp_host: &Path, repository: &str) -> PathBuf {
+    cargo_executable_store_host_for_scope(
+        temp_host,
+        &crate::github_adapter::cargo_target_trust_scope(),
+        repository,
+    )
+}
+
+fn cargo_executable_store_host_for_scope(
+    temp_host: &Path,
+    trust_scope: &str,
+    repository: &str,
+) -> PathBuf {
+    cargo_store_host(temp_host)
+        .join("bin")
+        .join(sanitize_store_key(trust_scope))
+        .join(sanitize_store_key(repository))
+}
+
 /// Host-persistent mise tool store (installs + cache subdirs are mounted).
 pub(crate) fn mise_store_host(temp_host: &Path) -> PathBuf {
     daemon_store_root(temp_host).join("_velnor_mise")
+}
+
+/// Host-persistent mise executable store, scoped by trust + repository.
+pub(crate) fn mise_executable_store_host(temp_host: &Path, repository: &str) -> PathBuf {
+    mise_executable_store_host_for_scope(
+        temp_host,
+        &crate::github_adapter::cargo_target_trust_scope(),
+        repository,
+    )
+}
+
+fn mise_executable_store_host_for_scope(
+    temp_host: &Path,
+    trust_scope: &str,
+    repository: &str,
+) -> PathBuf {
+    mise_store_host(temp_host)
+        .join("installs")
+        .join(sanitize_store_key(trust_scope))
+        .join(sanitize_store_key(repository))
 }
 
 /// Root for opt-in persistent CARGO_TARGET_DIR buckets (one per job class).
@@ -607,8 +811,8 @@ pub(crate) fn sanitize_store_key(name: &str) -> String {
         })
         .collect();
     key.truncate(128);
-    if key.is_empty() {
-        key.push_str("default");
+    if key.is_empty() || matches!(key.as_str(), "." | "..") {
+        key = "default".to_string();
     }
     key
 }
@@ -671,6 +875,8 @@ pub fn split_container_options(options: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn spec() -> JobContainerSpec {
         JobContainerSpec {
@@ -693,8 +899,20 @@ mod tests {
             docker_host_work_dir: None,
             verify_bind_mounts: false,
             daemon_id: "test-daemon".into(),
+            repository: Some("acme/repo".into()),
             cargo_target_host: None,
         }
+    }
+
+    fn container_test_temp(name: &str) -> PathBuf {
+        let counter = EXEC_ENV_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "velnor-container-{name}-{}-{counter}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
     }
 
     #[test]
@@ -723,6 +941,64 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_store_key_neutralizes_traversal() {
+        assert_eq!(sanitize_store_key(".."), "default");
+        assert_eq!(sanitize_store_key("."), "default");
+        assert_eq!(sanitize_store_key(""), "default");
+        assert_eq!(sanitize_store_key("normal-key.v2"), "normal-key.v2");
+    }
+
+    #[test]
+    fn executable_tool_store_hosts_are_scoped_by_trust_and_repo() {
+        let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
+
+        assert_eq!(
+            cargo_executable_store_host_for_scope(temp, "trusted", "ChainArgos/java-monorepo"),
+            PathBuf::from(
+                "/var/lib/velnor/work/_velnor_cargo/bin/trusted/ChainArgos_java-monorepo"
+            )
+        );
+        assert_eq!(
+            mise_executable_store_host_for_scope(temp, "trusted", "ChainArgos/java-monorepo"),
+            PathBuf::from(
+                "/var/lib/velnor/work/_velnor_mise/installs/trusted/ChainArgos_java-monorepo"
+            )
+        );
+    }
+
+    #[test]
+    fn executable_tool_store_hosts_differ_by_repo() {
+        let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
+
+        assert_ne!(
+            cargo_executable_store_host_for_scope(temp, "trusted", "org/one"),
+            cargo_executable_store_host_for_scope(temp, "trusted", "org/two")
+        );
+        assert_ne!(
+            mise_executable_store_host_for_scope(temp, "trusted", "org/one"),
+            mise_executable_store_host_for_scope(temp, "trusted", "org/two")
+        );
+    }
+
+    #[test]
+    fn pure_data_tool_stores_stay_shared_across_repos() {
+        let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
+
+        assert_eq!(
+            cargo_store_host(temp).join("registry"),
+            PathBuf::from("/var/lib/velnor/work/_velnor_cargo/registry")
+        );
+        assert_eq!(
+            cargo_store_host(temp).join("git"),
+            PathBuf::from("/var/lib/velnor/work/_velnor_cargo/git")
+        );
+        assert_eq!(
+            mise_store_host(temp).join("cache"),
+            PathBuf::from("/var/lib/velnor/work/_velnor_mise/cache")
+        );
+    }
+
+    #[test]
     fn sccache_host_is_shared_across_daemon_slots() {
         // slot-N work roots collapse to one daemon-level sccache dir.
         assert_eq!(
@@ -746,6 +1022,13 @@ mod tests {
         assert!(args.contains(&"/tmp/temp:/tmp".into()));
         assert!(args.contains(&"/tmp/_velnor_sccache:/var/cache/sccache".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
+        assert!(args
+            .contains(&"/tmp/_velnor_cargo/bin/trusted/acme_repo:/github/home/.cargo/bin".into()));
+        assert!(args
+            .contains(&"/tmp/_velnor_mise/installs/trusted/acme_repo:/opt/mise/installs".into()));
+        assert!(args.contains(&"/tmp/_velnor_cargo/registry:/github/home/.cargo/registry".into()));
+        assert!(args.contains(&"/tmp/_velnor_cargo/git:/github/home/.cargo/git".into()));
+        assert!(args.contains(&"/tmp/_velnor_mise/cache:/opt/mise/cache".into()));
         assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
@@ -847,6 +1130,105 @@ mod tests {
                 "/__a/action/dist/index.js"
             ]
         );
+    }
+
+    #[test]
+    fn secret_env_is_not_on_exec_argv() {
+        let mut spec = spec();
+        spec.temp_host = container_test_temp("secret-env");
+        let prepared = spec
+            .prepare_exec_process_args(
+                "/__w",
+                &[
+                    ("TOKEN".into(), "PLACEHOLDER_SECRET".into()),
+                    ("PLAIN".into(), "visible".into()),
+                ],
+                &["PLACEHOLDER_SECRET".into()],
+                &["printenv".into()],
+            )
+            .unwrap();
+
+        let joined = prepared.args().join("\0");
+        assert!(prepared.args().contains(&"--env-file".into()));
+        assert!(!joined.contains("PLACEHOLDER_SECRET"));
+        assert!(joined.contains("PLAIN=visible"));
+    }
+
+    #[test]
+    fn nonsecret_env_stays_inline() {
+        let prepared = spec()
+            .prepare_exec_process_args(
+                "/__w",
+                &[("PLAIN".into(), "visible".into())],
+                &["PLACEHOLDER_SECRET".into()],
+                &["printenv".into()],
+            )
+            .unwrap();
+
+        assert!(prepared.args().contains(&"-e".into()));
+        assert!(prepared.args().contains(&"PLAIN=visible".into()));
+        assert!(!prepared.args().contains(&"--env-file".into()));
+    }
+
+    #[test]
+    fn override_ordering_preserved_with_secret_env_file() {
+        let mut spec = spec();
+        spec.temp_host = container_test_temp("override-env");
+        let prepared = spec
+            .prepare_exec_process_args(
+                "/__w",
+                &[
+                    ("HOME".into(), "PLACEHOLDER_SECRET".into()),
+                    ("HOME".into(), "/override".into()),
+                ],
+                &["PLACEHOLDER_SECRET".into()],
+                &["printenv".into()],
+            )
+            .unwrap();
+
+        let env_file_pos = prepared
+            .args()
+            .iter()
+            .position(|arg| arg == "--env-file")
+            .unwrap();
+        let override_pos = prepared
+            .args()
+            .windows(2)
+            .position(|pair| pair == ["-e", "HOME=/override"])
+            .unwrap();
+        assert!(env_file_pos < override_pos);
+    }
+
+    #[test]
+    fn secret_env_file_is_0600_and_unlinked_on_drop() {
+        let mut spec = spec();
+        spec.temp_host = container_test_temp("mode-env");
+        let prepared = spec
+            .prepare_exec_process_args(
+                "/__w",
+                &[("TOKEN".into(), "PLACEHOLDER_SECRET".into())],
+                &["PLACEHOLDER_SECRET".into()],
+                &["printenv".into()],
+            )
+            .unwrap();
+        let env_file_pos = prepared
+            .args()
+            .iter()
+            .position(|arg| arg == "--env-file")
+            .unwrap();
+        let env_file = PathBuf::from(&prepared.args()[env_file_pos + 1]);
+
+        assert_eq!(
+            fs::read_to_string(&env_file).unwrap(),
+            "TOKEN=PLACEHOLDER_SECRET\n"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&env_file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(prepared);
+        assert!(!env_file.exists());
     }
 
     #[test]

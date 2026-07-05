@@ -41,6 +41,9 @@ sequence. See [`prompts/README.md`](prompts/README.md).
 
 Contributor rules are in [`AGENTS.md`](AGENTS.md).
 
+Run the CI gates locally with `mise run check` (or `mise run fmt`,
+`mise run lint`, and `mise run test` for focused loops).
+
 ## License
 
 Licensed under the Apache License, Version 2.0 (the "License");

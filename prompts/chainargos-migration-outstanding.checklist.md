@@ -1,5 +1,11 @@
 # ChainArgos → Velnor migration — outstanding checklist
 
+> **Archived snapshot.** This file is not an active goal prompt and is not part
+> of the prompt run sequence. It remains as historical migration notes from
+> 2026-06-05; current direction and open work live in
+> [`../docs/master-plan.md`](../docs/master-plan.md) and
+> [`../docs/comparison.md`](../docs/comparison.md).
+
 Status snapshot (2026-06-05). ChainArgos/java-monorepo is migrated: production
 workflows default to the Velnor self-hosted runner, switchable to GitHub-hosted
 or both via the `lanes`/`lane` dispatch input. This file tracks what is DONE and
@@ -42,11 +48,14 @@ Proper distribution: a **Debian package (`.deb`)** that installs the runner the
 right way, instead of the current ad-hoc transient `systemd-run` + manual
 git-bundle deploys. Target this as the real fix for daemon operations.
 
-- [ ] **apt-native repo + `.deb`** — full design in
+- [x] **apt-native repo + `.deb`** — shipped. Full design in
       [`docs/debian-apt-repo.md`](../docs/debian-apt-repo.md): cargo-deb builds
       the `.deb`, reprepro builds a GPG-signed apt repo, GitHub Pages hosts it,
       GitHub Actions publishes on tag, users `apt install velnor-runner` via a
-      `signed-by` keyring and `apt upgrade` to update.
+      `signed-by` keyring and `apt upgrade` to update. Current code has
+      `[package.metadata.deb]`, `crates/velnor-runner/debian/`, and
+      `.github/workflows/release-deb.yml`; auto-publish shipped in commit
+      `e9a6726`.
   - [x] **apt repo created + scaffolded**: `donbeave/velnor-apt` (public) — README
         with install steps, `conf/distributions` (reprepro), `publish.yml`
         (download `.deb` → reprepro sign → publish gh-pages).
@@ -75,28 +84,29 @@ git-bundle deploys. Target this as the real fix for daemon operations.
         `.deb` is reachable, `apt install velnor-runner` from
         `https://velnor-apt.tailrocks.com` works. `publish.yml` reads the `.deb`
         from velnor-apt's OWN release (same-repo token — no private-repo read).
-  - [ ] **Only remaining: auto-publish on tag** — add a PAT with write on
-        `donbeave/velnor-apt` as a velnor secret `VELNOR_APT_TOKEN`. Then a
-        `git tag vX.Y.Z` makes `release-deb.yml` build the `.deb`, upload it to
-        velnor-apt's release, and trigger `publish.yml` — fully automatic. Until
-        the PAT exists, publish manually (the workflow prints the two commands).
-- [ ] **`.deb` package** (e.g. via `cargo-deb` or `nfpm`):
+  - [x] **Auto-publish on tag** — shipped in `e9a6726`
+        (`release-deb.yml` uploads the `.deb` to velnor-apt and triggers
+        publish; later token-name follow-ups landed in `d40681a`/`e603850`).
+- [x] **`.deb` package** — shipped via `cargo-deb`:
   - ships the `velnor-runner` binary to `/usr/bin` (or `/opt/velnor`)
   - installs a **systemd unit** `velnor-daemon.service` (`Restart=always`,
     `RestartSec`, `WantedBy=multi-user.target` → boot start)
-  - creates a dedicated service user + state dirs (`/var/lib/velnor`,
-    `/etc/velnor` for the `.env`/PAT), correct perms
+  - creates state/config dirs (`/var/lib/velnor`, `/etc/velnor` for the
+    `.env`/PAT), correct perms; service intentionally still runs as `root`
+    because it manages Docker
   - config file (URL, name, labels, slots, work-dir, token) under `/etc/velnor`
     read by the unit (no secrets on argv — keeps the PAT out of `/proc`)
   - `postinst`/`prerm` enable/disable + start/stop; clean upgrade path
     (`apt install ./velnor-runner.deb` to update the binary + restart)
   - apt repo or release artifact so install/upgrade is `apt`-native
-- [ ] **Stop idle-exit churn** — currently `--idle-timeout-seconds 2400` exits
-      after 40 min idle; combined with rapid restarts it piles up stale "busy"
-      runner registrations until "0 usable slots" exits. For a packaged
-      long-running service, drop the idle-timeout, and have startup proactively
-      delete *all* of its own prior named runners before registering.
-- [ ] **Boot/auto-recovery verified** — daemon comes back after reboot + after a
+- [x] **Stop idle-exit churn** — shipped in the packaged daemon path:
+      `velnor-daemon.service` does not pass `--idle-timeout-seconds`;
+      supervised daemon registration retries forever instead of exiting; local
+      runner failures keep the registration and back off per slot; `--replace`
+      deletes stored runner ids best-effort and 409 orphan cleanup deletes by
+      name when possible.
+- [ ] **Boot/auto-recovery verified** — open operational evidence item in the
+      master-plan stability track: daemon comes back after reboot + after a
       crash without manual `gh api DELETE runners` + restart.
 - [x] **Docker network leak** FIXED (rc2: prune velnor-net + velnor-job on startup; verified) — interrupted jobs / daemon crashes leave
       `velnor-net-*` networks behind; they accumulate until Docker's address pool
@@ -135,7 +145,8 @@ git-bundle deploys. Target this as the real fix for daemon operations.
   - [x] **github lane VERIFIED** — `build-image.yml` for `debian-blockchain-base`
         on `lane=github` succeeded (run 26990829478). blockchain-nodes runs on
         GitHub-hosted via the new pattern.
-  - [ ] **velnor lane BLOCKED on a velnor bug** (run 26990823037 failed at
+- [ ] **velnor lane BLOCKED on a velnor bug** — historical follow-up, now owned
+        by the master-plan native-adapter completeness track. Run 26990823037 failed at
         `baptiste0928/cargo-install`: "Unable to locate executable file: cargo").
         Root cause: velnor runs JS actions in a **node:20 sidecar** (not the job
         container). `dtolnay/rust-toolchain` installs cargo to
@@ -153,7 +164,8 @@ git-bundle deploys. Target this as the real fix for daemon operations.
         Then re-enable the bcn daemon, verify `lane=velnor`, and merge PR #578.
 
 ### Platform gaps (GitHub V2 sends third-party runners a leaner message — likely NOT runner-fixable; decide whether to work around)
-- [ ] **Downloadable log archive empty** (`gh run view --log` / "Download log
+- [ ] **Downloadable log archive empty** — platform gap tracked in
+      `docs/comparison.md` / master-plan P4.3. (`gh run view --log` / "Download log
       archive"). Built from the **v1 timeline log store**, which needs a
       `scopeIdentifier` + the `pipelines…/_apis/distributedtask/…/logs` host —
       both ABSENT from velnor's V2 broker message (`plan.scopeIdentifier=null`,
@@ -163,16 +175,19 @@ git-bundle deploys. Target this as the real fix for daemon operations.
         as a **`job-log.txt` artifact** at completion (under the run's Artifacts),
         so there IS a real "download the logs" path. Not the native button, but a
         working archive. (Deploy to Sentry via `apt upgrade` once on rc4.)
-- [ ] **Step display names show `Run <command>`** instead of the YAML `name:`
-      (Tests / Rustfmt / Clippy). Proven at the wire: the broker step has
+- [ ] **Step display names show `Run <command>` instead of the YAML `name:`**
+      — platform/message-shape gap tracked in `docs/comparison.md` (Tests /
+      Rustfmt / Clippy). Proven at the wire: the broker step has
       `name=__run`/`__run_2`, `displayName=None` — GitHub strips the name. Only a
       fragile workflow-YAML parse (glob `.github/workflows`, match job by
       `system.github.job` + `__run_N` index) could recover it, at the risk of
       *wrong* labels. Currently left as GitHub's own unnamed-step format.
 
 ### Priority 4 — optional polish
-- [ ] **buildx local cache** (`type=gha` → local) for faster repeat Docker builds
-      on the Velnor lane (GHA cache backend is unavailable off-GitHub).
-- [ ] **Action-adapter text** (setup-mold / sccache / mise) — native adapters
-      print different text than the real JS actions. Functionally equivalent;
-      exact-text matching is brittle + low value. Deprioritized.
+- [ ] **buildx local cache** — performance follow-up under master-plan P3:
+      `type=gha` → local for faster repeat Docker builds on the Velnor lane
+      (GHA cache backend is unavailable off-GitHub).
+- [ ] **Action-adapter text** — UI polish tracked under master-plan P4:
+      setup-mold / sccache / mise native adapters print different text than the
+      real JS actions. Functionally equivalent; exact-text matching is brittle +
+      low value. Deprioritized.

@@ -221,6 +221,7 @@ pub struct RepositoryActionPlan {
     pub env: Vec<(String, String)>,
     pub condition: Option<String>,
     pub continue_on_error: bool,
+    pub timeout_minutes: Option<u64>,
 }
 
 pub const NATIVE_ACTION_REF: &str = "__native";
@@ -319,6 +320,7 @@ pub fn repository_action_plans(
             env: step_environment(step)?,
             condition: step.condition.clone(),
             continue_on_error: crate::script_step::step_continue_on_error(step),
+            timeout_minutes: crate::script_step::step_timeout_minutes(step),
         });
     }
     Ok(plans)
@@ -795,6 +797,7 @@ fn composite_action_invocations_with_path(
                         workspace_container,
                         &step_ids,
                     ),
+                    timeout_minutes: None,
                 },
             ));
             continue;
@@ -883,6 +886,7 @@ fn composite_action_invocations_with_path(
                 workspace_container,
                 &step_ids,
             ),
+            timeout_minutes: None,
         }));
     }
     let outputs = metadata
@@ -2110,6 +2114,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let metadata = parse_action_metadata(
             r#"
@@ -2178,6 +2183,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let metadata = parse_action_metadata(
             r#"
@@ -2250,6 +2256,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let metadata = parse_action_metadata(
             r#"
@@ -2303,6 +2310,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let metadata = parse_action_metadata(
             r#"
@@ -2367,6 +2375,7 @@ runs:
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             RepositoryActionPlan {
                 step_id: "cache-save".into(),
@@ -2379,6 +2388,7 @@ runs:
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
         ];
         let mut runner = RecordingRunner::default();
@@ -2416,6 +2426,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
 
         let resolved = resolve_action(&plan).unwrap();
@@ -2449,6 +2460,7 @@ runs:
             .into(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let metadata = parse_action_metadata(
             "runs:\n  using: node20\n  pre: dist/setup.js\n  pre-if: always()\n  main: dist/index.js\n  post: dist/cleanup.js\n  post-if: success()\n",
@@ -2515,6 +2527,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let metadata = parse_action_metadata(
             r#"
@@ -2570,6 +2583,7 @@ runs:
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let metadata = parse_action_metadata(
             r#"
@@ -2635,6 +2649,7 @@ runs:
             env: Vec::new(),
             condition: Some("needs.changes.outputs.is_publish == 'true'".into()),
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let metadata = parse_action_metadata(
             r#"
@@ -2694,6 +2709,7 @@ runs:
             env: [("LOG_LEVEL".to_string(), "debug".to_string())].into(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let metadata = parse_action_metadata(
             r#"
@@ -2865,6 +2881,7 @@ runs:
                             env: Vec::new(),
                             condition: None,
                             continue_on_error: false,
+                            timeout_minutes: None,
                         },
                         metadata_path: path.clone(),
                         runtime: metadata.runtime().unwrap(),
@@ -3084,7 +3101,7 @@ runs:
         match value {
             serde_yaml::Value::Mapping(map) => {
                 for (key, value) in map {
-                    if key.as_str() == Some("uses") {
+                    if key == "uses" {
                         if let Some(uses) = value.as_str() {
                             values.push(uses.to_string());
                         }

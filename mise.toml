@@ -1,5 +1,6 @@
 [tools]
 actionlint = "1.7.12"
+"cargo:cargo-deny" = "0.19.9"
 "cargo:cargo-nextest" = "0.9.137"
 "cargo:cargo-zigbuild" = "0.22.3"
 "cargo:cargo-deb" = "3.7.0"
@@ -7,3 +8,21 @@ zig = "0.16.0"
 
 [settings]
 idiomatic_version_file_enable_tools = ["rust"]
+
+[tasks.fmt]
+run = "cargo fmt --all --check"
+
+[tasks.lint]
+run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
+
+[tasks.test]
+run = "cargo nextest run --workspace --locked --color=always"
+
+[tasks.actionlint]
+run = "actionlint"
+
+[tasks.deny]
+run = "cargo deny check advisories"
+
+[tasks.check]
+depends = ["fmt", "actionlint", "deny", "lint", "test"]

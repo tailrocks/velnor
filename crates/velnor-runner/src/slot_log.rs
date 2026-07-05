@@ -11,18 +11,29 @@
 //! never affect the runner, and short-lived handles survive log directory
 //! removal, rotation, and daemon restarts without coordination.
 
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 /// Rotate a forensic log once it grows past this size; one rotated generation
 /// (`<name>.1`) is kept, bounding disk use to ~2x per file.
 const ROTATE_BYTES: u64 = 32 * 1024 * 1024;
+const ROTATE_CHECK_INTERVAL: u32 = 128;
 
 pub const LIFECYCLE_LOG: &str = "lifecycle.log";
 pub const BROKER_LOG: &str = "broker.log";
 pub const REGISTRY_LOG: &str = "registry.log";
 pub const DAEMON_LOG: &str = "daemon.log";
+
+#[derive(Debug, Default)]
+struct LogFileState {
+    dir_ensured: bool,
+    writes_since_rotate_check: u32,
+}
+
+static LOG_FILE_STATES: OnceLock<Mutex<HashMap<PathBuf, LogFileState>>> = OnceLock::new();
 
 /// Forensic logger bound to one log directory and one identity prefix
 /// (e.g. `runner=velnor-fixture-slot-1 agent_id=4237 session=ab12cd34`).
@@ -66,12 +77,72 @@ impl SlotForensics {
 pub fn append_log_line(dir: &Path, file_name: &str, identity: &str, message: &str) {
     tracing::info!(target: "velnor::forensic", file = file_name, identity, message);
     let path = dir.join(file_name);
-    let _ = std::fs::create_dir_all(dir);
-    rotate_if_large(&path, ROTATE_BYTES);
-    let line = format_log_line(&now_rfc3339(), identity, message);
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
-        let _ = file.write_all(line.as_bytes());
+    ensure_log_dir_once(&path, dir);
+    if should_check_rotation(&path) {
+        rotate_if_large(&path, ROTATE_BYTES);
     }
+    let line = format_log_line(&now_rfc3339(), identity, message);
+    match write_log_line(&path, &line) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            recreate_log_dir_and_retry(dir, &path, &line);
+        }
+        _ => {}
+    }
+}
+
+fn write_log_line(path: &Path, line: &str) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(line.as_bytes())
+}
+
+fn ensure_log_dir_once(path: &Path, dir: &Path) {
+    if !needs_log_dir_ensure(path) {
+        return;
+    }
+    if std::fs::create_dir_all(dir).is_ok() {
+        mark_log_dir_ensured(path);
+    }
+}
+
+fn recreate_log_dir_and_retry(dir: &Path, path: &Path, line: &str) {
+    if std::fs::create_dir_all(dir).is_ok() {
+        mark_log_dir_ensured(path);
+        let _ = write_log_line(path, line);
+    }
+}
+
+fn needs_log_dir_ensure(path: &Path) -> bool {
+    let Ok(mut states) = log_file_states().lock() else {
+        return true;
+    };
+    !states.entry(path.to_path_buf()).or_default().dir_ensured
+}
+
+fn mark_log_dir_ensured(path: &Path) {
+    if let Ok(mut states) = log_file_states().lock() {
+        states.entry(path.to_path_buf()).or_default().dir_ensured = true;
+    }
+}
+
+fn should_check_rotation(path: &Path) -> bool {
+    let Ok(mut states) = log_file_states().lock() else {
+        return true;
+    };
+    let state = states.entry(path.to_path_buf()).or_default();
+    if state.writes_since_rotate_check == 0 {
+        state.writes_since_rotate_check = 1;
+        true
+    } else if state.writes_since_rotate_check + 1 >= ROTATE_CHECK_INTERVAL {
+        state.writes_since_rotate_check = 0;
+        false
+    } else {
+        state.writes_since_rotate_check += 1;
+        false
+    }
+}
+
+fn log_file_states() -> &'static Mutex<HashMap<PathBuf, LogFileState>> {
+    LOG_FILE_STATES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn format_log_line(timestamp: &str, identity: &str, message: &str) -> String {
@@ -146,6 +217,20 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("[runner=t] poll empty status=204"));
         assert!(lines[1].contains("poll message status=200"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_recreates_removed_directory_once() {
+        let dir = unique_temp_dir("recreate");
+        let logs = dir.join("logs");
+        append_log_line(&logs, BROKER_LOG, "runner=t", "first");
+        std::fs::remove_dir_all(&logs).expect("remove logs");
+
+        append_log_line(&logs, BROKER_LOG, "runner=t", "second");
+
+        let content = std::fs::read_to_string(logs.join(BROKER_LOG)).expect("read recreated log");
+        assert!(content.contains("[runner=t] second"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

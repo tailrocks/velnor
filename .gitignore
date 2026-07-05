@@ -11,4 +11,5 @@ coverage/
 .velnor-config/
 .velnor-job-dumps/
 .velnor-live-evidence/
+.velnor-compare/*.html
 target-job-payloads/

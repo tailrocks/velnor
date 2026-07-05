@@ -1988,7 +1988,7 @@ fn collect_workflow(surface: &mut TargetSurface, workflow: &TargetWorkflow) -> R
             .push(format!("{}: workflow root is not mapping", workflow.path));
         return Ok(());
     };
-    if let Some(on) = mapping_get(root, "on").or_else(|| mapping_get_bool(root, true)) {
+    if let Some(on) = mapping_get(root, "on") {
         increment(
             &mut surface.workflow_triggers,
             (workflow.path.clone(), list_keys(on).join(",")),
@@ -2003,10 +2003,7 @@ fn collect_workflow(surface: &mut TargetSurface, workflow: &TargetWorkflow) -> R
     let Some(jobs) = mapping_get(root, "jobs").and_then(|value| value.as_mapping()) else {
         return Ok(());
     };
-    for (job_key, job_value) in jobs {
-        let Some(job_name) = scalar_to_string(job_key) else {
-            continue;
-        };
+    for (job_name, job_value) in jobs {
         let Some(job) = job_value.as_mapping() else {
             continue;
         };
@@ -2015,7 +2012,7 @@ fn collect_workflow(surface: &mut TargetSurface, workflow: &TargetWorkflow) -> R
                 &mut surface.job_runs_on,
                 (
                     workflow.path.clone(),
-                    job_name.clone(),
+                    job_name.to_string(),
                     compact_value(runs_on),
                 ),
             );
@@ -2025,7 +2022,7 @@ fn collect_workflow(surface: &mut TargetSurface, workflow: &TargetWorkflow) -> R
                 &mut surface.reusable_workflows,
                 (
                     workflow.path.clone(),
-                    job_name.clone(),
+                    job_name.to_string(),
                     normalize_uses(uses).to_string(),
                 ),
             );
@@ -2069,7 +2066,7 @@ fn collect_step(surface: &mut TargetSurface, workflow_path: &str, step: &serde_y
 
     if family == "actions/checkout" {
         if let Some(with) = mapping_get(step, "with").and_then(|value| value.as_mapping()) {
-            for input in with.keys().filter_map(scalar_to_string) {
+            for input in with.keys() {
                 let supported = matches!(
                     input.as_str(),
                     "repository"
@@ -2101,10 +2098,7 @@ fn normalize_uses(uses: &str) -> &str {
 fn list_keys(value: &serde_yaml::Value) -> Vec<String> {
     match value {
         serde_yaml::Value::Mapping(mapping) => {
-            let mut keys = mapping
-                .keys()
-                .filter_map(scalar_to_string)
-                .collect::<Vec<_>>();
+            let mut keys = mapping.keys().cloned().collect::<Vec<_>>();
             keys.sort();
             keys
         }
@@ -2134,9 +2128,7 @@ fn compact_value(value: &serde_yaml::Value) -> String {
         serde_yaml::Value::Mapping(mapping) => {
             let mut entries = mapping
                 .iter()
-                .filter_map(|(key, value)| {
-                    scalar_to_string(key).map(|key| (key, compact_value(value)))
-                })
+                .map(|(key, value)| (key.clone(), compact_value(value)))
                 .collect::<Vec<_>>();
             entries.sort_by(|left, right| left.0.cmp(&right.0));
             let entries = entries
@@ -2145,7 +2137,7 @@ fn compact_value(value: &serde_yaml::Value) -> String {
                 .collect::<Vec<_>>();
             format!("{{{}}}", entries.join(", "))
         }
-        serde_yaml::Value::Tagged(tagged) => compact_value(&tagged.value),
+        serde_yaml::Value::Tagged(tagged) => compact_value(tagged.value()),
     }
 }
 
@@ -2156,11 +2148,7 @@ fn object_get<'a>(value: &'a serde_yaml::Value, key: &str) -> Option<&'a serde_y
 }
 
 fn mapping_get<'a>(mapping: &'a serde_yaml::Mapping, key: &str) -> Option<&'a serde_yaml::Value> {
-    mapping.get(serde_yaml::Value::String(key.to_string()))
-}
-
-fn mapping_get_bool(mapping: &serde_yaml::Mapping, key: bool) -> Option<&serde_yaml::Value> {
-    mapping.get(serde_yaml::Value::Bool(key))
+    mapping.get(key)
 }
 
 fn scalar_to_string(value: &serde_yaml::Value) -> Option<String> {

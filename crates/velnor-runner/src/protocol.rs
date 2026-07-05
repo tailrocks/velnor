@@ -34,6 +34,27 @@ pub fn velnor_runner_display() -> String {
 }
 pub const EMPTY_LOCK_TOKEN: &str = "00000000-0000-0000-0000-000000000000";
 
+#[derive(Debug, thiserror::Error)]
+#[error("{action} failed: status={status}, body={body}")]
+pub struct GitHubApiError {
+    pub status: u16,
+    pub action: String,
+    pub body: String,
+}
+
+fn github_api_error(
+    action: impl Into<String>,
+    status: u16,
+    body: impl Into<String>,
+) -> anyhow::Error {
+    GitHubApiError {
+        status,
+        action: action.into(),
+        body: body.into(),
+    }
+    .into()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitHubScope {
     pub original_url: String,
@@ -342,6 +363,12 @@ pub struct OAuthTokenResponse {
     pub error_description: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthAccessToken {
+    pub token: String,
+    pub expires_in: Option<std::time::Duration>,
+}
+
 #[derive(Clone)]
 pub struct OAuthClient {
     http: Client,
@@ -359,7 +386,7 @@ impl OAuthClient {
     pub async fn exchange_client_credentials(
         &self,
         credentials: &OAuthJwtCredentials,
-    ) -> Result<String> {
+    ) -> Result<OAuthAccessToken> {
         let assertion = build_client_assertion(credentials)?;
         // Build URL-encoded form body for curl --data
         let body: String = url::form_urlencoded::Serializer::new(String::new())
@@ -421,23 +448,31 @@ impl OAuthClient {
         let status: u16 = status_str.trim().parse().unwrap_or(0);
         let ok = (200..300).contains(&status);
         if !ok && status != 400 {
-            bail!("OAuth token request failed: status={status}, body={text}");
+            return Err(github_api_error("OAuth token request", status, text));
         }
 
-        let token: OAuthTokenResponse =
+        let token_response: OAuthTokenResponse =
             serde_json::from_str(text.trim()).context("parse OAuth token response")?;
 
-        if let Some(error) = token.error {
+        if let Some(error) = token_response.error {
             bail!(
                 "OAuth token request failed: error={error}, description={}",
-                token.error_description.unwrap_or_default()
+                token_response.error_description.unwrap_or_default()
             );
         }
 
-        token
+        let token = token_response
             .access_token
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("OAuth token response missing access_token"))
+            .ok_or_else(|| anyhow::anyhow!("OAuth token response missing access_token"))?;
+        Ok(OAuthAccessToken {
+            token,
+            expires_in: token_response
+                .expires_in
+                .and_then(|seconds| u64::try_from(seconds).ok())
+                .filter(|seconds| *seconds > 0)
+                .map(std::time::Duration::from_secs),
+        })
     }
 }
 
@@ -597,8 +632,10 @@ impl RegistrationClient {
                             .context("parse JIT runner config response");
                     }
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    last_err = anyhow::anyhow!(
-                        "JIT runner config request failed: status={status}, body={json_part}, stderr={stderr}"
+                    last_err = github_api_error(
+                        "JIT runner config request",
+                        status,
+                        format!("{json_part}, stderr={stderr}"),
                     );
                     if status == 409 {
                         return Err(last_err);
@@ -639,7 +676,11 @@ impl RegistrationClient {
             let status = response.status();
             if !status.is_success() {
                 let body = response.text().await.unwrap_or_default();
-                bail!("list runners request failed: status={status}, body={body}");
+                return Err(github_api_error(
+                    "list runners request",
+                    status.as_u16(),
+                    body,
+                ));
             }
             let page: Page = response
                 .json()
@@ -720,10 +761,7 @@ impl RegistrationClient {
         if status == 204 || status == 404 {
             return Ok(());
         }
-        bail!(
-            "delete runner request failed: status={status}, body={}",
-            body
-        );
+        Err(github_api_error("delete runner request", status, body))
     }
 }
 
@@ -964,10 +1002,7 @@ pub fn parse_runner_lookup(status: u16, body: &str) -> Result<Option<ListedRunne
         return Ok(None);
     }
     if !(200..300).contains(&status) {
-        bail!(
-            "runner lookup failed: status={status}, body={}",
-            body.trim()
-        );
+        return Err(github_api_error("runner lookup", status, body.trim()));
     }
     serde_json::from_str(body.trim())
         .map(Some)
@@ -999,7 +1034,7 @@ impl BrokerClient {
         let (status, text) =
             curl_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
         if !(200..300).contains(&status) {
-            bail!("create broker session failed: status={status}, body={text}");
+            return Err(github_api_error("create broker session", status, text));
         }
         serde_json::from_str(&text).context("parse create broker session response")
     }
@@ -1009,7 +1044,7 @@ impl BrokerClient {
         let (status, text) =
             curl_json_request("DELETE", url.as_str(), &self.bearer_token, None, 30).await?;
         if status != 0 && !(200..300).contains(&status) {
-            bail!("delete broker session failed: status={status}, body={text}");
+            return Err(github_api_error("delete broker session", status, text));
         }
         Ok(())
     }
@@ -1034,10 +1069,11 @@ impl BrokerClient {
                     message: Some(message),
                 })
                 .context("parse get broker message response"),
-            BrokerPollClass::Error => bail!(
-                "get broker message failed: status={http_status}, body={}",
-                text.trim()
-            ),
+            BrokerPollClass::Error => Err(github_api_error(
+                "get broker message",
+                http_status,
+                text.trim(),
+            )),
         }
     }
 
@@ -1052,7 +1088,11 @@ impl BrokerClient {
         let (http_status, text) =
             curl_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
         if http_status != 0 && !(200..300).contains(&http_status) {
-            bail!("acknowledge broker runner request failed: status={http_status}, body={text}");
+            return Err(github_api_error(
+                "acknowledge broker runner request",
+                http_status,
+                text,
+            ));
         }
         Ok(())
     }
@@ -1110,7 +1150,7 @@ impl RunServiceClient {
             });
         }
         if !(200..300).contains(&status) {
-            bail!("acquire run-service job failed: status={status}, body={text}");
+            return Err(github_api_error("acquire run-service job", status, text));
         }
         serde_json::from_str::<Value>(&text)
             .map(AcquireJobOutcome::Acquired)
@@ -1129,7 +1169,7 @@ impl RunServiceClient {
         let (status, text) =
             curl_json_request("POST", url.as_str(), &self.bearer_token, Some(body), 30).await?;
         if !(200..300).contains(&status) {
-            bail!("renew run-service job failed: status={status}, body={text}");
+            return Err(github_api_error("renew run-service job", status, text));
         }
         serde_json::from_str(&text).context("parse renew run-service job response")
     }
@@ -1164,7 +1204,7 @@ impl RunServiceClient {
             if attempt >= MAX_ATTEMPTS || !retriable {
                 return match outcome {
                     Ok((status, text)) => {
-                        bail!("complete run-service job failed: status={status}, body={text}")
+                        Err(github_api_error("complete run-service job", status, text))
                     }
                     Err(error) => Err(error).context("complete run-service job request"),
                 };
@@ -1746,11 +1786,15 @@ where
 
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        bail!(
-            "{action} failed: status={status}, request_id={}, body={}",
-            request_id.unwrap_or_else(|| "unknown".to_string()),
-            body
-        );
+        return Err(github_api_error(
+            action,
+            status.as_u16(),
+            format!(
+                "request_id={}, body={}",
+                request_id.unwrap_or_else(|| "unknown".to_string()),
+                body
+            ),
+        ));
     }
 
     response
@@ -1806,7 +1850,7 @@ where
         .with_context(|| format!("read {action} response"))?;
 
     if !status.is_success() {
-        bail!("{action} failed: status={status}, body={text}");
+        return Err(github_api_error(action, status.as_u16(), text));
     }
 
     if text.trim().is_empty() {
@@ -1833,7 +1877,7 @@ async fn parse_optional_task_agent_message_response(
         .with_context(|| format!("read {action} response"))?;
 
     if !status.is_success() {
-        bail!("{action} failed: status={status}, body={text}");
+        return Err(github_api_error(action, status.as_u16(), text));
     }
 
     if text.trim().is_empty() {
@@ -1851,7 +1895,7 @@ async fn parse_empty_response(response: reqwest::Response, action: &str) -> Resu
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        bail!("{action} failed: status={status}, body={body}");
+        return Err(github_api_error(action, status.as_u16(), body));
     }
     Ok(())
 }

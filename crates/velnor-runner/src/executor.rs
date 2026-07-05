@@ -12,23 +12,32 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use globset::{Glob, GlobSetBuilder};
+use rayon::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc, Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::mpsc::UnboundedSender;
 
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
+const DEFAULT_STEP_TIMEOUT_MINUTES: u64 = 360;
+const DEFAULT_STEP_TIMEOUT: Duration = Duration::from_secs(DEFAULT_STEP_TIMEOUT_MINUTES * 60);
+const SETUP_QEMU_BINFMT_IMAGE: &str =
+    "docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0";
+static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
 // ANSI color helpers for Velnor-authored adapter output.
 // GitHub's UI renders these as colored spans (ansifg-* classes).
@@ -48,6 +57,27 @@ pub struct CommandResult {
 pub trait CommandRunner {
     fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult>;
 
+    fn run_timeout(
+        &mut self,
+        program: &str,
+        args: &[String],
+        timeout: Duration,
+    ) -> Result<CommandResult> {
+        let _ = timeout;
+        self.run(program, args)
+    }
+
+    fn run_streaming_timeout(
+        &mut self,
+        program: &str,
+        args: &[String],
+        timeout: Duration,
+        on_output: &mut dyn FnMut(CommandStream, &str),
+    ) -> Result<CommandResult> {
+        let _ = timeout;
+        self.run_streaming(program, args, on_output)
+    }
+
     fn run_streaming(
         &mut self,
         program: &str,
@@ -65,6 +95,17 @@ pub trait CommandRunner {
     ) -> Result<CommandResult> {
         let _ = env;
         self.run(program, args)
+    }
+
+    fn run_with_stdin_timeout(
+        &mut self,
+        program: &str,
+        args: &[String],
+        stdin: &str,
+        timeout: Duration,
+    ) -> Result<CommandResult> {
+        let _ = timeout;
+        self.run_with_stdin(program, args, stdin)
     }
 
     fn run_with_stdin(
@@ -115,16 +156,41 @@ pub struct ProcessCommandRunner;
 
 impl CommandRunner for ProcessCommandRunner {
     fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+        self.run_timeout(program, args, DEFAULT_STEP_TIMEOUT)
+    }
+
+    fn run_timeout(
+        &mut self,
+        program: &str,
+        args: &[String],
+        timeout: Duration,
+    ) -> Result<CommandResult> {
         // Called from spawn_blocking context — synchronous blocking is fine here.
-        let output = Command::new(program)
+        let child = Command::new(program)
             .args(args)
-            .output()
-            .with_context(|| format!("run {program} {}", args.join(" ")))?;
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
+        let (timed_out, watchdog_cancel, watchdog) =
+            spawn_docker_timeout_watchdog(program, args, timeout);
+        let output = child
+            .wait_with_output()
+            .with_context(|| format!("wait for {program} {}", args.join(" ")))?;
+        let _ = watchdog_cancel.send(());
+        if let Some(watchdog) = watchdog {
+            let _ = watchdog.join();
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(timeout_command_result(stdout, stderr));
+        }
 
         Ok(CommandResult {
             code: exit_code(output.status)?,
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            stdout,
+            stderr,
         })
     }
 
@@ -132,6 +198,16 @@ impl CommandRunner for ProcessCommandRunner {
         &mut self,
         program: &str,
         args: &[String],
+        on_output: &mut dyn FnMut(CommandStream, &str),
+    ) -> Result<CommandResult> {
+        self.run_streaming_timeout(program, args, DEFAULT_STEP_TIMEOUT, on_output)
+    }
+
+    fn run_streaming_timeout(
+        &mut self,
+        program: &str,
+        args: &[String],
+        timeout: Duration,
         on_output: &mut dyn FnMut(CommandStream, &str),
     ) -> Result<CommandResult> {
         let mut child = Command::new(program)
@@ -152,6 +228,8 @@ impl CommandRunner for ProcessCommandRunner {
         let stdout_sender = sender.clone();
         thread::spawn(move || stream_reader(stdout, CommandStream::Stdout, stdout_sender));
         thread::spawn(move || stream_reader(stderr, CommandStream::Stderr, sender));
+        let (timed_out, watchdog_cancel, watchdog) =
+            spawn_docker_timeout_watchdog(program, args, timeout);
 
         let mut stdout = String::new();
         let mut stderr = String::new();
@@ -172,6 +250,13 @@ impl CommandRunner for ProcessCommandRunner {
         let status = child
             .wait()
             .with_context(|| format!("wait for {program} {}", args.join(" ")))?;
+        let _ = watchdog_cancel.send(());
+        if let Some(watchdog) = watchdog {
+            let _ = watchdog.join();
+        }
+        if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(timeout_command_result(stdout, stderr));
+        }
         Ok(CommandResult {
             code: exit_code(status)?,
             stdout,
@@ -207,6 +292,16 @@ impl CommandRunner for ProcessCommandRunner {
         args: &[String],
         stdin: &str,
     ) -> Result<CommandResult> {
+        self.run_with_stdin_timeout(program, args, stdin, DEFAULT_STEP_TIMEOUT)
+    }
+
+    fn run_with_stdin_timeout(
+        &mut self,
+        program: &str,
+        args: &[String],
+        stdin: &str,
+        timeout: Duration,
+    ) -> Result<CommandResult> {
         let mut child = Command::new(program)
             .args(args)
             .stdin(Stdio::piped())
@@ -214,6 +309,8 @@ impl CommandRunner for ProcessCommandRunner {
             .stderr(Stdio::piped())
             .spawn()
             .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
+        let (timed_out, watchdog_cancel, watchdog) =
+            spawn_docker_timeout_watchdog(program, args, timeout);
         if let Some(mut child_stdin) = child.stdin.take() {
             child_stdin
                 .write_all(stdin.as_bytes())
@@ -222,11 +319,20 @@ impl CommandRunner for ProcessCommandRunner {
         let output = child
             .wait_with_output()
             .with_context(|| format!("wait for {program} {}", args.join(" ")))?;
+        let _ = watchdog_cancel.send(());
+        if let Some(watchdog) = watchdog {
+            let _ = watchdog.join();
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(timeout_command_result(stdout, stderr));
+        }
 
         Ok(CommandResult {
             code: exit_code(output.status)?,
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            stdout,
+            stderr,
         })
     }
 }
@@ -236,12 +342,25 @@ fn stream_reader<R: std::io::Read + Send + 'static>(
     stream: CommandStream,
     sender: mpsc::Sender<(CommandStream, String)>,
 ) {
-    for line in BufReader::new(reader).lines() {
-        let Ok(line) = line else {
-            break;
-        };
-        if sender.send((stream, line)).is_err() {
-            break;
+    let mut reader = BufReader::new(reader);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break,
+            Ok(_) => {
+                if buf.last() == Some(&b'\n') {
+                    buf.pop();
+                }
+                if buf.last() == Some(&b'\r') {
+                    buf.pop();
+                }
+                let line = String::from_utf8_lossy(&buf).into_owned();
+                if sender.send((stream, line)).is_err() {
+                    break;
+                }
+            }
+            Err(_) => break,
         }
     }
 }
@@ -255,6 +374,53 @@ pub struct StepExecutionResult {
     pub stdout: String,
     pub stderr: String,
 }
+
+#[derive(Debug)]
+pub(crate) struct StepLogicFailure {
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+impl StepLogicFailure {
+    pub(crate) fn new(
+        exit_code: i32,
+        stdout: impl Into<String>,
+        stderr: impl Into<String>,
+    ) -> Self {
+        Self {
+            exit_code,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
+
+    fn to_step_result(&self, stdout_prefix: Option<String>) -> StepExecutionResult {
+        let mut stdout = stdout_prefix.unwrap_or_default();
+        if !self.stdout.is_empty() {
+            if !stdout.is_empty() {
+                stdout.push('\n');
+            }
+            stdout.push_str(&self.stdout);
+        }
+        StepExecutionResult {
+            exit_code: self.exit_code,
+            state: StepCommandState::default(),
+            skipped: false,
+            failure_ignored: false,
+            stdout,
+            stderr: self.stderr.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for StepLogicFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.stderr)
+    }
+}
+
+impl std::error::Error for StepLogicFailure {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobExecutionSummary {
@@ -311,6 +477,7 @@ pub enum ExecutableStep {
         invocation: JavaScriptActionInvocation,
         condition: Option<String>,
         continue_on_error: bool,
+        timeout_minutes: Option<u64>,
     },
     Docker {
         step_id: String,
@@ -318,6 +485,7 @@ pub enum ExecutableStep {
         invocation: DockerActionInvocation,
         condition: Option<String>,
         continue_on_error: bool,
+        timeout_minutes: Option<u64>,
     },
     Native {
         step_id: String,
@@ -325,6 +493,7 @@ pub enum ExecutableStep {
         invocation: NativeActionInvocation,
         condition: Option<String>,
         continue_on_error: bool,
+        timeout_minutes: Option<u64>,
     },
     CompositeOutputs {
         step_id: String,
@@ -438,6 +607,7 @@ struct PostJavaScriptAction {
     invocation: JavaScriptActionInvocation,
     condition: Option<String>,
     continue_on_error: bool,
+    timeout_minutes: Option<u64>,
     umbrella_display: Option<String>,
 }
 
@@ -448,6 +618,7 @@ struct PostNativeAction {
     invocation: NativeActionInvocation,
     condition: Option<String>,
     continue_on_error: bool,
+    timeout_minutes: Option<u64>,
     /// Display name of the enclosing composite, when the owning step was
     /// embedded: GitHub runs embedded posts under ONE `Post Run <composite>`
     /// step (EmbeddedStepsWithPostRegistered).
@@ -500,6 +671,27 @@ impl ExecutableStep {
         }
     }
 
+    fn timeout_minutes(&self) -> Option<u64> {
+        match self {
+            ExecutableStep::Checkout(plan) => plan.timeout_minutes,
+            ExecutableStep::Script(step) => step.timeout_minutes,
+            ExecutableStep::JavaScript {
+                timeout_minutes, ..
+            }
+            | ExecutableStep::Docker {
+                timeout_minutes, ..
+            }
+            | ExecutableStep::Native {
+                timeout_minutes, ..
+            } => *timeout_minutes,
+            _ => None,
+        }
+    }
+
+    fn effective_timeout(&self, job_timeout_minutes: Option<u64>) -> Duration {
+        effective_step_timeout(self.timeout_minutes(), job_timeout_minutes)
+    }
+
     fn reports_timeline_start(&self) -> bool {
         !matches!(
             self,
@@ -538,6 +730,10 @@ pub struct DockerScriptExecutor<R> {
     /// Workflow-level env from the job message — shown first in every step's
     /// `env:` prelude block, the way GitHub renders it.
     workflow_env: Vec<(String, String)>,
+    job_timeout_minutes: Option<u64>,
+    /// Job-secret mask values supplied by the runner. Combined with runtime
+    /// ::add-mask:: values before building each docker exec argv.
+    secret_masks: Vec<String>,
     /// Identity of the step currently executing — lets native adapters stream
     /// their output to the live feed (GitHub streams every step live, not
     /// just `run:` steps).
@@ -564,8 +760,20 @@ where
             initial_order: 0,
             trailing_post_action_count: 0,
             workflow_env: Vec::new(),
+            job_timeout_minutes: None,
+            secret_masks: Vec::new(),
             live_step: None,
         }
+    }
+
+    pub fn with_job_timeout_minutes(mut self, timeout_minutes: Option<u64>) -> Self {
+        self.job_timeout_minutes = timeout_minutes;
+        self
+    }
+
+    pub fn with_secret_masks(mut self, masks: Vec<String>) -> Self {
+        self.secret_masks = masks;
+        self
     }
 
     pub fn with_workflow_env(mut self, env: Vec<(String, String)>) -> Self {
@@ -887,6 +1095,7 @@ where
                 step_id,
                 invocation,
                 continue_on_error,
+                timeout_minutes,
                 ..
             } = step
             {
@@ -899,6 +1108,7 @@ where
                                 invocation: invocation.clone(),
                                 condition: invocation.post_condition.clone(),
                                 continue_on_error: *continue_on_error,
+                                timeout_minutes: *timeout_minutes,
                                 umbrella_display: composite_frame
                                     .as_ref()
                                     .map(|frame| frame.display_name.clone()),
@@ -923,6 +1133,7 @@ where
                             &step_state.action_state_env(step_id),
                             temp_host,
                             &step_state,
+                            effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
                         )?;
                         let failed = result.exit_code != 0;
                         if failed && *continue_on_error {
@@ -998,14 +1209,18 @@ where
                     let mut env = step_state.step_env(&[]);
                     env.extend(step.env.iter().cloned());
                     env.extend(plan.env.iter().cloned());
-                    let exec_args = container.exec_script_args(
+                    let secret_masks = step_state.secret_masks(&self.secret_masks);
+                    let exec_args = container.prepare_exec_script_args(
                         &plan.script_container_path,
                         plan.shell,
                         &plan.working_directory_container,
                         &env,
-                    );
+                        &secret_masks,
+                    )?;
                     let live_sender = self.step_log_sender.clone();
+                    let mut live_masks = Vec::new();
                     let mut on_output = |_: CommandStream, line: &str| {
+                        live_masks.extend(parse_workflow_commands(line).masks);
                         emit_live_step_log(
                             &live_sender,
                             &live_step_id,
@@ -1013,11 +1228,15 @@ where
                             live_order,
                             &live_started_at,
                             line,
+                            &live_masks,
                         );
                     };
-                    let step_result =
-                        self.runner
-                            .run_streaming("docker", &exec_args, &mut on_output)?;
+                    let step_result = self.runner.run_streaming_timeout(
+                        "docker",
+                        exec_args.args(),
+                        effective_step_timeout(step.timeout_minutes, self.job_timeout_minutes),
+                        &mut on_output,
+                    )?;
                     let mut command_state = plan.collect_state()?;
                     command_state.merge(parse_workflow_commands_from_output(
                         &step_result.stdout,
@@ -1035,6 +1254,7 @@ where
                 ExecutableStep::JavaScript {
                     step_id,
                     invocation,
+                    timeout_minutes,
                     ..
                 } => self.execute_javascript_action_in_started_container(
                     container,
@@ -1044,10 +1264,12 @@ where
                     &step_state.action_state_env(step_id),
                     temp_host,
                     &step_state,
+                    effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
                 ),
                 ExecutableStep::Docker {
                     step_id,
                     invocation,
+                    timeout_minutes,
                     ..
                 } => self.execute_docker_action_in_started_container(
                     container,
@@ -1055,16 +1277,19 @@ where
                     invocation,
                     temp_host,
                     &step_state,
+                    effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
                 ),
                 ExecutableStep::Native {
                     step_id,
                     invocation,
+                    timeout_minutes,
                     ..
                 } => self.execute_native_action_in_started_container(
                     container,
                     step_id,
                     invocation,
                     &step_state,
+                    effective_step_timeout(*timeout_minutes, self.job_timeout_minutes),
                 ),
                 ExecutableStep::CompositeOutputs { outputs, .. } => Ok(StepExecutionResult {
                     exit_code: 0,
@@ -1085,6 +1310,7 @@ where
                     if let ExecutableStep::JavaScript {
                         invocation,
                         continue_on_error,
+                        timeout_minutes,
                         ..
                     } = step
                     {
@@ -1095,6 +1321,7 @@ where
                                 invocation: invocation.clone(),
                                 condition: invocation.post_condition.clone(),
                                 continue_on_error: *continue_on_error,
+                                timeout_minutes: *timeout_minutes,
                                 umbrella_display: composite_frame
                                     .as_ref()
                                     .map(|frame| frame.display_name.clone()),
@@ -1104,6 +1331,7 @@ where
                     if let ExecutableStep::Native {
                         invocation,
                         continue_on_error,
+                        timeout_minutes,
                         ..
                     } = step
                     {
@@ -1114,6 +1342,7 @@ where
                                 invocation: invocation.clone(),
                                 condition: Some(condition.to_string()),
                                 continue_on_error: *continue_on_error,
+                                timeout_minutes: *timeout_minutes,
                                 umbrella_display: composite_frame
                                     .as_ref()
                                     .map(|frame| frame.display_name.clone()),
@@ -1231,6 +1460,7 @@ where
                     &member.step_id,
                     &member.invocation,
                     &state,
+                    effective_step_timeout(member.timeout_minutes, self.job_timeout_minutes),
                 );
                 match result {
                     Ok(mut result) => {
@@ -1308,6 +1538,7 @@ where
                 &state.action_state_env(&post_action.step_id),
                 temp_host,
                 &state,
+                effective_step_timeout(post_action.timeout_minutes, self.job_timeout_minutes),
             );
             match result {
                 Ok(mut result) => {
@@ -1363,6 +1594,7 @@ where
             &[],
             temp_host,
             &JobExecutionState::default(),
+            DEFAULT_STEP_TIMEOUT,
         );
 
         if let Err(error) = self.cleanup(container) {
@@ -1381,6 +1613,7 @@ where
         action_state_env: &[(String, String)],
         temp_host: &Path,
         state: &JobExecutionState,
+        timeout: Duration,
     ) -> Result<StepExecutionResult> {
         let command_files = ScriptStepPlan::prepare(
             &ScriptStep {
@@ -1392,6 +1625,7 @@ where
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             temp_host,
         )?;
@@ -1409,7 +1643,7 @@ where
             &node_image,
             entrypoint_container_path,
         );
-        let step_result = self.runner.run("docker", &exec_args)?;
+        let step_result = self.runner.run_timeout("docker", &exec_args, timeout)?;
         let mut state = command_files.collect_state()?;
         state.merge(parse_workflow_commands_from_output(
             &step_result.stdout,
@@ -1436,7 +1670,12 @@ where
             *version = state.resolve_expressions(version);
         }
         let mut trace = Vec::new();
-        execute_checkout(&mut self.runner, &plan, &mut trace)?;
+        if let Err(error) = execute_checkout(&mut self.runner, &plan, &mut trace) {
+            if let Some(failure) = error.downcast_ref::<StepLogicFailure>() {
+                return Ok(failure.to_step_result(Some(trace.join("\n"))));
+            }
+            return Err(error);
+        }
         configure_safe_directory(
             &container.home_host,
             &container.workspace_host,
@@ -1461,6 +1700,7 @@ where
         action: &DockerActionInvocation,
         temp_host: &Path,
         state: &JobExecutionState,
+        timeout: Duration,
     ) -> Result<StepExecutionResult> {
         if let (Some(context_host), Some(dockerfile_host)) =
             (&action.build_context_host, &action.dockerfile_host)
@@ -1481,6 +1721,7 @@ where
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             temp_host,
         )?;
@@ -1507,7 +1748,7 @@ where
             entrypoint.as_deref(),
             &args,
         );
-        let step_result = self.runner.run("docker", &exec_args)?;
+        let step_result = self.runner.run_timeout("docker", &exec_args, timeout)?;
         let mut state = command_files.collect_state()?;
         state.merge(parse_workflow_commands_from_output(
             &step_result.stdout,
@@ -1529,6 +1770,7 @@ where
         step_id: &str,
         action: &NativeActionInvocation,
         state: &JobExecutionState,
+        timeout: Duration,
     ) -> Result<StepExecutionResult> {
         match action.adapter {
             NativeActionAdapter::Cache => native_cache(action, state),
@@ -1536,29 +1778,41 @@ where
             NativeActionAdapter::DownloadArtifact => native_download_artifact(action, state),
             NativeActionAdapter::UploadPagesArtifact => native_upload_pages_artifact(action, state),
             NativeActionAdapter::DeployPages => Ok(native_deploy_pages(action, state)),
-            NativeActionAdapter::Mise => self.native_mise(_container, action, state),
-            NativeActionAdapter::Sccache => self.native_sccache(_container, action, state),
-            NativeActionAdapter::SetupMold => self.native_setup_mold(_container, action, state),
-            NativeActionAdapter::SetupJust => self.native_setup_just(_container, action, state),
+            NativeActionAdapter::Mise => self.native_mise(_container, action, state, timeout),
+            NativeActionAdapter::Sccache => self.native_sccache(_container, action, state, timeout),
+            NativeActionAdapter::SetupMold => {
+                self.native_setup_mold(_container, action, state, timeout)
+            }
+            NativeActionAdapter::SetupJust => {
+                self.native_setup_just(_container, action, state, timeout)
+            }
             NativeActionAdapter::RustCache => native_rust_cache(action, state),
-            NativeActionAdapter::Renovate => self.native_renovate(_container, action, state),
+            NativeActionAdapter::Renovate => {
+                self.native_renovate(_container, action, state, timeout)
+            }
             NativeActionAdapter::GitHubRuntimeExport => {
                 Ok(native_github_runtime_export(action, state))
             }
             NativeActionAdapter::PathsFilter => self.native_paths_filter(action, state),
             NativeActionAdapter::DockerSetupBuildx => {
-                self.native_docker_setup_buildx(_container, action, state)
+                self.native_docker_setup_buildx(_container, action, state, timeout)
             }
-            NativeActionAdapter::DockerLogin => self.native_docker_login(_container, action, state),
+            NativeActionAdapter::DockerLogin => {
+                self.native_docker_login(_container, action, state, timeout)
+            }
             NativeActionAdapter::DockerMetadata => Ok(native_docker_metadata(action, state)),
             NativeActionAdapter::DockerBuildPush => {
-                self.native_docker_build_push(_container, action, state)
+                self.native_docker_build_push(_container, action, state, timeout)
             }
-            NativeActionAdapter::DockerBake => self.native_docker_bake(_container, action, state),
-            NativeActionAdapter::Hadolint => self.native_hadolint(_container, action, state),
-            NativeActionAdapter::SetupQemu => self.native_setup_qemu(action, state),
+            NativeActionAdapter::DockerBake => {
+                self.native_docker_bake(_container, action, state, timeout)
+            }
+            NativeActionAdapter::Hadolint => {
+                self.native_hadolint(_container, action, state, timeout)
+            }
+            NativeActionAdapter::SetupQemu => self.native_setup_qemu(action, state, timeout),
             NativeActionAdapter::CosignInstaller => {
-                self.native_cosign_installer(_container, action, state)
+                self.native_cosign_installer(_container, action, state, timeout)
             }
             _ => {
                 bail!(
@@ -1576,6 +1830,7 @@ where
         step_id: &str,
         action: &NativeActionInvocation,
         state: &JobExecutionState,
+        timeout: Duration,
     ) -> Result<StepExecutionResult> {
         match action.adapter {
             NativeActionAdapter::Cache => native_cache_save(step_id, action, state),
@@ -1586,6 +1841,7 @@ where
                     _container,
                     state,
                     "sccache --show-stats 2>/dev/null || true; sccache --stop-server 2>/dev/null || true",
+                    timeout,
                 )?;
                 Ok(native_command_result(result, StepCommandState::default()))
             }
@@ -1595,7 +1851,7 @@ where
                 let script = format!(
                     "docker buildx rm --keep-state {name} 2>/dev/null || true; echo \"Removing builder {name}\""
                 );
-                let result = self.native_shell(_container, state, &script)?;
+                let result = self.native_shell(_container, state, &script, timeout)?;
                 Ok(native_command_result(result, StepCommandState::default()))
             }
             NativeActionAdapter::DockerLogin => {
@@ -1606,7 +1862,7 @@ where
                 } else {
                     format!("docker logout {registry} 2>/dev/null || true")
                 };
-                let result = self.native_shell(_container, state, &script)?;
+                let result = self.native_shell(_container, state, &script, timeout)?;
                 Ok(native_command_result(result, StepCommandState::default()))
             }
             _ => bail!(
@@ -1622,13 +1878,14 @@ where
         container: &JobContainerSpec,
         action: &NativeActionInvocation,
         state: &JobExecutionState,
+        timeout: Duration,
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
         let install = input_truthy(&native_input_or(&action_state, action, "install", "true"));
         let install_args = native_input(action, &action_state, "install_args");
         let working_directory = native_input(action, &action_state, "working_directory");
         let script = setup_mise_script(install, &install_args, &working_directory);
-        let mut result = self.native_shell(container, state, &script)?;
+        let mut result = self.native_shell(container, state, &script, timeout)?;
         let mut path = vec![
             // Mise binary dir so subsequent steps can call `mise run ...` directly.
             "/opt/mise/bin".to_string(),
@@ -1687,8 +1944,9 @@ where
         container: &JobContainerSpec,
         _action: &NativeActionInvocation,
         state: &JobExecutionState,
+        timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let result = self.native_shell(container, state, &sccache_setup_script())?;
+        let result = self.native_shell(container, state, &sccache_setup_script(), timeout)?;
         Ok(native_command_result(result, StepCommandState::default()))
     }
 
@@ -1697,8 +1955,9 @@ where
         container: &JobContainerSpec,
         _action: &NativeActionInvocation,
         state: &JobExecutionState,
+        timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let result = self.native_shell(container, state, &setup_mold_script())?;
+        let result = self.native_shell(container, state, &setup_mold_script(), timeout)?;
         Ok(native_command_result(result, StepCommandState::default()))
     }
 
@@ -1713,6 +1972,7 @@ where
         container: &JobContainerSpec,
         action: &NativeActionInvocation,
         state: &JobExecutionState,
+        timeout: Duration,
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
         let inputs = HadolintInputs {
@@ -1732,7 +1992,8 @@ where
             ignore: native_input(action, &action_state, "ignore"),
             trusted_registries: native_input(action, &action_state, "trusted-registries"),
         };
-        let result = self.native_shell(container, &action_state, &hadolint_script(&inputs))?;
+        let result =
+            self.native_shell(container, &action_state, &hadolint_script(&inputs), timeout)?;
         let findings = result.stdout.trim_end().to_string();
         let mut outputs = BTreeMap::new();
         outputs.insert("results".to_string(), findings.clone());
@@ -1753,8 +2014,9 @@ where
         container: &JobContainerSpec,
         _action: &NativeActionInvocation,
         state: &JobExecutionState,
+        timeout: Duration,
     ) -> Result<StepExecutionResult> {
-        let result = self.native_shell(container, state, &setup_just_script())?;
+        let result = self.native_shell(container, state, &setup_just_script(), timeout)?;
         Ok(native_command_result(
             result,
             StepCommandState {
@@ -1764,22 +2026,27 @@ where
         ))
     }
 
-    /// Native `docker/setup-qemu-action`: installs binfmt handlers via the
-    /// QEMU static-binaries image (exactly what the JS action runs). The
-    /// `cache-image` input is GHA-cache-specific and ignored — the image is
-    /// pulled through the host Docker daemon, which caches it locally.
+    /// Native `docker/setup-qemu-action`: installs binfmt handlers via a pinned
+    /// QEMU static-binaries image. This still needs `--privileged` because it
+    /// mutates host-global binfmt_misc state; workflow-supplied image overrides
+    /// are ignored so that privileged container is not attacker-controlled.
     fn native_setup_qemu(
         &mut self,
         action: &NativeActionInvocation,
         state: &JobExecutionState,
+        timeout: Duration,
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
-        let image = native_input_or(
-            &action_state,
-            action,
-            "image",
-            "docker.io/tonistiigi/binfmt:latest",
-        );
+        let requested_image =
+            native_input_or(&action_state, action, "image", SETUP_QEMU_BINFMT_IMAGE);
+        if requested_image.trim() != SETUP_QEMU_BINFMT_IMAGE {
+            eprintln!(
+                "Velnor ignored docker/setup-qemu-action image override `{}`; using pinned {}",
+                requested_image.trim(),
+                SETUP_QEMU_BINFMT_IMAGE
+            );
+        }
+        let image = SETUP_QEMU_BINFMT_IMAGE.to_string();
         let platforms = native_input_or(&action_state, action, "platforms", "all");
         let reset = native_input_or(&action_state, action, "reset", "false");
         if reset.trim() == "true" {
@@ -1791,7 +2058,7 @@ where
                 "--uninstall".to_string(),
                 "qemu-*".to_string(),
             ];
-            let result = self.run_docker_args(&uninstall)?;
+            let result = self.run_docker_args_timeout(&uninstall, timeout)?;
             if result.code != 0 {
                 return Ok(native_command_result(result, StepCommandState::default()));
             }
@@ -1804,7 +2071,7 @@ where
             "--install".to_string(),
             platforms.clone(),
         ];
-        let result = self.run_docker_args(&args)?;
+        let result = self.run_docker_args_timeout(&args, timeout)?;
         let mut outputs = BTreeMap::new();
         outputs.insert("platforms".to_string(), platforms);
         Ok(native_command_result(
@@ -1825,6 +2092,7 @@ where
         container: &JobContainerSpec,
         action: &NativeActionInvocation,
         state: &JobExecutionState,
+        timeout: Duration,
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
         let release = native_input(action, &action_state, "cosign-release");
@@ -1837,7 +2105,7 @@ where
             bail!("cosign-installer install-dir contains shell metacharacters: {install_dir:?}");
         }
         let script = cosign_installer_script(&release, &install_dir);
-        let mut result = self.native_shell(container, &action_state, &script)?;
+        let mut result = self.native_shell(container, &action_state, &script, timeout)?;
         // The action adds install-dir to GITHUB_PATH; mirror that by parsing
         // the resolved directory marker (install-dir may contain $HOME).
         let mut path = Vec::new();
@@ -1869,6 +2137,7 @@ where
         state: &JobExecutionState,
         docker_args: &[String],
         stdin: Option<&str>,
+        timeout: Duration,
     ) -> Result<CommandResult> {
         let mut cmd = String::from("docker");
         for arg in docker_args {
@@ -1882,18 +2151,30 @@ where
             // HOME=/github/home) — the same dir run steps and every other
             // adapter invocation read; it persists for the whole job through
             // the home bind mount.
-            let exec_args = container.exec_process_stdin_args(
+            let secret_masks = state.secret_masks(&self.secret_masks);
+            let exec_args = container.prepare_exec_process_stdin_args(
                 "/__w",
                 &env,
+                &secret_masks,
                 &["sh".to_string(), "-c".to_string(), cmd],
-            );
-            return self.runner.run_with_stdin("docker", &exec_args, stdin);
+            )?;
+            return self
+                .runner
+                .run_with_stdin_timeout("docker", exec_args.args(), stdin, timeout);
         }
-        self.native_shell(container, state, &cmd)
+        self.native_shell(container, state, &cmd, timeout)
     }
 
     fn run_docker_args(&mut self, args: &[String]) -> Result<CommandResult> {
         self.runner.run("docker", args)
+    }
+
+    fn run_docker_args_timeout(
+        &mut self,
+        args: &[String],
+        timeout: Duration,
+    ) -> Result<CommandResult> {
+        self.runner.run_timeout("docker", args, timeout)
     }
 
     fn native_shell(
@@ -1901,6 +2182,7 @@ where
         container: &JobContainerSpec,
         state: &JobExecutionState,
         script: &str,
+        timeout: Duration,
     ) -> Result<CommandResult> {
         let env = state.step_env(&[]);
         // Build PATH from accumulated state paths plus the container's default paths.
@@ -1923,22 +2205,26 @@ where
             .collect();
         let path = path_entries.join(":");
         let wrapped = format!("export PATH={path}; {script}");
-        let args = container.exec_process_args(
+        let secret_masks = state.secret_masks(&self.secret_masks);
+        let args = container.prepare_exec_process_args(
             "/__w",
             &env,
+            &secret_masks,
             &["sh".to_string(), "-c".to_string(), wrapped],
-        );
+        )?;
         // Stream adapter output to the live feed as it happens — a minutes-long
         // native step (mise install on a cold store) must not look frozen in
         // the live view while the GitHub lane streams continuously.
         let live_sender = self.step_log_sender.clone();
         let live_step = self.live_step.clone();
+        let mut live_masks = Vec::new();
         let mut on_output = |_: CommandStream, line: &str| {
             // Internal adapter markers are stripped from the blob after the
             // run; keep them out of the live feed too.
             if line.starts_with("__VELNOR_MISE_BIN__") {
                 return;
             }
+            live_masks.extend(parse_workflow_commands(line).masks);
             if let Some(live) = live_step.as_ref() {
                 emit_live_step_log(
                     &live_sender,
@@ -1947,10 +2233,12 @@ where
                     live.order,
                     &live.started_at,
                     line,
+                    &live_masks,
                 );
             }
         };
-        self.runner.run_streaming("docker", &args, &mut on_output)
+        self.runner
+            .run_streaming_timeout("docker", args.args(), timeout, &mut on_output)
     }
 
     fn native_renovate(
@@ -1958,6 +2246,7 @@ where
         container: &JobContainerSpec,
         action: &NativeActionInvocation,
         state: &JobExecutionState,
+        timeout: Duration,
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
         let version = native_input(action, &action_state, "renovate-version");
@@ -1981,7 +2270,7 @@ where
         }
         let args = container.run_docker_action_args("/github/workspace", &env, &image, None, &[]);
         Ok(native_command_result(
-            self.runner.run("docker", &args)?,
+            self.runner.run_timeout("docker", &args, timeout)?,
             StepCommandState::default(),
         ))
     }
@@ -1991,16 +2280,17 @@ where
         container: &JobContainerSpec,
         action: &NativeActionInvocation,
         state: &JobExecutionState,
+        timeout: Duration,
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
         let name = native_input_or(&action_state, action, "name", "velnor-builder");
         let driver = native_input_or(&action_state, action, "driver", "docker-container");
         let inspect_args = vec!["buildx".to_string(), "inspect".to_string(), name.clone()];
         let inspect_result =
-            self.container_docker(container, &action_state, &inspect_args, None)?;
+            self.container_docker(container, &action_state, &inspect_args, None, timeout)?;
         let result = if inspect_result.code == 0 {
             let use_args = vec!["buildx".to_string(), "use".to_string(), name.clone()];
-            self.container_docker(container, &action_state, &use_args, None)?
+            self.container_docker(container, &action_state, &use_args, None, timeout)?
         } else {
             let mut args = vec![
                 "buildx".to_string(),
@@ -2014,7 +2304,7 @@ where
             if input_truthy(&native_input_or(&action_state, action, "install", "false")) {
                 args.push("--bootstrap".to_string());
             }
-            self.container_docker(container, &action_state, &args, None)?
+            self.container_docker(container, &action_state, &args, None, timeout)?
         };
         Ok(native_command_result(
             result,
@@ -2042,6 +2332,7 @@ where
         container: &JobContainerSpec,
         action: &NativeActionInvocation,
         state: &JobExecutionState,
+        timeout: Duration,
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
         let registry = native_input_or(
@@ -2060,7 +2351,7 @@ where
             "--password-stdin".to_string(),
         ];
         Ok(native_command_result(
-            self.container_docker(container, &action_state, &args, Some(&password))?,
+            self.container_docker(container, &action_state, &args, Some(&password), timeout)?,
             StepCommandState::default(),
         ))
     }
@@ -2070,6 +2361,7 @@ where
         container: &JobContainerSpec,
         action: &NativeActionInvocation,
         state: &JobExecutionState,
+        timeout: Duration,
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
         let context = native_input_or(&action_state, action, "context", ".");
@@ -2144,7 +2436,7 @@ where
             &format!("/tmp/{metadata_name}"),
         );
         args.push(container_context_path(&context));
-        let mut result = self.container_docker(container, &action_state, &args, None)?;
+        let mut result = self.container_docker(container, &action_state, &args, None, timeout)?;
         if dropped_gha_cache > 0 {
             result.stdout = format!(
                 "[velnor] dropped {dropped_gha_cache} type=gha cache option(s): the persistent local builder cache covers them on the Velnor lane\n{}",
@@ -2189,6 +2481,7 @@ where
         container: &JobContainerSpec,
         action: &NativeActionInvocation,
         state: &JobExecutionState,
+        timeout: Duration,
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
         let mut args = vec!["buildx".to_string(), "bake".to_string()];
@@ -2213,7 +2506,7 @@ where
             &action_state,
             "targets",
         )));
-        let mut result = self.container_docker(container, &action_state, &args, None)?;
+        let mut result = self.container_docker(container, &action_state, &args, None, timeout)?;
         if dropped_gha_cache > 0 {
             result.stdout = format!(
                 "[velnor] dropped {dropped_gha_cache} type=gha cache option(s): the persistent local builder cache covers them on the Velnor lane\n{}",
@@ -2341,7 +2634,10 @@ where
         if let Err(error) = self.start_job_environment_once(container) {
             eprintln!("Docker job environment start failed, removing stale resources: {error:#}");
             self.cleanup_stale(container);
-            self.start_job_environment_once(container)?;
+            if let Err(retry_error) = self.start_job_environment_once(container) {
+                self.cleanup_stale(container);
+                return Err(retry_error);
+            }
         }
         Ok(())
     }
@@ -2432,16 +2728,17 @@ where
         fs::write(&marker, "velnor\n")
             .with_context(|| format!("write Docker bind-mount marker {}", marker.display()))?;
 
-        let args = container.exec_process_args(
+        let args = container.prepare_exec_process_args(
             "/",
+            &[],
             &[],
             &[
                 "sh".to_string(),
                 "-c".to_string(),
                 format!("test -f /__t/{DOCKER_MOUNT_CHECK_FILE}"),
             ],
-        );
-        let result = self.runner.run("docker", &args)?;
+        )?;
+        let result = self.runner.run("docker", args.args())?;
         fs::remove_file(&marker).ok();
         if result.code != 0 {
             bail!(
@@ -2538,6 +2835,7 @@ fn emit_live_step_log(
     order: i32,
     started_at: &str,
     line: &str,
+    masks: &[String],
 ) {
     let Some(sender) = sender else {
         return;
@@ -2549,7 +2847,7 @@ fn emit_live_step_log(
         started_at: started_at.to_string(),
         completed_at: String::new(),
         lines: vec![line.to_string()],
-        masks: Vec::new(),
+        masks: masks.to_vec(),
         annotations: Vec::new(),
         telemetry: Vec::new(),
         exit_code: 0,
@@ -2920,13 +3218,7 @@ fn native_cache(
     let exact_hit = matched_key.as_deref() == Some(key.as_str());
 
     let mut outputs = BTreeMap::new();
-    outputs.insert(
-        "cache-hit".to_string(),
-        matched_key
-            .as_ref()
-            .map(|_| exact_hit.to_string())
-            .unwrap_or_default(),
-    );
+    outputs.insert("cache-hit".to_string(), exact_hit.to_string());
     outputs.insert("cache-primary-key".to_string(), key.clone());
     outputs.insert(
         "cache-matched-key".to_string(),
@@ -3253,13 +3545,11 @@ fn save_cache_result(
     // The store is shared across daemon slots: stage the whole entry next to
     // its final location and swap with a rename, so a sibling slot restoring
     // this key never reads a half-written tree.
-    let staging_name = format!(
-        "{}.staging-{}",
+    let staging_name = cache_staging_name(
         cache_dir
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("cache"),
-        std::process::id()
     );
     let staging_dir = cache_dir.with_file_name(staging_name);
     fs::remove_dir_all(&staging_dir).ok();
@@ -3286,7 +3576,14 @@ fn save_cache_result(
         let target = staging_dir.join(index.to_string());
         fs::create_dir_all(&target)
             .with_context(|| format!("create cache entry {}", target.display()))?;
-        copy_cache_source(&source, &target)?;
+        if let Err(error) = copy_cache_source(&source, &target) {
+            fs::remove_dir_all(&staging_dir).ok();
+            return Ok(cache_save_step_result(
+                0,
+                "",
+                &format!("Cache save skipped after copy contention for key '{key}': {error:#}\n"),
+            ));
+        }
         saved += 1;
     }
     let save_ms = t0.elapsed().as_millis();
@@ -3308,8 +3605,16 @@ fn save_cache_result(
         ));
     }
     fs::remove_dir_all(&cache_dir).ok();
-    fs::rename(&staging_dir, &cache_dir)
-        .with_context(|| format!("publish cache entry {}", cache_dir.display()))?;
+    if let Err(error) = fs::rename(&staging_dir, &cache_dir)
+        .with_context(|| format!("publish cache entry {}", cache_dir.display()))
+    {
+        fs::remove_dir_all(&staging_dir).ok();
+        return Ok(cache_save_step_result(
+            0,
+            "",
+            &format!("Cache save skipped after publish contention for key '{key}': {error:#}\n"),
+        ));
+    }
     Ok(cache_save_step_result(
         0,
         &format!(
@@ -3317,6 +3622,16 @@ fn save_cache_result(
         ),
         "",
     ))
+}
+
+fn cache_staging_name(cache_file_name: &str) -> String {
+    let unique = CACHE_STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{}.staging-{}-{}",
+        cache_file_name,
+        std::process::id(),
+        unique
+    )
 }
 
 fn cache_save_step_result(exit_code: i32, stdout: &str, stderr: &str) -> StepExecutionResult {
@@ -3421,9 +3736,20 @@ fn native_upload_artifact(
                     &name,
                     &zip_files,
                 ) {
-                    eprintln!(
-                        "Best-effort Results Service artifact upload failed for '{name}': {e:#}"
-                    );
+                    let message =
+                        format!("Results Service artifact upload failed for '{name}': {e:#}\n");
+                    eprintln!("{message}");
+                    return Ok(StepExecutionResult {
+                        exit_code: 1,
+                        state: StepCommandState::default(),
+                        skipped: false,
+                        failure_ignored: false,
+                        stdout: format!(
+                            "Saved local artifact '{name}' with {} path(s)\n",
+                            uploaded.len()
+                        ),
+                        stderr: message,
+                    });
                 }
             }
         }
@@ -3670,7 +3996,16 @@ fn cache_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
         .ok_or_else(|| anyhow::anyhow!("cache actions require a temp directory"))?;
     // Daemon-shared (across slots), not per-slot: cold slots must hit the
     // caches their siblings saved (see container::daemon_shared_root).
-    Ok(crate::container::daemon_shared_root(shared_work_root(temp)).join("_velnor_caches"))
+    let repository = state
+        .resolve_context_expression("github.repository")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown-repository".to_string());
+    Ok(crate::container::daemon_shared_root(shared_work_root(temp))
+        .join("_velnor_caches")
+        .join(crate::container::sanitize_store_key(
+            &crate::github_adapter::cargo_target_trust_scope(),
+        ))
+        .join(crate::container::sanitize_store_key(&repository)))
 }
 
 fn shared_work_root(temp: &Path) -> PathBuf {
@@ -4139,11 +4474,36 @@ fn hash_artifact_dir(path: &Path) -> Result<String> {
     let mut files = Vec::new();
     collect_files(path, &mut files)?;
     files.sort();
+    let digest_results: Vec<_> = files
+        .par_iter()
+        .enumerate()
+        .map(|(index, file)| sha256_file_digest(file).map(|digest| (index, digest)))
+        .collect();
+    let mut digests: Vec<_> = digest_results.into_iter().collect::<Result<_>>()?;
+    digests.sort_by_key(|(index, _)| *index);
+
     let mut aggregate = Sha256::new();
-    for file in files {
-        aggregate.update(Sha256::digest(fs::read(file)?));
+    for (_, digest) in digests {
+        aggregate.update(digest);
     }
-    Ok(hex_digest(aggregate.finalize().as_slice()))
+    let digest = aggregate.finalize();
+    Ok(hex_digest(&digest))
+}
+
+fn sha256_file_digest(path: &Path) -> Result<[u8; 32]> {
+    let mut file = fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher.finalize().into())
 }
 
 fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
@@ -4161,7 +4521,8 @@ fn collect_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 fn sanitize_artifact_name(name: &str) -> String {
-    name.chars()
+    let mapped: String = name
+        .chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
                 ch
@@ -4169,7 +4530,11 @@ fn sanitize_artifact_name(name: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    match mapped.as_str() {
+        "" | "." | ".." => "_".to_string(),
+        _ => mapped,
+    }
 }
 
 fn pages_url_for_repository(repository: &str) -> String {
@@ -4373,10 +4738,7 @@ fn parse_paths_filter_rules(filters: &str) -> Result<Vec<(String, Vec<String>)>>
     };
     let mut rules = Vec::new();
     for (name, patterns) in mapping {
-        let name = name
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("paths-filter name must be a string"))?
-            .to_string();
+        let name = name.to_string();
         let patterns = paths_filter_patterns(patterns)
             .with_context(|| format!("parse paths-filter patterns for '{name}'"))?;
         rules.push((name, patterns));
@@ -4437,6 +4799,20 @@ struct JobExecutionState {
     path: Vec<String>,
     masks: Vec<String>,
     composite_stack: Vec<String>,
+    composite_conclusion_stack: Vec<CompositeConclusionFrame>,
+    hash_files_cache: Arc<Mutex<HashMap<HashFilesCacheKey, String>>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CompositeConclusionFrame {
+    step_id: String,
+    conclusions: BTreeMap<String, StepOutcome>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HashFilesCacheKey {
+    workspace: PathBuf,
+    patterns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4499,6 +4875,8 @@ impl JobExecutionState {
             path: Vec::new(),
             masks: Vec::new(),
             composite_stack: Vec::new(),
+            composite_conclusion_stack: Vec::new(),
+            hash_files_cache: Arc::new(Mutex::new(HashMap::new())),
         };
         state.env = state
             .env
@@ -4518,6 +4896,12 @@ impl JobExecutionState {
         env
     }
 
+    fn secret_masks(&self, initial_masks: &[String]) -> Vec<String> {
+        let mut masks = initial_masks.to_vec();
+        masks.extend(self.masks.iter().cloned());
+        masks
+    }
+
     fn with_step_action(&self, step_id: &str) -> Self {
         let mut state = Self {
             env: self.env.clone(),
@@ -4533,6 +4917,8 @@ impl JobExecutionState {
             path: self.path.clone(),
             masks: self.masks.clone(),
             composite_stack: self.composite_stack.clone(),
+            composite_conclusion_stack: self.composite_conclusion_stack.clone(),
+            hash_files_cache: Arc::clone(&self.hash_files_cache),
         };
         state
             .env
@@ -4555,6 +4941,8 @@ impl JobExecutionState {
             path: self.path.clone(),
             masks: self.masks.clone(),
             composite_stack: self.composite_stack.clone(),
+            composite_conclusion_stack: self.composite_conclusion_stack.clone(),
+            hash_files_cache: Arc::clone(&self.hash_files_cache),
         };
         for (name, value) in env {
             state.env.insert(name, value);
@@ -4564,6 +4952,11 @@ impl JobExecutionState {
 
     fn push_composite(&mut self, step_id: &str) {
         self.composite_stack.push(step_id.to_string());
+        self.composite_conclusion_stack
+            .push(CompositeConclusionFrame {
+                step_id: step_id.to_string(),
+                conclusions: BTreeMap::new(),
+            });
     }
 
     fn pop_composite(&mut self, step_id: &str) {
@@ -4573,6 +4966,13 @@ impl JobExecutionState {
             .is_some_and(|scope| scope == step_id)
         {
             self.composite_stack.pop();
+        }
+        if self
+            .composite_conclusion_stack
+            .last()
+            .is_some_and(|frame| frame.step_id == step_id)
+        {
+            self.composite_conclusion_stack.pop();
         }
     }
 
@@ -4591,6 +4991,9 @@ impl JobExecutionState {
         };
         self.outcomes.insert(step_id.to_string(), outcome);
         self.conclusions.insert(step_id.to_string(), conclusion);
+        if let Some(frame) = self.composite_conclusion_stack.last_mut() {
+            frame.conclusions.insert(step_id.to_string(), conclusion);
+        }
 
         if !result.state.outputs.is_empty() {
             self.outputs
@@ -4643,6 +5046,7 @@ impl JobExecutionState {
             env: self.resolve_env(&step.env),
             condition: step.condition.clone(),
             continue_on_error: step.continue_on_error,
+            timeout_minutes: step.timeout_minutes,
         }
     }
 
@@ -4789,10 +5193,7 @@ impl JobExecutionState {
                 .and_then(|value| serde_json::to_string(value).ok());
         }
         if let Some(patterns) = parse_hash_files(expression) {
-            return self
-                .workspace_host
-                .as_deref()
-                .map(|workspace| hash_files(workspace, &patterns));
+            return self.resolve_hash_files_expression(patterns);
         }
         if expression.trim().starts_with("format(") {
             // Resolve format() args through the full state resolver so that runtime
@@ -4801,6 +5202,24 @@ impl JobExecutionState {
             return self.resolve_format_expression(expression.trim());
         }
         self.resolve_context_expression(expression)
+    }
+
+    fn resolve_hash_files_expression(&self, patterns: Vec<String>) -> Option<String> {
+        let workspace = self.workspace_host.as_ref()?;
+        let key = HashFilesCacheKey {
+            workspace: workspace.clone(),
+            patterns,
+        };
+        if let Ok(cache) = self.hash_files_cache.lock() {
+            if let Some(value) = cache.get(&key).cloned() {
+                return Some(value);
+            }
+        }
+        let value = hash_files(&key.workspace, &key.patterns);
+        if let Ok(mut cache) = self.hash_files_cache.lock() {
+            cache.insert(key, value.clone());
+        }
+        Some(value)
     }
 
     /// Evaluate `format('template', arg0, arg1, ...)` using the full state resolver
@@ -4904,15 +5323,7 @@ impl JobExecutionState {
     }
 
     fn action_status(&self) -> &'static str {
-        let Some(scope) = self.composite_stack.last() else {
-            return self.job_status();
-        };
-        if self.conclusions.iter().any(|(step_id, outcome)| {
-            *outcome == StepOutcome::Failure
-                && step_id
-                    .strip_prefix(scope)
-                    .is_some_and(|suffix| suffix.starts_with('-'))
-        }) {
+        if self.status_scope_has_failure() {
             "failure"
         } else {
             "success"
@@ -4953,16 +5364,10 @@ impl JobExecutionState {
             return true;
         }
         if expression == "success()" {
-            return !self
-                .conclusions
-                .values()
-                .any(|outcome| *outcome == StepOutcome::Failure);
+            return !self.status_scope_has_failure();
         }
         if expression == "failure()" {
-            return self
-                .conclusions
-                .values()
-                .any(|outcome| *outcome == StepOutcome::Failure);
+            return self.status_scope_has_failure();
         }
         if expression == "cancelled()" {
             return false;
@@ -4970,14 +5375,14 @@ impl JobExecutionState {
         if let Some(inner) = strip_wrapping_parentheses(expression) {
             return self.evaluate_condition_expr(inner);
         }
-        if let Some(inner) = expression.strip_prefix('!') {
-            return !self.evaluate_condition_expr(inner);
-        }
         if let Some((left, right)) = split_top_level(expression, "||") {
             return self.evaluate_condition_expr(left) || self.evaluate_condition_expr(right);
         }
         if let Some((left, right)) = split_top_level(expression, "&&") {
             return self.evaluate_condition_expr(left) && self.evaluate_condition_expr(right);
+        }
+        if let Some(inner) = expression.strip_prefix('!') {
+            return !self.evaluate_condition_expr(inner);
         }
         if let Some((value, needle)) = parse_contains(expression) {
             return self
@@ -5012,6 +5417,19 @@ impl JobExecutionState {
             return expression_truthy(&value);
         }
         true
+    }
+
+    fn status_scope_has_failure(&self) -> bool {
+        if let Some(frame) = self.composite_conclusion_stack.last() {
+            frame
+                .conclusions
+                .values()
+                .any(|outcome| *outcome == StepOutcome::Failure)
+        } else {
+            self.conclusions
+                .values()
+                .any(|outcome| *outcome == StepOutcome::Failure)
+        }
     }
 
     fn resolve_condition_comparison_value(&self, expression: &str) -> Option<String> {
@@ -5659,14 +6077,19 @@ fn hash_files(workspace: &Path, patterns: &[String]) -> String {
         return String::new();
     }
 
+    let mut digests: Vec<_> = matches
+        .par_iter()
+        .enumerate()
+        .filter_map(|(index, path)| sha256_file_digest(path).ok().map(|digest| (index, digest)))
+        .collect();
+    digests.sort_by_key(|(index, _)| *index);
+
     let mut aggregate = Sha256::new();
-    for path in matches {
-        let Ok(bytes) = fs::read(&path) else {
-            continue;
-        };
-        aggregate.update(Sha256::digest(bytes));
+    for (_, digest) in digests {
+        aggregate.update(digest);
     }
-    hex_digest(aggregate.finalize().as_slice())
+    let digest = aggregate.finalize();
+    hex_digest(&digest)
 }
 
 fn build_globs(patterns: &[String]) -> Result<globset::GlobSet> {
@@ -5849,6 +6272,96 @@ fn exit_code(status: ExitStatus) -> Result<i32> {
         .ok_or_else(|| anyhow::anyhow!("process terminated by signal"))
 }
 
+fn effective_step_timeout(
+    step_timeout_minutes: Option<u64>,
+    job_timeout_minutes: Option<u64>,
+) -> Duration {
+    Duration::from_secs(
+        step_timeout_minutes
+            .or(job_timeout_minutes)
+            .unwrap_or(DEFAULT_STEP_TIMEOUT_MINUTES)
+            * 60,
+    )
+}
+
+fn timeout_command_result(stdout: String, mut stderr: String) -> CommandResult {
+    if !stderr.is_empty() {
+        stderr.push('\n');
+    }
+    stderr.push_str("##[error]The operation was canceled because it exceeded timeout-minutes.\n");
+    CommandResult {
+        code: 124,
+        stdout,
+        stderr,
+    }
+}
+
+fn spawn_docker_timeout_watchdog(
+    program: &str,
+    args: &[String],
+    timeout: Duration,
+) -> (
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    mpsc::Sender<()>,
+    Option<thread::JoinHandle<()>>,
+) {
+    let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (watchdog_cancel, watchdog_cancelled) = mpsc::channel();
+    let watchdog = docker_timeout_container_name(program, args).map(|container_name| {
+        let timed_out = std::sync::Arc::clone(&timed_out);
+        thread::spawn(move || {
+            if watchdog_cancelled.recv_timeout(timeout).is_err() {
+                timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = Command::new("docker")
+                    .arg("kill")
+                    .arg(container_name)
+                    .status();
+            }
+        })
+    });
+    (timed_out, watchdog_cancel, watchdog)
+}
+
+fn docker_timeout_container_name(program: &str, args: &[String]) -> Option<String> {
+    if program != "docker" {
+        return None;
+    }
+    match args.first().map(String::as_str) {
+        Some("exec") => docker_exec_container_name(&args[1..]),
+        Some("run") => docker_run_container_name(&args[1..]),
+        _ => None,
+    }
+}
+
+fn docker_exec_container_name(args: &[String]) -> Option<String> {
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-i" | "-t" | "--interactive" | "--tty" | "--privileged" => index += 1,
+            "-w" | "--workdir" | "-e" | "--env" | "--env-file" | "-u" | "--user" => index += 2,
+            value if value.starts_with('-') => return None,
+            _ => return Some(args[index].clone()),
+        }
+    }
+    None
+}
+
+fn docker_run_container_name(args: &[String]) -> Option<String> {
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--name" => return args.get(index + 1).cloned(),
+            "-v" | "--volume" | "--workdir" | "-w" | "-e" | "--env" | "--env-file"
+            | "--network" | "--entrypoint" | "--user" | "-u" => index += 2,
+            value if value.starts_with("--name=") => {
+                return value.strip_prefix("--name=").map(ToString::to_string);
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5861,6 +6374,67 @@ mod tests {
     };
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn effective_timeout_prefers_step_over_job_over_default() {
+        assert_eq!(
+            effective_step_timeout(Some(2), Some(9)),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            effective_step_timeout(None, Some(9)),
+            Duration::from_secs(540)
+        );
+        assert_eq!(
+            effective_step_timeout(None, None),
+            Duration::from_secs(DEFAULT_STEP_TIMEOUT_MINUTES * 60)
+        );
+    }
+
+    #[test]
+    fn timeout_step_returns_failure_not_hang() {
+        let result = timeout_command_result("stdout\n".into(), "stderr\n".into());
+
+        assert_eq!(result.code, 124);
+        assert_eq!(result.stdout, "stdout\n");
+        assert!(result.stderr.contains("timeout-minutes"));
+        assert!(result.stderr.contains("The operation was canceled"));
+    }
+
+    #[test]
+    fn docker_timeout_container_name_finds_exec_and_run_targets() {
+        let args = vec![
+            "exec".to_string(),
+            "-i".to_string(),
+            "--workdir".to_string(),
+            "/__w".to_string(),
+            "--env-file".to_string(),
+            "/tmp/env".to_string(),
+            "-e".to_string(),
+            "NAME=value".to_string(),
+            "velnor-job-1".to_string(),
+            "sh".to_string(),
+            "-c".to_string(),
+            "sleep 60".to_string(),
+        ];
+
+        assert_eq!(
+            docker_timeout_container_name("docker", &args).as_deref(),
+            Some("velnor-job-1")
+        );
+        let run_args = vec![
+            "run".to_string(),
+            "--rm".to_string(),
+            "--name".to_string(),
+            "velnor-node-action-velnor-job-1".to_string(),
+            "node:24-bookworm".to_string(),
+        ];
+        assert_eq!(
+            docker_timeout_container_name("docker", &run_args).as_deref(),
+            Some("velnor-node-action-velnor-job-1")
+        );
+        assert_eq!(docker_timeout_container_name("git", &args), None);
+    }
 
     #[derive(Default)]
     struct RecordingRunner {
@@ -6011,6 +6585,33 @@ mod tests {
                 code: 0,
                 stdout,
                 stderr: String::new(),
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct FailingCheckoutRunner {
+        calls: Vec<(String, Vec<String>)>,
+    }
+
+    impl CommandRunner for FailingCheckoutRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            if is_seed_probe(args) {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: if program == "git" { 128 } else { 0 },
+                stdout: String::new(),
+                stderr: if program == "git" {
+                    "fatal: couldn't find remote ref missing".into()
+                } else {
+                    String::new()
+                },
             })
         }
     }
@@ -6166,6 +6767,38 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct StreamingMaskRunner {
+        calls: Vec<(String, Vec<String>)>,
+    }
+
+    impl CommandRunner for StreamingMaskRunner {
+        fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            Ok(CommandResult {
+                code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+
+        fn run_streaming(
+            &mut self,
+            program: &str,
+            args: &[String],
+            on_output: &mut dyn FnMut(CommandStream, &str),
+        ) -> Result<CommandResult> {
+            self.calls.push((program.to_string(), args.to_vec()));
+            on_output(CommandStream::Stdout, "::add-mask::dynsecret");
+            on_output(CommandStream::Stdout, "echo dynsecret");
+            Ok(CommandResult {
+                code: 0,
+                stdout: "::add-mask::dynsecret\necho dynsecret\n".into(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[derive(Default)]
     struct SilentCommandRunner {
         calls: Vec<(String, Vec<String>)>,
     }
@@ -6212,6 +6845,23 @@ mod tests {
         std::env::temp_dir().join(format!("velnor-executor-test-{nonce}-{sequence}"))
     }
 
+    #[test]
+    fn stream_reader_survives_invalid_utf8() {
+        let bytes = b"first\n\xff\xfebad\nafter\n";
+        let (sender, receiver) = mpsc::channel();
+
+        stream_reader(std::io::Cursor::new(bytes), CommandStream::Stdout, sender);
+
+        let lines: Vec<_> = receiver.iter().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines
+            .iter()
+            .all(|(stream, _)| *stream == CommandStream::Stdout));
+        assert_eq!(lines[0].1, "first");
+        assert!(lines[1].1.contains('\u{fffd}'));
+        assert_eq!(lines[2].1, "after");
+    }
+
     fn assert_uuid(value: &str) {
         uuid::Uuid::parse_str(value).unwrap_or_else(|_| panic!("expected UUID, got {value}"));
     }
@@ -6225,6 +6875,18 @@ mod tests {
             arg == &format!("{name}=/__t/{file_name}")
                 || arg == &format!("{name}=/github/file_commands/{file_name}")
         })
+    }
+
+    fn runtime_token_with_results_scope(plan_id: &str, job_id: &str) -> String {
+        use base64::Engine;
+
+        let payload = serde_json::json!({
+            "scp": format!("Actions.Results:{plan_id}:{job_id}")
+        });
+        format!(
+            "e30.{}.sig",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
+        )
     }
 
     fn container(temp: &Path) -> JobContainerSpec {
@@ -6248,6 +6910,7 @@ mod tests {
             docker_host_work_dir: None,
             verify_bind_mounts: false,
             daemon_id: "test-daemon".into(),
+            repository: Some("unknown-repository".into()),
             cargo_target_host: None,
         }
     }
@@ -6317,6 +6980,7 @@ mod tests {
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
@@ -6373,6 +7037,7 @@ mod tests {
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
@@ -6407,6 +7072,7 @@ mod tests {
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ScriptStep {
                 id: "step2".into(),
@@ -6417,6 +7083,7 @@ mod tests {
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
         ];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
@@ -6453,6 +7120,7 @@ mod tests {
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
@@ -6520,6 +7188,7 @@ mod tests {
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let mut executor = DockerScriptExecutor::new(GitDiffRunner {
             calls: Vec::new(),
@@ -6607,10 +7276,12 @@ mod tests {
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let mut expected_hash = Sha256::new();
         expected_hash.update(Sha256::digest(b"pub fn answer() -> u8 { 42 }\n"));
-        let expected_hash = hex_digest(expected_hash.finalize().as_slice());
+        let digest = expected_hash.finalize();
+        let expected_hash = hex_digest(&digest);
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
         let results = executor
@@ -6624,7 +7295,7 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].exit_code, 0);
-        assert_eq!(results[0].state.outputs["cache-hit"], "");
+        assert_eq!(results[0].state.outputs["cache-hit"], "false");
         assert_eq!(
             results[0].state.outputs["cache-primary-key"],
             format!("rust-script-Linux-{expected_hash}")
@@ -6657,6 +7328,106 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_artifact_name_neutralizes_traversal() {
+        assert_eq!(sanitize_artifact_name(".."), "_");
+        assert_eq!(sanitize_artifact_name("."), "_");
+        assert_eq!(sanitize_artifact_name(""), "_");
+        assert_eq!(sanitize_artifact_name("normal-key.v2"), "normal-key.v2");
+    }
+
+    #[test]
+    fn cache_store_dir_is_scoped_by_trust_and_repo() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        fs::create_dir_all(&temp).unwrap();
+        let state = JobExecutionState::new_internal(
+            &[("GITHUB_REPOSITORY".into(), "Org/Repo.Name".into())],
+            &[],
+            None,
+            Some(temp.clone()),
+        );
+
+        let store = cache_store_dir(&state).unwrap();
+
+        assert!(store.ends_with("_velnor_caches/trusted/Org_Repo.Name"));
+        assert!(store.starts_with(root.join("_velnor_caches")));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cache_hit_output_matches_actions_cache() {
+        let root = temp_dir();
+        let store = root.join("_velnor_caches/trusted/unknown-repository");
+        let exact_cache = store.join("linux-rust-exact");
+        let partial_cache = store.join("linux-rust-prefix-new");
+        fs::create_dir_all(exact_cache.join("0")).unwrap();
+        fs::create_dir_all(partial_cache.join("0")).unwrap();
+        fs::write(exact_cache.join(".velnor-key"), "linux-rust-exact").unwrap();
+        fs::write(exact_cache.join(".velnor-created"), "1").unwrap();
+        fs::write(exact_cache.join("0/state.bin"), "exact\n").unwrap();
+        fs::write(partial_cache.join(".velnor-key"), "linux-rust-prefix-new").unwrap();
+        fs::write(partial_cache.join(".velnor-created"), "2").unwrap();
+        fs::write(partial_cache.join("0/state.bin"), "partial\n").unwrap();
+
+        let cache_step = |key: &str, restore_keys: &str| {
+            vec![ExecutableStep::Native {
+                step_id: "cache".into(),
+                display_name: String::new(),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::Cache,
+                    inputs: [
+                        ("path".into(), "~/.cache/rust-script".into()),
+                        ("key".into(), key.into()),
+                        ("restore-keys".into(), restore_keys.into()),
+                    ]
+                    .into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            }]
+        };
+
+        let exact_temp = root.join("exact-job/temp");
+        let partial_temp = root.join("partial-job/temp");
+        let miss_temp = root.join("miss-job/temp");
+        fs::create_dir_all(root.join("exact-job/home")).unwrap();
+        fs::create_dir_all(root.join("partial-job/home")).unwrap();
+        fs::create_dir_all(root.join("miss-job/home")).unwrap();
+
+        let exact_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&exact_temp),
+                &cache_step("linux-rust-exact", ""),
+                &[],
+                &exact_temp,
+            )
+            .unwrap();
+        let partial_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&partial_temp),
+                &cache_step("linux-rust-prefix-miss", "linux-rust-prefix-\n"),
+                &[],
+                &partial_temp,
+            )
+            .unwrap();
+        let miss_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&miss_temp),
+                &cache_step("linux-rust-total-miss", "linux-rust-missing-\n"),
+                &[],
+                &miss_temp,
+            )
+            .unwrap();
+
+        assert_eq!(exact_results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(partial_results[0].state.outputs["cache-hit"], "false");
+        assert_eq!(miss_results[0].state.outputs["cache-hit"], "false");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn native_cache_can_fail_on_miss() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -6675,6 +7446,7 @@ mod tests {
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
@@ -6683,7 +7455,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(results[0].exit_code, 1);
-        assert_eq!(results[0].state.outputs["cache-hit"], "");
+        assert_eq!(results[0].state.outputs["cache-hit"], "false");
         assert!(results[0].stderr.contains("fail-on-cache-miss"));
 
         fs::remove_dir_all(temp).unwrap();
@@ -6715,6 +7487,7 @@ mod tests {
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         DockerScriptExecutor::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &[], &save_temp)
@@ -6735,6 +7508,7 @@ mod tests {
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let restore_results = DockerScriptExecutor::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &[], &restore_temp)
@@ -6773,6 +7547,7 @@ mod tests {
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
 
         let save_results = DockerScriptExecutor::new(RecordingRunner::default())
@@ -6784,7 +7559,9 @@ mod tests {
             "rust-script-Linux-deadbeef"
         );
         assert!(root
-            .join("_velnor_caches/rust-script-Linux-deadbeef/0/state.bin")
+            .join(
+                "_velnor_caches/trusted/unknown-repository/rust-script-Linux-deadbeef/0/state.bin"
+            )
             .exists());
 
         let restore = vec![ExecutableStep::Native {
@@ -6801,6 +7578,7 @@ mod tests {
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let restore_results = DockerScriptExecutor::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &[], &restore_temp)
@@ -6812,6 +7590,16 @@ mod tests {
             "cached\n"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cache_staging_dirs_are_unique_per_save() {
+        let first = cache_staging_name("linux-rust-script-abc");
+        let second = cache_staging_name("linux-rust-script-abc");
+
+        assert_ne!(first, second);
+        assert!(first.starts_with("linux-rust-script-abc.staging-"));
+        assert!(second.starts_with("linux-rust-script-abc.staging-"));
     }
 
     #[test]
@@ -6841,18 +7629,19 @@ mod tests {
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
 
         let save_results = DockerScriptExecutor::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
-        assert_eq!(save_results[0].state.outputs["cache-hit"], "");
+        assert_eq!(save_results[0].state.outputs["cache-hit"], "false");
         assert!(save_results[1]
             .stdout
             .contains("Saved cache 'linux-rust-script-abc'"));
         assert!(root
-            .join("_velnor_caches/linux-rust-script-abc/0/state.bin")
+            .join("_velnor_caches/trusted/unknown-repository/linux-rust-script-abc/0/state.bin")
             .exists());
 
         let restore = vec![ExecutableStep::Native {
@@ -6869,6 +7658,7 @@ mod tests {
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let restore_results = DockerScriptExecutor::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
@@ -6915,6 +7705,7 @@ mod tests {
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
 
         DockerScriptExecutor::new(RecordingRunner::default())
@@ -6936,6 +7727,7 @@ mod tests {
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let lookup_results = DockerScriptExecutor::new(RecordingRunner::default())
             .execute_ordered_steps(&container(&lookup_temp), &lookup, &[], &lookup_temp)
@@ -6954,7 +7746,7 @@ mod tests {
     fn native_cache_restore_key_uses_newest_prefix_match() {
         let root = temp_dir();
         let restore_temp = root.join("restore-job/temp");
-        let store = root.join("_velnor_caches");
+        let store = root.join("_velnor_caches/trusted/unknown-repository");
         let old_cache = store.join("rust-linux-a-old");
         let new_cache = store.join("rust-linux-z-new");
         fs::create_dir_all(old_cache.join("0")).unwrap();
@@ -6982,6 +7774,7 @@ mod tests {
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
 
         let restore_results = DockerScriptExecutor::new(RecordingRunner::default())
@@ -7030,6 +7823,7 @@ mod tests {
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::Native {
                 step_id: "login".into(),
@@ -7045,6 +7839,7 @@ mod tests {
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::Native {
                 step_id: "meta".into(),
@@ -7065,6 +7860,7 @@ type=sha,format=long,prefix=,enable=true"
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::Native {
                 step_id: "build-push".into(),
@@ -7095,6 +7891,7 @@ type=sha,format=long,prefix=,enable=true"
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::Native {
                 step_id: "bake".into(),
@@ -7128,6 +7925,7 @@ type=sha,format=long,prefix=,enable=true"
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
         ];
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
@@ -7245,6 +8043,7 @@ type=sha,format=long,prefix=,enable=true"
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
@@ -7280,6 +8079,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
@@ -7419,6 +8219,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::Native {
                 step_id: "setup-mold".into(),
@@ -7430,6 +8231,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::Native {
                 step_id: "sccache".into(),
@@ -7441,6 +8243,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::Native {
                 step_id: "setup-just".into(),
@@ -7452,6 +8255,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::Native {
                 step_id: "rust-cache".into(),
@@ -7467,6 +8271,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
         ];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
@@ -7552,6 +8357,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         };
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
@@ -7579,6 +8385,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
@@ -7597,6 +8404,33 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert_eq!(calls[1].1, vec!["rm", "--force", "job"]);
         assert_eq!(calls[2].1, vec!["network", "rm", "net"]);
         assert_eq!(calls[3].1, vec!["network", "create", "net"]);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn start_job_double_failure_cleans_up_retry_resources() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            codes: vec![1, 0, 0, 0, 1, 0, 0],
+        });
+
+        let error = executor
+            .start_job_environment(&container(&temp))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("docker run"));
+        let calls = &executor.runner().calls;
+        assert_eq!(calls[0].1, vec!["network", "create", "net"]);
+        assert_eq!(calls[1].1, vec!["rm", "--force", "job"]);
+        assert_eq!(calls[2].1, vec!["network", "rm", "net"]);
+        assert_eq!(calls[3].1, vec!["network", "create", "net"]);
+        assert_eq!(calls[4].1[0], "run");
+        assert_eq!(calls[5].1, vec!["rm", "--force", "job"]);
+        assert_eq!(calls[6].1, vec!["network", "rm", "net"]);
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -7652,6 +8486,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Checkout(CheckoutPlan {
                 step_id: "checkout2".into(),
@@ -7667,6 +8502,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 lfs: false,
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(CheckoutOutputRunner::default());
@@ -8148,6 +8984,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             ],
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         })];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
@@ -8219,6 +9056,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             env: vec![("ACTION_NAME".into(), "${{ github.action }}".into())],
             condition: Some("${{ github.action == 'build' }}".into()),
             continue_on_error: false,
+            timeout_minutes: None,
         })];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
@@ -8278,6 +9116,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         })];
         let context = vec![(
             "github".to_string(),
@@ -8317,6 +9156,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "consumer".into(),
@@ -8327,6 +9167,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
@@ -8366,6 +9207,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::JavaScript {
                 step_id: "login-docker-hub".into(),
@@ -8393,6 +9235,7 @@ fi"#
                 },
                 condition: Some(condition.into()),
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::JavaScript {
                 step_id: "setup-buildx".into(),
@@ -8411,6 +9254,7 @@ fi"#
                 },
                 condition: Some(condition.into()),
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::Script(ScriptStep {
                 id: "build-docker-image".into(),
@@ -8421,6 +9265,7 @@ fi"#
                 env: vec![("GITHUB_TOKEN".into(), "${{ secrets.GITHUB_TOKEN }}".into())],
                 condition: Some(condition.into()),
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let context = vec![
@@ -8489,6 +9334,7 @@ fi"#
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         })];
         let job_outputs = serde_json::json!({
             "answer": "${{ steps.producer.outputs.answer }}",
@@ -8531,6 +9377,7 @@ fi"#
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         })];
         let environment_url = serde_json::json!({
             "type": "String",
@@ -8574,6 +9421,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "sitemap".into(),
@@ -8587,6 +9435,7 @@ fi"#
                 )],
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
@@ -8628,6 +9477,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "sitemap".into(),
@@ -8641,6 +9491,7 @@ fi"#
                 )],
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "check-deployed-1".into(),
@@ -8658,6 +9509,7 @@ fi"#
                 ],
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
@@ -8714,6 +9566,7 @@ fi"#
             env: Vec::new(),
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         })];
         let job_outputs = serde_json::json!({
             "type": "map",
@@ -8901,6 +9754,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::CompositeOutputs {
                 step_id: "composite".into(),
@@ -8920,6 +9774,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
@@ -8941,6 +9796,104 @@ fi"#
     }
 
     #[test]
+    fn composite_status_ignores_prior_job_failure() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Script(ScriptStep {
+                id: "prior-failure".into(),
+                display_name: String::new(),
+                script: "exit 1".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+            ExecutableStep::CompositeStart {
+                step_id: "composite".into(),
+                display_name: "Run local composite".into(),
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+                condition: Some("always()".into()),
+            },
+            ExecutableStep::Script(ScriptStep {
+                id: "composite-first".into(),
+                display_name: String::new(),
+                script: "echo first".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "composite-success".into(),
+                display_name: String::new(),
+                script: "echo success".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: Some("success()".into()),
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "composite-failure".into(),
+                display_name: String::new(),
+                script: "echo failure".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w/repo".into(),
+                env: Vec::new(),
+                condition: Some("failure()".into()),
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+            ExecutableStep::CompositeEnd {
+                step_id: "composite".into(),
+            },
+        ];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            codes: vec![0, 0, 1, 0, 0],
+        });
+
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[0].exit_code, 1);
+        assert_eq!(results[1].exit_code, 0);
+        assert_eq!(results[2].exit_code, 0);
+        assert!(results[3].skipped);
+        let exec_scripts = executor
+            .runner()
+            .calls
+            .iter()
+            .filter_map(|(_, args)| {
+                (args.first().is_some_and(|arg| arg == "exec"))
+                    .then(|| args.last().cloned())
+                    .flatten()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            exec_scripts,
+            vec![
+                "/__t/prior-failure.sh",
+                "/__t/composite-first.sh",
+                "/__t/composite-success.sh",
+            ]
+        );
+        assert!(!temp.join("composite-failure.sh").exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn emits_step_started_events_for_real_executable_steps() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -8954,6 +9907,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::CompositeOutputs {
                 step_id: "composite".into(),
@@ -8973,6 +9927,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -9014,6 +9969,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "consumer".into(),
@@ -9024,6 +9980,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -9047,6 +10004,43 @@ fi"#
     }
 
     #[test]
+    fn live_stream_carries_add_mask_values_after_registration() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Script(ScriptStep {
+            id: "masker".into(),
+            display_name: String::new(),
+            script: "echo mask".into(),
+            shell: Shell::Sh,
+            working_directory_container: "/__w/repo".into(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        })];
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut executor =
+            DockerScriptExecutor::new(StreamingMaskRunner::default()).with_step_log_sender(sender);
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+        let mut logs = Vec::new();
+        while let Ok(log) = receiver.try_recv() {
+            logs.push(log);
+        }
+        let live_logs: Vec<_> = logs
+            .iter()
+            .filter(|log| log.completed_at.is_empty() && !log.lines.is_empty())
+            .collect();
+
+        assert_eq!(live_logs.len(), 2);
+        assert_eq!(live_logs[1].lines, vec!["echo dynsecret".to_string()]);
+        assert_eq!(live_logs[1].masks, vec!["dynsecret".to_string()]);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn reports_silent_and_skipped_steps_for_completion() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -9060,6 +10054,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "skipped".into(),
@@ -9070,6 +10065,7 @@ fi"#
                 env: Vec::new(),
                 condition: Some("${{ false }}".into()),
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(SilentCommandRunner::default());
@@ -9115,6 +10111,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "consumer".into(),
@@ -9125,6 +10122,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(StdoutCommandRunner::default());
@@ -9174,6 +10172,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "consumer".into(),
@@ -9184,6 +10183,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(StderrCommandRunner::default());
@@ -9264,7 +10264,8 @@ fi"#
         expected_hash.update(Sha256::digest(b"image = 'app'\n"));
         expected_hash.update(Sha256::digest(b"fn main() {}\n"));
         expected_hash.update(Sha256::digest(b"build:\n"));
-        let expected = hex_digest(expected_hash.finalize().as_slice());
+        let digest = expected_hash.finalize();
+        let expected = hex_digest(&digest);
         let steps = vec![ExecutableStep::JavaScript {
             step_id: "cache".into(),
             display_name: String::new(),
@@ -9291,6 +10292,7 @@ fi"#
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
@@ -9312,6 +10314,52 @@ fi"#
     }
 
     #[test]
+    fn hash_files_digest_is_stable_for_sorted_streamed_files() {
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(workspace.join("nested")).unwrap();
+        fs::write(workspace.join("alpha.txt"), "alpha\n").unwrap();
+        fs::write(workspace.join("nested/beta.txt"), "beta\n").unwrap();
+        fs::write(
+            workspace.join("nested/gamma.bin"),
+            vec![b'x'; 128 * 1024 + 17],
+        )
+        .unwrap();
+
+        let digest = hash_files(
+            &workspace,
+            &["**/*.txt".to_string(), "nested/gamma.bin".to_string()],
+        );
+
+        assert_eq!(
+            digest,
+            "04ffe0aff7d100a890dfec2e0c951e89fa45e2afb6b9f96bafabf15f15ba1c35"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn hash_files_resolution_memoizes_identical_patterns_per_job() {
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
+        let state = JobExecutionState::new_internal(&[], &[], Some(workspace), None);
+
+        let expression = "hash=${{ hashFiles('Cargo.toml') }}";
+        let first = state.resolve_expressions(expression);
+        let second = state.resolve_expressions(expression);
+
+        assert_eq!(first, second);
+        assert!(!first.ends_with("hash="));
+        let cache = state.hash_files_cache.lock().unwrap();
+        assert_eq!(cache.len(), 1);
+        let key = cache.keys().next().unwrap();
+        assert_eq!(key.patterns, vec!["Cargo.toml".to_string()]);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn skips_steps_when_output_condition_is_false() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -9325,6 +10373,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "consumer".into(),
@@ -9335,6 +10384,7 @@ fi"#
                 env: Vec::new(),
                 condition: Some("steps.producer.outputs.answer == 'nope'".into()),
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
@@ -9375,6 +10425,7 @@ fi"#
                     "needs.check.result == 'failure' || needs.check.result == 'cancelled'".into(),
                 ),
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "bitcoin-cancelled".into(),
@@ -9389,6 +10440,7 @@ fi"#
                         .into(),
                 ),
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "ok".into(),
@@ -9399,6 +10451,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let context = vec![(
@@ -9461,6 +10514,7 @@ fi"#
                 },
                 condition: None,
                 continue_on_error: true,
+                timeout_minutes: None,
             },
             ExecutableStep::Script(ScriptStep {
                 id: "enable-sccache".into(),
@@ -9471,6 +10525,7 @@ fi"#
                 env: Vec::new(),
                 condition: Some("steps.sccache.outcome == 'success'".into()),
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "next".into(),
@@ -9481,6 +10536,7 @@ fi"#
                 env: Vec::new(),
                 condition: Some("success()".into()),
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
@@ -9514,6 +10570,130 @@ fi"#
     }
 
     #[test]
+    fn failed_checkout_runs_always_step() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Checkout(CheckoutPlan {
+                step_id: "checkout".into(),
+                display_name: "Checkout".into(),
+                clone_url: "https://github.com/acme/missing.git".into(),
+                version: Some("missing".into()),
+                destination: temp.join("workspace"),
+                token: None,
+                fetch_depth: Some(1),
+                fetch_tags: false,
+                persist_credentials: false,
+                clean: true,
+                lfs: false,
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+            ExecutableStep::Script(ScriptStep {
+                id: "always".into(),
+                display_name: "Always".into(),
+                script: "echo always".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w".into(),
+                env: Vec::new(),
+                condition: Some("always()".into()),
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(FailingCheckoutRunner::default());
+
+        let summary = executor
+            .execute_ordered_steps_with_completion(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(summary.step_results.len(), 2);
+        assert_eq!(summary.step_results[0].exit_code, 128);
+        assert!(!summary.step_results[0].failure_ignored);
+        assert_eq!(summary.step_results[1].exit_code, 0);
+        assert_eq!(summary.step_logs.len(), 2);
+        assert_eq!(summary.step_logs[0].display_name, "Checkout");
+        assert_eq!(summary.step_logs[0].exit_code, 128);
+        assert!(summary.step_logs[0]
+            .lines
+            .iter()
+            .any(|line| line.contains("couldn't find remote ref")));
+        assert_eq!(summary.step_logs[1].display_name, "Always");
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn failed_native_action_honors_continue_on_error() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![
+            ExecutableStep::Native {
+                step_id: "upload".into(),
+                display_name: "Upload".into(),
+                invocation: NativeActionInvocation {
+                    adapter: NativeActionAdapter::UploadArtifact,
+                    inputs: [
+                        ("path".into(), "missing-file".into()),
+                        ("if-no-files-found".into(), "error".into()),
+                    ]
+                    .into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: true,
+                timeout_minutes: None,
+            },
+            ExecutableStep::Script(ScriptStep {
+                id: "next".into(),
+                display_name: "Next".into(),
+                script: "echo next".into(),
+                shell: Shell::Sh,
+                working_directory_container: "/__w".into(),
+                env: Vec::new(),
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            }),
+        ];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        let summary = executor
+            .execute_ordered_steps_with_completion(
+                &container(&temp),
+                &steps,
+                &[],
+                &[],
+                None,
+                None,
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(summary.step_results.len(), 2);
+        assert_eq!(summary.step_results[0].exit_code, 1);
+        assert!(summary.step_results[0].failure_ignored);
+        assert_eq!(summary.step_results[1].exit_code, 0);
+        assert_eq!(summary.step_logs.len(), 2);
+        assert_eq!(summary.step_logs[0].display_name, "Upload");
+        assert_eq!(summary.step_logs[0].exit_code, 1);
+        assert!(summary.step_logs[0]
+            .lines
+            .iter()
+            .any(|line| line.contains("No files were found")));
+        assert_eq!(summary.step_logs[1].display_name, "Next");
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn conditions_without_status_check_require_success() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -9527,6 +10707,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "plain-condition".into(),
@@ -9537,6 +10718,7 @@ fi"#
                 env: Vec::new(),
                 condition: Some("steps.fail.outcome == 'failure'".into()),
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "status-condition".into(),
@@ -9547,6 +10729,7 @@ fi"#
                 env: Vec::new(),
                 condition: Some("failure() && steps.fail.outcome == 'failure'".into()),
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
@@ -9663,6 +10846,30 @@ fi"#
             ignored_state.resolve_expressions("${{ job.status }}"),
             "success"
         );
+    }
+
+    #[test]
+    fn not_precedence_binds_tighter_than_and() {
+        let mut state = JobExecutionState::default();
+        state.apply(
+            "failed",
+            &StepExecutionResult {
+                exit_code: 1,
+                skipped: false,
+                failure_ignored: false,
+                state: StepCommandState::default(),
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+
+        assert!(
+            !state.evaluate_condition(Some("!cancelled() && steps.failed.outcome == 'success'"))
+        );
+        assert!(state.evaluate_condition(Some("!cancelled() && steps.failed.outcome == 'failure'")));
+        assert!(state.evaluate_condition(Some("!cancelled()")));
+        assert!(state.evaluate_condition(Some("failure() && !cancelled()")));
+        assert!(!state.evaluate_condition(Some("!failure()")));
     }
 
     #[test]
@@ -9790,6 +10997,7 @@ fi"#
             invocation: action,
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
@@ -9859,6 +11067,7 @@ fi"#
             invocation: action,
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let context = vec![
             (
@@ -9917,6 +11126,7 @@ fi"#
             invocation: action,
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
@@ -9951,6 +11161,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::JavaScript {
                 step_id: "action1".into(),
@@ -9971,6 +11182,7 @@ fi"#
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::Script(ScriptStep {
                 id: "step2".into(),
@@ -9981,6 +11193,7 @@ fi"#
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
@@ -10043,6 +11256,7 @@ fi"#
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::Native {
                 step_id: "upload".into(),
@@ -10066,6 +11280,7 @@ fi"#
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::Native {
                 step_id: "download".into(),
@@ -10082,6 +11297,7 @@ fi"#
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::Native {
                 step_id: "github-runtime".into(),
@@ -10093,6 +11309,7 @@ fi"#
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
         ];
         let runtime_env = vec![
@@ -10128,7 +11345,8 @@ fi"#
         expected_hash.update(Sha256::digest(b"image = 'app'\n"));
         expected_hash.update(Sha256::digest(b"fn main() {}\n"));
         expected_hash.update(Sha256::digest(b"build:\n"));
-        let expected_hash = hex_digest(expected_hash.finalize().as_slice());
+        let digest = expected_hash.finalize();
+        let expected_hash = hex_digest(&digest);
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
         let results = executor
@@ -10155,7 +11373,7 @@ fi"#
             .map(|(_, args)| args)
             .collect::<Vec<_>>();
         assert_eq!(node_calls.len(), 0);
-        assert_eq!(results[0].state.outputs["cache-hit"], "");
+        assert_eq!(results[0].state.outputs["cache-hit"], "false");
         assert_eq!(
             results[0].state.outputs["cache-primary-key"],
             format!("rust-script-Linux-{expected_hash}")
@@ -10216,6 +11434,7 @@ fi"#
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let download = vec![ExecutableStep::Native {
             step_id: "download".into(),
@@ -10232,6 +11451,7 @@ fi"#
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
 
         DockerScriptExecutor::new(RecordingRunner::default())
@@ -10295,6 +11515,7 @@ fi"#
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }];
             DockerScriptExecutor::new(RecordingRunner::default())
                 .execute_ordered_steps(
@@ -10315,6 +11536,7 @@ fi"#
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
 
         let results = DockerScriptExecutor::new(RecordingRunner::default())
@@ -10369,6 +11591,7 @@ fi"#
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         DockerScriptExecutor::new(RecordingRunner::default())
             .execute_ordered_steps(
@@ -10392,6 +11615,7 @@ fi"#
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
 
         let results = DockerScriptExecutor::new(RecordingRunner::default())
@@ -10446,6 +11670,7 @@ fi"#
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         DockerScriptExecutor::new(RecordingRunner::default())
             .execute_ordered_steps(
@@ -10469,6 +11694,7 @@ fi"#
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
 
         DockerScriptExecutor::new(RecordingRunner::default())
@@ -10522,6 +11748,7 @@ fi"#
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
 
         let results = DockerScriptExecutor::new(RecordingRunner::default())
@@ -10576,6 +11803,7 @@ fi"#
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }]
         };
 
@@ -10635,6 +11863,7 @@ fi"#
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }]
         };
 
@@ -10700,6 +11929,7 @@ fi"#
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
 
         let results = DockerScriptExecutor::new(RecordingRunner::default())
@@ -10713,6 +11943,57 @@ fi"#
             )
             .unwrap(),
             "sha256:abc\n"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_upload_artifact_fails_when_results_service_upload_fails() {
+        let temp = temp_dir();
+        fs::create_dir_all(temp.join("work")).unwrap();
+        fs::write(temp.join("work/result.json"), "{\"ok\":true}\n").unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "upload".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::UploadArtifact,
+                inputs: [
+                    ("name".into(), "result-velnor-app".into()),
+                    ("path".into(), "result.json".into()),
+                    ("if-no-files-found".into(), "error".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+        let runtime_env = [
+            ("ACTIONS_RESULTS_URL".into(), "http://127.0.0.1:9".into()),
+            (
+                "ACTIONS_RUNTIME_TOKEN".into(),
+                runtime_token_with_results_scope("plan-1", "job-1"),
+            ),
+        ];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &runtime_env, &temp)
+            .unwrap();
+
+        assert_eq!(results[0].exit_code, 1);
+        assert!(results[0]
+            .stdout
+            .contains("Saved local artifact 'result-velnor-app'"));
+        assert!(results[0]
+            .stderr
+            .contains("Results Service artifact upload failed"));
+        assert_eq!(
+            fs::read_to_string(
+                temp.join("_velnor_artifacts/local-1/result-velnor-app/result.json")
+            )
+            .unwrap(),
+            "{\"ok\":true}\n"
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -10762,6 +12043,7 @@ fi"#
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::Script(ScriptStep {
                 id: "consume".into(),
@@ -10772,6 +12054,7 @@ fi"#
                 env: Vec::new(),
                 condition: Some("steps.paths.outputs.construct == 'true'".into()),
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let context_data = vec![(
@@ -10868,6 +12151,7 @@ fi"#
                 env: vec![("INPUT_PATH".into(), "docs/dist".into())],
                 condition: Some("runner.os == 'Linux'".into()),
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Native {
                 step_id: "upload-artifact".into(),
@@ -10885,6 +12169,7 @@ fi"#
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::CompositeOutputs {
                 step_id: "pages-artifact".into(),
@@ -10908,6 +12193,7 @@ fi"#
                 },
                 condition: Some("steps.pages-artifact.outputs.artifact_id != ''".into()),
                 continue_on_error: false,
+                timeout_minutes: None,
             },
         ];
         let runtime_env = vec![
@@ -10994,6 +12280,7 @@ fi"#
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::JavaScript {
                 step_id: "login".into(),
@@ -11014,6 +12301,7 @@ fi"#
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::JavaScript {
                 step_id: "metadata".into(),
@@ -11035,6 +12323,7 @@ fi"#
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::JavaScript {
                 step_id: "build-push".into(),
@@ -11056,6 +12345,7 @@ fi"#
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::JavaScript {
                 step_id: "bake".into(),
@@ -11078,6 +12368,7 @@ fi"#
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
         ];
         let mut spec = container(&temp);
@@ -11149,6 +12440,7 @@ fi"#
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
@@ -11208,6 +12500,7 @@ fi"#
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::JavaScript {
                 step_id: "buildx-jackin".into(),
@@ -11229,6 +12522,7 @@ fi"#
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::JavaScript {
                 step_id: "metadata".into(),
@@ -11256,6 +12550,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::CompositeOutputs {
                 step_id: "meta".into(),
@@ -11312,6 +12607,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::JavaScript {
                 step_id: "bake".into(),
@@ -11339,6 +12635,7 @@ bitcoin-processor-app.push=${{ (github.event_name == 'push' && needs.changes.out
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
         ];
         let mut spec = container(&temp);
@@ -11471,6 +12768,7 @@ bitcoin-processor-app.push=true")
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let mut spec = container(&temp);
         spec.mount_docker_socket = true;
@@ -11540,6 +12838,7 @@ bitcoin-processor-app.push=true")
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::JavaScript {
                 step_id: "cargo-install".into(),
@@ -11557,6 +12856,7 @@ bitcoin-processor-app.push=true")
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
         ];
         let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
@@ -11612,6 +12912,7 @@ bitcoin-processor-app.push=true")
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::JavaScript {
                 step_id: "setup-python".into(),
@@ -11639,6 +12940,7 @@ bitcoin-processor-app.push=true")
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
         ];
         let base_env = vec![
@@ -11712,6 +13014,7 @@ bitcoin-processor-app.push=true")
                 env: Vec::new(),
                 condition: Some("runner.os != 'Windows'".into()),
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "setup-mold".into(),
@@ -11722,6 +13025,7 @@ bitcoin-processor-app.push=true")
                 env: Vec::new(),
                 condition: Some("runner.os == 'Linux'".into()),
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::JavaScript {
                 step_id: "setup-just".into(),
@@ -11743,6 +13047,7 @@ bitcoin-processor-app.push=true")
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::JavaScript {
                 step_id: "cargo-install".into(),
@@ -11765,6 +13070,7 @@ bitcoin-processor-app.push=true")
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
         ];
         let runtime_env = vec![
@@ -11845,6 +13151,7 @@ bitcoin-processor-app.push=true")
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::JavaScript {
                 step_id: "login".into(),
@@ -11862,6 +13169,7 @@ bitcoin-processor-app.push=true")
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
         ];
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -11947,6 +13255,7 @@ bitcoin-processor-app.push=true")
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let mut executor = DockerScriptExecutor::new(OutputWritingRunner {
             calls: Vec::new(),
@@ -12002,6 +13311,7 @@ bitcoin-processor-app.push=true")
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let mut executor = DockerScriptExecutor::new(PhaseStateRunner {
             calls: Vec::new(),
@@ -12047,6 +13357,7 @@ bitcoin-processor-app.push=true")
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
             calls: Vec::new(),
@@ -12106,6 +13417,7 @@ bitcoin-processor-app.push=true")
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::Script(ScriptStep {
                 id: "fail".into(),
@@ -12116,6 +13428,7 @@ bitcoin-processor-app.push=true")
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(RecordingRunner {
@@ -12164,6 +13477,7 @@ bitcoin-processor-app.push=true")
             },
             condition: None,
             continue_on_error: true,
+            timeout_minutes: None,
         }];
         let mut executor = DockerScriptExecutor::new(FailingPostRunner { calls: Vec::new() });
 
@@ -12211,6 +13525,7 @@ bitcoin-processor-app.push=true")
                 },
                 condition: None,
                 continue_on_error: true,
+                timeout_minutes: None,
             },
             ExecutableStep::Script(ScriptStep {
                 id: "enable-sccache".into(),
@@ -12221,6 +13536,7 @@ bitcoin-processor-app.push=true")
                 env: Vec::new(),
                 condition: Some("steps.sccache.outcome == 'success'".into()),
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(FailingPostRunner { calls: Vec::new() });
@@ -12295,6 +13611,7 @@ bitcoin-processor-app.push=true")
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::Script(ScriptStep {
                 id: "enable".into(),
@@ -12305,6 +13622,7 @@ bitcoin-processor-app.push=true")
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "fail".into(),
@@ -12315,6 +13633,7 @@ bitcoin-processor-app.push=true")
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let mut executor = DockerScriptExecutor::new(EnvAndFailureRunner {
@@ -12378,6 +13697,7 @@ bitcoin-processor-app.push=true")
                 },
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             },
             ExecutableStep::Script(ScriptStep {
                 id: "enable".into(),
@@ -12388,6 +13708,7 @@ bitcoin-processor-app.push=true")
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
             ExecutableStep::Script(ScriptStep {
                 id: "fail".into(),
@@ -12398,6 +13719,7 @@ bitcoin-processor-app.push=true")
                 env: Vec::new(),
                 condition: None,
                 continue_on_error: false,
+                timeout_minutes: None,
             }),
         ];
         let runtime_env = vec![
@@ -12620,7 +13942,7 @@ bitcoin-processor-app.push=true")
             }
             serde_yaml::Value::Mapping(map) => {
                 for (key, value) in map {
-                    collect_yaml_strings(key, strings);
+                    strings.push(key);
                     collect_yaml_strings(value, strings);
                 }
             }
@@ -12636,7 +13958,7 @@ bitcoin-processor-app.push=true")
         match value {
             serde_yaml::Value::Mapping(map) => {
                 for (key, value) in map {
-                    if key.as_str() == Some(name) {
+                    if key == name {
                         if let Some(value) = value.as_str() {
                             strings.push(value);
                         }
@@ -13022,6 +14344,7 @@ bitcoin-processor-app.push=true")
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
         let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
 
@@ -13071,6 +14394,38 @@ bitcoin-processor-app.push=true")
             crate::action::native_action_adapter("docker/setup-qemu-action"),
             Some(NativeActionAdapter::SetupQemu)
         );
+    }
+
+    #[test]
+    fn setup_qemu_uses_pinned_image() {
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let mut inputs = BTreeMap::new();
+        inputs.insert(
+            "image".to_string(),
+            "evil.example/binfmt:latest".to_string(),
+        );
+        inputs.insert("platforms".to_string(), "arm64".to_string());
+        let result = executor
+            .native_setup_qemu(
+                &NativeActionInvocation {
+                    adapter: NativeActionAdapter::SetupQemu,
+                    inputs,
+                    env: Vec::new(),
+                },
+                &JobExecutionState::default(),
+                DEFAULT_STEP_TIMEOUT,
+            )
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let calls = &executor.runner().calls;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "docker");
+        assert!(calls[0].1.contains(&"--privileged".to_string()));
+        assert!(calls[0].1.contains(&SETUP_QEMU_BINFMT_IMAGE.to_string()));
+        assert!(!calls[0]
+            .1
+            .contains(&"evil.example/binfmt:latest".to_string()));
     }
 
     #[test]

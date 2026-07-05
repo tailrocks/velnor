@@ -1,5 +1,10 @@
 # Goal: ChainArgos Runner Parity (GitHub-hosted green, then GitHub + Velnor in parallel)
 
+> **Superseded — shipped.** This real-target parity goal is complete; do not
+> start a new `/goal` run from this prompt. Current production status and any
+> follow-up work live in [`../docs/master-plan.md`](../docs/master-plan.md) and
+> [`../docs/comparison.md`](../docs/comparison.md).
+
 > **Mission:** see [`../docs/mission.md`](../docs/mission.md). Velnor must be a
 > **drop-in** runner: the *same* workflow YAML that is green on GitHub-hosted
 > runners must be green on Velnor — **faster, cheaper, nicer**, never by
