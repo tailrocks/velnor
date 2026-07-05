@@ -12,6 +12,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Inspect Velnor's daemon-shared host cache stores.
+    Cache(CacheArgs),
     /// Create and store a GitHub JIT runner configuration.
     Configure(ConfigureArgs),
     /// Run one daemon process that manages one or more internal runner slots.
@@ -27,6 +29,47 @@ pub enum Command {
     /// Probe GitHub for this daemon's registered runners and fail loudly when
     /// the fleet is gone (run from a systemd timer for alerting).
     Doctor(DoctorArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CacheArgs {
+    /// Host work directory that contains daemon-shared stores. Defaults under the runner config directory.
+    #[arg(long)]
+    pub work_dir: Option<PathBuf>,
+
+    /// Store configuration under this directory when deriving the default work dir.
+    #[arg(long)]
+    pub config_dir: Option<PathBuf>,
+
+    #[command(subcommand)]
+    pub command: CacheCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CacheCommand {
+    /// Report store sizes by store and scope. Read-only.
+    Du,
+    /// Preview cache eviction candidates. Destructive GC is not implemented in this spike.
+    Gc(CacheGcArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CacheGcArgs {
+    /// Print candidates without deleting anything. Required in this spike.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Keep this many newest target buckets per trust/repo/workflow/job scope.
+    #[arg(long, default_value_t = 3)]
+    pub keep_newest_targets: usize,
+
+    /// Consider cache/artifact/cargo/mise entries older than this many days candidates.
+    #[arg(long, default_value_t = 30)]
+    pub max_age_days: u64,
+
+    /// Optional total byte ceiling for all GC-managed stores.
+    #[arg(long)]
+    pub max_size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Args)]

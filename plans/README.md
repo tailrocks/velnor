@@ -50,7 +50,7 @@ Independent plans can run in parallel; respect the "Depends on" column.
 | 026 | Deny privilege-granting `container.options`; pin qemu image | P3 | M | — | security | DONE |
 | 027 | mise dev-loop + fix documented CLI flag + env-var docs | P3 | S | — | dx | DONE |
 | 028 | Reconcile prompts/checklists + dated docs with master-plan | P3 | S | — | docs | DONE |
-| 029 | Cache GC + `cache` subcommand (design/spike) | P2 | L | 006, 007 | direction | TODO |
+| 029 | Cache GC + `cache` subcommand (design/spike) | P2 | L | 006, 007 | direction | DONE |
 | 030 | `lane-compare` regression/watch mode (spike) | P3 | M | — | direction | TODO |
 | 031 | Investigate: upload-artifact remote-failure semantics | P3 | S | 009 | bug | TODO |
 | 032 | Investigate: cancellation during broker outage | P3 | L | 018 | bug | TODO |
