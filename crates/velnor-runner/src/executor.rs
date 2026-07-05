@@ -22,13 +22,17 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::mpsc::UnboundedSender;
 
 const DOCKER_MOUNT_CHECK_FILE: &str = ".velnor-mount-check";
+static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
 // ANSI color helpers for Velnor-authored adapter output.
 // GitHub's UI renders these as colored spans (ansifg-* classes).
@@ -3253,13 +3257,11 @@ fn save_cache_result(
     // The store is shared across daemon slots: stage the whole entry next to
     // its final location and swap with a rename, so a sibling slot restoring
     // this key never reads a half-written tree.
-    let staging_name = format!(
-        "{}.staging-{}",
+    let staging_name = cache_staging_name(
         cache_dir
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("cache"),
-        std::process::id()
     );
     let staging_dir = cache_dir.with_file_name(staging_name);
     fs::remove_dir_all(&staging_dir).ok();
@@ -3286,7 +3288,14 @@ fn save_cache_result(
         let target = staging_dir.join(index.to_string());
         fs::create_dir_all(&target)
             .with_context(|| format!("create cache entry {}", target.display()))?;
-        copy_cache_source(&source, &target)?;
+        if let Err(error) = copy_cache_source(&source, &target) {
+            fs::remove_dir_all(&staging_dir).ok();
+            return Ok(cache_save_step_result(
+                0,
+                "",
+                &format!("Cache save skipped after copy contention for key '{key}': {error:#}\n"),
+            ));
+        }
         saved += 1;
     }
     let save_ms = t0.elapsed().as_millis();
@@ -3308,8 +3317,16 @@ fn save_cache_result(
         ));
     }
     fs::remove_dir_all(&cache_dir).ok();
-    fs::rename(&staging_dir, &cache_dir)
-        .with_context(|| format!("publish cache entry {}", cache_dir.display()))?;
+    if let Err(error) = fs::rename(&staging_dir, &cache_dir)
+        .with_context(|| format!("publish cache entry {}", cache_dir.display()))
+    {
+        fs::remove_dir_all(&staging_dir).ok();
+        return Ok(cache_save_step_result(
+            0,
+            "",
+            &format!("Cache save skipped after publish contention for key '{key}': {error:#}\n"),
+        ));
+    }
     Ok(cache_save_step_result(
         0,
         &format!(
@@ -3317,6 +3334,16 @@ fn save_cache_result(
         ),
         "",
     ))
+}
+
+fn cache_staging_name(cache_file_name: &str) -> String {
+    let unique = CACHE_STAGING_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "{}.staging-{}-{}",
+        cache_file_name,
+        std::process::id(),
+        unique
+    )
 }
 
 fn cache_save_step_result(exit_code: i32, stdout: &str, stderr: &str) -> StepExecutionResult {
@@ -6812,6 +6839,16 @@ mod tests {
             "cached\n"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cache_staging_dirs_are_unique_per_save() {
+        let first = cache_staging_name("linux-rust-script-abc");
+        let second = cache_staging_name("linux-rust-script-abc");
+
+        assert_ne!(first, second);
+        assert!(first.starts_with("linux-rust-script-abc.staging-"));
+        assert!(second.starts_with("linux-rust-script-abc.staging-"));
     }
 
     #[test]

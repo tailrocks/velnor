@@ -23,7 +23,7 @@ Independent plans can run in parallel; respect the "Depends on" column.
 | Plan | Title | Priority | Effort | Depends on | Category | Status |
 |------|-------|----------|--------|------------|----------|--------|
 | 001 | Unary `!` precedence in `if:` conditions | P1 | S | — | bug | DONE |
-| 002 | Cache-save staging unique per slot, non-fatal on contention | P1 | S | — | bug | TODO |
+| 002 | Cache-save staging unique per slot, non-fatal on contention | P1 | S | — | bug | DONE |
 | 003 | Stop dropping stream on invalid UTF-8 line | P1 | S | — | bug | TODO |
 | 004 | `cache-hit: 'false'` on total miss | P2 | S | — | bug | TODO |
 | 005 | Secret masking parity (multi-line + add-mask live feed) | P1 | M | — | security | TODO |
