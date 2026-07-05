@@ -81,7 +81,7 @@ opentelemetry_sdk = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
 
 [dev-dependencies]
-wiremock = "0.6.5"
+wiremock = "=0.6.5"
 
 [features]
 default = []
