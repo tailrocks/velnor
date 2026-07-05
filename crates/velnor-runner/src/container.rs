@@ -25,6 +25,7 @@ pub struct JobContainerSpec {
     pub docker_host_work_dir: Option<PathBuf>,
     pub verify_bind_mounts: bool,
     pub daemon_id: String,
+    pub repository: Option<String>,
     /// Host-persistent incremental-build store mounted as CARGO_TARGET_DIR
     /// (opt-in via VELNOR_CARGO_TARGET_PERSIST; GitHub-hosted runners do not
     /// set CARGO_TARGET_DIR, so this stays off unless the operator enables it).
@@ -70,23 +71,23 @@ impl JobContainerSpec {
                 &cargo_store_host(&self.temp_host).join("git"),
                 "/github/home/.cargo/git",
             ),
-            // Shared $CARGO_HOME/bin: mise's rust backend keys "installed" off
-            // this dir, so with a per-job-fresh home every job re-ran
-            // rustup-init (network!) to reinstall the proxies. Shared, they
-            // install once per fleet.
+            // $CARGO_HOME/bin holds executable proxies on PATH, so it is
+            // shared only inside one trust/repository scope. Registry/git data
+            // above stays daemon-shared for warmth because cargo does not
+            // execute files directly from those caches.
             "-v".into(),
             self.mount_arg(
-                &cargo_store_host(&self.temp_host).join("bin"),
+                &cargo_executable_store_host(&self.temp_host, &self.repository_store_key()),
                 "/github/home/.cargo/bin",
             ),
-            // Host-persistent mise tool store: only `installs` + `cache` are
-            // mounted (the mise binary, shims and global config stay baked in
-            // the image). A tool a job installs (GraalVM, node, python, cargo
-            // backends) persists for the whole fleet instead of re-downloading
-            // per job. mise installs under its own file locks.
+            // Host-persistent mise tool store: installed tools are executable,
+            // so `installs` is scoped by trust/repository. The mise binary,
+            // shims and global config stay baked in the image. `cache` is
+            // download data and remains daemon-shared for warmth; mise uses
+            // its own file locks.
             "-v".into(),
             self.mount_arg(
-                &mise_store_host(&self.temp_host).join("installs"),
+                &mise_executable_store_host(&self.temp_host, &self.repository_store_key()),
                 "/opt/mise/installs",
             ),
             "-v".into(),
@@ -166,7 +167,10 @@ impl JobContainerSpec {
             "--entrypoint".into(),
             "sh".into(),
             "-v".into(),
-            self.mount_arg(&store.join("installs"), "/__velnor_seed/installs"),
+            self.mount_arg(
+                &mise_executable_store_host(&self.temp_host, &self.repository_store_key()),
+                "/__velnor_seed/installs",
+            ),
             "-v".into(),
             self.mount_arg(&store.join("cache"), "/__velnor_seed/cache"),
             self.image.clone(),
@@ -428,6 +432,19 @@ impl JobContainerSpec {
         mount(&self.docker_host_path(host_path), container_path)
     }
 
+    fn repository_store_key(&self) -> String {
+        self.repository
+            .as_deref()
+            .or_else(|| {
+                self.env
+                    .iter()
+                    .find(|(name, _)| name == "GITHUB_REPOSITORY")
+                    .map(|(_, value)| value.as_str())
+            })
+            .map(sanitize_store_key)
+            .unwrap_or_else(|| "unknown-repository".to_string())
+    }
+
     fn docker_host_path(&self, host_path: &Path) -> PathBuf {
         let Some(docker_work_dir) = &self.docker_host_work_dir else {
             return host_path.to_path_buf();
@@ -565,9 +582,49 @@ pub(crate) fn cargo_store_host(temp_host: &Path) -> PathBuf {
     daemon_store_root(temp_host).join("_velnor_cargo")
 }
 
+/// Host-persistent cargo executable store, scoped by trust + repository.
+pub(crate) fn cargo_executable_store_host(temp_host: &Path, repository: &str) -> PathBuf {
+    cargo_executable_store_host_for_scope(
+        temp_host,
+        &crate::github_adapter::cargo_target_trust_scope(),
+        repository,
+    )
+}
+
+fn cargo_executable_store_host_for_scope(
+    temp_host: &Path,
+    trust_scope: &str,
+    repository: &str,
+) -> PathBuf {
+    cargo_store_host(temp_host)
+        .join("bin")
+        .join(sanitize_store_key(trust_scope))
+        .join(sanitize_store_key(repository))
+}
+
 /// Host-persistent mise tool store (installs + cache subdirs are mounted).
 pub(crate) fn mise_store_host(temp_host: &Path) -> PathBuf {
     daemon_store_root(temp_host).join("_velnor_mise")
+}
+
+/// Host-persistent mise executable store, scoped by trust + repository.
+pub(crate) fn mise_executable_store_host(temp_host: &Path, repository: &str) -> PathBuf {
+    mise_executable_store_host_for_scope(
+        temp_host,
+        &crate::github_adapter::cargo_target_trust_scope(),
+        repository,
+    )
+}
+
+fn mise_executable_store_host_for_scope(
+    temp_host: &Path,
+    trust_scope: &str,
+    repository: &str,
+) -> PathBuf {
+    mise_store_host(temp_host)
+        .join("installs")
+        .join(sanitize_store_key(trust_scope))
+        .join(sanitize_store_key(repository))
 }
 
 /// Root for opt-in persistent CARGO_TARGET_DIR buckets (one per job class).
@@ -693,6 +750,7 @@ mod tests {
             docker_host_work_dir: None,
             verify_bind_mounts: false,
             daemon_id: "test-daemon".into(),
+            repository: Some("acme/repo".into()),
             cargo_target_host: None,
         }
     }
@@ -731,6 +789,56 @@ mod tests {
     }
 
     #[test]
+    fn executable_tool_store_hosts_are_scoped_by_trust_and_repo() {
+        let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
+
+        assert_eq!(
+            cargo_executable_store_host_for_scope(temp, "trusted", "ChainArgos/java-monorepo"),
+            PathBuf::from(
+                "/var/lib/velnor/work/_velnor_cargo/bin/trusted/ChainArgos_java-monorepo"
+            )
+        );
+        assert_eq!(
+            mise_executable_store_host_for_scope(temp, "trusted", "ChainArgos/java-monorepo"),
+            PathBuf::from(
+                "/var/lib/velnor/work/_velnor_mise/installs/trusted/ChainArgos_java-monorepo"
+            )
+        );
+    }
+
+    #[test]
+    fn executable_tool_store_hosts_differ_by_repo() {
+        let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
+
+        assert_ne!(
+            cargo_executable_store_host_for_scope(temp, "trusted", "org/one"),
+            cargo_executable_store_host_for_scope(temp, "trusted", "org/two")
+        );
+        assert_ne!(
+            mise_executable_store_host_for_scope(temp, "trusted", "org/one"),
+            mise_executable_store_host_for_scope(temp, "trusted", "org/two")
+        );
+    }
+
+    #[test]
+    fn pure_data_tool_stores_stay_shared_across_repos() {
+        let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
+
+        assert_eq!(
+            cargo_store_host(temp).join("registry"),
+            PathBuf::from("/var/lib/velnor/work/_velnor_cargo/registry")
+        );
+        assert_eq!(
+            cargo_store_host(temp).join("git"),
+            PathBuf::from("/var/lib/velnor/work/_velnor_cargo/git")
+        );
+        assert_eq!(
+            mise_store_host(temp).join("cache"),
+            PathBuf::from("/var/lib/velnor/work/_velnor_mise/cache")
+        );
+    }
+
+    #[test]
     fn sccache_host_is_shared_across_daemon_slots() {
         // slot-N work roots collapse to one daemon-level sccache dir.
         assert_eq!(
@@ -754,6 +862,13 @@ mod tests {
         assert!(args.contains(&"/tmp/temp:/tmp".into()));
         assert!(args.contains(&"/tmp/_velnor_sccache:/var/cache/sccache".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
+        assert!(args
+            .contains(&"/tmp/_velnor_cargo/bin/trusted/acme_repo:/github/home/.cargo/bin".into()));
+        assert!(args
+            .contains(&"/tmp/_velnor_mise/installs/trusted/acme_repo:/opt/mise/installs".into()));
+        assert!(args.contains(&"/tmp/_velnor_cargo/registry:/github/home/.cargo/registry".into()));
+        assert!(args.contains(&"/tmp/_velnor_cargo/git:/github/home/.cargo/git".into()));
+        assert!(args.contains(&"/tmp/_velnor_mise/cache:/opt/mise/cache".into()));
         assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"HOME=/github/home".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));

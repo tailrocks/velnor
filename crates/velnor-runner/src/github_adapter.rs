@@ -61,6 +61,7 @@ pub fn github_job_container_spec(
         docker_host_work_dir: paths.docker_host_work_dir,
         verify_bind_mounts: true,
         daemon_id,
+        repository: job_variable(job, "github.repository").map(ToOwned::to_owned),
         cargo_target_host,
     }
 }
@@ -581,6 +582,7 @@ mod tests {
             docker_host_work_dir: None,
             verify_bind_mounts: true,
             daemon_id: "test-daemon".into(),
+            repository: Some("ChainArgos/java-monorepo".into()),
             cargo_target_host: None,
         };
         let plan = github_normalized_job_plan(

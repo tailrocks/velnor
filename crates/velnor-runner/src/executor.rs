@@ -6352,6 +6352,7 @@ mod tests {
             docker_host_work_dir: None,
             verify_bind_mounts: false,
             daemon_id: "test-daemon".into(),
+            repository: Some("unknown-repository".into()),
             cargo_target_host: None,
         }
     }

@@ -28,7 +28,7 @@ Independent plans can run in parallel; respect the "Depends on" column.
 | 004 | `cache-hit: 'false'` on total miss | P2 | S | — | bug | DONE |
 | 005 | Secret masking parity (multi-line + add-mask live feed) | P1 | M | — | security | DONE |
 | 006 | Repo/trust-scope the `actions/cache` store + `..` hardening | P1 | M | — | security | DONE |
-| 007 | Trust-scope the writable executable tool stores | P2 | L | 006 | security | TODO |
+| 007 | Trust-scope the writable executable tool stores | P2 | L | 006 | security | DONE |
 | 008 | Secret env via 0600 `--env-file`, not exec argv | P2 | M | — | security | TODO |
 | 009 | Step-logic failures = failed steps, not job aborts | P1 | M | — | bug | TODO |
 | 010 | Enforce `timeout-minutes` (kill hung steps) | P1 | M | — | bug | TODO |
