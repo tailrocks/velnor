@@ -45,7 +45,7 @@ Independent plans can run in parallel; respect the "Depends on" column.
 | 021 | `hashFiles()` streaming/parallel/memoized | P3 | M | — | perf | DONE |
 | 022 | Buffer trace/forensic writers + CI `fmt` rustup cache | P3 | S | — | perf | DONE |
 | 023 | Scope `success()`/`failure()` to the composite's steps | P3 | M | — | bug | DONE |
-| 024 | Clean up docker resources on double start-failure | P3 | S | — | bug | TODO |
+| 024 | Clean up docker resources on double start-failure | P3 | S | — | bug | DONE |
 | 025 | Runner credential file 0600 / dir 0700 | P3 | S | — | security | TODO |
 | 026 | Deny privilege-granting `container.options`; pin qemu image | P3 | M | — | security | TODO |
 | 027 | mise dev-loop + fix documented CLI flag + env-var docs | P3 | S | — | dx | TODO |

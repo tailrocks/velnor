@@ -2628,7 +2628,10 @@ where
         if let Err(error) = self.start_job_environment_once(container) {
             eprintln!("Docker job environment start failed, removing stale resources: {error:#}");
             self.cleanup_stale(container);
-            self.start_job_environment_once(container)?;
+            if let Err(retry_error) = self.start_job_environment_once(container) {
+                self.cleanup_stale(container);
+                return Err(retry_error);
+            }
         }
         Ok(())
     }
@@ -8372,6 +8375,33 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert_eq!(calls[1].1, vec!["rm", "--force", "job"]);
         assert_eq!(calls[2].1, vec!["network", "rm", "net"]);
         assert_eq!(calls[3].1, vec!["network", "create", "net"]);
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn start_job_double_failure_cleans_up_retry_resources() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let mut executor = DockerScriptExecutor::new(RecordingRunner {
+            calls: Vec::new(),
+            stdin: Vec::new(),
+            env: Vec::new(),
+            codes: vec![1, 0, 0, 0, 1, 0, 0],
+        });
+
+        let error = executor
+            .start_job_environment(&container(&temp))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("docker run"));
+        let calls = &executor.runner().calls;
+        assert_eq!(calls[0].1, vec!["network", "create", "net"]);
+        assert_eq!(calls[1].1, vec!["rm", "--force", "job"]);
+        assert_eq!(calls[2].1, vec!["network", "rm", "net"]);
+        assert_eq!(calls[3].1, vec!["network", "create", "net"]);
+        assert_eq!(calls[4].1[0], "run");
+        assert_eq!(calls[5].1, vec!["rm", "--force", "job"]);
+        assert_eq!(calls[6].1, vec!["network", "rm", "net"]);
         fs::remove_dir_all(temp).unwrap();
     }
 
