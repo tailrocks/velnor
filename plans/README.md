@@ -40,7 +40,7 @@ Independent plans can run in parallel; respect the "Depends on" column.
 | 016 | Migrate off unmaintained `serde_yaml` | P3 | M | — | migration | DONE |
 | 017 | `cargo-deny` advisory gate + sha2 dedup | P3 | S | 016 | dx | DONE |
 | 018 | Broker/run-service HTTP test harness | P2 | L | (012 soft) | tests | DONE |
-| 019 | Drain/SIGTERM regression tests | P2 | M | — | tests | TODO |
+| 019 | Drain/SIGTERM regression tests | P2 | M | — | tests | DONE |
 | 020 | Batch live log feed + hoist masks + aho-corasick | P2 | M | 005 | perf | TODO |
 | 021 | `hashFiles()` streaming/parallel/memoized | P3 | M | — | perf | TODO |
 | 022 | Buffer trace/forensic writers + CI `fmt` rustup cache | P3 | S | — | perf | TODO |

@@ -540,6 +540,21 @@ pub(crate) fn draining() -> bool {
     DRAINING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotAction {
+    Continue,
+    DeregisterAndExit,
+    FinishJobThenExit,
+}
+
+fn slot_action_on_poll(draining: bool, busy: bool) -> SlotAction {
+    match (draining, busy) {
+        (false, _) => SlotAction::Continue,
+        (true, false) => SlotAction::DeregisterAndExit,
+        (true, true) => SlotAction::FinishJobThenExit,
+    }
+}
+
 fn start_drain_listener(config_base: PathBuf) {
     tokio::spawn(async move {
         let mut term =
@@ -906,7 +921,7 @@ async fn run_daemon_slot(
     let mut cycle = 1_u64;
     let mut local_failure_streak: u32 = 0;
     loop {
-        if draining() {
+        if slot_action_on_poll(draining(), false) == SlotAction::DeregisterAndExit {
             let note = format!("slot-{slot_index} draining: deleting registration and exiting");
             println!("{note}");
             daemon_forensic_log(&config_base, &note);
@@ -971,7 +986,7 @@ async fn run_daemon_slot(
         if args.once {
             return Ok(());
         }
-        if draining() {
+        if slot_action_on_poll(draining(), true) == SlotAction::FinishJobThenExit {
             let note =
                 format!("slot-{slot_index} cycle {cycle} finished during drain: deregistering");
             println!("{note}");
@@ -1599,7 +1614,7 @@ async fn run_v2(
 
             let Some(message) = message else {
                 println!("No broker message received.");
-                if draining() {
+                if slot_action_on_poll(draining(), false) == SlotAction::DeregisterAndExit {
                     // Daemon drain (SIGTERM): an idle slot exits at the poll
                     // boundary; the slot loop above deletes the registration.
                     forensics.lifecycle("idle slot exiting: daemon drain requested");
@@ -5824,6 +5839,21 @@ mod tests {
         );
         assert!(huge <= 600 + 14, "cap plus bounded jitter: {huge}");
     }
+
+    #[test]
+    fn drain_slot_decisions_keep_busy_jobs_running() {
+        assert_eq!(slot_action_on_poll(false, false), SlotAction::Continue);
+        assert_eq!(slot_action_on_poll(false, true), SlotAction::Continue);
+        assert_eq!(
+            slot_action_on_poll(true, false),
+            SlotAction::DeregisterAndExit
+        );
+        assert_eq!(
+            slot_action_on_poll(true, true),
+            SlotAction::FinishJobThenExit
+        );
+    }
+
     use crate::protocol::TaskAgentMessage;
     use crate::script_step::StepCommandTelemetry;
     use std::{
