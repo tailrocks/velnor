@@ -555,6 +555,9 @@ pub struct DockerScriptExecutor<R> {
     /// Workflow-level env from the job message — shown first in every step's
     /// `env:` prelude block, the way GitHub renders it.
     workflow_env: Vec<(String, String)>,
+    /// Job-secret mask values supplied by the runner. Combined with runtime
+    /// ::add-mask:: values before building each docker exec argv.
+    secret_masks: Vec<String>,
     /// Identity of the step currently executing — lets native adapters stream
     /// their output to the live feed (GitHub streams every step live, not
     /// just `run:` steps).
@@ -581,8 +584,14 @@ where
             initial_order: 0,
             trailing_post_action_count: 0,
             workflow_env: Vec::new(),
+            secret_masks: Vec::new(),
             live_step: None,
         }
+    }
+
+    pub fn with_secret_masks(mut self, masks: Vec<String>) -> Self {
+        self.secret_masks = masks;
+        self
     }
 
     pub fn with_workflow_env(mut self, env: Vec<(String, String)>) -> Self {
@@ -1015,12 +1024,14 @@ where
                     let mut env = step_state.step_env(&[]);
                     env.extend(step.env.iter().cloned());
                     env.extend(plan.env.iter().cloned());
-                    let exec_args = container.exec_script_args(
+                    let secret_masks = step_state.secret_masks(&self.secret_masks);
+                    let exec_args = container.prepare_exec_script_args(
                         &plan.script_container_path,
                         plan.shell,
                         &plan.working_directory_container,
                         &env,
-                    );
+                        &secret_masks,
+                    )?;
                     let live_sender = self.step_log_sender.clone();
                     let mut live_masks = Vec::new();
                     let mut on_output = |_: CommandStream, line: &str| {
@@ -1037,7 +1048,7 @@ where
                     };
                     let step_result =
                         self.runner
-                            .run_streaming("docker", &exec_args, &mut on_output)?;
+                            .run_streaming("docker", exec_args.args(), &mut on_output)?;
                     let mut command_state = plan.collect_state()?;
                     command_state.merge(parse_workflow_commands_from_output(
                         &step_result.stdout,
@@ -1902,12 +1913,16 @@ where
             // HOME=/github/home) — the same dir run steps and every other
             // adapter invocation read; it persists for the whole job through
             // the home bind mount.
-            let exec_args = container.exec_process_stdin_args(
+            let secret_masks = state.secret_masks(&self.secret_masks);
+            let exec_args = container.prepare_exec_process_stdin_args(
                 "/__w",
                 &env,
+                &secret_masks,
                 &["sh".to_string(), "-c".to_string(), cmd],
-            );
-            return self.runner.run_with_stdin("docker", &exec_args, stdin);
+            )?;
+            return self
+                .runner
+                .run_with_stdin("docker", exec_args.args(), stdin);
         }
         self.native_shell(container, state, &cmd)
     }
@@ -1943,11 +1958,13 @@ where
             .collect();
         let path = path_entries.join(":");
         let wrapped = format!("export PATH={path}; {script}");
-        let args = container.exec_process_args(
+        let secret_masks = state.secret_masks(&self.secret_masks);
+        let args = container.prepare_exec_process_args(
             "/__w",
             &env,
+            &secret_masks,
             &["sh".to_string(), "-c".to_string(), wrapped],
-        );
+        )?;
         // Stream adapter output to the live feed as it happens — a minutes-long
         // native step (mise install on a cold store) must not look frozen in
         // the live view while the GitHub lane streams continuously.
@@ -1973,7 +1990,8 @@ where
                 );
             }
         };
-        self.runner.run_streaming("docker", &args, &mut on_output)
+        self.runner
+            .run_streaming("docker", args.args(), &mut on_output)
     }
 
     fn native_renovate(
@@ -2455,16 +2473,17 @@ where
         fs::write(&marker, "velnor\n")
             .with_context(|| format!("write Docker bind-mount marker {}", marker.display()))?;
 
-        let args = container.exec_process_args(
+        let args = container.prepare_exec_process_args(
             "/",
+            &[],
             &[],
             &[
                 "sh".to_string(),
                 "-c".to_string(),
                 format!("test -f /__t/{DOCKER_MOUNT_CHECK_FILE}"),
             ],
-        );
-        let result = self.runner.run("docker", &args)?;
+        )?;
+        let result = self.runner.run("docker", args.args())?;
         fs::remove_file(&marker).ok();
         if result.code != 0 {
             bail!(
@@ -4571,6 +4590,12 @@ impl JobExecutionState {
             .collect();
         env.extend(command_file_env.iter().cloned());
         env
+    }
+
+    fn secret_masks(&self, initial_masks: &[String]) -> Vec<String> {
+        let mut masks = initial_masks.to_vec();
+        masks.extend(self.masks.iter().cloned());
+        masks
     }
 
     fn with_step_action(&self, step_id: &str) -> Self {
