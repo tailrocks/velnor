@@ -89,8 +89,8 @@ The Phase 0 model is Docker-outside-of-Docker:
 
 - Velnor mounts the host Docker socket at `/var/run/docker.sock` inside the job
   container.
-- The default `velnor/job-ubuntu:24.04` job image is built from official
-  `ubuntu:24.04` and includes Docker CLI plus Buildx.
+- The default `velnor/job-ubuntu:26.04` job image is built from official
+  `ubuntu:26.04` and includes Docker CLI plus Buildx.
 - Native Docker adapters and any shell steps that run `docker ...` or
   `docker buildx ...` talk to the host daemon through that socket.
 
