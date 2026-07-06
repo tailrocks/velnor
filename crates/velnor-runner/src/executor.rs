@@ -7512,6 +7512,7 @@ mod tests {
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
 
         let results = DockerScriptExecutor::new(RecordingRunner::default())
@@ -7520,7 +7521,7 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].exit_code, 0);
-        assert_eq!(results[0].state.outputs["cache-hit"], "");
+        assert_eq!(results[0].state.outputs["cache-hit"], "false");
         assert!(results[0]
             .stdout
             .contains("Cache paths live on Velnor host-persistent storage (always warm)"));
@@ -7534,7 +7535,6 @@ mod tests {
     fn native_cache_treats_root_rustup_path_as_velnor_provided() {
         assert!(velnor_persistent_cache_path("/root/.rustup/toolchains"));
         assert!(velnor_persistent_cache_path("/root/.rustup/update-hashes"));
-    }
     }
 
     #[test]
@@ -7551,6 +7551,7 @@ mod tests {
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
 
         let results = DockerScriptExecutor::new(RecordingRunner::default())
@@ -7589,6 +7590,7 @@ mod tests {
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
 
         let results = DockerScriptExecutor::new(RecordingRunner::default())
@@ -7624,6 +7626,7 @@ mod tests {
             },
             condition: None,
             continue_on_error: false,
+            timeout_minutes: None,
         }];
 
         let results = DockerScriptExecutor::new(RecordingRunner::default())
