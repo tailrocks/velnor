@@ -12,6 +12,8 @@ use std::os::unix::fs::OpenOptionsExt;
 
 static EXEC_ENV_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+const NODE_ACTION_BASE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
 #[derive(Debug, Clone)]
 pub struct JobContainerSpec {
     pub name: String,
@@ -63,6 +65,19 @@ impl JobContainerSpec {
             self.mount_arg(&self.temp_host, "/__t"),
             "-v".into(),
             self.mount_arg(&self.temp_host, "/tmp"),
+            "-v".into(),
+            self.mount_arg(
+                &self.temp_host,
+                &self.docker_host_path(&self.temp_host).display().to_string(),
+            ),
+            "-v".into(),
+            self.mount_arg(
+                &self.workspace_host,
+                &self
+                    .docker_host_path(&self.workspace_host)
+                    .display()
+                    .to_string(),
+            ),
             "-v".into(),
             self.mount_arg(&sccache_host(&self.temp_host), "/var/cache/sccache"),
             "-v".into(),
@@ -118,11 +133,23 @@ impl JobContainerSpec {
             "-e".into(),
             "CARGO_HOME=/github/home/.cargo".into(),
             "-e".into(),
+            "SCCACHE_DIR=/var/cache/sccache".into(),
+            "-e".into(),
             "RUNNER_TEMP=/__t".into(),
             "-e".into(),
             "RUNNER_TOOL_CACHE=/__tool".into(),
             "-e".into(),
             "AGENT_TOOLSDIRECTORY=/__tool".into(),
+            "-e".into(),
+            format!(
+                "VELNOR_DOCKER_HOST_TEMP={}",
+                self.docker_host_path(&self.temp_host).display()
+            ),
+            "-e".into(),
+            format!(
+                "VELNOR_DOCKER_HOST_WORKSPACE={}",
+                self.docker_host_path(&self.workspace_host).display()
+            ),
         ];
         if let Some(target_host) = &self.cargo_target_host {
             args.extend([
@@ -334,11 +361,19 @@ impl JobContainerSpec {
     /// applies the last duplicate -e, so steps can still override.
     fn append_base_exec_env(&self, args: &mut Vec<String>) {
         for kv in [
-            "HOME=/github/home",
-            "RUSTUP_HOME=/root/.rustup",
-            "CARGO_HOME=/github/home/.cargo",
+            "HOME=/github/home".to_string(),
+            "RUSTUP_HOME=/root/.rustup".to_string(),
+            "CARGO_HOME=/github/home/.cargo".to_string(),
+            format!(
+                "VELNOR_DOCKER_HOST_TEMP={}",
+                self.docker_host_path(&self.temp_host).display()
+            ),
+            format!(
+                "VELNOR_DOCKER_HOST_WORKSPACE={}",
+                self.docker_host_path(&self.workspace_host).display()
+            ),
         ] {
-            args.extend(["-e".into(), kv.into()]);
+            args.extend(["-e".into(), kv]);
         }
     }
 
@@ -387,6 +422,10 @@ impl JobContainerSpec {
             "RUNNER_TOOL_CACHE=/__tool".into(),
             "-e".into(),
             "AGENT_TOOLSDIRECTORY=/__tool".into(),
+            // The Node image entrypoint/shell drops env names with '-', but
+            // @actions/core reads inputs like INPUT_PUSH-TO-REGISTRY.
+            "--entrypoint".into(),
+            "node".into(),
         ];
         if self.mount_docker_socket {
             args.extend([
@@ -398,16 +437,17 @@ impl JobContainerSpec {
         for (name, value) in env {
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
-        args.push(node_image.into());
-        if path_prepend.is_empty() {
-            args.extend(["node".into(), entrypoint_container_path.into()]);
-        } else {
-            args.extend([
-                "sh".into(),
-                "-lc".into(),
-                node_action_shell_command(path_prepend, entrypoint_container_path),
-            ]);
+        if !path_prepend.is_empty() {
+            let path = path_prepend
+                .iter()
+                .cloned()
+                .chain(std::iter::once(NODE_ACTION_BASE_PATH.to_string()))
+                .collect::<Vec<_>>()
+                .join(":");
+            args.extend(["-e".into(), format!("PATH={path}")]);
         }
+        args.push(node_image.into());
+        args.push(entrypoint_container_path.into());
         args
     }
 
@@ -817,18 +857,6 @@ pub(crate) fn sanitize_store_key(name: &str) -> String {
     key
 }
 
-fn node_action_shell_command(path_prepend: &[String], entrypoint_container_path: &str) -> String {
-    let joined = path_prepend
-        .iter()
-        .map(|path| shell_single_quote(path))
-        .collect::<Vec<_>>()
-        .join(":");
-    format!(
-        "export PATH={joined}:\"$PATH\"\nexec node {}",
-        shell_single_quote(entrypoint_container_path)
-    )
-}
-
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -1031,6 +1059,7 @@ mod tests {
         assert!(args.contains(&"/tmp/_velnor_mise/cache:/opt/mise/cache".into()));
         assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"HOME=/github/home".into()));
+        assert!(args.contains(&"SCCACHE_DIR=/var/cache/sccache".into()));
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"NODE_OPTIONS=--max-old-space-size=4096".into()));
@@ -1061,11 +1090,15 @@ mod tests {
 
         assert!(args.contains(&"/daemon/work/job-1/workspace:/__w".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp:/__t".into()));
+        assert!(args.contains(&"/daemon/work/job-1/temp:/daemon/work/job-1/temp".into()));
+        assert!(args.contains(&"/daemon/work/job-1/workspace:/daemon/work/job-1/workspace".into()));
         assert!(args.contains(&"/daemon/work/_velnor_sccache:/var/cache/sccache".into()));
         assert!(args.contains(&"/daemon/work/job-1/home:/github/home".into()));
         assert!(args.contains(&"/daemon/work/job-1/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"/daemon/work/job-1/actions:/__a".into()));
         assert!(args.contains(&"/daemon/work/job-1/tools:/__tool".into()));
+        assert!(args.contains(&"VELNOR_DOCKER_HOST_TEMP=/daemon/work/job-1/temp".into()));
+        assert!(args.contains(&"VELNOR_DOCKER_HOST_WORKSPACE=/daemon/work/job-1/workspace".into()));
     }
 
     #[test]
@@ -1089,6 +1122,10 @@ mod tests {
                 "RUSTUP_HOME=/root/.rustup",
                 "-e",
                 "CARGO_HOME=/github/home/.cargo",
+                "-e",
+                "VELNOR_DOCKER_HOST_TEMP=/tmp/temp",
+                "-e",
+                "VELNOR_DOCKER_HOST_WORKSPACE=/tmp/work",
                 "-e",
                 "GITHUB_OUTPUT=/__t/out",
                 "velnor-job-1",
@@ -1123,6 +1160,10 @@ mod tests {
                 "RUSTUP_HOME=/root/.rustup",
                 "-e",
                 "CARGO_HOME=/github/home/.cargo",
+                "-e",
+                "VELNOR_DOCKER_HOST_TEMP=/tmp/temp",
+                "-e",
+                "VELNOR_DOCKER_HOST_WORKSPACE=/tmp/work",
                 "-e",
                 "INPUT_NAME=value",
                 "velnor-job-1",
@@ -1260,9 +1301,10 @@ mod tests {
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"GITHUB_OUTPUT=/__t/out".into()));
+        assert!(args.windows(2).any(|pair| pair == ["--entrypoint", "node"]));
         assert_eq!(
-            &args[args.len() - 3..],
-            ["node:20-bookworm", "node", "/__a/action/dist/index.js"]
+            &args[args.len() - 2..],
+            ["node:20-bookworm", "/__a/action/dist/index.js"]
         );
     }
 
@@ -1276,13 +1318,11 @@ mod tests {
             "/__a/action/dist/index.js",
         );
 
+        assert!(args.windows(2).any(|pair| pair == ["--entrypoint", "node"]));
+        assert!(args.contains(&"PATH=/github/home/.cargo/bin:/path/with'quote:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()));
         assert_eq!(
-            &args[args.len() - 4..args.len() - 1],
-            ["node:20-bookworm", "sh", "-lc"]
-        );
-        assert_eq!(
-            args.last().unwrap(),
-            "export PATH='/github/home/.cargo/bin':'/path/with'\\''quote':\"$PATH\"\nexec node '/__a/action/dist/index.js'"
+            &args[args.len() - 2..],
+            ["node:20-bookworm", "/__a/action/dist/index.js"]
         );
     }
 

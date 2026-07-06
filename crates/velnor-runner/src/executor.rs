@@ -969,12 +969,13 @@ where
     ) -> Result<JobExecutionSummary> {
         let mut results = Vec::new();
         let mut step_logs = Vec::new();
-        let mut base_env = base_env.to_vec();
+        let mut effective_base_env = container_runtime_env(container);
+        effective_base_env.extend_from_slice(base_env);
         if let Some(event_path) = prepare_github_event_path(temp_host, context_data)? {
-            base_env.push(("GITHUB_EVENT_PATH".to_string(), event_path));
+            effective_base_env.push(("GITHUB_EVENT_PATH".to_string(), event_path));
         }
         let mut state = JobExecutionState::new_with_workspace(
-            &base_env,
+            &effective_base_env,
             context_data,
             &container.workspace_host,
             temp_host,
@@ -1899,9 +1900,10 @@ where
         ];
         // Add the active mise tool install bin dirs (emitted by setup_mise_script)
         // so executables installed into a mise-managed tool (e.g. ansible-galaxy
-        // from `pip install ansible-core` into mise's python) are on PATH for
-        // subsequent steps. Strip the marker lines from the logged output so the
-        // step log stays clean (UI parity with the GitHub-hosted lane).
+        // from `pip install ansible-core` into mise's python, cargo-deny from
+        // mise's GitHub backend, or cargo-audit from mise's cargo backend) are on
+        // PATH for subsequent steps. Strip the marker lines from the logged output
+        // so the step log stays clean (UI parity with the GitHub-hosted lane).
         for line in result.stdout.lines() {
             if let Some(dir) = line.strip_prefix("__VELNOR_MISE_BIN__") {
                 let dir = dir.trim();
@@ -1931,6 +1933,7 @@ where
                         "MISE_CONFIG_DIR".to_string(),
                         "/opt/mise/config".to_string(),
                     ),
+                    ("MISE_TRUSTED_CONFIG_PATHS".to_string(), "/__w".to_string()),
                 ]
                 .into(),
                 path,
@@ -2930,6 +2933,7 @@ fi
 export MISE_DATA_DIR="$mise_home"
 export MISE_CACHE_DIR="$mise_home/cache"
 export MISE_CONFIG_DIR="$mise_home/config"
+export MISE_TRUSTED_CONFIG_PATHS="/__w"
 # Ensure mise itself can find cargo for 'cargo:' backend tools.
 export CARGO_HOME=/github/home/.cargo
 export RUSTUP_HOME=/root/.rustup
@@ -2944,6 +2948,10 @@ if [ -n "{install_flag}" ]; then
     [ -f "$f" ] && mise trust "$f" 2>/dev/null || true
   done
   mise trust --all 2>/dev/null || true
+  # Velnor shares the mise store across jobs. If a previous interrupted install
+  # left an empty version dir, mise can treat it as installed and skip the real
+  # download. Drop those poisoned entries before installing.
+  find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d -empty -exec rm -rf {{}} + 2>/dev/null || true
   echo "::group::mise install"
   if [ -n "$install_args" ]; then
     mise install $install_args
@@ -2956,11 +2964,15 @@ else
 fi
 # Emit active mise tool bin dirs as markers. native_mise parses these and adds
 # them to PATH for subsequent steps. Velnor only puts the shims dir on the step
-# PATH, but executables installed INTO a mise-managed tool — e.g. `pip install
-# ansible-core` into mise's python (ansible-galaxy/ansible-playbook land in the
-# python tool's bin) — live in the tool's install bin, not the shims. This makes
-# them findable in later steps, matching jdx/mise-action.
-mise bin-paths 2>/dev/null | while IFS= read -r p; do [ -n "$p" ] && echo "__VELNOR_MISE_BIN__$p"; done || true
+# PATH, but executables installed INTO a mise-managed tool (python/cargo
+# and GitHub backends, etc.) live in the tool's install root or bin, not always
+# in shims. This makes ansible-galaxy, cargo-audit, cargo-shear, cargo-deny, and
+# similar tools findable in later steps, matching jdx/mise-action.
+{{
+  mise bin-paths 2>/dev/null || true
+  find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d 2>/dev/null || true
+  find "$mise_home/installs" -mindepth 3 -maxdepth 3 -type d -name bin 2>/dev/null || true
+}} | awk 'NF && !seen[$0]++ {{ print "__VELNOR_MISE_BIN__" $0 }}'
 echo "mise install completed, cargo: $(command -v cargo 2>/dev/null || echo 'not found')"
 mise --version
 "#,
@@ -3297,11 +3309,25 @@ fn native_rust_cache(
         restore_cache_paths(&action_state, matched_key, &cache_directories)?;
     }
     let restore_ms = t0.elapsed().as_millis();
+    let persistent_target =
+        rust_cache_covered_by_persistent_storage(&action_state, &cache_directories);
+    let cache_hit = matched.is_some() || persistent_target;
     let mut outputs = BTreeMap::new();
-    outputs.insert("cache-hit".to_string(), matched.is_some().to_string());
+    outputs.insert("cache-hit".to_string(), cache_hit.to_string());
     if !shared_key.is_empty() {
         outputs.insert("cache-primary-key".to_string(), shared_key.clone());
     }
+    let stdout = if let Some(key) = matched {
+        format!(
+            "{ANSI_GREEN}Rust cache restored from shared key '{key}'{ANSI_RESET} ({restore_ms}ms)\n"
+        )
+    } else if persistent_target {
+        format!(
+            "{ANSI_GREEN}Rust cache paths live on Velnor host-persistent storage (always warm){ANSI_RESET}\n"
+        )
+    } else {
+        format!("{ANSI_YELLOW}Rust cache miss for shared key '{shared_key}'{ANSI_RESET}\n")
+    };
     Ok(StepExecutionResult {
         exit_code: 0,
         state: StepCommandState {
@@ -3311,18 +3337,7 @@ fn native_rust_cache(
         },
         skipped: false,
         failure_ignored: false,
-        stdout: matched.map_or_else(
-            || {
-                format!(
-                    "{ANSI_YELLOW}Rust cache miss for shared key '{shared_key}'{ANSI_RESET}\n"
-                )
-            },
-            |key| {
-                format!(
-                    "{ANSI_GREEN}Rust cache restored from shared key '{key}'{ANSI_RESET} ({restore_ms}ms)\n"
-                )
-            },
-        ),
+        stdout,
         stderr: String::new(),
     })
 }
@@ -3502,22 +3517,55 @@ fn restore_cache_paths(state: &JobExecutionState, key: &str, paths: &str) -> Res
 }
 
 /// True for cache paths whose container locations are backed by Velnor's
-/// host-persistent stores (mounted into every job container): the cargo
-/// registry/git stores, the mise tool store, and the shared sccache dir.
-/// These are always warm; the actions/cache adapter neither tars them into
-/// the store nor copies store bytes back over them.
+/// host-persistent or image-provided stores (mounted into every job container):
+/// the cargo registry/git stores, the mise tool store, the image-baked rustup
+/// toolchain store, and the shared sccache dir. These are always warm; the
+/// actions/cache adapter neither tars them into the store nor copies store bytes
+/// back over them.
 fn velnor_persistent_cache_path(path: &str) -> bool {
     let path = path.trim();
     let home_relative = path
         .strip_prefix("~/")
         .or_else(|| path.strip_prefix("/github/home/"));
     if let Some(rest) = home_relative {
-        return rest.starts_with(".cargo/registry") || rest.starts_with(".cargo/git");
+        return rest.starts_with(".cargo/registry")
+            || rest.starts_with(".cargo/git")
+            // Workflows usually cache ~/.rustup on GitHub-hosted runners. Velnor
+            // points RUSTUP_HOME at the image-baked /root/.rustup store instead,
+            // so a ~/.rustup cache restore is pure hosted-runner compatibility
+            // noise on the Velnor lane.
+            || rest.starts_with(".rustup");
     }
     path == "/opt/mise"
         || path.starts_with("/opt/mise/")
+        || path == "/__cargo_target"
+        || path.starts_with("/__cargo_target/")
+        || path == "/root/.rustup"
+        || path.starts_with("/root/.rustup/")
         || path == "/var/cache/sccache"
         || path.starts_with("/var/cache/sccache/")
+}
+
+fn rust_cache_covered_by_persistent_storage(
+    state: &JobExecutionState,
+    cache_directories: &str,
+) -> bool {
+    let paths = cache_paths(cache_directories);
+    if !paths.is_empty() {
+        return paths.iter().all(|path| velnor_persistent_cache_path(path));
+    }
+    state
+        .env
+        .get("CARGO_TARGET_DIR")
+        .is_some_and(|path| velnor_persistent_cache_path(path))
+}
+
+fn container_runtime_env(container: &JobContainerSpec) -> Vec<(String, String)> {
+    let mut env = container.env.clone();
+    if container.cargo_target_host.is_some() {
+        env.push(("CARGO_TARGET_DIR".into(), "/__cargo_target".into()));
+    }
+    env
 }
 
 fn save_cache_result(
@@ -6867,6 +6915,20 @@ mod tests {
         uuid::Uuid::parse_str(value).unwrap_or_else(|_| panic!("expected UUID, got {value}"));
     }
 
+    #[test]
+    fn mise_setup_exports_cargo_backend_tool_bins() {
+        let script = setup_mise_script(true, "", "");
+
+        assert!(script.contains("mise bin-paths"));
+        assert!(script.contains("-type d -empty -exec rm -rf"));
+        assert!(script.contains(r#"find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d"#));
+        assert!(script.contains(r#"find "$mise_home/installs" -mindepth 3 -maxdepth 3"#));
+        assert!(script.contains("__VELNOR_MISE_BIN__"));
+        assert!(script.contains("cargo-audit"));
+        assert!(script.contains("cargo-deny"));
+        assert!(script.contains("cargo-shear"));
+    }
+
     fn host_temp_script_path(container_path: &str, temp: &Path) -> PathBuf {
         temp.join(container_path.trim_start_matches("/__t/"))
     }
@@ -6959,8 +7021,8 @@ mod tests {
     #[test]
     fn selects_node_action_image_from_runtime() {
         assert_eq!(
-            node_action_image("node24", "velnor/job-ubuntu:24.04"),
-            "velnor/job-ubuntu:24.04"
+            node_action_image("node24", "velnor/job-ubuntu:26.04"),
+            "velnor/job-ubuntu:26.04"
         );
         assert_eq!(node_action_image("node20", ""), "node:20-bookworm");
         assert_eq!(node_action_image("node24", ""), "node:24-bookworm");
@@ -7426,6 +7488,157 @@ mod tests {
         assert_eq!(partial_results[0].state.outputs["cache-hit"], "false");
         assert_eq!(miss_results[0].state.outputs["cache-hit"], "false");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_cache_treats_rustup_paths_as_velnor_provided() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "cache".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::Cache,
+                inputs: [
+                    (
+                        "path".into(),
+                        "~/.rustup/toolchains\n~/.rustup/update-hashes\n".into(),
+                    ),
+                    ("key".into(), "rustup-Linux-X64-lock".into()),
+                    ("restore-keys".into(), "rustup-Linux-X64-\n".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].exit_code, 0);
+        assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        assert!(results[0]
+            .stdout
+            .contains("Cache paths live on Velnor host-persistent storage (always warm)"));
+        assert!(!results[0].stdout.contains("Cache not found"));
+        assert!(results[1].stdout.contains("nothing to save"));
+        assert!(results[1].stderr.is_empty());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_cache_treats_root_rustup_path_as_velnor_provided() {
+        assert!(velnor_persistent_cache_path("/root/.rustup/toolchains"));
+        assert!(velnor_persistent_cache_path("/root/.rustup/update-hashes"));
+    }
+
+    #[test]
+    fn native_rust_cache_treats_persistent_cargo_target_as_warm() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "rust-cache".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::RustCache,
+                inputs: [("shared-key".into(), "ci-default-dev-workspace-v2".into())].into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(
+                &container(&temp),
+                &steps,
+                &[("CARGO_TARGET_DIR".into(), "/__cargo_target".into())],
+                &temp,
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].exit_code, 0);
+        assert_eq!(results[0].state.outputs["cache-hit"], "true");
+        assert!(results[0]
+            .stdout
+            .contains("Rust cache paths live on Velnor host-persistent storage"));
+        assert!(!results[0].stdout.contains("Rust cache miss"));
+        assert!(results[1].stdout.contains("Cache hit occurred"));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_rust_cache_sees_container_persistent_cargo_target() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        spec.cargo_target_host = Some(temp.join("target-store"));
+        let steps = vec![ExecutableStep::Native {
+            step_id: "rust-cache".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::RustCache,
+                inputs: [("shared-key".into(), "ci-default-dev-workspace-v2".into())].into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&spec, &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results[0].state.outputs["cache-hit"], "true");
+        assert!(results[0]
+            .stdout
+            .contains("Rust cache paths live on Velnor host-persistent storage"));
+        assert!(!results[0].stdout.contains("Rust cache miss"));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_rust_cache_treats_persistent_cache_directories_as_warm() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "rust-cache".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                adapter: NativeActionAdapter::RustCache,
+                inputs: [
+                    ("shared-key".into(), "ci-custom-dir".into()),
+                    (
+                        "cache-directories".into(),
+                        "/__cargo_target\n/var/cache/sccache\n".into(),
+                    ),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results[0].state.outputs["cache-hit"], "true");
+        assert!(results[0]
+            .stdout
+            .contains("Rust cache paths live on Velnor host-persistent storage"));
+        assert!(velnor_persistent_cache_path("/__cargo_target/debug"));
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
@@ -10959,9 +11172,12 @@ fi"#
         assert!(calls[2]
             .1
             .contains(&"GITHUB_OUTPUT=/github/file_commands/action1_output".into()));
+        assert!(calls[2]
+            .1
+            .windows(2)
+            .any(|pair| pair == ["--entrypoint", "node"]));
         assert!(calls[2].1.ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/acme_action/v1/dist/index.js".into()
         ]));
 
@@ -12879,12 +13095,14 @@ bitcoin-processor-app.push=true")
             })
             .map(|(_, args)| args)
             .unwrap();
-        assert!(node_call
-            .last()
-            .is_some_and(|arg| arg.contains("export PATH='/root/.cargo/bin':\"$PATH\"")));
-        assert!(node_call.last().is_some_and(
-            |arg| arg.contains("exec node '/__a/_actions/cargo-install/dist/index.js'")
+        assert!(node_call.contains(
+            &"PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                .into()
         ));
+        assert!(node_call.ends_with(&[
+            "node:20-bookworm".into(),
+            "/__a/_actions/cargo-install/dist/index.js".into()
+        ]));
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -12989,14 +13207,17 @@ bitcoin-processor-app.push=true")
         assert!(
             node_calls[1].contains(&"GITHUB_PATH=/github/file_commands/setup-python_path".into())
         );
-        assert!(node_calls[1]
-            .last()
-            .is_some_and(|arg| { arg.contains("export PATH='/opt/mise/shims':\"$PATH\"") }));
+        assert!(node_calls[1].contains(
+            &"PATH=/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                .into()
+        ));
+        assert!(node_calls[2].contains(
+            &"PATH=/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                .into()
+        ));
         assert!(node_calls[2].ends_with(&[
             "node:24-bookworm".into(),
-            "sh".into(),
-            "-lc".into(),
-            "export PATH='/opt/mise/shims':\"$PATH\"\nexec node '/__a/_actions/actions_setup-python/dist/cache-save/index.js'".into()
+            "/__a/_actions/actions_setup-python/dist/cache-save/index.js".into()
         ]));
         fs::remove_dir_all(temp).unwrap();
     }
@@ -13116,9 +13337,7 @@ bitcoin-processor-app.push=true")
             assert!(call.contains(&"GITHUB_REPOSITORY=ChainArgos/java-monorepo".into()));
             assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
-            assert!(call
-                .last()
-                .is_some_and(|arg| { arg.contains("export PATH='/root/.cargo/bin':\"$PATH\"") }));
+            assert!(call.contains(&"PATH=/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".into()));
         }
         assert!(node_calls[0].contains(&"INPUT_REPO=casey/just".into()));
         assert!(node_calls[0].contains(&"INPUT_GITHUB-TOKEN=ghs_token".into()));
@@ -13198,22 +13417,18 @@ bitcoin-processor-app.push=true")
             .collect::<Vec<_>>();
         assert!(exec_calls[0].ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/cache/dist/restore.js".into()
         ]));
         assert!(exec_calls[1].ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/docker_login/dist/main.js".into()
         ]));
         assert!(exec_calls[2].ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/docker_login/dist/post.js".into()
         ]));
         assert!(exec_calls[3].ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/cache/dist/save.js".into()
         ]));
         assert!(exec_calls[3].contains(&"STATE_primaryKey=linux-cache".into()));
@@ -13280,12 +13495,10 @@ bitcoin-processor-app.push=true")
             .collect::<Vec<_>>();
         assert!(node_calls[0].ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/cache/dist/pre.js".into()
         ]));
         assert!(node_calls[1].ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/cache/dist/restore.js".into()
         ]));
         assert!(node_calls[1].contains(&"STATE_primaryKey=linux-cache".into()));
@@ -13386,12 +13599,10 @@ bitcoin-processor-app.push=true")
         assert_eq!(node_calls.len(), 2);
         assert!(node_calls[0].ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/wrapped/dist/pre.js".into()
         ]));
         assert!(node_calls[1].ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/wrapped/dist/post.js".into()
         ]));
         fs::remove_dir_all(temp).unwrap();
@@ -13580,12 +13791,10 @@ bitcoin-processor-app.push=true")
         }
         assert!(node_calls[0].ends_with(&[
             "node:24-bookworm".into(),
-            "node".into(),
             "/__a/_actions/mozilla-actions_sccache-action/dist/setup/index.js".into()
         ]));
         assert!(node_calls[1].ends_with(&[
             "node:24-bookworm".into(),
-            "node".into(),
             "/__a/_actions/mozilla-actions_sccache-action/dist/show_stats/index.js".into()
         ]));
         fs::remove_dir_all(temp).unwrap();
@@ -13661,7 +13870,6 @@ bitcoin-processor-app.push=true")
         assert_eq!(node_calls.len(), 2);
         assert!(node_calls[1].ends_with(&[
             "node:20-bookworm".into(),
-            "node".into(),
             "/__a/_actions/rust-cache/dist/save/index.js".into()
         ]));
         fs::remove_dir_all(temp).unwrap();
@@ -13770,7 +13978,6 @@ bitcoin-processor-app.push=true")
         assert!(node_calls[1].contains(&"CACHE_ON_FAILURE=true".into()));
         assert!(node_calls[1].ends_with(&[
             "node:24-bookworm".into(),
-            "node".into(),
             "/__a/_actions/Swatinem_rust-cache/dist/save/index.js".into()
         ]));
         fs::remove_dir_all(temp).unwrap();
