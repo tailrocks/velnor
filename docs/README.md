@@ -40,3 +40,6 @@ Start here:
   in-scope action with a direct link to its latest upstream source — the
   source-of-truth for implementing/verifying adapters (Velnor tracks latest
   only).
+- [Rust build cache hygiene → Velnor](rust-build-cache-hygiene-velnor.md):
+  jackin disk-hygiene research mapped to runner gaps (budgets, GC, sccache
+  vs kache, doctor inventory).
