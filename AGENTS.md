@@ -107,6 +107,19 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-07-18: **Portfolio-wide Velnor-default CI standard**
+  ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md)): the first
+  standardization portfolio is jackin, java-monorepo, blockchain-nodes,
+  parallax, parallax-telemetry-playground, tablerock, holla, velnor, ruxel,
+  termrock, schemalane, pg-bigdecimal, and tracing-request-level. Every
+  executable workflow defaults to Velnor, exposes pinned `ubuntu-26.04`
+  GitHub and `both` modes, uses Ubuntu only, installs tools through mise,
+  shares the same cache contract, and preserves single-writer safety. This
+  supersedes the old jackin-family GitHub-default exception. The same research
+  promotes bounded cache ownership/GC to a pre-rollout stability requirement:
+  warm stores need budgets, accounting, active-scope-safe reclamation, and
+  soak proof before thirteen repos depend on the fleet by default.
+
 - 2026-06-11: **Operating principles are law** (operator doctrine, full text
   in [docs/mission.md](docs/mission.md) §Operating principles): (1) judge
   work by correctness against the goal, never by ROI/cost/effort — "low
