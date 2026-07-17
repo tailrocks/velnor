@@ -74,6 +74,11 @@ When comparing to `actions/runner` or any GitHub Actions protocol: **always targ
 
 This applies to: Twirp vs REST, WebSocket vs polling, gRPC vs HTTP, results service vs distributed task timeline, V2 broker vs classic broker.
 
+The same law covers the estate workflow surface
+([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) §2.0 Law 2): latest
+stable action majors SHA-pinned with Renovate active, latest tool/toolchain
+versions via mise, no deprecated workflow commands or superseded inputs.
+
 ## HARD RULE: Use actions/runner as the source of truth for protocol behavior
 
 When implementing or debugging any GitHub Actions runner protocol feature — job message parsing, broker messages, expression evaluation, credential handling, run-service, timeline, etc. — **always consult the official runner source first**:
@@ -86,6 +91,26 @@ Do not guess or implement blindly. Before writing new protocol code:
 3. Implement Velnor to match the observed behavior.
 
 This is mandatory for: expression types (lit/expr/format), input structures, context data, credential schemes, JIT config fields, and V2 broker protocol messages.
+
+## HARD RULE: Strict capabilities; approval for expansion
+
+Velnor supports only the exact refs, inputs, values, combinations, and runtime
+behaviors declared in the Rust capability manifest and
+[docs/strict-capability-contract.md](docs/strict-capability-contract.md).
+
+- Validate the complete received job before checkout, cache mutation, service
+  startup, or container creation.
+- Fail unsupported configuration immediately with its exact field/value,
+  accepted alternatives, and manifest version. Never ignore, approximate,
+  emulate, silently fall back, or pretend success.
+- Unknown JavaScript/remote actions are not a product fallback. Every approved
+  `uses:` path has a native Rust adapter pinned to an approved commit.
+- Implement a new capability only after the operator explicitly approves that
+  described feature. First explain why it is needed, its exact surface,
+  behavior, trust/storage/network implications, and fixture proof. Adjacent
+  approval does not authorize broader behavior.
+- Fixing an approved feature to meet its declared contract is allowed;
+  accepting new inputs, values, backends, or behavior requires approval.
 
 ## Rust-first scripting
 
@@ -106,6 +131,120 @@ Whenever a discussion or change affects the **vision, plan, or roadmap**:
 Never let a prompt, README, or doc describe a direction that the current vision/plan/roadmap no longer holds. A new prompt must start from up-to-date `docs/`, not from outdated assumptions. If a prompt and `docs/` disagree, `docs/` wins — fix the prompt.
 
 ### Direction change log
+
+- 2026-07-18: **jackin delivers on top of PR #810** (operator; answers
+  [VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) §12.5): the entire
+  jackin estate-standard work stacks onto the head branch of
+  jackin-project/jackin#810 and merges with it as jackin's single program
+  PR; no separate `velnor-estate-standard` branch for jackin. All other
+  repos keep the canonical branch name.
+
+- 2026-07-18: **Single-branch delivery, uniform shape, host baseline cleanup**
+  ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) §2.12 + §8): the
+  entire standardization program lands as exactly one branch named
+  `velnor-estate-standard` per repository — velnor included (all runner work
+  plus dogfood CI on that one branch) and the fixture included; per-feature
+  commits, never per-feature branches; every V-B/V-C dual-runner
+  verification dispatches from the program branch before merge. §2.12 makes
+  uniformity literal: identical workflow filenames (`ci.yml`, `release.yml`,
+  `docs.yml`, `preview.yml`, `renovate.yml`), job ids, dispatch input, cache
+  keys, concurrency groups, and a shared `.github/AGENTS.md` template across
+  all repos; `audit-ci` enforces names as well as behavior. New Phase-0 gate:
+  the Velnor host is cleaned to a recorded baseline (stale runners, leftover
+  Docker resources, legacy `unknown-repository` trees, over-budget BuildKit
+  stores — owned-resource deletion only) before any verification campaign;
+  the durable fix remains V0.7–V0.13.
+
+- 2026-07-18: **Portability + freshness laws**
+  ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) §2.0): (1) one YAML
+  runs on all lanes — every Velnor acceleration is runner-internal with
+  preserved observable step semantics; the only sanctioned lane awareness in
+  YAML is `matrix.config.writer` gating and the lane job-name suffix; an
+  optimization that needs a YAML change is misdesigned and becomes a
+  manifest-declared runner transform (the actions/cache no-op model).
+  (2) latest-and-greatest extends from runner protocol to the whole estate:
+  latest stable action majors SHA-pinned with Renovate, latest tools and
+  toolchains via mise + `rust-toolchain.toml`, current workflow features, no
+  deprecated commands/inputs/runtimes; upgrades pass the same fixture and
+  lane-parity gates as any change. `audit-ci` enforces both laws.
+
+- 2026-07-18: **Speed doctrine + dual-runner verification protocol**
+  ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) rev 2): standardization
+  now carries explicit run classes (cold / warm / no-change rerun) with initial
+  latency budgets (§2.11), a workflow-side pipeline speed standard (§2.10:
+  concurrency + cancel-in-progress everywhere, timeout-minutes on every job,
+  shallow checkout with justified `fetch-depth: 0` only, never compile tooling
+  in CI, `line-tables-only` debuginfo, job-level path classify, docker
+  registry-cache `mode=max` + `provenance: false` off release, no double-cache
+  stacks, adapter-owned cache reporting), a 2026-07-18 perf-marker scan of all
+  13 repos (§3.0), and a four-gate dual-runner verification protocol
+  (V-A fixture → V-B lane parity → V-C perf acceptance → V-D soak) — parity
+  divergence is always fixed in Velnor, never by weakening the workflow. The
+  runner backlog gains P1-perf items V1.9–V1.16 (async finalization, container
+  pre-create, host git mirror, JIT overlap, reflink restore, step-timing +
+  cache report in job summary, pickup SLOs in doctor, `velnor-tools compare`).
+  The setup doc's old `SCCACHE_GHA_ENABLED=true` guidance is superseded: both
+  lanes run local-only compiler cache per the strict contract; GHA-backed
+  sccache for the GitHub lane is open decision §12.7, weekly scheduled `both`
+  parity runs are §12.8.
+
+- 2026-07-18: **Strict capability contract + local-only compiler caches**
+  ([docs/strict-capability-contract.md](docs/strict-capability-contract.md)):
+  validate the expanded job against a compiled Rust manifest before side
+  effects. Unsupported refs, inputs, values, expressions, backend env, and
+  combinations fail precisely; ignored inputs and unknown-action fallback are
+  architectural defects. The approved compiler-cache proposal is mutually
+  exclusive local sccache v0.16.0 or Kache v0.10.0 through pinned Actions,
+  equal 20 GiB budgets, no remote/GitHub cache, no explicit credentials, and
+  native Rust setup/post behavior. GHA/S3 requires a separate explicit yes.
+
+- 2026-07-18: **Canonical storage + disk-pressure controller are P0**
+  ([docs/storage-and-disk-pressure-2026-07-18.md](docs/storage-and-disk-pressure-2026-07-18.md)):
+  live Sentry inspection found root XFS 84% used, about 432 GB physical in
+  persistent Cargo targets, and about 158 GB in the two largest BuildKit
+  stores. Velnor now has one explicit `/var/lib` durable, `/var/cache`
+  regenerable, `/run` lease, `/var/log`, and job-work contract; every store
+  has identity, trust, owner, budget, lifetime, and safe-delete rules. One
+  filesystem coordinator leases active scopes, serializes all daemons, uses
+  target generations and Velnor-owned builder pruning, reserves peak job
+  space, and automatically reclaims before advertising a slot. Once a job is
+  acquired its reservation lasts through result upload; Velnor never silently
+  refuses it. If owned inactive data cannot satisfy the reserve, the runner
+  exposes explicit pre-assignment backpressure instead of accepting unsafe
+  work, and never runs broad Docker prune. Persistent
+  `unknown-repository/unknown-workflow` identity and
+  the ineffective target retention scope are P0 correctness bugs. Keep capped
+  sccache default; kache remains a pinned trusted canary until its documented
+  container/SQLite topology constraint and representative concurrency gates
+  pass. Both may be installed and selected per pool/job, with separate stores;
+  never nest both cache wrappers around one rustc invocation. Standard workflows
+  keep wrapper setup/statistics behind the native setup adapter so identical
+  YAML can use sccache on GitHub and the selected backend on Velnor. Manual
+  Sentry deletion is not the product fix.
+
+- 2026-07-18: **Measure sccache and Kache; do not guess**
+  ([storage comparison](docs/storage-and-disk-pressure-2026-07-18.md#deep-comparison-action-and-storage-modes)):
+  Velnor will support both as mutually exclusive native compiler-cache backends
+  plus `off`. The **approved first comparison is local-only** across actual
+  estate workloads; GitHub-cache and same-S3 modes remain documented research
+  options requiring separate approval. Record setup/compile/post time, hit/miss
+  reasons, network, logical and physical target+store bytes, reflink/dedup,
+  GC, concurrency, and crash correctness. Results are median/tail and per
+  workload. Never claim either tool is inherently local-only/remote-only, and
+  never stack both wrappers in one job.
+
+- 2026-07-18: **Portfolio-wide Velnor-default CI standard**
+  ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md)): the first
+  standardization portfolio is jackin, java-monorepo, blockchain-nodes,
+  parallax, parallax-telemetry-playground, tablerock, holla, velnor, ruxel,
+  termrock, schemalane, pg-bigdecimal, and tracing-request-level. Every
+  executable workflow defaults to Velnor, exposes pinned `ubuntu-26.04`
+  GitHub and `both` modes, uses Ubuntu only, installs tools through mise,
+  shares the same cache contract, and preserves single-writer safety. This
+  supersedes the old jackin-family GitHub-default exception. The same research
+  promotes bounded cache ownership/GC to a pre-rollout stability requirement:
+  warm stores need budgets, accounting, active-scope-safe reclamation, and
+  soak proof before thirteen repos depend on the fleet by default.
 
 - 2026-06-11: **Operating principles are law** (operator doctrine, full text
   in [docs/mission.md](docs/mission.md) §Operating principles): (1) judge
