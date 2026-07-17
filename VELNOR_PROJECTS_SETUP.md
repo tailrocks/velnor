@@ -37,7 +37,10 @@ Velnor is a GitHub Actions–compatible self-hosted runner (Rust/tokio) that:
 
 Relevant law in-repo: `docs/mission.md`, `docs/master-plan.md` §3a (universal caching), `docs/runner-usage.md`, `docs/perf-instant-cache-plan-2026-06-11.md`, `docs/reference/target-action-registry.md`.
 
-**Hard limit:** Velnor does **not** run macOS/Darwin jobs. Any `macos-*` matrix leg stays on GitHub-hosted forever (or is dropped if not required).
+**Hard limit and migration consequence:** Velnor does **not** run macOS/Darwin
+jobs, and the operator requires Ubuntu everywhere. Therefore every existing
+`macos-*` job must be removed, replaced by an Ubuntu cross-build, or documented
+as a proven product blocker before that repository can be declared migrated.
 
 ---
 
@@ -69,43 +72,41 @@ on:
         options: [velnor, github, both]
 ```
 
-**Matrix-setup job** (metadata only; always GitHub-hosted; ≤5 min timeout):
+**Canonical matrix** (inline; no runner-dependent selector job):
 
 ```yaml
-jobs:
-  matrix-setup:
-    name: Select runner lane
-    runs-on: ubuntu-26.04          # coordinator may use pinned GitHub
-    timeout-minutes: 5
-    outputs:
-      configs: ${{ steps.set.outputs.configs }}
-    steps:
-      - id: set
-        env:
-          LANES: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || 'velnor' }}
-        run: |
-          set -euo pipefail
-          github='{"lane":"GitHub","runner":"\"ubuntu-26.04\""}'
-          velnor='{"lane":"Velnor","runner":"[\"self-hosted\",\"velnor-target-mvp\"]"}'
-          case "$LANES" in
-            github) configs="[$github]" ;;
-            both)   configs="[$github,$velnor]" ;;
-            *)      configs="[$velnor]" ;;
-          esac
-          echo "configs=$configs" >> "$GITHUB_OUTPUT"
+strategy:
+  fail-fast: false
+  matrix:
+    config: ${{ fromJSON((inputs.lanes || 'velnor') == 'both'
+      && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]'
+      || (inputs.lanes || 'velnor') == 'github'
+      && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]'
+      || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
+runs-on: ${{ matrix.config.runner }}
 ```
+
+The current reference repositories use a small job to produce the same JSON.
+Do not standardize that extra job: it creates a hidden fourth state where a
+`github` run first consumes Velnor or a Velnor-default run first consumes
+GitHub, and it spends a runner slot transforming three static records. GitHub
+documents string-valued choice inputs, JSON-derived matrices, and string/array
+`runs-on` values ([dispatch inputs](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow),
+[matrices](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/run-job-variations),
+[runner selection](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job)).
+Prove the expression in `velnor-actions-fixture` before rollout; formatting may
+be collapsed to one line if actionlint/GitHub's parser requires it.
 
 **Workload jobs:**
 
 ```yaml
   some-job:
     name: <purpose> (${{ matrix.config.lane }})
-    needs: [matrix-setup / …]
     strategy:
       fail-fast: false
       matrix:
-        config: ${{ fromJSON(needs.matrix-setup.outputs.configs) }}
-    runs-on: ${{ fromJSON(matrix.config.runner) }}
+        config: # canonical expression above
+    runs-on: ${{ matrix.config.runner }}
 ```
 
 **Rules:**
@@ -115,7 +116,9 @@ jobs:
 - Job display names include `(${{ matrix.config.lane }})` so GitHub UI shows **Format and lint (Velnor)** vs **(GitHub)**.
 - Cache keys include `${{ matrix.config.lane }}` (or a stable lane field) so GitHub and Velnor caches never corrupt each other when both write GHA cache.
 - **State-mutating jobs** (Renovate writers, Docker Hub publish, crates.io, Pages deploy): if `both` is offered, the secondary lane is **read-only / dry-run**. One writer only.
-- Coordinator / aggregate / required-status glue jobs may stay on pinned GitHub-hosted Ubuntu; they must not claim parity for work they did not run.
+- Control and aggregate jobs use the selected lane matrix too, or disappear by
+  moving pure routing into expressions. A Velnor-default run must not silently
+  consume a GitHub-hosted coordinator.
 
 ### 3.2 Ubuntu / OS policy (from ChainArgos `.github/AGENTS.md`)
 
@@ -126,7 +129,7 @@ Canonical rule (java-monorepo production policy — adopt estate-wide):
 | Velnor | `["self-hosted","velnor-target-mvp"]` | Job OS is Velnor's Ubuntu job image (keep image current; align with 26.04 direction) |
 | GitHub | **`ubuntu-26.04` only** | Never `ubuntu-latest`. Never unpinned `ubuntu-24.04` once estate migrates |
 | GitHub ARM (rare) | `ubuntu-26.04-arm` only when an ARM-specific job is intentional | Do not invent other labels |
-| macOS | `macos-15` / `macos-26` etc. | **Not Velnor.** Cross-build release legs may stay GitHub macOS, or move to `cargo-zigbuild` on Linux Velnor where possible |
+| macOS | **forbidden in the standardized workflows** | Replace with Ubuntu cross-builds (`cargo-zigbuild` where valid); never hide it as a GitHub-only fourth lane |
 
 **Repo policy file:** every repo gets `.github/AGENTS.md` (or `.github/workflows/AGENTS.md`) stating the three lanes + Ubuntu pin. Do not restate the full policy inside every workflow.
 
@@ -136,11 +139,21 @@ Canonical rule (java-monorepo production policy — adopt estate-wide):
 |-------|----------|
 | Tool installs | `jdx/mise-action` only (pin commit SHA + major comment) |
 | Versions | `mise.toml` + `mise.lock` committed |
-| Rust | `rust-toolchain.toml` + `settings.idiomatic_version_file_enable_tools = ["rust"]` in mise; components rustfmt/clippy listed there |
+| Rust | `rust-toolchain.toml` is the single version source; use exact stable channel, `profile = "minimal"`, required components/targets; mise reads it through `idiomatic_version_file_enable_tools = ["rust"]` |
 | Forbidden in product path | `dtolnay/rust-toolchain`, ad-hoc `curl \| sh`, language-specific setup actions for tools mise covers |
 | Cargo tools | Prefer `cargo:<crate>` in mise with pinned versions; install `cargo-binstall` first when many cargo: tools need prebuilts |
 | Order that matters | When workflow sets `RUSTC_WRAPPER=sccache` and mold flags **before** mise installs cargo tools that compile: setup mold + sccache **before** `jdx/mise-action` (java-monorepo lesson) |
-| mise cache write | `cache_save: ${{ github.ref == 'refs/heads/main' }}` — main owns durable tool cache; PRs restore only |
+| mise cache write | `cache_save: ${{ github.ref == 'refs/heads/main' && matrix.config.writer }}` — the trusted main writer owns durable tool cache; PRs/comparison lanes restore only |
+
+Rustup explicitly supports checked-in channel/profile/component/target
+declarations and recommends the minimal profile for CI
+([toolchain file](https://rust-lang.github.io/rustup/overrides.html#the-toolchain-file),
+[profiles](https://rust-lang.github.io/rustup/concepts/profiles.html)). Mise's
+Rust idiomatic version-file support reads `rust-toolchain.toml`; do not mirror
+the Rust version as a second independent value in `mise.toml`
+([mise configuration](https://mise.jdx.dev/configuration.html)). Commit
+`mise.lock`; `mise-action` uses locked installation when the lock exists
+([mise-action](https://github.com/jdx/mise-action#lock-files)).
 
 ### 3.4 Caching standard (universal mandate)
 
@@ -150,7 +163,7 @@ Everything cacheable must be cached. Rerun of the same commit on a warm fleet mu
 
 | Layer | GitHub lane | Velnor lane |
 |-------|-------------|-------------|
-| **1. sccache** | `mozilla-actions/sccache-action` + `RUSTC_WRAPPER=sccache` + `SCCACHE_GHA_ENABLED=true` | Host `_velnor_sccache` mount; adapter no-ops GHA backend |
+| **1. sccache** | `mozilla-actions/sccache-action` + `RUSTC_WRAPPER=sccache` + `SCCACHE_GHA_ENABLED=true` | Trust-scoped host sccache backend; adapter avoids redundant GHA transfer |
 | **2. Cargo registry/git** | `actions/cache` on `~/.cargo/registry/{cache,index,src}` + `~/.cargo/git/db`, key includes `Cargo.lock` + lane + os | Host `_velnor_cargo` mounts; cache action no-ops |
 | **3. Target dir** (optional / measured) | `actions/cache` on `target` **or** Swatinem/rust-cache with shared-key; prefer **not** both blindly | Optional `VELNOR_CARGO_TARGET_PERSIST` buckets under trust scope |
 | **4. Result reuse** (advanced, jackin PR #810) | Publish exact crate/job proofs as artifacts; skip producer when input contract matches | Same YAML; Velnor benefits from less work |
@@ -161,14 +174,17 @@ Everything cacheable must be cached. Rerun of the same commit on a warm fleet mu
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
-  RUSTFLAGS: "-C link-arg=-fuse-ld=mold"   # Linux only; skip on macOS legs
+  RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
   RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "true"              # Velnor adapter redirects
 ```
 
 **Linker:** `rui314/setup-mold` on Linux workload jobs (or image-baked mold on Velnor — still call the action for GitHub parity).
 
-**Do not use** `Swatinem/rust-cache` **and** a full target `actions/cache` **and** sccache without measuring — pick the stack:
+**Do not use** `Swatinem/rust-cache` **and** a full target `actions/cache` **and** sccache without measuring — pick the stack. Compiled-target reuse must key
+toolchain, target triple, profile, `RUSTFLAGS`, job purpose, lockfile, repo, and
+trust scope; PR #810's versioned target-seed contract is safer than a generic
+branch fallback.
 
 - **Estate default (recommended):** sccache + cargo-registry cache + mold. Skip Swatinem unless a small library needs simpler YAML.
 - **Library minimal:** may use sccache + registry only; still no `dtolnay/rust-toolchain`.
@@ -183,6 +199,17 @@ env:
 | Cache-from/to | Registry `buildcache-*` refs for publish streams; GHA type only for PR-only ephemeral builds |
 | Velnor | Prefer persistent local buildkit; adapters may drop redundant `type=gha` export (already designed) |
 | Dockerfiles | apt/apk behind `--mount=type=cache`; pin base digests; cargo-chef feature parity between cook and final build |
+
+BuildKit's official guidance is to keep contexts small, order stable layers
+first, use locked cache mounts for apt, and use explicit external
+`cache-from`/`cache-to` for ephemeral CI builders
+([cache optimization](https://docs.docker.com/build/cache/optimize/)). The GHA
+backend is v2-only and requires current Buildx/BuildKit on self-hosted runners;
+give every image a distinct scope so caches do not overwrite each other
+([GHA backend](https://docs.docker.com/build/cache/backends/gha/)). Build
+credentials use BuildKit secret mounts, never `ARG` or `COPY`, because cache
+exports can expose incorporated files
+([cache backends](https://docs.docker.com/build/cache/backends/)).
 
 #### 3.4.3 Other caches
 
@@ -213,15 +240,15 @@ Use the same conceptual stages so any repo’s Actions tab is navigable:
 
 | Stage | Examples | Runner |
 |-------|----------|--------|
-| **Select** | Select runner lane | GitHub pinned |
-| **Classify** | Detect changes / paths-filter | GitHub pinned (cheap) |
-| **Policy / hygiene** | actionlint, gitleaks, zizmor, reuse, agent-instruction checks | Prefer Velnor matrix when non-trivial; pure lint can stay GitHub if sub-minute |
+| **Route** | Inline static lane matrix; no job | No runner consumed |
+| **Classify** | Detect changes / paths-filter | Selected lane matrix |
+| **Policy / hygiene** | actionlint, gitleaks, zizmor, reuse, agent-instruction checks | Selected lane matrix |
 | **Format / lint** | fmt, clippy, deny | Lane matrix |
 | **Test** | nextest / cargo test / integration | Lane matrix |
 | **Build image** | docker bake/build | Lane matrix (writer rules) |
 | **Package / release** | zigbuild, deb, crates.io, GH release | Lane matrix; publish single-writer |
 | **Docs / pages** | site build + deploy | Build on matrix; deploy once |
-| **Required aggregate** | `ci-required` / `rust-required` that merges results | GitHub OK; must reflect real lane results |
+| **Required aggregate** | `ci-required` / `rust-required` that merges results | Selected lane matrix; must reflect all selected results |
 
 ### 3.7 Shared composite actions (recommended productization)
 
@@ -230,7 +257,6 @@ To kill copy-paste drift, introduce a small shared action set (either `tailrocks
 | Composite | Purpose |
 |-----------|---------|
 | `setup-rust-ci` | mold → sccache → mise (install_args) → rustup components verify → registry cache |
-| `select-runner-lane` | matrix-setup snippet as reusable composite or reusable workflow |
 | `cache-cargo-registry` | jackin-style verified offline fetch (optional for large workspaces) |
 | `aggregate-needs` | required status aggregation (already in jackin/parallax) |
 
@@ -255,15 +281,15 @@ Local checkouts used for this research live under `/Users/donbeave/Projects/…`
 | Repository | Org | Local path | Complexity | Lane today | Default today | mise | Rust toolchain source | Docker | Primary stacks | Gap vs standard |
 |------------|-----|------------|------------|------------|---------------|------|----------------------|--------|----------------|-----------------|
 | **jackin** | jackin-project | `jackin-project/jackin` | Production / reference | Partial (`ci`, `construct`, `preview`, `release`, `jackin-dev`) | **github** | Yes (rich) | rust-toolchain + mise | Yes (construct) | Rust, Bun, Docker, cosign, Pages | Flip default → velnor; pin ubuntu-26.04; expand lanes to remaining workflows; keep PR #810 ideas |
-| **java-monorepo** | ChainArgos | `ChainArgos/java-monorepo` | Production / reference | Full on rust/ansible/docker/kestra | **velnor** | Yes | rust-toolchain + mise | Yes (bake) | Rust, Java/GraalVM, Node, Python, Ansible, Docker | Align GitHub pin to **ubuntu-26.04** (still uses ubuntu-latest in matrix); keep as reference |
+| **java-monorepo** | ChainArgos | `ChainArgos/java-monorepo` | Production / reference | Full on rust/ansible/docker/kestra | **velnor** | Yes | rust-toolchain via mise | Yes (bake) | Rust, Java/GraalVM, Node, Python, Ansible, Docker | Remote `main` already pins **ubuntu-26.04**; remove selector-job exceptions and keep as reference |
 | **blockchain-nodes** | ChainArgos | `ChainArgos/blockchain-nodes` | Production Docker factory | Yes | **velnor** | Yes (minimal) | none (rust-script only) | Yes (many images) | mise rust-script, buildx, Docker Hub | Rename `lane`→`lanes`; pin ubuntu-26.04; registry cache already |
-| **parallax** | tailrocks | `tailrocks/parallax-project/parallax` | Mid–heavy product | **None** | github only | Yes | rust-toolchain + mise | Limited | Rust, Bun UI, zigbuild, cosign, sccache | Full lane plumbing; Velnor default; macOS legs stay GitHub |
+| **parallax** | tailrocks | `tailrocks/parallax-project/parallax` | Mid–heavy product | **None** | github only | Yes | rust-toolchain + mise | Limited | Rust, Bun UI, zigbuild, cosign, sccache | Full lane plumbing; Velnor default; replace macOS legs with Ubuntu cross-builds |
 | **parallax-telemetry-playground** | tailrocks | `…/parallax-telemetry-playground` | Small playground | None | github | Yes | mise rust | No | Rust, Bun, Java | Lane + sccache + registry cache |
 | **tablerock** | tailrocks | `tailrocks/tablerock` | Early | None | **macos-15 only** | **Missing** | dtolnay | No | cargo-outdated, cargo-deny-action | Rebuild CI on Linux Velnor; add mise; drop macOS-as-default |
 | **holla** | tailrocks | `tailrocks/holla-project/holla` | Mid CLI + release | None (mentions only) | ubuntu-26.04 fixed | Yes | rust-toolchain | No | Rust, zigbuild, deb, sccache | Lane matrix; default velnor; already good Ubuntu pin |
 | **velnor** | tailrocks | `tailrocks/velnor-project/velnor` | Mid (self) | None | ubuntu-latest | Yes | rust-toolchain | Yes (job image) | Rust, deb, zigbuild, sccache | Must dogfood Velnor; pin 26.04; lane plumbing |
 | **ruxel** | tailrocks | `tailrocks/ruxel` | Mid | None | ubuntu-latest | Yes | rust-toolchain | Spec fixtures | Rust, uv, Ansible oracle, sccache | Lane + pin; keep uv/ansible on Linux |
-| **termrock** | tailrocks | `tailrocks/termrock` | Mid library + docs | None | ubuntu-latest + macOS matrix | Partial | mix mise + **dtolnay** | No | Rust, Bun docs, Pages | Remove dtolnay; lane; macOS optional on GitHub only |
+| **termrock** | tailrocks | `tailrocks/termrock` | Mid library + docs | None | ubuntu-latest + macOS matrix | Partial | mix mise + **dtolnay** | No | Rust, Bun docs, Pages | Remove dtolnay; lanes; replace macOS coverage with Ubuntu-valid coverage |
 | **schemalane** | tailrocks | `tailrocks/schemalane` | Library + PG integration | None | ubuntu-latest | **Missing** | **dtolnay** | No | Rust, Postgres tests, crates.io | Full modernize: mise, sccache, lanes, nextest |
 | **pg-bigdecimal** | tailrocks | `tailrocks/pg-bigdecimal` | Tiny library | None | ubuntu-latest | **Missing** | **dtolnay** | No | Rust, crates.io | Same library template as schemalane (lighter) |
 | **tracing-request-level** | tailrocks | `tailrocks/tracing-request-level` | Tiny library | None | ubuntu-latest | **Missing** | **dtolnay** | No | Rust, crates.io | Same library template |
@@ -287,7 +313,7 @@ Local checkouts used for this research live under `/Users/donbeave/Projects/…`
 | Default `lanes` = **github** | Flip to **velnor** in every selectable workflow + AGENTS.md |
 | `ubuntu-24.04` / `ubuntu-latest` mixed | Standardize GitHub workload + coordinator to **ubuntu-26.04** |
 | Some workflows lack lanes (hygiene, docs parts, renovate) | Add lanes where work is non-trivial; keep Renovate single-writer on one lane |
-| macOS in hygiene/preview | Keep GitHub macOS; never put on Velnor matrix |
+| macOS in hygiene/preview | Remove or replace with Ubuntu cross-build/portable tests; no fourth runner lane |
 | PR #810 not necessarily merged at analysis time | When merged, treat as jackin-internal standard; extract only portable composites for other repos |
 
 **Target workflows:** `ci.yml`, `construct.yml`, `docs.yml`, `hygiene.yml`, `jackin-dev.yml`, `preview.yml`, `release.yml`, `rust-nextest.yml` (+ policy files).
@@ -310,7 +336,7 @@ Local checkouts used for this research live under `/Users/donbeave/Projects/…`
 
 | Gap | Action |
 |-----|--------|
-| GitHub matrix still uses `ubuntu-latest` string | Change to `ubuntu-26.04` to match AGENTS.md |
+| Metadata/control jobs consume GitHub even in Velnor-default runs | Inline the static lane matrix and matrix required aggregators so the selected mode is truthful |
 | Step boilerplate repeated per test job | Optional composite `setup-rust-ci` |
 | Large bash in clippy package selection | Optional xtask later; not blocking |
 
@@ -334,7 +360,7 @@ Local checkouts used for this research live under `/Users/donbeave/Projects/…`
 | GitHub runner `ubuntu-latest` | → `ubuntu-26.04` |
 | No rust-toolchain (only rust-script) | OK; document as Docker-primary repo |
 | QEMU via raw docker run | Prefer `docker/setup-qemu-action` for adapter coverage / clarity |
-| matrix-setup does heavy sweep on GitHub | Fine; optionally allow sweep on Velnor for speed later |
+| selector/exists sweep is pinned to GitHub | Separate pure lane selection from the semantic exists sweep; run the sweep on the selected lane(s) |
 
 **Velnor needs:** trusted Docker socket, large disk, multi-arch buildx, long `TimeoutStopSec` drain (already runner-side).
 
@@ -353,8 +379,9 @@ Local checkouts used for this research live under `/Users/donbeave/Projects/…`
 
 1. Add full lane plumbing (default velnor).
 2. Pin GitHub to ubuntu-26.04.
-3. Linux workload jobs on matrix; macOS jobs: `if: matrix.config.lane == 'GitHub'` **or** separate `macos-*` jobs outside Velnor matrix.
-4. Prefer zigbuild on Linux for cross targets where already used — reduce macOS CI dependency over time.
+3. Move every workload to the Ubuntu lane matrix.
+4. Replace macOS artifact legs with `cargo-zigbuild` on Ubuntu where valid;
+   prove and record any artifact that genuinely cannot be produced there.
 5. Apply jackin clarity rules to job names; keep scripts or migrate hot path to Rust later.
 
 ### 4.6 tailrocks/parallax-telemetry-playground
@@ -373,7 +400,8 @@ Local checkouts used for this research live under `/Users/donbeave/Projects/…`
 
 - `ci.yml`: lane matrix, fmt/clippy/nextest/deny.
 - `mise.toml` + `rust-toolchain.toml`.
-- Drop macOS as CI host unless a future SwiftUI app needs it (then GitHub-only job).
+- Drop macOS as a CI host. A future native-only product requirement would be a
+  direction change, not an implicit exception.
 
 ### 4.8 tailrocks/holla
 
@@ -383,7 +411,8 @@ Local checkouts used for this research live under `/Users/donbeave/Projects/…`
 
 **Gaps:** no lane matrix; CI always GitHub-hosted.
 
-**Target:** Add matrix-setup + lanes default velnor; release publish remains single-writer; macOS release legs stay GitHub.
+**Target:** Add inline lanes defaulting to Velnor; release publish remains
+single-writer; cross-build release artifacts from Ubuntu.
 
 ### 4.9 tailrocks/velnor
 
@@ -414,7 +443,9 @@ Local checkouts used for this research live under `/Users/donbeave/Projects/…`
 
 **Gaps:** dtolnay on some jobs; unpinned `jdx/mise-action@v4` / `Swatinem/rust-cache@v2`; macOS matrix; no lanes; no sccache.
 
-**Target:** mise-only toolchain; sccache; lanes; docs/pages build on Linux; deploy once; macOS optional GitHub-only if crossterm platform matrix remains required (or run Linux-only if sufficient).
+**Target:** mise-only toolchain; sccache; lanes; docs/pages build on Ubuntu;
+deploy once; replace the macOS crossterm leg with portable/unit coverage that
+runs on Ubuntu.
 
 ### 4.12 Library trio: schemalane, pg-bigdecimal, tracing-request-level
 
@@ -473,7 +504,7 @@ Adapters or node fallback must cover these families (local composite `./.github/
 Best production template for:
 
 - `lanes` default velnor  
-- matrix-setup  
+- inline selected-lane matrix  
 - sccache + mold + mise order  
 - per-package job names  
 - required-check patterns  
@@ -525,7 +556,7 @@ ubuntu-26.04 + sccache + mise + zigbuild/deb — add only lanes.
 
 - Lane matrix on image build jobs.
 - Registry caches mandatory.
-- Exists-sweep coordinator (GitHub or Velnor).
+- Exists sweep on the selected lane; one publish writer.
 
 ### Class D — Library crates (schemalane, pg-bigdecimal, tracing-request-level, tablerock early)
 
@@ -533,7 +564,7 @@ ubuntu-26.04 + sccache + mise + zigbuild/deb — add only lanes.
 - fmt / clippy / test / optional audit.
 - `release.yml` crates.io single-writer.
 - mise + rust-toolchain mandatory.
-- No macOS unless product requires it.
+- No macOS jobs.
 
 ### Class E — Playground (parallax-telemetry-playground)
 
@@ -640,15 +671,17 @@ Do **not** open 13 PRs blindly on day one. Order by risk and reference quality.
 
 1. Land this document in `velnor` (`VELNOR_PROJECTS_SETUP.md`).
 2. Confirm fleet labels, org JIT status, and job image contents against §7–§8.
-3. Publish a one-page **workflow snippet pack** (matrix-setup, setup-rust-ci composite) — either in `velnor/docs/` or a small `velnor-ci-actions` repo.
+3. Publish a one-page **workflow snippet pack** (inline lane matrix,
+   `setup-rust-ci` composite) — either in `velnor/docs/` or a small
+   `velnor-ci-actions` repo.
 
 ### Phase 1 — Reference alignment
 
 | Order | Repo | PR focus |
 |-------|------|----------|
-| 1 | **java-monorepo** | `ubuntu-latest` → `ubuntu-26.04`; confirm AGENTS match reality |
-| 2 | **blockchain-nodes** | `lane` → `lanes`; ubuntu pin; qemu action |
-| 3 | **jackin** | default lanes → **velnor**; ubuntu-26.04; AGENTS policy update; optional PR #810 merge first |
+| 1 | **java-monorepo** | Replace selector-only GitHub jobs with inline selected-lane matrices; preserve its already-correct Ubuntu pin |
+| 2 | **blockchain-nodes** | `lane` → `lanes`; Ubuntu pin; selected-lane exists sweep; QEMU action |
+| 3 | **jackin** | default lanes → **velnor**; Ubuntu 26.04; AGENTS policy update; absorb the reusable parts of PR #810 |
 
 ### Phase 2 — Dogfood + strong mid-tier
 
@@ -657,7 +690,7 @@ Do **not** open 13 PRs blindly on day one. Order by risk and reference quality.
 | 4 | **velnor** | lanes + default velnor + ubuntu-26.04 |
 | 5 | **holla** | lanes only (already clean) |
 | 6 | **ruxel** | lanes + pin; verify ansible/uv on Velnor |
-| 7 | **parallax** | full lanes; macOS isolation; pin |
+| 7 | **parallax** | full lanes; replace macOS legs; pin |
 
 ### Phase 3 — Libraries + cleanup
 
@@ -674,21 +707,22 @@ Do **not** open 13 PRs blindly on day one. Order by risk and reference quality.
 
 1. `velnor-tools` audit command: scan workflows for `ubuntu-latest`, missing `lanes`, `dtolnay/rust-toolchain`, missing sccache on compile jobs.
 2. Fixture snippets updated for any new patterns.
-3. Update `docs/master-plan.md` estate table + default-lane policy to match **Velnor default everywhere**.
+3. Keep `docs/master-plan.md`, `docs/mission.md`, root `AGENTS.md`, and prompts
+   reconciled with **Velnor default everywhere**.
 4. Optional: required status checks named with lane suffix strategy documented per repo (GitHub required checks vs Velnor non-blocking during rollout — **operator choice**, but final state is Velnor required).
 
 ### Per-PR checklist (every repo)
 
 - [ ] `.github/AGENTS.md` three-lane + ubuntu-26.04 policy
 - [ ] `workflow_dispatch.inputs.lanes` with default `velnor`
-- [ ] `matrix-setup` job; workload `runs-on: ${{ fromJSON(matrix.config.runner) }}`
+- [ ] Inline canonical matrix; workload `runs-on: ${{ matrix.config.runner }}`
 - [ ] Job names include `(${{ matrix.config.lane }})`
 - [ ] `mise.toml` + `mise.lock` + `rust-toolchain.toml` (if Rust)
 - [ ] No `dtolnay/rust-toolchain` / no unpinned actions
 - [ ] sccache + cargo registry cache on compile jobs
 - [ ] Docker builds have cache-from/to (if any)
 - [ ] Single-writer safety when `both` can mutate
-- [ ] macOS jobs not on Velnor matrix
+- [ ] no macOS/Windows jobs; all selected-lane work runs on Ubuntu
 - [ ] Manual verify: `lanes=velnor`, `lanes=github`, `lanes=both` once each
 - [ ] Rerun-idempotency smoke on Velnor (no crate download wall)
 
@@ -728,35 +762,13 @@ env:
   SCCACHE_GHA_ENABLED: "true"
 
 jobs:
-  matrix-setup:
-    name: Select runner lane
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    outputs:
-      configs: ${{ steps.set.outputs.configs }}
-    steps:
-      - id: set
-        env:
-          LANES: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || 'velnor' }}
-        run: |
-          set -euo pipefail
-          github='{"lane":"GitHub","runner":"\"ubuntu-26.04\""}'
-          velnor='{"lane":"Velnor","runner":"[\"self-hosted\",\"velnor-target-mvp\"]"}'
-          case "$LANES" in
-            github) configs="[$github]" ;;
-            both)   configs="[$github,$velnor]" ;;
-            *)      configs="[$velnor]" ;;
-          esac
-          echo "configs=$configs" >> "$GITHUB_OUTPUT"
-
   rust:
     name: Format, lint, and test (${{ matrix.config.lane }})
-    needs: matrix-setup
     strategy:
       fail-fast: false
       matrix:
-        config: ${{ fromJSON(needs.matrix-setup.outputs.configs) }}
-    runs-on: ${{ fromJSON(matrix.config.runner) }}
+        config: ${{ fromJSON((inputs.lanes || 'velnor') == 'both' && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (inputs.lanes || 'velnor') == 'github' && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
     steps:
       - uses: actions/checkout@<pin> # v7
       - uses: rui314/setup-mold@<pin> # v1
@@ -825,7 +837,8 @@ Recommended combination: **C for tailrocks**, **B/A for ChainArgos/jackin** (the
 1. **Required checks:** When Velnor is default, are GitHub-lane checks required, optional, or dispatch-only?
 2. **Org JIT timeline:** Block tailrocks mass-onboarding until org-level JIT ships, or accept N repo-level daemons temporarily?
 3. **Shared action repo vs vendoring:** Approve `tailrocks/velnor-ci-actions`?
-4. **macOS release strategy:** Keep GitHub macOS for notarization-style needs, or Linux zigbuild-only?
+4. **Cross-build proof:** Which existing macOS artifacts need a prototype to
+   prove an Ubuntu `cargo-zigbuild` replacement before their migration PR?
 5. **jackin PR #810:** Merge before or after default-lane flip?
 6. **Public vs private:** Any of these repos public with fork PRs? → need non-trusted pool without secrets/Docker socket.
 
