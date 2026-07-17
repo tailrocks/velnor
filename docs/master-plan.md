@@ -212,8 +212,9 @@ Standing rules that follow:
 - mise is the only tool installer in target workflows.
 - Velnor ships as a `.deb` via `velnor-apt.tailrocks.com`; upgrades via plain
   `apt-get upgrade`.
-- Jackin repos stay on GitHub-hosted runners (no Velnor there for now); they
-  serve as the optimization reference and receive improvements too.
+- Jackin repositories use the same portfolio contract: Velnor default,
+  pinned-Ubuntu GitHub selectable, and `both`; they remain the pipeline-design
+  reference while migrating off their former GitHub-default policy.
 
 ## 5. Execution plan
 
@@ -387,7 +388,8 @@ never remove testing/release correctness while speeding things up.
    Gate: PR with one package changed runs exactly that scope; full-touch PR
    runs everything; `lanes=both` timing report shows GitHub lane at its best.
 
-**Jackin repos** (reference stays GitHub-hosted; fix their own gaps):
+**Jackin repos** (pipeline reference; migrate to portfolio-wide Velnor default
+while fixing their own gaps):
 1. **[PARTIAL — PR jackin#561 merged]** `test` un-serialized from
    `check-all-features` (up to ~2.5 min off the critical path) and `audit`
    gated on the rust filter. Remaining: spell-check gating, bench-matrix
