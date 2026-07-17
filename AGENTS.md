@@ -118,19 +118,31 @@ Always use Rust for scripting as much as possible. Prefer Rust for verification 
 
 Rarely use Python or shell. Use them only when the task cannot reasonably be done properly in Rust, or when the existing interface is necessarily a shell entrypoint that delegates substantive work to Rust.
 
-## HARD RULE: Keep direction docs and prompts consistent
+## HARD RULE: Keep direction docs and the execution prompt consistent
 
-`docs/` is the single source of truth for direction: [docs/mission.md](docs/mission.md), [docs/vision.md](docs/vision.md), [docs/roadmap.md](docs/roadmap.md) (the plan), and [docs/comparison.md](docs/comparison.md). The goal prompts in `prompts/` and the rest of the repository defer to it.
+`docs/` is the single source of truth for direction: [docs/mission.md](docs/mission.md), [docs/vision.md](docs/vision.md), [docs/roadmap.md](docs/roadmap.md) (the plan), and [docs/comparison.md](docs/comparison.md). The single active execution prompt ([plans/estate-program-goal-prompt.md](plans/estate-program-goal-prompt.md)), the plan library (`plans/`), and the rest of the repository defer to it. The old `prompts/` goal-prompt system is retired — its sequences completed 2026-06-11 and the files were removed 2026-07-18; there is exactly ONE active prompt at a time.
 
 Whenever a discussion or change affects the **vision, plan, or roadmap**:
 
 1. Update the relevant file in `docs/` first.
 2. Record the direction change here in `AGENTS.md` (so the decision is captured where every agent reads it).
-3. Reconcile any affected `prompts/*.md` / `prompts/*.checklist.md` and the `prompts/README.md` run sequence so they do not go stale.
+3. Reconcile `plans/README.md` and `plans/estate-program-goal-prompt.md` so they do not go stale.
 
-Never let a prompt, README, or doc describe a direction that the current vision/plan/roadmap no longer holds. A new prompt must start from up-to-date `docs/`, not from outdated assumptions. If a prompt and `docs/` disagree, `docs/` wins — fix the prompt.
+Never let a prompt, README, or doc describe a direction that the current vision/plan/roadmap no longer holds. If the prompt and `docs/` disagree, `docs/` wins — fix the prompt.
 
 ### Direction change log
+
+- 2026-07-18: **One active prompt; legacy prompts and completed plans purged**:
+  the `prompts/` goal-prompt system (all sequences complete since 2026-06-11)
+  and the DONE plan files 001–013/016–032 plus `plans/goal-execution-prompt.md`
+  are deleted — history stays in git (pre-cleanup tree at `17136f9`). The only
+  active execution prompt is
+  [plans/estate-program-goal-prompt.md](plans/estate-program-goal-prompt.md)
+  (program 033–059 **plus** outstanding 014 systemd hardening and 015
+  run-log-capture purge, which fold into the program's host window).
+  Branch hygiene: superseded branches `docs/velnor-projects-setup` (first
+  draft) and `renovate/casey-just-1.x` (bump already on main) deleted; the
+  repository keeps `main` only between program deliveries.
 
 - 2026-07-18: **jackin delivers on top of PR #810** (operator; answers
   [VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) §12.5): the entire
