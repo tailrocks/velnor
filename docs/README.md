@@ -9,8 +9,9 @@ Start here:
 
 - [Master plan](master-plan.md): **the top-level plan** — goal, the 2026-06-10
   incident review, the operator mandates (universal caching +
-  rerun-idempotency, performance-first, estate unification, the three-repo
-  dual-lane policy, switch-readiness, native-adapter completeness), and the
+  rerun-idempotency, performance-first, estate unification, the
+  portfolio-wide Velnor-default/GitHub/both lane policy, native-adapter
+  completeness), and the
   phased execution sequence with live status.
 - [Mission](mission.md): what Velnor optimizes for — fastest, Rust-first,
   nicer output, cheaper — and the hard rules every change inherits.

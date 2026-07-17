@@ -512,6 +512,8 @@ Adopted rules for Velnor host stores:
 
 Two-cache model (mirrors jackin recommendation): shared downloads + compiler results (cargo home + sccache, cross-repo safe), bounded per-scope build-output targets (disposable, pruned by policy). Same architecture Velnor already sketches; hygiene layer is what's missing.
 
+Runner-side engineering detail + backlog: §8.1 (V0.7, V0.8, V1.8). This section is the workflow/estate-facing mandate; §8.1 owns implementation.
+
 ---
 
 ## 5. Reference patterns (what to copy from where)
@@ -644,9 +646,9 @@ Prioritized by **unblocks standardization** and **correctness**.
 The requested
 [Rust Build Cache Hygiene proposal](https://github.com/jackin-project/jackin/blob/0cbada6dc0cd2adfc603bffd17287145520d374c/docs/content/docs/roadmap/rust-build-cache-hygiene.mdx)
 documents the failure mode Velnor's warm fleet will otherwise reproduce at
-larger scale: a target grew to 460 GiB, including thousands of incremental
-session directories, while alternate `CARGO_TARGET_DIR` values duplicated
-near-identical artifacts. Its important conclusion is structural: a warm cache
+larger scale: the July 2026 operator audit found `~/.cache/jackin` at roughly
+410 GB with one project cache target around 402 GB, while separate workspaces
+duplicated near-identical `target/` artifacts. Its important conclusion is structural: a warm cache
 without ownership, accounting, budgets, retention, and automatic reclamation is
 an availability bug, not a performance feature.
 
@@ -732,8 +734,7 @@ stability work required before mass default flips.
 | V1.5 | **Composite local actions** resolution always eager when checkout needed | historical eager-checkout bugs |
 | V1.6 | **Job image track ubuntu-26.04** align with GitHub pin | reduce lane drift |
 | V1.7 | **Performance markers** (optional): expose sccache/stats consistently in logs | warm-run audits |
-| V1.8 | **Cache hygiene program** (§4.14): cache-class inventory, budgets (`SCCACHE_CACHE_SIZE`), prune/doctor accounting, soft budget warnings | 13-repo estate multiplies host-store growth; jackin audit proved unowned caches reach 400+ GB |
-| V1.9 | **Target-bucket eviction**: LRU/TTL on per-scope cargo target buckets; per-repo keying, never global `CARGO_TARGET_DIR` | Parallel jobs + `cargo clean` blast radius (rust-lang/cargo#12516) |
+| V1.8 | **Target-bucket eviction**: LRU/TTL on per-scope cargo target buckets; identity includes toolchain/target/profile/flags; never global `CARGO_TARGET_DIR` | Parallel jobs + `cargo clean` blast radius (rust-lang/cargo#12516); GC lock/active-set prerequisite lands in V0.7 |
 
 ### P2 — Superiority / scale
 

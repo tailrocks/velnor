@@ -1,9 +1,9 @@
 # Velnor Master Plan — Goal, Current State, and Execution Sequence
 
-Status date: 2026-06-10. This document is the single top-level plan for making
-Velnor the fastest, most stable GitHub-Actions-compatible runner for the two
-production target repositories, and for making the whole CI/CD estate
-(ChainArgos + Jackin) maximally fast on both runner lanes. It extends
+Status date: 2026-07-18. This document is the single top-level plan for making
+Velnor the fastest, most stable GitHub-Actions-compatible runner for the
+standardized 13-repository portfolio, and for making the whole CI/CD estate
+(ChainArgos + Jackin + Tailrocks) maximally fast on both runner lanes. It extends
 [roadmap.md](roadmap.md) (runner-internal implementation detail) and is bound
 by [mission.md](mission.md) and the hard rules in [`../AGENTS.md`](../AGENTS.md).
 
@@ -160,14 +160,15 @@ anywhere is propagated to every applicable repo. The four agent-role repos
 (jackin-the-architect, jackin-agent-smith, jackin-sentinel,
 jackin-agent-brown) must use the shared `jackin-project/jackin-role-action`
 (composite action + reusable publish workflow) with identical configuration —
-no per-repo drift. **Lane policy (operator, updated 2026-06-11): ChainArgos/java-monorepo and
-ChainArgos/blockchain-nodes default to the Velnor lane. Every jackin-family
-repo — jackin, the-architect, agent-smith, sentinel, and agent-brown
-(PR #91) — defaults to the GitHub runner.** All repos carry (or are gaining)
-the same lane plumbing (`lanes`/`lane` input: `github | velnor | both`,
-ported verbatim from brown's scaffolding with only the default flipped), so
-any repo can switch to Velnor at any moment without workflow rewrites
-(smith PR #68, sentinel PR #8 shipped; architect + jackin main pending).
+no per-repo drift. **Lane policy (operator, updated 2026-07-18): every
+standardized repository defaults to Velnor for automatic and manual runs,
+retains an explicit pinned-Ubuntu GitHub lane, and supports `both` with the
+same workload and exactly one writer for shared/external state.** This
+supersedes the 2026-06-11 jackin-family GitHub-default exception. The first
+standardization portfolio is the 13 repositories enumerated and analyzed in
+[`../VELNOR_PROJECTS_SETUP.md`](../VELNOR_PROJECTS_SETUP.md). All carry the
+same `lanes: velnor | github | both` contract; GitHub means exactly
+`ubuntu-26.04`, and no macOS/Windows or `ubuntu-latest` fourth lane is allowed.
 The fixture keeps its own both-lanes-by-default contract role. **Velnor must
 support the full feature surface of every estate repo.** Velnor must
 support the role-action pattern end-to-end for agent-brown (hadolint JS

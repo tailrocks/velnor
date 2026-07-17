@@ -23,6 +23,13 @@ docs win — fix the prompt. **When the vision/plan/roadmap changes, update
 > [`../docs/master-plan.md`](../docs/master-plan.md) for live status and the
 > current phases). New goal prompts should be cut from master-plan phases.
 
+> **Direction update 2026-07-18:** the standardized 13-repository portfolio is
+> Velnor-default everywhere with pinned-Ubuntu GitHub and `both` modes. The
+> research and per-repository rollout design live in
+> [`../VELNOR_PROJECTS_SETUP.md`](../VELNOR_PROJECTS_SETUP.md). No rollout goal
+> prompt has been activated by the research-only change; create it from that
+> plan when implementation begins.
+
 ## Completed Sequence Archive
 
 The table below is the historical Phase 0 execution sequence. These prompts are
