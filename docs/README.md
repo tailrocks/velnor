@@ -1,9 +1,12 @@
 # Velnor Docs
 
-This folder is the **source of truth** for Velnor's direction. Prompts in
-[`../prompts/`](../prompts/) and all other documentation defer to it. When the
-vision, plan, or roadmap changes, update the relevant file here (and record the
-direction change in [`../AGENTS.md`](../AGENTS.md)) so nothing goes stale.
+This folder is the **source of truth** for Velnor's direction. The active
+execution prompt
+([`../plans/estate-program-goal-prompt.md`](../plans/estate-program-goal-prompt.md))
+and all other documentation defer to it. When the vision, plan, or roadmap
+changes, update the relevant file here (and record the direction change in
+[`../AGENTS.md`](../AGENTS.md)) so nothing goes stale. The old `prompts/`
+goal-prompt system is retired (its sequences completed; removed 2026-07-18).
 
 Start here:
 
