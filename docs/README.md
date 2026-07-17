@@ -9,8 +9,9 @@ Start here:
 
 - [Master plan](master-plan.md): **the top-level plan** — goal, the 2026-06-10
   incident review, the operator mandates (universal caching +
-  rerun-idempotency, performance-first, estate unification, the three-repo
-  dual-lane policy, switch-readiness, native-adapter completeness), and the
+  rerun-idempotency, performance-first, estate unification, the
+  portfolio-wide Velnor-default/GitHub/both lane policy, native-adapter
+  completeness), and the
   phased execution sequence with live status.
 - [Mission](mission.md): what Velnor optimizes for — fastest, Rust-first,
   nicer output, cheaper — and the hard rules every change inherits.
@@ -40,3 +41,11 @@ Start here:
   in-scope action with a direct link to its latest upstream source — the
   source-of-truth for implementing/verifying adapters (Velnor tracks latest
   only).
+- [Rust build cache hygiene → Velnor](rust-build-cache-hygiene-velnor.md):
+  jackin disk-hygiene research mapped to runner gaps (budgets, GC, sccache
+  vs kache, doctor inventory).
+- [Strict capability contract](strict-capability-contract.md): fail-fast,
+  versioned Rust allowlists and the exact local-only sccache/Kache proposal.
+- [Storage and disk pressure](storage-and-disk-pressure-2026-07-18.md): live
+  Sentry evidence, canonical paths, leases, reclaim-before-register, and the
+  compiler-cache comparison method.
