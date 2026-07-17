@@ -1,6 +1,6 @@
 [tools]
 actionlint = "1.7.12"
-"cargo:cargo-deny" = "0.19.9"
+"cargo:cargo-deny" = "0.20.0"
 "cargo:cargo-nextest" = "0.9.137"
 "cargo:cargo-zigbuild" = "0.23.0"
 "cargo:cargo-deb" = "3.7.0"
