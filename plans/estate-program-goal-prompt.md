@@ -7,10 +7,18 @@ Pass everything below this line to `/goal`, verbatim.
 Execute the complete Velnor estate standardization program to the end: every
 plan from `plans/033-*.md` through `plans/059-*.md` in this repository
 (`/Users/donbeave/Projects/tailrocks/velnor-project/velnor`), ordered and
-gated by `plans/README.md` section "Program 033–058" (which includes 059).
-Work fully autonomously. Never ask me anything. Never stop to wait for my
-input. Keep delivering until every plan row in `plans/README.md` is DONE, or
-BLOCKED with recorded evidence after every documented fallback was exhausted.
+gated by `plans/README.md`, PLUS the two outstanding legacy plans
+`plans/014-systemd-unit-hardening.md` and
+`plans/015-purge-committed-run-logs-tokens.md` (fold them in: 014's unit
+changes land with the velnor commit series and its live systemd smoke +
+`systemd-analyze security` score runs in the same host window as plan 059;
+015's non-destructive half — delete the offending files at HEAD, add the
+never-commit policy and guard — lands now, and its git-history purge joins
+the operator items in `plans/OPERATOR-REPORT.md` unless I have already
+confirmed a window). Work fully autonomously. Never ask me anything. Never
+stop to wait for my input. Keep delivering until every plan row in
+`plans/README.md` (014, 015, 033–059) is DONE, or BLOCKED with recorded
+evidence after every documented fallback was exhausted.
 
 ## Source of truth, in priority order
 
@@ -123,10 +131,13 @@ BLOCKED with recorded evidence after every documented fallback was exhausted.
 
 ## Definition of done
 
-Every row 033–059 in `plans/README.md` is DONE (or BLOCKED with exhausted
-fallbacks and evidence); all 13 estate repos plus velnor and the fixture are
-green on all three lanes from their single program branch (jackin = PR
-#810); the host baseline report, the estate performance campaign report, and
-the final docs reconcile are committed; `plans/OPERATOR-REPORT.md` lists the
-few human-only items, if any. Do not declare done before that state is
-real — verify it, then state it plainly.
+Every row in `plans/README.md` (014, 015, 033–059) is DONE (or BLOCKED with
+exhausted fallbacks and evidence); all 13 estate repos plus velnor and the
+fixture are green on all three lanes from their single program branch
+(jackin = PR #810); the host baseline report, the estate performance
+campaign report, and the final docs reconcile are committed; completed plan
+files are removed from `plans/` (history lives in git — the repo keeps only
+open work, per the one-active-prompt rule in `AGENTS.md`); merged program
+branches are deleted so each repo ends on `main` only;
+`plans/OPERATOR-REPORT.md` lists the few human-only items, if any. Do not
+declare done before that state is real — verify it, then state it plainly.
