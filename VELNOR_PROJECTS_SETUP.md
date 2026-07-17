@@ -452,7 +452,7 @@ maintainer moving between repos must find zero naming drift.
 
 | Surface | Canonical form |
 |---------|----------------|
-| Program branch | `velnor-estate-standard` — **one branch per repo carries that repo's entire program work**, velnor itself included (runner features + dogfood CI on the same branch) and the fixture too. Per-feature commits, never per-feature branches. |
+| Program branch | `velnor-estate-standard` — **one branch per repo carries that repo's entire program work**, velnor itself included (runner features + dogfood CI on the same branch) and the fixture too. Per-feature commits, never per-feature branches. **Sole exception: jackin** — its one branch is the existing head branch of [PR #810](https://github.com/jackin-project/jackin/pull/810) (operator decision, §12.5). |
 | Workflow files | `ci.yml` (always); `release.yml` (publish/tag); `docs.yml` (docs + Pages); `preview.yml`; `renovate.yml`. One concern = one filename, identical in every repo. Extra repo-specific workflows allowed; they follow every other rule. |
 | Dispatch input | `lanes` exactly as §2.1 — same description text, default, options order |
 | Job ids | `rust`, `integration`, `audit`, `build-image`, `docs`, `release`, `ci-required`; display names `<Purpose> (${{ matrix.config.lane }})` |
@@ -1001,7 +1001,11 @@ jobs:
 2. **Org JIT timeline:** block mass onboarding until shipped, or temporary N repo-level daemons?  
 3. **Shared `velnor-ci-actions`?**  
 4. **Which macOS artifacts need a zigbuild proof before migration?**  
-5. **jackin PR #810:** merge before or after default-lane flip?  
+5. **jackin PR #810:** ANSWERED (operator, 2026-07-18) — the entire jackin
+   program delivery lands **on top of PR #810's head branch**; that PR stays
+   jackin's single program PR (the §2.12 one-branch rule maps to that
+   existing branch for jackin only; every other repo uses
+   `velnor-estate-standard`).  
 6. **Public forks?** → non-trusted pool without secrets/Docker.  
 7. **GitHub-lane compiler cache:** the strict contract makes the GitHub lane a
    cold-compile baseline (`SCCACHE_GHA_ENABLED=false`, job-lifetime store).
