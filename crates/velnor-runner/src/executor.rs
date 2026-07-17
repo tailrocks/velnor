@@ -4046,14 +4046,23 @@ fn cache_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
     // caches their siblings saved (see container::daemon_shared_root).
     let repository = state
         .resolve_context_expression("github.repository")
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown-repository".to_string());
-    Ok(crate::container::daemon_shared_root(shared_work_root(temp))
-        .join("_velnor_caches")
-        .join(crate::container::sanitize_store_key(
-            &crate::github_adapter::cargo_target_trust_scope(),
-        ))
-        .join(crate::container::sanitize_store_key(&repository)))
+        .filter(|value| !value.is_empty());
+    let Some(repository) = repository else {
+        eprintln!(
+            "forensics.lifecycle: persistent actions cache refused: missing github.repository"
+        );
+        return Ok(temp.join("_velnor/ephemeral/caches"));
+    };
+    let root = crate::storage::cache_class_path(
+        &crate::container::daemon_shared_root(shared_work_root(temp)),
+        "caches",
+        "_velnor_caches",
+    );
+    Ok(crate::storage::append_legacy_trust(
+        root,
+        &crate::github_adapter::cargo_target_trust_scope(),
+    )
+    .join(crate::container::sanitize_store_key(&repository)))
 }
 
 fn shared_work_root(temp: &Path) -> PathBuf {
@@ -7418,9 +7427,23 @@ mod tests {
     }
 
     #[test]
+    fn cache_store_refuses_missing_repository_identity() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        fs::create_dir_all(&temp).unwrap();
+        let state = JobExecutionState::new_internal(&[], &[], None, Some(temp.clone()));
+        assert_eq!(
+            cache_store_dir(&state).unwrap(),
+            temp.join("_velnor/ephemeral/caches")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn cache_hit_output_matches_actions_cache() {
         let root = temp_dir();
-        let store = root.join("_velnor_caches/trusted/unknown-repository");
+        let store = root.join("_velnor_caches/trusted/Test_Repo");
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
         let exact_cache = store.join("linux-rust-exact");
         let partial_cache = store.join("linux-rust-prefix-new");
         fs::create_dir_all(exact_cache.join("0")).unwrap();
@@ -7463,7 +7486,7 @@ mod tests {
             .execute_ordered_steps(
                 &container(&exact_temp),
                 &cache_step("linux-rust-exact", ""),
-                &[],
+                &env,
                 &exact_temp,
             )
             .unwrap();
@@ -7471,7 +7494,7 @@ mod tests {
             .execute_ordered_steps(
                 &container(&partial_temp),
                 &cache_step("linux-rust-prefix-miss", "linux-rust-prefix-\n"),
-                &[],
+                &env,
                 &partial_temp,
             )
             .unwrap();
@@ -7479,7 +7502,7 @@ mod tests {
             .execute_ordered_steps(
                 &container(&miss_temp),
                 &cache_step("linux-rust-total-miss", "linux-rust-missing-\n"),
-                &[],
+                &env,
                 &miss_temp,
             )
             .unwrap();
@@ -7687,6 +7710,7 @@ mod tests {
             "cached\n",
         )
         .unwrap();
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
         let save = vec![ExecutableStep::Native {
             step_id: "cache".into(),
             display_name: String::new(),
@@ -7704,7 +7728,7 @@ mod tests {
             timeout_minutes: None,
         }];
         DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(&container(&save_temp), &save, &[], &save_temp)
+            .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
         let restore = vec![ExecutableStep::Native {
@@ -7725,7 +7749,7 @@ mod tests {
             timeout_minutes: None,
         }];
         let restore_results = DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(&container(&restore_temp), &restore, &[], &restore_temp)
+            .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
         assert_eq!(restore_results[0].exit_code, 0);
@@ -7747,6 +7771,7 @@ mod tests {
         )
         .unwrap();
         let folded_key = "rust-script-Linux-deadbeef\n";
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
         let save = vec![ExecutableStep::Native {
             step_id: "cache".into(),
             display_name: String::new(),
@@ -7765,7 +7790,7 @@ mod tests {
         }];
 
         let save_results = DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(&container(&save_temp), &save, &[], &save_temp)
+            .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
         assert_eq!(
@@ -7773,9 +7798,7 @@ mod tests {
             "rust-script-Linux-deadbeef"
         );
         assert!(root
-            .join(
-                "_velnor_caches/trusted/unknown-repository/rust-script-Linux-deadbeef/0/state.bin"
-            )
+            .join("_velnor_caches/trusted/Test_Repo/rust-script-Linux-deadbeef/0/state.bin")
             .exists());
 
         let restore = vec![ExecutableStep::Native {
@@ -7795,7 +7818,7 @@ mod tests {
             timeout_minutes: None,
         }];
         let restore_results = DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(&container(&restore_temp), &restore, &[], &restore_temp)
+            .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
         assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
@@ -7828,7 +7851,10 @@ mod tests {
             "cached\n",
         )
         .unwrap();
-        let env = vec![("GITHUB_RUN_ID".into(), "123456".into())];
+        let env = vec![
+            ("GITHUB_RUN_ID".into(), "123456".into()),
+            ("GITHUB_REPOSITORY".into(), "Test/Repo".into()),
+        ];
         let save = vec![ExecutableStep::Native {
             step_id: "cache".into(),
             display_name: String::new(),
@@ -7855,7 +7881,7 @@ mod tests {
             .stdout
             .contains("Saved cache 'linux-rust-script-abc'"));
         assert!(root
-            .join("_velnor_caches/trusted/unknown-repository/linux-rust-script-abc/0/state.bin")
+            .join("_velnor_caches/trusted/Test_Repo/linux-rust-script-abc/0/state.bin")
             .exists());
 
         let restore = vec![ExecutableStep::Native {
@@ -7905,6 +7931,7 @@ mod tests {
             "cached\n",
         )
         .unwrap();
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
         let save = vec![ExecutableStep::Native {
             step_id: "cache".into(),
             display_name: String::new(),
@@ -7923,7 +7950,7 @@ mod tests {
         }];
 
         DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(&container(&save_temp), &save, &[], &save_temp)
+            .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
         let lookup = vec![ExecutableStep::Native {
@@ -7944,7 +7971,7 @@ mod tests {
             timeout_minutes: None,
         }];
         let lookup_results = DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(&container(&lookup_temp), &lookup, &[], &lookup_temp)
+            .execute_ordered_steps(&container(&lookup_temp), &lookup, &env, &lookup_temp)
             .unwrap();
 
         assert_eq!(lookup_results[0].exit_code, 0);
@@ -7960,7 +7987,8 @@ mod tests {
     fn native_cache_restore_key_uses_newest_prefix_match() {
         let root = temp_dir();
         let restore_temp = root.join("restore-job/temp");
-        let store = root.join("_velnor_caches/trusted/unknown-repository");
+        let store = root.join("_velnor_caches/trusted/Test_Repo");
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
         let old_cache = store.join("rust-linux-a-old");
         let new_cache = store.join("rust-linux-z-new");
         fs::create_dir_all(old_cache.join("0")).unwrap();
@@ -7992,7 +8020,7 @@ mod tests {
         }];
 
         let restore_results = DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(&container(&restore_temp), &restore, &[], &restore_temp)
+            .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
         assert_eq!(restore_results[0].state.outputs["cache-hit"], "false");

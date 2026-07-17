@@ -62,6 +62,15 @@ Units (all shipped by the package):
   after a timer run. Inspect `systemctl list-timers 'velnor-doctor*'` and
   failed units instead of treating inactive one-shot services as stale daemons.
 
+Persistent stores use `/var/cache/velnor/v1/<trust-scope>/...`; durable state,
+runtime leases, and logs use `/var/lib/velnor`, `/run/velnor`, and
+`/var/log/velnor`. Package units set `VELNOR_STORAGE_ROOT=/var`. Before an
+upgrade that adopts the canonical tree, drain every daemon and move each
+legacy `/var/lib/velnor*/work/_velnor_*` class into its matching canonical
+trust/class path. Velnor reads an existing legacy class only while its
+canonical destination is absent, so migration is explicit and reversible.
+Use `velnor-runner storage paths` and `storage status` to inspect resolution.
+
 ## Current runner state
 
 The first Rust crate is `velnor-runner`. Velnor targets GitHub's current V2

@@ -81,6 +81,10 @@ all writable stores plus active-job peaks stays below filesystem capacity.
 
 ## Canonical on-disk contract
 
+Implementation status: canonical root resolution, explicit legacy readability,
+and fail-closed persistent identity are closed by plan 035. Capacity leases,
+physical accounting, and destructive reconciliation remain plans 036–037.
+
 Use one configurable prefix, defaulting to the normal Linux locations below.
 Do not hide persistent caches under a daemon's GitHub-compatible work tree.
 
@@ -126,6 +130,10 @@ cache key and mount. Untrusted jobs never receive trusted writable stores,
 compiler-cache credentials, executable tool stores, or the host Docker socket.
 
 ## Catalog and accounting
+
+Implementation status: the read-only class catalog and `storage paths/status`
+operator surface are closed by plan 035; the authoritative SQLite lifecycle,
+allocated-byte accounting, budgets, and audit history remain plans 036–037.
 
 Store an authoritative SQLite catalog under `/var/lib/velnor/storage.db`, with
 the filesystem as the reconciled source of physical truth. Do not use atime.
