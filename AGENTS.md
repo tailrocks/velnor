@@ -132,6 +132,22 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-07-18: **Single-branch delivery, uniform shape, host baseline cleanup**
+  ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) §2.12 + §8): the
+  entire standardization program lands as exactly one branch named
+  `velnor-estate-standard` per repository — velnor included (all runner work
+  plus dogfood CI on that one branch) and the fixture included; per-feature
+  commits, never per-feature branches; every V-B/V-C dual-runner
+  verification dispatches from the program branch before merge. §2.12 makes
+  uniformity literal: identical workflow filenames (`ci.yml`, `release.yml`,
+  `docs.yml`, `preview.yml`, `renovate.yml`), job ids, dispatch input, cache
+  keys, concurrency groups, and a shared `.github/AGENTS.md` template across
+  all repos; `audit-ci` enforces names as well as behavior. New Phase-0 gate:
+  the Velnor host is cleaned to a recorded baseline (stale runners, leftover
+  Docker resources, legacy `unknown-repository` trees, over-budget BuildKit
+  stores — owned-resource deletion only) before any verification campaign;
+  the durable fix remains V0.7–V0.13.
+
 - 2026-07-18: **Portability + freshness laws**
   ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) §2.0): (1) one YAML
   runs on all lanes — every Velnor acceleration is runner-internal with

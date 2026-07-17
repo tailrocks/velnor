@@ -58,6 +58,7 @@ One CI/CD shape for every listed repository:
 4. Estate adapters green for the shared action surface.
 5. Fixture proves the **inline lane matrix** expression.
 6. **Per-repo timing baseline recorded** (cold / warm / no-change rerun, both lanes, §2.11) — a migration without numbers is not a migration.
+7. **Velnor host cleaned to a recorded baseline** (§8 Phase 0.5) before the dual-lane verification campaigns — measurements on a polluted host don't count.
 
 ---
 
@@ -443,6 +444,25 @@ latency classes found in the 2026-07-18 estate scan (§3.0):
 5. Regression gate: `audit-ci` perf mode (§2.8) fails warm runs showing
    dependency download/compile or tool-install markers.
 
+### 2.12 Uniform shape — identical names everywhere
+
+"One approach" is literal: for every concern a repo has, every repo uses the
+**same file names, job ids, input names, key shapes, and branch name**. A
+maintainer moving between repos must find zero naming drift.
+
+| Surface | Canonical form |
+|---------|----------------|
+| Program branch | `velnor-estate-standard` — **one branch per repo carries that repo's entire program work**, velnor itself included (runner features + dogfood CI on the same branch) and the fixture too. Per-feature commits, never per-feature branches. |
+| Workflow files | `ci.yml` (always); `release.yml` (publish/tag); `docs.yml` (docs + Pages); `preview.yml`; `renovate.yml`. One concern = one filename, identical in every repo. Extra repo-specific workflows allowed; they follow every other rule. |
+| Dispatch input | `lanes` exactly as §2.1 — same description text, default, options order |
+| Job ids | `rust`, `integration`, `audit`, `build-image`, `docs`, `release`, `ci-required`; display names `<Purpose> (${{ matrix.config.lane }})` |
+| Concurrency groups | `<workflow-name>-${{ github.ref }}` |
+| Cache keys | §2.4/§9 shapes verbatim (`cargo-registry-<lane>-<os>-<lockhash>`, …) |
+| `.github/AGENTS.md` | Identical shared template text (three lanes, ubuntu-26.04, standard stack); repo-specific lines appended **below** the shared block |
+| Env block, step order, timeout tiers | §2.10/§9 verbatim |
+
+Enforcement: `audit-ci` (§2.8) checks names and shapes, not just behavior.
+
 ---
 
 ## 3. Per-repository analysis and target configuration
@@ -761,12 +781,28 @@ Prioritized by unblocking estate default-flip and stability. Detail for cache: �
 
 Do **not** open 13 PRs on day one.
 
+**Delivery model — one branch per repo (§2.12).** The entire program lands
+as exactly ONE branch named `velnor-estate-standard` in every repository —
+velnor included (all runner work + dogfood CI on that one branch) and the
+fixture included. Phases below order the opening and merging of those
+branches; they never split a repo's work across branches. Every dual-runner
+verification (V-B three-lane dispatch, V-C timing) runs **from the repo's
+program branch before merge** — the same configuration must be proven on
+GitHub and on Velnor for everything the branch changes.
+
 ### Phase 0 — Contract + runner readiness
 
 1. Land / keep this document as law.  
 2. Snippet pack: inline matrix + `setup-rust-ci` (fixture first).  
 3. Close V0.7–V0.10 (GC, budgets, matrix proof) enough for fleet safety.  
-4. Confirm fleet labels and org JIT approach.
+4. Confirm fleet labels and org JIT approach.  
+5. **Host baseline cleanup**: before any verification campaign, clean the
+   Velnor host to a recorded baseline — stale runner registrations, leftover
+   velnor Docker resources, legacy `unknown-repository` store trees,
+   over-budget BuildKit stores — inventory-first, supervised, owned-resource
+   deletion only (never broad prune). Cold/warm measurements on a polluted
+   host are not trustworthy. The durable fix remains V0.7–V0.13; this is the
+   one-time test-bed reset.
 
 ### Phase 1 — Reference alignment
 
