@@ -495,6 +495,23 @@ Adapters or node fallback must cover these families (local composite `./.github/
 | `sigstore/cosign-installer` | (registry; jackin uses mise cosign) | native install path |
 | `hadolint/hadolint-action` | agent roles (not this list) | image-baked |
 
+### 4.14 Host cache hygiene mandate (from jackin `rust-build-cache-hygiene.mdx`)
+
+Jackin's July 2026 disk audit found ~410 GB in one cache root because caches were created for speed with no lifetime owner. Velnor's host-persistent stores (cargo registry/git, sccache, mise installs, target buckets, buildkit) have the **same bug class**: every store must have an owner, purpose label, default budget, eviction policy, and operator-visible accounting — before the estate default-flip multiplies write pressure by 13 repos.
+
+Adopted rules for Velnor host stores:
+
+| Rule | Application |
+|------|-------------|
+| **Every cache class labeled + owned** | `_velnor_cargo`, `_velnor_mise`, `_velnor_sccache`, target buckets, buildkit state: each gets purpose, budget, safe-deletion condition in docs + code metadata |
+| **Bounded sccache** | Set `SCCACHE_CACHE_SIZE` explicitly on host store (upstream default is only 10 GB — size for 13-repo estate deliberately, e.g. 50–100 GB, measured) |
+| **No unbounded target buckets** | Per-trust-scope `VELNOR_CARGO_TARGET_PERSIST` buckets keyed per repo/workspace; LRU/TTL eviction; never one global `CARGO_TARGET_DIR` across repos (Cargo lock serialization + `cargo clean` blast radius, rust-lang/cargo#12516) |
+| **Prune + doctor surface** | `velnor-tools` (or daemon doctor) reports bytes by cache class, dry-run prune, class selectors (`--cargo`, `--sccache`, `--targets`, `--buildkit`) |
+| **Soft budget guardrail** | Warn when a Velnor-owned cache root crosses configured threshold; auto-eviction only for classes labeled safe; never touch non-Velnor paths |
+| **Registry cleanup** | Cargo 1.78+ auto-cleans global registry caches; rely on it for CARGO_HOME, add explicit policy only if measurement shows growth |
+
+Two-cache model (mirrors jackin recommendation): shared downloads + compiler results (cargo home + sccache, cross-repo safe), bounded per-scope build-output targets (disposable, pruned by policy). Same architecture Velnor already sketches; hygiene layer is what's missing.
+
 ---
 
 ## 5. Reference patterns (what to copy from where)
@@ -622,6 +639,75 @@ Resource caps: keep `VELNOR_JOB_CPUS` / `VELNOR_JOB_MEMORY` daemon defaults; tun
 
 Prioritized by **unblocks standardization** and **correctness**.
 
+### 8.1 Cache-hygiene findings from jackin's July 2026 research
+
+The requested
+[Rust Build Cache Hygiene proposal](https://github.com/jackin-project/jackin/blob/0cbada6dc0cd2adfc603bffd17287145520d374c/docs/content/docs/roadmap/rust-build-cache-hygiene.mdx)
+documents the failure mode Velnor's warm fleet will otherwise reproduce at
+larger scale: a target grew to 460 GiB, including thousands of incremental
+session directories, while alternate `CARGO_TARGET_DIR` values duplicated
+near-identical artifacts. Its important conclusion is structural: a warm cache
+without ownership, accounting, budgets, retention, and automatic reclamation is
+an availability bug, not a performance feature.
+
+Velnor already has the right design skeleton in `docs/cache-gc-design.md` and
+the read-only `velnor-runner cache du` / `cache gc --dry-run` commands. The
+destructive reaper is deliberately absent because there is no daemon-wide GC
+lock or authoritative active-scope set. The estate rollout makes completing
+that work a **P0 gate**: thirteen default-on repositories must not be allowed to
+fill the host and park every slot.
+
+Required runner changes:
+
+1. **One cache registry.** Every Velnor-owned store (`_velnor_cargo`,
+   `_velnor_mise`, `_velnor_targets`, `_velnor_caches`, `_velnor_artifacts`,
+   `_velnor_sccache`, BuildKit) declares owner, purpose, path schema, trust
+   boundary, size budget, retention/TTL, deletion-safety rule, and observable
+   counters. `doctor` and `cache du` report logical and physical bytes by class
+   and scope.
+2. **Bounded by construction.** Add explicit sccache size configuration (the
+   upstream cache supports `SCCACHE_CACHE_SIZE`), per-store byte ceilings, and
+   high/low-watermarks. Run GC before the disk-floor logic parks slots. A
+   cache-pressure incident must reclaim disposable state automatically and
+   remain explainable from forensic logs.
+3. **Safe destructive GC.** Implement the daemon-shared lock and derive the
+   in-use set from live slot/job bookkeeping. Never delete an active scope.
+   Emit structured trace spans plus one forensic record per candidate/deletion;
+   retain dry-run and operator-triggered modes.
+4. **Target buckets stay isolated and disposable.** Keep the current
+   `<trust>/<repo>/<workflow>/<job>` boundary, add toolchain/target/profile/
+   flags/cache-contract generation to the bucket identity, retain only the
+   newest measured N, and never introduce one global target directory. Cargo's
+   own model permits redirected target dirs but does not provide a shipped
+   user-wide target cache; a global directory creates lock and cleanup blast
+   radius ([Cargo build cache](https://doc.rust-lang.org/cargo/reference/build-cache.html),
+   [Cargo #12516](https://github.com/rust-lang/cargo/issues/12516)).
+5. **Incremental compilation is always off in CI.** Enforce
+   `CARGO_INCREMENTAL=0` in the runner's compiling-job environment and audit
+   `target/**/incremental` growth. Compiler caches cannot safely cache
+   incrementally compiled crates; sccache accelerates recompilation but does
+   not garbage-collect target trees
+   ([sccache](https://github.com/mozilla/sccache),
+   [Cargo profiles](https://doc.rust-lang.org/cargo/reference/profiles.html#incremental)).
+6. **Evaluate kache; do not switch on claims alone.** The proposal recommends
+   kache for its content-addressed store, reflink/hardlink restore, path
+   normalization, and built-in GC. Those properties directly address target
+   duplication, while sccache remains substantially more mature and already
+   has the estate's remote/GHA integration. Build a Velnor prototype on the
+   actual Linux host filesystem and through the Docker bind-mount path. Measure
+   physical bytes, correctness under parallel jobs, hit rate, GC safety, and
+   cold/warm latency against capped sccache. Adopt kache only if that proof is
+   green; never pin `latest`, and add a native adapter/fixture before making it
+   a workflow dependency.
+7. **Cache-health acceptance gate.** A soak test runs representative parallel
+   jobs and worktrees long enough to cross at least one GC cycle. It must prove:
+   bounded steady-state bytes, no deletion of active data, no incremental-dir
+   accumulation, no cross-trust reuse, no full-host slot parking, and warm
+   reruns without avoidable downloads or compilation.
+
+This changes the priority below: cache GC is not P2 housekeeping. It is fleet
+stability work required before mass default flips.
+
 ### P0 — Must work before mass default-flip
 
 | ID | Item | Why |
@@ -632,6 +718,8 @@ Prioritized by **unblocks standardization** and **correctness**.
 | V0.4 | **Native adapters green** for estate action set (checkout, cache, mise, sccache, mold, rust-cache, paths-filter, docker family, artifacts) | Node sidecar is not the product path |
 | V0.5 | **`services:` / job containers** parity if schemalane (or others) use service containers | Library Postgres tests |
 | V0.6 | **Secret-bearing Docker login** on trusted pools only | blockchain-nodes / java-monorepo publish |
+| V0.7 | **Finish destructive cache GC safely** (shared lock, active-scope set, budgets, TTL/LRU, forensics) | Prevent warm stores from filling disk and parking the default runner fleet |
+| V0.8 | **Cache accounting in doctor/telemetry** (logical + physical bytes, per class/scope, high-water alerts) | Operators must see growth before capacity is lost |
 
 ### P1 — Needed for parity quality
 
@@ -644,13 +732,15 @@ Prioritized by **unblocks standardization** and **correctness**.
 | V1.5 | **Composite local actions** resolution always eager when checkout needed | historical eager-checkout bugs |
 | V1.6 | **Job image track ubuntu-26.04** align with GitHub pin | reduce lane drift |
 | V1.7 | **Performance markers** (optional): expose sccache/stats consistently in logs | warm-run audits |
+| V1.8 | **Cache hygiene program** (§4.14): cache-class inventory, budgets (`SCCACHE_CACHE_SIZE`), prune/doctor accounting, soft budget warnings | 13-repo estate multiplies host-store growth; jackin audit proved unowned caches reach 400+ GB |
+| V1.9 | **Target-bucket eviction**: LRU/TTL on per-scope cargo target buckets; per-repo keying, never global `CARGO_TARGET_DIR` | Parallel jobs + `cargo clean` blast radius (rust-lang/cargo#12516) |
 
 ### P2 — Superiority / scale
 
 | ID | Item | Why |
 |----|------|-----|
 | V2.1 | Multi-host scale-out / shared store design | tailrocks+ChainArgos+jackin together |
-| V2.2 | Remote shared sccache (jackin deferred kache comparison) | multi-host compiler cache |
+| V2.2 | Remote compiler cache: capped sccache baseline plus measured kache prototype | multi-host hits without unbounded or duplicated local state |
 | V2.3 | Richer native coverage for REUSE / gitleaks if not mise-installed | fewer node actions |
 | V2.4 | Fixture expansion for every new estate action | contract tests |
 
@@ -827,6 +917,7 @@ Recommended combination: **C for tailrocks**, **B/A for ChainArgos/jackin** (the
 | Ubuntu pin | Zero `ubuntu-latest` on workload jobs; GitHub = `ubuntu-26.04` |
 | Toolchain | Zero `dtolnay/rust-toolchain` in estate product workflows |
 | Warm rerun | No dependency download/compile wall on Velnor for unchanged commit |
+| Cache stability | Soak reaches steady-state under configured budgets; GC never touches active or cross-trust data; no incremental-session growth |
 | Clarity | Job name alone explains purpose + lane |
 | Velnor features | P0 backlog items closed before tailrocks mass flip |
 
@@ -870,6 +961,7 @@ Recommended combination: **C for tailrocks**, **B/A for ChainArgos/jackin** (the
 - Velnor docs: `mission.md`, `master-plan.md`, `runner-usage.md`, `perf-instant-cache-plan-2026-06-11.md`, `target-action-registry.md`.
 - ChainArgos java-monorepo `.github/AGENTS.md` (runner lane + ubuntu-26.04 policy).
 - jackin `.github/workflows/AGENTS.md` and PR [#810](https://github.com/jackin-project/jackin/pull/810) (result reuse, semantic jobs, Rust-owned CI).
+- jackin roadmap `docs/content/docs/roadmap/rust-build-cache-hygiene.mdx` (cache ownership/budget/prune model → §4.14, V1.8–V1.9).
 
 ---
 
