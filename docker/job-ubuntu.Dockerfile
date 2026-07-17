@@ -1,4 +1,4 @@
-FROM ubuntu:26.04@sha256:b7f48194d4d8b763a478a621cdc81c27be222ba2206ca3ca6bc42b49685f3d9e
+FROM ubuntu:26.04@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -76,12 +76,12 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/sccache-build \
     mkdir -p /opt/mise/bin && \
-    curl -fsSL https://mise.run | MISE_VERSION="v2026.7.0" MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
+    curl -fsSL https://mise.run | MISE_VERSION="v2026.7.7" MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
     # gh: GitHub-hosted runner images preinstall the GitHub CLI and estate
     # scripts rely on it (e.g. jackin-role-action's download script) —
     # drop-in parity requires it in the job image too.
     RUSTC_WRAPPER=sccache SCCACHE_DIR=/sccache-build \
-    mise use --global rust@1.96.1 'cargo:cargo-nextest@0.9.137' 'cargo:rust-script@0.36.0' just@1.56.0 protoc@35.1 gh@2.96.0 && \
+    mise use --global rust@1.97.1 'cargo:cargo-nextest@0.9.137' 'cargo:rust-script@0.36.0' just@1.56.0 protoc@35.1 gh@2.96.0 && \
     mise reshim && \
     rustup component add rustfmt clippy && \
     mise exec -- rustc --version && \
