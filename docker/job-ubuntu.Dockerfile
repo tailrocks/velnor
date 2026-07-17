@@ -93,7 +93,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
 
 # cosign: backs the native sigstore/cosign-installer adapter and the
 # `cosign sign` steps in the agent-role publish workflows.
-RUN cosign_ver="v3.1.1" && \
+RUN cosign_ver="v3.1.2" && \
     case "$(uname -m)" in \
       x86_64) cs_arch="amd64" ;; \
       aarch64|arm64) cs_arch="arm64" ;; \
