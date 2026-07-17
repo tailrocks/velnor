@@ -300,6 +300,171 @@ Kache's `clean-targets` command is not fleet-aware and must never be used as
 Velnor host GC. Its remote store also does not by itself establish producer
 authenticity or a multi-tenant cache-poisoning boundary.
 
+### Why kache remains a candidate
+
+The candidate status is tied to Sentry's measured failure mode, not novelty:
+
+1. The dominant Velnor-owned consumer is about 432 GB of persistent Cargo
+   target trees, not the roughly 22 GB of sccache stores.
+2. Common Rust artifacts appear in 20--32 target buckets. sccache avoids rustc
+   work but its restored output becomes an ordinary independent target file;
+   it does not make all resulting target trees share physical extents.
+3. Kache stores content-addressed blobs and restores through reflink, then
+   hardlink/copy fallbacks. Sentry's XFS reports `reflink=1`, so repeated
+   immutable outputs may share extents between the Kache store and target
+   buckets. This is a hypothesis until physical allocated bytes prove it
+   through the actual Docker bind/overlay path.
+4. Kache has an explicit local size policy, weighted eviction, access grace,
+   GC serialization, and orphan sweeping. Those are useful subordinate
+   mechanisms even though Velnor still owns the host reserve.
+
+Kache loses candidate status if the topology soak finds SQLite/WAL corruption,
+reflink restoration does not work through the real mount layout, physical bytes
+do not materially fall, warm builds regress, or trust-scoped operation cannot
+be made safe. The decision is evidence-gated rather than a committed migration.
+
+### Supporting both compiler caches
+
+Velnor should support both as **installed, selectable backends**, but not stack
+both around one rustc invocation.
+
+Cargo exposes one general `RUSTC_WRAPPER`; it can technically nest that with a
+separate workspace wrapper, producing
+`$RUSTC_WRAPPER $RUSTC_WORKSPACE_WRAPPER $RUSTC`. That mechanism does not prove
+that two compiler caches are composable. Stacking sccache and kache would add
+double lookup/write I/O, ambiguous hit and failure accounting, altered cache
+keys, and two independent GC systems while providing little useful second-level
+behavior. Sccache already has a supported multi-level backend chain when local
+plus remote tiers are desired.
+[Cargo wrapper configuration](https://doc.rust-lang.org/cargo/reference/config.html#buildrustc-wrapper),
+[sccache configuration](https://github.com/mozilla/sccache/blob/main/docs/Configuration.md)
+
+The supported modes should be:
+
+| Mode | Purpose |
+|---|---|
+| `sccache` | production default; current estate behavior |
+| `kache` | trusted canary and, only after gates pass, an optional production backend |
+| `off` | diagnosis and correctness baseline |
+
+Selection is immutable for a job and scoped by daemon/pool initially; later it
+may be selected by trusted workload class. Sccache and kache use separate
+canonical roots, budgets, leases, metrics, and remote credentials. Different
+jobs may use different backends concurrently on the same host.
+
+Implement a Rust `CompilerCacheBackend` seam owning binary discovery, mount,
+environment, setup, post-job statistics, health, and cache-native GC. The
+runner image may contain both pinned binaries, but it injects exactly one
+wrapper. The existing native `mozilla-actions/sccache-action` adapter remains
+GitHub-workflow compatible: on a Velnor kache canary it must clearly report that
+the configured compiler-cache backend is kache and set the later-step
+environment accordingly, rather than starting an unused sccache server.
+
+The standardized workflows currently also set `RUSTC_WRAPPER=sccache` and run
+an explicit `sccache --show-stats`. Those hard-coded commands prevent truthful
+transparent backend selection. Standardization should retain the marketplace
+sccache action for the GitHub lane but move wrapper selection and statistics
+behind the setup action/post step; no workflow step should assume a cache CLI.
+On GitHub-hosted this still resolves to sccache. On Velnor it allows the native
+adapter to select the configured backend while keeping identical workload YAML.
+
+Acceptance requires three independent fixture lanes using the same compile
+workload: `off`, `sccache`, and `kache`. Add an explicit negative test proving
+that configuration rejects simultaneous wrappers. Compare cold build, first
+warm build, repeated warm build, physical target+store bytes, hit correctness,
+concurrent GC, cancellation, and reboot recovery.
+
+### Deep comparison: action and storage modes
+
+The tools and their GitHub Actions integrations must not be conflated:
+
+| Dimension | `mozilla-actions/sccache-action` | `kunobi-ninja/kache-action` | Consequence for Velnor |
+|---|---|---|---|
+| Compiler model | Mature client/server compiler wrapper | Newer content-addressed compiler wrapper with SQLite index | Both can be one selected `RUSTC_WRAPPER` |
+| Local storage | Built-in disk backend, default 10 GiB unless configured | Content-addressed blob store, default 50 GiB unless configured | Override both with explicit, comparable budgets |
+| Local restore | Materializes cached compiler outputs normally | Reflink, then hardlink/copy fallback | Kache may reduce physical target duplication on XFS |
+| GitHub-cache mode | Sccache uses GitHub's cache service as an artifact backend when `SCCACHE_GHA_ENABLED=true` | Action restores/saves the **entire local Kache store** through `@actions/cache` when S3 is absent | Transfer granularity and setup/post time differ materially |
+| Remote storage | S3/R2, GCS, Azure, Redis, Memcached, GHA, WebDAV, OSS, COS; multi-level chains with backfill | S3-compatible stores (AWS, R2, MinIO, Ceph); selective manifest/shard warm prefetch | Sccache has broader backend maturity; Kache has a specialized prefetch design |
+| Action setup | Installs/starts sccache; workflow separately sets `RUSTC_WRAPPER` and GHA enablement | Installs Kache, sets wrapper, restores local store or starts S3 daemon | Velnor native abstraction must normalize setup semantics |
+| Post-job data | Sccache statistics/annotations | Save/sync plus report, miss-cost breakdown, summary and optional PR comment | Capture a common metric schema and retain backend-native detail |
+| Cache scope | Compiler invocations; Rust linker-producing crates and incremental builds have documented limitations | Per-crate content-addressed outputs; executable-like outputs are opt-in | Benchmark default-common scope first, then Kache executable mode separately |
+| Path portability | Requires correct `SCCACHE_BASEDIRS` normalization | Claims normalized invocation keys portable across checkouts | Test different Velnor slot/workspace paths explicitly |
+| GC | Local size cap; remote lifecycle is backend/operator policy | Weighted local eviction, grace, orphan sweep; S3 cap remains external | Both remain subordinate to Velnor filesystem GC |
+| Project evidence | Long-lived project and already production-proven in this estate | Young project/action with limited production history | Kache needs stronger soak/failure gates, not dismissal |
+
+Sources: [sccache project and storage support](https://github.com/mozilla/sccache),
+[sccache action](https://github.com/mozilla-actions/sccache-action),
+[Kache action mechanics](https://github.com/kunobi-ninja/kache-action).
+
+The statement "sccache is remote, Kache is local hardlinks" is therefore
+incomplete. Both have local and remote modes. Reflink/hardlink behavior is a
+Kache local-store advantage, while remote reach and multi-level composition are
+sccache advantages. On an ephemeral GitHub-hosted runner, Kache's local
+deduplication helps during the job, but persistence still requires transferring
+the store through GitHub cache or S3. On Velnor, the persistent XFS store makes
+the local physical-byte question much more important.
+
+### Required comparison experiment
+
+Velnor should support both native actions and expose a temporary experiment
+matrix. It runs separate jobs, never both wrappers inside the same job:
+
+| Environment | Required modes |
+|---|---|
+| Velnor persistent host | `off`, sccache-local, kache-local |
+| Velnor shared remote | sccache-local+S3, kache-local+the same S3-compatible service |
+| GitHub-hosted | `off`, sccache-GHA, kache-GHA |
+| GitHub-hosted remote | sccache-S3, kache-S3 against isolated prefixes in the same service/region |
+
+Local and remote stores are isolated by backend, experiment, trust scope, and
+workload. They receive equal local byte ceilings; remote lifecycle policies and
+network location are equal. Neither backend is allowed to consume the other's
+warmed outputs. Exact stable binary and action commits are pinned.
+
+Run the actual estate workload classes, not a synthetic hello-world:
+
+1. small libraries: schemalane, pg-bigdecimal, tracing-request-level;
+2. application/workspace: Velnor, holla, ruxel or termrock;
+3. large/mixed workspace: jackin, java-monorepo, parallax;
+4. native-heavy Rust builds and Rust compilation inside Docker builds.
+
+For each representative workload, execute in fixed order:
+
+1. empty store + empty target (cold correctness baseline);
+2. warm store + empty target (true compiler-cache restore value);
+3. warm store + retained target (normal warm Velnor value);
+4. unchanged rerun;
+5. workspace-source-only change;
+6. one dependency/lockfile change;
+7. same inputs from a different slot/workspace path;
+8. concurrency at 1, 2, 4, and host maximum;
+9. GC during lookup/write, cancellation, daemon restart, and reboot recovery.
+
+Use the same Rust/mise lock, linker, flags, target triple, features,
+`CARGO_INCREMENTAL=0`, CPU/memory limits, source commit, and job order. Rotate
+backend order between repetitions to reduce thermal and host-load bias. Run
+enough repetitions to report median and tail behavior rather than one best run.
+
+Capture these numbers mechanically in a common Velnor result record:
+
+- queue-to-start, setup/restore, compile, post/save, and total wall time;
+- rustc requests, executable requests, local/remote hits, misses, non-cacheable
+  reasons, hit latency, compile time avoided, and backend errors/fallbacks;
+- network bytes/requests and remote storage bytes/objects;
+- logical and physical allocated bytes for target, compiler store, and their
+  combined footprint; inode count and dedup/reflink ratio;
+- host free-space delta, GC duration, candidates, actual blocks freed, and
+  subsequent cold-cost caused by eviction;
+- output/test correctness, artifact hashes where deterministic, and cache
+  behavior after corruption/cancellation/reboot.
+
+The primary decision is a Pareto result, not hit rate alone. A backend wins a
+workload only if it preserves correctness and host safety while improving
+queue-to-result and/or physical bytes. Publish results by workload class: Kache
+may be the better persistent-XFS backend while sccache remains better on
+GitHub-hosted or for remote/backend breadth. Supporting both permanently is a
+valid outcome when the measured winners differ.
+
 ## Delivery sequence and acceptance gates
 
 1. Fix persistent identity and fail-closed path creation; add migration/report

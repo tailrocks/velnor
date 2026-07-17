@@ -125,7 +125,22 @@ Never let a prompt, README, or doc describe a direction that the current vision/
   the ineffective target retention scope are P0 correctness bugs. Keep capped
   sccache default; kache remains a pinned trusted canary until its documented
   container/SQLite topology constraint and representative concurrency gates
-  pass. Manual Sentry deletion is not the product fix.
+  pass. Both may be installed and selected per pool/job, with separate stores;
+  never nest both cache wrappers around one rustc invocation. Standard workflows
+  keep wrapper setup/statistics behind the native setup adapter so identical
+  YAML can use sccache on GitHub and the selected backend on Velnor. Manual
+  Sentry deletion is not the product fix.
+
+- 2026-07-18: **Measure sccache and Kache; do not guess**
+  ([storage comparison](docs/storage-and-disk-pressure-2026-07-18.md#deep-comparison-action-and-storage-modes)):
+  Velnor will support both as mutually exclusive native compiler-cache backends
+  plus `off`. Comparison uses separate matched local, GitHub-cache, and same-S3
+  modes across the actual estate workload classes. It records setup/compile/post
+  time, hit/miss reasons, network, logical and physical target+store bytes,
+  reflink/dedup behavior, GC recovery, concurrency, and crash correctness.
+  Results are median/tail and per workload; permanent backend choice may differ
+  by runner topology. Never claim that sccache is remote-only or Kache is
+  local-only, and never stack both wrappers in one job.
 
 - 2026-07-18: **Portfolio-wide Velnor-default CI standard**
   ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md)): the first

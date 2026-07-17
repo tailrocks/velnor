@@ -89,6 +89,15 @@ Jackin recommendation: **kache for host/containers (dedup), sccache kept for CI 
    trusted pool; verify physical reflink behavior through the actual mounts.
 6. Keep sccache default until representative estate A/B measurements pass.
 
+Both tools may be installed and different jobs/pools may select either one.
+Do not nest both compiler caches around the same rustc invocation. Add one
+runner-owned `CompilerCacheBackend` seam (`sccache | kache | off`) with separate
+stores, budgets, leases, health and statistics. The estate workflow must avoid
+explicit cache-CLI commands so Velnor's native setup adapter can select kache
+while the identical GitHub-hosted lane continues to select sccache. Full design
+and acceptance gates:
+[storage-and-disk-pressure-2026-07-18.md](storage-and-disk-pressure-2026-07-18.md#supporting-both-compiler-caches).
+
 **Do not** treat kache as a substitute for GC. jackin is explicit: even with kache, target dirs and stores need budgets and prune.
 
 ### P3 — Structural ownership model (port jackin’s program into Velnor ops)
