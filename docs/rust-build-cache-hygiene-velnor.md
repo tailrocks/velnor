@@ -2,7 +2,7 @@
 
 Status: analysis (2026-07-18)  
 Source: [jackin `rust-build-cache-hygiene.mdx`](https://raw.githubusercontent.com/jackin-project/jackin/0cbada6dc0cd2adfc603bffd17287145520d374c/docs/content/docs/roadmap/rust-build-cache-hygiene.mdx)  
-Related: [cache-gc-design.md](cache-gc-design.md), [perf-instant-cache-plan-2026-06-11.md](perf-instant-cache-plan-2026-06-11.md), [VELNOR_PROJECTS_SETUP.md](../VELNOR_PROJECTS_SETUP.md)
+Related: [storage-and-disk-pressure-2026-07-18.md](storage-and-disk-pressure-2026-07-18.md), [cache-gc-design.md](cache-gc-design.md), [perf-instant-cache-plan-2026-06-11.md](perf-instant-cache-plan-2026-06-11.md), [VELNOR_PROJECTS_SETUP.md](../VELNOR_PROJECTS_SETUP.md)
 
 This note maps jackin❯’s disk-hygiene research onto **Velnor the runner**, not onto jackin’s product prune UX. The bug class is the same: warm-path state grows without ownership, budgets, or automatic reclamation.
 
@@ -72,18 +72,22 @@ Jackin recommendation: **kache for host/containers (dedup), sccache kept for CI 
 |-------|--------------------------|------------------|------------------------|
 | Hit rate for same rustc inputs | Proven on estate | Needs soak | Keep sccache as default product path |
 | Disk dedup across target buckets | **No** — each `_velnor_targets/...` full copy | Content-addressed store + hardlink/reflink restore | **High value** if multi-bucket persist is widely enabled |
-| Linux job FS (ext4 typical) | N/A | Hardlink/copy (no reflink) | Store still dedupes; target restore partial benefit |
+| Linux job FS | Proven on Sentry XFS | Sentry has XFS reflink, but actual container mount path is unproven | Verify the real bind/overlay topology, not only host capability |
 | Remote backends | GHA + many | S3-like | Fleet multi-host later: sccache multi-level or kache S3 |
 | Maturity | High | Young (≈0.10, ~390★) | Trial behind feature flag, not flip default yet |
 | Adapter surface | `mozilla-actions/sccache-action` native | Would need `kache-action` native if estate switches | Do not block on kache; design env surface (`RUSTC_WRAPPER`) to stay tool-agnostic |
 
 **Concrete Velnor work for kache (optional track):**
 
-1. Feature `VELNOR_RUSTC_WRAPPER=sccache|kache` (default sccache).
-2. Job image: bake or mise-install chosen wrapper; mount `_velnor_kache` parallel to `_velnor_sccache`.
-3. Native adapter no-op for `kache-action` similar to sccache GHA redirect (host store, not tarball).
-4. FS matrix test: ext4 hardlink restore integrity under concurrent slots.
-5. 2–4 week soak on one non-critical pool before estate default change.
+1. Build the filesystem-wide disk controller first; kache only bounds itself.
+2. Feature `VELNOR_RUSTC_WRAPPER=sccache|kache` (default sccache).
+3. Bake a pinned stable version into a canary image; do not depend on the Node
+   `kache-action` product path.
+4. Resolve kache's documented warning about host cache bind mounts and SQLite
+   WAL before sharing one store across concurrent job containers.
+5. Soak 1/2/4/max slots, GC races, cancellation, restart and reboot on one
+   trusted pool; verify physical reflink behavior through the actual mounts.
+6. Keep sccache default until representative estate A/B measurements pass.
 
 **Do not** treat kache as a substitute for GC. jackin is explicit: even with kache, target dirs and stores need budgets and prune.
 
