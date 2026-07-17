@@ -87,6 +87,26 @@ Do not guess or implement blindly. Before writing new protocol code:
 
 This is mandatory for: expression types (lit/expr/format), input structures, context data, credential schemes, JIT config fields, and V2 broker protocol messages.
 
+## HARD RULE: Strict capabilities; approval for expansion
+
+Velnor supports only the exact refs, inputs, values, combinations, and runtime
+behaviors declared in the Rust capability manifest and
+[docs/strict-capability-contract.md](docs/strict-capability-contract.md).
+
+- Validate the complete received job before checkout, cache mutation, service
+  startup, or container creation.
+- Fail unsupported configuration immediately with its exact field/value,
+  accepted alternatives, and manifest version. Never ignore, approximate,
+  emulate, silently fall back, or pretend success.
+- Unknown JavaScript/remote actions are not a product fallback. Every approved
+  `uses:` path has a native Rust adapter pinned to an approved commit.
+- Implement a new capability only after the operator explicitly approves that
+  described feature. First explain why it is needed, its exact surface,
+  behavior, trust/storage/network implications, and fixture proof. Adjacent
+  approval does not authorize broader behavior.
+- Fixing an approved feature to meet its declared contract is allowed;
+  accepting new inputs, values, backends, or behavior requires approval.
+
 ## Rust-first scripting
 
 Always use Rust for scripting as much as possible. Prefer Rust for verification helpers, repository automation, data parsing, audits, and repeatable maintenance tasks because Rust gives more predictable behavior and this repository already has Rust tooling pre-set up.
@@ -106,6 +126,16 @@ Whenever a discussion or change affects the **vision, plan, or roadmap**:
 Never let a prompt, README, or doc describe a direction that the current vision/plan/roadmap no longer holds. A new prompt must start from up-to-date `docs/`, not from outdated assumptions. If a prompt and `docs/` disagree, `docs/` wins — fix the prompt.
 
 ### Direction change log
+
+- 2026-07-18: **Strict capability contract + local-only compiler caches**
+  ([docs/strict-capability-contract.md](docs/strict-capability-contract.md)):
+  validate the expanded job against a compiled Rust manifest before side
+  effects. Unsupported refs, inputs, values, expressions, backend env, and
+  combinations fail precisely; ignored inputs and unknown-action fallback are
+  architectural defects. The approved compiler-cache proposal is mutually
+  exclusive local sccache v0.16.0 or Kache v0.10.0 through pinned Actions,
+  equal 20 GiB budgets, no remote/GitHub cache, no explicit credentials, and
+  native Rust setup/post behavior. GHA/S3 requires a separate explicit yes.
 
 - 2026-07-18: **Canonical storage + disk-pressure controller are P0**
   ([docs/storage-and-disk-pressure-2026-07-18.md](docs/storage-and-disk-pressure-2026-07-18.md)):
@@ -134,13 +164,13 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 - 2026-07-18: **Measure sccache and Kache; do not guess**
   ([storage comparison](docs/storage-and-disk-pressure-2026-07-18.md#deep-comparison-action-and-storage-modes)):
   Velnor will support both as mutually exclusive native compiler-cache backends
-  plus `off`. Comparison uses separate matched local, GitHub-cache, and same-S3
-  modes across the actual estate workload classes. It records setup/compile/post
-  time, hit/miss reasons, network, logical and physical target+store bytes,
-  reflink/dedup behavior, GC recovery, concurrency, and crash correctness.
-  Results are median/tail and per workload; permanent backend choice may differ
-  by runner topology. Never claim that sccache is remote-only or Kache is
-  local-only, and never stack both wrappers in one job.
+  plus `off`. The **approved first comparison is local-only** across actual
+  estate workloads; GitHub-cache and same-S3 modes remain documented research
+  options requiring separate approval. Record setup/compile/post time, hit/miss
+  reasons, network, logical and physical target+store bytes, reflink/dedup,
+  GC, concurrency, and crash correctness. Results are median/tail and per
+  workload. Never claim either tool is inherently local-only/remote-only, and
+  never stack both wrappers in one job.
 
 - 2026-07-18: **Portfolio-wide Velnor-default CI standard**
   ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md)): the first

@@ -2,7 +2,7 @@
 
 **Status:** definitive research + implementation plan (2026-07-18, revised)  
 **Audience:** operators and agents preparing one PR per repo so **Velnor is the default runner**, with GitHub and dual-lane modes always available.  
-**Related:** [`docs/storage-and-disk-pressure-2026-07-18.md`](docs/storage-and-disk-pressure-2026-07-18.md), [`docs/rust-build-cache-hygiene-velnor.md`](docs/rust-build-cache-hygiene-velnor.md), [`docs/cache-gc-design.md`](docs/cache-gc-design.md), [`docs/perf-instant-cache-plan-2026-06-11.md`](docs/perf-instant-cache-plan-2026-06-11.md), [`docs/master-plan.md`](docs/master-plan.md)
+**Related:** [`docs/strict-capability-contract.md`](docs/strict-capability-contract.md), [`docs/storage-and-disk-pressure-2026-07-18.md`](docs/storage-and-disk-pressure-2026-07-18.md), [`docs/rust-build-cache-hygiene-velnor.md`](docs/rust-build-cache-hygiene-velnor.md), [`docs/cache-gc-design.md`](docs/cache-gc-design.md), [`docs/perf-instant-cache-plan-2026-06-11.md`](docs/perf-instant-cache-plan-2026-06-11.md), [`docs/master-plan.md`](docs/master-plan.md)
 
 This file is the **single planning artifact** for standardizing CI/CD across the estate. It defines the target contract, per-repo gap analysis, PR sequence, and Velnor runner development required to support that contract.
 
@@ -514,6 +514,7 @@ Prioritized by unblocking estate default-flip and stability. Detail for cache: Â
 | V0.11 | **Canonical storage contract** (`/var/lib`, `/var/cache`, `/run`, `/var/log`), catalog, resolved-path/status CLI, and legacy-root migration |
 | V0.12 | **Filesystem capacity controller** with active leases, target generations, per-class budgets, BuildKit ownership, job reservations, hysteresis, and hard emergency reserve |
 | V0.13 | **Reclaim before accept**: reserve worst-case space before advertising a slot, automatically GC toward the reservation, refine it on acquisition, and never silently reject an assigned job |
+| V0.14 | **Strict Rust capability manifest**: validate full job/ref/input/value/backend surface before side effects; exact errors; no ignored inputs, approximation, or unknown-action fallback |
 
 ### P1 â€” parity quality
 
@@ -533,8 +534,8 @@ Prioritized by unblocking estate default-flip and stability. Detail for cache: Â
 | ID | Item |
 |----|------|
 | V2.1 | Multi-host shared stores |
-| V2.2 | Compiler-cache backend seam (`sccache | kache | off`): capped sccache remains default; measured trusted kache canary; separate stores/budgets; never stack both wrappers |
-| V2.3 | Native sccache + Kache experiment matrix: matched local/GHA/S3 modes, real estate workload classes, common timing/hit/network/physical-byte/GC metrics, and published median/tail results |
+| V2.2 | Compiler-cache backend seam (`sccache | kache | off`): **local-only approved surface**, capped sccache remains default; Kache canary; separate stores/budgets; never stack wrappers |
+| V2.3 | Native sccache + Kache local experiment using `strict-capability-contract.md`; GHA/S3 modes require separate future approval |
 | V2.3 | Fewer node actions (mise for reuse/gitleaks patterns) |
 | V2.4 | Fixture expansion for every new estate action |
 

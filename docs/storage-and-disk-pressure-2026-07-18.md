@@ -4,6 +4,9 @@ Status: accepted direction and implementation plan (2026-07-18)
 Scope: the current 13-repository Rust, TypeScript, Java, Docker, and service-test estate  
 Related: [master-plan.md](master-plan.md), [cache-gc-design.md](cache-gc-design.md), [rust-build-cache-hygiene-velnor.md](rust-build-cache-hygiene-velnor.md)
 
+Strict local-only action configuration:
+[strict-capability-contract.md](strict-capability-contract.md).
+
 ## Decision
 
 Velnor must own a single, explicit storage contract and a filesystem-wide
@@ -407,14 +410,15 @@ the local physical-byte question much more important.
 ### Required comparison experiment
 
 Velnor should support both native actions and expose a temporary experiment
-matrix. It runs separate jobs, never both wrappers inside the same job:
+matrix. The approved first phase runs separate local-only jobs, never both
+wrappers inside one job. Remote rows are research options requiring approval:
 
-| Environment | Required modes |
+| Environment | Status and modes |
 |---|---|
-| Velnor persistent host | `off`, sccache-local, kache-local |
-| Velnor shared remote | sccache-local+S3, kache-local+the same S3-compatible service |
-| GitHub-hosted | `off`, sccache-GHA, kache-GHA |
-| GitHub-hosted remote | sccache-S3, kache-S3 against isolated prefixes in the same service/region |
+| Velnor persistent host | **Approved:** `off`, sccache-local, kache-local |
+| GitHub-hosted | **Approved:** the same local-only configurations as compatibility/cold baselines |
+| Velnor shared remote | **Not approved:** possible future same-S3 comparison |
+| GitHub cache/remote | **Not approved:** possible future sccache-GHA/Kache-GHA or same-S3 comparison |
 
 Local and remote stores are isolated by backend, experiment, trust scope, and
 workload. They receive equal local byte ceilings; remote lifecycle policies and
@@ -464,6 +468,11 @@ queue-to-result and/or physical bytes. Publish results by workload class: Kache
 may be the better persistent-XFS backend while sccache remains better on
 GitHub-hosted or for remote/backend breadth. Supporting both permanently is a
 valid outcome when the measured winners differ.
+
+The first approved experiment is local-only. The GHA/S3 rows above document
+possible future comparisons, not approved features. Do not implement them
+without separate approval. Exact allowed inputs and versions are normative in
+[strict-capability-contract.md](strict-capability-contract.md).
 
 ## Delivery sequence and acceptance gates
 
