@@ -41,6 +41,17 @@ TimeoutStopSec=10800
 User=root
 StateDirectory=velnor
 WorkingDirectory=/var/lib/velnor
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# State, work, and forensic logs all live below this root. Docker remains
+# reachable through /var/run/docker.sock; ProtectSystem=full leaves /var writable.
+ReadWritePaths=/var/lib/velnor
 
 [Install]
 WantedBy=multi-user.target
