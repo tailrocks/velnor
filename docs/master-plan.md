@@ -1,9 +1,9 @@
 # Velnor Master Plan — Goal, Current State, and Execution Sequence
 
-Status date: 2026-06-10. This document is the single top-level plan for making
-Velnor the fastest, most stable GitHub-Actions-compatible runner for the two
-production target repositories, and for making the whole CI/CD estate
-(ChainArgos + Jackin) maximally fast on both runner lanes. It extends
+Status date: 2026-07-18. This document is the single top-level plan for making
+Velnor the fastest, most stable GitHub-Actions-compatible runner for the
+standardized 13-repository portfolio, and for making the whole CI/CD estate
+(ChainArgos + Jackin + Tailrocks) maximally fast on both runner lanes. It extends
 [roadmap.md](roadmap.md) (runner-internal implementation detail) and is bound
 by [mission.md](mission.md) and the hard rules in [`../AGENTS.md`](../AGENTS.md).
 
@@ -74,6 +74,21 @@ faster Docker with warm buildkit cache.
    no ad-hoc installers.
 6. `actions/runner` (C#) remains the protocol source of truth; latest protocol
    paths only.
+7. **Storage is one explicit runner subsystem.** Velnor uses the canonical
+   layout and filesystem-wide capacity controller in
+   [storage-and-disk-pressure-2026-07-18.md](storage-and-disk-pressure-2026-07-18.md):
+   every persistent class is cataloged and bounded, active scopes are leased,
+   and only Velnor-owned state is reclaimed. Velnor automatically reclaims old
+   data to reserve a job's peak **before advertising the slot**; once acquired,
+   the job owns that reservation through result upload. Per-daemon `_velnor_*`
+   trees are a migration source, not the long-term storage interface.
+8. **Compatibility is explicit, never speculative.** The versioned Rust
+   capability manifest in
+   [strict-capability-contract.md](strict-capability-contract.md) validates the
+   complete received job before side effects. Unknown refs, inputs, values,
+   combinations, or runtime features fail immediately and precisely. New
+   surface requires explicit operator approval; adapters never ignore or
+   approximate unsupported configuration.
 
 ## 3. Incident review 2026-06-10 — and the bulletproofing it mandates
 
@@ -160,14 +175,15 @@ anywhere is propagated to every applicable repo. The four agent-role repos
 (jackin-the-architect, jackin-agent-smith, jackin-sentinel,
 jackin-agent-brown) must use the shared `jackin-project/jackin-role-action`
 (composite action + reusable publish workflow) with identical configuration —
-no per-repo drift. **Lane policy (operator, updated 2026-06-11): ChainArgos/java-monorepo and
-ChainArgos/blockchain-nodes default to the Velnor lane. Every jackin-family
-repo — jackin, the-architect, agent-smith, sentinel, and agent-brown
-(PR #91) — defaults to the GitHub runner.** All repos carry (or are gaining)
-the same lane plumbing (`lanes`/`lane` input: `github | velnor | both`,
-ported verbatim from brown's scaffolding with only the default flipped), so
-any repo can switch to Velnor at any moment without workflow rewrites
-(smith PR #68, sentinel PR #8 shipped; architect + jackin main pending).
+no per-repo drift. **Lane policy (operator, updated 2026-07-18): every
+standardized repository defaults to Velnor for automatic and manual runs,
+retains an explicit pinned-Ubuntu GitHub lane, and supports `both` with the
+same workload and exactly one writer for shared/external state.** This
+supersedes the 2026-06-11 jackin-family GitHub-default exception. The first
+standardization portfolio is the 13 repositories enumerated and analyzed in
+[`../VELNOR_PROJECTS_SETUP.md`](../VELNOR_PROJECTS_SETUP.md). All carry the
+same `lanes: velnor | github | both` contract; GitHub means exactly
+`ubuntu-26.04`, and no macOS/Windows or `ubuntu-latest` fourth lane is allowed.
 The fixture keeps its own both-lanes-by-default contract role. **Velnor must
 support the full feature surface of every estate repo.** Velnor must
 support the role-action pattern end-to-end for agent-brown (hadolint JS
@@ -211,8 +227,9 @@ Standing rules that follow:
 - mise is the only tool installer in target workflows.
 - Velnor ships as a `.deb` via `velnor-apt.tailrocks.com`; upgrades via plain
   `apt-get upgrade`.
-- Jackin repos stay on GitHub-hosted runners (no Velnor there for now); they
-  serve as the optimization reference and receive improvements too.
+- Jackin repositories use the same portfolio contract: Velnor default,
+  pinned-Ubuntu GitHub selectable, and `both`; they remain the pipeline-design
+  reference while migrating off their former GitHub-default policy.
 
 ## 5. Execution plan
 
@@ -386,7 +403,8 @@ never remove testing/release correctness while speeding things up.
    Gate: PR with one package changed runs exactly that scope; full-touch PR
    runs everything; `lanes=both` timing report shows GitHub lane at its best.
 
-**Jackin repos** (reference stays GitHub-hosted; fix their own gaps):
+**Jackin repos** (pipeline reference; migrate to portfolio-wide Velnor default
+while fixing their own gaps):
 1. **[PARTIAL — PR jackin#561 merged]** `test` un-serialized from
    `check-all-features` (up to ~2.5 min off the critical path) and `audit`
    gated on the rust filter. Remaining: spell-check gating, bench-matrix
