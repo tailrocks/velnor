@@ -25,6 +25,12 @@ Configuration (one daemon per target scope):
   `container.options` so daemon policy wins on shared warm-runner hosts.
   Set either value empty in the daemon env to disable that cap for a trusted
   scope, or tune per instance.
+- Rust compile-cache defaults: every job starts with
+  `CARGO_INCREMENTAL=0`, `SCCACHE_CACHE_SIZE=20G`, and
+  `SCCACHE_BASEDIRS=/__w:/github/home`. Workflow environment may explicitly
+  override the incremental setting and cache size. The path-normalization
+  roots are runner-owned and cannot be overridden. Set
+  `VELNOR_SCCACHE_CACHE_SIZE` on the daemon to change the default store bound.
 - Optional Rust target persistence: set `VELNOR_CARGO_TARGET_PERSIST=true` in
   the daemon env only for trusted target scopes. Velnor stores targets under
   `_velnor_targets/<trust-scope>/<repo>/<workflow>/<job-bucket>` so warm state
