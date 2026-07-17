@@ -81,7 +81,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     # scripts rely on it (e.g. jackin-role-action's download script) —
     # drop-in parity requires it in the job image too.
     RUSTC_WRAPPER=sccache SCCACHE_DIR=/sccache-build \
-    mise use --global rust@1.96.1 'cargo:cargo-nextest@0.9.137' 'cargo:rust-script@0.36.0' just@1.55.1 protoc@35.1 gh@2.96.0 && \
+    mise use --global rust@1.97.1 'cargo:cargo-nextest@0.9.137' 'cargo:rust-script@0.36.0' just@1.55.1 protoc@35.1 gh@2.96.0 && \
     mise reshim && \
     rustup component add rustfmt clippy && \
     mise exec -- rustc --version && \
