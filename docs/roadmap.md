@@ -37,6 +37,13 @@ legacy and a current implementation path, always choose the current one:
 Never implement deprecated paths from the runner just because they exist in older
 code. If a newer path exists, that is what Velnor implements.
 
+**Strict capability manifest.** Drop-in compatibility means exact behavior for
+the declared surface, not best-effort arbitrary Actions execution. Validate the
+expanded job against
+[strict-capability-contract.md](strict-capability-contract.md) before any side
+effect. Unsupported refs, inputs, values, and combinations fail clearly. New
+surface requires explicit operator approval.
+
 ## Implementation Goal
 
 Velnor is a GitHub Actions-compatible runner daemon with a Rust runtime.
@@ -55,6 +62,14 @@ The first product goal is:
 - let one Velnor daemon manage multiple internal runner slots
 - support the first target workflow surface used by `jackin-project/jackin` and
   `ChainArgos/java-monorepo`
+
+Storage and admission are runner subsystems, not per-workflow conventions. The
+canonical implementation contract is
+[storage-and-disk-pressure-2026-07-18.md](storage-and-disk-pressure-2026-07-18.md):
+Velnor catalogs and bounds all owned persistent data, reclaims inactive data to
+reserve worst-case job space before registering a slot, and holds that
+reservation through result upload. It never accepts a job and then silently
+refuses it for disk pressure.
 
 Hard rule: Velnor must first be a drop-in GitHub Actions runner replacement for
 Rust repositories. Both first target projects are Rust projects for Phase 0
