@@ -26,8 +26,8 @@ Verification gates used by every velnor code plan (from `mise.toml`):
 
 | Plan | Title | Priority | Effort | Status |
 |------|-------|----------|--------|--------|
-| 014 | Harden the systemd unit (sandboxing) without breaking Docker/bind mounts | P2 | S | BLOCKED: needs a live systemd smoke + `systemd-analyze security` score on the host — fold into the program's host window (do alongside 059) |
-| 015 | Purge committed run-log HTML captures with channel tokens + commit policy | P2 | S | BLOCKED: git-history purge is destructive — operator-confirmed window; the non-destructive part (delete files at HEAD, add the never-commit policy + guard) is executable now |
+| 014 | Harden the systemd unit (sandboxing) without breaking Docker/bind mounts | P2 | S | IN PROGRESS: unit changes now; live smoke and security score in plan 059 host window |
+| 015 | Purge committed run-log HTML captures with channel tokens + commit policy | P2 | S | BLOCKED: HEAD is clean and guard/policy exist; history purge of commit `55ed22f` requires an operator-confirmed coordinated rewrite window |
 
 ---
 
@@ -58,21 +58,21 @@ every repo (§2.12; `audit-ci` rule 11 enforces it).
 
 | Plan | Title | Priority | Effort | Depends on | Maps to | Status |
 |------|-------|----------|--------|------------|---------|--------|
-| 033 | Strict capability manifest; no unknown-action fallback | P0 | L | — | V0.14; contract gates 1–3,6,7 | TODO |
+| 033 | Strict capability manifest; no unknown-action fallback | P0 | L | — | V0.14; contract gates 1–3,6,7 | IN PROGRESS |
 | 034 | Compiler-cache backend seam (sccache v0.16.0 baked, kache, off) | P0 | L | 033 | contract gates 4–5; V2.2/V2.3 | TODO |
-| 035 | Canonical storage contract + fail-closed identity | P0 | L | — | V0.11; P0 unknown-repo bug | TODO |
+| 035 | Canonical storage contract + fail-closed identity | P0 | L | — | V0.11; P0 unknown-repo bug | IN PROGRESS |
 | 036 | Capacity controller — leases, reservations, reclaim-before-accept | P0 | L | 035 (037 couples) | V0.12/V0.13 | TODO |
 | 037 | Destructive cache GC + physical accounting | P0 | M/L | 035 | V0.7/V0.8 | TODO |
-| 038 | Job-env defaults (SCCACHE_CACHE_SIZE/BASEDIRS, CARGO_INCREMENTAL=0) | P0 | S | — | V0.9 | TODO |
-| 039 | Org-level JIT + multi-repo fleet ops | P0 | M | — | V0.1 | TODO |
-| 040 | `services:` parity (host/port env, alias) | P0 | M | — | V0.5 | TODO |
+| 038 | Job-env defaults (SCCACHE_CACHE_SIZE/BASEDIRS, CARGO_INCREMENTAL=0) | P0 | S | — | V0.9 | DONE: defaults, precedence tests, docs, and all runner gates green |
+| 039 | Org-level JIT + multi-repo fleet ops | P0 | M | — | V0.1 | IN PROGRESS |
+| 040 | `services:` parity (host/port env, alias) | P0 | M | — | V0.5 | IN PROGRESS |
 | 041 | Fixture: inline matrix, backend jobs, services job, registry sync | P0 | M | (033/034/040 soft) | V0.10; gate V-A | TODO |
 | 042 | Estate adapter completion (Pages, attest, composites, login gate) | P0/P1 | L | 033 | V0.4/V0.6/V1.1/V1.2/V1.5 | TODO |
 | 043 | Job lifecycle latency (async finalize, pre-create, JIT overlap) | P1 | L | — | V1.9/V1.10/V1.12 | TODO |
 | 044 | Git-mirror store + reflink copies | P1 | M | 035 | V1.11/V1.13 | TODO |
 | 045 | Timing observability (job summary reports, doctor SLOs) | P1 | M | 043 soft | V1.14/V1.15/V1.7 | TODO |
 | 046 | velnor-tools audit-ci + compare (incl. §2.12 uniform-shape rules) | P1 | M/L | — | V1.16; §2.8/§2.12 | TODO |
-| 059 | Velnor host baseline cleanup (operator-supervised; inventory now, destructive pass ideally post-035/037, always before the first verification campaign) | P0 | M | 035/037 preferred | §0 gate 7; §8 Phase 0.5 | TODO |
+| 059 | Velnor host baseline cleanup (operator-supervised; inventory now, destructive pass ideally post-035/037, always before the first verification campaign) | P0 | M | 035/037 preferred | §0 gate 7; §8 Phase 0.5 | IN PROGRESS: read-only inventory first; destructive pass remains gated by ownership and 035/037 |
 
 ## Execution order & status — estate (one PR per repo)
 
