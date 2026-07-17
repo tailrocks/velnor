@@ -37,6 +37,13 @@ legacy and a current implementation path, always choose the current one:
 Never implement deprecated paths from the runner just because they exist in older
 code. If a newer path exists, that is what Velnor implements.
 
+**Strict capability manifest.** Drop-in compatibility means exact behavior for
+the declared surface, not best-effort arbitrary Actions execution. Validate the
+expanded job against
+[strict-capability-contract.md](strict-capability-contract.md) before any side
+effect. Unsupported refs, inputs, values, and combinations fail clearly. New
+surface requires explicit operator approval.
+
 ## Implementation Goal
 
 Velnor is a GitHub Actions-compatible runner daemon with a Rust runtime.

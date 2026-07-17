@@ -38,6 +38,12 @@ docs win — fix the prompt. **When the vision/plan/roadmap changes, update
 > unbounded stores. No implementation prompt is activated by this analysis;
 > any future storage goal must start from that contract and its pressure tests.
 
+> **Capability direction update 2026-07-18:** Velnor validates a versioned,
+> explicitly approved surface before any job side effect and fails unsupported
+> refs/inputs/values exactly. See
+> [`../docs/strict-capability-contract.md`](../docs/strict-capability-contract.md).
+> Archived prompts do not authorize best-effort fallback or new adapter features.
+
 ## Completed Sequence Archive
 
 The table below is the historical Phase 0 execution sequence. These prompts are

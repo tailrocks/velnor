@@ -82,6 +82,13 @@ faster Docker with warm buildkit cache.
    data to reserve a job's peak **before advertising the slot**; once acquired,
    the job owns that reservation through result upload. Per-daemon `_velnor_*`
    trees are a migration source, not the long-term storage interface.
+8. **Compatibility is explicit, never speculative.** The versioned Rust
+   capability manifest in
+   [strict-capability-contract.md](strict-capability-contract.md) validates the
+   complete received job before side effects. Unknown refs, inputs, values,
+   combinations, or runtime features fail immediately and precisely. New
+   surface requires explicit operator approval; adapters never ignore or
+   approximate unsupported configuration.
 
 ## 3. Incident review 2026-06-10 — and the bulletproofing it mandates
 

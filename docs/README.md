@@ -44,3 +44,8 @@ Start here:
 - [Rust build cache hygiene → Velnor](rust-build-cache-hygiene-velnor.md):
   jackin disk-hygiene research mapped to runner gaps (budgets, GC, sccache
   vs kache, doctor inventory).
+- [Strict capability contract](strict-capability-contract.md): fail-fast,
+  versioned Rust allowlists and the exact local-only sccache/Kache proposal.
+- [Storage and disk pressure](storage-and-disk-pressure-2026-07-18.md): live
+  Sentry evidence, canonical paths, leases, reclaim-before-register, and the
+  compiler-cache comparison method.
