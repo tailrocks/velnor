@@ -102,7 +102,7 @@ impl JobContainerSpec {
             // execute files directly from those caches.
             "-v".into(),
             self.mount_arg(
-                &cargo_executable_store_host(&self.temp_host, &self.repository_store_key()),
+                &self.cargo_executable_store_host(),
                 "/github/home/.cargo/bin",
             ),
             // Host-persistent mise tool store: installed tools are executable,
@@ -111,10 +111,7 @@ impl JobContainerSpec {
             // download data and remains daemon-shared for warmth; mise uses
             // its own file locks.
             "-v".into(),
-            self.mount_arg(
-                &mise_executable_store_host(&self.temp_host, &self.repository_store_key()),
-                "/opt/mise/installs",
-            ),
+            self.mount_arg(&self.mise_executable_store_host(), "/opt/mise/installs"),
             "-v".into(),
             self.mount_arg(
                 &mise_store_host(&self.temp_host).join("cache"),
@@ -205,7 +202,7 @@ impl JobContainerSpec {
             "sh".into(),
             "-v".into(),
             self.mount_arg(
-                &mise_executable_store_host(&self.temp_host, &self.repository_store_key()),
+                &self.mise_executable_store_host(),
                 "/__velnor_seed/installs",
             ),
             "-v".into(),
@@ -561,7 +558,7 @@ impl JobContainerSpec {
         mount(&self.docker_host_path(host_path), container_path)
     }
 
-    fn repository_store_key(&self) -> String {
+    fn repository_store_key(&self) -> Option<String> {
         self.repository
             .as_deref()
             .or_else(|| {
@@ -570,8 +567,32 @@ impl JobContainerSpec {
                     .find(|(name, _)| name == "GITHUB_REPOSITORY")
                     .map(|(_, value)| value.as_str())
             })
+            .filter(|value| !value.is_empty())
             .map(sanitize_store_key)
-            .unwrap_or_else(|| "unknown-repository".to_string())
+    }
+
+    fn cargo_executable_store_host(&self) -> PathBuf {
+        self.repository_store_key().map_or_else(
+            || {
+                eprintln!(
+                    "forensics.lifecycle: persistent cargo bin store refused: missing github.repository"
+                );
+                self.temp_host.join("_velnor/ephemeral/cargo-bin")
+            },
+            |repository| cargo_executable_store_host(&self.temp_host, &repository),
+        )
+    }
+
+    fn mise_executable_store_host(&self) -> PathBuf {
+        self.repository_store_key().map_or_else(
+            || {
+                eprintln!(
+                    "forensics.lifecycle: persistent mise install store refused: missing github.repository"
+                );
+                self.temp_host.join("_velnor/ephemeral/mise-installs")
+            },
+            |repository| mise_executable_store_host(&self.temp_host, &repository),
+        )
     }
 
     fn docker_host_path(&self, host_path: &Path) -> PathBuf {
@@ -760,13 +781,17 @@ pub(crate) fn daemon_shared_root(root: PathBuf) -> PathBuf {
 }
 
 pub(crate) fn sccache_host(temp_host: &Path) -> PathBuf {
-    daemon_store_root(temp_host).join("_velnor_sccache")
+    crate::storage::cache_class_path(
+        &daemon_store_root(temp_host),
+        "compiler/sccache",
+        "_velnor_sccache",
+    )
 }
 
 /// Host-persistent cargo registry + git store, daemon-shared like sccache.
 /// Mounted at /github/home/.cargo/{registry,git} in every job container.
 pub(crate) fn cargo_store_host(temp_host: &Path) -> PathBuf {
-    daemon_store_root(temp_host).join("_velnor_cargo")
+    crate::storage::cache_class_path(&daemon_store_root(temp_host), "cargo", "_velnor_cargo")
 }
 
 /// Host-persistent cargo executable store, scoped by trust + repository.
@@ -783,15 +808,13 @@ fn cargo_executable_store_host_for_scope(
     trust_scope: &str,
     repository: &str,
 ) -> PathBuf {
-    cargo_store_host(temp_host)
-        .join("bin")
-        .join(sanitize_store_key(trust_scope))
+    crate::storage::child_with_legacy_trust(cargo_store_host(temp_host), "bin", trust_scope)
         .join(sanitize_store_key(repository))
 }
 
 /// Host-persistent mise tool store (installs + cache subdirs are mounted).
 pub(crate) fn mise_store_host(temp_host: &Path) -> PathBuf {
-    daemon_store_root(temp_host).join("_velnor_mise")
+    crate::storage::cache_class_path(&daemon_store_root(temp_host), "mise", "_velnor_mise")
 }
 
 /// Host-persistent mise executable store, scoped by trust + repository.
@@ -808,15 +831,13 @@ fn mise_executable_store_host_for_scope(
     trust_scope: &str,
     repository: &str,
 ) -> PathBuf {
-    mise_store_host(temp_host)
-        .join("installs")
-        .join(sanitize_store_key(trust_scope))
+    crate::storage::child_with_legacy_trust(mise_store_host(temp_host), "installs", trust_scope)
         .join(sanitize_store_key(repository))
 }
 
 /// Root for opt-in persistent CARGO_TARGET_DIR buckets (one per job class).
 pub(crate) fn cargo_target_store_host(temp_host: &Path) -> PathBuf {
-    daemon_store_root(temp_host).join("_velnor_targets")
+    crate::storage::cache_class_path(&daemon_store_root(temp_host), "targets", "_velnor_targets")
 }
 
 /// Resolve the daemon-shared store root from a job temp dir

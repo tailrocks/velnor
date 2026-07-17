@@ -72,17 +72,35 @@ fn github_cargo_target_store_host(
     temp_host: &std::path::Path,
     trust_scope: &str,
 ) -> PathBuf {
-    crate::container::cargo_target_store_host(temp_host)
-        .join(crate::container::sanitize_store_key(
-            &cargo_target_trust_scope_from(Some(trust_scope)),
-        ))
-        .join(crate::container::sanitize_store_key(
-            job_variable(job, "github.repository").unwrap_or("unknown-repository"),
-        ))
-        .join(crate::container::sanitize_store_key(
-            job_variable(job, "github.workflow").unwrap_or("unknown-workflow"),
-        ))
-        .join(crate::container::sanitize_store_key(&job.job_display_name))
+    let Some(repository) = job_variable(job, "github.repository").filter(|value| !value.is_empty())
+    else {
+        eprintln!(
+            "forensics.lifecycle: persistent target store refused: missing github.repository"
+        );
+        return temp_host
+            .join("_velnor/ephemeral/targets")
+            .join(crate::container::sanitize_store_key(&job.job_id));
+    };
+    let workflow = job_variable(job, "github.workflow_ref")
+        .and_then(|value| value.split('@').next())
+        .and_then(|value| value.strip_prefix(&format!("{repository}/")))
+        .or_else(|| job_variable(job, "github.workflow"))
+        .filter(|value| !value.is_empty());
+    let Some(workflow) = workflow else {
+        eprintln!(
+            "forensics.lifecycle: persistent target store refused: missing github.workflow_ref and github.workflow"
+        );
+        return temp_host
+            .join("_velnor/ephemeral/targets")
+            .join(crate::container::sanitize_store_key(&job.job_id));
+    };
+    crate::storage::append_legacy_trust(
+        crate::container::cargo_target_store_host(temp_host),
+        &cargo_target_trust_scope_from(Some(trust_scope)),
+    )
+    .join(crate::container::sanitize_store_key(repository))
+    .join(crate::container::sanitize_store_key(workflow))
+    .join(crate::container::sanitize_store_key(&job.job_display_name))
 }
 
 pub(crate) fn cargo_target_trust_scope() -> String {
@@ -857,6 +875,29 @@ mod tests {
                 "/velnor/work/_velnor_targets/trusted/ChainArgos_java-monorepo/CI___Preview/Rust___test__ubuntu_"
             )
         );
+    }
+
+    #[test]
+    fn target_bucket_refuses_missing_repository_identity() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "RunnerJobRequest",
+            "plan": { "planId": "plan-1" },
+            "timeline": { "id": "timeline-1" },
+            "jobId": "job-1",
+            "jobDisplayName": "Rust",
+            "requestId": 42
+        }))
+        .unwrap();
+        let host = github_cargo_target_store_host(
+            &job,
+            std::path::Path::new("/velnor/work/job/temp"),
+            "trusted",
+        );
+        assert_eq!(
+            host,
+            std::path::Path::new("/velnor/work/job/temp/_velnor/ephemeral/targets/job-1")
+        );
+        assert!(!host.to_string_lossy().contains("_velnor_targets"));
     }
 
     #[test]

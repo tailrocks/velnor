@@ -16,6 +16,7 @@ Type=notify
 WatchdogSec=180
 Environment=VELNOR_JOB_CPUS=4
 Environment=VELNOR_JOB_MEMORY=12g
+Environment=VELNOR_STORAGE_ROOT=/var
 EnvironmentFile=/etc/velnor/%i.env
 EnvironmentFile=-/etc/velnor/%i.secrets.env
 ExecStart=/usr/bin/velnor-runner daemon \
@@ -36,6 +37,9 @@ RestartSec=5
 TimeoutStopSec=10800
 User=root
 StateDirectory=velnor-%i
+CacheDirectory=velnor
+RuntimeDirectory=velnor
+LogsDirectory=velnor
 WorkingDirectory=/var/lib/velnor-%i
 NoNewPrivileges=true
 PrivateTmp=true
@@ -46,7 +50,7 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 # Per-instance state, work, and forensic logs all live below this root.
-ReadWritePaths=/var/lib/velnor-%i
+ReadWritePaths=/var/lib/velnor-%i /var/cache/velnor /run/velnor /var/log/velnor
 
 [Install]
 WantedBy=multi-user.target

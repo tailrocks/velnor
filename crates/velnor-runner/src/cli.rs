@@ -26,9 +26,29 @@ pub enum Command {
     Remove(RemoveArgs),
     /// Print local runner configuration status.
     Status(StatusArgs),
+    /// Inspect the canonical Velnor storage layout and catalog.
+    Storage(StorageArgs),
     /// Probe GitHub for this daemon's registered runners and fail loudly when
     /// the fleet is gone (run from a systemd timer for alerting).
     Doctor(DoctorArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct StorageArgs {
+    /// Store configuration under this directory for legacy/dev-mode resolution.
+    #[arg(long)]
+    pub config_dir: Option<PathBuf>,
+
+    #[command(subcommand)]
+    pub command: StorageCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StorageCommand {
+    /// Print every resolved storage root.
+    Paths,
+    /// Print bytes by canonical trust scope and class.
+    Status,
 }
 
 #[derive(Debug, Args)]

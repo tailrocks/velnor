@@ -17,6 +17,7 @@ mod runtime_env;
 mod script_step;
 mod sd_notify;
 mod slot_log;
+mod storage;
 mod telemetry;
 mod workflow_command;
 
@@ -50,6 +51,7 @@ async fn main() -> Result<()> {
         Command::Run(args) => runner::run(args).await,
         Command::Remove(args) => runner::remove(args).await,
         Command::Status(args) => runner::status(args).await,
+        Command::Storage(args) => storage::run(args),
         Command::Doctor(args) => runner::doctor(args).await,
     }
 }
