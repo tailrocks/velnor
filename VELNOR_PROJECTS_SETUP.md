@@ -25,6 +25,8 @@ One CI/CD shape for every listed repository:
 | 7 | **Clarity** — job/step names explain purpose; no shards/batches; complex CI decisions in Rust |
 | 8 | **One approach** — layered by complexity (library → product → monorepo), not divergent stacks |
 | 9 | **Speed is the product** — every workflow meets explicit run-class budgets (§2.11); rerun-idempotency is the acceptance test; performance is measured, never guessed |
+| 10 | **Portable YAML, hidden acceleration** — one workflow runs correctly on both runners; every Velnor speedup lives inside the runner, never in lane-specific YAML (§2.0 Law 1) |
+| 11 | **Latest and greatest** — newest stable major of every action, tool, toolchain, and workflow feature; Renovate keeps pins current; no deprecated surfaces (§2.0 Law 2) |
 
 **Policy override.** Older docs sometimes defaulted jackin-family repos to GitHub. **This plan defaults every listed repo to Velnor.** GitHub remains a permanent comparison lane.
 
@@ -79,6 +81,61 @@ Law: `docs/mission.md`, `docs/master-plan.md` §3a, `docs/runner-usage.md`, `doc
 ## 2. The Standard CI Contract (“Velnor Estate Standard”)
 
 Repos differ only in **which jobs exist**, not in **how lanes, tools, and caches are declared**.
+
+### 2.0 Two overriding laws
+
+These govern every rule below and every future change to the standard.
+
+#### Law 1 — Portable YAML, hidden acceleration (the drop-in guarantee)
+
+Velnor is a drop-in replacement for GitHub-hosted runners. The workflow is the
+public contract; the runner is where the magic lives.
+
+- **One YAML, all lanes.** Only `runs-on` differs, and only via the canonical
+  matrix. Every standardized workflow must be fully correct on GitHub-hosted
+  with Velnor absent from the universe.
+- **All Velnor speed is runner-internal**: native Rust adapters,
+  host-persistent stores, cache no-op transforms, git mirrors, container
+  pre-create, async finalization. Each optimization must preserve observable
+  step semantics — same step set, names, order, conclusions, and equivalent
+  logs (log-format contract).
+- **Sanctioned lane awareness in YAML — exactly two forms:**
+  `matrix.config.writer` single-writer gating (mutation safety, not
+  performance) and the `(${{ matrix.config.lane }})` job-name suffix
+  (clarity). Nothing else. A step that branches on runner identity for
+  performance is a design defect.
+- **If a Velnor optimization would require a YAML change, the optimization is
+  misdesigned.** Redesign it as a runner-internal transform declared in the
+  capability manifest — the `actions/cache` always-warm no-op is the model.
+- Enforcement: gate V-B lane parity + fixture-is-contract; `audit-ci` flags
+  lane-conditional steps beyond the two sanctioned forms.
+
+#### Law 2 — Latest and greatest everything
+
+Extends the runner's latest-protocol hard rule (`AGENTS.md`) to the entire
+estate surface:
+
+- **Actions:** every `uses:` targets the latest stable major, SHA-pinned to
+  the latest release at PR time with a `# vX` comment; Renovate is active in
+  every repo and keeps pins current.
+- **No deprecated surfaces:** no legacy workflow commands
+  (`set-output`, `save-state`), no actions running end-of-life Node runtimes,
+  no superseded inputs where the current major provides replacements.
+- **Workflow features:** use the current platform capabilities where they
+  serve the standard (typed `choice` inputs, `concurrency`, job-level
+  `permissions`, composite actions) — never legacy patterns copied forward.
+- **Tools and toolchains:** mise installs latest stable per committed
+  `mise.toml` + `mise.lock`; `rust-toolchain.toml` pins current stable and
+  Renovate bumps it promptly. Library MSRV coverage is a separate explicit
+  job, never the CI toolchain.
+- **OS:** GitHub lane = newest pinned Ubuntu LTS (`ubuntu-26.04` today);
+  the Velnor job image tracks it (V1.6).
+- **Native adapters track latest upstream behavior.** A new upstream action
+  major triggers adapter + manifest + fixture update; falling behind is a
+  defect, not a preference.
+- **Freshness never bypasses verification:** every upgrade lands through the
+  same gates (V-A fixture where behavior changes, V-B parity) as any other
+  change.
 
 ### 2.1 Lane plumbing
 
@@ -289,7 +346,7 @@ PR [jackin-project/jackin#810](https://github.com/jackin-project/jackin/pull/810
 | `cache-cargo-registry` | jackin-style offline verify (large workspaces) |
 | `aggregate-needs` | required status merge |
 | `tailrocks/velnor-ci-actions` (optional) | one upgrade point for tailrocks |
-| `velnor-tools audit-ci` | fail on `ubuntu-latest`, missing lanes, dtolnay, missing sccache on compile jobs, missing `concurrency`/`timeout-minutes`, uncommented `fetch-depth: 0`, double-cache stacks; **perf mode:** fail a warm run that logs dependency `Downloading`/`Compiling` or tool-install markers |
+| `velnor-tools audit-ci` | fail on `ubuntu-latest`, missing lanes, dtolnay, missing sccache on compile jobs, missing `concurrency`/`timeout-minutes`, uncommented `fetch-depth: 0`, double-cache stacks, lane-conditional steps beyond the two sanctioned forms (§2.0 Law 1), action majors behind latest upstream release, deprecated workflow commands (§2.0 Law 2); **perf mode:** fail a warm run that logs dependency `Downloading`/`Compiling` or tool-install markers |
 
 ### 2.9 Pinning & security
 
@@ -694,6 +751,8 @@ Prioritized by unblocking estate default-flip and stability. Detail for cache: �
 - Classic runner protocol.  
 - Supporting `dtolnay/rust-toolchain` as product path.  
 - Velnor-only YAML that cannot run on GitHub.  
+- Lane-conditional YAML beyond writer-gating and the lane name suffix (§2.0 Law 1).  
+- Pinning to old action majors / deprecated inputs for convenience (§2.0 Law 2).  
 - One global `CARGO_TARGET_DIR` for all repos.
 
 ---
@@ -762,6 +821,8 @@ workflow** (fixture-is-contract rule, applied to the estate).
 ### Per-PR checklist
 
 - [ ] `.github/AGENTS.md` — three lanes + ubuntu-26.04  
+- [ ] No lane-conditional steps beyond writer-gating + lane name suffix (§2.0 Law 1)  
+- [ ] Every `uses:` at latest stable major, SHA-pinned at PR time; Renovate active (§2.0 Law 2)  
 - [ ] `workflow_dispatch.inputs.lanes` default `velnor`  
 - [ ] Inline canonical matrix; `runs-on: ${{ matrix.config.runner }}`  
 - [ ] Job names include `(${{ matrix.config.lane }})`  
@@ -911,7 +972,11 @@ jobs:
    Approve the GHA sccache backend **for the GitHub lane only** (separate
    explicit yes per contract), or accept the cold baseline as the price of a
    truthful comparison lane? Recommendation: keep cold until the first
-   estate campaign quantifies the cost, then decide on data.  
+   estate campaign quantifies the cost, then decide on data. If approved, it
+   must land as a manifest-declared adapter transform — one YAML sets the GHA
+   backend, the GitHub lane consumes it, Velnor preflight treats the same
+   environment as satisfied by the host store — never as lane-conditional
+   YAML (§2.0 Law 1).  
 8. **Continuous parity cadence:** extend the canonical matrix with a
    `schedule → both` arm so a weekly scheduled run keeps GitHub parity
    verified continuously, or rely on manual `lanes=both` dispatches only?
