@@ -50,7 +50,7 @@ Instant-cache work (0.1.18+) fixed the structural “cache never saves” / HOME
 | ID | Gap | Why it hurts | Improvement |
 |----|-----|--------------|-------------|
 | **H0.1** | **No default `SCCACHE_CACHE_SIZE`** (or equivalent) injected by the runner | sccache default is modest per process, but long-lived daemon-shared `_velnor_sccache` can still grow without operator policy; multi-repo fleets amplify writes | Inject `SCCACHE_CACHE_SIZE` (daemon env, default e.g. `20G`–`50G` tunable) on every job; document in `runner-usage.md` |
-| **H0.2** | **Cache GC destructive path unfinished** | Design says: GC before disk-floor park; code still dry-run only; sccache marked “report only” | Ship reaper: lock + in-use scopes → GC targets/caches/artifacts/cargo ceilings → then disk check; optionally stop sccache and trim `SCCACHE_DIR` when over budget |
+| **H0.2** | **Cache GC destructive path unfinished** | Design says: GC before disk-floor park; code still dry-run only; sccache marked “report only” | Ship reaper: lock + in-use scopes → GC targets/caches/artifacts/cargo ceilings → then disk check; optionally stop sccache and trim `SCCACHE_DIR` when over budget. **In-use set must survive the stuck-process class**: jackin's audit found ~23 GiB undeletable for hours while a `cargo test` deadlocked on PTY I/O held target files open — GC of a disposable bucket under an active slot waits only the drain timeout, then the supervisor reaps the process so files release; never block indefinitely on a hung job. |
 | **H0.3** | **No operator-visible inventory** | jackin’s core lesson: every cache class needs owner + purpose + budget + cleanup command | Extend `velnor-runner doctor` / `cache du` with a fixed table of store classes, bytes, budget, and exact prune command |
 | **H0.4** | **Disk-floor parks slots without reclaim** | Full disk → capacity death looks like “no runners” (stability class) | Always run GC (or soft prune) before `disk_space_problem` park |
 
@@ -143,6 +143,13 @@ Implications:
 3. Enable destructive GC for `_velnor_targets`, `_velnor_caches`, `_velnor_artifacts`, coarse cargo/mise ceilings; optional sccache dir trim when over budget.
 4. Order: GC → re-check free space → only then park on disk floor.
 5. Forensic log + tracing spans for every deletion class.
+6. **Reap stuck/zombie job processes before GC of their bucket.** A process that
+   outlives slot bookkeeping (PTY-deadlocked `cargo test`, segfault-hung
+   linker) keeps target files open and blocks unlink — the jackin audit's 23 GiB
+   held-hostage class. The drain-timeout reap (already the SIGTERM path) must
+   run to completion before a bucket is considered free, so GC never waits
+   forever or skips a disposable bucket because a dead process still holds a
+   file handle.
 
 ### Phase C — target-persist safety
 
