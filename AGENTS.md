@@ -74,6 +74,11 @@ When comparing to `actions/runner` or any GitHub Actions protocol: **always targ
 
 This applies to: Twirp vs REST, WebSocket vs polling, gRPC vs HTTP, results service vs distributed task timeline, V2 broker vs classic broker.
 
+The same law covers the estate workflow surface
+([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) §2.0 Law 2): latest
+stable action majors SHA-pinned with Renovate active, latest tool/toolchain
+versions via mise, no deprecated workflow commands or superseded inputs.
+
 ## HARD RULE: Use actions/runner as the source of truth for protocol behavior
 
 When implementing or debugging any GitHub Actions runner protocol feature — job message parsing, broker messages, expression evaluation, credential handling, run-service, timeline, etc. — **always consult the official runner source first**:
@@ -126,6 +131,19 @@ Whenever a discussion or change affects the **vision, plan, or roadmap**:
 Never let a prompt, README, or doc describe a direction that the current vision/plan/roadmap no longer holds. A new prompt must start from up-to-date `docs/`, not from outdated assumptions. If a prompt and `docs/` disagree, `docs/` wins — fix the prompt.
 
 ### Direction change log
+
+- 2026-07-18: **Portability + freshness laws**
+  ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) §2.0): (1) one YAML
+  runs on all lanes — every Velnor acceleration is runner-internal with
+  preserved observable step semantics; the only sanctioned lane awareness in
+  YAML is `matrix.config.writer` gating and the lane job-name suffix; an
+  optimization that needs a YAML change is misdesigned and becomes a
+  manifest-declared runner transform (the actions/cache no-op model).
+  (2) latest-and-greatest extends from runner protocol to the whole estate:
+  latest stable action majors SHA-pinned with Renovate, latest tools and
+  toolchains via mise + `rust-toolchain.toml`, current workflow features, no
+  deprecated commands/inputs/runtimes; upgrades pass the same fixture and
+  lane-parity gates as any change. `audit-ci` enforces both laws.
 
 - 2026-07-18: **Speed doctrine + dual-runner verification protocol**
   ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) rev 2): standardization
