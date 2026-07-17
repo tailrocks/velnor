@@ -127,6 +127,26 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-07-18: **Speed doctrine + dual-runner verification protocol**
+  ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) rev 2): standardization
+  now carries explicit run classes (cold / warm / no-change rerun) with initial
+  latency budgets (§2.11), a workflow-side pipeline speed standard (§2.10:
+  concurrency + cancel-in-progress everywhere, timeout-minutes on every job,
+  shallow checkout with justified `fetch-depth: 0` only, never compile tooling
+  in CI, `line-tables-only` debuginfo, job-level path classify, docker
+  registry-cache `mode=max` + `provenance: false` off release, no double-cache
+  stacks, adapter-owned cache reporting), a 2026-07-18 perf-marker scan of all
+  13 repos (§3.0), and a four-gate dual-runner verification protocol
+  (V-A fixture → V-B lane parity → V-C perf acceptance → V-D soak) — parity
+  divergence is always fixed in Velnor, never by weakening the workflow. The
+  runner backlog gains P1-perf items V1.9–V1.16 (async finalization, container
+  pre-create, host git mirror, JIT overlap, reflink restore, step-timing +
+  cache report in job summary, pickup SLOs in doctor, `velnor-tools compare`).
+  The setup doc's old `SCCACHE_GHA_ENABLED=true` guidance is superseded: both
+  lanes run local-only compiler cache per the strict contract; GHA-backed
+  sccache for the GitHub lane is open decision §12.7, weekly scheduled `both`
+  parity runs are §12.8.
+
 - 2026-07-18: **Strict capability contract + local-only compiler caches**
   ([docs/strict-capability-contract.md](docs/strict-capability-contract.md)):
   validate the expanded job against a compiled Rust manifest before side
