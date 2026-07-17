@@ -168,7 +168,7 @@ pub struct ConfigureArgs {
     #[arg(long)]
     pub pool_id: Option<i64>,
 
-    /// Runner group name is not supported by JIT setup; pass --pool-id for non-default groups.
+    /// Resolve this organization or enterprise runner group name through GitHub.
     #[arg(long)]
     pub pool_name: Option<String>,
 

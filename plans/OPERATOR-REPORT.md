@@ -23,3 +23,18 @@ human-only actions for plans 014–015 and 033–059.
   `git filter-repo --path .velnor-compare/velnor-job.html --invert-paths`,
   force-push every rewritten ref, notify collaborators, and require fresh
   clones. Verify with `git log --all --oneline -- '.velnor-compare/*.html'`.
+
+## 2026-07-18 — Plan 039 organization permissions unavailable
+
+- Evidence: both the local authenticated `gh` session and each existing Sentry
+  daemon credential returned HTTP 403 for
+  `GET /orgs/{ChainArgos,jackin-project,tailrocks}/actions/runner-groups`.
+  Repository-scoped fleet inspection still succeeds; all 22 current slots were
+  online and idle at the inventory point.
+- Code and the migration runbook can land, but live organization registration
+  cannot pass until a credential has organization `Self-hosted runners: read
+  and write` (fine-grained/GitHub App) or classic `admin:org`, and the runner
+  groups plus repository access lists exist.
+- Human action: grant the daemon credential that permission in each
+  organization, create the restricted trusted/fork runner groups described in
+  `docs/org-fleet-migration.md`, then run the documented tailrocks-first smoke.
