@@ -37,6 +37,16 @@ TimeoutStopSec=10800
 User=root
 StateDirectory=velnor-%i
 WorkingDirectory=/var/lib/velnor-%i
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# Per-instance state, work, and forensic logs all live below this root.
+ReadWritePaths=/var/lib/velnor-%i
 
 [Install]
 WantedBy=multi-user.target
