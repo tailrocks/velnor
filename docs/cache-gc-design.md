@@ -1,5 +1,11 @@
 # Cache GC Design
 
+> **Superseded as the implementation contract:** this file documents the
+> original read-only spike. The production design, canonical paths, live Sentry
+> evidence, leases, filesystem-wide admission control, and delivery gates are
+> in [storage-and-disk-pressure-2026-07-18.md](storage-and-disk-pressure-2026-07-18.md).
+> Do not enable deletion from this spike without that design.
+
 Velnor's warm-runner model keeps daemon-shared host stores under the work root:
 `_velnor_cargo`, `_velnor_mise`, `_velnor_targets`, `_velnor_caches`,
 `_velnor_artifacts`, and `_velnor_sccache`. The current daemon only parks slots

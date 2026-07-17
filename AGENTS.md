@@ -107,6 +107,26 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-07-18: **Canonical storage + disk-pressure controller are P0**
+  ([docs/storage-and-disk-pressure-2026-07-18.md](docs/storage-and-disk-pressure-2026-07-18.md)):
+  live Sentry inspection found root XFS 84% used, about 432 GB physical in
+  persistent Cargo targets, and about 158 GB in the two largest BuildKit
+  stores. Velnor now has one explicit `/var/lib` durable, `/var/cache`
+  regenerable, `/run` lease, `/var/log`, and job-work contract; every store
+  has identity, trust, owner, budget, lifetime, and safe-delete rules. One
+  filesystem coordinator leases active scopes, serializes all daemons, uses
+  target generations and Velnor-owned builder pruning, reserves peak job
+  space, and automatically reclaims before advertising a slot. Once a job is
+  acquired its reservation lasts through result upload; Velnor never silently
+  refuses it. If owned inactive data cannot satisfy the reserve, the runner
+  exposes explicit pre-assignment backpressure instead of accepting unsafe
+  work, and never runs broad Docker prune. Persistent
+  `unknown-repository/unknown-workflow` identity and
+  the ineffective target retention scope are P0 correctness bugs. Keep capped
+  sccache default; kache remains a pinned trusted canary until its documented
+  container/SQLite topology constraint and representative concurrency gates
+  pass. Manual Sentry deletion is not the product fix.
+
 - 2026-07-18: **Portfolio-wide Velnor-default CI standard**
   ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md)): the first
   standardization portfolio is jackin, java-monorepo, blockchain-nodes,

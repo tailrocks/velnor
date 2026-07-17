@@ -30,6 +30,14 @@ docs win — fix the prompt. **When the vision/plan/roadmap changes, update
 > prompt has been activated by the research-only change; create it from that
 > plan when implementation begins.
 
+> **Storage direction update 2026-07-18:** canonical persistent paths,
+> filesystem-wide accounting, active leases, and reclaim-before-register are a
+> P0 gate in
+> [`../docs/storage-and-disk-pressure-2026-07-18.md`](../docs/storage-and-disk-pressure-2026-07-18.md).
+> The archived coverage prompt's broad-cache language does not authorize
+> unbounded stores. No implementation prompt is activated by this analysis;
+> any future storage goal must start from that contract and its pressure tests.
+
 ## Completed Sequence Archive
 
 The table below is the historical Phase 0 execution sequence. These prompts are

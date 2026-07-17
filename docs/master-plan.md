@@ -74,6 +74,14 @@ faster Docker with warm buildkit cache.
    no ad-hoc installers.
 6. `actions/runner` (C#) remains the protocol source of truth; latest protocol
    paths only.
+7. **Storage is one explicit runner subsystem.** Velnor uses the canonical
+   layout and filesystem-wide capacity controller in
+   [storage-and-disk-pressure-2026-07-18.md](storage-and-disk-pressure-2026-07-18.md):
+   every persistent class is cataloged and bounded, active scopes are leased,
+   and only Velnor-owned state is reclaimed. Velnor automatically reclaims old
+   data to reserve a job's peak **before advertising the slot**; once acquired,
+   the job owns that reservation through result upload. Per-daemon `_velnor_*`
+   trees are a migration source, not the long-term storage interface.
 
 ## 3. Incident review 2026-06-10 — and the bulletproofing it mandates
 

@@ -2,7 +2,7 @@
 
 **Status:** definitive research + implementation plan (2026-07-18, revised)  
 **Audience:** operators and agents preparing one PR per repo so **Velnor is the default runner**, with GitHub and dual-lane modes always available.  
-**Related:** [`docs/rust-build-cache-hygiene-velnor.md`](docs/rust-build-cache-hygiene-velnor.md), [`docs/cache-gc-design.md`](docs/cache-gc-design.md), [`docs/perf-instant-cache-plan-2026-06-11.md`](docs/perf-instant-cache-plan-2026-06-11.md), [`docs/master-plan.md`](docs/master-plan.md)
+**Related:** [`docs/storage-and-disk-pressure-2026-07-18.md`](docs/storage-and-disk-pressure-2026-07-18.md), [`docs/rust-build-cache-hygiene-velnor.md`](docs/rust-build-cache-hygiene-velnor.md), [`docs/cache-gc-design.md`](docs/cache-gc-design.md), [`docs/perf-instant-cache-plan-2026-06-11.md`](docs/perf-instant-cache-plan-2026-06-11.md), [`docs/master-plan.md`](docs/master-plan.md)
 
 This file is the **single planning artifact** for standardizing CI/CD across the estate. It defines the target contract, per-repo gap analysis, PR sequence, and Velnor runner development required to support that contract.
 
@@ -207,6 +207,13 @@ Source: [jackin rust-build-cache-hygiene](https://github.com/jackin-project/jack
 Mapped in detail: [`docs/rust-build-cache-hygiene-velnor.md`](docs/rust-build-cache-hygiene-velnor.md)
 
 July 2026 audit (jackin host): single targets → **460 GiB**, 3k+ incremental session dirs, alternate `CARGO_TARGET_DIR`s duplicating near-identical artifacts. Root class: **caches created for speed with no lifetime owner**.
+
+Live Sentry audit (2026-07-18): root XFS was **84% used** with about **432 GB
+physical in Velnor persistent target trees** and about **158 GB in the two
+largest BuildKit stores**. Current target GC cannot select those accumulators,
+and their paths collapse to `unknown-repository/unknown-workflow`. The accepted
+storage layout, capacity controller, lease model, and kache decision are in
+[`docs/storage-and-disk-pressure-2026-07-18.md`](docs/storage-and-disk-pressure-2026-07-18.md).
 
 Velnor already implements the jackin three-layer model (shared downloads, shared compiler results, scoped targets). The missing half is **hygiene**. Mass default-flip of 13 repos multiplies write pressure — this is a **stability** gate, not polish.
 
@@ -504,6 +511,9 @@ Prioritized by unblocking estate default-flip and stability. Detail for cache: �
 | V0.8 | **Cache accounting** in doctor/`cache du` (logical+physical, class/scope, high-water alerts) |
 | V0.9 | **Inject** `SCCACHE_CACHE_SIZE`, `SCCACHE_BASEDIRS`, default `CARGO_INCREMENTAL=0` on job containers |
 | V0.10 | Fixture proves **inline lane matrix** expression |
+| V0.11 | **Canonical storage contract** (`/var/lib`, `/var/cache`, `/run`, `/var/log`), catalog, resolved-path/status CLI, and legacy-root migration |
+| V0.12 | **Filesystem capacity controller** with active leases, target generations, per-class budgets, BuildKit ownership, job reservations, hysteresis, and hard emergency reserve |
+| V0.13 | **Reclaim before accept**: reserve worst-case space before advertising a slot, automatically GC toward the reservation, refine it on acquisition, and never silently reject an assigned job |
 
 ### P1 — parity quality
 

@@ -56,6 +56,14 @@ The first product goal is:
 - support the first target workflow surface used by `jackin-project/jackin` and
   `ChainArgos/java-monorepo`
 
+Storage and admission are runner subsystems, not per-workflow conventions. The
+canonical implementation contract is
+[storage-and-disk-pressure-2026-07-18.md](storage-and-disk-pressure-2026-07-18.md):
+Velnor catalogs and bounds all owned persistent data, reclaims inactive data to
+reserve worst-case job space before registering a slot, and holds that
+reservation through result upload. It never accepts a job and then silently
+refuses it for disk pressure.
+
 Hard rule: Velnor must first be a drop-in GitHub Actions runner replacement for
 Rust repositories. Both first target projects are Rust projects for Phase 0
 purposes. `ChainArgos/java-monorepo` has "java" in the repository name, but the
