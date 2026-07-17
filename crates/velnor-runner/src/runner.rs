@@ -273,18 +273,6 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
     validate_linux_only_labels(&labels)?;
     platform::validate_arm_label_matches_host(&labels, std::env::consts::ARCH)?;
 
-    if args.pool_name.is_some() && args.pool_id.is_none() {
-        bail!("JIT runner config requires numeric --pool-id for non-default runner groups");
-    }
-
-    let runner_group_id = args.pool_id.unwrap_or(1);
-    let jit_request = GitHubJitConfigRequest {
-        name: agent_name.clone(),
-        runner_group_id,
-        labels: labels.clone(),
-        work_folder: None,
-    };
-
     let pat = if args.dry_run {
         None
     } else {
@@ -293,6 +281,27 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("GitHub PAT required for JIT config: pass --pat"))?,
         )
+    };
+    let runner_group_id = match args.pool_name.as_deref() {
+        Some(_) if args.dry_run && args.pool_id.is_some() => args.pool_id.expect("checked above"),
+        Some(pool_name) => {
+            let pat = pat.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--pool-name requires live GitHub lookup; for --dry-run also pass --pool-id"
+                )
+            })?;
+            let groups = RegistrationClient::new()?
+                .list_runner_groups(&scope, pat)
+                .await?;
+            resolve_runner_group_id(&groups, pool_name, args.pool_id)?
+        }
+        None => args.pool_id.unwrap_or(1),
+    };
+    let jit_request = GitHubJitConfigRequest {
+        name: agent_name.clone(),
+        runner_group_id,
+        labels: labels.clone(),
+        work_folder: None,
     };
 
     if args.replace {
@@ -399,6 +408,37 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn resolve_runner_group_id(
+    groups: &[crate::protocol::RunnerGroup],
+    requested_name: &str,
+    requested_id: Option<i64>,
+) -> Result<i64> {
+    let group = groups
+        .iter()
+        .find(|group| group.name.eq_ignore_ascii_case(requested_name))
+        .ok_or_else(|| {
+            let accepted = groups
+                .iter()
+                .map(|group| group.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::anyhow!(
+                "runner group '{requested_name}' not found; accepted groups: {accepted}"
+            )
+        })?;
+    if let Some(requested_id) = requested_id {
+        if requested_id != group.id {
+            bail!(
+                "runner group '{}' resolves to id {}, not supplied --pool-id {}",
+                group.name,
+                group.id,
+                requested_id
+            );
+        }
+    }
+    Ok(group.id)
 }
 
 async fn remove_existing_jit_config_for_replace(dir: &Path, pat: Option<&str>) -> Result<()> {
@@ -5998,6 +6038,23 @@ fn default_agent_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runner_group_name_resolves_case_insensitively() {
+        let groups = vec![crate::protocol::RunnerGroup {
+            id: 42,
+            name: "Velnor Trusted".into(),
+        }];
+        assert_eq!(
+            resolve_runner_group_id(&groups, "velnor trusted", None).unwrap(),
+            42
+        );
+        assert!(resolve_runner_group_id(&groups, "missing", None)
+            .unwrap_err()
+            .to_string()
+            .contains("accepted groups: Velnor Trusted"));
+        assert!(resolve_runner_group_id(&groups, "Velnor Trusted", Some(7)).is_err());
+    }
     use crate::action::{
         parse_action_metadata, resolve_action, ActionRuntime, LocalActionPlan, RepositoryActionPlan,
     };

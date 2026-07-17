@@ -45,6 +45,10 @@ Configuration (one daemon per target scope):
   receive the host Docker socket. Use separate runner labels and runner groups
   for trusted and untrusted daemons so fork PRs cannot land on a trusted warm
   pool by accident.
+- Organization fleets: use `--url https://github.com/<org>` with
+  `--pool-name <runner-group>` to resolve the current group id through GitHub.
+  Follow the drain, trust-lane, label-continuity, and rollback procedure in
+  [org-fleet-migration.md](org-fleet-migration.md).
 
 Units (all shipped by the package):
 

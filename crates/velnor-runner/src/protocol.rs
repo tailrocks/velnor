@@ -106,6 +106,27 @@ impl GitHubScope {
             .join(&format!("{}/actions/runners", self.runner_scope_path))
             .context("build GitHub runners URL")
     }
+
+    pub fn runner_groups_url(&self) -> Result<Url> {
+        if !self.runner_scope_path.starts_with("orgs/")
+            && !self.runner_scope_path.starts_with("enterprises/")
+        {
+            bail!("runner groups apply only to organization or enterprise scopes");
+        }
+        self.api_base_url
+            .join(&format!("{}/actions/runner-groups", self.runner_scope_path))
+            .context("build GitHub runner groups URL")
+    }
+
+    pub fn kind(&self) -> &'static str {
+        if self.runner_scope_path.starts_with("orgs/") {
+            "organization"
+        } else if self.runner_scope_path.starts_with("enterprises/") {
+            "enterprise"
+        } else {
+            "repository"
+        }
+    }
 }
 
 fn is_hosted_github(host: &str) -> bool {
@@ -168,6 +189,12 @@ pub struct GitHubJitRunnerLabel {
     pub name: String,
     #[serde(default, rename = "type")]
     pub kind: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct RunnerGroup {
+    pub id: i64,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -694,6 +721,41 @@ impl RegistrationClient {
             }
             page_number += 1;
         }
+    }
+
+    pub async fn list_runner_groups(
+        &self,
+        scope: &GitHubScope,
+        pat: &str,
+    ) -> Result<Vec<RunnerGroup>> {
+        #[derive(Deserialize)]
+        struct Response {
+            runner_groups: Vec<RunnerGroup>,
+        }
+        let response = self
+            .http
+            .get(scope.runner_groups_url()?)
+            .bearer_auth(pat)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .header(ACCEPT, "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .context("send list runner groups request")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(github_api_error(
+                "list runner groups request",
+                status.as_u16(),
+                body,
+            ));
+        }
+        response
+            .json::<Response>()
+            .await
+            .map(|response| response.runner_groups)
+            .context("parse list runner groups response")
     }
 
     /// Look up one runner registration by id. `Ok(None)` means GitHub no
@@ -3557,6 +3619,11 @@ mod tests {
             scope.jit_config_url.as_str(),
             "https://api.github.com/orgs/ChainArgos/actions/runners/generate-jitconfig"
         );
+        assert_eq!(scope.kind(), "organization");
+        assert_eq!(
+            scope.runner_groups_url().unwrap().as_str(),
+            "https://api.github.com/orgs/ChainArgos/actions/runner-groups"
+        );
     }
 
     #[test]
@@ -3567,6 +3634,7 @@ mod tests {
             scope.jit_config_url.as_str(),
             "https://api.github.com/enterprises/acme/actions/runners/generate-jitconfig"
         );
+        assert_eq!(scope.kind(), "enterprise");
     }
 
     #[test]

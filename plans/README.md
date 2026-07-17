@@ -64,7 +64,7 @@ every repo (§2.12; `audit-ci` rule 11 enforces it).
 | 036 | Capacity controller — leases, reservations, reclaim-before-accept | P0 | L | 035 (037 couples) | V0.12/V0.13 | TODO |
 | 037 | Destructive cache GC + physical accounting | P0 | M/L | 035 | V0.7/V0.8 | TODO |
 | 038 | Job-env defaults (SCCACHE_CACHE_SIZE/BASEDIRS, CARGO_INCREMENTAL=0) | P0 | S | — | V0.9 | DONE: defaults, precedence tests, docs, and all runner gates green |
-| 039 | Org-level JIT + multi-repo fleet ops | P0 | M | — | V0.1 | IN PROGRESS |
+| 039 | Org-level JIT + multi-repo fleet ops | P0 | M | — | V0.1 | BLOCKED: code/runbook and gates complete; all local and daemon credentials return HTTP 403 for org runner-group administration |
 | 040 | `services:` parity (host/port env, alias) | P0 | M | — | V0.5 | IN PROGRESS |
 | 041 | Fixture: inline matrix, backend jobs, services job, registry sync | P0 | M | (033/034/040 soft) | V0.10; gate V-A | TODO |
 | 042 | Estate adapter completion (Pages, attest, composites, login gate) | P0/P1 | L | 033 | V0.4/V0.6/V1.1/V1.2/V1.5 | TODO |
