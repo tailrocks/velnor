@@ -132,6 +132,13 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-07-18: **jackin delivers on top of PR #810** (operator; answers
+  [VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) §12.5): the entire
+  jackin estate-standard work stacks onto the head branch of
+  jackin-project/jackin#810 and merges with it as jackin's single program
+  PR; no separate `velnor-estate-standard` branch for jackin. All other
+  repos keep the canonical branch name.
+
 - 2026-07-18: **Single-branch delivery, uniform shape, host baseline cleanup**
   ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) §2.12 + §8): the
   entire standardization program lands as exactly one branch named
