@@ -90,9 +90,9 @@ treatment.
 
 - **The mandates in [master-plan.md](master-plan.md) §3a are law**: universal
   caching with rerun-idempotency, performance-first, estate unification
-  (jackin is the pipeline source of truth), the three-repo dual-lane policy
-  (agent-brown, java-monorepo, blockchain-nodes — Velnor default, github/both
-  selectable), and switch-readiness for every other estate repo.
+  (jackin is the pipeline source of truth), and the portfolio-wide lane policy:
+  Velnor default, pinned-Ubuntu GitHub selectable, and both selectable for every
+  standardized repository, with one shared configuration shape.
 - **No JavaScript product path** — every `uses:` in the estate gets a native
   Rust adapter matching the latest upstream behavior (master-plan P3b); the
   node sidecar is a diagnostic fallback only.
