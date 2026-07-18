@@ -2699,6 +2699,7 @@ async fn handle_job_request(
                         outputs: BTreeMap::new(),
                         environment_url: None,
                         step_logs: Vec::new(),
+                        teardown: None,
                     }
                 } else {
                     let infrastructure_failure_category =
@@ -2725,6 +2726,7 @@ async fn handle_job_request(
         };
         let outputs = job_result.outputs;
         let step_logs = job_result.step_logs;
+        let teardown = job_result.teardown;
         let completion = complete_run_service_job_refreshing(
             &run_service_job.client,
             &stored_for_refresh,
@@ -2741,6 +2743,13 @@ async fn handle_job_request(
         .await;
         renewal.abort();
         completion?;
+        println!("forensics.lifecycle: completion-posted");
+        if let Some(teardown) = teardown {
+            tokio::task::spawn_blocking(move || teardown.run())
+                .await
+                .context("join post-completion teardown task")??;
+            println!("forensics.lifecycle: teardown-done");
+        }
         println!(
             "Job completed with result {:?} and message acknowledged.",
             job_result.result
@@ -3742,11 +3751,13 @@ fn execute_script_job(
         step_log_sender,
         daemon_id,
     );
-    if let Err(e) = fs::remove_dir_all(&job_dir) {
-        eprintln!(
-            "Warning: failed to clean up job workspace at {}: {e:#}",
-            job_dir.display()
-        );
+    if result.is_err() {
+        if let Err(e) = fs::remove_dir_all(&job_dir) {
+            eprintln!(
+                "Warning: failed to clean up job workspace at {}: {e:#}",
+                job_dir.display()
+            );
+        }
     }
     result
 }
@@ -3972,7 +3983,7 @@ fn execute_script_job_inner(
     if let Some(sender) = step_log_sender {
         executor = executor.with_step_log_sender(sender);
     }
-    let summary_result = executor.execute_ordered_steps_with_completion(
+    let summary_result = executor.execute_ordered_steps_without_cleanup(
         &plan.execution.job_container,
         &plan.steps,
         &plan.execution.env,
@@ -3981,6 +3992,11 @@ fn execute_script_job_inner(
         actions_environment_url(job),
         &plan.execution.temp_host,
     );
+    if summary_result.is_err() {
+        if let Err(error) = executor.cleanup(&plan.execution.job_container) {
+            eprintln!("Warning: cleanup failed after executor error: {error:#}");
+        }
+    }
     let mut command_runner = executor.into_runner();
     let cleanup_result = cleanup_checkout_credentials(&mut command_runner, &cleanup_checkout_plans);
     let (summary, cleanup_traces) = match (summary_result, cleanup_result) {
@@ -4125,6 +4141,10 @@ fn execute_script_job_inner(
         outputs: summary.job_outputs,
         environment_url,
         step_logs: all_step_logs,
+        teardown: Some(TeardownHandle {
+            container: plan.execution.job_container,
+            job_dir: job_dir.to_path_buf(),
+        }),
     })
 }
 
@@ -4211,6 +4231,24 @@ struct ScriptJobResult {
     outputs: BTreeMap<String, String>,
     environment_url: Option<String>,
     step_logs: Vec<StepLog>,
+    teardown: Option<TeardownHandle>,
+}
+
+#[derive(Debug, Clone)]
+struct TeardownHandle {
+    container: crate::container::JobContainerSpec,
+    job_dir: PathBuf,
+}
+
+impl TeardownHandle {
+    fn run(self) -> Result<()> {
+        let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+        if let Err(error) = executor.cleanup(&self.container) {
+            eprintln!("Warning: post-completion Docker teardown failed: {error:#}");
+        }
+        fs::remove_dir_all(&self.job_dir)
+            .with_context(|| format!("remove job workspace {}", self.job_dir.display()))
+    }
 }
 
 fn job_context_data(job: &AgentJobRequestMessage) -> Vec<(String, Value)> {

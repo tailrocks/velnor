@@ -947,18 +947,11 @@ where
         environment_url: Option<&Value>,
         temp_host: &Path,
     ) -> Result<JobExecutionSummary> {
-        self.start_job_environment(container)?;
-        let mut runtime_context = context_data.to_vec();
-        if let Some(services) = self.service_context(container)? {
-            runtime_context.retain(|(name, _)| !name.eq_ignore_ascii_case("services"));
-            runtime_context.push(("services".to_string(), services));
-        }
-
-        let result = self.execute_ordered_steps_in_started_container(
+        let result = self.execute_ordered_steps_without_cleanup(
             container,
             steps,
             base_env,
-            &runtime_context,
+            context_data,
             job_outputs,
             environment_url,
             temp_host,
@@ -968,6 +961,35 @@ where
             eprintln!("Warning: cleanup failed after ordered job steps: {error:#}");
         }
         result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_ordered_steps_without_cleanup(
+        &mut self,
+        container: &JobContainerSpec,
+        steps: &[ExecutableStep],
+        base_env: &[(String, String)],
+        context_data: &[(String, Value)],
+        job_outputs: Option<&Value>,
+        environment_url: Option<&Value>,
+        temp_host: &Path,
+    ) -> Result<JobExecutionSummary> {
+        self.start_job_environment(container)?;
+        let mut runtime_context = context_data.to_vec();
+        if let Some(services) = self.service_context(container)? {
+            runtime_context.retain(|(name, _)| !name.eq_ignore_ascii_case("services"));
+            runtime_context.push(("services".to_string(), services));
+        }
+
+        self.execute_ordered_steps_in_started_container(
+            container,
+            steps,
+            base_env,
+            &runtime_context,
+            job_outputs,
+            environment_url,
+            temp_host,
+        )
     }
 
     fn service_context(&mut self, container: &JobContainerSpec) -> Result<Option<Value>> {
@@ -2720,7 +2742,7 @@ where
         Ok(files)
     }
 
-    fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
+    pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         let service_results = container
             .services
@@ -7596,6 +7618,35 @@ mod tests {
             .1
             .contains(&format!("test -f /__t/{DOCKER_MOUNT_CHECK_FILE}")));
         assert!(!temp.join(DOCKER_MOUNT_CHECK_FILE).exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn deferred_teardown_keeps_resources_until_completion_boundary() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps_without_cleanup(&spec, &[], &[], &[], None, None, &temp)
+            .unwrap();
+        assert!(!executor
+            .runner()
+            .calls
+            .iter()
+            .any(|(_, args)| args.first().is_some_and(|arg| arg == "rm")));
+
+        executor.cleanup(&spec).unwrap();
+        let calls = &executor.runner().calls;
+        assert!(calls
+            .iter()
+            .any(|(_, args)| { args.starts_with(&["rm".into(), "--force".into(), "job".into()]) }));
+        assert!(calls.iter().any(|(_, args)| args.starts_with(&[
+            "network".into(),
+            "rm".into(),
+            "net".into()
+        ])));
         fs::remove_dir_all(temp).unwrap();
     }
 
