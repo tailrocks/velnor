@@ -674,3 +674,11 @@ same-version local-artifact sentence is superseded and must not be used.
   retry passed, establishing a repository test flake rather than a runner
   divergence. The Holla daemon then drained and deregistered every slot; PR
   and program branches were deleted and the repository now ends on `main`.
+- Ruxel required-check run `29644979281` exposed a base-image parity defect:
+  its existing static-musl assertion invokes the standard Ubuntu `file`
+  utility, but the Velnor Ubuntu 26.04 image omitted that package. The runner
+  image now installs `file`, and daemon image preflight asserts it alongside
+  sh, bash, and git so this class fails before accepting work. All runner
+  gates passed (618 tests). Release v0.1.67 is the apt delivery carrying the
+  corrected image; Ruxel verification resumes only after that package is
+  installed through the signed repository.
