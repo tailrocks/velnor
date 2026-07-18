@@ -116,7 +116,7 @@ fn run_gc(
     };
     let candidates = select_eviction_candidates(&listing, &policy);
 
-    println!("dry_run\ttrue");
+    println!("dry_run\t{}", args.dry_run);
     println!("work_dir\t{}", work_root.display());
     println!("candidate_count\t{}", candidates.len());
     println!("store\tbytes\tscope\treason\tpath");
@@ -141,7 +141,7 @@ fn run_gc(
     for candidate in candidates {
         let result = fs::remove_dir_all(&candidate.path);
         let outcome = if result.is_ok() { "deleted" } else { "failed" };
-        append_gc_history(&log_root, &candidate, outcome)?;
+        append_gc_history(&log_root, &candidate, Some(&policy), outcome)?;
         println!(
             "{}\t{}\t{}\t{}\t{}",
             candidate.store,
@@ -182,11 +182,29 @@ impl GcLeaderLock {
     }
 }
 
-fn append_gc_history(log_root: &Path, candidate: &EvictionCandidate, outcome: &str) -> Result<()> {
+fn append_gc_history(
+    log_root: &Path,
+    candidate: &EvictionCandidate,
+    policy: Option<&EvictionPolicy>,
+    outcome: &str,
+) -> Result<()> {
     fs::create_dir_all(log_root)
         .with_context(|| format!("create GC log dir {}", log_root.display()))?;
     let path = log_root.join("gc-history.jsonl");
     let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    let policy = policy.map_or_else(
+        || serde_json::json!({ "mode": "reclaim-target" }),
+        |policy| {
+            serde_json::json!({
+                "keep_newest_per_target_scope": policy.keep_newest_per_target_scope,
+                "max_age_seconds": policy.max_age.as_secs(),
+                "max_total_bytes": policy.max_total_bytes,
+                "class_budgets": policy.class_budgets.iter().map(|(store, bytes)| {
+                    (store.to_string(), *bytes)
+                }).collect::<BTreeMap<_, _>>(),
+            })
+        },
+    );
     let line = serde_json::json!({
         "store": candidate.store.to_string(),
         "scope": candidate.scope_key(),
@@ -194,6 +212,7 @@ fn append_gc_history(log_root: &Path, candidate: &EvictionCandidate, outcome: &s
         "reason": candidate.reason,
         "path": candidate.path,
         "outcome": outcome,
+        "policy": policy,
     });
     writeln!(file, "{line}")?;
     eprintln!("gc.history {line}");
@@ -365,13 +384,13 @@ pub(crate) fn reclaim_work_root(
             Ok(()) => {
                 report.freed_bytes = report.freed_bytes.saturating_add(candidate.bytes);
                 report.deleted.push(candidate.path.clone());
-                append_gc_history(log_root, &candidate, "deleted")?;
+                append_gc_history(log_root, &candidate, None, "deleted")?;
             }
             Err(error) => {
                 report
                     .failures
                     .push(format!("{}: {error}", candidate.path.display()));
-                append_gc_history(log_root, &candidate, "failed")?;
+                append_gc_history(log_root, &candidate, None, "failed")?;
             }
         }
     }
