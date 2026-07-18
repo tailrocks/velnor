@@ -23,10 +23,12 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
 1. **Build the `.deb`** — `cargo-deb` (Rust-native; reads `[package.metadata.deb]`
    in `Cargo.toml`). Both holla and velnor use the exact same approach in their
    `release-deb.yml` (on tag `v*` or workflow_dispatch):
-   - `jdx/mise-action` (rust + zig + cargo:cargo-zigbuild)
+   - `jdx/mise-action` (rust + zig + prebuilt cargo-binstall + cargo-zigbuild)
    - sccache + mold
    - Matrix over `x86_64-unknown-linux-gnu` + `aarch64-unknown-linux-gnu`
    - `cargo zigbuild --release --locked --target $TGT` (modern glibc, no .2.17 shims — those are only for portable tarballs)
+   - cargo-deb is pinned by mise and installed only as a verified prebuilt
+     cargo-binstall/QuickInstall artifact; CI fails instead of compiling it.
    - `cargo deb -p velnor-runner --target $TGT --no-build --deb-version "$VERSION"`
    Produces `velnor-runner_<version>_<arch>.deb` (amd64 + arm64).
    - Package contents: binary → `/usr/bin/velnor-runner`; systemd units →

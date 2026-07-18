@@ -68,7 +68,7 @@ jobs:
 
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
-          install_args: "rust zig cargo:cargo-zigbuild"
+          install_args: "rust zig cargo-binstall cargo:cargo-zigbuild"
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - run: rustup target add ${{ matrix.target }}
@@ -92,8 +92,8 @@ jobs:
       # cross :arm64 packages are needed — zigbuild supplies the toolchain.
 
       - name: Install cargo-deb
-        # Pinned via mise.toml (cargo:cargo-deb) so the binary comes from the
-        # mise tool cache instead of a from-source compile every release run.
+        # cargo.binstall_only + quickinstall are repository policy: download
+        # the verified prebuilt artifact or fail; never compile tooling in CI.
         run: mise install 'cargo:cargo-deb' && mise exec -- cargo-deb --version
 
       - name: Build

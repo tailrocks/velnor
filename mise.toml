@@ -1,5 +1,6 @@
 [tools]
 actionlint = "1.7.12"
+cargo-binstall = "1.21.0"
 "cargo:cargo-deny" = "0.20.0"
 "cargo:cargo-nextest" = "0.9.137"
 "cargo:cargo-zigbuild" = "0.23.0"
@@ -8,6 +9,8 @@ zig = "0.16.0"
 
 [settings]
 idiomatic_version_file_enable_tools = ["rust"]
+cargo.binstall_only = true
+cargo.binstall_quickinstall = true
 
 [tasks.fmt]
 run = "cargo fmt --all --check"
