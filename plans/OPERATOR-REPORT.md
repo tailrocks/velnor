@@ -348,3 +348,12 @@ same-version local-artifact sentence is superseded and must not be used.
   because current V2 carries `github.repository` in ContextData rather than
   Variables; commit `64366d5` normalizes that current representation for the
   existing storage identity boundary.
+- Live lifecycle evidence from that run shows completion posted before detached
+  teardown, new JIT configuration ready while teardown was still active, and
+  subsequent jobs acquired cleanly on both slots. This closes plan 043's live
+  acceptance in addition to its full 588-test gate.
+- The canonical mirror is live at
+  `/var/cache/velnor/v1/trusted/git-mirrors/tailrocks__velnor-actions-fixture.git`
+  (172 KiB during the fixture campaign). It has no persisted `remote.origin.url`
+  and therefore no credential-bearing remote. Trace close events measured warm
+  checkout at 407–454 ms, under plan 044's one-second acceptance threshold.
