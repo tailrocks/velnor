@@ -411,7 +411,7 @@ pub fn prune_owned_builder(max_used_space_bytes: u64) -> Result<bool> {
         return Ok(false);
     }
     let limit = format!("{max_used_space_bytes}B");
-    let status = std::process::Command::new("docker")
+    let output = std::process::Command::new("docker")
         .args([
             "buildx",
             "prune",
@@ -421,10 +421,18 @@ pub fn prune_owned_builder(max_used_space_bytes: u64) -> Result<bool> {
             "--max-used-space",
             &limit,
         ])
-        .status()
+        .output()
         .context("prune Velnor-owned buildx builder")?;
-    if !status.success() {
-        bail!("Velnor-owned buildx builder prune failed: {status}");
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("No such container") || stderr.contains("no builder") {
+            return Ok(false);
+        }
+        bail!(
+            "Velnor-owned buildx builder prune failed: {}: {}",
+            output.status,
+            stderr.trim()
+        );
     }
     Ok(true)
 }
