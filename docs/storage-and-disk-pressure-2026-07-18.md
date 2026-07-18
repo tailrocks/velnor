@@ -109,7 +109,7 @@ Canonical cache hierarchy:
   <trust-scope>/
     cargo/{registry,git}/
     cargo/bin/<repository>/
-    mise/{cache,installs/<repository>}/
+    mise/{cache,installs/<repository>,rustup/<repository>}/
     compiler/sccache/
     compiler/kache/                 # canary only
     targets/<repository>/<workflow>/<job-class>/<contract-generation>/
@@ -124,6 +124,12 @@ already trusted by the executor. Persistent storage creation must fail closed
 if a required identity is unavailable; `unknown-*` is permitted only for an
 ephemeral, job-private path. Path components are normalized and hashed where
 necessary, while the catalog retains the human-readable value.
+
+Mise executable installs and the rustup state used by mise's Rust backend
+share the same trust/repository boundary. Persisting `/opt/mise/installs`
+without `/root/.rustup` is invalid: it records a selected Rust version while
+the actual compiler disappears with the job container. The job image seeds
+both stores, and later jobs mount both before tool resolution.
 
 The hierarchy is not permission by itself. Trust scope remains part of every
 cache key and mount. Untrusted jobs never receive trusted writable stores,

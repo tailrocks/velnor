@@ -132,6 +132,11 @@ impl JobContainerSpec {
             // its own file locks.
             "-v".into(),
             self.mount_arg(&self.mise_executable_store_host(), "/opt/mise/installs"),
+            // mise's Rust backend stores compiler payloads and selection state
+            // in rustup, not in /opt/mise. Keep it in the same trust/repository
+            // scope or an ephemeral container loses the selected toolchain.
+            "-v".into(),
+            self.mount_arg(&self.rustup_executable_store_host(), "/root/.rustup"),
             "-v".into(),
             self.mount_arg(
                 &mise_store_host(&self.temp_host).join("cache"),
@@ -231,10 +236,16 @@ impl JobContainerSpec {
             ),
             "-v".into(),
             self.mount_arg(&store.join("cache"), "/__velnor_seed/cache"),
+            "-v".into(),
+            self.mount_arg(
+                &self.rustup_executable_store_host(),
+                "/__velnor_seed/rustup",
+            ),
             self.image.clone(),
             "-c".into(),
             "cp -an /opt/mise/installs/. /__velnor_seed/installs/ 2>/dev/null || true; \
-             cp -an /opt/mise/cache/. /__velnor_seed/cache/ 2>/dev/null || true"
+             cp -an /opt/mise/cache/. /__velnor_seed/cache/ 2>/dev/null || true; \
+             cp -an /root/.rustup/. /__velnor_seed/rustup/ 2>/dev/null || true"
                 .into(),
         ]
     }
@@ -689,6 +700,18 @@ impl JobContainerSpec {
         )
     }
 
+    fn rustup_executable_store_host(&self) -> PathBuf {
+        self.repository_store_key().map_or_else(
+            || {
+                eprintln!(
+                    "forensics.lifecycle: persistent rustup store refused: missing github.repository"
+                );
+                self.temp_host.join("_velnor/ephemeral/rustup")
+            },
+            |repository| rustup_executable_store_host(&self.temp_host, &repository),
+        )
+    }
+
     fn docker_host_path(&self, host_path: &Path) -> PathBuf {
         let Some(docker_work_dir) = &self.docker_host_work_dir else {
             return host_path.to_path_buf();
@@ -1026,6 +1049,25 @@ fn mise_executable_store_host_for_scope(
         .join(sanitize_store_key(repository))
 }
 
+/// Host-persistent rustup state used by mise's Rust backend, scoped by the
+/// same trust/repository boundary as executable mise installs.
+pub(crate) fn rustup_executable_store_host(temp_host: &Path, repository: &str) -> PathBuf {
+    rustup_executable_store_host_for_scope(
+        temp_host,
+        &crate::github_adapter::cargo_target_trust_scope(),
+        repository,
+    )
+}
+
+fn rustup_executable_store_host_for_scope(
+    temp_host: &Path,
+    trust_scope: &str,
+    repository: &str,
+) -> PathBuf {
+    crate::storage::child_with_legacy_trust(mise_store_host(temp_host), "rustup", trust_scope)
+        .join(sanitize_store_key(repository))
+}
+
 /// Root for opt-in persistent CARGO_TARGET_DIR buckets (one per job class).
 pub(crate) fn cargo_target_store_host(temp_host: &Path) -> PathBuf {
     crate::storage::cache_class_path(&daemon_store_root(temp_host), "targets", "_velnor_targets")
@@ -1252,6 +1294,12 @@ mod tests {
                 "/var/lib/velnor/work/_velnor_mise/installs/trusted/ChainArgos_java-monorepo"
             )
         );
+        assert_eq!(
+            rustup_executable_store_host_for_scope(temp, "trusted", "ChainArgos/java-monorepo"),
+            PathBuf::from(
+                "/var/lib/velnor/work/_velnor_mise/rustup/trusted/ChainArgos_java-monorepo"
+            )
+        );
     }
 
     #[test]
@@ -1265,6 +1313,10 @@ mod tests {
         assert_ne!(
             mise_executable_store_host_for_scope(temp, "trusted", "org/one"),
             mise_executable_store_host_for_scope(temp, "trusted", "org/two")
+        );
+        assert_ne!(
+            rustup_executable_store_host_for_scope(temp, "trusted", "org/one"),
+            rustup_executable_store_host_for_scope(temp, "trusted", "org/two")
         );
     }
 
@@ -1314,6 +1366,7 @@ mod tests {
             .contains(&"/tmp/_velnor_cargo/bin/trusted/acme_repo:/github/home/.cargo/bin".into()));
         assert!(args
             .contains(&"/tmp/_velnor_mise/installs/trusted/acme_repo:/opt/mise/installs".into()));
+        assert!(args.contains(&"/tmp/_velnor_mise/rustup/trusted/acme_repo:/root/.rustup".into()));
         assert!(args.contains(&"/tmp/_velnor_cargo/registry:/github/home/.cargo/registry".into()));
         assert!(args.contains(&"/tmp/_velnor_cargo/git:/github/home/.cargo/git".into()));
         assert!(args.contains(&"/tmp/_velnor_mise/cache:/opt/mise/cache".into()));
@@ -1333,6 +1386,19 @@ mod tests {
         assert_eq!(
             args.last().map(String::as_str),
             Some("mkdir -p /__t/_velnor && touch /__t/_velnor/console.log && exec tail -n +1 -F /__t/_velnor/console.log")
+        );
+    }
+
+    #[test]
+    fn mise_seed_copies_repo_scoped_rustup_state() {
+        let args = spec().seed_mise_store_args();
+
+        assert!(args
+            .contains(&"/tmp/_velnor_mise/rustup/trusted/acme_repo:/__velnor_seed/rustup".into()));
+        assert!(
+            args.last().is_some_and(
+                |script| script.contains("cp -an /root/.rustup/. /__velnor_seed/rustup/")
+            )
         );
     }
 
