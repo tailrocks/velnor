@@ -13,6 +13,7 @@ deleted.
 | Before | 771 GiB | 149 GiB | 84% |
 | After cache cleanup | 369 GiB | 551 GiB | 41% |
 | After stale-workspace cleanup | 321,750,663,168 B | 664,653,627,392 B | 33% |
+| Campaign recheck | 350,705,975,296 B | 635,698,315,264 B | 36% |
 
 Inodes remained healthy (3% used before cleanup). The final root-filesystem
 usage is well below plan 059's 60% ceiling.
@@ -33,6 +34,14 @@ result to `/var/log/velnor/gc-history.jsonl`; the remaining validated roots
 their exact absolute paths while every daemon was stopped. Final inventory:
 zero `unknown-repository` directories and zero bytes in all legacy target
 roots.
+
+The campaign recheck also found two pre-contract executable-tool directories
+under the inactive jackin pool:
+`_velnor_cargo/bin/trusted/unknown-repository` (20,838,918 B) and
+`_velnor_mise/installs/trusted/unknown-repository` (806,452,683 B). The jackin
+daemon was inactive, `lsof +D` showed no owner, and both exact Velnor-owned
+paths were removed. A full `/var/lib/velnor{,-jackin}` scan then returned zero
+`unknown-repository` directories.
 
 Cargo, mise, and sccache were initially retained as legitimate warm stores.
 The first live capacity acceptance exposed an over-broad shortfall calculation
@@ -74,20 +83,25 @@ no broad Docker prune command was run.
   plus the 10 GiB emergency floor). Excess Java slots expose explicit capacity
   backpressure instead of creating broker sessions.
 
-## Package delivery and remaining smoke gate
+## Package delivery and completed smoke gate
 
 The operator reaffirmed that production deployment means the complete signed
 apt path: pushed release commit and tag → Velnor `Release deb` →
 `tailrocks/velnor-apt` Release → signed reprepro Pages publish → Sentry
 `apt-get update && apt-get install velnor-runner`. Local artifact installation
 used during initial host diagnosis is superseded and is not an accepted
-deployment gate. Release `v0.1.35` is the first corrected package candidate.
+deployment gate. The final baseline validation advanced through apt-installed
+v0.1.54; every intermediate and subsequent runner candidate used the same
+signed apt path.
 
-The post-cleanup `compat.yml lanes=both` dispatch against fixture `main` was
-rejected by GitHub with HTTP 422 because its current choice list does not yet
-contain `both`. This is the documented plan-041 progress fallback, not a host
-failure. Plan 059 remains open until plan 041 lands the canonical fixture input
-and its new both-lane run URL is recorded here.
+After plan 041 landed the canonical input, clean fixture dispatches passed on
+GitHub (`29634753256`), Velnor (`29634781889`), and both lanes
+(`29634836133`). The combined run completed the fixture's cross-lane result
+comparison successfully. Post-upgrade both-lane run `29636145660` also passed,
+including exact service-container lifecycle step parity and the Class-D timing
+budget. During the campaign recheck, a Velnor-owned job
+container/network was observed while a legitimate Renovate job was actively
+running; it was not classified as stale or deleted.
 
 Operator-scope assertion: all destructive targets were Velnor-owned and were
 validated by exact path/name before deletion; no non-Velnor resource was
