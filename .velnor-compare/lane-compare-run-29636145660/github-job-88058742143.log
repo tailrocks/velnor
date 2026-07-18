@@ -1,0 +1,754 @@
+﻿2026-07-18T07:40:45.5496474Z Current runner version: '2.335.1'
+2026-07-18T07:40:45.5534271Z ##[group]Runner Image Provisioner
+2026-07-18T07:40:45.5535608Z Hosted Compute Agent
+2026-07-18T07:40:45.5537163Z Version: 20260707.563
+2026-07-18T07:40:45.5538340Z Commit: 02667638d2b423fbc733a8e32a88b44996a3ba6e
+2026-07-18T07:40:45.5539561Z Build Date: 2026-07-07T19:33:50Z
+2026-07-18T07:40:45.5540895Z Worker ID: {21a2818f-af27-45c0-bbf1-af688af94d55}
+2026-07-18T07:40:45.5542459Z Azure Region: eastus
+2026-07-18T07:40:45.5543556Z ##[endgroup]
+2026-07-18T07:40:45.5546128Z ##[group]Operating System
+2026-07-18T07:40:45.5547247Z Ubuntu
+2026-07-18T07:40:45.5548145Z 26.04
+2026-07-18T07:40:45.5548990Z LTS
+2026-07-18T07:40:45.5549938Z ##[endgroup]
+2026-07-18T07:40:45.5550929Z ##[group]Runner Image
+2026-07-18T07:40:45.5552007Z Image: ubuntu-26.04
+2026-07-18T07:40:45.5553328Z Version: 20260714.74.1
+2026-07-18T07:40:45.5555529Z Included Software: https://github.com/actions/runner-images/blob/ubuntu26/20260714.74/images/ubuntu/Ubuntu2604-Readme.md
+2026-07-18T07:40:45.5558231Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu26%2F20260714.74
+2026-07-18T07:40:45.5560030Z ##[endgroup]
+2026-07-18T07:40:45.5561941Z ##[group]GITHUB_TOKEN Permissions
+2026-07-18T07:40:45.5565420Z Actions: read
+2026-07-18T07:40:45.5566394Z Contents: read
+2026-07-18T07:40:45.5567516Z Metadata: read
+2026-07-18T07:40:45.5568467Z ##[endgroup]
+2026-07-18T07:40:45.5571679Z Secret source: Actions
+2026-07-18T07:40:45.5573497Z Prepare workflow directory
+2026-07-18T07:40:45.6200279Z Prepare all required actions
+2026-07-18T07:40:45.6258143Z Getting action download info
+2026-07-18T07:40:45.7846435Z Download action repository 'actions/checkout@v6' (SHA:df4cb1c069e1874edd31b4311f1884172cec0e10)
+2026-07-18T07:40:45.9314168Z Download action repository 'mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e' (SHA:1583d6b38d7be47f593cb472781bbb21cab4321e)
+2026-07-18T07:40:46.0294701Z Download action repository 'rui314/setup-mold@v1' (SHA:9c9c13bf4c3f1adef0cc596abc155580bcb04444)
+2026-07-18T07:40:46.1085334Z Download action repository 'jdx/mise-action@v4' (SHA:dad1bfd3df957f44999b559dd69dc1671cb4e9ea)
+2026-07-18T07:40:46.2526678Z Download action repository 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' (SHA:55cc8345863c7cc4c66a329aec7e433d2d1c52a9)
+2026-07-18T07:40:46.3321327Z Download action repository 'actions/upload-artifact@v7' (SHA:043fb46d1a93c77aae656e7c1c64a875d1fc6a0a)
+2026-07-18T07:40:46.5322053Z Complete job name: compat (app-a, GitHub, ubuntu-26.04, false)
+2026-07-18T07:40:46.6151943Z ##[group]Run actions/checkout@v6
+2026-07-18T07:40:46.6153237Z with:
+2026-07-18T07:40:46.6153845Z   repository: tailrocks/velnor-actions-fixture
+2026-07-18T07:40:46.6162669Z   token: ***
+2026-07-18T07:40:46.6163178Z   ssh-strict: true
+2026-07-18T07:40:46.6163691Z   ssh-user: git
+2026-07-18T07:40:46.6164219Z   persist-credentials: true
+2026-07-18T07:40:46.6164841Z   clean: true
+2026-07-18T07:40:46.6165377Z   sparse-checkout-cone-mode: true
+2026-07-18T07:40:46.6166052Z   fetch-depth: 1
+2026-07-18T07:40:46.6166582Z   fetch-tags: false
+2026-07-18T07:40:46.6167114Z   show-progress: true
+2026-07-18T07:40:46.6167657Z   lfs: false
+2026-07-18T07:40:46.6168125Z   submodules: false
+2026-07-18T07:40:46.6168670Z   set-safe-directory: true
+2026-07-18T07:40:46.6169532Z env:
+2026-07-18T07:40:46.6170010Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:40:46.6170630Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:40:46.6171221Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:40:46.6171783Z ##[endgroup]
+2026-07-18T07:40:46.7308623Z Syncing repository: tailrocks/velnor-actions-fixture
+2026-07-18T07:40:46.7311956Z ##[group]Getting Git version info
+2026-07-18T07:40:46.7314375Z Working directory is '/home/runner/work/velnor-actions-fixture/velnor-actions-fixture'
+2026-07-18T07:40:46.7317297Z [command]/usr/bin/git version
+2026-07-18T07:40:46.7318381Z git version 2.53.0
+2026-07-18T07:40:46.7321775Z ##[endgroup]
+2026-07-18T07:40:46.7329682Z Temporarily overriding HOME='/home/runner/work/_temp/8825a98a-4d00-4da5-bc49-aa23b46c84ad' before making global git config changes
+2026-07-18T07:40:46.7334241Z Adding repository directory to the temporary git global config as a safe directory
+2026-07-18T07:40:46.7338003Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:40:46.7397601Z Deleting the contents of '/home/runner/work/velnor-actions-fixture/velnor-actions-fixture'
+2026-07-18T07:40:46.7403776Z ##[group]Determining repository object format
+2026-07-18T07:40:46.7406484Z ##[endgroup]
+2026-07-18T07:40:46.7408495Z ##[group]Initializing the repository
+2026-07-18T07:40:46.7411634Z [command]/usr/bin/git init /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:40:46.7516762Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-07-18T07:40:46.7519411Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-07-18T07:40:46.7521861Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-07-18T07:40:46.7523974Z hint: call:
+2026-07-18T07:40:46.7524713Z hint:
+2026-07-18T07:40:46.7525728Z hint: 	git config --global init.defaultBranch <name>
+2026-07-18T07:40:46.7527155Z hint:
+2026-07-18T07:40:46.7528433Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-07-18T07:40:46.7530868Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-07-18T07:40:46.7532915Z hint:
+2026-07-18T07:40:46.7533700Z hint: 	git branch -m <name>
+2026-07-18T07:40:46.7534666Z hint:
+2026-07-18T07:40:46.7536176Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-07-18T07:40:46.7540177Z Initialized empty Git repository in /home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git/
+2026-07-18T07:40:46.7546151Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor-actions-fixture
+2026-07-18T07:40:46.7581734Z ##[endgroup]
+2026-07-18T07:40:46.7583766Z ##[group]Disabling automatic garbage collection
+2026-07-18T07:40:46.7586005Z [command]/usr/bin/git config --local gc.auto 0
+2026-07-18T07:40:46.7618008Z ##[endgroup]
+2026-07-18T07:40:46.7618887Z ##[group]Setting up auth
+2026-07-18T07:40:46.7619771Z Removing SSH command configuration
+2026-07-18T07:40:46.7627058Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-07-18T07:40:46.7665972Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-07-18T07:40:46.8063269Z Removing HTTP extra header
+2026-07-18T07:40:46.8069177Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-07-18T07:40:46.8110986Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-07-18T07:40:46.8393735Z Removing includeIf entries pointing to credentials config files
+2026-07-18T07:40:46.8399169Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-07-18T07:40:46.8434618Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-07-18T07:40:46.8701600Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-17ca9b68-e9a9-41a1-99f2-9c021882acd1.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-07-18T07:40:46.8741302Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git.path /home/runner/work/_temp/git-credentials-17ca9b68-e9a9-41a1-99f2-9c021882acd1.config
+2026-07-18T07:40:46.8774286Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-17ca9b68-e9a9-41a1-99f2-9c021882acd1.config
+2026-07-18T07:40:46.8809746Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-17ca9b68-e9a9-41a1-99f2-9c021882acd1.config
+2026-07-18T07:40:46.8842147Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-17ca9b68-e9a9-41a1-99f2-9c021882acd1.config
+2026-07-18T07:40:46.8869733Z ##[endgroup]
+2026-07-18T07:40:46.8870736Z ##[group]Fetching the repository
+2026-07-18T07:40:46.8879505Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +1ef5d108eab61e103e09efd08e1afcd3078048ae:refs/remotes/origin/main
+2026-07-18T07:40:47.1166770Z From https://github.com/tailrocks/velnor-actions-fixture
+2026-07-18T07:40:47.1168985Z  * [new ref]         1ef5d108eab61e103e09efd08e1afcd3078048ae -> origin/main
+2026-07-18T07:40:47.1220852Z [command]/usr/bin/git branch --list --remote origin/main
+2026-07-18T07:40:47.1259905Z   origin/main
+2026-07-18T07:40:47.1270319Z [command]/usr/bin/git rev-parse refs/remotes/origin/main
+2026-07-18T07:40:47.1293435Z 1ef5d108eab61e103e09efd08e1afcd3078048ae
+2026-07-18T07:40:47.1298242Z ##[endgroup]
+2026-07-18T07:40:47.1299690Z ##[group]Determining the checkout info
+2026-07-18T07:40:47.1301129Z ##[endgroup]
+2026-07-18T07:40:47.1303617Z [command]/usr/bin/git sparse-checkout disable
+2026-07-18T07:40:47.1351441Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-07-18T07:40:47.1379785Z ##[group]Checking out the ref
+2026-07-18T07:40:47.1382825Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+2026-07-18T07:40:47.1452899Z Switched to a new branch 'main'
+2026-07-18T07:40:47.1455365Z branch 'main' set up to track 'origin/main'.
+2026-07-18T07:40:47.1463543Z ##[endgroup]
+2026-07-18T07:40:47.1504530Z [command]/usr/bin/git log -1 --format=%H
+2026-07-18T07:40:47.1529570Z 1ef5d108eab61e103e09efd08e1afcd3078048ae
+2026-07-18T07:40:47.1850886Z ##[group]Run mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e
+2026-07-18T07:40:47.1852813Z with:
+2026-07-18T07:40:47.1853557Z   version: v0.16.0
+2026-07-18T07:40:47.1854405Z   disable_annotations: false
+2026-07-18T07:40:47.1863849Z   token: ***
+2026-07-18T07:40:47.1864604Z env:
+2026-07-18T07:40:47.1865347Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:40:47.1866282Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:40:47.1867176Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:40:47.1868028Z ##[endgroup]
+2026-07-18T07:40:47.2704072Z try to setup sccache version: v0.16.0
+2026-07-18T07:40:47.2721365Z sccache download from url: https://github.com/mozilla/sccache/releases/download/v0.16.0/sccache-v0.16.0-x86_64-unknown-linux-musl.tar.gz
+2026-07-18T07:40:47.6083298Z Correct checksum: aec995a83ad3dff3d14b6314e08858b7b73d35ca85a5bcf3d3a9ec07dee35588
+2026-07-18T07:40:47.6209074Z [command]/usr/bin/tar xz --warning=no-unknown-keyword --overwrite -C /home/runner/work/_temp/1a8d427a-6e92-476e-be73-bbf3dd075745 -f /home/runner/work/_temp/dd0179f9-cf8b-42b5-8a8c-e0b2e6ef226a
+2026-07-18T07:40:47.7284741Z sccache extracted to: /home/runner/work/_temp/1a8d427a-6e92-476e-be73-bbf3dd075745
+2026-07-18T07:40:47.7409542Z sccache cached to: /opt/hostedtoolcache/sccache/0.16.0/x64
+2026-07-18T07:40:47.7616982Z ##[group]Run rui314/setup-mold@v1
+2026-07-18T07:40:47.7617914Z with:
+2026-07-18T07:40:47.7618711Z   mold-version: 2.41.0
+2026-07-18T07:40:47.7619554Z   make-default: true
+2026-07-18T07:40:47.7620376Z env:
+2026-07-18T07:40:47.7621172Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:40:47.7622059Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:40:47.7623256Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:40:47.7624246Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:40:47.7625286Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:40:47.7626362Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:40:47.7676099Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:40:47.7677303Z ##[endgroup]
+2026-07-18T07:40:47.7792571Z ##[group]Run set -x
+2026-07-18T07:40:47.7793450Z [36;1mset -x[0m
+2026-07-18T07:40:47.7794249Z [36;1mecho "mold 2.41.0"[0m
+2026-07-18T07:40:47.7795226Z [36;1mif [ "$(whoami)" = root ]; then SUDO=; else SUDO=sudo; fi[0m
+2026-07-18T07:40:47.7797216Z [36;1mwget -O- --timeout=10 --waitretry=3 --retry-connrefused --progress=dot:mega https://github.com/rui314/mold/releases/download/v2.41.0/mold-2.41.0-$(uname -m)-linux.tar.gz | $SUDO tar -C /usr/local --strip-components=1 --no-overwrite-dir -xzf -[0m
+2026-07-18T07:40:47.7799411Z [36;1mtest true = true -a "$(realpath /usr/bin/ld)" != /usr/local/bin/mold && $SUDO ln -sf /usr/local/bin/mold "$(realpath /usr/bin/ld)"; true[0m
+2026-07-18T07:40:47.7974026Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-07-18T07:40:47.7975027Z env:
+2026-07-18T07:40:47.7975794Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:40:47.7976633Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:40:47.7977438Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:40:47.7978395Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:40:47.7979375Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:40:47.7980434Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:40:47.8029460Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:40:47.8030304Z ##[endgroup]
+2026-07-18T07:40:47.8141385Z + echo 'mold 2.41.0'
+2026-07-18T07:40:47.8142960Z mold 2.41.0
+2026-07-18T07:40:47.8145200Z ++ whoami
+2026-07-18T07:40:47.8179733Z + '[' runner = root ']'
+2026-07-18T07:40:47.8181092Z + SUDO=sudo
+2026-07-18T07:40:47.8185475Z + sudo tar -C /usr/local --strip-components=1 --no-overwrite-dir -xzf -
+2026-07-18T07:40:47.8187242Z ++ uname -m
+2026-07-18T07:40:47.8217836Z + wget -O- --timeout=10 --waitretry=3 --retry-connrefused --progress=dot:mega https://github.com/rui314/mold/releases/download/v2.41.0/mold-2.41.0-x86_64-linux.tar.gz
+2026-07-18T07:40:47.8258144Z --2026-07-18 07:40:47--  https://github.com/rui314/mold/releases/download/v2.41.0/mold-2.41.0-x86_64-linux.tar.gz
+2026-07-18T07:40:47.8341752Z Resolving github.com (github.com)... 140.82.114.3
+2026-07-18T07:40:47.8360558Z Connecting to github.com (github.com)|140.82.114.3|:443... connected.
+2026-07-18T07:40:48.0005837Z HTTP request sent, awaiting response... 302 Found
+2026-07-18T07:40:48.0017697Z Location: https://release-assets.githubusercontent.com/github-production-release-asset/299510783/f4863e5d-1747-433e-8c26-b5a1c1950d2d?sp=r&sv=2018-11-09&sr=b&spr=https&se=2026-07-18T08%3A39%3A12Z&rscd=attachment%3B+filename%3Dmold-2.41.0-x86_64-linux.tar.gz&rsct=application%2Foctet-stream&skoid=96c2d410-5711-43a1-aedd-ab1947aa7ab0&sktid=398a6654-997b-47e9-b12b-9515b896b4de&skt=2026-07-18T07%3A39%3A08Z&ske=2026-07-18T08%3A39%3A12Z&sks=b&skv=2018-11-09&sig=uuCc9ZpCypH6xsGNmDrL3K7HqqU25m7boraohF7Iuzc%3D&jwt=*** [following]
+2026-07-18T07:40:48.0038047Z --2026-07-18 07:40:47--  https://release-assets.githubusercontent.com/github-production-release-asset/299510783/f4863e5d-1747-433e-8c26-b5a1c1950d2d?sp=r&sv=2018-11-09&sr=b&spr=https&se=2026-07-18T08%3A39%3A12Z&rscd=attachment%3B+filename%3Dmold-2.41.0-x86_64-linux.tar.gz&rsct=application%2Foctet-stream&skoid=96c2d410-5711-43a1-aedd-ab1947aa7ab0&sktid=398a6654-997b-47e9-b12b-9515b896b4de&skt=2026-07-18T07%3A39%3A08Z&ske=2026-07-18T08%3A39%3A12Z&sks=b&skv=2018-11-09&sig=uuCc9ZpCypH6xsGNmDrL3K7HqqU25m7boraohF7Iuzc%3D&jwt=***
+2026-07-18T07:40:48.0061407Z Resolving release-assets.githubusercontent.com (release-assets.githubusercontent.com)... 185.199.111.133, 185.199.108.133, 185.199.109.133, ...
+2026-07-18T07:40:48.0081163Z Connecting to release-assets.githubusercontent.com (release-assets.githubusercontent.com)|185.199.111.133|:443... connected.
+2026-07-18T07:40:48.0163633Z HTTP request sent, awaiting response... 200 OK
+2026-07-18T07:40:48.0165340Z Length: 5119986 (4.9M) [application/octet-stream]
+2026-07-18T07:40:48.0167249Z Saving to: ‘STDOUT’
+2026-07-18T07:40:48.0182094Z 
+2026-07-18T07:40:48.0599506Z      0K ........ ........ ........ ........ ........ ........ 61% 69.1M 0s
+2026-07-18T07:40:48.0873616Z   3072K ........ ........ ........ ......                    100% 76.3M=0.07s
+2026-07-18T07:40:48.0874564Z 
+2026-07-18T07:40:48.0875191Z 2026-07-18 07:40:48 (71.7 MB/s) - written to stdout [5119986/5119986]
+2026-07-18T07:40:48.0876229Z 
+2026-07-18T07:40:48.0932126Z ++ realpath /usr/bin/ld
+2026-07-18T07:40:48.0963775Z + test true = true -a /usr/bin/x86_64-linux-gnu-ld.bfd '!=' /usr/local/bin/mold
+2026-07-18T07:40:48.0966156Z ++ realpath /usr/bin/ld
+2026-07-18T07:40:48.0990304Z + sudo ln -sf /usr/local/bin/mold /usr/bin/x86_64-linux-gnu-ld.bfd
+2026-07-18T07:40:48.1080523Z + true
+2026-07-18T07:40:48.1257810Z ##[group]Run jdx/mise-action@v4
+2026-07-18T07:40:48.1258654Z with:
+2026-07-18T07:40:48.1259372Z   install: true
+2026-07-18T07:40:48.1260109Z   bootstrap: false
+2026-07-18T07:40:48.1260842Z   cache: true
+2026-07-18T07:40:48.1261555Z   cache_save: true
+2026-07-18T07:40:48.1262572Z   cache_key_prefix: mise-v1
+2026-07-18T07:40:48.1263360Z   experimental: false
+2026-07-18T07:40:48.1264126Z   log_level: info
+2026-07-18T07:40:48.1264847Z   reshim: false
+2026-07-18T07:40:48.1265582Z   add_shims_to_path: true
+2026-07-18T07:40:48.1269131Z   github_token: ***
+2026-07-18T07:40:48.1269888Z   fetch_from_github: true
+2026-07-18T07:40:48.1270657Z   env: true
+2026-07-18T07:40:48.1271368Z   wings_enabled: false
+2026-07-18T07:40:48.1272142Z env:
+2026-07-18T07:40:48.1272993Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:40:48.1273790Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:40:48.1274549Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:40:48.1275454Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:40:48.1276384Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:40:48.1277360Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:40:48.1325874Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:40:48.1326665Z ##[endgroup]
+2026-07-18T07:40:48.2571268Z ##[group]Restoring mise cache
+2026-07-18T07:40:48.2618567Z [command]/usr/bin/ldd --version
+2026-07-18T07:40:48.2677091Z ldd (Ubuntu GLIBC 2.43-2ubuntu2) 2.43
+2026-07-18T07:40:48.2679124Z Copyright (C) 2024 Free Software Foundation, Inc.
+2026-07-18T07:40:48.2681531Z This is free software; see the source for copying conditions.  There is NO
+2026-07-18T07:40:48.2683677Z warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+2026-07-18T07:40:48.2685474Z Written by Roland McGrath and Ulrich Drepper.
+2026-07-18T07:40:48.4198888Z mise cache not found for mise-v1-linux-x64-ubuntu26-3f09e7651569c6e9f5932bf3b371578afcca89e11d6d3f7e9e0323072f13665b
+2026-07-18T07:40:48.4202919Z ##[group]Setup mise
+2026-07-18T07:40:48.4220975Z [command]/usr/local/bin/zstd --version
+2026-07-18T07:40:48.4251773Z *** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***
+2026-07-18T07:40:48.4310743Z Using curl to download mise
+2026-07-18T07:40:48.4777111Z [command]/usr/bin/ldd --version
+2026-07-18T07:40:48.4813110Z ldd (Ubuntu GLIBC 2.43-2ubuntu2) 2.43
+2026-07-18T07:40:48.4815393Z Copyright (C) 2024 Free Software Foundation, Inc.
+2026-07-18T07:40:48.4817993Z This is free software; see the source for copying conditions.  There is NO
+2026-07-18T07:40:48.4820761Z warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+2026-07-18T07:40:48.4823326Z Written by Roland McGrath and Ulrich Drepper.
+2026-07-18T07:40:48.4844050Z [command]/usr/bin/curl -fsSL https://github.com/jdx/mise/releases/download/v2026.7.7/mise-v2026.7.7-linux-x64.tar.zst --output /tmp/mise-action-ct1Mo6/mise-v2026.7.7-linux-x64.tar.zst
+2026-07-18T07:40:48.8406423Z Verified mise-v2026.7.7-linux-x64.tar.zst against signed checksums
+2026-07-18T07:40:48.8421023Z [command]/usr/bin/tar --zstd -xf /tmp/mise-action-ct1Mo6/mise-v2026.7.7-linux-x64.tar.zst -C /tmp/mise-action-ct1Mo6
+2026-07-18T07:40:49.0228761Z [command]/usr/bin/mv /tmp/mise-action-ct1Mo6/mise/bin/mise /home/runner/.local/share/mise/bin/mise
+2026-07-18T07:40:49.0805871Z ##[group]Setting env vars
+2026-07-18T07:40:49.0806795Z Setting MISE_LOG_LEVEL=info
+2026-07-18T07:40:49.0811276Z Setting MISE_GITHUB_TOKEN=***
+2026-07-18T07:40:49.0811975Z Setting MISE_TRUSTED_CONFIG_PATHS=/home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:40:49.0813283Z Setting MISE_YES=1
+2026-07-18T07:40:49.0813852Z Adding /home/runner/.local/share/mise/shims to PATH
+2026-07-18T07:40:49.0814603Z ##[group]Running mise --version
+2026-07-18T07:40:49.0830716Z [command]/home/runner/.local/share/mise/bin/mise --version
+2026-07-18T07:40:49.0918325Z 2026.7.7 linux-x64 (2026-07-15)
+2026-07-18T07:40:49.0987328Z ##[endgroup]
+2026-07-18T07:40:49.1136304Z ##[group]Running mise install
+2026-07-18T07:40:49.1152897Z [command]/home/runner/.local/share/mise/bin/mise install
+2026-07-18T07:40:49.3991133Z [2mmise[0m [34mrust[0m@1.97.1     [1/3] install
+2026-07-18T07:40:49.3993506Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [1/3] install
+2026-07-18T07:40:49.3994468Z [2mmise[0m [34mjust[0m@1.52.0     [1/3] install
+2026-07-18T07:40:49.5831961Z info: syncing channel updates for 1.97.1-x86_64-unknown-linux-gnu
+2026-07-18T07:40:50.0579310Z info: latest update on 2026-07-16 for version 1.97.1 (8bab26f4f 2026-07-14)
+2026-07-18T07:40:50.0635635Z info: downloading 3 components
+2026-07-18T07:40:50.3579553Z [2mmise[0m [34mjust[0m@1.52.0     [1/3] download just-1.52.0-x86_64-unknown-linux-musl.tar.gz
+2026-07-18T07:40:50.3795168Z [2mmise[0m [34mjust[0m@1.52.0     [2/3] checksum just-1.52.0-x86_64-unknown-linux-musl.tar.gz
+2026-07-18T07:40:50.3823197Z [2mmise[0m [34mjust[0m@1.52.0     [3/3] extract just-1.52.0-x86_64-unknown-linux-musl.tar.gz
+2026-07-18T07:40:50.4036727Z [2mmise[0m [34mjust[0m@1.52.0   [38;5;10m✓[0m installed
+2026-07-18T07:40:51.0337174Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [1/3] download cargo-binstall-x86_64-unknown-linux-musl.tgz
+2026-07-18T07:40:51.0673904Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [2/3] verify GitHub artifact attestations
+2026-07-18T07:40:51.3904440Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [2/3] ✓ GitHub artifact attestations verified
+2026-07-18T07:40:51.3906005Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [2/3] checksum cargo-binstall-x86_64-unknown-linux-musl.tgz
+2026-07-18T07:40:51.3965897Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [3/3] extract cargo-binstall-x86_64-unknown-linux-musl.tgz
+2026-07-18T07:40:51.4660703Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [38;5;10m✓[0m installed
+2026-07-18T07:40:58.0302903Z [2mmise[0m [34mrust[0m@1.97.1     [1/3]   1.97.1-x86_64-unknown-linux-gnu installed - rustc 1.97.1 (8bab26f4f 2026-07-14)
+2026-07-18T07:40:58.0709152Z [2mmise[0m [34mrust[0m@1.97.1     [1/3] rustc -V
+2026-07-18T07:40:58.0841990Z [2mmise[0m [34mrust[0m@1.97.1     [1/3] rustc 1.97.1 (8bab26f4f 2026-07-14)
+2026-07-18T07:40:58.0855914Z [2mmise[0m [34mrust[0m@1.97.1   [38;5;10m✓[0m installed
+2026-07-18T07:40:58.0865506Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3] install
+2026-07-18T07:40:58.1016721Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3]  INFO resolve: Resolving package: 'cargo-nextest@=0.9.137'
+2026-07-18T07:41:01.8650877Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3]  WARN The package cargo-nextest v0.9.137 (x86_64-unknown-linux-gnu) has been downloaded from github.com
+2026-07-18T07:41:01.8653129Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3]  INFO This will install the following binaries:
+2026-07-18T07:41:01.8655447Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3]  INFO   - cargo-nextest => /home/runner/.local/share/mise/installs/cargo-cargo-nextest/0.9.137/bin/cargo-nextest
+2026-07-18T07:41:01.8657212Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3]  INFO Installing binaries...
+2026-07-18T07:41:01.8661820Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3]  INFO Done in 3.774462408s
+2026-07-18T07:41:01.8686592Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [38;5;10m✓[0m installed
+2026-07-18T07:41:01.8810942Z ##[endgroup]
+2026-07-18T07:41:01.8812093Z ##[group]Saving mise cache
+2026-07-18T07:41:01.9017589Z [command]/usr/bin/tar --posix -cf cache.tzst --exclude cache.tzst -P -C /home/runner/work/velnor-actions-fixture/velnor-actions-fixture --files-from manifest.txt --use-compress-program zstdmt
+2026-07-18T07:41:02.4189190Z Failed to save: Unable to reserve cache with key mise-v1-linux-x64-ubuntu26-3f09e7651569c6e9f5932bf3b371578afcca89e11d6d3f7e9e0323072f13665b, another job may be creating this cache.
+2026-07-18T07:41:02.4234695Z ##[endgroup]
+2026-07-18T07:41:02.4235334Z ##[group]Running mise ls
+2026-07-18T07:41:02.4254080Z [command]/home/runner/.local/share/mise/bin/mise ls
+2026-07-18T07:41:02.4416121Z cargo-binstall       1.21.0            ~/work/velnor-actions-fixture/velnor-actions-fixture/mise.toml  1.21.0
+2026-07-18T07:41:02.4417610Z cargo:cargo-nextest  0.9.137           ~/work/velnor-actions-fixture/velnor-actions-fixture/mise.toml  0.9.137
+2026-07-18T07:41:02.4418651Z just                 1.52.0            ~/work/velnor-actions-fixture/velnor-actions-fixture/mise.toml  1.52.0
+2026-07-18T07:41:02.4419496Z rust                 1.97.1 (symlink)  ~/work/velnor-actions-fixture/velnor-actions-fixture/mise.toml  1.97.1
+2026-07-18T07:41:02.4429533Z ##[endgroup]
+2026-07-18T07:41:02.4431999Z ##[group]Exporting mise environment variables
+2026-07-18T07:41:02.4641611Z [command]/home/runner/.local/share/mise/bin/mise env --json
+2026-07-18T07:41:02.4804045Z {
+2026-07-18T07:41:02.4804615Z   "CARGO_HOME": "/home/runner/.cargo",
+2026-07-18T07:41:02.4809868Z   "PATH": "/home/runner/.cargo/bin:/home/runner/.local/share/mise/installs/cargo-binstall/1.21.0:/home/runner/.local/share/mise/installs/cargo-cargo-nextest/0.9.137/bin:/home/runner/.local/share/mise/installs/just/1.52.0:/home/runner/.local/share/mise/shims:/home/runner/.local/share/mise/bin:/opt/hostedtoolcache/sccache/0.16.0/x64:/snap/bin:/home/runner/.local/bin:/opt/pipx_bin:/home/runner/.cargo/bin:/home/runner/.config/composer/vendor/bin:/usr/local/.ghcup/bin:/home/runner/.dotnet/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+2026-07-18T07:41:02.4813947Z   "RUSTUP_HOME": "/home/runner/.rustup",
+2026-07-18T07:41:02.4814562Z   "RUSTUP_TOOLCHAIN": "1.97.1"
+2026-07-18T07:41:02.4815093Z }
+2026-07-18T07:41:02.4824309Z ##[endgroup]
+2026-07-18T07:41:02.4941891Z ##[group]Run rustup component add rustfmt clippy
+2026-07-18T07:41:02.4942782Z [36;1mrustup component add rustfmt clippy[0m
+2026-07-18T07:41:02.4996538Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-07-18T07:41:02.4996890Z env:
+2026-07-18T07:41:02.4997097Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:41:02.4997356Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:41:02.4997601Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:41:02.4997916Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:41:02.4998276Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:41:02.4998689Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:41:02.5045961Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:41:02.5046255Z   MISE_LOG_LEVEL: info
+2026-07-18T07:41:02.5048829Z   MISE_GITHUB_TOKEN: ***
+2026-07-18T07:41:02.5049265Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:41:02.5049729Z   MISE_YES: 1
+2026-07-18T07:41:02.5049933Z   CARGO_HOME: /home/runner/.cargo
+2026-07-18T07:41:02.5050187Z   RUSTUP_HOME: /home/runner/.rustup
+2026-07-18T07:41:02.5050443Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-07-18T07:41:02.5050666Z ##[endgroup]
+2026-07-18T07:41:02.5851956Z info: downloading component rustfmt
+2026-07-18T07:41:02.9938747Z info: downloading component clippy
+2026-07-18T07:41:03.5099756Z ##[group]Run actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+2026-07-18T07:41:03.5100138Z with:
+2026-07-18T07:41:03.5100365Z   path: ~/.cargo/registry
+~/.cargo/git
+
+2026-07-18T07:41:03.5100848Z   key: fixture-GitHub-Linux-5750502252cf2c526d78a0e52ccba8a519c58a347cd50cf7273e2ac0f2691436
+2026-07-18T07:41:03.5101347Z   restore-keys: fixture-GitHub-Linux-
+2026-07-18T07:41:03.5101630Z   enableCrossOsArchive: false
+2026-07-18T07:41:03.5101898Z   fail-on-cache-miss: false
+2026-07-18T07:41:03.5102650Z   lookup-only: false
+2026-07-18T07:41:03.5102874Z   save-always: false
+2026-07-18T07:41:03.5103071Z env:
+2026-07-18T07:41:03.5103258Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:41:03.5103524Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:41:03.5103748Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:41:03.5104043Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:41:03.5104385Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:41:03.5104824Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:41:03.5151668Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:41:03.5151933Z   MISE_LOG_LEVEL: info
+2026-07-18T07:41:03.5154748Z   MISE_GITHUB_TOKEN: ***
+2026-07-18T07:41:03.5155158Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:41:03.5155589Z   MISE_YES: 1
+2026-07-18T07:41:03.5155792Z   CARGO_HOME: /home/runner/.cargo
+2026-07-18T07:41:03.5156045Z   RUSTUP_HOME: /home/runner/.rustup
+2026-07-18T07:41:03.5156309Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-07-18T07:41:03.5156527Z ##[endgroup]
+2026-07-18T07:41:03.7204327Z Cache not found for input keys: fixture-GitHub-Linux-5750502252cf2c526d78a0e52ccba8a519c58a347cd50cf7273e2ac0f2691436, fixture-GitHub-Linux-
+2026-07-18T07:41:03.7351174Z ##[group]Run set -euo pipefail
+2026-07-18T07:41:03.7351699Z [36;1mset -euo pipefail[0m
+2026-07-18T07:41:03.7353816Z [36;1mversion="$(grep '^rust-version' "crates/app-a/Cargo.toml" | sed 's/.*= *"\(.*\)"/\1/' || echo 'stable')"[0m
+2026-07-18T07:41:03.7354806Z [36;1mecho "version=${version:-stable}" >> "${GITHUB_OUTPUT}"[0m
+2026-07-18T07:41:03.7436878Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-07-18T07:41:03.7437475Z env:
+2026-07-18T07:41:03.7437810Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:41:03.7438252Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:41:03.7438665Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:41:03.7439227Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:41:03.7439869Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:41:03.7440593Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:41:03.7541218Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:41:03.7541689Z   MISE_LOG_LEVEL: info
+2026-07-18T07:41:03.7547140Z   MISE_GITHUB_TOKEN: ***
+2026-07-18T07:41:03.7547884Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:41:03.7548670Z   MISE_YES: 1
+2026-07-18T07:41:03.7549021Z   CARGO_HOME: /home/runner/.cargo
+2026-07-18T07:41:03.7549471Z   RUSTUP_HOME: /home/runner/.rustup
+2026-07-18T07:41:03.7549919Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-07-18T07:41:03.7550303Z ##[endgroup]
+2026-07-18T07:41:03.7730683Z ##[group]Run set -euo pipefail
+2026-07-18T07:41:03.7731029Z [36;1mset -euo pipefail[0m
+2026-07-18T07:41:03.7731349Z [36;1mecho "FIXTURE_PACKAGE=${PACKAGE}" >> "${GITHUB_ENV}"[0m
+2026-07-18T07:41:03.7731748Z [36;1mecho "package=${PACKAGE}" >> "${GITHUB_OUTPUT}"[0m
+2026-07-18T07:41:03.7732106Z [36;1mecho "lane=${LANE}" >> "${GITHUB_OUTPUT}"[0m
+2026-07-18T07:41:03.7732764Z [36;1mecho "setup-state=complete" >> "${GITHUB_STATE}"[0m
+2026-07-18T07:41:03.7733216Z [36;1m# Multiline heredoc output — matches ChainArgos bake-targets pattern[0m
+2026-07-18T07:41:03.7733738Z [36;1mprintf 'packages<<EOF\n%s\n%s\nEOF\n' "app-a" "app-b" >> "${GITHUB_OUTPUT}"[0m
+2026-07-18T07:41:03.7734154Z [36;1mmkdir -p "${HOME}/.local/bin"[0m
+2026-07-18T07:41:03.7734599Z [36;1mprintf '%s\n' '#!/usr/bin/env bash' 'echo fixture-tool-ok' > "${HOME}/.local/bin/fixture-tool"[0m
+2026-07-18T07:41:03.7735071Z [36;1mchmod +x "${HOME}/.local/bin/fixture-tool"[0m
+2026-07-18T07:41:03.7735442Z [36;1mecho "${HOME}/.local/bin" >> "${GITHUB_PATH}"[0m
+2026-07-18T07:41:03.7735802Z [36;1mecho "### ${LANE} ${PACKAGE}" >> "${GITHUB_STEP_SUMMARY}"[0m
+2026-07-18T07:41:03.7790359Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-07-18T07:41:03.7790713Z env:
+2026-07-18T07:41:03.7790920Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:41:03.7791378Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:41:03.7791619Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:41:03.7791940Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:41:03.7792551Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:41:03.7792971Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:41:03.7840039Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:41:03.7840309Z   MISE_LOG_LEVEL: info
+2026-07-18T07:41:03.7843235Z   MISE_GITHUB_TOKEN: ***
+2026-07-18T07:41:03.7843674Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:41:03.7844122Z   MISE_YES: 1
+2026-07-18T07:41:03.7844348Z   CARGO_HOME: /home/runner/.cargo
+2026-07-18T07:41:03.7844612Z   RUSTUP_HOME: /home/runner/.rustup
+2026-07-18T07:41:03.7844873Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-07-18T07:41:03.7845101Z   PACKAGE: app-a
+2026-07-18T07:41:03.7845296Z   LANE: GitHub
+2026-07-18T07:41:03.7845497Z ##[endgroup]
+2026-07-18T07:41:03.8015029Z ##[group]Run just fmt-check
+2026-07-18T07:41:03.8015318Z [36;1mjust fmt-check[0m
+2026-07-18T07:41:03.8066810Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-07-18T07:41:03.8067167Z env:
+2026-07-18T07:41:03.8067369Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:41:03.8067631Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:41:03.8067880Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:41:03.8068221Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:41:03.8068597Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:41:03.8069025Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:41:03.8116173Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:41:03.8116443Z   MISE_LOG_LEVEL: info
+2026-07-18T07:41:03.8119022Z   MISE_GITHUB_TOKEN: ***
+2026-07-18T07:41:03.8119432Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:41:03.8119862Z   MISE_YES: 1
+2026-07-18T07:41:03.8120127Z   CARGO_HOME: /home/runner/.cargo
+2026-07-18T07:41:03.8120387Z   RUSTUP_HOME: /home/runner/.rustup
+2026-07-18T07:41:03.8120640Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-07-18T07:41:03.8120867Z   FIXTURE_PACKAGE: app-a
+2026-07-18T07:41:03.8121083Z ##[endgroup]
+2026-07-18T07:41:03.8359057Z cargo fmt --check
+2026-07-18T07:41:03.8833576Z ##[group]Run just clippy "app-a"
+2026-07-18T07:41:03.8834334Z [36;1mjust clippy "app-a"[0m
+2026-07-18T07:41:03.8904567Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-07-18T07:41:03.8905252Z env:
+2026-07-18T07:41:03.8905750Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:41:03.8906369Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:41:03.8906874Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:41:03.8907483Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:41:03.8908284Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:41:03.8968740Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:41:03.9016554Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:41:03.9016835Z   MISE_LOG_LEVEL: info
+2026-07-18T07:41:03.9019422Z   MISE_GITHUB_TOKEN: ***
+2026-07-18T07:41:03.9019823Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:41:03.9020250Z   MISE_YES: 1
+2026-07-18T07:41:03.9020484Z   CARGO_HOME: /home/runner/.cargo
+2026-07-18T07:41:03.9020887Z   RUSTUP_HOME: /home/runner/.rustup
+2026-07-18T07:41:03.9021148Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-07-18T07:41:03.9021372Z   FIXTURE_PACKAGE: app-a
+2026-07-18T07:41:03.9021586Z ##[endgroup]
+2026-07-18T07:41:03.9265689Z cargo clippy -p "app-a" -- -D warnings
+2026-07-18T07:41:04.1232385Z     Checking shared v0.1.0 (/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/crates/shared)
+2026-07-18T07:41:04.1523479Z     Checking app-a v0.1.0 (/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/crates/app-a)
+2026-07-18T07:41:04.1769002Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.21s
+2026-07-18T07:41:04.1838720Z ##[group]Run just test "app-a"
+2026-07-18T07:41:04.1839178Z [36;1mjust test "app-a"[0m
+2026-07-18T07:41:04.1909235Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-07-18T07:41:04.1909780Z env:
+2026-07-18T07:41:04.1910089Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:41:04.1910478Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:41:04.1910844Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:41:04.1911326Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:41:04.1911884Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:41:04.1912767Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:41:04.1998609Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:41:04.1999039Z   MISE_LOG_LEVEL: info
+2026-07-18T07:41:04.2001971Z   MISE_GITHUB_TOKEN: ***
+2026-07-18T07:41:04.2002678Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:41:04.2003135Z   MISE_YES: 1
+2026-07-18T07:41:04.2003380Z   CARGO_HOME: /home/runner/.cargo
+2026-07-18T07:41:04.2003659Z   RUSTUP_HOME: /home/runner/.rustup
+2026-07-18T07:41:04.2003918Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-07-18T07:41:04.2004152Z   FIXTURE_PACKAGE: app-a
+2026-07-18T07:41:04.2004381Z ##[endgroup]
+2026-07-18T07:41:04.2280529Z cargo test -p "app-a"
+2026-07-18T07:41:04.4017188Z    Compiling shared v0.1.0 (/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/crates/shared)
+2026-07-18T07:41:04.4526255Z    Compiling app-a v0.1.0 (/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/crates/app-a)
+2026-07-18T07:41:04.8491756Z     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.61s
+2026-07-18T07:41:04.8495268Z      Running unittests src/main.rs (target/debug/deps/app_a-f4143d51637cb1fd)
+2026-07-18T07:41:04.8509785Z 
+2026-07-18T07:41:04.8510027Z running 1 test
+2026-07-18T07:41:04.8517180Z test tests::prints_expected_label ... ok
+2026-07-18T07:41:04.8517560Z 
+2026-07-18T07:41:04.8518042Z test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+2026-07-18T07:41:04.8518666Z 
+2026-07-18T07:41:04.8561193Z ##[group]Run just nextest "app-a"
+2026-07-18T07:41:04.8561531Z [36;1mjust nextest "app-a"[0m
+2026-07-18T07:41:04.8614402Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-07-18T07:41:04.8614739Z env:
+2026-07-18T07:41:04.8614933Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:41:04.8615175Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:41:04.8615399Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:41:04.8615695Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:41:04.8616040Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:41:04.8616445Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:41:04.8663446Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:41:04.8663712Z   MISE_LOG_LEVEL: info
+2026-07-18T07:41:04.8666291Z   MISE_GITHUB_TOKEN: ***
+2026-07-18T07:41:04.8666699Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:41:04.8667160Z   MISE_YES: 1
+2026-07-18T07:41:04.8667404Z   CARGO_HOME: /home/runner/.cargo
+2026-07-18T07:41:04.8667671Z   RUSTUP_HOME: /home/runner/.rustup
+2026-07-18T07:41:04.8667933Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-07-18T07:41:04.8668168Z   FIXTURE_PACKAGE: app-a
+2026-07-18T07:41:04.8668389Z ##[endgroup]
+2026-07-18T07:41:04.8892097Z cargo nextest run -p "app-a"
+2026-07-18T07:41:04.9726520Z     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.00s
+2026-07-18T07:41:04.9782446Z ────────────
+2026-07-18T07:41:04.9783106Z  Nextest run ID 001b243d-1363-4734-9585-2f6a6ee6828e with nextest profile: default
+2026-07-18T07:41:04.9783840Z     Starting 1 test across 1 binary
+2026-07-18T07:41:04.9825126Z         PASS [   0.004s] (1/1) app-a::bin/app-a tests::prints_expected_label
+2026-07-18T07:41:04.9825898Z ────────────
+2026-07-18T07:41:04.9826302Z      Summary [   0.004s] 1 test run: 1 passed, 0 skipped
+2026-07-18T07:41:04.9869098Z ##[group]Run cargo check -p "app-a" --locked
+2026-07-18T07:41:04.9869653Z [36;1mcargo check -p "app-a" --locked[0m
+2026-07-18T07:41:04.9922515Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-07-18T07:41:04.9922871Z env:
+2026-07-18T07:41:04.9923079Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:41:04.9923333Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:41:04.9923566Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:41:04.9923878Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:41:04.9924231Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:41:04.9924643Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:41:04.9970897Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:41:04.9971165Z   MISE_LOG_LEVEL: info
+2026-07-18T07:41:04.9973956Z   MISE_GITHUB_TOKEN: ***
+2026-07-18T07:41:04.9974374Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:41:04.9974840Z   MISE_YES: 1
+2026-07-18T07:41:04.9975063Z   CARGO_HOME: /home/runner/.cargo
+2026-07-18T07:41:04.9975329Z   RUSTUP_HOME: /home/runner/.rustup
+2026-07-18T07:41:04.9975589Z   RUSTUP_TOOLCHAIN: stable
+2026-07-18T07:41:04.9975821Z   FIXTURE_PACKAGE: app-a
+2026-07-18T07:41:04.9976042Z ##[endgroup]
+2026-07-18T07:41:05.0355075Z     Checking shared v0.1.0 (/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/crates/shared)
+2026-07-18T07:41:05.0582808Z     Checking app-a v0.1.0 (/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/crates/app-a)
+2026-07-18T07:41:05.0793448Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
+2026-07-18T07:41:05.0855990Z Prepare all required actions
+2026-07-18T07:41:05.0886032Z ##[group]Run ./.github/actions/check-fixture-output
+2026-07-18T07:41:05.0886351Z with:
+2026-07-18T07:41:05.0886547Z   package: app-a
+2026-07-18T07:41:05.0886740Z env:
+2026-07-18T07:41:05.0886929Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:41:05.0887168Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:41:05.0887397Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:41:05.0887696Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:41:05.0888055Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:41:05.0888456Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:41:05.0936220Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:41:05.0936493Z   MISE_LOG_LEVEL: info
+2026-07-18T07:41:05.0939080Z   MISE_GITHUB_TOKEN: ***
+2026-07-18T07:41:05.0939497Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:41:05.0939936Z   MISE_YES: 1
+2026-07-18T07:41:05.0940167Z   CARGO_HOME: /home/runner/.cargo
+2026-07-18T07:41:05.0940423Z   RUSTUP_HOME: /home/runner/.rustup
+2026-07-18T07:41:05.0940679Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-07-18T07:41:05.0940910Z   FIXTURE_PACKAGE: app-a
+2026-07-18T07:41:05.0941128Z ##[endgroup]
+2026-07-18T07:41:05.0956367Z ##[group]Run set -euo pipefail
+2026-07-18T07:41:05.0956661Z [36;1mset -euo pipefail[0m
+2026-07-18T07:41:05.0956937Z [36;1mtest "app-a" = "${FIXTURE_PACKAGE}"[0m
+2026-07-18T07:41:05.0957281Z [36;1mtest "$(fixture-tool)" = "fixture-tool-ok"[0m
+2026-07-18T07:41:05.0957611Z [36;1mecho "checked=true" >> "${GITHUB_OUTPUT}"[0m
+2026-07-18T07:41:05.1011842Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-07-18T07:41:05.1012427Z env:
+2026-07-18T07:41:05.1012637Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:41:05.1012885Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:41:05.1013114Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:41:05.1013424Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:41:05.1013782Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:41:05.1014178Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:41:05.1060449Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:41:05.1060712Z   MISE_LOG_LEVEL: info
+2026-07-18T07:41:05.1063499Z   MISE_GITHUB_TOKEN: ***
+2026-07-18T07:41:05.1063919Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:41:05.1064559Z   MISE_YES: 1
+2026-07-18T07:41:05.1064767Z   CARGO_HOME: /home/runner/.cargo
+2026-07-18T07:41:05.1065031Z   RUSTUP_HOME: /home/runner/.rustup
+2026-07-18T07:41:05.1065289Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-07-18T07:41:05.1065538Z   FIXTURE_PACKAGE: app-a
+2026-07-18T07:41:05.1065755Z ##[endgroup]
+2026-07-18T07:41:05.1219568Z ##[group]Run python3 .github/scripts/write-result.py "app-a" "GitHub" "out/result.json"
+2026-07-18T07:41:05.1220213Z [36;1mpython3 .github/scripts/write-result.py "app-a" "GitHub" "out/result.json"[0m
+2026-07-18T07:41:05.1266845Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-07-18T07:41:05.1267192Z env:
+2026-07-18T07:41:05.1267389Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:41:05.1267637Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:41:05.1267870Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:41:05.1268182Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:41:05.1268538Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:41:05.1268945Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:41:05.1315546Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:41:05.1315808Z   MISE_LOG_LEVEL: info
+2026-07-18T07:41:05.1318371Z   MISE_GITHUB_TOKEN: ***
+2026-07-18T07:41:05.1318813Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:41:05.1319253Z   MISE_YES: 1
+2026-07-18T07:41:05.1319459Z   CARGO_HOME: /home/runner/.cargo
+2026-07-18T07:41:05.1319715Z   RUSTUP_HOME: /home/runner/.rustup
+2026-07-18T07:41:05.1319973Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-07-18T07:41:05.1320284Z   FIXTURE_PACKAGE: app-a
+2026-07-18T07:41:05.1320529Z ##[endgroup]
+2026-07-18T07:41:05.1683824Z ##[group]Run actions/upload-artifact@v7
+2026-07-18T07:41:05.1684282Z with:
+2026-07-18T07:41:05.1684503Z   name: result-GitHub-app-a
+2026-07-18T07:41:05.1684759Z   path: out/result.json
+2026-07-18T07:41:05.1684983Z   if-no-files-found: warn
+2026-07-18T07:41:05.1685211Z   compression-level: 6
+2026-07-18T07:41:05.1685418Z   overwrite: false
+2026-07-18T07:41:05.1685638Z   include-hidden-files: false
+2026-07-18T07:41:05.1685867Z   archive: true
+2026-07-18T07:41:05.1686048Z env:
+2026-07-18T07:41:05.1686231Z   SCCACHE_GHA_ENABLED: false
+2026-07-18T07:41:05.1686461Z   SCCACHE_CACHE_SIZE: 20G
+2026-07-18T07:41:05.1686678Z   RUSTC_WRAPPER: sccache
+2026-07-18T07:41:05.1686989Z   SCCACHE_PATH: /opt/hostedtoolcache/sccache/0.16.0/x64/sccache
+2026-07-18T07:41:05.1687329Z   ACTIONS_CACHE_SERVICE_V2: on
+2026-07-18T07:41:05.1687715Z   ACTIONS_RESULTS_URL: https://results-receiver.actions.githubusercontent.com/
+2026-07-18T07:41:05.1733939Z   ACTIONS_RUNTIME_TOKEN: ***
+2026-07-18T07:41:05.1734218Z   MISE_LOG_LEVEL: info
+2026-07-18T07:41:05.1736787Z   MISE_GITHUB_TOKEN: ***
+2026-07-18T07:41:05.1737196Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:41:05.1737631Z   MISE_YES: 1
+2026-07-18T07:41:05.1737841Z   CARGO_HOME: /home/runner/.cargo
+2026-07-18T07:41:05.1738109Z   RUSTUP_HOME: /home/runner/.rustup
+2026-07-18T07:41:05.1738368Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-07-18T07:41:05.1738596Z   FIXTURE_PACKAGE: app-a
+2026-07-18T07:41:05.1738815Z ##[endgroup]
+2026-07-18T07:41:05.3207273Z With the provided path, there will be 1 file uploaded
+2026-07-18T07:41:05.3223048Z Artifact name is valid!
+2026-07-18T07:41:05.3253057Z Root directory input is valid!
+2026-07-18T07:41:05.4471861Z Uploading artifact: result-GitHub-app-a.zip
+2026-07-18T07:41:05.4517627Z Beginning upload of artifact content to blob storage
+2026-07-18T07:41:05.5122893Z Uploaded bytes 212
+2026-07-18T07:41:05.5273071Z Finished uploading artifact content to blob storage!
+2026-07-18T07:41:05.5274480Z SHA256 digest of uploaded artifact is ed607fbe4ba25b4ed48a2ea19fb448e4f9f6689a74a8ea7fd2c4abbbed92e2f3
+2026-07-18T07:41:05.5275885Z Finalizing artifact upload
+2026-07-18T07:41:05.6829302Z Artifact result-GitHub-app-a successfully finalized. Artifact ID 8427162582
+2026-07-18T07:41:05.6830746Z Artifact result-GitHub-app-a has been successfully uploaded! Final size is 212 bytes. Artifact ID is 8427162582
+2026-07-18T07:41:05.6834520Z Artifact download URL: https://github.com/tailrocks/velnor-actions-fixture/actions/runs/29636145660/artifacts/8427162582
+2026-07-18T07:41:05.7548986Z Post job cleanup.
+2026-07-18T07:41:05.8867826Z [warning]Path Validation Error: Path(s) specified in the action for caching do(es) not exist, hence no cache is being saved.
+2026-07-18T07:41:05.9021562Z Post job cleanup.
+2026-07-18T07:41:05.9841545Z ##[group]Get human-readable stats
+2026-07-18T07:41:05.9860958Z [command]/opt/hostedtoolcache/sccache/0.16.0/x64/sccache --show-stats
+2026-07-18T07:41:05.9914241Z Compile requests                     13
+2026-07-18T07:41:05.9915023Z Compile requests executed             0
+2026-07-18T07:41:05.9915783Z Cache hits                            0
+2026-07-18T07:41:05.9916713Z Cache misses                          0
+2026-07-18T07:41:05.9917223Z Cache hits rate                       -
+2026-07-18T07:41:05.9917951Z Cache timeouts                        0
+2026-07-18T07:41:05.9918480Z Cache read errors                     0
+2026-07-18T07:41:05.9918960Z Forced recaches                       0
+2026-07-18T07:41:05.9919459Z Cache write errors                    0
+2026-07-18T07:41:05.9919927Z Cache errors                          0
+2026-07-18T07:41:05.9920392Z Compilations                          0
+2026-07-18T07:41:05.9920926Z Compilation failures                  0
+2026-07-18T07:41:05.9921429Z Non-cacheable compilations            0
+2026-07-18T07:41:05.9921925Z Non-cacheable calls                  13
+2026-07-18T07:41:05.9922734Z Non-compilation calls                 0
+2026-07-18T07:41:05.9923262Z Unsupported compiler calls            0
+2026-07-18T07:41:05.9923772Z Average cache write               0.000 s
+2026-07-18T07:41:05.9924297Z Average compiler                  0.000 s
+2026-07-18T07:41:05.9924806Z Average cache read hit            0.000 s
+2026-07-18T07:41:05.9925327Z Failed distributed compilations       0
+2026-07-18T07:41:05.9925675Z 
+2026-07-18T07:41:05.9925853Z Non-cacheable reasons:
+2026-07-18T07:41:05.9926261Z -                                     3
+2026-07-18T07:41:05.9926713Z incremental                           3
+2026-07-18T07:41:05.9927207Z missing input                         2
+2026-07-18T07:41:05.9927678Z missing output_dir                    2
+2026-07-18T07:41:05.9928164Z multiple input files                  2
+2026-07-18T07:41:05.9928664Z crate-type                            1
+2026-07-18T07:41:05.9928985Z 
+2026-07-18T07:41:05.9929288Z Cache location                  Local disk: "/home/runner/.cache/sccache"
+2026-07-18T07:41:05.9929940Z Base directories                (none)
+2026-07-18T07:41:05.9930450Z Use direct/preprocessor mode?   yes
+2026-07-18T07:41:05.9930960Z Version (client)                0.16.0
+2026-07-18T07:41:05.9931450Z Max cache size                       20 GiB
+2026-07-18T07:41:05.9939155Z ##[endgroup]
+2026-07-18T07:41:05.9940197Z ##[group]Get JSON stats
+2026-07-18T07:41:05.9941792Z [command]/opt/hostedtoolcache/sccache/0.16.0/x64/sccache --show-stats --stats-format=json
+2026-07-18T07:41:05.9986197Z {"stats":{"compile_requests":13,"requests_unsupported_compiler":0,"requests_not_compile":0,"requests_not_cacheable":13,"requests_executed":0,"cache_errors":{"counts":{},"adv_counts":{}},"cache_hits":{"counts":{},"adv_counts":{}},"cache_misses":{"counts":{},"adv_counts":{}},"cache_timeouts":0,"cache_read_errors":0,"non_cacheable_compilations":0,"forced_recaches":0,"cache_write_errors":0,"cache_writes":0,"cache_write_duration":{"secs":0,"nanos":0},"cache_read_hit_duration":{"secs":0,"nanos":0},"compilations":0,"compiler_write_duration":{"secs":0,"nanos":0},"compile_fails":0,"not_cached":{"-":3,"missing output_dir":2,"multiple input files":2,"missing input":2,"crate-type":1,"incremental":3},"dist_compiles":{},"dist_errors":0,"multi_level":null},"cache_location":"Local disk: \"/home/runner/.cache/sccache\"","cache_size":null,"max_cache_size":21474836480,"use_preprocessor_cache_mode":true,"version":"0.16.0","basedirs":[]}
+2026-07-18T07:41:05.9991990Z ##[endgroup]
+2026-07-18T07:41:06.0018516Z ##[notice]0% - 0 hits, 0 misses, 0 errors
+2026-07-18T07:41:06.0028812Z 
+2026-07-18T07:41:06.0029034Z Full human-readable stats:
+2026-07-18T07:41:06.0029480Z Compile requests                     13
+2026-07-18T07:41:06.0029951Z Compile requests executed             0
+2026-07-18T07:41:06.0030403Z Cache hits                            0
+2026-07-18T07:41:06.0031131Z Cache misses                          0
+2026-07-18T07:41:06.0031582Z Cache hits rate                       -
+2026-07-18T07:41:06.0032026Z Cache timeouts                        0
+2026-07-18T07:41:06.0032746Z Cache read errors                     0
+2026-07-18T07:41:06.0033260Z Forced recaches                       0
+2026-07-18T07:41:06.0033780Z Cache write errors                    0
+2026-07-18T07:41:06.0034334Z Cache errors                          0
+2026-07-18T07:41:06.0034767Z Compilations                          0
+2026-07-18T07:41:06.0035202Z Compilation failures                  0
+2026-07-18T07:41:06.0035670Z Non-cacheable compilations            0
+2026-07-18T07:41:06.0036119Z Non-cacheable calls                  13
+2026-07-18T07:41:06.0036562Z Non-compilation calls                 0
+2026-07-18T07:41:06.0037014Z Unsupported compiler calls            0
+2026-07-18T07:41:06.0037470Z Average cache write               0.000 s
+2026-07-18T07:41:06.0037936Z Average compiler                  0.000 s
+2026-07-18T07:41:06.0038398Z Average cache read hit            0.000 s
+2026-07-18T07:41:06.0038864Z Failed distributed compilations       0
+2026-07-18T07:41:06.0039168Z 
+2026-07-18T07:41:06.0039316Z Non-cacheable reasons:
+2026-07-18T07:41:06.0039677Z -                                     3
+2026-07-18T07:41:06.0040093Z incremental                           3
+2026-07-18T07:41:06.0040518Z missing input                         2
+2026-07-18T07:41:06.0040947Z missing output_dir                    2
+2026-07-18T07:41:06.0041383Z multiple input files                  2
+2026-07-18T07:41:06.0041813Z crate-type                            1
+2026-07-18T07:41:06.0042100Z 
+2026-07-18T07:41:06.0042948Z Cache location                  Local disk: "/home/runner/.cache/sccache"
+2026-07-18T07:41:06.0043573Z Base directories                (none)
+2026-07-18T07:41:06.0044029Z Use direct/preprocessor mode?   yes
+2026-07-18T07:41:06.0044512Z Version (client)                0.16.0
+2026-07-18T07:41:06.0044968Z Max cache size                       20 GiB
+2026-07-18T07:41:06.0045281Z 
+2026-07-18T07:41:06.0179886Z Post job cleanup.
+2026-07-18T07:41:06.1081397Z [command]/usr/bin/git version
+2026-07-18T07:41:06.1125981Z git version 2.53.0
+2026-07-18T07:41:06.1165721Z Temporarily overriding HOME='/home/runner/work/_temp/e7c598e8-183a-4a5a-b63b-2f285e179dd4' before making global git config changes
+2026-07-18T07:41:06.1167710Z Adding repository directory to the temporary git global config as a safe directory
+2026-07-18T07:41:06.1171226Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:41:06.1205723Z Removing SSH command configuration
+2026-07-18T07:41:06.1212710Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-07-18T07:41:06.1249940Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-07-18T07:41:06.1557248Z Removing HTTP extra header
+2026-07-18T07:41:06.1564174Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-07-18T07:41:06.1603829Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-07-18T07:41:06.1913170Z Removing includeIf entries pointing to credentials config files
+2026-07-18T07:41:06.1921828Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-07-18T07:41:06.1951685Z includeif.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git.path
+2026-07-18T07:41:06.1953238Z includeif.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git/worktrees/*.path
+2026-07-18T07:41:06.1954056Z includeif.gitdir:/github/workspace/.git.path
+2026-07-18T07:41:06.1954589Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-07-18T07:41:06.1962147Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git.path
+2026-07-18T07:41:06.1987189Z /home/runner/work/_temp/git-credentials-17ca9b68-e9a9-41a1-99f2-9c021882acd1.config
+2026-07-18T07:41:06.2001141Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git.path /home/runner/work/_temp/git-credentials-17ca9b68-e9a9-41a1-99f2-9c021882acd1.config
+2026-07-18T07:41:06.2054944Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git/worktrees/*.path
+2026-07-18T07:41:06.2093225Z /home/runner/work/_temp/git-credentials-17ca9b68-e9a9-41a1-99f2-9c021882acd1.config
+2026-07-18T07:41:06.2104229Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-17ca9b68-e9a9-41a1-99f2-9c021882acd1.config
+2026-07-18T07:41:06.2153351Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+2026-07-18T07:41:06.2176161Z /github/runner_temp/git-credentials-17ca9b68-e9a9-41a1-99f2-9c021882acd1.config
+2026-07-18T07:41:06.2188643Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-17ca9b68-e9a9-41a1-99f2-9c021882acd1.config
+2026-07-18T07:41:06.2229067Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-07-18T07:41:06.2254877Z /github/runner_temp/git-credentials-17ca9b68-e9a9-41a1-99f2-9c021882acd1.config
+2026-07-18T07:41:06.2267781Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-17ca9b68-e9a9-41a1-99f2-9c021882acd1.config
+2026-07-18T07:41:06.2310217Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-07-18T07:41:06.2588205Z Removing credentials config '/home/runner/work/_temp/git-credentials-17ca9b68-e9a9-41a1-99f2-9c021882acd1.config'
+2026-07-18T07:41:06.2744738Z Cleaning up orphan processes
+2026-07-18T07:41:06.3096268Z Terminate orphan process: pid (2764) (sccache)
