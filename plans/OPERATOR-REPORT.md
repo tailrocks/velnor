@@ -659,3 +659,18 @@ same-version local-artifact sentence is superseded and must not be used.
   gates as GitHub and format/lint passed. The recoverable target-bucket rename
   had disproved cache contamination; after this green proof, the explicit
   Velnor-owned quarantine path recorded above was removed.
+- Holla PR <https://github.com/tailrocks/holla/pull/36> merged after Velnor
+  run `29644699959`, GitHub run `29644855730`, combined parity run
+  `29645094502`, and the PR required-check rerun `29639626469` all passed.
+  The initial combined run revealed that the new per-repository Holla daemon
+  lacked `VELNOR_CARGO_TARGET_PERSIST=1`; its otherwise green Velnor lane
+  rebuilt dependencies. The trusted Holla instance was corrected with an
+  explicit `VELNOR_TRUST_SCOPE=trusted` and persistent targets, without a
+  workflow semantic change. Warm population run `29645253465` passed and
+  unchanged acceptance run `29645393337` completed in 57 seconds with zero
+  dependency downloads/compiles and zero tool installs (only the local Holla
+  crate rebuilt). Attempt `29645326167` hit one non-repeating Holla
+  filesystem-mtime test failure after three green lane proofs; the unchanged
+  retry passed, establishing a repository test flake rather than a runner
+  divergence. The Holla daemon then drained and deregistered every slot; PR
+  and program branches were deleted and the repository now ends on `main`.
