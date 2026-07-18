@@ -992,3 +992,17 @@ same-version local-artifact sentence is superseded and must not be used.
   through Results Service CreateArtifact; every other value remains rejected.
   Contract, manifest, runtime, and protocol coverage passes with all 631 tests,
   format, strict clippy, and actionlint. No workflow was weakened.
+- v0.1.80 general release `29657118842`, Debian release `29657118836`, and
+  signed apt publish `29657247202` passed. Sentry was upgraded exclusively
+  through apt; installed version, candidate, and job-image label all report
+  0.1.80 before retention-dependent campaigns resumed.
+- Pg-bigdecimal's final v0.1.79 evidence is complete: standalone Velnor
+  `29656674242`, GitHub `29656700384`, both `29656727022`, and V-C rounds
+  `29656785834`/`29656825488`/`29656852885` passed. Its no-change Velnor job
+  finished in 21 seconds with no dependency download, dependency compilation,
+  or tool installation; only the repository crate and cargo-package
+  verification compiled. Tracing standalone Velnor `29656886121` and GitHub
+  `29656916615` passed before the v0.1.80 hold.
+- Playground's latest-head GitHub run `29656744438` passed after signed target
+  commit `0c9da1d` declared rustfmt and clippy as mise-managed Rust components,
+  removing implicit GitHub-image provisioning while keeping mise authoritative.
