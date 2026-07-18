@@ -796,3 +796,17 @@ same-version local-artifact sentence is superseded and must not be used.
   force-cancel endpoint completed the run. This is runner backlog evidence:
   cancellation must promptly terminate the active step and release the job;
   workflow semantics were not changed to hide it.
+- Parallax repository follow-up `c54c39eb` restores the checksum-verifying
+  `setup-macos-sdk` composite action still included by Rust contract tests and
+  required by native Darwin releases, adds the exact 1,579-byte workflow-agent
+  ratchet, and reconciles the stale Oxfmt fixture with the live 493-file,
+  100-column contract. Local policy, Oxfmt, and strict clippy gates pass. Clean
+  follow-up run `29650466272` again rejected a browser job before execution on
+  the same `retention-days: 14` surface, proving the remaining blocker is the
+  unapproved native action capability. Plan 053 is BLOCKED pending an explicit
+  operator decision to add `actions/upload-artifact@v7` `retention-days` with
+  its GitHub-equivalent storage lifetime semantics; after approval, rerun the
+  three-lane and timing campaign from PR
+  <https://github.com/tailrocks/parallax/pull/21>. Cancellation again required
+  force-cancel plus termination of the already-cancelled owned systemd cgroup;
+  the Parallax unit is disabled and its runner registrations are deleted.
