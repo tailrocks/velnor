@@ -679,6 +679,10 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
 
     let mut attempt: u32 = 0;
     loop {
+        if draining() {
+            println!("drain complete during registration retry: exiting");
+            return Ok(());
+        }
         match daemon_pass(&args, slots).await {
             Ok(()) => return Ok(()),
             Err(error) => {
@@ -701,7 +705,13 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
                     "registration failing (attempt {attempt}); retrying in {}s",
                     delay.as_secs()
                 ));
-                tokio::time::sleep(delay).await;
+                for _ in 0..delay.as_secs().max(1) {
+                    if draining() {
+                        println!("drain complete during registration backoff: exiting");
+                        return Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
             }
         }
     }
@@ -712,6 +722,9 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
 /// reaching the end of this function only happens in one-shot modes or when
 /// every slot task has stopped (e.g. all panicked repeatedly).
 async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
+    if draining() {
+        return Ok(());
+    }
     let config_base = daemon_config_dir(args)?;
     preflight_before_daemon_jit_config(args, &config_base, slots)?;
     if args.url.is_some() && !args.dry_run_registration {
@@ -723,6 +736,9 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         prune_stale_velnor_docker_resources(&daemon_id);
     }
     configure_daemon_slots(args, &config_base, slots).await?;
+    if draining() {
+        return Ok(());
+    }
     if !daemon_should_poll_after_jit_config(args) {
         println!("Daemon JIT config dry run complete; skipped polling GitHub for jobs.");
         return Ok(());
@@ -1155,6 +1171,10 @@ async fn configure_daemon_slots(args: &DaemonArgs, config_base: &Path, slots: us
     let mut usable_slots = 0usize;
     let mut skipped_slots = Vec::new();
     for slot_index in 1..=slots {
+        if draining() {
+            cleanup_configured_daemon_slots(args, config_base, slots, &configured_slots).await;
+            return Ok(());
+        }
         let slot_config_dir = daemon_slot_config_dir(config_base, slot_index, slots);
         if !daemon_slot_should_configure_jit(
             &slot_config_dir,
