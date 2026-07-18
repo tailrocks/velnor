@@ -56,3 +56,30 @@ authoritative sequence is commit + push → version tag → Velnor
 `publish.yml` signed reprepro/Pages deployment → repository version check →
 `apt-get update && apt-get install velnor-runner` on Sentry. The preceding
 same-version local-artifact sentence is superseded and must not be used.
+
+## 2026-07-18 — v0.1.35 signed apt deployment evidence
+
+- Source release run `29623974593` passed for amd64 and arm64, attached both
+  packages, cross-uploaded them to `tailrocks/velnor-apt`, and dispatched the
+  publisher. Signed reprepro/Pages run `29624452820` passed.
+- Public evidence: `dists/stable/InRelease` is PGP signed, dated
+  `2026-07-18 01:04:15 UTC`, and its amd64 `Packages` entry advertises
+  `velnor-runner 0.1.35` with SHA-256
+  `16cbbd312a41ecec5e45b538844ed5184f333727ac539fa472a6d6a1e07e42fc`.
+- Sentry evidence after `apt-get update`: candidate `0.1.35`; upgraded only by
+  `apt-get install -y velnor-runner`; `dpkg-query` reports `0.1.35`. Fixture
+  was started first and both broker sessions became ready, then all four other
+  daemon units were started. All five units are active; the default daemon
+  reports ten supervised slots and capacity-limited slots expose explicit
+  backpressure.
+- Shutdown deviation/root-cause evidence: four units drained immediately, but
+  the default ten-slot daemon removed every JIT registration and local slot
+  config, then remained in `deactivating` with no `velnor-job-*` container.
+  The installed unit exposed `TimeoutStopUSec=3h`, so after the documented
+  two-minute stuck-state investigation the registration-free process was
+  killed before apt proceeded. This is a runner drain-completion defect, not
+  permission to shorten or bypass a drain while any job/resource remains.
+- Hardened-unit score is unchanged after repository deployment:
+  `systemd-analyze security` reports `7.9 EXPOSED` for both the default and
+  fixture units (pre-hardening baseline was `9.4 UNSAFE`). Final plan 014/059
+  scoring and live smoke remain gated on fixture plan 041.
