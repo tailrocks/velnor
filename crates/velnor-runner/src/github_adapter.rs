@@ -30,7 +30,7 @@ pub fn github_job_container_spec(
     daemon_id: String,
     trust_scope: &str,
 ) -> JobContainerSpec {
-    // Opt-in persistent CARGO_TARGET_DIR. Buckets are scoped by the GitHub
+    // Opt-in persistent workspace target directory. Buckets are scoped by the GitHub
     // trust boundary plus workflow/job class so warm state cannot cross repos
     // or unrelated workflows when an operator enables the speed-up per daemon.
     let cargo_target_host = std::env::var("VELNOR_CARGO_TARGET_PERSIST")

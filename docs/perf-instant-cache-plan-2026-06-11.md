@@ -85,9 +85,10 @@ B. **Host-persistent stores mounted into every job container** (under the
      baked `/opt/mise` once per image digest, then accretes job-installed
      tools: GraalVM installs once per fleet, not per job)
    - `_velnor_targets/<trust-scope>/<repo>/<workflow>/<job-bucket>` →
-     `CARGO_TARGET_DIR` (per-trust-scope, per-job-class persistent incremental
-     state; cargo's own build-dir lock serializes the rare same-bucket
-     concurrency)
+     `/__w/target` (the normal workspace target path; per-trust-scope,
+     per-job-class persistent incremental state; cargo's own build-dir lock
+     serializes the rare same-bucket concurrency). Velnor does not export a
+     synthetic `CARGO_TARGET_DIR`.
    Cargo registry/git are concurrency-safe by cargo's own file locking.
 
 C. **Cache adapter: persistent-path no-op** — `~/.cargo/registry|git`,

@@ -1070,6 +1070,7 @@ where
             &container.workspace_host,
             temp_host,
         );
+        state.persistent_workspace_target = container.cargo_target_host.is_some();
         state.workflow_env = self
             .workflow_env
             .iter()
@@ -3883,8 +3884,8 @@ fn velnor_persistent_cache_path(path: &str) -> bool {
     }
     path == "/opt/mise"
         || path.starts_with("/opt/mise/")
-        || path == "/__cargo_target"
-        || path.starts_with("/__cargo_target/")
+        || path == "/__w/target"
+        || path.starts_with("/__w/target/")
         || path == "/root/.rustup"
         || path.starts_with("/root/.rustup/")
         || path == "/var/cache/sccache"
@@ -3899,18 +3900,11 @@ fn rust_cache_covered_by_persistent_storage(
     if !paths.is_empty() {
         return paths.iter().all(|path| velnor_persistent_cache_path(path));
     }
-    state
-        .env
-        .get("CARGO_TARGET_DIR")
-        .is_some_and(|path| velnor_persistent_cache_path(path))
+    state.persistent_workspace_target
 }
 
 fn container_runtime_env(container: &JobContainerSpec) -> Vec<(String, String)> {
-    let mut env = container.env.clone();
-    if container.cargo_target_host.is_some() {
-        env.push(("CARGO_TARGET_DIR".into(), "/__cargo_target".into()));
-    }
-    env
+    container.env.clone()
 }
 
 fn save_cache_result(
@@ -5634,6 +5628,8 @@ struct JobExecutionState {
     context_data: BTreeMap<String, Value>,
     workspace_host: Option<PathBuf>,
     temp_host: Option<PathBuf>,
+    /// Runner-internal storage fact; deliberately not exported to step env.
+    persistent_workspace_target: bool,
     outputs: BTreeMap<String, BTreeMap<String, String>>,
     action_states: BTreeMap<String, BTreeMap<String, String>>,
     outcomes: BTreeMap<String, StepOutcome>,
@@ -5710,6 +5706,7 @@ impl JobExecutionState {
             context_data: context_data.iter().cloned().collect(),
             workspace_host,
             temp_host,
+            persistent_workspace_target: false,
             outputs: BTreeMap::new(),
             action_states: BTreeMap::new(),
             outcomes: BTreeMap::new(),
@@ -5752,6 +5749,7 @@ impl JobExecutionState {
             context_data: self.context_data.clone(),
             workspace_host: self.workspace_host.clone(),
             temp_host: self.temp_host.clone(),
+            persistent_workspace_target: self.persistent_workspace_target,
             outputs: self.outputs.clone(),
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
@@ -5776,6 +5774,7 @@ impl JobExecutionState {
             context_data: self.context_data.clone(),
             workspace_host: self.workspace_host.clone(),
             temp_host: self.temp_host.clone(),
+            persistent_workspace_target: self.persistent_workspace_target,
             outputs: self.outputs.clone(),
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
@@ -8529,6 +8528,8 @@ mod tests {
     fn native_rust_cache_treats_persistent_cargo_target_as_warm() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        spec.cargo_target_host = Some(temp.join("target-store"));
         let steps = vec![ExecutableStep::Native {
             step_id: "rust-cache".into(),
             display_name: String::new(),
@@ -8544,12 +8545,7 @@ mod tests {
         }];
 
         let results = DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(
-                &container(&temp),
-                &steps,
-                &[("CARGO_TARGET_DIR".into(), "/__cargo_target".into())],
-                &temp,
-            )
+            .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
         assert_eq!(results.len(), 2);
@@ -8613,7 +8609,7 @@ mod tests {
                     ("shared-key".into(), "ci-custom-dir".into()),
                     (
                         "cache-directories".into(),
-                        "/__cargo_target\n/var/cache/sccache\n".into(),
+                        "/__w/target\n/var/cache/sccache\n".into(),
                     ),
                 ]
                 .into(),
@@ -8632,7 +8628,7 @@ mod tests {
         assert!(results[0]
             .stdout
             .contains("Rust cache paths live on Velnor host-persistent storage"));
-        assert!(velnor_persistent_cache_path("/__cargo_target/debug"));
+        assert!(velnor_persistent_cache_path("/__w/target/debug"));
         fs::remove_dir_all(temp).unwrap();
     }
 
