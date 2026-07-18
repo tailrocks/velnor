@@ -4912,6 +4912,10 @@ fn native_restore_prepared_jackin_tools(
     let tools_dir = workspace.join(".ci-prebuilt-tools");
     let xtask_dir = workspace.join(".ci-prebuilt-xtask");
 
+    if tools_hit && !prepared_jackin_tools_complete(&tools_dir) {
+        tools_hit = false;
+    }
+
     if include_tools && !tools_hit {
         let artifact = format!(
             "ci-tools-{}-{}-{}",
@@ -4920,6 +4924,12 @@ fn native_restore_prepared_jackin_tools(
             required_env(env, "JACKIN_TOOLS_CONTRACT")?
         );
         tools_hit = restore_repository_artifact(env, &artifact, &tools_dir, allow_miss)?;
+        if tools_hit && !prepared_jackin_tools_complete(&tools_dir) {
+            if !allow_miss {
+                bail!("prepared CI tools artifact is incomplete: {artifact}");
+            }
+            tools_hit = false;
+        }
     }
     if include_xtask && !xtask_hit {
         let prefix = format!(
@@ -4998,6 +5008,26 @@ fn native_restore_prepared_jackin_tools(
         }
     }
     Ok(native_success_with_state(command_state))
+}
+
+fn prepared_jackin_tools_complete(directory: &Path) -> bool {
+    const REQUIRED: &[&str] = &[
+        "sccache",
+        "cargo-nextest",
+        "cargo-deny",
+        "cargo-shear",
+        "cargo-audit",
+        "cargo-dylint",
+        "cargo-fuzz",
+        "cargo-hack",
+        "cargo-hakari",
+        "cargo-llvm-cov",
+        "cargo-mutants",
+        "cargo-zigbuild",
+        "dylint-link",
+        "weaver",
+    ];
+    REQUIRED.iter().all(|tool| directory.join(tool).is_file())
 }
 
 fn required_env<'a>(env: &'a BTreeMap<String, String>, name: &str) -> Result<&'a str> {
@@ -7580,6 +7610,33 @@ mod tests {
             native_post_condition(NativeActionAdapter::Kache),
             Some("always()")
         );
+    }
+
+    #[test]
+    fn prepared_jackin_tools_require_the_complete_bundle() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("cargo-fuzz"), b"tool").unwrap();
+        assert!(!prepared_jackin_tools_complete(&root));
+        for tool in [
+            "sccache",
+            "cargo-nextest",
+            "cargo-deny",
+            "cargo-shear",
+            "cargo-audit",
+            "cargo-dylint",
+            "cargo-hack",
+            "cargo-hakari",
+            "cargo-llvm-cov",
+            "cargo-mutants",
+            "cargo-zigbuild",
+            "dylint-link",
+            "weaver",
+        ] {
+            fs::write(root.join(tool), b"tool").unwrap();
+        }
+        assert!(prepared_jackin_tools_complete(&root));
+        fs::remove_dir_all(root).unwrap();
     }
     use crate::container::{ServiceContainerSpec, Shell};
     use std::{
