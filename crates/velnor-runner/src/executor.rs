@@ -1071,6 +1071,7 @@ where
             temp_host,
         );
         state.persistent_workspace_target = container.cargo_target_host.is_some();
+        state.cargo_target_host = container.cargo_target_host.clone();
         state.workflow_env = self
             .workflow_env
             .iter()
@@ -5317,6 +5318,19 @@ fn artifact_glob_base_and_pattern(
     path: &str,
 ) -> Option<(PathBuf, String)> {
     let path = path.trim();
+    if path == "target" || path == "/__w/target" || path == "/github/workspace/target" {
+        return state
+            .cargo_target_host
+            .as_ref()
+            .map(|base| (base.clone(), String::new()));
+    }
+    for prefix in ["target/", "/__w/target/", "/github/workspace/target/"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            if let Some(base) = &state.cargo_target_host {
+                return Some((base.clone(), rest.to_string()));
+            }
+        }
+    }
     if let Some(rest) = path.strip_prefix("/__w/") {
         return state
             .workspace_host
@@ -5420,6 +5434,18 @@ fn resolve_host_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> {
     let path = path.trim();
     if path.is_empty() {
         return None;
+    }
+    if path == "target" || path == "/__w/target" || path == "/github/workspace/target" {
+        if let Some(base) = &state.cargo_target_host {
+            return Some(base.clone());
+        }
+    }
+    for prefix in ["target/", "/__w/target/", "/github/workspace/target/"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            if let Some(base) = &state.cargo_target_host {
+                return Some(base.join(rest));
+            }
+        }
     }
     if let Some(rest) = path.strip_prefix("/__w/") {
         return state.workspace_host.as_ref().map(|base| base.join(rest));
@@ -6031,6 +6057,8 @@ struct JobExecutionState {
     temp_host: Option<PathBuf>,
     /// Runner-internal storage fact; deliberately not exported to step env.
     persistent_workspace_target: bool,
+    /// Host side of the dedicated `/__w/target` bind mount, when enabled.
+    cargo_target_host: Option<PathBuf>,
     outputs: BTreeMap<String, BTreeMap<String, String>>,
     action_states: BTreeMap<String, BTreeMap<String, String>>,
     outcomes: BTreeMap<String, StepOutcome>,
@@ -6101,6 +6129,7 @@ impl JobExecutionState {
             workspace_host,
             temp_host,
             persistent_workspace_target: false,
+            cargo_target_host: None,
             outputs: BTreeMap::new(),
             action_states: BTreeMap::new(),
             outcomes: BTreeMap::new(),
@@ -6143,6 +6172,7 @@ impl JobExecutionState {
             workspace_host: self.workspace_host.clone(),
             temp_host: self.temp_host.clone(),
             persistent_workspace_target: self.persistent_workspace_target,
+            cargo_target_host: self.cargo_target_host.clone(),
             outputs: self.outputs.clone(),
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
@@ -6167,6 +6197,7 @@ impl JobExecutionState {
             workspace_host: self.workspace_host.clone(),
             temp_host: self.temp_host.clone(),
             persistent_workspace_target: self.persistent_workspace_target,
+            cargo_target_host: self.cargo_target_host.clone(),
             outputs: self.outputs.clone(),
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
@@ -13816,6 +13847,54 @@ fi"#
         assert!(!temp
             .join("_velnor_artifacts/local-1/jackin-x86_64-unknown-linux-gnu/ignore.txt")
             .exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_upload_artifact_reads_persistent_workspace_target_mount() {
+        let temp = temp_dir();
+        let target = temp.join("target-store");
+        fs::create_dir_all(target.join("cargo-timings")).unwrap();
+        fs::write(target.join("cargo-timings/cargo-timing.html"), "timing\n").unwrap();
+        fs::write(target.join("sccache-check.txt"), "stats\n").unwrap();
+        let mut spec = container(&temp);
+        spec.cargo_target_host = Some(target);
+        let steps = vec![ExecutableStep::Native {
+            step_id: "upload".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::UploadArtifact,
+                inputs: [
+                    ("name".into(), "cargo-cache-evidence".into()),
+                    (
+                        "path".into(),
+                        "target/cargo-timings/*.html\n/__w/target/sccache-check.txt".into(),
+                    ),
+                    ("if-no-files-found".into(), "error".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&spec, &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results[0].exit_code, 0);
+        let artifact = temp.join("_velnor_artifacts/local-1/cargo-cache-evidence");
+        assert_eq!(
+            fs::read_to_string(artifact.join("cargo-timing.html")).unwrap(),
+            "timing\n"
+        );
+        assert_eq!(
+            fs::read_to_string(artifact.join("sccache-check.txt")).unwrap(),
+            "stats\n"
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 
