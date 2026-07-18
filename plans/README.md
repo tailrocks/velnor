@@ -89,9 +89,9 @@ V-A). Do not open estate PRs before 041's operator verification.
 | 052 | tailrocks/ruxel | 2 | S | — | DONE — PR #2 merged; final three-lane and 52 s zero-install rerun green |
 | 053 | tailrocks/parallax | 2 | L | 051 (pattern), 042 (attest) | IN PROGRESS |
 | 054 | tailrocks/termrock | 3 | M | 042 (Pages) | IN PROGRESS |
-| 055 | schemalane + pg-bigdecimal + tracing-request-level (Class D trio) | 3 | M | 040 (schemalane services) | TODO |
-| 056 | tailrocks/parallax-telemetry-playground | 3 | S | — | TODO |
-| 057 | tailrocks/tablerock | 3 | S | — | TODO |
+| 055 | schemalane + pg-bigdecimal + tracing-request-level (Class D trio) | 3 | M | 040 (schemalane services) | IN PROGRESS |
+| 056 | tailrocks/parallax-telemetry-playground | 3 | S | — | IN PROGRESS |
+| 057 | tailrocks/tablerock | 3 | S | — | IN PROGRESS |
 | 058 | Phase 4: estate enforcement + docs reconcile + required checks | 4 | M | 046, 047–057 | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) |
