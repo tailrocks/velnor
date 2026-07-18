@@ -711,3 +711,19 @@ same-version local-artifact sentence is superseded and must not be used.
   The runner now excludes only its manifest-approved persistent `target/`
   mount from checkout cleaning and retains normal clean semantics everywhere
   else. No workflow was weakened.
+- Ruxel plan 052 completed in PR
+  <https://github.com/tailrocks/ruxel/pull/2>. Final branch runs were Velnor
+  `29648690451` (52 seconds; zero dependency downloads/compiles and zero tool
+  installs), GitHub `29648738056`, and combined `29648808556`; the combined
+  run had the same five job ids on both lanes. Merged-main run `29648916790`
+  passed before the owned Ruxel daemon was disabled and its four runner
+  registrations deleted. Release v0.1.70 was built by runs `29648071433` and
+  `29648071447`, published by `velnor-apt` run `29648199356`, and installed on
+  Sentry exclusively with `apt-get install --only-upgrade velnor-runner`.
+- Ruxel's cache evidence exposed an existing runner expression deviation:
+  cache step inputs render `hashFiles(...)` as an empty suffix even though the
+  files exist after checkout. The workflow keeps the canonical expression and
+  uses an explicit `oracle-v2` generation; cache restore correctness and the
+  no-change acceptance proof are green. The runner-side step-time evaluation
+  defect remains in scope for the Velnor commit series and must not be worked
+  around by removing dependency-based invalidation estate-wide.
