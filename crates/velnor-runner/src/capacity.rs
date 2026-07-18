@@ -142,8 +142,8 @@ impl CapacityController {
             .create(true)
             .truncate(false)
             .open(&lock_path)?;
-        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-            .with_context(|| "another daemon is updating filesystem reservations")?;
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::LockExclusive)
+            .with_context(|| "serialize filesystem reservation update")?;
         let active = reservation_bytes(&dir)?;
         let backpressure = self.run_root.join("capacity-backpressure");
         let hysteresis = if backpressure.exists() {
