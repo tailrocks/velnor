@@ -5056,6 +5056,7 @@ fn restore_repository_artifact(
         .trim_end_matches('/');
     let client = reqwest::blocking::Client::builder()
         .user_agent("velnor-runner")
+        .timeout(std::time::Duration::from_secs(120))
         .build()?;
     let deadline = std::time::Instant::now()
         + if allow_miss {
