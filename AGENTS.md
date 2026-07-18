@@ -132,6 +132,13 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-07-18: **Artifact fan-in is Results Service authoritative**: the
+  superseded Phase-0 single-host artifact assumption is removed. Native
+  upload and download use the current Results Service v4 flow
+  (Create/Finalize/List/GetSignedArtifactURL), so producer and consumer may
+  run on different slots or hosts. `_velnor_artifacts` is diagnostic/offline
+  fallback only and must never determine product correctness.
+
 - 2026-07-18: **Sentry deployments use the signed Debian repository only**
   (operator): every Velnor version deployed to the live host is first committed
   and pushed, tagged, built by `release-deb.yml`, published through

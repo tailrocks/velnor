@@ -4140,18 +4140,77 @@ fn native_download_artifact(
     fs::create_dir_all(&destination)
         .with_context(|| format!("create artifact download dir {}", destination.display()))?;
 
-    let store = artifact_store_dir(state)?;
-    let artifacts = matching_artifacts(&store, &name, &pattern)?;
-    for (artifact_name, artifact_dir) in &artifacts {
-        let target = if merge_multiple || !name.is_empty() {
-            destination.clone()
+    let downloaded_count = if let Some(runtime_token) = action_state
+        .env
+        .get("ACTIONS_RUNTIME_TOKEN")
+        .filter(|token| !token.is_empty())
+    {
+        let results_url = action_state
+            .env
+            .get("ACTIONS_RESULTS_URL")
+            .filter(|url| !url.is_empty())
+            .context("download-artifact requires ACTIONS_RESULTS_URL")?;
+        let (plan_id, job_id) = artifact_backend_ids_from_token(runtime_token)
+            .context("download-artifact runtime token is missing workflow backend IDs")?;
+        let remote = crate::protocol::download_artifacts_blocking(
+            results_url,
+            runtime_token,
+            &plan_id,
+            &job_id,
+        )?;
+        let matcher = if pattern.is_empty() {
+            None
         } else {
-            destination.join(artifact_name)
+            let mut builder = GlobSetBuilder::new();
+            builder.add(Glob::new(&pattern)?);
+            Some(builder.build().context("build artifact pattern")?)
         };
-        fs::create_dir_all(&target)
-            .with_context(|| format!("create artifact target {}", target.display()))?;
-        copy_artifact_download_contents(artifact_dir, &target)?;
-    }
+        let selected = remote
+            .into_iter()
+            .filter(|artifact| {
+                if !name.is_empty() {
+                    artifact.name == name
+                } else if let Some(matcher) = &matcher {
+                    matcher.is_match(&artifact.name)
+                } else {
+                    true
+                }
+            })
+            .collect::<Vec<_>>();
+        for artifact in &selected {
+            let target = if merge_multiple || !name.is_empty() {
+                destination.clone()
+            } else {
+                destination.join(&artifact.name)
+            };
+            for (relative, content) in &artifact.files {
+                let output = target.join(relative);
+                if let Some(parent) = output.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("create artifact target {}", parent.display()))?;
+                }
+                fs::write(&output, content)
+                    .with_context(|| format!("write artifact file {}", output.display()))?;
+            }
+        }
+        selected.len()
+    } else {
+        // Unit/offline fallback. Product jobs always carry Results Service
+        // credentials and therefore use the host-independent v4 path above.
+        let store = artifact_store_dir(state)?;
+        let artifacts = matching_artifacts(&store, &name, &pattern)?;
+        for (artifact_name, artifact_dir) in &artifacts {
+            let target = if merge_multiple || !name.is_empty() {
+                destination.clone()
+            } else {
+                destination.join(artifact_name)
+            };
+            fs::create_dir_all(&target)
+                .with_context(|| format!("create artifact target {}", target.display()))?;
+            copy_artifact_download_contents(artifact_dir, &target)?;
+        }
+        artifacts.len()
+    };
 
     let mut outputs = BTreeMap::new();
     outputs.insert(
@@ -4160,15 +4219,15 @@ fn native_download_artifact(
     );
 
     Ok(StepExecutionResult {
-        exit_code: if artifacts.is_empty() { 1 } else { 0 },
+        exit_code: if downloaded_count == 0 { 1 } else { 0 },
         state: StepCommandState {
             outputs,
             ..StepCommandState::default()
         },
         skipped: false,
         failure_ignored: false,
-        stdout: format!("Downloaded {} artifact(s)\n", artifacts.len()),
-        stderr: if artifacts.is_empty() {
+        stdout: format!("Downloaded {downloaded_count} artifact(s)\n"),
+        stderr: if downloaded_count == 0 {
             "No artifacts matched the requested name or pattern\n".to_string()
         } else {
             String::new()
@@ -12633,7 +12692,9 @@ fi"#
                         ("merge-multiple".into(), "true".into()),
                     ]
                     .into(),
-                    env: Vec::new(),
+                    // Keep this broad adapter-contract test offline. Dedicated
+                    // protocol tests cover the authenticated Results Service path.
+                    env: vec![("ACTIONS_RUNTIME_TOKEN".into(), String::new())],
                 },
                 condition: None,
                 continue_on_error: false,

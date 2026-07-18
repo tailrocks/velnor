@@ -3539,9 +3539,257 @@ pub fn upload_artifact_blocking(
     Ok(artifact_id)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultsArtifactDownload {
+    pub name: String,
+    pub files: Vec<(std::path::PathBuf, Vec<u8>)>,
+}
+
+/// Download every artifact visible to this workflow run through the Results
+/// Service v4 protocol used by `actions/download-artifact`.
+///
+/// Flow: ListArtifacts -> GetSignedArtifactURL -> GET zip. Signed URLs and the
+/// runtime bearer token are supplied through mode-0600 curl config files so
+/// neither credential appears in process arguments.
+pub fn download_artifacts_blocking(
+    results_service_url: &str,
+    token: &str,
+    plan_id: &str,
+    job_id: &str,
+) -> Result<Vec<ResultsArtifactDownload>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
+    let base = results_service_url.trim_end_matches('/');
+    let tmp_dir = std::env::temp_dir();
+
+    let write_secret_file = |suffix: &str, content: &[u8]| -> std::io::Result<std::path::PathBuf> {
+        let path = tmp_dir.join(format!(
+            "velnor-artifact-download-{}.{suffix}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        std::io::Write::write_all(&mut file, content)?;
+        Ok(path)
+    };
+
+    let curl_post = |method: &str, body: &serde_json::Value| -> Result<serde_json::Value> {
+        let url = format!("{base}/{SERVICE}/{method}");
+        let config = format!(
+            "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
+             header = \"Authorization: Bearer {token}\"\n\
+             header = \"Accept: application/json\"\n\
+             header = \"Content-Type: application/json\"\n\
+             max-time = 30\n\
+             request = POST\n\
+             silent\n\
+             write-out = \"\\n%{{http_code}}\"\n"
+        );
+        let config_path = write_secret_file("cfg", config.as_bytes())?;
+        let body_path = write_secret_file("json", serde_json::to_string(body)?.as_bytes())?;
+        let output = std::process::Command::new("curl")
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--data")
+            .arg(format!("@{}", body_path.display()))
+            .arg(&url)
+            .output();
+        let _ = std::fs::remove_file(&config_path);
+        let _ = std::fs::remove_file(&body_path);
+        let output = output.with_context(|| format!("run Results Service {method}"))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let (response, status_text) = stdout.rsplit_once('\n').unwrap_or(("", &stdout));
+        let status: u16 = status_text.trim().parse().unwrap_or(0);
+        if !(200..300).contains(&status) {
+            bail!("Results Service {method}: status={status}, body={response}");
+        }
+        serde_json::from_str(response).with_context(|| format!("parse Results Service {method}"))
+    };
+
+    let listed = curl_post(
+        "ListArtifacts",
+        &serde_json::json!({
+            "workflow_run_backend_id": plan_id,
+            "workflow_job_run_backend_id": job_id
+        }),
+    )?;
+    let artifacts = listed
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut downloads = Vec::new();
+    for artifact in artifacts {
+        let Some(name) = artifact
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        let artifact_plan = artifact
+            .get("workflow_run_backend_id")
+            .or_else(|| artifact.get("workflowRunBackendId"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(plan_id);
+        let artifact_job = artifact
+            .get("workflow_job_run_backend_id")
+            .or_else(|| artifact.get("workflowJobRunBackendId"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(job_id);
+        let signed = curl_post(
+            "GetSignedArtifactURL",
+            &serde_json::json!({
+                "workflow_run_backend_id": artifact_plan,
+                "workflow_job_run_backend_id": artifact_job,
+                "name": name
+            }),
+        )?;
+        let signed_url = signed
+            .get("signed_url")
+            .or_else(|| signed.get("signedUrl"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|url| !url.is_empty())
+            .context("GetSignedArtifactURL returned no signed URL")?;
+        let zip_path = tmp_dir.join(format!(
+            "velnor-artifact-download-{}.zip",
+            uuid::Uuid::new_v4()
+        ));
+        let get_config = format!(
+            "header = \"User-Agent: {RUNNER_USER_AGENT}\"\n\
+             max-time = 120\n\
+             location\n\
+             fail\n\
+             silent\n\
+             show-error\n\
+             url = \"{signed_url}\"\n"
+        );
+        let config_path = write_secret_file("get.cfg", get_config.as_bytes())?;
+        let output = std::process::Command::new("curl")
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--output")
+            .arg(&zip_path)
+            .output();
+        let _ = std::fs::remove_file(&config_path);
+        let output = output.context("download Results Service artifact zip")?;
+        if !output.status.success() {
+            let _ = std::fs::remove_file(&zip_path);
+            bail!(
+                "artifact zip download failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        let archive_file = std::fs::File::open(&zip_path)?;
+        let mut archive = zip::ZipArchive::new(archive_file).context("open artifact zip")?;
+        let mut files = Vec::new();
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index)?;
+            if entry.is_dir() {
+                continue;
+            }
+            let Some(path) = entry.enclosed_name() else {
+                let _ = std::fs::remove_file(&zip_path);
+                bail!("artifact '{name}' contains an unsafe archive path");
+            };
+            let mut content = Vec::new();
+            entry.read_to_end(&mut content)?;
+            files.push((path, content));
+        }
+        let _ = std::fs::remove_file(&zip_path);
+        downloads.push(ResultsArtifactDownload {
+            name: name.to_string(),
+            files,
+        });
+    }
+    Ok(downloads)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn results_service_download_lists_signs_and_extracts_artifact_v4() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("dist/output.txt", zip::write::FileOptions::<()>::default())
+            .unwrap();
+        zip.write_all(b"artifact-v4\n").unwrap();
+        let zip_bytes = zip.finish().unwrap().into_inner();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let signed_url = format!("{base}/signed.zip?credential=secret");
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request_text = String::from_utf8_lossy(&request).to_string();
+                requests.push(request_text);
+                let (content_type, body) = match index {
+                    0 => (
+                        "application/json",
+                        serde_json::to_vec(&serde_json::json!({
+                            "artifacts": [{
+                                "name": "release-linux",
+                                "workflow_run_backend_id": "plan",
+                                "workflow_job_run_backend_id": "producer"
+                            }]
+                        }))
+                        .unwrap(),
+                    ),
+                    1 => (
+                        "application/json",
+                        serde_json::to_vec(&serde_json::json!({"signed_url": signed_url})).unwrap(),
+                    ),
+                    _ => ("application/zip", zip_bytes.clone()),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+            requests
+        });
+
+        let downloads =
+            download_artifacts_blocking(&base, "runtime-token", "plan", "consumer").unwrap();
+        assert_eq!(downloads.len(), 1);
+        assert_eq!(downloads[0].name, "release-linux");
+        assert_eq!(
+            downloads[0].files,
+            vec![(
+                std::path::PathBuf::from("dist/output.txt"),
+                b"artifact-v4\n".to_vec()
+            )]
+        );
+        let requests = server.join().unwrap();
+        assert!(requests[0].contains("ArtifactService/ListArtifacts"));
+        assert!(requests[1].contains("ArtifactService/GetSignedArtifactURL"));
+        assert!(requests[2].starts_with("GET /signed.zip?credential=secret HTTP/1.1"));
+    }
 
     #[test]
     fn classify_broker_poll_healthy_empty() {

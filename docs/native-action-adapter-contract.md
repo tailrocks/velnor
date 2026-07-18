@@ -101,7 +101,7 @@ until a new target workflow needs more.
 | `actions/checkout` | `Checkout` | self checkout, external repo checkout, `path`, `ref`, `token`, `fetch-depth` |
 | `actions/cache` | `Cache` | restore/save paths, key, restore keys with newest prefix match, `hashFiles(...)` keys, latest `cache-hit` output semantics (`true` exact hit, `false` prefix hit, empty miss), `fail-on-cache-miss`, `lookup-only` without restoring paths, shared workdir cache storage |
 | `actions/upload-artifact` | `UploadArtifact` | `name`, `path` including target glob patterns, `if-no-files-found`, `include-hidden-files` defaulting to false like the latest action, `overwrite` defaulting to false with duplicate-name failure, `retention-days`, target outputs, deterministic per-run/per-name artifact id, run-scoped workdir storage, Results Service upload required for cross-host handoff |
-| `actions/download-artifact` | `DownloadArtifact` | `name`, `pattern`, all-artifacts mode, `path`, container-visible `download-path` output, `merge-multiple`, latest directory layout semantics, downloaded directory/file permissions normalized to `755`/`644`, same-run cross-job handoff on one Velnor host |
+| `actions/download-artifact` | `DownloadArtifact` | `name`, `pattern`, all-artifacts mode, `path`, container-visible `download-path` output, `merge-multiple`, latest directory layout semantics, safe zip extraction, and Results Service v4 ListArtifacts/GetSignedArtifactURL transport across jobs, slots, and hosts |
 | `actions/upload-pages-artifact` | `UploadPagesArtifact` | package pages directory and expose artifact handoff |
 | `actions/deploy-pages` | `DeployPages` | pages artifact name and deployment output `page_url` |
 | `dorny/paths-filter` | `PathsFilter` | evaluate target multiline filters for push, PR, workflow dispatch |
@@ -125,6 +125,10 @@ matrix jobs, including the Velnor lane, then download them from Ubuntu-hosted
 fan-in/compare jobs. A failed remote upload would make Velnor report success
 while the downstream GitHub-hosted job cannot find the artifact, so the upload
 step must fail after preserving the local `_velnor_artifacts` copy.
+`actions/download-artifact` likewise treats the Results Service as
+authoritative whenever the job carries runtime credentials; a daemon-local
+copy is only an offline/test fallback and must never determine product
+correctness or constrain fan-in jobs to one slot or host.
 
 Local composite actions remain first-class workflow code. Velnor should parse
 their metadata and expand their nested `run` and `uses` steps, but nested
