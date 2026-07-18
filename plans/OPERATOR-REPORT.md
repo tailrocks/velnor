@@ -322,3 +322,29 @@ same-version local-artifact sentence is superseded and must not be used.
   cargo-binstall 1.21.0 verified the signed cargo-deb 3.7.0 artifact for the
   host platform. The release workflow now installs cargo-binstall through
   mise first and fails closed if no prebuilt cargo-deb exists.
+
+## 2026-07-18 — Apt deployment and hardened-unit live evidence
+
+- Release-deb run `29633354819` built and delivered v0.1.49 for amd64 and
+  arm64; apt publisher run `29633535644` regenerated and signed the repository.
+  The public amd64 index advertised `0.1.49` with SHA-256
+  `015b8b4c8a3e6cb62d676306e8109db599f4310b5cf5c9bab17509e7f918949b`.
+- Sentry accepted non-interactive key-only SSH as root. The host was drained,
+  upgraded from 0.1.42 to 0.1.49 exclusively with `apt-get`, rebuilt the
+  canonical job image from the package, and restarted successfully. No
+  1Password agent or approval was used.
+- `systemd-analyze security velnor-daemon.service` reports 7.9 EXPOSED after
+  the conservative plan-014 sandbox. The required directives are live:
+  `NoNewPrivileges=yes`, `PrivateTmp=yes`, `ProtectSystem=full`,
+  `ProtectHome=read-only`, kernel/control-group protections, and
+  `RestrictSUIDSGID=yes`. Root, host networking, devices, and Docker-compatible
+  namespace/syscall access remain deliberately open per plan scope.
+- Hardened-unit fixture run `29633739080` proved Docker startup, bind mounts,
+  cache adapters, live/result logs, completion-before-teardown, and JIT overlap;
+  the cache jobs plus both Rust matrix jobs completed green. Its PostgreSQL job
+  exposed a runner protocol defect: current V2 service scalar tokens use `lit`,
+  while Velnor decoded only legacy `value`. Commit `1586297` fixes the decoder;
+  the workflow was not weakened. The same run exposed missing storage identity
+  because current V2 carries `github.repository` in ContextData rather than
+  Variables; commit `64366d5` normalizes that current representation for the
+  existing storage identity boundary.
