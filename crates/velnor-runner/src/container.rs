@@ -577,6 +577,29 @@ impl JobContainerSpec {
         ]
     }
 
+    pub fn inspect_network_args(&self) -> Vec<String> {
+        vec!["network".into(), "inspect".into(), self.network.clone()]
+    }
+
+    pub fn service_dns_args(&self, alias: &str) -> Vec<String> {
+        vec![
+            "exec".into(),
+            self.name.clone(),
+            "getent".into(),
+            "hosts".into(),
+            alias.into(),
+        ]
+    }
+
+    pub fn resolver_state_args(&self) -> Vec<String> {
+        vec![
+            "exec".into(),
+            self.name.clone(),
+            "cat".into(),
+            "/etc/resolv.conf".into(),
+        ]
+    }
+
     fn append_docker_cli_mounts(&self, args: &mut Vec<String>) {
         if !self.mount_docker_socket {
             return;
