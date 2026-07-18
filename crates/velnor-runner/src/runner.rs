@@ -3222,6 +3222,10 @@ fn github_api_error_status(error: &anyhow::Error) -> Option<u16> {
     })
 }
 
+fn active_job_broker_registration_is_gone(error: &anyhow::Error) -> bool {
+    github_api_error_status(error) == Some(404)
+}
+
 fn start_broker_cancellation_poll(
     broker: BrokerClient,
     session_id: String,
@@ -3250,6 +3254,14 @@ fn start_broker_cancellation_poll(
                         eprintln!(
                             "Broker cancellation poll failed ({error_streak} consecutive): {error:#}"
                         );
+                    }
+                    if active_job_broker_registration_is_gone(&error) {
+                        eprintln!(
+                            "Active job runner registration disappeared; cancelling the job because broker control messages can no longer be received: {error:#}"
+                        );
+                        canceled.store(true, Ordering::SeqCst);
+                        kill_job_container(&job_container_name);
+                        break;
                     }
                     if is_credential_poll_error(&error) {
                         match oauth_access_token(&stored).await {
@@ -7421,12 +7433,19 @@ mod tests {
             action: "get broker message".into(),
             body: "oops".into(),
         });
+        let missing_runner = anyhow::Error::from(GitHubApiError {
+            status: 404,
+            action: "get broker message".into(),
+            body: r#"{"errorKind":"RunnerNotFound"}"#.into(),
+        });
         let string_error = anyhow::anyhow!("get broker message failed: status=401, body=");
 
         assert!(is_credential_poll_error(&auth_error));
         assert!(is_credential_poll_error(&forbidden_error));
         assert!(!is_credential_poll_error(&server_error));
         assert!(!is_credential_poll_error(&string_error));
+        assert!(active_job_broker_registration_is_gone(&missing_runner));
+        assert!(!active_job_broker_registration_is_gone(&server_error));
     }
 
     #[test]
