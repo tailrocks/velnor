@@ -2005,12 +2005,9 @@ where
         let mut path = vec![
             // Mise binary dir so subsequent steps can call `mise run ...` directly.
             "/opt/mise/bin".to_string(),
-            // Real cargo/rustc from rustup precedes the mise cargo shim so that
-            // `cargo install` inside mise tasks uses the actual toolchain. The mise
-            // shim exits with "cargo is not a valid shim" when rust/cargo are not
-            // in the active toolset but the real binary is not on PATH first.
-            "/root/.cargo/bin".to_string(),
-            // Mise shims for all other mise-managed tools
+            // Match mise-action: the repository-selected toolchain must win over
+            // anything baked into the job image. setup_mise_script keeps the
+            // rustup proxy ahead only while mise installs cargo-backed tools.
             "/opt/mise/shims".to_string(),
         ];
         // Add the active mise tool install bin dirs (emitted by setup_mise_script)
@@ -2027,6 +2024,10 @@ where
                 }
             }
         }
+        // Keep the image-baked rustup proxies as a final fallback for projects
+        // that do not select Rust through mise. They must never shadow an exact
+        // rust-toolchain.toml version resolved above.
+        path.push("/root/.cargo/bin".to_string());
         if result.stdout.contains("__VELNOR_MISE_BIN__") {
             let filtered: Vec<&str> = result
                 .stdout
@@ -9558,6 +9559,19 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
 
         assert_eq!(results.len(), 7); // 5 main + sccache-post + rust-cache-post
         assert!(results[0].state.path.contains(&"/opt/mise/shims".into()));
+        let mise_shims = results[0]
+            .state
+            .path
+            .iter()
+            .position(|path| path == "/opt/mise/shims")
+            .unwrap();
+        let baked_rustup = results[0]
+            .state
+            .path
+            .iter()
+            .position(|path| path == "/root/.cargo/bin")
+            .unwrap();
+        assert!(mise_shims < baked_rustup);
         assert!(results[3].state.path.contains(&"/root/.cargo/bin".into()));
         assert_eq!(results[4].state.outputs["cache-hit"], "false");
         assert_eq!(results[4].state.env["CACHE_ON_FAILURE"], "true");
