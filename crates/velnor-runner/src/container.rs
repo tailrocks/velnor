@@ -40,9 +40,9 @@ pub struct JobContainerSpec {
     pub verify_bind_mounts: bool,
     pub daemon_id: String,
     pub repository: Option<String>,
-    /// Host-persistent incremental-build store mounted as CARGO_TARGET_DIR
-    /// (opt-in via VELNOR_CARGO_TARGET_PERSIST; GitHub-hosted runners do not
-    /// set CARGO_TARGET_DIR, so this stays off unless the operator enables it).
+    /// Host-persistent incremental-build store mounted at the workspace's
+    /// ordinary `target` path. This preserves GitHub-hosted observable path
+    /// semantics while enabling opt-in warm builds.
     pub cargo_target_host: Option<PathBuf>,
     /// Exactly one compiler-cache store is exposed to a job.
     pub compiler_cache_backend: CompilerCacheBackend,
@@ -173,12 +173,7 @@ impl JobContainerSpec {
         ];
         self.append_compiler_cache_mount(&mut args);
         if let Some(target_host) = &self.cargo_target_host {
-            args.extend([
-                "-v".into(),
-                self.mount_arg(target_host, "/__cargo_target"),
-                "-e".into(),
-                "CARGO_TARGET_DIR=/__cargo_target".into(),
-            ]);
+            args.extend(["-v".into(), self.mount_arg(target_host, "/__w/target")]);
         }
         for (name, value) in &self.env {
             args.extend(["-e".into(), format!("{name}={value}")]);
@@ -1068,7 +1063,7 @@ fn rustup_executable_store_host_for_scope(
         .join(sanitize_store_key(repository))
 }
 
-/// Root for opt-in persistent CARGO_TARGET_DIR buckets (one per job class).
+/// Root for opt-in persistent workspace target buckets (one per job class).
 pub(crate) fn cargo_target_store_host(temp_host: &Path) -> PathBuf {
     crate::storage::cache_class_path(&daemon_store_root(temp_host), "targets", "_velnor_targets")
 }

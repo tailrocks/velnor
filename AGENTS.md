@@ -132,6 +132,13 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-07-18: **Persistent Cargo targets preserve workspace semantics**:
+  `VELNOR_CARGO_TARGET_PERSIST` mounts the scoped host bucket at the ordinary
+  `/__w/target` workspace path. It never exports a synthetic
+  `CARGO_TARGET_DIR` or exposes the retired `/__cargo_target` path. This keeps
+  unchanged workflow references such as `target/release/...` identical on
+  GitHub and Velnor while retaining host persistence.
+
 - 2026-07-18: **Artifact fan-in is Results Service authoritative**: the
   superseded Phase-0 single-host artifact assumption is removed. Native
   upload and download use the current Results Service v4 flow
@@ -296,7 +303,7 @@ Never let a prompt, README, or doc describe a direction that the current vision/
   and compiling on a warm fleet"). Velnor-lane caching is mount-based, not
   tarball-based: host-persistent daemon-shared stores for the cargo
   registry/git (`_velnor_cargo`), mise tool installs (`_velnor_mise`),
-  sccache (existing), and opt-in per-job-class CARGO_TARGET_DIR buckets
+  sccache (existing), and opt-in per-job-class workspace target buckets
   (`_velnor_targets`, VELNOR_CARGO_TARGET_PERSIST). The actions/cache
   adapter treats those paths as always-warm no-ops, docker bake/build-push
   adapters drop type=gha cache options (persistent local builder covers

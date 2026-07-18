@@ -682,3 +682,13 @@ same-version local-artifact sentence is superseded and must not be used.
   gates passed (618 tests). Release v0.1.67 is the apt delivery carrying the
   corrected image; Ruxel verification resumes only after that package is
   installed through the signed repository.
+- The corrected image revealed a deeper portability defect in Ruxel runs
+  `29646127544` and `29646441642`: Cargo wrote the valid static artifact to
+  Velnor's synthetic `/__cargo_target`, while the unchanged workflow checked
+  GitHub's ordinary `target/...` path. GitHub run `29646219377` passed the
+  same job. Root cause was runner-visible optimization state: persistent
+  targets changed `CARGO_TARGET_DIR` and therefore observable filesystem
+  semantics. Velnor now mounts the scoped durable bucket directly at
+  `/__w/target`, exports no synthetic target variable, and tracks persistence
+  only in internal execution state. The `/__cargo_target` runtime path is
+  retired; 618 runner tests and all static gates pass.
