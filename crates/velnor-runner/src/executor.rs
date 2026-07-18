@@ -1692,14 +1692,18 @@ where
         env.extend(command_files.env.iter().cloned());
         rewrite_command_file_env_for_action_container(&mut env);
         let node_image = node_action_image(&action.node, &container.node_action_image);
-        let exec_args = container.run_node_action_args(
+        let secret_masks = action_state.secret_masks(&self.secret_masks);
+        let exec_args = container.prepare_run_node_action_args(
             "/__w",
             &env,
+            &secret_masks,
             &state.path,
             &node_image,
             entrypoint_container_path,
-        );
-        let step_result = self.runner.run_timeout("docker", &exec_args, timeout)?;
+        )?;
+        let step_result = self
+            .runner
+            .run_timeout("docker", exec_args.args(), timeout)?;
         let mut state = command_files.collect_state()?;
         state.merge(parse_workflow_commands_from_output(
             &step_result.stdout,
@@ -1797,14 +1801,18 @@ where
             .iter()
             .map(|value| state.resolve_expressions(value))
             .collect::<Vec<_>>();
-        let exec_args = container.run_docker_action_args(
+        let secret_masks = action_state.secret_masks(&self.secret_masks);
+        let exec_args = container.prepare_run_docker_action_args(
             "/github/workspace",
             &env,
+            &secret_masks,
             &action.image,
             entrypoint.as_deref(),
             &args,
-        );
-        let step_result = self.runner.run_timeout("docker", &exec_args, timeout)?;
+        )?;
+        let step_result = self
+            .runner
+            .run_timeout("docker", exec_args.args(), timeout)?;
         let mut state = command_files.collect_state()?;
         state.merge(parse_workflow_commands_from_output(
             &step_result.stdout,
@@ -2352,9 +2360,17 @@ where
         if let Some(repository) = action_state.env.get("GITHUB_REPOSITORY") {
             set_env_value(&mut env, "RENOVATE_REPOSITORIES", repository);
         }
-        let args = container.run_docker_action_args("/github/workspace", &env, &image, None, &[]);
+        let secret_masks = action_state.secret_masks(&self.secret_masks);
+        let args = container.prepare_run_docker_action_args(
+            "/github/workspace",
+            &env,
+            &secret_masks,
+            &image,
+            None,
+            &[],
+        )?;
         Ok(native_command_result(
-            self.runner.run_timeout("docker", &args, timeout)?,
+            self.runner.run_timeout("docker", args.args(), timeout)?,
             StepCommandState::default(),
         ))
     }
@@ -8570,9 +8586,11 @@ type=sha,format=long,prefix=,enable=true"
         // local builder cache); the step output records the substitution.
         assert!(!calls[build_call.unwrap()].contains("type=gha"));
         assert!(results[3].stdout.contains("[velnor] dropped"));
-        // Runtime env reaches the container via docker exec -e flags.
+        // Non-secret runtime env remains inline, while credentials use a
+        // mode-0600 env file and never occur in the process argument vector.
         let build_invocation = &calls[build_call.unwrap()];
-        assert!(build_invocation.contains("ACTIONS_RUNTIME_TOKEN=runtime-token"));
+        assert!(!build_invocation.contains("ACTIONS_RUNTIME_TOKEN=runtime-token"));
+        assert!(build_invocation.contains("--env-file"));
         assert!(build_invocation.contains("ACTIONS_CACHE_URL=https://cache.actions"));
         let bake_call = calls
             .iter()
@@ -10012,14 +10030,16 @@ fi"#
             .collect::<Vec<_>>();
         assert_eq!(node_calls.len(), 2);
         assert!(node_calls[0].contains(&"INPUT_USERNAME=docker_user".into()));
-        assert!(node_calls[0].contains(&"INPUT_PASSWORD=docker_secret".into()));
+        assert!(!node_calls[0].contains(&"INPUT_PASSWORD=docker_secret".into()));
+        assert!(node_calls[0].contains(&"--env-file".into()));
         let build_exec = executor
             .runner()
             .calls
             .iter()
             .find(|(_, args)| args.iter().any(|arg| arg == "/__t/build-docker-image.sh"))
             .expect("build script should execute");
-        assert!(build_exec.1.contains(&"GITHUB_TOKEN=ghs_token".into()));
+        assert!(!build_exec.1.contains(&"GITHUB_TOKEN=ghs_token".into()));
+        assert!(build_exec.1.contains(&"--env-file".into()));
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -12829,7 +12849,8 @@ fi"#
             })
             .map(|(_, args)| args)
             .unwrap();
-        assert!(node_call.contains(&"INPUT_TOKEN=ghs_token".into()));
+        assert!(!node_call.contains(&"INPUT_TOKEN=ghs_token".into()));
+        assert!(node_call.contains(&"--env-file".into()));
         assert!(node_call.contains(&"INPUT_BASE=main".into()));
         assert!(node_call
             .iter()
@@ -13135,7 +13156,8 @@ fi"#
             assert!(call.contains(
                 &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
             ));
-            assert!(call.contains(&"GITHUB_TOKEN=ghs_token".into()));
+            assert!(!call.contains(&"GITHUB_TOKEN=ghs_token".into()));
+            assert!(call.contains(&"--env-file".into()));
             assert!(call.contains(&"GITHUB_REPOSITORY=ChainArgos/java-monorepo".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
         }
@@ -13531,8 +13553,9 @@ bitcoin-processor-app.push=true")
             .unwrap();
         assert!(node_call.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
         assert!(node_call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
-        assert!(node_call.contains(&"INPUT_TOKEN=renovate-token".into()));
-        assert!(node_call.contains(&"RENOVATE_TOKEN=renovate-token".into()));
+        assert!(!node_call.contains(&"INPUT_TOKEN=renovate-token".into()));
+        assert!(!node_call.contains(&"RENOVATE_TOKEN=renovate-token".into()));
+        assert!(node_call.contains(&"--env-file".into()));
         assert!(node_call.contains(&"RENOVATE_REPOSITORIES=ChainArgos/java-monorepo".into()));
         assert!(node_call.contains(&"RENOVATE_ONBOARDING=false".into()));
         assert!(node_call.contains(&"LOG_LEVEL=debug".into()));
@@ -13710,10 +13733,12 @@ bitcoin-processor-app.push=true")
             assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
         }
-        assert!(node_calls[0].contains(&"INPUT_GITHUB_TOKEN=ghs_token".into()));
+        assert!(!node_calls[0].contains(&"INPUT_GITHUB_TOKEN=ghs_token".into()));
+        assert!(node_calls[0].contains(&"--env-file".into()));
         assert!(node_calls[0].contains(&"GITHUB_PATH=/github/file_commands/mise_path".into()));
         assert!(node_calls[1].contains(&"INPUT_PYTHON-VERSION=3.13".into()));
-        assert!(node_calls[1].contains(&"INPUT_TOKEN=ghs_token".into()));
+        assert!(!node_calls[1].contains(&"INPUT_TOKEN=ghs_token".into()));
+        assert!(node_calls[1].contains(&"--env-file".into()));
         assert!(
             node_calls[1].contains(&"GITHUB_PATH=/github/file_commands/setup-python_path".into())
         );
@@ -13854,7 +13879,8 @@ bitcoin-processor-app.push=true")
         assert!(node_calls[1].contains(&"INPUT_CRATE=cargo-binstall".into()));
         assert!(node_calls[1].contains(&"INPUT_VERSION=latest".into()));
         assert!(node_calls[1].contains(&"INPUT_LOCKED=true".into()));
-        assert!(node_calls[1].contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
+        assert!(!node_calls[1].contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
+        assert!(node_calls[1].contains(&"--env-file".into()));
         assert!(node_calls[1].contains(&"ACTIONS_CACHE_URL=https://cache.actions".into()));
         assert!(node_calls[1].contains(&"ACTIONS_CACHE_SERVICE_V2=True".into()));
         fs::remove_dir_all(temp).unwrap();
@@ -14294,7 +14320,8 @@ bitcoin-processor-app.push=true")
             .collect::<Vec<_>>();
         assert_eq!(node_calls.len(), 2);
         for call in &node_calls {
-            assert!(call.contains(&"INPUT_TOKEN=ghs_token".into()));
+            assert!(!call.contains(&"INPUT_TOKEN=ghs_token".into()));
+            assert!(call.contains(&"--env-file".into()));
             assert!(call.contains(&"INPUT_DISABLE_ANNOTATIONS=false".into()));
             assert!(call.contains(&"GITHUB_REPOSITORY=jackin-project/jackin".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
@@ -14479,7 +14506,8 @@ bitcoin-processor-app.push=true")
             assert!(call.contains(&"GITHUB_REPOSITORY=ChainArgos/java-monorepo".into()));
             assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
-            assert!(call.contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
+            assert!(!call.contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
+            assert!(call.contains(&"--env-file".into()));
             assert!(call.contains(&"ACTIONS_CACHE_URL=https://cache.actions".into()));
             assert!(call.contains(&"ACTIONS_CACHE_SERVICE_V2=True".into()));
         }

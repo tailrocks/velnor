@@ -239,7 +239,7 @@ impl JobContainerSpec {
         ]
     }
 
-    pub fn exec_script_args(
+    fn exec_script_args(
         &self,
         script_path_in_container: &str,
         shell: Shell,
@@ -269,7 +269,7 @@ impl JobContainerSpec {
         )
     }
 
-    pub fn exec_process_args(
+    fn exec_process_args(
         &self,
         working_directory: &str,
         env: &[(String, String)],
@@ -304,29 +304,8 @@ impl JobContainerSpec {
         Ok(prepared)
     }
 
-    /// Like exec_process_args, but with stdin kept open (`docker exec -i`) so
-    /// the caller can stream data (e.g. a registry password) to the process.
-    pub fn exec_process_stdin_args(
-        &self,
-        working_directory: &str,
-        env: &[(String, String)],
-        command: &[String],
-    ) -> Vec<String> {
-        let mut args = vec![
-            "exec".into(),
-            "-i".into(),
-            "--workdir".into(),
-            working_directory.into(),
-        ];
-        self.append_base_exec_env(&mut args);
-        for (name, value) in env {
-            args.extend(["-e".into(), format!("{name}={value}")]);
-        }
-        args.push(self.name.clone());
-        args.extend(command.iter().cloned());
-        args
-    }
-
+    /// Like prepare_exec_process_args, but with stdin kept open (`docker exec
+    /// -i`) so the caller can stream data (for example a registry password).
     pub fn prepare_exec_process_stdin_args(
         &self,
         working_directory: &str,
@@ -354,15 +333,20 @@ impl JobContainerSpec {
         secret_masks: &[String],
     ) -> io::Result<()> {
         for (name, value) in env {
-            if env_value_is_secret(value, secret_masks) && !value.contains('\n') {
+            let is_secret = env_name_is_secret(name) || env_value_is_secret(value, secret_masks);
+            if is_secret && value.contains('\n') {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("secret environment variable {name} contains a newline"),
+                ));
+            }
+            if is_secret {
                 let env_file = write_exec_env_file(&self.temp_host, name, value)?;
                 prepared
                     .args
                     .extend(["--env-file".into(), env_file.path().display().to_string()]);
                 prepared.env_files.push(env_file);
             } else {
-                // Docker --env-file cannot represent multi-line values; those
-                // stay inline to preserve exact env semantics.
                 prepared
                     .args
                     .extend(["-e".into(), format!("{name}={value}")]);
@@ -398,7 +382,7 @@ impl JobContainerSpec {
         }
     }
 
-    pub fn run_node_action_args(
+    fn run_node_action_args(
         &self,
         working_directory: &str,
         env: &[(String, String)],
@@ -471,6 +455,29 @@ impl JobContainerSpec {
         args
     }
 
+    pub fn prepare_run_node_action_args(
+        &self,
+        working_directory: &str,
+        env: &[(String, String)],
+        secret_masks: &[String],
+        path_prepend: &[String],
+        node_image: &str,
+        entrypoint_container_path: &str,
+    ) -> io::Result<PreparedDockerArgs> {
+        let mut prepared = PreparedDockerArgs::new(self.run_node_action_args(
+            working_directory,
+            &[],
+            path_prepend,
+            node_image,
+            entrypoint_container_path,
+        ));
+        let image_position = prepared.args.len() - 2;
+        let trailing = prepared.args.split_off(image_position);
+        self.append_step_env(&mut prepared, env, secret_masks)?;
+        prepared.args.extend(trailing);
+        Ok(prepared)
+    }
+
     pub fn build_docker_action_args(
         &self,
         image: &str,
@@ -487,7 +494,7 @@ impl JobContainerSpec {
         ]
     }
 
-    pub fn run_docker_action_args(
+    fn run_docker_action_args(
         &self,
         working_directory: &str,
         env: &[(String, String)],
@@ -548,6 +555,29 @@ impl JobContainerSpec {
         args.push(image.into());
         args.extend(command_args.iter().cloned());
         args
+    }
+
+    pub fn prepare_run_docker_action_args(
+        &self,
+        working_directory: &str,
+        env: &[(String, String)],
+        secret_masks: &[String],
+        image: &str,
+        entrypoint: Option<&str>,
+        command_args: &[String],
+    ) -> io::Result<PreparedDockerArgs> {
+        let mut prepared = PreparedDockerArgs::new(self.run_docker_action_args(
+            working_directory,
+            &[],
+            image,
+            entrypoint,
+            command_args,
+        ));
+        let image_position = prepared.args.len() - command_args.len() - 1;
+        let trailing = prepared.args.split_off(image_position);
+        self.append_step_env(&mut prepared, env, secret_masks)?;
+        prepared.args.extend(trailing);
+        Ok(prepared)
     }
 
     pub fn remove_container_args(&self) -> Vec<String> {
@@ -724,6 +754,17 @@ fn env_value_is_secret(value: &str, secret_masks: &[String]) -> bool {
             .iter()
             .filter(|mask| mask.len() >= 3)
             .any(|mask| value.contains(mask))
+}
+
+fn env_name_is_secret(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    matches!(
+        name.as_str(),
+        "ACTIONS_RUNTIME_TOKEN" | "ACTIONS_ID_TOKEN_REQUEST_TOKEN" | "GITHUB_TOKEN"
+    ) || name.ends_with("_TOKEN")
+        || name.ends_with("_PASSWORD")
+        || name.ends_with("_SECRET")
+        || name.ends_with("_PRIVATE_KEY")
 }
 
 fn write_exec_env_file(temp_host: &Path, name: &str, value: &str) -> io::Result<ExecEnvFile> {
@@ -1357,6 +1398,64 @@ mod tests {
         assert!(prepared.args().contains(&"--env-file".into()));
         assert!(!joined.contains("PLACEHOLDER_SECRET"));
         assert!(joined.contains("PLAIN=visible"));
+    }
+
+    #[test]
+    fn runtime_tokens_are_not_on_exec_argv_without_masks() {
+        let mut spec = spec();
+        spec.temp_host = container_test_temp("runtime-token-env");
+        for name in [
+            "ACTIONS_RUNTIME_TOKEN",
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+            "GITHUB_TOKEN",
+        ] {
+            let prepared = spec
+                .prepare_exec_process_args(
+                    "/__w",
+                    &[(name.into(), "PLACEHOLDER_CREDENTIAL".into())],
+                    &[],
+                    &["printenv".into()],
+                )
+                .unwrap();
+            let joined = prepared.args().join("\0");
+            assert!(prepared.args().contains(&"--env-file".into()));
+            assert!(!joined.contains("PLACEHOLDER_CREDENTIAL"));
+        }
+    }
+
+    #[test]
+    fn multiline_secret_is_rejected_instead_of_exposed() {
+        let error = spec()
+            .prepare_exec_process_args(
+                "/__w",
+                &[("ACTIONS_RUNTIME_TOKEN".into(), "line-one\nline-two".into())],
+                &[],
+                &["printenv".into()],
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(!error.to_string().contains("line-one"));
+    }
+
+    #[test]
+    fn action_sidecars_keep_runtime_tokens_off_argv() {
+        let mut spec = spec();
+        spec.temp_host = container_test_temp("sidecar-token-env");
+        let env = &[(
+            "ACTIONS_RUNTIME_TOKEN".into(),
+            "PLACEHOLDER_CREDENTIAL".into(),
+        )];
+        let node = spec
+            .prepare_run_node_action_args("/__w", env, &[], &[], "node:24", "/__a/action/index.js")
+            .unwrap();
+        let docker = spec
+            .prepare_run_docker_action_args("/__w", env, &[], "alpine:3.22", None, &["true".into()])
+            .unwrap();
+        for prepared in [node, docker] {
+            let joined = prepared.args().join("\0");
+            assert!(prepared.args().contains(&"--env-file".into()));
+            assert!(!joined.contains("PLACEHOLDER_CREDENTIAL"));
+        }
     }
 
     #[test]

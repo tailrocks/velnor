@@ -217,3 +217,24 @@ same-version local-artifact sentence is superseded and must not be used.
   adds a pre-step DNS assertion that records sanitized network membership,
   aliases, and resolver state on the live job before cleanup; this replaces
   further speculative service fixes with direct evidence.
+
+## 2026-07-18 — Fixture 0.1.42 runtime-credential argv exposure
+
+- v0.1.42 source run `29630247538`, Debian delivery run `29630247507`, and
+  apt publisher run `29630609981` passed. The public InRelease signature and
+  both architecture indexes independently verified `0.1.42`; Sentry installed
+  it only through `apt-get update && apt-get install -y velnor-runner`, then
+  package, image label, and pinned tools were verified.
+- During clean fixture run `29630764634`, host diagnosis of an active setup
+  step revealed that a GitHub Actions runtime credential was present in the
+  `docker exec` process argument vector. The credential value is deliberately
+  omitted. The run was canceled immediately, the fixture daemon stopped, and
+  all fixture runner registrations deleted; no further job was dispatched on
+  the affected version.
+- Root cause: the secure env-file transport classified secrets only by values
+  already present in the mask set. Protocol-provided runtime credentials were
+  not guaranteed to be members of that set. JavaScript and Docker action
+  sidecars also retained older inline environment construction. v0.1.43 makes
+  credential names independently secret, applies env-file transport to every
+  execution path, and rejects rather than exposes multiline secrets. Regression
+  tests prove unmasked runtime credentials never occur in process arguments.
