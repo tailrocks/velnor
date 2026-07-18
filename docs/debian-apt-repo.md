@@ -155,4 +155,8 @@ avoids the deprecated global `apt-key` / `trusted.gpg.d`).
 
 Verified 2026-07-18: `tailrocks/velnor-apt` publishes amd64+arm64 with a signed
 reprepro index through GitHub Actions Pages; Sentry has the scoped keyring and
-source configured. Release `v0.1.34` is the current published baseline.
+source configured. Release `v0.1.35` is the current published baseline. The
+source package run is
+[`29623974593`](https://github.com/tailrocks/velnor/actions/runs/29623974593)
+and the signed repository/Pages run is
+[`29624452820`](https://github.com/tailrocks/velnor-apt/actions/runs/29624452820).
