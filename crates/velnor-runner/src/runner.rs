@@ -734,6 +734,9 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "default".to_string());
         prune_stale_velnor_docker_resources(&daemon_id);
+        if let Some(work_root) = args.work_dir.as_deref() {
+            prune_stale_job_workspaces(work_root);
+        }
     }
     configure_daemon_slots(args, &config_base, slots).await?;
     if draining() {
@@ -1422,6 +1425,48 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
             "Pruned {} stale velnor-net network(s) at startup.",
             networks.len()
         );
+    }
+}
+
+/// A fresh daemon pass has no surviving jobs from the previous process, so
+/// UUID-named job workspaces below its own slot roots are stale by definition.
+/// Restrict deletion to this exact shape; shared stores and operator files at
+/// the work-root or slot level are never candidates.
+fn prune_stale_job_workspaces(work_root: &Path) {
+    let Ok(slots) = std::fs::read_dir(work_root) else {
+        return;
+    };
+    let mut removed = 0usize;
+    for slot in slots.flatten() {
+        let Ok(file_type) = slot.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() || !slot.file_name().to_string_lossy().starts_with("slot-") {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(slot.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir()
+                || uuid::Uuid::parse_str(&entry.file_name().to_string_lossy()).is_err()
+            {
+                continue;
+            }
+            match std::fs::remove_dir_all(entry.path()) {
+                Ok(()) => removed += 1,
+                Err(error) => eprintln!(
+                    "Failed to prune stale Velnor job workspace {}: {error}",
+                    entry.path().display()
+                ),
+            }
+        }
+    }
+    if removed > 0 {
+        eprintln!("Pruned {removed} stale Velnor job workspace(s) at startup.");
     }
 }
 
@@ -6190,6 +6235,30 @@ fn default_agent_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_workspace_pruner_only_removes_uuid_dirs_below_slots() {
+        let root = std::env::temp_dir().join(format!("velnor-work-prune-{}", uuid::Uuid::new_v4()));
+        let stale = root
+            .join("slot-1")
+            .join("4675b50d-5bf9-529b-8082-648f9c52c3b2");
+        let keep_slot = root.join("slot-1/preflight");
+        let keep_shared = root.join("_velnor_cargo/registry");
+        let keep_other = root
+            .join("other")
+            .join("6e0ed314-4298-5b5b-be02-b2914d9427e3");
+        for path in [&stale, &keep_slot, &keep_shared, &keep_other] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+
+        prune_stale_job_workspaces(&root);
+
+        assert!(!stale.exists());
+        assert!(keep_slot.exists());
+        assert!(keep_shared.exists());
+        assert!(keep_other.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn runner_group_name_resolves_case_insensitively() {

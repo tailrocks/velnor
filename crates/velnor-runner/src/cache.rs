@@ -359,7 +359,14 @@ pub(crate) fn reclaim_work_root(
     target_bytes: u64,
     in_use_scopes: &BTreeSet<String>,
 ) -> Result<ReclaimReport> {
-    let _lock = GcLeaderLock::acquire(run_root)?;
+    let _lock = match GcLeaderLock::acquire(run_root) {
+        Ok(lock) => lock,
+        Err(error) if error.to_string().contains("another gc holds the lock") => {
+            eprintln!("capacity reclaim already running in another daemon; rechecking later");
+            return Ok(ReclaimReport::default());
+        }
+        Err(error) => return Err(error),
+    };
     let mut entries = cache_listing(work_root)?;
     entries.retain(|entry| !in_use_scopes.contains(&entry.scope_key()));
     entries.sort_by(|left, right| {
