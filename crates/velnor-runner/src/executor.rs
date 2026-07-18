@@ -2763,19 +2763,31 @@ where
 
     pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
+        let service_result = self.cleanup_services(container);
+        let network_result = self.run_docker(&container.remove_network_args());
+
+        container_result?;
+        service_result?;
+        network_result?;
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_services(&mut self, container: &JobContainerSpec) -> Result<()> {
         let service_results = container
             .services
             .iter()
             .rev()
             .map(|service| self.run_docker(&service.remove_args()))
             .collect::<Vec<_>>();
-        let network_result = self.run_docker(&container.remove_network_args());
-
-        container_result?;
         for service_result in service_results {
             service_result?;
         }
-        network_result?;
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_job_and_network(&mut self, container: &JobContainerSpec) -> Result<()> {
+        self.run_docker_remove_container(&container.remove_container_args())?;
+        self.run_docker(&container.remove_network_args())?;
         Ok(())
     }
 
@@ -9601,6 +9613,27 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert_eq!(calls[2].1[0], "inspect");
         assert_eq!(calls[3].1[0], "run");
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn service_cleanup_is_separate_from_deferred_job_teardown() {
+        let temp = temp_dir();
+        let mut spec = container(&temp);
+        spec.services.push(ServiceContainerSpec {
+            name: "svc".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "net".into(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: Vec::new(),
+        });
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor.cleanup_services(&spec).unwrap();
+
+        assert_eq!(executor.runner().calls.len(), 1);
+        assert_eq!(executor.runner().calls[0].1, vec!["rm", "--force", "svc"]);
     }
 
     #[test]
