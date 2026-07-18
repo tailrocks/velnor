@@ -129,6 +129,8 @@ jobs:
           # Require the packaged binary to be present and the deb to be sane.
           dpkg-deb -c "$DEB_SRC" | grep -q "usr/bin/velnor-runner" \
             || { echo "deb does not contain usr/bin/velnor-runner" >&2; exit 1; }
+          dpkg-deb -c "$DEB_SRC" | grep -q "usr/share/velnor/job-ubuntu.Dockerfile" \
+            || { echo "deb does not contain the canonical job-image Dockerfile" >&2; exit 1; }
           [ "$(stat -c%s "$DEB_SRC")" -gt 1000000 ] \
             || { echo "deb suspiciously small: $(stat -c%s "$DEB_SRC") bytes" >&2; exit 1; }
           DEB_DST="velnor-runner-${VERSION}-${{ matrix.target }}.deb"
