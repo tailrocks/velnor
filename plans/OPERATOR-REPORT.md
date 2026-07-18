@@ -456,3 +456,16 @@ same-version local-artifact sentence is superseded and must not be used.
   `unknown-repository` identities, no stale owned containers/networks, and no
   deletion outside exact Velnor-owned paths. Fixture both-lane run
   `29636145660` is the final post-cleanup smoke and parity proof.
+
+## 2026-07-18 — Plan 045 live timing evidence
+
+- Apt-installed v0.1.55 doctor read five fixture records from the named daemon
+  logs and printed p50/p95 values. Pickup (917 ms p95) and teardown (1,715 ms)
+  pass; pickup-to-first-step (15,138 ms, driven by the PostgreSQL service cold
+  start) and finalize (2,775 ms) warn against their 5,000/2,000 ms defaults.
+  Plan 045's observability acceptance requires truthful warnings, not masking
+  or retuning measured breaches; the estate performance campaign retains them.
+- The same host trace contains all six stable spans: `job-pickup`,
+  `job-checkout`, `job-container-boot`, `job-steps`, `job-finalize`, and
+  `job-teardown`. Fixture run `29636145660` carries adapter post steps and the
+  versioned lifecycle `job-timing` records used by compare and doctor.
