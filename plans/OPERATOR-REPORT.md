@@ -691,4 +691,13 @@ same-version local-artifact sentence is superseded and must not be used.
   semantics. Velnor now mounts the scoped durable bucket directly at
   `/__w/target`, exports no synthetic target variable, and tracks persistence
   only in internal execution state. The `/__cargo_target` runtime path is
-  retired; 618 runner tests and all static gates pass.
+  retired. A `workspace-v2` target generation prevents binaries compiled with
+  the retired absolute path from entering the new mount; old generations are
+  inactive Velnor-owned cache data and remain eligible for guarded GC.
+- The local macOS `cargo nextest` rerun for the target-generation-only change
+  reached the linker and was refused because this workstation has not accepted
+  the installed Xcode license (`xcrun --sdk macosx --show-sdk-path`, exit 69).
+  Accepting a vendor license is not inferred operator authority. Formatting
+  and clippy passed locally; the mandatory full 618-test gate is instead run
+  unchanged by the Linux Velnor dogfood workflow and its run URL is recorded
+  with the release evidence.

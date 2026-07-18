@@ -12,6 +12,10 @@ use crate::{
 use serde_json::Value;
 use std::{collections::BTreeMap, path::PathBuf};
 
+/// Bump whenever target mounting or compiler-visible path semantics change.
+/// Old generations remain inactive, owned cache data and are reclaimed by GC.
+const CARGO_TARGET_GENERATION: &str = "workspace-v2";
+
 pub struct GitHubJobContainerPaths {
     pub workspace_host: PathBuf,
     pub temp_host: PathBuf,
@@ -99,6 +103,7 @@ fn github_cargo_target_store_host(
         crate::container::cargo_target_store_host(temp_host),
         &cargo_target_trust_scope_from(Some(trust_scope)),
     )
+    .join(CARGO_TARGET_GENERATION)
     .join(crate::container::sanitize_store_key(repository))
     .join(crate::container::sanitize_store_key(workflow))
     .join(crate::container::sanitize_store_key(&job.job_display_name))
@@ -973,7 +978,7 @@ mod tests {
         assert_eq!(
             host,
             std::path::PathBuf::from(
-                "/velnor/work/_velnor_targets/trusted/ChainArgos_java-monorepo/CI___Preview/Rust___test__ubuntu_"
+                "/velnor/work/_velnor_targets/trusted/workspace-v2/ChainArgos_java-monorepo/CI___Preview/Rust___test__ubuntu_"
             )
         );
     }

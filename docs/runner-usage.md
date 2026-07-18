@@ -59,7 +59,8 @@ a stale tool image; image-build failure fails the package transaction.
   `/root/.rustup` payload; they are one executable-tool lifetime and budget.
 - Optional Rust target persistence: set `VELNOR_CARGO_TARGET_PERSIST=true` in
   the daemon env only for trusted target scopes. Velnor stores targets under
-  `_velnor_targets/<trust-scope>/<repo>/<workflow>/<job-bucket>` so warm state
+  `_velnor_targets/<trust-scope>/<generation>/<repo>/<workflow>/<job-bucket>`
+  so warm state
   is shared only across matching trust scope, repository, workflow, and job
   classes, then mounts that bucket at the normal `/__w/target` workspace path.
   It does not set `CARGO_TARGET_DIR`, so workflow-visible Cargo paths remain

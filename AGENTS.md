@@ -134,7 +134,8 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 - 2026-07-18: **Persistent Cargo targets preserve workspace semantics**:
   `VELNOR_CARGO_TARGET_PERSIST` mounts the scoped host bucket at the ordinary
-  `/__w/target` workspace path. It never exports a synthetic
+  `/__w/target` workspace path. Target generations invalidate artifacts when
+  compiler-visible path semantics change. It never exports a synthetic
   `CARGO_TARGET_DIR` or exposes the retired `/__cargo_target` path. This keeps
   unchanged workflow references such as `target/release/...` identical on
   GitHub and Velnor while retaining host persistence.
