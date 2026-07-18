@@ -151,3 +151,19 @@ same-version local-artifact sentence is superseded and must not be used.
   local-failure, post-reconfigure, and JIT-reconfigure backoffs. Full runner
   gates passed (568 nextest tests, fmt, clippy, actionlint). Live drain proof
   will run after 0.1.37 arrives through the same signed apt chain.
+
+## 2026-07-18 — Fixture 0.1.37 image-freshness failure
+
+- Clean Velnor-only fixture run `29627143419` used runner 0.1.37 and failed
+  the Kache job immediately because the host's pre-existing
+  `velnor/job-ubuntu:26.04` image did not contain `kache`; remaining jobs were
+  canceled. The fixture was unchanged.
+- Root cause: the Debian package updated the runner binary and units but did
+  not ship or refresh the job image even though native adapter versions are
+  coupled to tools baked there. This allowed a new runner to advertise a
+  capability its deployed image could not execute.
+- Fix: the package now ships the canonical Dockerfile, labels the built image
+  with the package version, and `postinst` builds a mismatched image before it
+  restarts any daemon. A build failure fails the apt transaction instead of
+  silently running a stale image. Full gates passed (570 nextest tests, fmt,
+  clippy, actionlint, and postinst shell syntax).
