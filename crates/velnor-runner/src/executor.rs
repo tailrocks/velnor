@@ -6,7 +6,7 @@ use crate::{
         NativeActionInvocation,
     },
     checkout::{configure_safe_directory, execute_checkout, CheckoutPlan},
-    container::{sccache_host, JobContainerSpec, Shell},
+    container::{kache_host, sccache_host, JobContainerSpec, Shell},
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
     workflow_command::parse_workflow_commands,
 };
@@ -1781,6 +1781,7 @@ where
             NativeActionAdapter::DeployPages => Ok(native_deploy_pages(action, state)),
             NativeActionAdapter::Mise => self.native_mise(_container, action, state, timeout),
             NativeActionAdapter::Sccache => self.native_sccache(_container, action, state, timeout),
+            NativeActionAdapter::Kache => self.native_kache(_container, action, state, timeout),
             NativeActionAdapter::SetupMold => {
                 self.native_setup_mold(_container, action, state, timeout)
             }
@@ -1841,7 +1842,16 @@ where
                 let result = self.native_shell(
                     _container,
                     state,
-                    "sccache --show-stats 2>/dev/null || true; sccache --stop-server 2>/dev/null || true",
+                    "stats=$(sccache --show-stats 2>&1 || true); printf '%s\\n' \"$stats\"; if [ -n \"${GITHUB_STEP_SUMMARY:-}\" ]; then printf '## sccache statistics\\n```text\\n%s\\n```\\n' \"$stats\" >> \"$GITHUB_STEP_SUMMARY\"; fi; sccache --stop-server 2>/dev/null || true",
+                    timeout,
+                )?;
+                Ok(native_command_result(result, StepCommandState::default()))
+            }
+            NativeActionAdapter::Kache => {
+                let result = self.native_shell(
+                    _container,
+                    state,
+                    "stats=$(kache stats 2>&1 || true); printf '%s\\n' \"$stats\"; if [ -n \"${GITHUB_STEP_SUMMARY:-}\" ]; then printf '## Kache statistics\\n```text\\n%s\\n```\\n' \"$stats\" >> \"$GITHUB_STEP_SUMMARY\"; kache report --format github >> \"$GITHUB_STEP_SUMMARY\" 2>/dev/null || true; fi",
                     timeout,
                 )?;
                 Ok(native_command_result(result, StepCommandState::default()))
@@ -1950,6 +1960,17 @@ where
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
         let result = self.native_shell(container, state, &sccache_setup_script(), timeout)?;
+        Ok(native_command_result(result, StepCommandState::default()))
+    }
+
+    fn native_kache(
+        &mut self,
+        container: &JobContainerSpec,
+        _action: &NativeActionInvocation,
+        state: &JobExecutionState,
+        timeout: Duration,
+    ) -> Result<StepExecutionResult> {
+        let result = self.native_shell(container, state, &kache_setup_script(), timeout)?;
         Ok(native_command_result(result, StepCommandState::default()))
     }
 
@@ -2652,12 +2673,23 @@ where
                 container.temp_host.display()
             )
         })?;
-        fs::create_dir_all(sccache_host(&container.temp_host)).with_context(|| {
-            format!(
-                "create shared sccache directory for {}",
-                container.temp_host.display()
-            )
-        })?;
+        let cache_host = match container.compiler_cache_backend {
+            crate::compiler_cache::CompilerCacheBackend::Sccache => {
+                Some(sccache_host(&container.temp_host))
+            }
+            crate::compiler_cache::CompilerCacheBackend::Kache => {
+                Some(kache_host(&container.temp_host))
+            }
+            crate::compiler_cache::CompilerCacheBackend::Off => None,
+        };
+        if let Some(cache_host) = cache_host {
+            fs::create_dir_all(cache_host).with_context(|| {
+                format!(
+                    "create shared compiler-cache directory for {}",
+                    container.temp_host.display()
+                )
+            })?;
+        }
         // The temp dir is bind-mounted over the job container's /tmp. A plain
         // create_dir_all yields 0755 owned by the daemon user, which leaves the
         // container's /tmp non-sticky and unwritable by non-root sandbox users
@@ -2988,20 +3020,8 @@ fn sccache_setup_script() -> String {
     // SCCACHE_GHA_ENABLED + the ACTIONS_RESULTS_URL/ACTIONS_RUNTIME_TOKEN env that
     // Velnor injects let sccache use the GitHub Actions cache backend.
     r#"set -e
-if ! command -v sccache >/dev/null 2>&1; then
-  ver="v0.15.0"
-  case "$(uname -m)" in
-    x86_64) arch="x86_64-unknown-linux-musl" ;;
-    aarch64|arm64) arch="aarch64-unknown-linux-musl" ;;
-    *) echo "unsupported arch $(uname -m) for sccache" >&2; exit 1 ;;
-  esac
-  tmp="$(mktemp -d)"
-  curl -fsSL "https://github.com/mozilla/sccache/releases/download/${ver}/sccache-${ver}-${arch}.tar.gz" -o "$tmp/sccache.tar.gz"
-  tar -xzf "$tmp/sccache.tar.gz" -C "$tmp"
-  install -m 0755 "$tmp/sccache-${ver}-${arch}/sccache" /usr/local/bin/sccache
-  rm -rf "$tmp"
-fi
-sccache --version
+command -v sccache >/dev/null 2>&1 || { echo 'sccache v0.16.0 must be preinstalled in the job image' >&2; exit 1; }
+sccache --version | grep -F 'sccache 0.16.0'
 # Velnor provides a fast, host-shared sccache cache bind-mounted at
 # /var/cache/sccache. Use that local backend instead of the GitHub Actions cache
 # service: this is not a GitHub-hosted cache environment, so SCCACHE_GHA_ENABLED
@@ -3016,8 +3036,30 @@ if [ -n "${GITHUB_ENV:-}" ]; then
 fi
 export SCCACHE_DIR="$SCCACHE_LOCAL_DIR"
 export SCCACHE_GHA_ENABLED=false
+export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-20G}"
+if [ -n "${GITHUB_ENV:-}" ]; then
+  echo "SCCACHE_CACHE_SIZE=$SCCACHE_CACHE_SIZE" >> "$GITHUB_ENV"
+fi
 # Best-effort: cargo will auto-start the server on first use anyway.
 sccache --start-server 2>/dev/null || true
+"#
+    .to_string()
+}
+
+fn kache_setup_script() -> String {
+    r#"set -e
+command -v kache >/dev/null 2>&1 || { echo 'kache v0.10.0 must be preinstalled in the job image' >&2; exit 1; }
+kache --version | grep -F 'kache 0.10.0'
+mkdir -p /var/cache/kache
+export KACHE_CACHE_DIR=/var/cache/kache
+export KACHE_MAX_SIZE=20GiB
+export RUSTC_WRAPPER=kache
+if [ -n "${GITHUB_ENV:-}" ]; then
+  echo 'KACHE_CACHE_DIR=/var/cache/kache' >> "$GITHUB_ENV"
+  echo 'KACHE_MAX_SIZE=20GiB' >> "$GITHUB_ENV"
+  echo 'RUSTC_WRAPPER=kache' >> "$GITHUB_ENV"
+fi
+kache stats >/dev/null
 "#
     .to_string()
 }
@@ -3200,6 +3242,7 @@ fn native_post_condition(adapter: NativeActionAdapter) -> Option<&'static str> {
         NativeActionAdapter::RustCache => Some("success() || env.CACHE_ON_FAILURE == 'true'"),
         // Sccache post step stops the server (always run, matches GitHub's behavior).
         NativeActionAdapter::Sccache => Some("always()"),
+        NativeActionAdapter::Kache => Some("always()"),
         // GitHub's setup-buildx post removes the builder it created.
         NativeActionAdapter::DockerSetupBuildx => Some("always()"),
         // GitHub's login-action post logs out (drops registry credentials).
@@ -6423,6 +6466,30 @@ fn docker_run_container_name(args: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiler_cache_setup_scripts_never_download_tools() {
+        let sccache = sccache_setup_script();
+        let kache = kache_setup_script();
+        for script in [&sccache, &kache] {
+            assert!(!script.contains("curl"));
+            assert!(!script.contains("wget"));
+        }
+        assert!(sccache.contains("0.16.0"));
+        assert!(kache.contains("0.10.0"));
+    }
+
+    #[test]
+    fn compiler_cache_post_actions_always_run() {
+        assert_eq!(
+            native_post_condition(NativeActionAdapter::Sccache),
+            Some("always()")
+        );
+        assert_eq!(
+            native_post_condition(NativeActionAdapter::Kache),
+            Some("always()")
+        );
+    }
     use crate::container::{ServiceContainerSpec, Shell};
     use std::{
         fs,
@@ -6984,6 +7051,7 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
+            compiler_cache_backend: crate::compiler_cache::CompilerCacheBackend::Sccache,
         }
     }
 

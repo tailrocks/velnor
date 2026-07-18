@@ -7,6 +7,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use crate::compiler_cache::CompilerCacheBackend;
+
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -42,9 +44,31 @@ pub struct JobContainerSpec {
     /// (opt-in via VELNOR_CARGO_TARGET_PERSIST; GitHub-hosted runners do not
     /// set CARGO_TARGET_DIR, so this stays off unless the operator enables it).
     pub cargo_target_host: Option<PathBuf>,
+    /// Exactly one compiler-cache store is exposed to a job.
+    pub compiler_cache_backend: CompilerCacheBackend,
 }
 
 impl JobContainerSpec {
+    fn append_compiler_cache_mount(&self, args: &mut Vec<String>) {
+        let (host, container, env) = match self.compiler_cache_backend {
+            CompilerCacheBackend::Sccache => (
+                sccache_host(&self.temp_host),
+                "/var/cache/sccache",
+                vec!["SCCACHE_DIR=/var/cache/sccache"],
+            ),
+            CompilerCacheBackend::Kache => (
+                kache_host(&self.temp_host),
+                "/var/cache/kache",
+                vec!["KACHE_CACHE_DIR=/var/cache/kache", "KACHE_MAX_SIZE=20GiB"],
+            ),
+            CompilerCacheBackend::Off => return,
+        };
+        args.extend(["-v".into(), self.mount_arg(&host, container)]);
+        for value in env {
+            args.extend(["-e".into(), value.into()]);
+        }
+    }
+
     pub fn create_network_args(&self) -> Vec<String> {
         vec!["network".into(), "create".into(), self.network.clone()]
     }
@@ -78,8 +102,6 @@ impl JobContainerSpec {
                     .display()
                     .to_string(),
             ),
-            "-v".into(),
-            self.mount_arg(&sccache_host(&self.temp_host), "/var/cache/sccache"),
             "-v".into(),
             self.mount_arg(&self.home_host, "/github/home"),
             // Host-persistent cargo registry/git stores (daemon-shared, like
@@ -130,8 +152,6 @@ impl JobContainerSpec {
             "-e".into(),
             "CARGO_HOME=/github/home/.cargo".into(),
             "-e".into(),
-            "SCCACHE_DIR=/var/cache/sccache".into(),
-            "-e".into(),
             "RUNNER_TEMP=/__t".into(),
             "-e".into(),
             "RUNNER_TOOL_CACHE=/__tool".into(),
@@ -148,6 +168,7 @@ impl JobContainerSpec {
                 self.docker_host_path(&self.workspace_host).display()
             ),
         ];
+        self.append_compiler_cache_mount(&mut args);
         if let Some(target_host) = &self.cargo_target_host {
             args.extend([
                 "-v".into(),
@@ -400,8 +421,6 @@ impl JobContainerSpec {
             "-v".into(),
             self.mount_arg(&self.temp_host, "/tmp"),
             "-v".into(),
-            self.mount_arg(&sccache_host(&self.temp_host), "/var/cache/sccache"),
-            "-v".into(),
             self.mount_arg(&self.temp_host, "/github/runner_temp"),
             "-v".into(),
             self.mount_arg(&self.temp_host, "/github/file_commands"),
@@ -424,6 +443,7 @@ impl JobContainerSpec {
             "--entrypoint".into(),
             "node".into(),
         ];
+        self.append_compiler_cache_mount(&mut args);
         if self.mount_docker_socket {
             args.extend([
                 "-v".into(),
@@ -490,8 +510,6 @@ impl JobContainerSpec {
             "-v".into(),
             self.mount_arg(&self.temp_host, "/tmp"),
             "-v".into(),
-            self.mount_arg(&sccache_host(&self.temp_host), "/var/cache/sccache"),
-            "-v".into(),
             self.mount_arg(&self.temp_host, "/github/runner_temp"),
             "-v".into(),
             self.mount_arg(&self.temp_host, "/github/file_commands"),
@@ -510,6 +528,7 @@ impl JobContainerSpec {
             "-e".into(),
             "AGENT_TOOLSDIRECTORY=/__tool".into(),
         ];
+        self.append_compiler_cache_mount(&mut args);
         if self.mount_docker_socket {
             args.extend([
                 "-v".into(),
@@ -788,6 +807,14 @@ pub(crate) fn sccache_host(temp_host: &Path) -> PathBuf {
     )
 }
 
+pub(crate) fn kache_host(temp_host: &Path) -> PathBuf {
+    crate::storage::cache_class_path(
+        &daemon_store_root(temp_host),
+        "compiler/kache",
+        "_velnor_kache",
+    )
+}
+
 /// Host-persistent cargo registry + git store, daemon-shared like sccache.
 /// Mounted at /github/home/.cargo/{registry,git} in every job container.
 pub(crate) fn cargo_store_host(temp_host: &Path) -> PathBuf {
@@ -950,6 +977,7 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("acme/repo".into()),
             cargo_target_host: None,
+            compiler_cache_backend: CompilerCacheBackend::Sccache,
         }
     }
 
@@ -962,6 +990,37 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn compiler_cache_mounts_are_mutually_exclusive() {
+        let mut job = spec();
+        let sccache = job.start_args().join(" ");
+        assert!(sccache.contains("/var/cache/sccache"));
+        assert!(!sccache.contains("/var/cache/kache"));
+
+        job.compiler_cache_backend = CompilerCacheBackend::Kache;
+        let kache = job.start_args().join(" ");
+        assert!(kache.contains("/var/cache/kache"));
+        assert!(!kache.contains("/var/cache/sccache"));
+
+        job.compiler_cache_backend = CompilerCacheBackend::Off;
+        let off = job.start_args().join(" ");
+        assert!(!off.contains("/var/cache/sccache"));
+        assert!(!off.contains("/var/cache/kache"));
+    }
+
+    #[test]
+    fn compiler_cache_stores_have_distinct_canonical_classes() {
+        let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
+        assert_eq!(
+            sccache_host(temp),
+            PathBuf::from("/var/lib/velnor/work/_velnor_sccache")
+        );
+        assert_eq!(
+            kache_host(temp),
+            PathBuf::from("/var/lib/velnor/work/_velnor_kache")
+        );
     }
 
     #[test]

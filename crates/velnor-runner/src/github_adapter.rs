@@ -64,6 +64,7 @@ pub fn github_job_container_spec(
         daemon_id,
         repository: job_variable(job, "github.repository").map(ToOwned::to_owned),
         cargo_target_host,
+        compiler_cache_backend: crate::manifest::compiler_cache_backend(job),
     }
 }
 
@@ -801,6 +802,7 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("ChainArgos/java-monorepo".into()),
             cargo_target_host: None,
+            compiler_cache_backend: crate::compiler_cache::CompilerCacheBackend::Sccache,
         };
         let plan = github_normalized_job_plan(
             &job,

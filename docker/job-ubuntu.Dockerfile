@@ -56,18 +56,39 @@ ENV HOME=/root \
     CARGO_NET_RETRY=10 \
     CARGO_HTTP_TIMEOUT=120
 
-RUN ver="v0.16.0" && \
+ARG SCCACHE_VERSION=v0.16.0
+ARG SCCACHE_SHA256_X86_64=aec995a83ad3dff3d14b6314e08858b7b73d35ca85a5bcf3d3a9ec07dee35588
+ARG SCCACHE_SHA256_AARCH64=f73a5c39f96bb6ebb89cc7915cf182260d4cbf30765322c5e793d0fe8bd80784
+RUN ver="$SCCACHE_VERSION" && \
     case "$(uname -m)" in \
-      x86_64) arch="x86_64-unknown-linux-musl" ;; \
-      aarch64|arm64) arch="aarch64-unknown-linux-musl" ;; \
+      x86_64) arch="x86_64-unknown-linux-musl"; sha="$SCCACHE_SHA256_X86_64" ;; \
+      aarch64|arm64) arch="aarch64-unknown-linux-musl"; sha="$SCCACHE_SHA256_AARCH64" ;; \
       *) echo "unsupported arch $(uname -m) for sccache" >&2; exit 1 ;; \
     esac && \
     tmp="$(mktemp -d)" && \
     curl -fsSL "https://github.com/mozilla/sccache/releases/download/${ver}/sccache-${ver}-${arch}.tar.gz" -o "$tmp/sccache.tar.gz" && \
+    echo "$sha  $tmp/sccache.tar.gz" | sha256sum -c - && \
     tar -xzf "$tmp/sccache.tar.gz" -C "$tmp" && \
     install -m 0755 "$tmp/sccache-${ver}-${arch}/sccache" /usr/local/bin/sccache && \
     rm -rf "$tmp" && \
     sccache --version
+
+ARG KACHE_VERSION=v0.10.0
+ARG KACHE_SHA256_X86_64=4f78f2897de2a5e40c1ba9cfa983deb8a17ff2d843d13f067ba3fcfa240529fc
+ARG KACHE_SHA256_AARCH64=d91090996d9a5af9f348f661dc12ff2dbd4e641016a8f49180a06211a0ae2417
+RUN ver="$KACHE_VERSION" && \
+    case "$(uname -m)" in \
+      x86_64) arch="x86_64-unknown-linux-musl"; sha="$KACHE_SHA256_X86_64" ;; \
+      aarch64|arm64) arch="aarch64-unknown-linux-musl"; sha="$KACHE_SHA256_AARCH64" ;; \
+      *) echo "unsupported arch $(uname -m) for kache" >&2; exit 1 ;; \
+    esac && \
+    tmp="$(mktemp -d)" && \
+    curl -fsSL "https://github.com/kunobi-ninja/kache/releases/download/${ver}/kache-${arch}.tar.gz" -o "$tmp/kache.tar.gz" && \
+    echo "$sha  $tmp/kache.tar.gz" | sha256sum -c - && \
+    tar -xzf "$tmp/kache.tar.gz" -C "$tmp" && \
+    install -m 0755 "$tmp/kache" /usr/local/bin/kache && \
+    rm -rf "$tmp" && \
+    kache --version
 
 # The cargo:* tools compile from source: registry/git cache mounts + sccache
 # (scoped to this RUN — runtime jobs choose their own RUSTC_WRAPPER) make a

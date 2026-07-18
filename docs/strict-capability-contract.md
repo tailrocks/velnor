@@ -140,7 +140,8 @@ inactive store below its backend ceiling under pressure.
 Production workflows select one backend and contain one setup action. Sccache
 remains the initial default because it is proven. A comparison fixture and small
 representative canary use literal `off`, `sccache`, and `kache` jobs with two
-separately pinned conditional action steps; both never run in one job.
+separately pinned conditional action steps; both never run in one job. Fixture
+backend-selection jobs and dual-lane proof land through plan 041.
 
 The GitHub-hosted lane uses the same local-only configuration. Its store lasts
 only for that job, so this is a compatibility/cold-baseline lane, not cross-run
@@ -159,8 +160,9 @@ action post step owns reporting.
    provided input is a failure. **Implemented by plan 033.** Surface changes
    require a manifest version bump.
 4. Add native Rust Kache setup/post/store/report support and refactor sccache
-   through the common backend seam.
+   through the common backend seam. **Implemented by plan 034.**
 5. Bake both pinned binaries into the Ubuntu image; never compile during a job.
+   **Implemented by plan 034.**
 6. Test every allowed value and every rejected input, value, ref, remote env,
    expression, dual-wrapper combination, and store override.
 7. Audit the estate with `capabilities check`; propose missing features instead

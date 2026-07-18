@@ -4,6 +4,7 @@ mod capacity;
 mod checkout;
 mod cli;
 mod command_files;
+mod compiler_cache;
 mod config;
 mod container;
 mod executor;
