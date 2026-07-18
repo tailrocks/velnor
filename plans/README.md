@@ -86,7 +86,7 @@ V-A). Do not open estate PRs before 041's operator verification.
 | 049 | jackin-project/jackin (stacks on PR #810) | 1 | L | 047 (pattern) | TODO |
 | 050 | tailrocks/velnor (dogfood) | 2 | M | 039 (fleet label) | IN PROGRESS |
 | 051 | tailrocks/holla | 2 | S | — | IN PROGRESS |
-| 052 | tailrocks/ruxel | 2 | S | — | TODO |
+| 052 | tailrocks/ruxel | 2 | S | — | IN PROGRESS |
 | 053 | tailrocks/parallax | 2 | L | 051 (pattern), 042 (attest) | TODO |
 | 054 | tailrocks/termrock | 3 | M | 042 (Pages) | TODO |
 | 055 | schemalane + pg-bigdecimal + tracing-request-level (Class D trio) | 3 | M | 040 (schemalane services) | TODO |
