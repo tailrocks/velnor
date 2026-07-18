@@ -166,5 +166,6 @@ configured. The v0.1.37 source package run is
 [`29626653677`](https://github.com/tailrocks/velnor/actions/runs/29626653677)
 and its signed repository/Pages run is
 [`29627062793`](https://github.com/tailrocks/velnor-apt/actions/runs/29627062793).
-The v0.1.38 package is the next deployment candidate; every later deployment
-must follow this same tag-to-signed-apt chain.
+Those run URLs are historical proof of the chain, not a current version pin;
+every later deployment must follow this same tag-to-signed-apt chain and verify
+the candidate reported by `apt-cache policy` before changing a host.

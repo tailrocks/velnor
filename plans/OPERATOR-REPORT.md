@@ -271,3 +271,19 @@ same-version local-artifact sentence is superseded and must not be used.
   security, and Pages work. Per the progress-STOP rule, implementation is
   proceeding from re-located lifecycle symbols while preserving the current
   never-abandon, renewal, and capability-validation invariants.
+
+## 2026-07-18 — Linux package and deployment documentation audit
+
+- Verified `docs/debian-apt-repo.md` against Velnor's `release-deb.yml`, the
+  live `tailrocks/velnor-apt` publisher, and its repository README. The source
+  workflow builds and guards amd64+arm64 packages, hands them to a same-tag apt
+  release, and dispatches the signed reprepro/Pages publisher. Hosts verify the
+  indexed candidate and install or roll back only through APT.
+- The apt repository README incorrectly pointed to the former personal GitHub
+  namespace and implied that the token belonged in `velnor.env`. Commit
+  `81255c1` on its single `velnor-estate-standard` branch corrects those facts,
+  documents the full operator deployment sequence, and is pushed as
+  `tailrocks/velnor-apt#9`.
+- Removed a stale sentence that described v0.1.38 as the next candidate. The
+  linked v0.1.37 runs remain useful historical evidence; candidate selection is
+  now explicitly dynamic through `apt-cache policy`.
