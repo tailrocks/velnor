@@ -581,3 +581,13 @@ same-version local-artifact sentence is superseded and must not be used.
   retaining it. The adapter now removes only Rust/tool links targeting the two
   known container-local Cargo proxy paths and their dangling aliases before
   reinstalling. Valid installs and non-Velnor paths are untouched.
+- The v0.1.62 live fallback removed only the validated Java Rust links after
+  GitHub run `29641214190` was cancelled and `velnor-daemon.service` stopped.
+  The graceful stop remained in `deactivating` despite the run being fully
+  cancelled; with no active Java run, only that Velnor daemon was SIGKILLed
+  (dogfood remained active). This is additional drain-bug evidence.
+- The deeper toolchain root cause is storage topology: mise persists its Rust
+  selection under `/opt/mise`, while rustup stores the compiler under
+  `/root/.rustup`. Only the first path was durable, so every new job container
+  reverted to image Rust 1.97.0. The runner now seeds and mounts rustup in the
+  same trust/repository-scoped mise class; no workflow semantics changed.

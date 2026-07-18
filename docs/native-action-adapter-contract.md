@@ -105,7 +105,7 @@ until a new target workflow needs more.
 | `actions/upload-pages-artifact` | `UploadPagesArtifact` | package pages directory and expose artifact handoff |
 | `actions/deploy-pages` | `DeployPages` | pages artifact name and deployment output `page_url` |
 | `dorny/paths-filter` | `PathsFilter` | evaluate target multiline filters for push, PR, workflow dispatch |
-| `jdx/mise-action` | `Mise` | install mise when missing, install requested tools, use shared home, update `GITHUB_PATH` |
+| `jdx/mise-action` | `Mise` | install mise when missing, install requested tools, persist executable installs and rustup state in the same trust/repository scope, update `GITHUB_PATH` |
 | `mozilla-actions/sccache-action` | `Sccache` | configure env/path/cache, fail honestly when `sccache` is unavailable so target `continue-on-error` gates work |
 | `rui314/setup-mold` | `SetupMold` | install/link mold for later Rust builds |
 | `extractions/setup-just` | `SetupJust` | install just or reuse image-provided just, update cargo bin path |
