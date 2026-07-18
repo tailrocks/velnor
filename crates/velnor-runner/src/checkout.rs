@@ -482,14 +482,17 @@ where
             "HEAD".to_string(),
         ]);
         run_git(runner, &reset, log)?;
+        let preserve_workspace_target = std::env::var("VELNOR_CARGO_TARGET_PERSIST")
+            .ok()
+            .is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            });
         run_git(
             runner,
-            &[
-                "-C".to_string(),
-                path_arg(destination),
-                "clean".to_string(),
-                "-ffdx".to_string(),
-            ],
+            &checkout_clean_args(destination, preserve_workspace_target),
             log,
         )?;
     }
@@ -501,6 +504,25 @@ where
     }
 
     Ok(())
+}
+
+fn checkout_clean_args(destination: &Path, preserve_workspace_target: bool) -> Vec<String> {
+    let mut args = vec![
+        "-C".to_string(),
+        path_arg(destination),
+        "clean".to_string(),
+        "-ffdx".to_string(),
+    ];
+    // The persistent Cargo bucket is bind-mounted at the workflow-visible
+    // `target/` path before checkout. Native checkout must keep that one
+    // runner-owned cache mount; otherwise `git clean -ffdx` empties the bucket
+    // at the beginning of every job and defeats no-change reruns. All other
+    // ignored and untracked workspace content retains actions/checkout's clean
+    // semantics.
+    if preserve_workspace_target {
+        args.extend(["-e".to_string(), "target/".to_string()]);
+    }
+    args
 }
 
 /// `git -c` args that make the git-lfs smudge/process filters skip downloading
@@ -1751,5 +1773,17 @@ mod tests {
 
         assert!(formatted.contains("AUTHORIZATION: ***"));
         assert!(!formatted.contains("secret"));
+    }
+
+    #[test]
+    fn checkout_clean_preserves_only_runner_owned_target_when_persistent() {
+        assert_eq!(
+            checkout_clean_args(Path::new("/__w"), true),
+            ["-C", "/__w", "clean", "-ffdx", "-e", "target/"]
+        );
+        assert_eq!(
+            checkout_clean_args(Path::new("/__w"), false),
+            ["-C", "/__w", "clean", "-ffdx"]
+        );
     }
 }

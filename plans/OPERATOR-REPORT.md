@@ -701,3 +701,13 @@ same-version local-artifact sentence is superseded and must not be used.
   and clippy passed locally; the mandatory full 618-test gate is instead run
   unchanged by the Linux Velnor dogfood workflow and its run URL is recorded
   with the release evidence.
+- Ruxel unchanged runs `29647708018` and `29647811689` remained green but
+  emitted 307 dependency `Compiling` markers. Host evidence showed that apt
+  had installed v0.1.69 while the Ruxel daemon still held the pre-upgrade
+  executable started at 14:11:01 UTC; an idle-window systemd restart at
+  14:22:35 activated the apt-installed binary. The next cold-generation run
+  `29647936109` then proved a second root cause: native checkout's faithful
+  `git clean -ffdx` emptied the bind-mounted `/__w/target` before every job.
+  The runner now excludes only its manifest-approved persistent `target/`
+  mount from checkout cleaning and retains normal clean semantics everywhere
+  else. No workflow was weakened.
