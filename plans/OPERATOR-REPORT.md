@@ -209,3 +209,11 @@ same-version local-artifact sentence is superseded and must not be used.
   `postgres`, isolating the defect to Velnor's implicit create-time topology.
   v0.1.41 explicitly reconciles the runner-owned job endpoint and service DNS
   aliases after container creation and before the first workflow step.
+- v0.1.41 source run `29629595781`, Debian delivery `29629595771`, and apt
+  publisher `29629951741` passed; public signature/index and Sentry package,
+  image, pinned tools, and hardened-unit score verified. Fixture run
+  `29630088620` proved both Kache and sccache jobs green but service DNS still
+  failed, falsifying endpoint reconciliation as the complete cause. v0.1.42
+  adds a pre-step DNS assertion that records sanitized network membership,
+  aliases, and resolver state on the live job before cleanup; this replaces
+  further speculative service fixes with direct evidence.

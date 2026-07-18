@@ -2793,9 +2793,38 @@ where
                 self.run_docker(&service.disconnect_network_args())?;
                 self.run_docker(&service.connect_network_args())?;
             }
+            self.verify_service_dns(container)?;
         }
         if container.verify_bind_mounts {
             self.verify_bind_mounts(container)?;
+        }
+        Ok(())
+    }
+
+    fn verify_service_dns(&mut self, container: &JobContainerSpec) -> Result<()> {
+        for service in &container.services {
+            let lookup = self.runner.run(
+                "docker",
+                &container.service_dns_args(&service.network_alias),
+            )?;
+            if lookup.code == 0 {
+                continue;
+            }
+            let network = self
+                .runner
+                .run("docker", &container.inspect_network_args())?;
+            let resolver = self
+                .runner
+                .run("docker", &container.resolver_state_args())?;
+            bail!(
+                "service DNS preflight failed for alias '{}' in job '{}': getent code={}, stderr={}; network={}; resolv.conf={}",
+                service.network_alias,
+                container.name,
+                lookup.code,
+                lookup.stderr.trim(),
+                network.stdout.trim(),
+                resolver.stdout.trim()
+            );
         }
         Ok(())
     }
