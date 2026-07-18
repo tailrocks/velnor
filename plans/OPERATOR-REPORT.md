@@ -753,3 +753,14 @@ same-version local-artifact sentence is superseded and must not be used.
   the canonical lanes; static workflow and repository policy fixtures pass.
   The broader local test glob additionally requires an uninstalled `vite`
   binary; this is recorded as a local prerequisite, not masked in CI.
+- Plan 057 cannot be applied safely. Tablerock moved from planned `03c6dd9`
+  to `0bb0119` and added `checks.yml` with macOS, Ubuntu, real-server, UniFFI,
+  import/export, performance, and ENOSPC coverage absent from the plan. Its
+  repository `AGENTS.md` explicitly mandates trunk-only work and prohibits
+  creating/publishing branches or PRs, conflicting with the binding estate
+  delivery branch. The worktree also contains unrelated user edits in
+  `TableRockApp.swift` and `PageV1.swift`. The documented plan fallback cannot
+  preserve both instruction sets, and applying its stale template would
+  weaken current coverage. No branch or file was changed. Human-only decision:
+  reconcile Tablerock's trunk-only `AGENTS.md` with the estate branch model and
+  re-plan from `0bb0119`; do not delete the new coverage.
