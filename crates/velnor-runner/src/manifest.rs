@@ -137,6 +137,18 @@ const RUNTIME_REFS: &[AllowedRef] = &[
     allowed("04d248b84655b509d8c44dc1d6f990c879747487", "v4"),
     allowed("v4", "fixture transition until plan 041"),
 ];
+const GITHUB_SCRIPT_REFS: &[AllowedRef] =
+    &[allowed("373c709c69115d41ff229c7e5df9f8788daa9553", "v9")];
+const GITHUB_SCRIPT_INPUTS: &[InputRule] = &[
+    InputRule::Any("github-token"),
+    InputRule::Literal(
+        "script",
+        &[
+            "core.setOutput('docs-xtask', process.env.CONTRACT)",
+            "return await import(process.env.JACKIN_ACTION_RUNTIME).then(({ main }) => main())",
+        ],
+    ),
+];
 const RENOVATE_REFS: &[AllowedRef] = &[
     allowed("22e0a16091fc706b04affe6ae53d5e3358ac4023", "v44"),
     allowed("693b9ef15eec82123529a37c782242f091365961", "v43"),
@@ -268,6 +280,12 @@ pub static ACTIONS: &[ActionCapability] = &[
         UploadArtifact,
         UPLOAD_REFS,
         ARTIFACT_INPUTS
+    ),
+    capability!(
+        "actions/github-script",
+        GitHubScript,
+        GITHUB_SCRIPT_REFS,
+        GITHUB_SCRIPT_INPUTS
     ),
     capability!(
         "actions/download-artifact",
@@ -462,6 +480,52 @@ pub fn find(repository: &str) -> Option<&'static ActionCapability> {
     ACTIONS
         .iter()
         .find(|capability| capability.repository.eq_ignore_ascii_case(repository))
+}
+
+pub fn validate_resolved_action(
+    step: &str,
+    repository: &str,
+    action_ref: &str,
+    inputs: &BTreeMap<String, String>,
+) -> Result<()> {
+    let capability = find(repository).ok_or_else(|| {
+        violation(
+            step,
+            repository,
+            action_ref,
+            "uses",
+            repository,
+            ACTIONS
+                .iter()
+                .map(|item| item.repository.to_string())
+                .collect(),
+        )
+    })?;
+    if !capability
+        .allowed_refs
+        .iter()
+        .any(|candidate| candidate.value == action_ref)
+    {
+        return Err(violation(
+            step,
+            repository,
+            action_ref,
+            "ref",
+            action_ref,
+            capability
+                .allowed_refs
+                .iter()
+                .map(|candidate| candidate.value.to_string())
+                .collect(),
+        )
+        .into());
+    }
+    let mut found = Vec::new();
+    validate_inputs(&mut found, step, repository, action_ref, capability, inputs);
+    if let Some(error) = found.into_iter().next() {
+        return Err(error.into());
+    }
+    Ok(())
 }
 
 pub fn violations(job: &AgentJobRequestMessage) -> Vec<CapabilityViolation> {
@@ -905,6 +969,7 @@ mod tests {
             NativeActionAdapter::SetupJust,
             NativeActionAdapter::RustCache,
             NativeActionAdapter::GitHubRuntimeExport,
+            NativeActionAdapter::GitHubScript,
             NativeActionAdapter::Renovate,
             NativeActionAdapter::DockerSetupBuildx,
             NativeActionAdapter::DockerLogin,
@@ -1030,6 +1095,30 @@ mod tests {
         ));
         assert_eq!(errors[0].field, "with.retention-days");
         assert_eq!(errors[0].accepted, ["1", "7", "14", "30", "90"]);
+    }
+
+    #[test]
+    fn validate_github_script_accepts_only_jackin_patterns() {
+        for script in [
+            "core.setOutput('docs-xtask', process.env.CONTRACT)",
+            "return await import(process.env.JACKIN_ACTION_RUNTIME).then(({ main }) => main())",
+        ] {
+            validate_job_with_context(
+                &job(
+                    "actions/github-script",
+                    Some("373c709c69115d41ff229c7e5df9f8788daa9553"),
+                    serde_json::json!({"github-token": "masked", "script": script}),
+                ),
+                &[],
+            )
+            .unwrap();
+        }
+        let errors = violations(&job(
+            "actions/github-script",
+            Some("373c709c69115d41ff229c7e5df9f8788daa9553"),
+            serde_json::json!({"script": "console.log('adjacent')"}),
+        ));
+        assert_eq!(errors[0].field, "with.script");
     }
 
     #[test]
