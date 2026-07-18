@@ -946,6 +946,41 @@ pub(crate) fn cargo_store_host(temp_host: &Path) -> PathBuf {
     crate::storage::cache_class_path(&daemon_store_root(temp_host), "cargo", "_velnor_cargo")
 }
 
+/// Remove Cargo git checkouts whose same-named bare repository is absent.
+/// Cargo cannot heal this state itself: it treats the checkout as reusable,
+/// then fails metadata with `Repository .../git/db/<name> not found`.
+pub(crate) fn repair_cargo_git_store(cargo_store: &Path) -> io::Result<usize> {
+    let git = cargo_store.join("git");
+    let lock = git.join(".velnor-repair-lock");
+    match fs::create_dir(&lock) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(0),
+        Err(error) => return Err(error),
+    }
+
+    let result = (|| {
+        let checkouts = git.join("checkouts");
+        let db = git.join("db");
+        let entries = match fs::read_dir(&checkouts) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error),
+        };
+        let mut repaired = 0;
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() || db.join(entry.file_name()).is_dir() {
+                continue;
+            }
+            fs::remove_dir_all(entry.path())?;
+            repaired += 1;
+        }
+        Ok(repaired)
+    })();
+    let _ = fs::remove_dir(&lock);
+    result
+}
+
 /// Host-persistent cargo executable store, scoped by trust + repository.
 pub(crate) fn cargo_executable_store_host(temp_host: &Path, repository: &str) -> PathBuf {
     cargo_executable_store_host_for_scope(
@@ -1119,6 +1154,22 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn repairs_orphaned_cargo_git_checkouts_as_one_coherent_store() {
+        let root = container_test_temp("cargo-git-repair");
+        let cargo = root.join("cargo");
+        fs::create_dir_all(cargo.join("git/checkouts/orphan-123/rev")).unwrap();
+        fs::create_dir_all(cargo.join("git/checkouts/healthy-456/rev")).unwrap();
+        fs::create_dir_all(cargo.join("git/db/healthy-456")).unwrap();
+
+        assert_eq!(repair_cargo_git_store(&cargo).unwrap(), 1);
+        assert!(!cargo.join("git/checkouts/orphan-123").exists());
+        assert!(cargo.join("git/checkouts/healthy-456").is_dir());
+        assert_eq!(repair_cargo_git_store(&cargo).unwrap(), 0);
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
