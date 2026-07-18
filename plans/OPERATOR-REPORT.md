@@ -296,3 +296,15 @@ same-version local-artifact sentence is superseded and must not be used.
   mirror, checkout-copy, and storage-class symbols remain independently
   identifiable. Per the program's progress-STOP rule, plan 044 proceeds by
   symbol relocation without reverting the intervening contract work.
+
+## 2026-07-18 — Plan 045 drift and queue-time fallback
+
+- The timing-plan drift check reports 1,789 changed lines in `runner.rs` and
+  `executor.rs`; `telemetry.rs` and `slot_log.rs` remain unchanged from the
+  plan base. Lifecycle and adapter symbols are still identifiable, so work
+  proceeds by symbol relocation under the progress-STOP fallback.
+- The current V2 acquired-job reference and expanded job message carry lease
+  expiry (`locked_until`) but no authoritative GitHub queued-at timestamp.
+  Following plan 045's documented fallback, the timing record omits queue wait
+  rather than deriving a false value; doctor will use the locally measured
+  broker-message-to-acquire/pickup interval.
