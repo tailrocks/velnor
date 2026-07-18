@@ -91,7 +91,7 @@ V-A). Do not open estate PRs before 041's operator verification.
 | 054 | tailrocks/termrock | 3 | M | 042 (Pages) | IN PROGRESS |
 | 055 | schemalane + pg-bigdecimal + tracing-request-level (Class D trio) | 3 | M | 040 (schemalane services) | IN PROGRESS |
 | 056 | tailrocks/parallax-telemetry-playground | 3 | S | — | IN PROGRESS |
-| 057 | tailrocks/tablerock | 3 | S | — | IN PROGRESS |
+| 057 | tailrocks/tablerock | 3 | S | — | BLOCKED — target AGENTS forbids branch/PR; plan drift would delete current coverage |
 | 058 | Phase 4: estate enforcement + docs reconcile + required checks | 4 | M | 046, 047–057 | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) |
