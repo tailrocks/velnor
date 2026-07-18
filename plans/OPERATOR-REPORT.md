@@ -199,3 +199,13 @@ same-version local-artifact sentence is superseded and must not be used.
   job options followed its runner network argument. v0.1.40 makes the owned
   network final for both job and service containers and adds separate
   precedence regressions for both paths.
+- v0.1.40 source run `29628766170`, Debian delivery run `29628766147`, and
+  apt publisher run `29629164057` passed. The public InRelease signature
+  (key `CD4693750A4BA4F12BC9ABFD857FCD279679A34B`) and both architecture
+  indexes verified `0.1.40`; Sentry then installed `0.1.40` through apt and
+  verified the package-built image and pinned tools. Fixture run
+  `29629359514` still failed service DNS, falsifying create-option precedence
+  as the complete cause. A direct Sentry Docker bridge/alias probe resolved
+  `postgres`, isolating the defect to Velnor's implicit create-time topology.
+  v0.1.41 explicitly reconciles the runner-owned job endpoint and service DNS
+  aliases after container creation and before the first workflow step.
