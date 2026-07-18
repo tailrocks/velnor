@@ -846,3 +846,24 @@ same-version local-artifact sentence is superseded and must not be used.
   The GitHub run's semver job remained in its cold full-tool installation for
   more than two minutes and was cancelled under the monitoring rule after the
   parity blocker was established. PR: <https://github.com/tailrocks/termrock/pull/4>.
+- Schemalane's first controlled Velnor run `29652124778` exposed concurrent
+  extraction into the daemon-shared Cargo registry `src` tree: two independent
+  job containers raced while unpacking `astral-tokio-tar` and one received
+  `EEXIST` for `.cargo-ok`. The shared store now contains only immutable Cargo
+  archives/indexes and bare Git databases; extracted registry sources and Git
+  checkouts remain job-local. Signed runner commit `73cf5ac` passed formatting,
+  strict clippy, all 619 nextest tests, and actionlint. Velnor v0.1.74 was built
+  by release runs `29652393700` and `29652393714`, published by signed apt run
+  `29652519168`, and installed on Sentry exclusively through the configured apt
+  repository. `dpkg-query` and the package-built job-image label both report
+  0.1.74. Clean Schemalane Velnor run `29652678710` then passed all three jobs,
+  proving the extraction race was removed without changing fixture or workflow
+  semantics.
+- Schemalane's clean GitHub lane exposed two host-image assumptions in its
+  pre-existing audit job after the estate-wide workflow environment became
+  explicit: it inherited `RUSTC_WRAPPER=sccache` and mold linker flags but did
+  not provision either tool. Signed commits `195600f` and `b0e3090` give the
+  audit job the same native setup steps as the other Rust jobs. Signed commit
+  `2e629c9` replaces mise's Cargo-source installations of cargo-audit and
+  cargo-nextest with their current release-binary GitHub backends, eliminating
+  CI tool compilation while retaining mise as the sole tool authority.
