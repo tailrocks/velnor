@@ -7296,14 +7296,19 @@ mod tests {
     struct GitDiffRunner {
         calls: Vec<(String, Vec<String>)>,
         stdout: String,
+        missing_refs: bool,
     }
 
     impl CommandRunner for GitDiffRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             self.calls.push((program.to_string(), args.to_vec()));
             Ok(CommandResult {
-                code: 0,
-                stdout: if program == "git" {
+                code: if self.missing_refs && args.iter().any(|arg| arg == "cat-file") {
+                    1
+                } else {
+                    0
+                },
+                stdout: if program == "git" && args.iter().any(|arg| arg == "diff") {
                     self.stdout.clone()
                 } else {
                     String::new()
@@ -8037,6 +8042,7 @@ mod tests {
         let mut executor = DockerScriptExecutor::new(GitDiffRunner {
             calls: Vec::new(),
             stdout: "docker/construct/Dockerfile\ndocs/index.md\nREADME.md\n".into(),
+            missing_refs: true,
         });
 
         let results = executor
@@ -8074,6 +8080,13 @@ mod tests {
         assert!(results[0].stdout.contains("changed: README.md"));
         assert!(executor.runner().calls.iter().any(|(program, args)| {
             program == "git" && args.contains(&"base-sha...head-sha".into())
+        }));
+        assert!(executor.runner().calls.iter().any(|(program, args)| {
+            program == "git"
+                && args.contains(&"fetch".into())
+                && args.contains(&"--depth=10".into())
+                && args.contains(&"base-sha".into())
+                && args.contains(&"head-sha".into())
         }));
         assert_eq!(
             executor
