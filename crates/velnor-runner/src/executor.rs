@@ -3483,6 +3483,14 @@ fn native_cache(
     if !path.is_empty() {
         stdout.push_str(&format!("{ANSI_CYAN}Cache path: {path}{ANSI_RESET}\n"));
     }
+    let summary = if persistent_paths > 0 && persistent_paths == cache_paths(&path).len() {
+        "## Velnor cache report\n- Backend: actions/cache (native)\n- Store: host-persistent cache class\n- Result: host-persistent store — restore/save skipped\n".to_string()
+    } else {
+        format!(
+            "## Velnor cache report\n- Backend: actions/cache (native)\n- Key: `{key}`\n- Result: {}\n- Restore: {restore_ms} ms\n",
+            matched_key.as_deref().unwrap_or("miss")
+        )
+    };
 
     Ok(StepExecutionResult {
         exit_code: if fail_on_cache_miss && matched_key.is_none() {
@@ -3493,6 +3501,7 @@ fn native_cache(
         state: StepCommandState {
             outputs,
             state: state_values,
+            summary,
             ..StepCommandState::default()
         },
         skipped: false,
@@ -3539,11 +3548,20 @@ fn native_rust_cache(
     } else {
         format!("{ANSI_YELLOW}Rust cache miss for shared key '{shared_key}'{ANSI_RESET}\n")
     };
+    let summary = if persistent_target {
+        "## Velnor cache report\n- Backend: rust-cache (native)\n- Store: host-persistent target class\n- Result: host-persistent store — restore/save skipped\n".to_string()
+    } else {
+        format!(
+            "## Velnor cache report\n- Backend: rust-cache (native)\n- Key: `{shared_key}`\n- Result: {}\n- Restore: {restore_ms} ms\n",
+            if cache_hit { "hit" } else { "miss" }
+        )
+    };
     Ok(StepExecutionResult {
         exit_code: 0,
         state: StepCommandState {
             outputs,
             env: [("CACHE_ON_FAILURE".to_string(), cache_on_failure)].into(),
+            summary,
             ..StepCommandState::default()
         },
         skipped: false,
@@ -3582,7 +3600,12 @@ fn native_rust_cache_save(
         .get(step_id)
         .and_then(|outputs| outputs.get("cache-hit"))
         .is_some_and(|value| value == "true");
-    save_cache_result(&action_state, &key, &path, exact_hit)
+    let mut result = save_cache_result(&action_state, &key, &path, exact_hit)?;
+    result.state.summary = result
+        .state
+        .summary
+        .replace("actions/cache (native post)", "rust-cache (native post)");
+    Ok(result)
 }
 
 /// `type=gha` buildx cache options pay GitHub's cache API latency from the
@@ -3894,9 +3917,21 @@ fn cache_staging_name(cache_file_name: &str) -> String {
 }
 
 fn cache_save_step_result(exit_code: i32, stdout: &str, stderr: &str) -> StepExecutionResult {
+    let result = if stdout.contains("host-persistent storage") {
+        "host-persistent store — restore/save skipped"
+    } else if stderr.is_empty() {
+        "save completed"
+    } else {
+        "save skipped"
+    };
     StepExecutionResult {
         exit_code,
-        state: StepCommandState::default(),
+        state: StepCommandState {
+            summary: format!(
+                "## Velnor cache report\n- Backend: actions/cache (native post)\n- Result: {result}\n"
+            ),
+            ..StepCommandState::default()
+        },
         skipped: false,
         failure_ignored: false,
         stdout: stdout.to_string(),
@@ -8241,7 +8276,15 @@ mod tests {
             .stdout
             .contains("Cache paths live on Velnor host-persistent storage (always warm)"));
         assert!(!results[0].stdout.contains("Cache not found"));
+        assert!(results[0]
+            .state
+            .summary
+            .contains("host-persistent store — restore/save skipped"));
         assert!(results[1].stdout.contains("nothing to save"));
+        assert!(results[1]
+            .state
+            .summary
+            .contains("host-persistent store — restore/save skipped"));
         assert!(results[1].stderr.is_empty());
         fs::remove_dir_all(temp).unwrap();
     }
@@ -8286,6 +8329,10 @@ mod tests {
             .stdout
             .contains("Rust cache paths live on Velnor host-persistent storage"));
         assert!(!results[0].stdout.contains("Rust cache miss"));
+        assert!(results[0]
+            .state
+            .summary
+            .contains("Backend: rust-cache (native)"));
         assert!(results[1].stdout.contains("Cache hit occurred"));
         fs::remove_dir_all(temp).unwrap();
     }
