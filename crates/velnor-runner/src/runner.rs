@@ -2557,44 +2557,89 @@ async fn handle_job_request(
     let capacity_run_root = crate::storage::StorageLayout::resolve()
         .map(|layout| layout.run_root)
         .unwrap_or_else(|| daemon_capacity_run_root(config_dir));
-    let _storage_leases = crate::github_adapter::job_variable(&job, "github.repository")
-        .filter(|repository| !repository.is_empty())
-        .zip(
-            crate::github_adapter::job_variable(&job, "github.workflow")
-                .filter(|workflow| !workflow.is_empty()),
-        )
-        .map(
-            |(repository, workflow)| -> Result<Vec<crate::capacity::ScopeLease>> {
-                let target_scope = format!(
-                    "{}/{}/{}/{}",
-                    crate::container::sanitize_store_key(&args.trust_scope),
-                    crate::container::sanitize_store_key(repository),
-                    crate::container::sanitize_store_key(workflow),
-                    crate::container::sanitize_store_key(&job.job_display_name)
+    let acquire_storage_leases = || {
+        crate::github_adapter::job_variable(&job, "github.repository")
+            .filter(|repository| !repository.is_empty())
+            .map(|repository| -> Result<Vec<crate::capacity::ScopeLease>> {
+                let work_root = crate::container::daemon_shared_root(
+                    args.work_dir
+                        .clone()
+                        .unwrap_or_else(|| config_dir.join("_work")),
                 );
-                let cache_scope = format!(
-                    "{}/{}/{}",
-                    crate::container::sanitize_store_key(&args.trust_scope),
-                    crate::container::sanitize_store_key(repository),
-                    crate::container::sanitize_store_key(&job.job_id)
+                let repository_key = crate::container::sanitize_store_key(repository);
+                let trust_key = crate::container::sanitize_store_key(&args.trust_scope);
+                let cargo_root = crate::container::cargo_store_host(&work_root);
+                let mise_root = crate::container::mise_store_host(&work_root);
+                let target_root = crate::storage::append_legacy_trust(
+                    crate::container::cargo_target_store_host(&work_root),
+                    &trust_key,
                 );
-                Ok(vec![
+                let target_job = crate::github_adapter::github_cargo_target_store_host(
+                    &job, &work_root, &trust_key,
+                );
+                let target_scope = target_job
+                    .parent()
+                    .and_then(|path| path.strip_prefix(&target_root).ok())
+                    .context("derive persistent target GC scope")?
+                    .to_string_lossy()
+                    .to_string();
+                let cargo_bin_scope =
+                    crate::container::cargo_executable_store_host(&work_root, &repository_key)
+                        .strip_prefix(&cargo_root)
+                        .context("derive Cargo executable GC scope")?
+                        .to_string_lossy()
+                        .to_string();
+                let mise_install_scope =
+                    crate::container::mise_executable_store_host(&work_root, &repository_key)
+                        .strip_prefix(&mise_root)
+                        .context("derive mise install GC scope")?
+                        .to_string_lossy()
+                        .to_string();
+                let rustup_scope =
+                    crate::container::rustup_executable_store_host(&work_root, &repository_key)
+                        .strip_prefix(&mise_root)
+                        .context("derive rustup GC scope")?
+                        .to_string_lossy()
+                        .to_string();
+                let actions_cache =
+                    crate::storage::cache_class_path(&work_root, "caches", "_velnor_caches");
+                let actions_cache_scope = if actions_cache
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("_velnor_"))
+                {
+                    format!("{trust_key}/{repository_key}")
+                } else {
+                    repository_key
+                };
+                let stale_after = Duration::from_secs(24 * 3600);
+                let lease_holder = crate::container::sanitize_store_key(&job.job_id);
+                [
+                    ("targets", target_scope),
+                    ("actions-cache", actions_cache_scope),
+                    ("cargo", "registry".into()),
+                    ("cargo", "git".into()),
+                    ("cargo", cargo_bin_scope),
+                    ("mise", "cache".into()),
+                    ("mise", mise_install_scope),
+                    ("mise", rustup_scope),
+                ]
+                .into_iter()
+                .map(|(class, scope)| {
+                    // ScopeLease is intentionally exclusive. Give every active job its own
+                    // child lease while the GC's ancestor-overlap check protects the shared
+                    // candidate scope for all concurrent holders.
+                    let holder_scope = format!("{scope}/{lease_holder}");
                     crate::capacity::ScopeLease::acquire(
                         &capacity_run_root,
-                        "targets",
-                        &target_scope,
-                        Duration::from_secs(24 * 3600),
-                    )?,
-                    crate::capacity::ScopeLease::acquire(
-                        &capacity_run_root,
-                        "caches",
-                        &cache_scope,
-                        Duration::from_secs(24 * 3600),
-                    )?,
-                ])
-            },
-        )
-        .transpose()?;
+                        class,
+                        &holder_scope,
+                        stale_after,
+                    )
+                })
+                .collect()
+            })
+            .transpose()
+    };
     let script_steps = match crate::script_step::github_script_steps_with_context(
         &job.steps,
         "/__w",
@@ -2646,6 +2691,10 @@ async fn handle_job_request(
                 return Err(error);
             }
         }
+        // Lease publication mutates the runtime store, so it must follow all
+        // trust and strict-capability checks. Keep the guards through result
+        // upload by binding them in the execution scope.
+        let _storage_leases = acquire_storage_leases()?;
         if let Err(error) = publish_timeline_job_started(&job, runner_name).await {
             eprintln!("Best-effort timeline job start update failed: {error:#}");
         }

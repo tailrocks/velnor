@@ -90,6 +90,14 @@ fn run_gc(
     let run_root = crate::storage::StorageLayout::resolve()
         .map(|layout| layout.run_root)
         .unwrap_or_else(|| work_root.join("_velnor_runtime"));
+    let _destructive_locks = if args.dry_run {
+        None
+    } else {
+        Some((
+            GcLeaderLock::acquire(&run_root)?,
+            crate::capacity::FilesystemCoordinator::lock_exclusive(&run_root)?,
+        ))
+    };
     let in_use_scopes = match crate::capacity::active_scopes(&run_root, Duration::from_secs(86400))
     {
         Ok(scopes) => scopes,
@@ -137,7 +145,6 @@ fn run_gc(
     let log_root = crate::storage::StorageLayout::resolve()
         .map(|layout| layout.log_root)
         .unwrap_or_else(|| work_root.join("_velnor_logs"));
-    let _lock = GcLeaderLock::acquire(&run_root)?;
     for candidate in candidates {
         let result = fs::remove_dir_all(&candidate.path);
         let outcome = if result.is_ok() { "deleted" } else { "failed" };
@@ -223,12 +230,18 @@ fn append_gc_history(
 struct StoreRoot {
     kind: CacheStore,
     path: PathBuf,
+    scope_prefix: Vec<String>,
     scope_depth: usize,
     candidate_depth: usize,
     gc_managed: bool,
 }
 
 fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
+    let cargo = crate::container::cargo_store_host(work_root);
+    let cargo_bin = cargo.join("bin");
+    let cargo_bin_legacy = is_legacy_store(&cargo);
+    let mise = crate::container::mise_store_host(work_root);
+    let mise_legacy = is_legacy_store(&mise);
     let targets = crate::container::cargo_target_store_host(work_root);
     let targets_legacy = is_legacy_store(&targets);
     let actions_cache = crate::storage::cache_class_path(work_root, "caches", "_velnor_caches");
@@ -236,21 +249,56 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
     vec![
         StoreRoot {
             kind: CacheStore::Cargo,
-            path: crate::container::cargo_store_host(work_root),
-            scope_depth: 1,
-            candidate_depth: 1,
+            path: cargo.join("registry"),
+            scope_prefix: vec!["registry".into()],
+            scope_depth: 0,
+            candidate_depth: 0,
+            gc_managed: true,
+        },
+        StoreRoot {
+            kind: CacheStore::Cargo,
+            path: cargo.join("git"),
+            scope_prefix: vec!["git".into()],
+            scope_depth: 0,
+            candidate_depth: 0,
+            gc_managed: true,
+        },
+        StoreRoot {
+            kind: CacheStore::Cargo,
+            path: cargo_bin,
+            scope_prefix: vec!["bin".into()],
+            scope_depth: if cargo_bin_legacy { 2 } else { 1 },
+            candidate_depth: if cargo_bin_legacy { 2 } else { 1 },
             gc_managed: true,
         },
         StoreRoot {
             kind: CacheStore::Mise,
-            path: crate::container::mise_store_host(work_root),
-            scope_depth: 1,
-            candidate_depth: 1,
+            path: mise.join("cache"),
+            scope_prefix: vec!["cache".into()],
+            scope_depth: 0,
+            candidate_depth: 0,
+            gc_managed: true,
+        },
+        StoreRoot {
+            kind: CacheStore::Mise,
+            path: mise.join("installs"),
+            scope_prefix: vec!["installs".into()],
+            scope_depth: if mise_legacy { 2 } else { 1 },
+            candidate_depth: if mise_legacy { 2 } else { 1 },
+            gc_managed: true,
+        },
+        StoreRoot {
+            kind: CacheStore::Mise,
+            path: mise.join("rustup"),
+            scope_prefix: vec!["rustup".into()],
+            scope_depth: if mise_legacy { 2 } else { 1 },
+            candidate_depth: if mise_legacy { 2 } else { 1 },
             gc_managed: true,
         },
         StoreRoot {
             kind: CacheStore::Targets,
             path: targets,
+            scope_prefix: Vec::new(),
             scope_depth: if targets_legacy { 4 } else { 3 },
             candidate_depth: if targets_legacy { 4 } else { 3 },
             gc_managed: true,
@@ -258,6 +306,7 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
         StoreRoot {
             kind: CacheStore::ActionsCache,
             path: actions_cache,
+            scope_prefix: Vec::new(),
             scope_depth: if actions_cache_legacy { 2 } else { 1 },
             candidate_depth: if actions_cache_legacy { 3 } else { 2 },
             gc_managed: true,
@@ -265,6 +314,7 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
         StoreRoot {
             kind: CacheStore::Artifacts,
             path: work_root.join("_velnor_artifacts"),
+            scope_prefix: Vec::new(),
             scope_depth: 1,
             candidate_depth: 1,
             gc_managed: true,
@@ -272,6 +322,7 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
         StoreRoot {
             kind: CacheStore::Sccache,
             path: crate::container::sccache_host(work_root),
+            scope_prefix: Vec::new(),
             scope_depth: 1,
             candidate_depth: 1,
             gc_managed: false,
@@ -367,8 +418,24 @@ pub(crate) fn reclaim_work_root(
         }
         Err(error) => return Err(error),
     };
+    // Publish/snapshot leases under one filesystem-wide coordinator. A daemon
+    // starting a job cannot race between this snapshot and candidate deletion.
+    let _coordinator = crate::capacity::FilesystemCoordinator::lock_exclusive(run_root)?;
+    let mut protected = in_use_scopes.clone();
+    protected.extend(crate::capacity::active_scopes(
+        run_root,
+        Duration::from_secs(24 * 3600),
+    )?);
     let mut entries = cache_listing(work_root)?;
-    entries.retain(|entry| !in_use_scopes.contains(&entry.scope_key()));
+    let policy = EvictionPolicy {
+        now: SystemTime::now(),
+        keep_newest_per_target_scope: 0,
+        max_age: Duration::ZERO,
+        max_total_bytes: None,
+        class_budgets: BTreeMap::new(),
+        in_use_scopes: protected,
+    };
+    entries.retain(|entry| !in_use(entry, &policy));
     entries.sort_by(|left, right| {
         reclaim_priority(left.store)
             .cmp(&reclaim_priority(right.store))
@@ -470,7 +537,13 @@ fn collect_candidates(
             entries.push(CacheEntry {
                 path: path.to_path_buf(),
                 store: store.kind,
-                scope: scope_parts(&store.path, path, store.scope_depth),
+                scope: store
+                    .scope_prefix
+                    .iter()
+                    .cloned()
+                    .chain(scope_parts(&store.path, path, store.scope_depth))
+                    .filter(|part| part != ".")
+                    .collect(),
                 bytes,
                 modified,
             });
@@ -745,7 +818,16 @@ fn add_candidate(
 }
 
 fn in_use(entry: &CacheEntry, policy: &EvictionPolicy) -> bool {
-    policy.in_use_scopes.contains(&entry.scope_key())
+    let candidate = format!("{}/{}", entry.store, entry.scope_key());
+    policy.in_use_scopes.iter().any(|active| {
+        candidate == *active
+            || candidate
+                .strip_prefix(active)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+            || active
+                .strip_prefix(&candidate)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    })
 }
 
 fn is_older_than(modified: SystemTime, now: SystemTime, max_age: Duration) -> bool {
@@ -908,7 +990,9 @@ mod tests {
             ),
         ];
         let mut policy = policy();
-        policy.in_use_scopes.insert("trusted/active".to_string());
+        policy
+            .in_use_scopes
+            .insert("actions-cache/trusted/active".to_string());
 
         let candidates = select_eviction_candidates(&entries, &policy);
 
@@ -958,7 +1042,7 @@ mod tests {
             &root.join("run"),
             &root.join("log"),
             16,
-            &BTreeSet::from(["trusted/active".into()]),
+            &BTreeSet::from(["actions-cache/trusted/active".into()]),
         )
         .unwrap();
         assert_eq!(report.deleted.len(), 1);
@@ -966,5 +1050,208 @@ mod tests {
         assert_eq!(first.exists() as u8 + second.exists() as u8, 1);
         assert!(root.join("log/gc-history.jsonl").exists());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn split_store_roots_emit_exact_shared_and_repo_candidates() {
+        let root =
+            std::env::temp_dir().join(format!("velnor-split-store-{}", uuid::Uuid::new_v4()));
+        let registry = root.join("cargo/registry");
+        let canonical_bin = root.join("cargo/bin");
+        let legacy_bin = root.join("legacy-bin");
+        fs::create_dir_all(registry.join("cache/index")).unwrap();
+        fs::write(registry.join("cache/index/crate"), b"crate").unwrap();
+        fs::create_dir_all(canonical_bin.join("tailrocks_playground")).unwrap();
+        fs::write(canonical_bin.join("tailrocks_playground/tool"), b"tool").unwrap();
+        fs::create_dir_all(legacy_bin.join("trusted/tailrocks_playground")).unwrap();
+        fs::write(
+            legacy_bin.join("trusted/tailrocks_playground/tool"),
+            b"tool",
+        )
+        .unwrap();
+
+        let roots = [
+            StoreRoot {
+                kind: CacheStore::Cargo,
+                path: registry.clone(),
+                scope_prefix: vec!["registry".into()],
+                scope_depth: 0,
+                candidate_depth: 0,
+                gc_managed: true,
+            },
+            StoreRoot {
+                kind: CacheStore::Cargo,
+                path: canonical_bin,
+                scope_prefix: vec!["bin".into()],
+                scope_depth: 1,
+                candidate_depth: 1,
+                gc_managed: true,
+            },
+            StoreRoot {
+                kind: CacheStore::Cargo,
+                path: legacy_bin,
+                scope_prefix: vec!["bin".into()],
+                scope_depth: 2,
+                candidate_depth: 2,
+                gc_managed: true,
+            },
+        ];
+        let mut entries = Vec::new();
+        for store in &roots {
+            collect_candidates(store, &store.path, 0, &mut entries).unwrap();
+        }
+
+        assert!(entries
+            .iter()
+            .any(|entry| { entry.path == registry && entry.scope_key() == "registry" }));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.scope_key() == "bin/tailrocks_playground"));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.scope_key() == "bin/trusted/tailrocks_playground"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn active_job_leases_protect_every_mounted_store_across_daemons() {
+        let run_root =
+            std::env::temp_dir().join(format!("velnor-active-stores-{}", uuid::Uuid::new_v4()));
+        let stale_after = Duration::from_secs(60);
+        let scopes = [
+            ("targets", "workspace-v2/tailrocks_playground/ci.yml"),
+            ("actions-cache", "tailrocks_playground"),
+            ("cargo", "registry"),
+            ("cargo", "git"),
+            ("cargo", "bin/tailrocks_playground"),
+            ("mise", "cache"),
+            ("mise", "installs/tailrocks_playground"),
+            ("mise", "rustup/tailrocks_playground"),
+        ];
+        let mut leases = Vec::new();
+        // Four jobs from one repository must be able to hold every shared and
+        // repository-local store concurrently.
+        for holder in ["job-1", "job-2", "job-3", "job-4"] {
+            for (class, scope) in scopes {
+                leases.push(
+                    crate::capacity::ScopeLease::acquire(
+                        &run_root,
+                        class,
+                        &format!("{scope}/{holder}"),
+                        stale_after,
+                    )
+                    .unwrap(),
+                );
+            }
+        }
+        // A concurrent job from another repository shares Cargo registry/git
+        // and mise cache, while protecting its own executable/cache/target scopes.
+        for (class, scope) in [
+            ("targets", "workspace-v2/tailrocks_other/ci.yml"),
+            ("actions-cache", "tailrocks_other"),
+            ("cargo", "registry"),
+            ("cargo", "git"),
+            ("cargo", "bin/tailrocks_other"),
+            ("mise", "cache"),
+            ("mise", "installs/tailrocks_other"),
+            ("mise", "rustup/tailrocks_other"),
+        ] {
+            leases.push(
+                crate::capacity::ScopeLease::acquire(
+                    &run_root,
+                    class,
+                    &format!("{scope}/other-job"),
+                    stale_after,
+                )
+                .unwrap(),
+            );
+        }
+        let active = crate::capacity::active_scopes(&run_root, stale_after).unwrap();
+        let entries = vec![
+            entry(
+                "/targets/playground",
+                CacheStore::Targets,
+                &["workspace-v2", "tailrocks_playground", "ci.yml"],
+                90,
+                10,
+            ),
+            entry(
+                "/targets/other",
+                CacheStore::Targets,
+                &["workspace-v2", "tailrocks_other", "ci.yml"],
+                90,
+                10,
+            ),
+            entry(
+                "/caches/playground",
+                CacheStore::ActionsCache,
+                &["tailrocks_playground"],
+                90,
+                10,
+            ),
+            entry(
+                "/caches/other",
+                CacheStore::ActionsCache,
+                &["tailrocks_other"],
+                90,
+                10,
+            ),
+            entry("/cargo/registry", CacheStore::Cargo, &["registry"], 90, 10),
+            entry("/cargo/git", CacheStore::Cargo, &["git"], 90, 10),
+            entry(
+                "/cargo/bin/playground",
+                CacheStore::Cargo,
+                &["bin", "tailrocks_playground"],
+                90,
+                10,
+            ),
+            entry(
+                "/cargo/bin/other",
+                CacheStore::Cargo,
+                &["bin", "tailrocks_other"],
+                90,
+                10,
+            ),
+            entry("/mise/cache", CacheStore::Mise, &["cache"], 90, 10),
+            entry(
+                "/mise/installs/playground",
+                CacheStore::Mise,
+                &["installs", "tailrocks_playground"],
+                90,
+                10,
+            ),
+            entry(
+                "/mise/installs/other",
+                CacheStore::Mise,
+                &["installs", "tailrocks_other"],
+                90,
+                10,
+            ),
+            entry(
+                "/mise/rustup/playground",
+                CacheStore::Mise,
+                &["rustup", "tailrocks_playground"],
+                90,
+                10,
+            ),
+            entry(
+                "/mise/rustup/other",
+                CacheStore::Mise,
+                &["rustup", "tailrocks_other"],
+                90,
+                10,
+            ),
+        ];
+        let mut policy = policy();
+        policy.in_use_scopes = active;
+
+        let candidates = select_eviction_candidates(&entries, &policy);
+        let paths: BTreeSet<_> = candidates
+            .into_iter()
+            .map(|candidate| candidate.path)
+            .collect();
+        assert!(paths.is_empty());
+        drop(leases);
+        fs::remove_dir_all(run_root).unwrap();
     }
 }

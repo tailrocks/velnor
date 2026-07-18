@@ -28,6 +28,37 @@ pub struct ScopeLease {
     path: PathBuf,
 }
 
+/// Serializes lease publication against destructive cache snapshots.
+///
+/// Lease files remain the fine-grained liveness authority. The coordinator
+/// closes the cross-daemon race where a reaper snapshots those files while a
+/// different daemon is publishing a lease for the same store.
+pub struct FilesystemCoordinator {
+    _file: fs::File,
+}
+
+impl FilesystemCoordinator {
+    pub fn lock_shared(run_root: &Path) -> Result<Self> {
+        Self::lock(run_root, rustix::fs::FlockOperation::LockShared)
+    }
+
+    pub fn lock_exclusive(run_root: &Path) -> Result<Self> {
+        Self::lock(run_root, rustix::fs::FlockOperation::LockExclusive)
+    }
+
+    fn lock(run_root: &Path, operation: rustix::fs::FlockOperation) -> Result<Self> {
+        fs::create_dir_all(run_root)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(run_root.join("filesystem-coordinator.lock"))?;
+        rustix::fs::flock(&file, operation).context("lock filesystem coordinator")?;
+        Ok(Self { _file: file })
+    }
+}
+
 impl ScopeLease {
     pub fn acquire(
         run_root: &Path,
@@ -35,6 +66,7 @@ impl ScopeLease {
         scope: &str,
         stale_after: Duration,
     ) -> Result<Self> {
+        let _coordinator = FilesystemCoordinator::lock_shared(run_root)?;
         let dir = run_root
             .join("leases")
             .join(crate::container::sanitize_store_key(class));
@@ -85,28 +117,21 @@ pub fn active_scopes(run_root: &Path, stale_after: Duration) -> Result<BTreeSet<
     if !root.exists() {
         return Ok(active);
     }
-    for class in fs::read_dir(&root)? {
-        let class = class?.path();
-        if !class.is_dir() {
+    for class_entry in fs::read_dir(&root)? {
+        let class = class_entry?;
+        let class_path = class.path();
+        if !class_path.is_dir() {
             continue;
         }
-        for entry in fs::read_dir(class)? {
+        let class = class.file_name().to_string_lossy().to_string();
+        for entry in fs::read_dir(class_path)? {
             let path = entry?.path();
             if lease_is_stale(&path, stale_after)? {
                 let _ = fs::remove_file(path);
                 continue;
             }
             let record: LeaseRecord = serde_json::from_slice(&fs::read(path)?)?;
-            let parts: Vec<_> = record.scope.split('/').collect();
-            for length in 2..=parts.len() {
-                active.insert(parts[..length].join("/"));
-            }
-            if parts.len() > 1 {
-                for length in 1..parts.len() {
-                    active.insert(parts[1..=length].join("/"));
-                }
-            }
-            active.insert(record.scope);
+            active.insert(format!("{class}/{}", record.scope));
         }
     }
     Ok(active)
@@ -247,6 +272,40 @@ mod tests {
         assert!(
             ScopeLease::acquire(&root, "targets", "trusted/repo", Duration::from_secs(60)).is_ok()
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn active_scopes_are_typed_by_cache_class() {
+        let root = root("typed-lease");
+        let _cargo = ScopeLease::acquire(&root, "cargo", "cache", Duration::from_secs(60)).unwrap();
+        let _mise = ScopeLease::acquire(&root, "mise", "cache", Duration::from_secs(60)).unwrap();
+
+        assert_eq!(
+            active_scopes(&root, Duration::from_secs(60)).unwrap(),
+            BTreeSet::from(["cargo/cache".into(), "mise/cache".into()])
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn coordinator_blocks_lease_publication_during_reclaim_snapshot() {
+        let root = root("coordinator");
+        let coordinator = FilesystemCoordinator::lock_exclusive(&root).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let thread_root = root.clone();
+        let handle = std::thread::spawn(move || {
+            let lease =
+                ScopeLease::acquire(&thread_root, "cargo", "registry", Duration::from_secs(60))
+                    .unwrap();
+            sender.send(lease).unwrap();
+        });
+
+        assert!(receiver.recv_timeout(Duration::from_millis(100)).is_err());
+        drop(coordinator);
+        let lease = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(lease);
+        handle.join().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
