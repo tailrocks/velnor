@@ -46,3 +46,13 @@ change is committed with DCO signoff and pushed, a `.deb` is built from that
 exact commit, and the artifact is installed through `apt`. Direct `dpkg -i`
 deployment is prohibited. Same-version host validation uses
 `apt-get install --reinstall -y ./velnor-runner_<version>_amd64.deb`.
+
+## 2026-07-18 — Deployment-process correction after repository audit
+
+Inspection of `tailrocks/velnor-apt` established that “apt deployment” means
+the complete signed-repository path, not a local `.deb` passed to apt. The
+authoritative sequence is commit + push → version tag → Velnor
+`release-deb.yml` → cross-upload to the matching `velnor-apt` Release →
+`publish.yml` signed reprepro/Pages deployment → repository version check →
+`apt-get update && apt-get install velnor-runner` on Sentry. The preceding
+same-version local-artifact sentence is superseded and must not be used.

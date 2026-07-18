@@ -1,7 +1,7 @@
 # Velnor runner — Debian package + apt-native repository
 
 **Status: implemented and fully automatic** since v0.1.4 (amd64) / v0.1.6
-(arm64): `git tag vX.Y.Z && git push --tags` runs CI, builds both debs with a
+(arm64): `git tag vX.Y.Z && git push origin vX.Y.Z` runs CI, builds both debs with a
 binary-presence + size guard, attaches tar.gz + deb assets to the GitHub
 release, uploads to `tailrocks/velnor-apt`, and triggers the signed reprepro
 publish to GitHub Pages — zero manual steps. The packaged daemon ships
@@ -29,17 +29,19 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
    - `cargo zigbuild --release --locked --target $TGT` (modern glibc, no .2.17 shims — those are only for portable tarballs)
    - `cargo deb -p velnor-runner --target $TGT --no-build --deb-version "$VERSION"`
    Produces `velnor-runner_<version>_<arch>.deb` (amd64 + arm64).
-   - Package contents: binary → `/usr/bin/velnor-runner`; systemd unit →
-     `/lib/systemd/system/velnor-daemon.service`; default config →
-     `/etc/velnor/velnor.env` (conffile, token NOT shipped — operator fills it);
-     state dir `/var/lib/velnor` owned by a `velnor` service user.
-   - `maintainer-scripts`: `postinst` creates the `velnor` user + dirs,
-     `systemctl daemon-reload`, `enable` (start gated on the operator having set
-     the token); `prerm`/`postrm` stop + disable on remove.
-   - systemd unit: `Restart=always`, `EnvironmentFile=/etc/velnor/velnor.env`
-     (URL, name, labels, slots, work-dir, `GITHUB_TOKEN`) so the **PAT stays off
-     argv/`/proc`** (current deploy leaks it on the command line), `WantedBy=
-     multi-user.target` for boot start.
+   - Package contents: binary → `/usr/bin/velnor-runner`; systemd units →
+     `/usr/lib/systemd/system/velnor-daemon.service` and
+     `velnor-daemon@.service`; default config → `/etc/velnor/velnor.env`;
+     operator-owned tokens → `/etc/velnor/secrets.env` or
+     `/etc/velnor/<instance>.secrets.env` (0600, never shipped).
+   - `maintainer-scripts`: `postinst` creates the state/cache/runtime/log dirs,
+     migrates any legacy token out of `velnor.env`, reloads systemd, and leaves
+     start/enable under operator control. The daemon currently runs as root
+     because it owns Docker-backed job containers and bind mounts.
+   - systemd unit: `Restart=always`, separate config and secret environment
+     files, so the PAT stays off argv/`/proc`; `WantedBy=multi-user.target` for
+     boot start. The default and templated units have the same sandboxing and
+     storage contract.
 
 2. **Build the apt repository** — `reprepro` (standard, simple, signs Release).
    - `conf/distributions`:
@@ -64,9 +66,10 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
 ### Where it lives (storage decision)
 
 - **Store = GitHub Pages.** apt fetches the signed tree over HTTPS directly.
-- **Dedicated repo** `donbeave/velnor-apt` (NOT the velnor source repo) so the
-  `.deb` binaries don't bloat the code git history; the signed tree lives on its
-  `gh-pages` branch.
+- **Dedicated repo** `tailrocks/velnor-apt` (not the Velnor source repo) so the
+  `.deb` binaries do not enter code git history. GitHub Actions deploys the
+  generated signed tree directly as a Pages artifact; no `gh-pages` branch is
+  used.
 - **GitHub Packages does NOT support apt/deb** (npm/Docker/Maven/NuGet/RubyGems
   only) — can't use it.
 - **GitHub Releases** is the alternative blob store: keep `.deb` assets in
@@ -87,8 +90,10 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
 4. If `GH_VELNOR_APT_TOKEN` is present, cross-uploads the .debs to the `velnor-apt` repository's Releases (same tag) and triggers `publish.yml` in the apt repo via `gh workflow run -f version=$TAG`.
 5. The apt-repo's `publish.yml` then downloads the .debs from *its own* Releases (default GITHUB_TOKEN is sufficient), runs reprepro (fresh index with only the current version's debs), and deploys to Pages.
 
-The `.deb` build + attachment to the original release is the responsibility of the source project. The apt publisher only consumes from the apt-repo's own releases.
-   The index on Pages is generated fresh each time with only current versions (no state branch; old versions forgotten from index per maintainer preference). GitHub Pages is deployed via GitHub Actions (recommended; never "Deploy from a branch").
+The `.deb` build + attachment to the original release is the responsibility of
+the source project. The apt publisher consumes only the apt repository's own
+release assets. The Pages index is generated fresh with only the requested
+version; historical packages remain in Releases.
 6. Also attach the raw `.deb`(s) to the GitHub Release for direct download.
 
 Each new tag → new `.deb` in the pool → regenerated signed `Release` → `apt
@@ -123,7 +128,31 @@ avoids the deprecated global `apt-key` / `trusted.gpg.d`).
 - **key rotation**: document a key-rotation procedure; expired signing keys break
   `apt update` for everyone (see the `gh` CLI incident).
 
-## Status
+## Maintainer release and Sentry deployment
 
-Future work — not started. Tracked in
-`prompts/chainargos-migration-outstanding.checklist.md` (Priority 1).
+1. Ensure the release commit is signed off, pushed, and green. Create the next
+   `vX.Y.Z` tag on that exact commit and push only that tag.
+2. Monitor Velnor's `Release deb` workflow. It must build amd64 and arm64,
+   validate package contents/size, attach assets to both matching Releases, and
+   dispatch `tailrocks/velnor-apt`'s `Publish apt repo` workflow.
+3. Monitor the apt publish and Pages deployment. Verify the signed index and
+   candidate before touching a host:
+   ```bash
+   curl -fsSL https://velnor-apt.tailrocks.com/dists/stable/InRelease | head
+   apt-cache policy velnor-runner
+   ```
+4. On Sentry, drain the daemons, then install only from the configured signed
+   repository:
+   ```bash
+   sudo apt-get update
+   sudo apt-get install velnor-runner
+   dpkg-query -W velnor-runner
+   sudo systemctl start velnor-daemon velnor-daemon@fixture # plus instances
+   ```
+5. Run doctor and the fixture smoke. Roll back only to a previously published
+   apt version (`apt-get install velnor-runner=<version>`); never sideload a
+   release asset.
+
+Verified 2026-07-18: `tailrocks/velnor-apt` publishes amd64+arm64 with a signed
+reprepro index through GitHub Actions Pages; Sentry has the scoped keyring and
+source configured. Release `v0.1.34` is the current published baseline.
