@@ -4114,6 +4114,10 @@ fn native_upload_artifact(
     let include_hidden_files =
         input_truthy(&native_input(action, &action_state, "include-hidden-files"));
     let overwrite = input_truthy(&native_input(action, &action_state, "overwrite"));
+    // The strict manifest admits only the estate-approved v4 value `0`.
+    // upload-artifact defines it as no compression (ZIP Stored).
+    let store_uncompressed =
+        artifact_store_uncompressed(&native_input(action, &action_state, "compression-level"));
     let artifact_dir = artifact_store_dir(state)?.join(sanitize_artifact_name(&name));
     if artifact_dir.exists() {
         // Always overwrite in Velnor: re-runs on the same slot reuse the artifact store,
@@ -4192,6 +4196,7 @@ fn native_upload_artifact(
                     &job_id,
                     &name,
                     &zip_files,
+                    store_uncompressed,
                 ) {
                     Ok(id) => artifact_id = id,
                     Err(e) => {
@@ -4238,6 +4243,10 @@ fn native_upload_artifact(
         ),
         stderr: String::new(),
     })
+}
+
+fn artifact_store_uncompressed(compression_level: &str) -> bool {
+    compression_level.trim() == "0"
 }
 
 fn native_download_artifact(
@@ -13287,6 +13296,9 @@ fi"#
 
     #[test]
     fn native_upload_artifact_expands_target_release_globs() {
+        assert!(artifact_store_uncompressed("0"));
+        assert!(!artifact_store_uncompressed(""));
+
         let temp = temp_dir();
         fs::create_dir_all(temp.join("work")).unwrap();
         fs::write(temp.join("work/jackin-1.2.3-x86_64.tar.gz"), "archive\n").unwrap();

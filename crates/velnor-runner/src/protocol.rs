@@ -3380,6 +3380,25 @@ impl TwirpResultsClient {
     }
 }
 
+fn artifact_zip_bytes(files: &[(String, Vec<u8>)], store_uncompressed: bool) -> Result<Vec<u8>> {
+    use std::io::Write;
+
+    let buf = std::io::Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(buf);
+    let method = if store_uncompressed {
+        zip::CompressionMethod::Stored
+    } else {
+        zip::CompressionMethod::Deflated
+    };
+    let options = zip::write::FileOptions::<()>::default().compression_method(method);
+    for (archive_path, content) in files {
+        zip.start_file(archive_path, options)
+            .context("zip start_file")?;
+        zip.write_all(content).context("zip write")?;
+    }
+    Ok(zip.finish().context("zip finish")?.into_inner())
+}
+
 /// Upload artifact files to GitHub's Results Service (artifact v4 format).
 ///
 /// Uses synchronous `reqwest::blocking` — safe to call from `tokio::task::spawn_blocking`
@@ -3393,6 +3412,7 @@ pub fn upload_artifact_blocking(
     job_id: &str,
     name: &str,
     files: &[(String, Vec<u8>)], // (archive path, content)
+    store_uncompressed: bool,
 ) -> Result<String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -3470,18 +3490,7 @@ pub fn upload_artifact_blocking(
 
     // 2. Create zip archive and PUT to signed URL.
     // The signed URL is itself a credential — keep it off argv via --config.
-    let zip_bytes = {
-        let buf = std::io::Cursor::new(Vec::new());
-        let mut zw = zip::ZipWriter::new(buf);
-        let opts = zip::write::FileOptions::<()>::default()
-            .compression_method(zip::CompressionMethod::Deflated);
-        for (archive_path, content) in files {
-            zw.start_file(archive_path, opts)
-                .context("zip start_file")?;
-            zw.write_all(content).context("zip write")?;
-        }
-        zw.finish().context("zip finish")?.into_inner()
-    };
+    let zip_bytes = artifact_zip_bytes(files, store_uncompressed)?;
     let zip_size = zip_bytes.len() as u64;
 
     let zip_path = write_secret_file("zip", &zip_bytes).context("write zip temp file")?;
@@ -3713,6 +3722,14 @@ pub fn download_artifacts_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn artifact_compression_level_zero_uses_zip_stored() {
+        let bytes = artifact_zip_bytes(&[("seed.tar.zst".into(), vec![42; 64])], true).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let file = archive.by_index(0).unwrap();
+        assert_eq!(file.compression(), zip::CompressionMethod::Stored);
+    }
 
     #[test]
     fn results_service_download_lists_signs_and_extracts_artifact_v4() {
