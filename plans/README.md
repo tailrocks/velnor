@@ -81,14 +81,14 @@ V-A). Do not open estate PRs before 041's operator verification.
 
 | Plan | Repo | Phase | Effort | Extra deps | Status |
 |------|------|-------|--------|-----------|--------|
-| 047 | ChainArgos/java-monorepo | 1 | M | — | IN PROGRESS |
+| 047 | ChainArgos/java-monorepo | 1 | M | — | BLOCKED — all gates green; branch policy requires human approval/merge |
 | 048 | ChainArgos/blockchain-nodes | 1 | S/M | — | BLOCKED: both lanes identically fail three pre-existing package builds; fixes require out-of-scope Dockerfile/package-source changes (runs `29637999142`, `29638091607`) |
 | 049 | jackin-project/jackin (stacks on PR #810) | 1 | L | 047 (pattern) | TODO |
 | 050 | tailrocks/velnor (dogfood) | 2 | M | 039 (fleet label) | IN PROGRESS |
 | 051 | tailrocks/holla | 2 | S | — | DONE: PR #36 merged; Velnor/GitHub/both green; 57 s no-change budget passed |
 | 052 | tailrocks/ruxel | 2 | S | — | DONE — PR #2 merged; final three-lane and 52 s zero-install rerun green |
 | 053 | tailrocks/parallax | 2 | L | 051 (pattern), 042 (attest) | IN PROGRESS |
-| 054 | tailrocks/termrock | 3 | M | 042 (Pages) | TODO |
+| 054 | tailrocks/termrock | 3 | M | 042 (Pages) | IN PROGRESS |
 | 055 | schemalane + pg-bigdecimal + tracing-request-level (Class D trio) | 3 | M | 040 (schemalane services) | TODO |
 | 056 | tailrocks/parallax-telemetry-playground | 3 | S | — | TODO |
 | 057 | tailrocks/tablerock | 3 | S | — | TODO |

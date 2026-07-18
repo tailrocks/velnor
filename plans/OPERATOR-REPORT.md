@@ -727,3 +727,29 @@ same-version local-artifact sentence is superseded and must not be used.
   no-change acceptance proof are green. The runner-side step-time evaluation
   defect remains in scope for the Velnor commit series and must not be worked
   around by removing dependency-based invalidation estate-wide.
+- Plan 054 started from Termrock main `dd8bed1`, two source-only commits after
+  the planned `b7f34da`; scoped workflow excerpts were unchanged. Static work
+  is signed and pushed as `b4d6d185` in PR
+  <https://github.com/tailrocks/termrock/pull/4>. All workflow gates and 332
+  nextest tests passed. Existing source-only rustfmt drift and five strict
+  clippy warnings in `completion_menu.rs` predate the program branch and were
+  not masked with workflow changes; they remain repository-source evidence
+  to address before the PR can merge.
+- Java-monorepo plan 047 has exhausted its executable gates. Final Velnor,
+  GitHub, and combined runs are `29643642046`, `29643795326`, and
+  `29644162613`; required PR run `29637250998` attempt 2 was rerun after the
+  v0.1.71 apt deployment and passed every job, including the formerly failing
+  coingecko job. `gh pr merge 1753 --repo ChainArgos/java-monorepo --merge
+  --delete-branch` is refused with “base branch policy prohibits the merge”
+  despite no non-success checks. Human-only action: approve PR
+  <https://github.com/ChainArgos/java-monorepo/pull/1753>, then click **Merge
+  pull request**, or run the same `gh pr merge` command with an authorized
+  reviewer session. The owned Java daemon and all registrations were removed.
+- Parallax plan 053 static delivery is pushed as signed commits `92e4a68c`
+  and `7e3412b9`. Native Darwin preview/release builders remain intentionally:
+  their aarch64/x86_64 Apple artifacts require native `dsymutil`, codesign,
+  and Apple ld header padding to preserve signed DWARF-bearing package
+  semantics. Cargo-zigbuild is not equivalent. Every Linux-capable job uses
+  the canonical lanes; static workflow and repository policy fixtures pass.
+  The broader local test glob additionally requires an uninstalled `vite`
+  binary; this is recorded as a local prerequisite, not masked in CI.
