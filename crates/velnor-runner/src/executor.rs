@@ -4965,7 +4965,7 @@ fn native_restore_prepared_jackin_tools(
         .insert("xtask-hit".into(), xtask_hit.to_string());
     command_state
         .env
-        .insert("CI_TOOLS_PATH".into(), tools_dir.display().to_string());
+        .insert("CI_TOOLS_PATH".into(), to_container_path(state, &tools_dir));
     command_state
         .env
         .insert("CI_TOOLS_HIT".into(), tools_hit.to_string());
@@ -4981,9 +4981,10 @@ fn native_restore_prepared_jackin_tools(
             .push(to_container_path(state, &tools_dir));
         let cargo_fuzz = tools_dir.join("cargo-fuzz");
         if cargo_fuzz.exists() {
-            command_state
-                .env
-                .insert("CI_CARGO_FUZZ".into(), cargo_fuzz.display().to_string());
+            command_state.env.insert(
+                "CI_CARGO_FUZZ".into(),
+                to_container_path(state, &cargo_fuzz),
+            );
         }
     }
     if include_xtask {
@@ -4999,12 +5000,12 @@ fn native_restore_prepared_jackin_tools(
         };
         command_state
             .env
-            .insert("CI_XTASK".into(), xtask.display().to_string());
+            .insert("CI_XTASK".into(), to_container_path(state, &xtask));
         let metadata = xtask_dir.join("workspace-metadata.json");
         if metadata.exists() {
             command_state
                 .env
-                .insert("CI_METADATA".into(), metadata.display().to_string());
+                .insert("CI_METADATA".into(), to_container_path(state, &metadata));
         }
     }
     Ok(native_success_with_state(command_state))
@@ -7636,6 +7637,61 @@ mod tests {
             fs::write(root.join(tool), b"tool").unwrap();
         }
         assert!(prepared_jackin_tools_complete(&root));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prepared_jackin_tool_exports_use_container_paths() {
+        let root = temp_dir();
+        let temp = root.join("temp");
+        let tools = root.join(".ci-prebuilt-tools");
+        let xtask = root.join(".ci-prebuilt-xtask");
+        fs::create_dir_all(&temp).unwrap();
+        fs::create_dir_all(&tools).unwrap();
+        fs::create_dir_all(&xtask).unwrap();
+        for tool in [
+            "sccache",
+            "cargo-nextest",
+            "cargo-deny",
+            "cargo-shear",
+            "cargo-audit",
+            "cargo-dylint",
+            "cargo-fuzz",
+            "cargo-hack",
+            "cargo-hakari",
+            "cargo-llvm-cov",
+            "cargo-mutants",
+            "cargo-zigbuild",
+            "dylint-link",
+            "weaver",
+        ] {
+            fs::write(tools.join(tool), b"tool").unwrap();
+        }
+        fs::write(xtask.join("jackin-xtask"), b"xtask").unwrap();
+        fs::write(xtask.join("workspace-metadata.json"), b"{}").unwrap();
+        let env = [
+            ("JACKIN_WORKSPACE".into(), "/__w".into()),
+            ("JACKIN_INCLUDE_TOOLS".into(), "true".into()),
+            ("JACKIN_INCLUDE_XTASK".into(), "true".into()),
+            ("JACKIN_TOOLS_CACHE_HIT".into(), "true".into()),
+            ("JACKIN_XTASK_CACHE_HIT".into(), "true".into()),
+        ];
+        let state = JobExecutionState::new_with_workspace(&[], &[], &root, &temp);
+        let action_state = JobExecutionState::new(&env);
+        let result = native_restore_prepared_jackin_tools(&action_state, &state).unwrap();
+        assert_eq!(result.state.env["CI_TOOLS_PATH"], "/__w/.ci-prebuilt-tools");
+        assert_eq!(
+            result.state.env["CI_CARGO_FUZZ"],
+            "/__w/.ci-prebuilt-tools/cargo-fuzz"
+        );
+        assert_eq!(
+            result.state.env["CI_XTASK"],
+            "/__w/.ci-prebuilt-xtask/jackin-xtask"
+        );
+        assert_eq!(
+            result.state.env["CI_METADATA"],
+            "/__w/.ci-prebuilt-xtask/workspace-metadata.json"
+        );
         fs::remove_dir_all(root).unwrap();
     }
     use crate::container::{ServiceContainerSpec, Shell};
