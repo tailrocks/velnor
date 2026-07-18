@@ -558,6 +558,25 @@ impl JobContainerSpec {
         vec!["network".into(), "rm".into(), self.network.clone()]
     }
 
+    pub fn disconnect_network_args(&self) -> Vec<String> {
+        vec![
+            "network".into(),
+            "disconnect".into(),
+            "--force".into(),
+            self.network.clone(),
+            self.name.clone(),
+        ]
+    }
+
+    pub fn connect_network_args(&self) -> Vec<String> {
+        vec![
+            "network".into(),
+            "connect".into(),
+            self.network.clone(),
+            self.name.clone(),
+        ]
+    }
+
     fn append_docker_cli_mounts(&self, args: &mut Vec<String>) {
         if !self.mount_docker_socket {
             return;
@@ -740,6 +759,27 @@ impl ServiceContainerSpec {
 
     pub fn remove_args(&self) -> Vec<String> {
         vec!["rm".into(), "--force".into(), self.name.clone()]
+    }
+
+    pub fn disconnect_network_args(&self) -> Vec<String> {
+        vec![
+            "network".into(),
+            "disconnect".into(),
+            "--force".into(),
+            self.network.clone(),
+            self.name.clone(),
+        ]
+    }
+
+    pub fn connect_network_args(&self) -> Vec<String> {
+        vec![
+            "network".into(),
+            "connect".into(),
+            "--alias".into(),
+            self.network_alias.clone(),
+            self.network.clone(),
+            self.name.clone(),
+        ]
     }
 
     pub fn health_status_args(&self) -> Vec<String> {

@@ -2781,6 +2781,19 @@ where
             self.wait_for_service(service)?;
         }
         self.run_docker(&container.start_args())?;
+        // Docker accepts repeated network-shaped create options with behavior
+        // that depends on option placement. Reconcile the runner-owned
+        // topology explicitly after every container exists, before any step
+        // can observe it. This also makes each workflow service key the exact
+        // embedded-DNS alias on the per-job network.
+        if !container.services.is_empty() {
+            self.run_docker(&container.disconnect_network_args())?;
+            self.run_docker(&container.connect_network_args())?;
+            for service in &container.services {
+                self.run_docker(&service.disconnect_network_args())?;
+                self.run_docker(&service.connect_network_args())?;
+            }
+        }
         if container.verify_bind_mounts {
             self.verify_bind_mounts(container)?;
         }
