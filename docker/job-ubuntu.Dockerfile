@@ -14,6 +14,7 @@ RUN apt-get update \
         curl \
         docker-buildx \
         docker.io \
+        file \
         git \
         git-lfs \
         jq \
