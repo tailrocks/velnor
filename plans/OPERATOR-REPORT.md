@@ -287,3 +287,12 @@ same-version local-artifact sentence is superseded and must not be used.
 - Removed a stale sentence that described v0.1.38 as the next candidate. The
   linked v0.1.37 runs remain useful historical evidence; candidate selection is
   now explicitly dynamic through `apt-cache policy`.
+
+## 2026-07-18 — Plan 044 drift resolution
+
+- The prescribed drift check against `48b04ad` reports 1,988 changed lines in
+  `executor.rs`, `runner.rs`, and `storage.rs`, chiefly from the already landed
+  capability, storage, service, adapter, security, and lifecycle plans. The
+  mirror, checkout-copy, and storage-class symbols remain independently
+  identifiable. Per the program's progress-STOP rule, plan 044 proceeds by
+  symbol relocation without reverting the intervening contract work.
