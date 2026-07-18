@@ -2027,7 +2027,11 @@ where
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
         let result = self.native_shell(container, state, &kache_setup_script(), timeout)?;
-        Ok(native_command_result(result, StepCommandState::default()))
+        let mut command_state = StepCommandState::default();
+        command_state.set_env("KACHE_CACHE_DIR".into(), "/var/cache/kache".into());
+        command_state.set_env("KACHE_MAX_SIZE".into(), "20GiB".into());
+        command_state.set_env("RUSTC_WRAPPER".into(), "kache".into());
+        Ok(native_command_result(result, command_state))
     }
 
     fn native_setup_mold(
@@ -8959,6 +8963,34 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             0
         );
 
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_kache_exports_compile_environment_to_later_steps() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "kache".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::Kache,
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results[0].state.env["RUSTC_WRAPPER"], "kache");
+        assert_eq!(results[0].state.env["KACHE_CACHE_DIR"], "/var/cache/kache");
+        assert_eq!(results[0].state.env["KACHE_MAX_SIZE"], "20GiB");
         fs::remove_dir_all(temp).unwrap();
     }
 
