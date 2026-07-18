@@ -3203,6 +3203,13 @@ if [ -n "{install_flag}" ]; then
   # left an empty version dir, mise can treat it as installed and skip the real
   # download. Drop those poisoned entries before installing.
   find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d -empty -exec rm -rf {{}} + 2>/dev/null || true
+  # Releases before 0.1.62 injected CARGO_HOME/RUSTUP_HOME and could persist a
+  # Rust version as a symlink to a container-local Cargo proxy directory. That
+  # target is never a valid durable mise install. Remove only those known-bad
+  # links and their now-dangling version aliases, then let mise reinstall.
+  find "$mise_home/installs" -mindepth 2 -maxdepth 3 -type l \
+    \( -lname "/root/.cargo/bin" -o -lname "/github/home/.cargo/bin" \) -delete 2>/dev/null || true
+  find -L "$mise_home/installs" -mindepth 2 -maxdepth 3 -type l -delete 2>/dev/null || true
   echo "::group::mise install"
   if [ -n "$install_args" ]; then
     mise install $install_args
@@ -7713,6 +7720,9 @@ mod tests {
 
         assert!(script.contains("mise bin-paths"));
         assert!(script.contains("-type d -empty -exec rm -rf"));
+        assert!(script.contains(r#"-lname "/root/.cargo/bin""#));
+        assert!(script.contains(r#"-lname "/github/home/.cargo/bin""#));
+        assert!(script.contains(r#"find -L "$mise_home/installs""#));
         assert!(script.contains(r#"find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d"#));
         assert!(script.contains(r#"find "$mise_home/installs" -mindepth 3 -maxdepth 3"#));
         assert!(script.contains("__VELNOR_MISE_BIN__"));
