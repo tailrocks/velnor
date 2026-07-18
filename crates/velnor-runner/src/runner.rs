@@ -888,6 +888,22 @@ fn slot_retry_delay(attempt: u32, slot_index: usize) -> Duration {
     Duration::from_secs(capped + jitter)
 }
 
+/// Wait for a slot retry without making SIGTERM drain wait behind a long
+/// capacity/JIT backoff. Returns true as soon as drain is requested.
+async fn sleep_slot_retry_or_drain(delay: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + delay;
+    loop {
+        if draining() {
+            return true;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        tokio::time::sleep((deadline - now).min(Duration::from_secs(1))).await;
+    }
+}
+
 /// Minimum free disk space below which a slot parks instead of registering
 /// runners whose jobs are doomed.
 const DISK_MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -999,7 +1015,9 @@ async fn run_daemon_slot(
             eprintln!("{message}");
             crate::sd_notify::status(&message);
             daemon_forensic_log(&config_base, &message);
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            if sleep_slot_retry_or_drain(Duration::from_secs(60)).await {
+                continue;
+            }
             continue;
         }
         let mut slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
@@ -1027,7 +1045,9 @@ async fn run_daemon_slot(
                         "slot-{slot_index} cycle {cycle} local failure attempt {local_failure_streak} (registration kept): {error:#}"
                     ),
                 );
-                tokio::time::sleep(delay).await;
+                if sleep_slot_retry_or_drain(delay).await {
+                    continue;
+                }
                 continue;
             }
             local_failure_streak = 0;
@@ -1041,7 +1061,9 @@ async fn run_daemon_slot(
             );
             reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle).await;
             cycle += 1;
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            if sleep_slot_retry_or_drain(Duration::from_secs(5)).await {
+                continue;
+            }
             continue;
         }
         local_failure_streak = 0;
@@ -1100,7 +1122,9 @@ async fn reconfigure_daemon_slot_forever(
                     "daemon slot-{slot_index} JIT reconfigure attempt {attempt} failed: {error:#}.{diagnosis} Retrying in {}s.",
                     delay.as_secs()
                 );
-                tokio::time::sleep(delay).await;
+                if sleep_slot_retry_or_drain(delay).await {
+                    return;
+                }
             }
         }
     }

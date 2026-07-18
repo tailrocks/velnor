@@ -131,3 +131,23 @@ same-version local-artifact sentence is superseded and must not be used.
   actual mapping. It does not synthesize service host/port environment
   variables. Velnor now matches that surface and preserves legacy broker input
   only as a fallback. Fixture Postgres acceptance remains plan 041's V-A gate.
+
+## 2026-07-18 — v0.1.36 deployment and drain-backoff defect
+
+- Source release run `29626083112` passed for amd64 and arm64. Signed apt
+  publisher run `29626443164` passed; isolated `gpgv` verification reports a
+  good `InRelease` signature from the Velnor APT key, and both architecture
+  indexes advertise `0.1.36`.
+- Sentry upgraded only after `apt-get update` exposed candidate `0.1.36`, then
+  `apt-get install -y velnor-runner`; `dpkg-query` confirms `0.1.36`. No local
+  package or direct binary deployment was used.
+- The default 0.1.35 daemon did not finish SIGTERM drain: forensic logs prove
+  slots 1 and 7 were idle but sleeping in capacity-backpressure retry delays
+  capped at ten minutes. Eight other slots deregistered immediately, no Velnor
+  job container remained, and systemd correctly kept the process in
+  `deactivating`; it was not force-killed.
+- Root cause: slot retry sleeps did not observe the global drain flag. The
+  0.1.37 fix checks drain at most once per second across disk-pressure,
+  local-failure, post-reconfigure, and JIT-reconfigure backoffs. Full runner
+  gates passed (568 nextest tests, fmt, clippy, actionlint). Live drain proof
+  will run after 0.1.37 arrives through the same signed apt chain.
