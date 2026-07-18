@@ -741,6 +741,7 @@ pub struct DockerScriptExecutor<R> {
     /// their output to the live feed (GitHub streams every step live, not
     /// just `run:` steps).
     live_step: Option<LiveStepIdentity>,
+    job_environment_started: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -767,6 +768,7 @@ where
             secret_masks: Vec::new(),
             trust_scope: "trusted".to_string(),
             live_step: None,
+            job_environment_started: false,
         }
     }
 
@@ -807,6 +809,11 @@ where
 
     pub fn with_step_log_sender(mut self, sender: UnboundedSender<StepLog>) -> Self {
         self.step_log_sender = Some(sender);
+        self
+    }
+
+    pub fn with_job_environment_started(mut self, started: bool) -> Self {
+        self.job_environment_started = started;
         self
     }
 
@@ -861,7 +868,10 @@ where
         steps: &[ScriptStep],
         temp_host: &Path,
     ) -> Result<Vec<StepExecutionResult>> {
-        self.start_job_environment(container)?;
+        if !self.job_environment_started {
+            self.start_job_environment(container)?;
+            self.job_environment_started = true;
+        }
 
         let ordered = steps
             .iter()
@@ -974,7 +984,10 @@ where
         environment_url: Option<&Value>,
         temp_host: &Path,
     ) -> Result<JobExecutionSummary> {
-        self.start_job_environment(container)?;
+        if !self.job_environment_started {
+            self.start_job_environment(container)?;
+            self.job_environment_started = true;
+        }
         let mut runtime_context = context_data.to_vec();
         if let Some(services) = self.service_context(container)? {
             runtime_context.retain(|(name, _)| !name.eq_ignore_ascii_case("services"));
@@ -2760,7 +2773,7 @@ where
         Ok(())
     }
 
-    fn start_job_environment(&mut self, container: &JobContainerSpec) -> Result<()> {
+    pub(crate) fn start_job_environment(&mut self, container: &JobContainerSpec) -> Result<()> {
         if let Err(error) = self.start_job_environment_once(container) {
             eprintln!("Docker job environment start failed, removing stale resources: {error:#}");
             self.cleanup_stale(container);
@@ -7647,6 +7660,30 @@ mod tests {
             "rm".into(),
             "net".into()
         ])));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn precreated_environment_skips_lazy_container_start() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default())
+            .with_job_environment_started(true);
+
+        executor
+            .execute_ordered_steps_without_cleanup(&spec, &[], &[], &[], None, None, &temp)
+            .unwrap();
+
+        assert!(
+            !executor
+                .runner()
+                .calls
+                .iter()
+                .any(|(_, args)| args == &["network", "create", "net"]),
+            "lazy startup unexpectedly recreated the network: {:?}",
+            executor.runner().calls
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 
