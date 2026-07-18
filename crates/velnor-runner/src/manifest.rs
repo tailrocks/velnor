@@ -167,6 +167,7 @@ const ARTIFACT_INPUTS: &[InputRule] = &[
     InputRule::Literal("if-no-files-found", &["warn", "error", "ignore"]),
     InputRule::Literal("include-hidden-files", &["true", "false"]),
     InputRule::Literal("overwrite", &["true", "false"]),
+    InputRule::Literal("compression-level", &["0"]),
 ];
 const DOWNLOAD_INPUTS: &[InputRule] = &[
     InputRule::Any("name"),
@@ -1002,6 +1003,24 @@ mod tests {
             serde_json::json!({"version": "2025.1.0"}),
         ));
         assert_eq!(errors[0].field, "with.version");
+    }
+
+    #[test]
+    fn validate_upload_artifact_accepts_only_estate_compression_level() {
+        let approved = job(
+            "actions/upload-artifact",
+            Some("043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+            serde_json::json!({"name": "seed", "path": "target.tar.zst", "compression-level": "0"}),
+        );
+        validate_job_with_context(&approved, &[]).unwrap();
+
+        let errors = violations(&job(
+            "actions/upload-artifact",
+            Some("043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+            serde_json::json!({"compression-level": "6"}),
+        ));
+        assert_eq!(errors[0].field, "with.compression-level");
+        assert_eq!(errors[0].accepted, ["0"]);
     }
 
     #[test]

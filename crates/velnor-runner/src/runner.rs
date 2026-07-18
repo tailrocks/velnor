@@ -5886,6 +5886,7 @@ async fn upload_job_log_artifact(job: &AgentJobRequestMessage, step_logs: &[Step
             &job_id,
             "job-log",
             &[("job-log.txt".to_string(), content)],
+            false,
         )
     })
     .await;
