@@ -182,6 +182,10 @@ pub fn unsupported_action_error(repository: &str) -> Option<&'static str> {
              ephemeral node sidecar container that has no Rust tooling. \
              Use jdx/mise-action with a 'cargo:<crate> = \"latest\"' entry in mise.toml instead.",
         ),
+        "embarkstudios/cargo-deny-action" => Some(
+            "EmbarkStudios/cargo-deny-action is not supported on Velnor: use jdx/mise-action \
+             with a pinned 'cargo:cargo-deny' tool and invoke cargo deny from a run step instead.",
+        ),
         _ => None,
     }
 }
@@ -3036,6 +3040,7 @@ runs:
         assert!(unsupported_action_error("DTOLNAY/RUST-TOOLCHAIN").is_some());
         assert!(unsupported_action_error("baptiste0928/cargo-install").is_some());
         assert!(unsupported_action_error("Baptiste0928/Cargo-Install").is_some());
+        assert!(unsupported_action_error("EmbarkStudios/cargo-deny-action").is_some());
         assert!(unsupported_action_error("jdx/mise-action").is_none());
         assert!(unsupported_action_error("owner/unknown-action").is_none());
         assert!(unsupported_action_error("dtolnay/rust-toolchain")
@@ -3044,6 +3049,9 @@ runs:
         assert!(unsupported_action_error("baptiste0928/cargo-install")
             .unwrap()
             .contains("jdx/mise-action"));
+        assert!(unsupported_action_error("EmbarkStudios/cargo-deny-action")
+            .unwrap()
+            .contains("cargo:cargo-deny"));
     }
 
     fn action_metadata_files(root: &Path) -> Vec<PathBuf> {

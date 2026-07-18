@@ -734,6 +734,9 @@ pub struct DockerScriptExecutor<R> {
     /// Job-secret mask values supplied by the runner. Combined with runtime
     /// ::add-mask:: values before building each docker exec argv.
     secret_masks: Vec<String>,
+    /// Operator-selected trust boundary. Credential-bearing native adapters
+    /// enforce this independently of Docker-socket availability.
+    trust_scope: String,
     /// Identity of the step currently executing — lets native adapters stream
     /// their output to the live feed (GitHub streams every step live, not
     /// just `run:` steps).
@@ -762,6 +765,7 @@ where
             workflow_env: Vec::new(),
             job_timeout_minutes: None,
             secret_masks: Vec::new(),
+            trust_scope: "trusted".to_string(),
             live_step: None,
         }
     }
@@ -773,6 +777,11 @@ where
 
     pub fn with_secret_masks(mut self, masks: Vec<String>) -> Self {
         self.secret_masks = masks;
+        self
+    }
+
+    pub fn with_trust_scope(mut self, trust_scope: impl Into<String>) -> Self {
+        self.trust_scope = trust_scope.into();
         self
     }
 
@@ -2413,6 +2422,14 @@ where
         );
         let username = native_input(action, &action_state, "username");
         let password = native_input(action, &action_state, "password");
+        if !password.is_empty()
+            && !crate::github_adapter::github_trust_scope_allows_host_docker(&self.trust_scope)
+        {
+            bail!(
+                "docker/login-action refuses registry credentials in trust scope '{}'; accepted trust scope: trusted",
+                self.trust_scope
+            );
+        }
         let args = vec![
             "login".to_string(),
             registry,
@@ -8439,6 +8456,34 @@ type=sha,format=long,prefix=,enable=true"
         );
 
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn docker_login_refused_outside_trusted_scope() {
+        let temp = temp_dir();
+        let mut executor =
+            DockerScriptExecutor::new(RecordingRunner::default()).with_trust_scope("public-forks");
+        let error = executor
+            .native_docker_login(
+                &container(&temp),
+                &NativeActionInvocation {
+                    git_ref: String::new(),
+                    adapter: NativeActionAdapter::DockerLogin,
+                    inputs: [
+                        ("username".into(), "docker-user".into()),
+                        ("password".into(), "registry-secret".into()),
+                    ]
+                    .into(),
+                    env: Vec::new(),
+                },
+                &JobExecutionState::default(),
+                DEFAULT_STEP_TIMEOUT,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("public-forks"));
+        assert!(error.to_string().contains("accepted trust scope: trusted"));
+        assert!(executor.runner().calls.is_empty());
     }
 
     #[test]
