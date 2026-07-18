@@ -48,6 +48,7 @@ assets = [
   ["debian/velnor-doctor@.service", "lib/systemd/system/velnor-doctor@.service", "644"],
   ["debian/velnor-doctor@.timer", "lib/systemd/system/velnor-doctor@.timer", "644"],
   ["debian/velnor.env", "etc/velnor/velnor.env", "640"],
+  ["../../docker/job-ubuntu.Dockerfile", "usr/share/velnor/job-ubuntu.Dockerfile", "644"],
   ["../../README.md", "usr/share/doc/velnor-runner/README.md", "644"],
 ]
 

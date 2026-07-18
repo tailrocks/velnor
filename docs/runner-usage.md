@@ -20,6 +20,12 @@ push the source, tag the new version, wait for `release-deb.yml` and
 offers the new version, then run the apt command above. Do not deploy with
 `dpkg -i` or install a local `.deb` path with apt.
 
+The package ships the canonical job-image Dockerfile. During configuration,
+`postinst` compares the image's OCI version label with the Debian package
+version and rebuilds `velnor/job-ubuntu:26.04` before restarting any daemon when
+they differ. An apt upgrade therefore cannot leave native adapters paired with
+a stale tool image; image-build failure fails the package transaction.
+
 - Default instance: `/etc/velnor/velnor.env` (URL, name, labels, slots,
   work dir) + `/etc/velnor/secrets.env` (0600, `GITHUB_TOKEN=...` — never
   shipped or touched by the package; `postinst` migrates a token out of
