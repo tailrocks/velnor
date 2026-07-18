@@ -957,3 +957,16 @@ same-version local-artifact sentence is superseded and must not be used.
   a fresh image seed instead of racing distribution mutation. Format, strict
   clippy, all 629 nextest tests, and actionlint pass; workflows remain
   unchanged.
+- v0.1.78 general run `29656211655`, Debian run `29656211660`, and apt publish
+  `29656255686` were green, including both preinstalled-target architecture
+  builds. Installation was correctly withheld because the signed apt index
+  still advertised 0.1.77. Package inspection found that `cargo deb` created
+  the correct 0.1.78 files, but the staging step selected the first unversioned
+  glob entry from the persistent target directory and relabeled an older
+  0.1.77 package as a v0.1.78 release asset. No mislabeled package was
+  installed.
+- Signed commit `f4ed88b` makes the release fail closed: staging requires
+  exactly one filename for the requested version and verifies the embedded
+  Debian `Version` and target-derived `Architecture` before content/size
+  checks or upload. This removes persistent-target ordering from package
+  identity. Format, strict clippy, all 629 tests, and actionlint pass.
