@@ -2002,6 +2002,23 @@ where
         let working_directory = native_input(action, &action_state, "working_directory");
         let script = setup_mise_script(install, &install_args, &working_directory);
         let mut result = self.native_shell(container, state, &script, timeout)?;
+        let temp_host = state
+            .temp_host
+            .as_deref()
+            .context("mise adapter requires the mounted job temp directory")?;
+        let env_path = temp_host.join("_velnor/mise-env.json");
+        let redacted_path = temp_host.join("_velnor/mise-env-redacted.json");
+        let exported_env = fs::read_to_string(&env_path)
+            .with_context(|| format!("read mise environment from {}", env_path.display()))?;
+        let redacted_env = fs::read_to_string(&redacted_path).with_context(|| {
+            format!(
+                "read mise redacted environment from {}",
+                redacted_path.display()
+            )
+        })?;
+        let (mut env, masks) = parse_mise_environment(&exported_env, &redacted_env)?;
+        let _ = fs::remove_file(&env_path);
+        let _ = fs::remove_file(&redacted_path);
         let mut path = vec![
             // Mise binary dir so subsequent steps can call `mise run ...` directly.
             "/opt/mise/bin".to_string(),
@@ -2039,20 +2056,21 @@ where
                 result.stdout.push('\n');
             }
         }
+        env.extend([
+            ("MISE_DATA_DIR".to_string(), "/opt/mise".to_string()),
+            ("MISE_CACHE_DIR".to_string(), "/opt/mise/cache".to_string()),
+            (
+                "MISE_CONFIG_DIR".to_string(),
+                "/opt/mise/config".to_string(),
+            ),
+            ("MISE_TRUSTED_CONFIG_PATHS".to_string(), "/__w".to_string()),
+        ]);
         Ok(native_command_result(
             result,
             StepCommandState {
-                env: [
-                    ("MISE_DATA_DIR".to_string(), "/opt/mise".to_string()),
-                    ("MISE_CACHE_DIR".to_string(), "/opt/mise/cache".to_string()),
-                    (
-                        "MISE_CONFIG_DIR".to_string(),
-                        "/opt/mise/config".to_string(),
-                    ),
-                    ("MISE_TRUSTED_CONFIG_PATHS".to_string(), "/__w".to_string()),
-                ]
-                .into(),
+                env,
                 path,
+                masks,
                 ..StepCommandState::default()
             },
         ))
@@ -3224,10 +3242,42 @@ fi
   find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d 2>/dev/null || true
   find "$mise_home/installs" -mindepth 3 -maxdepth 3 -type d -name bin 2>/dev/null || true
 }} | awk 'NF && !seen[$0]++ {{ print "__VELNOR_MISE_BIN__" $0 }}'
+# Match mise-action's environment export. Write through the job temp mount so
+# values never enter the streamed action log; native_mise reads and deletes
+# these files, exports every non-PATH string, and registers redacted values as
+# masks before subsequent steps can emit them.
+umask 077
+mkdir -p /__t/_velnor
+mise env --redacted --json > /__t/_velnor/mise-env-redacted.json
+mise env --json > /__t/_velnor/mise-env.json
 echo "mise install completed, cargo: $(command -v cargo 2>/dev/null || echo 'not found')"
 mise --version
 "#,
     )
+}
+
+fn parse_mise_environment(
+    exported_json: &str,
+    redacted_json: &str,
+) -> Result<(BTreeMap<String, String>, Vec<String>)> {
+    let exported: BTreeMap<String, Value> =
+        serde_json::from_str(exported_json).context("parse mise environment JSON")?;
+    let redacted: BTreeMap<String, Value> =
+        serde_json::from_str(redacted_json).context("parse mise redacted environment JSON")?;
+    let env = exported
+        .into_iter()
+        .filter_map(|(key, value)| {
+            (key.to_uppercase() != "PATH")
+                .then(|| value.as_str().map(|value| (key, value.to_string())))
+                .flatten()
+        })
+        .collect();
+    let masks = redacted
+        .into_values()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .filter(|value| !value.is_empty())
+        .collect();
+    Ok((env, masks))
 }
 
 fn sccache_setup_script() -> String {
@@ -7721,6 +7771,22 @@ mod tests {
         assert!(script.contains("cargo-shear"));
         assert!(!script.contains("export CARGO_HOME="));
         assert!(!script.contains("export RUSTUP_HOME="));
+        assert!(script.contains("mise env --redacted --json"));
+        assert!(script.contains("mise env --json"));
+    }
+
+    #[test]
+    fn mise_environment_exports_strings_except_path_and_masks_redacted_values() {
+        let (env, masks) = parse_mise_environment(
+            r#"{"RUSTUP_TOOLCHAIN":"1.97.1","PATH":"ignored","COUNT":2}"#,
+            r#"{"TOKEN":"secret","EMPTY":""}"#,
+        )
+        .unwrap();
+
+        assert_eq!(env.get("RUSTUP_TOOLCHAIN"), Some(&"1.97.1".to_string()));
+        assert!(!env.contains_key("PATH"));
+        assert!(!env.contains_key("COUNT"));
+        assert_eq!(masks, vec!["secret"]);
     }
 
     fn host_temp_script_path(container_path: &str, temp: &Path) -> PathBuf {
@@ -9531,6 +9597,13 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     fn native_tool_adapters_use_job_container_without_node_sidecars() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
+        fs::create_dir_all(temp.join("_velnor")).unwrap();
+        fs::write(
+            temp.join("_velnor/mise-env.json"),
+            r#"{"RUSTUP_TOOLCHAIN":"1.97.1"}"#,
+        )
+        .unwrap();
+        fs::write(temp.join("_velnor/mise-env-redacted.json"), "{}").unwrap();
         let steps = vec![
             ExecutableStep::Native {
                 step_id: "mise".into(),
@@ -9635,6 +9708,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .position(|path| path == "/root/.cargo/bin")
             .unwrap();
         assert!(mise_shims < baked_rustup);
+        assert_eq!(results[0].state.env["RUSTUP_TOOLCHAIN"], "1.97.1");
         assert!(results[3].state.path.contains(&"/root/.cargo/bin".into()));
         assert_eq!(results[4].state.outputs["cache-hit"], "false");
         assert_eq!(results[4].state.env["CACHE_ON_FAILURE"], "true");

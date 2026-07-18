@@ -591,3 +591,12 @@ same-version local-artifact sentence is superseded and must not be used.
   `/root/.rustup`. Only the first path was durable, so every new job container
   reverted to image Rust 1.97.0. The runner now seeds and mounts rustup in the
   same trust/repository-scoped mise class; no workflow semantics changed.
+- Java Velnor run
+  <https://github.com/ChainArgos/java-monorepo/actions/runs/29642010121>
+  proved the persisted 1.97.1 rustup store was healthy but later steps still
+  selected 1.97.0. Inspection of the current official `jdx/mise-action`
+  identified the missing protocol behavior: after installation it exports
+  every non-`PATH` string from `mise env --json` and masks values reported by
+  `mise env --redacted --json`. The native adapter now performs the same
+  operation through mode-0600 files on the mounted job temp directory, then
+  deletes them; environment documents never enter the live or uploaded log.
