@@ -3786,21 +3786,26 @@ fn is_job_cancellation_for(message: &crate::protocol::TaskAgentMessage, job_id: 
 }
 
 fn kill_job_container(container_name: &str) {
-    match Command::new("docker")
-        .args(["kill", container_name])
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            println!("Killed Docker job container {container_name} after GitHub cancellation.");
-        }
-        Ok(output) => {
-            eprintln!(
-                "Failed to kill Docker job container {container_name}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        Err(error) => {
-            eprintln!("Failed to run docker kill for {container_name}: {error:#}");
+    // Docker actions run in a sibling sidecar, so killing only the long-lived
+    // job container leaves `docker run` blocked until the action exits. Stop
+    // the exact job-owned sidecar first, then the job container.
+    for name in [
+        format!("velnor-docker-action-{container_name}"),
+        container_name.to_string(),
+    ] {
+        match Command::new("docker").args(["kill", &name]).output() {
+            Ok(output) if output.status.success() => {
+                println!("Killed Docker container {name} after GitHub cancellation.");
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stderr.contains("No such container") {
+                    eprintln!("Failed to kill Docker container {name}: {stderr}");
+                }
+            }
+            Err(error) => {
+                eprintln!("Failed to run docker kill for {name}: {error:#}");
+            }
         }
     }
 }
