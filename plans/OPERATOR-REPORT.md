@@ -263,3 +263,11 @@ same-version local-artifact sentence is superseded and must not be used.
   or repeated errors, preview payload, and real outputs. Artifact upload now
   propagates the database ID returned by `FinalizeArtifact` instead of a local
   placeholder. A five-endpoint protocol test covers the successful loop.
+
+## 2026-07-18 — Plan 043 drift resolution
+
+- The lifecycle drift check against `48b04ad` reported 1,437 changed lines in
+  `runner.rs` and `executor.rs`, including intervening P0 capacity, service,
+  security, and Pages work. Per the progress-STOP rule, implementation is
+  proceeding from re-located lifecycle symbols while preserving the current
+  never-abandon, renewal, and capability-validation invariants.
