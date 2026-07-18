@@ -2727,6 +2727,42 @@ where
             .ok_or_else(|| anyhow::anyhow!("paths-filter requires a workspace"))?;
         let base = paths_filter_base_ref(state);
         let head = paths_filter_head_ref(state);
+        if let (Some(base), Some(head)) = (base.as_deref(), head.as_deref()) {
+            let missing = [base, head].iter().any(|git_ref| {
+                let args = vec![
+                    "-C".to_string(),
+                    workspace.display().to_string(),
+                    "cat-file".to_string(),
+                    "-e".to_string(),
+                    format!("{git_ref}^{{commit}}"),
+                ];
+                match self.runner.run("git", &args) {
+                    Ok(result) => result.code != 0,
+                    Err(_) => true,
+                }
+            });
+            if missing {
+                let fetch_args = vec![
+                    "-C".to_string(),
+                    workspace.display().to_string(),
+                    "fetch".to_string(),
+                    "--no-tags".to_string(),
+                    "--depth=10".to_string(),
+                    "origin".to_string(),
+                    base.to_string(),
+                    head.to_string(),
+                ];
+                let fetched = self.runner.run("git", &fetch_args)?;
+                if fetched.code != 0 {
+                    bail!(
+                        "git {} failed with code {}: {}",
+                        fetch_args.join(" "),
+                        fetched.code,
+                        fetched.stderr
+                    );
+                }
+            }
+        }
         let mut args = vec![
             "-C".to_string(),
             workspace.display().to_string(),
@@ -2735,7 +2771,7 @@ where
         ];
         args.push(match (base.as_deref(), head.as_deref()) {
             (Some(base), Some(head)) if !base.is_empty() && !head.is_empty() => {
-                format!("{base}..{head}")
+                format!("{base}...{head}")
             }
             (Some(base), _) if !base.is_empty() => format!("{base}..HEAD"),
             _ => "HEAD".to_string(),
@@ -8037,7 +8073,7 @@ mod tests {
         );
         assert!(results[0].stdout.contains("changed: README.md"));
         assert!(executor.runner().calls.iter().any(|(program, args)| {
-            program == "git" && args.contains(&"base-sha..head-sha".into())
+            program == "git" && args.contains(&"base-sha...head-sha".into())
         }));
         assert_eq!(
             executor
