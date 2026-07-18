@@ -85,7 +85,7 @@ V-A). Do not open estate PRs before 041's operator verification.
 | 048 | ChainArgos/blockchain-nodes | 1 | S/M | — | BLOCKED: both lanes identically fail three pre-existing package builds; fixes require out-of-scope Dockerfile/package-source changes (runs `29637999142`, `29638091607`) |
 | 049 | jackin-project/jackin (stacks on PR #810) | 1 | L | 047 (pattern) | TODO |
 | 050 | tailrocks/velnor (dogfood) | 2 | M | 039 (fleet label) | IN PROGRESS |
-| 051 | tailrocks/holla | 2 | S | — | IN PROGRESS |
+| 051 | tailrocks/holla | 2 | S | — | DONE: PR #36 merged; Velnor/GitHub/both green; 57 s no-change budget passed |
 | 052 | tailrocks/ruxel | 2 | S | — | IN PROGRESS |
 | 053 | tailrocks/parallax | 2 | L | 051 (pattern), 042 (attest) | TODO |
 | 054 | tailrocks/termrock | 3 | M | 042 (Pages) | TODO |
