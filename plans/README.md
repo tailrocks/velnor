@@ -71,7 +71,7 @@ every repo (§2.12; `audit-ci` rule 11 enforces it).
 | 043 | Job lifecycle latency (async finalize, pre-create, JIT overlap) | P1 | L | — | V1.9/V1.10/V1.12 | DONE: completion-before-teardown and next-JIT overlap proved live on Sentry |
 | 044 | Git-mirror store + reflink copies | P1 | M | 035 | V1.11/V1.13 | DONE: trust mirror live; checkout spans 407–454 ms; no credential persisted |
 | 045 | Timing observability (job summary reports, doctor SLOs) | P1 | M | 043 soft | V1.14/V1.15/V1.7 | IN PROGRESS |
-| 046 | velnor-tools audit-ci + compare (incl. §2.12 uniform-shape rules) | P1 | M/L | — | V1.16; §2.8/§2.12 | TODO |
+| 046 | velnor-tools audit-ci + compare (incl. §2.12 uniform-shape rules) | P1 | M/L | — | V1.16; §2.8/§2.12 | IN PROGRESS |
 | 059 | Velnor host baseline cleanup (operator-supervised; inventory now, destructive pass ideally post-035/037, always before the first verification campaign) | P0 | M | 035/037 preferred | §0 gate 7; §8 Phase 0.5 | IN PROGRESS: read-only inventory first; destructive pass remains gated by ownership and 035/037 |
 
 ## Execution order & status — estate (one PR per repo)

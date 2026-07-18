@@ -1,3 +1,4 @@
+mod audit_ci;
 mod lane_compare;
 
 use anyhow::{bail, Context, Result};
@@ -62,6 +63,10 @@ enum CommandKind {
     TargetSmoke(TargetSmokeArgs),
     /// Check fixture lane pattern: matrix.config has both lanes, runs-on uses matrix variable, steps are lane-agnostic.
     CheckFixtureLanes(CheckFixtureLanesArgs),
+    /// Audit a repository or estate against the Velnor CI contract.
+    AuditCi(audit_ci::AuditCiArgs),
+    /// Compare GitHub and Velnor lanes (promoted alias of lane-compare).
+    Compare(lane_compare::LaneCompareArgs),
     /// Diff the GitHub-hosted and Velnor lanes of one run via the GitHub API (equal-or-better gate).
     LaneCompare(lane_compare::LaneCompareArgs),
 }
@@ -502,6 +507,8 @@ async fn main() -> Result<()> {
         CommandKind::FixtureSmoke(args) => fixture_smoke(&root, args),
         CommandKind::TargetSmoke(args) => target_smoke(&root, args),
         CommandKind::CheckFixtureLanes(args) => check_fixture_lanes(args).await,
+        CommandKind::AuditCi(args) => audit_ci::audit_ci(args),
+        CommandKind::Compare(args) => lane_compare::lane_compare(&root, args),
         CommandKind::LaneCompare(args) => lane_compare::lane_compare(&root, args),
     }
 }
