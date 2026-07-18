@@ -1,16 +1,20 @@
-# Target Action Registry (source-of-truth)
+# Target Action Registry (upstream research index)
+
+The compiled code authority for accepted repositories, exact refs, inputs, and
+literal values is
+[`crates/velnor-runner/src/manifest.rs`](../../crates/velnor-runner/src/manifest.rs).
+This document links upstream behavior used to review changes to that manifest;
+it is not an execution allowlist.
 
 > **What this is:** the authoritative list of action families Velnor's native
 > adapters replace, with a direct link to each action's **latest** source so we
 > can read the original TypeScript / composite / Docker behavior before
 > implementing or changing an adapter.
 >
-> **One version: latest.** Velnor tracks the **latest** behavior of each action
-> only — it does **not** support historical versions. Velnor routes by action
-> *family* and ignores the pinned `@ref` (contract §66), so the exact tag in any
-> workflow does not matter. Only the **major** is recorded below as a coarse
-> marker. When upstream changes behavior in a way a consumer relies on, update
-> the Velnor adapter to match — that is the maintenance model.
+> **Latest behavior, exact refs.** Velnor implements the latest approved
+> behavior and executes only refs listed in the compiled manifest. Transitional
+> estate/fixture refs remain explicit entries until their migration plan lands;
+> refs are never ignored.
 >
 > **Rule:** *the latest upstream source is the contract.* When you implement or
 > modify an adapter, open the **Source** link, read the real
@@ -37,8 +41,8 @@ gh api repos/<owner>/<repo>/releases/latest --jq '.tag_name'
 ```
 
 The fixture-snippet assertions in `crates/velnor-tools/src/main.rs`
-(`fixture_required_snippets`) track the fixture's *actual* tags; they are
-routing markers, not behavior pins.
+(`fixture_required_snippets`) track the fixture's actual refs. Every accepted
+ref must also exist in the compiled manifest.
 
 ## Core `actions/*`
 

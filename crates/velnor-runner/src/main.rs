@@ -9,6 +9,7 @@ mod container;
 mod executor;
 mod github_adapter;
 mod job_message;
+mod manifest;
 mod plan;
 mod platform;
 mod preflight;
@@ -46,6 +47,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Cache(args) => cache::run(args),
+        Command::Capabilities(args) => manifest::run(args),
         Command::Configure(args) => runner::configure(args).await,
         Command::Daemon(args) => runner::daemon(args).await,
         Command::Preflight(args) => preflight::preflight(args),

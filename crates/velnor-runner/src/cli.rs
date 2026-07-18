@@ -14,6 +14,8 @@ pub struct Cli {
 pub enum Command {
     /// Inspect Velnor's daemon-shared host cache stores.
     Cache(CacheArgs),
+    /// Inspect or validate against the compiled strict capability manifest.
+    Capabilities(CapabilitiesArgs),
     /// Create and store a GitHub JIT runner configuration.
     Configure(ConfigureArgs),
     /// Run one daemon process that manages one or more internal runner slots.
@@ -31,6 +33,20 @@ pub enum Command {
     /// Probe GitHub for this daemon's registered runners and fail loudly when
     /// the fleet is gone (run from a systemd timer for alerting).
     Doctor(DoctorArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CapabilitiesArgs {
+    #[command(subcommand)]
+    pub command: CapabilitiesCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CapabilitiesCommand {
+    /// Validate a sanitized broker job-message JSON dump.
+    Check { job_dump: PathBuf },
+    /// Export the compiled manifest as JSON.
+    Export,
 }
 
 #[derive(Debug, Args)]
@@ -302,6 +318,14 @@ pub struct RunArgs {
     #[arg(long, default_value = "")]
     pub node_action_image: String,
 
+    /// Diagnostic only: permit the Node sidecar when capability validation is also skipped.
+    #[arg(long, env = "VELNOR_DIAGNOSTIC_NODE_SIDECAR")]
+    pub diagnostic_node_sidecar: bool,
+
+    /// Diagnostic only: skip the strict capability preflight.
+    #[arg(long, env = "VELNOR_SKIP_CAPABILITY_VALIDATION")]
+    pub skip_capability_validation: bool,
+
     /// Host work directory for Docker job state. Defaults under the runner config directory.
     #[arg(long)]
     pub work_dir: Option<PathBuf>,
@@ -434,6 +458,14 @@ pub struct DaemonArgs {
     /// Override Docker image used to run JavaScript actions. By default Velnor uses the action's declared Node runtime image.
     #[arg(long, default_value = "")]
     pub node_action_image: String,
+
+    /// Diagnostic only: permit the Node sidecar when capability validation is also skipped.
+    #[arg(long, env = "VELNOR_DIAGNOSTIC_NODE_SIDECAR")]
+    pub diagnostic_node_sidecar: bool,
+
+    /// Diagnostic only: skip the strict capability preflight.
+    #[arg(long, env = "VELNOR_SKIP_CAPABILITY_VALIDATION")]
+    pub skip_capability_validation: bool,
 
     /// Base host work directory for Docker job state. For --slots > 1, each slot uses a slot-N child.
     #[arg(long)]

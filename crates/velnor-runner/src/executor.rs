@@ -7186,6 +7186,7 @@ mod tests {
             step_id: "github-runtime".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::GitHubRuntimeExport,
                 inputs: [("github-token".into(), "ghs_token".into())].into(),
                 env: vec![("ACTIONS_CUSTOM".into(), "${{ env.CUSTOM_RUNTIME }}".into())],
@@ -7250,6 +7251,7 @@ mod tests {
             step_id: "filter".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::PathsFilter,
                 inputs: [(
                     "filters".into(),
@@ -7331,6 +7333,7 @@ mod tests {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -7460,6 +7463,7 @@ mod tests {
                 step_id: "cache".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::Cache,
                     inputs: [
                         ("path".into(), "~/.cache/rust-script".into()),
@@ -7521,6 +7525,7 @@ mod tests {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     (
@@ -7568,6 +7573,7 @@ mod tests {
             step_id: "rust-cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::RustCache,
                 inputs: [("shared-key".into(), "ci-default-dev-workspace-v2".into())].into(),
                 env: Vec::new(),
@@ -7607,6 +7613,7 @@ mod tests {
             step_id: "rust-cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::RustCache,
                 inputs: [("shared-key".into(), "ci-default-dev-workspace-v2".into())].into(),
                 env: Vec::new(),
@@ -7636,6 +7643,7 @@ mod tests {
             step_id: "rust-cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::RustCache,
                 inputs: [
                     ("shared-key".into(), "ci-custom-dir".into()),
@@ -7672,6 +7680,7 @@ mod tests {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "target".into()),
@@ -7715,6 +7724,7 @@ mod tests {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -7735,6 +7745,7 @@ mod tests {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -7776,6 +7787,7 @@ mod tests {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -7805,6 +7817,7 @@ mod tests {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -7859,6 +7872,7 @@ mod tests {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -7888,6 +7902,7 @@ mod tests {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -7936,6 +7951,7 @@ mod tests {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -7957,6 +7973,7 @@ mod tests {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -8005,6 +8022,7 @@ mod tests {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -8054,6 +8072,7 @@ mod tests {
                 step_id: "buildx".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerSetupBuildx,
                     inputs: [
                         ("name".into(), "velnor-builder".into()),
@@ -8071,6 +8090,7 @@ mod tests {
                 step_id: "login".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerLogin,
                     inputs: [
                         ("username".into(), "docker-user".into()),
@@ -8087,6 +8107,7 @@ mod tests {
                 step_id: "meta".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerMetadata,
                     inputs: [
                         ("images".into(), "chainargos/rust-bitcoin-processor".into()),
@@ -8108,6 +8129,7 @@ type=sha,format=long,prefix=,enable=true"
                 step_id: "build-push".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerBuildPush,
                     inputs: [
                         ("context".into(), ".".into()),
@@ -8139,6 +8161,7 @@ type=sha,format=long,prefix=,enable=true"
                 step_id: "bake".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerBake,
                     inputs: [
                         ("files".into(), "backend-rust/docker-bake.hcl".into()),
@@ -8273,6 +8296,7 @@ type=sha,format=long,prefix=,enable=true"
             step_id: "build-push".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::DockerBuildPush,
                 inputs: [
                     ("context".into(), ".".into()),
@@ -8311,6 +8335,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             step_id: "pr-meta".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::DockerMetadata,
                 inputs: [
                     ("images".into(), "${{ inputs.image }}".into()),
@@ -8377,6 +8402,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             )],
         );
         let publish_action = NativeActionInvocation {
+            git_ref: String::new(),
             adapter: NativeActionAdapter::DockerMetadata,
             inputs: [
                 ("images".into(), "${{ inputs.image }}".into()),
@@ -8404,6 +8430,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             &[],
         );
         let action = NativeActionInvocation {
+            git_ref: String::new(),
             adapter: NativeActionAdapter::DockerMetadata,
             inputs: [
                 ("images".into(), "ghcr.io/org/repo/fixture".into()),
@@ -8433,6 +8460,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             &[],
         );
         let action = NativeActionInvocation {
+            git_ref: String::new(),
             adapter: NativeActionAdapter::DockerMetadata,
             inputs: [
                 ("images".into(), "ghcr.io/org/repo/fixture".into()),
@@ -8455,6 +8483,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 step_id: "mise".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::Mise,
                     inputs: [("install".into(), "false".into())].into(),
                     env: Vec::new(),
@@ -8467,6 +8496,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 step_id: "setup-mold".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::SetupMold,
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
@@ -8479,6 +8509,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 step_id: "sccache".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::Sccache,
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
@@ -8491,6 +8522,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 step_id: "setup-just".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::SetupJust,
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
@@ -8503,6 +8535,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 step_id: "rust-cache".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::RustCache,
                     inputs: [
                         ("shared-key".into(), "kestra-rust-build-cache".into()),
@@ -10882,6 +10915,7 @@ fi"#
                 step_id: "upload".into(),
                 display_name: "Upload".into(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
                     inputs: [
                         ("path".into(), "missing-file".into()),
@@ -11484,6 +11518,7 @@ fi"#
                 step_id: "cache".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::Cache,
                     inputs: [
                         ("path".into(), "~/.cache/rust-script".into()),
@@ -11507,6 +11542,7 @@ fi"#
                 step_id: "upload".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
                     inputs: [
                         (
@@ -11531,6 +11567,7 @@ fi"#
                 step_id: "download".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::DownloadArtifact,
                     inputs: [
                         ("pattern".into(), "construct-digest-*".into()),
@@ -11548,6 +11585,7 @@ fi"#
                 step_id: "github-runtime".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::GitHubRuntimeExport,
                     inputs: [("github-token".into(), "ghs_token".into())].into(),
                     env: Vec::new(),
@@ -11668,6 +11706,7 @@ fi"#
             step_id: "upload".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
                 inputs: [
                     ("name".into(), "construct-digest-linux-amd64".into()),
@@ -11685,6 +11724,7 @@ fi"#
             step_id: "download".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::DownloadArtifact,
                 inputs: [
                     ("pattern".into(), "construct-digest-*".into()),
@@ -11749,6 +11789,7 @@ fi"#
                 step_id: format!("upload-{name}"),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
                     inputs: [
                         ("name".into(), name.into()),
@@ -11775,6 +11816,7 @@ fi"#
             step_id: "download".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::DownloadArtifact,
                 inputs: [("path".into(), "/__w/downloaded".into())].into(),
                 env: Vec::new(),
@@ -11825,6 +11867,7 @@ fi"#
             step_id: "upload".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
                 inputs: [
                     ("name".into(), "output".into()),
@@ -11850,6 +11893,7 @@ fi"#
             step_id: "download".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::DownloadArtifact,
                 inputs: [
                     ("name".into(), "output".into()),
@@ -11904,6 +11948,7 @@ fi"#
             step_id: "upload".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
                 inputs: [
                     ("name".into(), "bin".into()),
@@ -11929,6 +11974,7 @@ fi"#
             step_id: "download".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::DownloadArtifact,
                 inputs: [
                     ("name".into(), "bin".into()),
@@ -11979,6 +12025,7 @@ fi"#
             step_id: "upload".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
                 inputs: [
                     ("name".into(), "jackin-x86_64-unknown-linux-gnu".into()),
@@ -12042,6 +12089,7 @@ fi"#
                 step_id: format!("upload-{name}"),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
                     inputs,
                     env: Vec::new(),
@@ -12102,6 +12150,7 @@ fi"#
                 step_id: format!("upload-{}", path.replace('.', "-")),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
                     inputs,
                     env: Vec::new(),
@@ -12160,6 +12209,7 @@ fi"#
             step_id: "upload".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
                 inputs: [
                     ("name".into(), "construct-digest-amd64".into()),
@@ -12201,6 +12251,7 @@ fi"#
             step_id: "upload".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
                 inputs: [
                     ("name".into(), "result-velnor-app".into()),
@@ -12402,6 +12453,7 @@ fi"#
                 step_id: "upload-artifact".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
                     inputs: [
                         ("name".into(), "github-pages".into()),
@@ -12428,6 +12480,7 @@ fi"#
                 step_id: "deploy-pages".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::DeployPages,
                     inputs: [
                         ("token".into(), "${{ github.token }}".into()),
@@ -12675,6 +12728,7 @@ fi"#
             step_id: "buildx".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::DockerSetupBuildx,
                 inputs: [
                     ("name".into(), "jackin-construct".into()),
@@ -12996,6 +13050,7 @@ bitcoin-processor-app.push=true")
             step_id: "renovate".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Renovate,
                 inputs: [
                     ("token".into(), "${{ secrets.RENOVATE_TOKEN }}".into()),
@@ -14566,6 +14621,7 @@ bitcoin-processor-app.push=true")
             step_id: "build".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::DockerBuildPush,
                 inputs: [
                     ("context".into(), ".".into()),
@@ -14644,6 +14700,7 @@ bitcoin-processor-app.push=true")
         let result = executor
             .native_setup_qemu(
                 &NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::SetupQemu,
                     inputs,
                     env: Vec::new(),

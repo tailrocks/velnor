@@ -83,3 +83,21 @@ same-version local-artifact sentence is superseded and must not be used.
   `systemd-analyze security` reports `7.9 EXPOSED` for both the default and
   fixture units (pre-hardening baseline was `9.4 UNSAFE`). Final plan 014/059
   scoring and live smoke remain gated on fixture plan 041.
+
+## 2026-07-18 — Plan 033 manifest rollout boundary
+
+- Decision: keep only the fixture's currently observed floating refs as
+  explicit, annotated transition entries through plan 041; all other action
+  entries use immutable commits resolved from the current estate sweep and
+  upstream repositories. No wildcard ref is accepted.
+- Estate/local-composite sweep also found action families that intentionally
+  remain rejected by manifest version 1, including
+  `actions/attest-build-provenance`, plus legacy setup actions slated for
+  workflow replacement. They were not silently admitted: plan 042 owns the
+  already-approved native attest/composite completion, while estate plans
+  remove superseded setup actions. Dispatch remains gated by fixture plan 041.
+- Seam deviation: validation reads repository/ref/input values directly from
+  the expanded broker job rather than rebuilding repository plans before the
+  worker closure. This is the smaller pure-data boundary and runs immediately
+  after trust validation, before `execute_script_job` can create `_work`,
+  download an action, mutate a cache, or create a container.
