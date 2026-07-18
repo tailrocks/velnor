@@ -38,6 +38,12 @@ GitHub sends Velnor an expanded job message. Before side effects Velnor validate
 job containers, services, options, shells, expressions, every `uses:` repository
 and immutable commit, all provided inputs and values, companion environment,
 trust requirements, mounts, network, stores, setup/main/post behavior and outputs.
+Local composite actions are not deferred until checkout: preflight reads their
+`action.yml`/`action.yaml` from the workflow repository at the exact
+`github.workflow_sha`, recursively resolves nested local and repository `uses:`,
+and validates the complete closure before storage leases, checkout, cache or
+service mutation, action-container setup, or job-container creation. Metadata
+fetching is read-only and uses the job token plus the advertised GitHub API URL.
 
 Capability-affecting inputs must be literal or statically resolvable during
 preflight. A runtime-dependent value is rejected unless the manifest declares a
