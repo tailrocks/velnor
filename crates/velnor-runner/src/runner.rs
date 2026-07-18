@@ -4930,10 +4930,12 @@ fn preflight_local_action_closure(
     }
     let source = workflow_source_context(context_data)
         .context("local action preflight requires exact workflow repository and SHA")?;
-    let token = job
-        .system_connection()
-        .and_then(system_connection_access_token)
-        .context("local action preflight requires the job access token")?;
+    // Local action metadata lives in the workflow repository. The
+    // SystemVssConnection token authenticates Actions service endpoints and
+    // does not carry repository Contents API scope; use the same repository
+    // token preference as checkout.
+    let token = job_repository_access_token(job)
+        .context("local action preflight requires the job repository access token")?;
     let api_url = context_string(context_data, "github.api_url")
         .unwrap_or_else(|| "https://api.github.com".to_string());
     preflight_local_paths(
@@ -4943,6 +4945,17 @@ fn preflight_local_action_closure(
         &token,
         &api_url,
     )
+}
+
+fn job_repository_access_token(job: &AgentJobRequestMessage) -> Option<String> {
+    job.variables
+        .get("system.github.token")
+        .and_then(|variable| variable.value.clone())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            job.system_connection()
+                .and_then(system_connection_access_token)
+        })
 }
 
 fn preflight_local_paths(
@@ -7279,6 +7292,37 @@ mod tests {
         }));
 
         validate_job_trust_policy(&job, "public-forks").unwrap();
+    }
+
+    #[test]
+    fn local_action_preflight_prefers_repository_token() {
+        let job: crate::job_message::AgentJobRequestMessage =
+            serde_json::from_value(serde_json::json!({
+                "messageType": "PipelineAgentJobRequest",
+                "plan": { "planId": "plan" },
+                "timeline": { "id": "timeline" },
+                "jobId": "job",
+                "jobDisplayName": "Local action",
+                "requestId": 1,
+                "variables": {
+                    "system.github.token": { "value": "repository-token", "isSecret": true }
+                },
+                "resources": {
+                    "endpoints": [{
+                        "name": "SystemVssConnection",
+                        "authorization": {
+                            "scheme": "OAuth",
+                            "parameters": { "AccessToken": "actions-service-token" }
+                        }
+                    }]
+                }
+            }))
+            .unwrap();
+
+        assert_eq!(
+            job_repository_access_token(&job).as_deref(),
+            Some("repository-token")
+        );
     }
 
     #[test]
