@@ -278,6 +278,20 @@ pub static ACTIONS: &[ActionCapability] = &[
         &[InputRule::Any("path"), InputRule::Any("name")]
     ),
     capability!(
+        "actions/configure-pages",
+        ConfigurePages,
+        &[allowed(
+            "45bfe0192ca1faeb007ade9deae92b16b8254a0d",
+            "v6.0.0"
+        )],
+        &[
+            InputRule::Any("token"),
+            InputRule::Literal("enablement", &["false"]),
+            InputRule::Forbidden("static_site_generator"),
+            InputRule::Forbidden("generator_config_file")
+        ]
+    ),
+    capability!(
         "actions/deploy-pages",
         DeployPages,
         &[

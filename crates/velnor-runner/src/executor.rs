@@ -1833,6 +1833,7 @@ where
             NativeActionAdapter::UploadArtifact => native_upload_artifact(action, state),
             NativeActionAdapter::DownloadArtifact => native_download_artifact(action, state),
             NativeActionAdapter::UploadPagesArtifact => native_upload_pages_artifact(action, state),
+            NativeActionAdapter::ConfigurePages => native_configure_pages(action, state),
             NativeActionAdapter::DeployPages => Ok(native_deploy_pages(action, state)),
             NativeActionAdapter::Mise => self.native_mise(_container, action, state, timeout),
             NativeActionAdapter::Sccache => self.native_sccache(_container, action, state, timeout),
@@ -4005,6 +4006,97 @@ fn native_upload_pages_artifact(
         },
         ..result
     })
+}
+
+fn native_configure_pages(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let repository = action_state
+        .env
+        .get("GITHUB_REPOSITORY")
+        .filter(|value| !value.trim().is_empty())
+        .context("actions/configure-pages requires GITHUB_REPOSITORY")?;
+    let api_url = action_state
+        .env
+        .get("GITHUB_API_URL")
+        .map(String::as_str)
+        .unwrap_or("https://api.github.com")
+        .trim_end_matches('/');
+    let token = {
+        let input = native_input(action, &action_state, "token");
+        if input.trim().is_empty() {
+            action_state
+                .env
+                .get("GITHUB_TOKEN")
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            input
+        }
+    };
+    if token.trim().is_empty() {
+        bail!("actions/configure-pages requires input 'token' or GITHUB_TOKEN");
+    }
+    let endpoint = format!("{api_url}/repos/{repository}/pages");
+    let response = reqwest::blocking::Client::new()
+        .get(&endpoint)
+        .bearer_auth(&token)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "velnor-runner")
+        .send()
+        .with_context(|| format!("get Pages site for {repository}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().unwrap_or_default();
+        bail!(
+            "get Pages site for {repository} failed with HTTP {status}: {}",
+            body.trim()
+        );
+    }
+    let page: Value = response
+        .json()
+        .with_context(|| format!("decode Pages site for {repository}"))?;
+    let html_url = page
+        .get("html_url")
+        .and_then(Value::as_str)
+        .context("Pages response is missing html_url")?;
+    let outputs = pages_site_outputs(html_url)?;
+    let base_url = outputs["base_url"].clone();
+
+    Ok(StepExecutionResult {
+        exit_code: 0,
+        state: StepCommandState {
+            outputs,
+            env: [("GITHUB_PAGES".to_string(), "true".to_string())].into(),
+            ..StepCommandState::default()
+        },
+        skipped: false,
+        failure_ignored: false,
+        stdout: format!("Configured GitHub Pages at {base_url}\n"),
+        stderr: String::new(),
+    })
+}
+
+fn pages_site_outputs(html_url: &str) -> Result<BTreeMap<String, String>> {
+    let site_url = url::Url::parse(html_url).context("Pages html_url is invalid")?;
+    let base_url = site_url.as_str().trim_end_matches('/').to_string();
+    let base_path = site_url.path().trim_end_matches('/').to_string();
+    Ok([
+        ("base_url".to_string(), base_url),
+        (
+            "origin".to_string(),
+            site_url.origin().ascii_serialization(),
+        ),
+        (
+            "host".to_string(),
+            site_url.host_str().unwrap_or_default().to_string(),
+        ),
+        ("base_path".to_string(), base_path),
+    ]
+    .into())
 }
 
 fn native_deploy_pages(
@@ -8484,6 +8576,23 @@ type=sha,format=long,prefix=,enable=true"
         assert!(error.to_string().contains("public-forks"));
         assert!(error.to_string().contains("accepted trust scope: trusted"));
         assert!(executor.runner().calls.is_empty());
+    }
+
+    #[test]
+    fn configure_pages_outputs_match_upstream_url_surface() {
+        let outputs = pages_site_outputs("https://octocat.github.io/example/").unwrap();
+        assert_eq!(outputs["base_url"], "https://octocat.github.io/example");
+        assert_eq!(outputs["origin"], "https://octocat.github.io");
+        assert_eq!(outputs["host"], "octocat.github.io");
+        assert_eq!(outputs["base_path"], "/example");
+    }
+
+    #[test]
+    fn configure_pages_adapter_is_registered() {
+        assert_eq!(
+            crate::action::native_action_adapter("actions/configure-pages"),
+            Some(NativeActionAdapter::ConfigurePages)
+        );
     }
 
     #[test]
