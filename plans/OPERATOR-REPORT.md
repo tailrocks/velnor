@@ -238,3 +238,28 @@ same-version local-artifact sentence is superseded and must not be used.
   credential names independently secret, applies env-file transport to every
   execution path, and rejects rather than exposes multiline secrets. Regression
   tests prove unmasked runtime credentials never occur in process arguments.
+
+## 2026-07-18 — v0.1.43 apt handoff rate-limit failure
+
+- Source release run `29631069587` passed. Debian run `29631069580` built
+  both architectures and attached the packages to the source release, but its
+  final `velnor-apt` handoff failed after the GitHub API core quota for the
+  service identity reached 5,000/5,000 requests. The API reported reset at
+  `2026-07-18T05:45:04Z`; no package was installed directly or outside apt.
+- Decision: do not bypass the signed repository. The next package release
+  includes the completed Pages protocol work already in flight; retry the
+  normal `velnor-apt` handoff after reset and deploy that superseding version
+  through `apt-get update && apt-get install`.
+
+## 2026-07-18 — Plan 042 Pages protocol completion
+
+- The planned-code drift check showed substantial expected program drift
+  (`action.rs` 39 lines and `executor.rs` 678 lines since `48b04ad`). Symbols
+  and scope boundaries remained identifiable, so the progress-STOP fallback
+  was to re-locate by symbol and continue without reverting intervening work.
+- `actions/deploy-pages@v5` now mirrors the current upstream flow: Results
+  Service V2 artifact lookup by backend identity, OIDC token acquisition,
+  Pages deployment creation, bounded status polling, cancellation on timeout
+  or repeated errors, preview payload, and real outputs. Artifact upload now
+  propagates the database ID returned by `FinalizeArtifact` instead of a local
+  placeholder. A five-endpoint protocol test covers the successful loop.
