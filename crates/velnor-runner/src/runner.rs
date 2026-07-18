@@ -2618,8 +2618,34 @@ async fn handle_job_request(
     }
     if should_execute_job(args) {
         let Some(script_steps) = script_steps else {
+            complete_acquired_job_failure(
+                &run_service_job,
+                &AcquiredJobIdentity::from_job(&job),
+                Some("step_mapping".to_string()),
+            )
+            .await?;
             bail!("cannot execute scripts because step mapping failed");
         };
+        if let Err(error) = validate_job_trust_policy(&job, &args.trust_scope) {
+            complete_acquired_job_failure(
+                &run_service_job,
+                &AcquiredJobIdentity::from_job(&job),
+                Some("trust_policy".to_string()),
+            )
+            .await?;
+            return Err(error);
+        }
+        if !args.skip_capability_validation {
+            if let Err(error) = crate::manifest::validate_job(&job) {
+                complete_acquired_job_failure(
+                    &run_service_job,
+                    &AcquiredJobIdentity::from_job(&job),
+                    Some("capability_validation".to_string()),
+                )
+                .await?;
+                return Err(error);
+            }
+        }
         if let Err(error) = publish_timeline_job_started(&job, runner_name).await {
             eprintln!("Best-effort timeline job start update failed: {error:#}");
         }
@@ -2659,10 +2685,6 @@ async fn handle_job_request(
         let docker_image = args.docker_image.clone();
         let resource_options = job_resource_options(&args.job_cpus, &args.job_memory);
         let node_action_image = args.node_action_image.clone();
-        validate_job_trust_policy(&job, &args.trust_scope)?;
-        if !args.skip_capability_validation {
-            crate::manifest::validate_job(&job)?;
-        }
         let allow_unknown_action_diagnostics =
             args.skip_capability_validation && args.diagnostic_node_sidecar;
         let trust_scope = args.trust_scope.clone();
