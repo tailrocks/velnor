@@ -1,0 +1,407 @@
+﻿2026-07-18T07:40:35.4431075Z Current runner version: '2.335.1'
+2026-07-18T07:40:35.4452353Z ##[group]Runner Image Provisioner
+2026-07-18T07:40:35.4453137Z Hosted Compute Agent
+2026-07-18T07:40:35.4453753Z Version: 20260707.563
+2026-07-18T07:40:35.4454342Z Commit: 02667638d2b423fbc733a8e32a88b44996a3ba6e
+2026-07-18T07:40:35.4455227Z Build Date: 2026-07-07T19:33:50Z
+2026-07-18T07:40:35.4455945Z Worker ID: {4f2e6cc0-932f-4748-8a2b-ba1262f6b046}
+2026-07-18T07:40:35.4456627Z Azure Region: westcentralus
+2026-07-18T07:40:35.4457210Z ##[endgroup]
+2026-07-18T07:40:35.4458865Z ##[group]Operating System
+2026-07-18T07:40:35.4459496Z Ubuntu
+2026-07-18T07:40:35.4460057Z 26.04
+2026-07-18T07:40:35.4460524Z LTS
+2026-07-18T07:40:35.4460977Z ##[endgroup]
+2026-07-18T07:40:35.4461530Z ##[group]Runner Image
+2026-07-18T07:40:35.4462107Z Image: ubuntu-26.04
+2026-07-18T07:40:35.4462653Z Version: 20260714.74.1
+2026-07-18T07:40:35.4463822Z Included Software: https://github.com/actions/runner-images/blob/ubuntu26/20260714.74/images/ubuntu/Ubuntu2604-Readme.md
+2026-07-18T07:40:35.4465662Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu26%2F20260714.74
+2026-07-18T07:40:35.4466584Z ##[endgroup]
+2026-07-18T07:40:35.4467680Z ##[group]GITHUB_TOKEN Permissions
+2026-07-18T07:40:35.4469582Z Actions: read
+2026-07-18T07:40:35.4470264Z Contents: read
+2026-07-18T07:40:35.4470797Z Metadata: read
+2026-07-18T07:40:35.4471331Z ##[endgroup]
+2026-07-18T07:40:35.4473242Z Secret source: Actions
+2026-07-18T07:40:35.4474250Z Prepare workflow directory
+2026-07-18T07:40:35.4955953Z Prepare all required actions
+2026-07-18T07:40:35.5467428Z Complete job name: Postgres service (GitHub)
+2026-07-18T07:40:35.6006142Z ##[group]Checking docker version
+2026-07-18T07:40:35.6019290Z ##[command]/usr/bin/docker version --format '{{.Server.APIVersion}}'
+2026-07-18T07:40:35.6983348Z '1.54'
+2026-07-18T07:40:35.7001066Z Docker daemon API version: '1.54'
+2026-07-18T07:40:35.7001881Z ##[command]/usr/bin/docker version --format '{{.Client.APIVersion}}'
+2026-07-18T07:40:35.7179715Z '1.54'
+2026-07-18T07:40:35.7195413Z Docker client API version: '1.54'
+2026-07-18T07:40:35.7200236Z ##[endgroup]
+2026-07-18T07:40:35.7203618Z ##[group]Clean up resources from previous jobs
+2026-07-18T07:40:35.7209057Z ##[command]/usr/bin/docker ps --all --quiet --no-trunc --filter "label=e10d70"
+2026-07-18T07:40:35.7357117Z ##[command]/usr/bin/docker network prune --force --filter "label=e10d70"
+2026-07-18T07:40:35.7497692Z ##[endgroup]
+2026-07-18T07:40:35.7498346Z ##[group]Create local container network
+2026-07-18T07:40:35.7508583Z ##[command]/usr/bin/docker network create --label e10d70 github_network_fb2f9ddc18d641e89a1c40a4290101cc
+2026-07-18T07:40:35.7932586Z 535700d941b9b9f67cde04bec5a2a4849c62f1bc88817015d0a50aa6783cd78c
+2026-07-18T07:40:35.7955286Z ##[endgroup]
+2026-07-18T07:40:35.7977907Z ##[group]Starting job container
+2026-07-18T07:40:35.7996988Z ##[command]/usr/bin/docker pull ubuntu:26.04
+2026-07-18T07:40:36.4496665Z 26.04: Pulling from library/ubuntu
+2026-07-18T07:40:36.9096365Z a3679419df18: Pulling fs layer
+2026-07-18T07:40:36.9097432Z ed819469700f: Pulling fs layer
+2026-07-18T07:40:37.1155338Z a3679419df18: Download complete
+2026-07-18T07:40:37.2178219Z e16351a257e4: Download complete
+2026-07-18T07:40:37.3166040Z ed819469700f: Download complete
+2026-07-18T07:40:38.3400419Z a3679419df18: Pull complete
+2026-07-18T07:40:38.3425728Z ed819469700f: Pull complete
+2026-07-18T07:40:38.3427240Z Digest: sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb
+2026-07-18T07:40:38.3428294Z Status: Downloaded newer image for ubuntu:26.04
+2026-07-18T07:40:38.3428934Z docker.io/library/ubuntu:26.04
+2026-07-18T07:40:38.3537229Z ##[command]/usr/bin/docker create --name a271e117ae3a402fb3eea75ad7b4b141_ubuntu2604_66c230 --label e10d70 --workdir /__w/velnor-actions-fixture/velnor-actions-fixture --network github_network_fb2f9ddc18d641e89a1c40a4290101cc  -e "HOME=/github/home" -e GITHUB_ACTIONS=true -e CI=true -v "/var/run/docker.sock":"/var/run/docker.sock" -v "/home/runner/work":"/__w" -v "/home/runner/actions-runner/cached/2.335.1/externals":"/__e":ro -v "/home/runner/work/_temp":"/__w/_temp" -v "/home/runner/work/_actions":"/__w/_actions" -v "/opt/hostedtoolcache":"/__t" -v "/home/runner/work/_temp/_github_home":"/github/home" -v "/home/runner/work/_temp/_github_workflow":"/github/workflow" --entrypoint "tail" ubuntu:26.04 "-f" "/dev/null"
+2026-07-18T07:40:38.4922962Z f7ac3eb1f67b504652aadc5f3182fc27f9ac7a0f8da6f0459b33ba16c42e528a
+2026-07-18T07:40:38.4949492Z ##[command]/usr/bin/docker start f7ac3eb1f67b504652aadc5f3182fc27f9ac7a0f8da6f0459b33ba16c42e528a
+2026-07-18T07:40:38.6793435Z f7ac3eb1f67b504652aadc5f3182fc27f9ac7a0f8da6f0459b33ba16c42e528a
+2026-07-18T07:40:38.6813488Z ##[command]/usr/bin/docker ps --all --filter id=f7ac3eb1f67b504652aadc5f3182fc27f9ac7a0f8da6f0459b33ba16c42e528a --filter status=running --no-trunc --format "{{.ID}} {{.Status}}"
+2026-07-18T07:40:38.7021338Z f7ac3eb1f67b504652aadc5f3182fc27f9ac7a0f8da6f0459b33ba16c42e528a Up Less than a second
+2026-07-18T07:40:38.7041742Z ##[command]/usr/bin/docker inspect --format "{{range .Config.Env}}{{println .}}{{end}}" f7ac3eb1f67b504652aadc5f3182fc27f9ac7a0f8da6f0459b33ba16c42e528a
+2026-07-18T07:40:38.7176963Z HOME=/github/home
+2026-07-18T07:40:38.7177483Z GITHUB_ACTIONS=true
+2026-07-18T07:40:38.7177868Z CI=true
+2026-07-18T07:40:38.7178234Z PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+2026-07-18T07:40:38.7198771Z ##[endgroup]
+2026-07-18T07:40:38.7200260Z ##[group]Starting postgres service container
+2026-07-18T07:40:38.7201521Z ##[command]/usr/bin/docker pull postgres:16
+2026-07-18T07:40:39.2672980Z 16: Pulling from library/postgres
+2026-07-18T07:40:39.5118833Z 971d8ffba74c: Pulling fs layer
+2026-07-18T07:40:39.5119831Z 7b78d2f26598: Pulling fs layer
+2026-07-18T07:40:39.5120573Z 7f9e3a85794c: Pulling fs layer
+2026-07-18T07:40:39.5120989Z 062e450697fa: Pulling fs layer
+2026-07-18T07:40:39.5121432Z cb52fa00305a: Pulling fs layer
+2026-07-18T07:40:39.5121800Z c68b4bd1f4db: Pulling fs layer
+2026-07-18T07:40:39.5122168Z 16a6273f39e4: Pulling fs layer
+2026-07-18T07:40:39.5122547Z 98d8c18b5328: Pulling fs layer
+2026-07-18T07:40:39.5124928Z 2f0a4cdcb4a0: Pulling fs layer
+2026-07-18T07:40:39.5125785Z 0991be5ba967: Pulling fs layer
+2026-07-18T07:40:39.5126455Z d05a3039bf71: Pulling fs layer
+2026-07-18T07:40:39.5127189Z ed3f4fc92f94: Pulling fs layer
+2026-07-18T07:40:39.5127780Z 55e69f401030: Pulling fs layer
+2026-07-18T07:40:39.5128367Z 115bb5c8bb8b: Pulling fs layer
+2026-07-18T07:40:39.7357641Z 7b78d2f26598: Download complete
+2026-07-18T07:40:39.7372672Z 55e69f401030: Download complete
+2026-07-18T07:40:39.7395240Z ed3f4fc92f94: Download complete
+2026-07-18T07:40:39.7421287Z 971d8ffba74c: Download complete
+2026-07-18T07:40:39.7431335Z 7f9e3a85794c: Download complete
+2026-07-18T07:40:39.7439817Z 16a6273f39e4: Download complete
+2026-07-18T07:40:39.7442741Z 115bb5c8bb8b: Download complete
+2026-07-18T07:40:39.7457924Z c68b4bd1f4db: Download complete
+2026-07-18T07:40:39.7467060Z 98d8c18b5328: Download complete
+2026-07-18T07:40:39.8380006Z 0991be5ba967: Download complete
+2026-07-18T07:40:39.9364111Z 96a5602e9416: Download complete
+2026-07-18T07:40:39.9364423Z 062e450697fa: Download complete
+2026-07-18T07:40:39.9368196Z d05a3039bf71: Download complete
+2026-07-18T07:40:39.9369879Z 2f0a4cdcb4a0: Download complete
+2026-07-18T07:40:40.0345828Z ee50c91d1372: Download complete
+2026-07-18T07:40:40.3347020Z cb52fa00305a: Download complete
+2026-07-18T07:40:40.7417255Z c68b4bd1f4db: Pull complete
+2026-07-18T07:40:40.7445516Z 062e450697fa: Pull complete
+2026-07-18T07:40:40.8421950Z 16a6273f39e4: Pull complete
+2026-07-18T07:40:40.8456139Z d05a3039bf71: Pull complete
+2026-07-18T07:40:40.9432081Z 2f0a4cdcb4a0: Pull complete
+2026-07-18T07:40:41.0352757Z 7b78d2f26598: Pull complete
+2026-07-18T07:40:41.0388627Z 7f9e3a85794c: Pull complete
+2026-07-18T07:40:41.0425721Z 0991be5ba967: Pull complete
+2026-07-18T07:40:42.6411576Z cb52fa00305a: Pull complete
+2026-07-18T07:40:42.6797633Z 55e69f401030: Pull complete
+2026-07-18T07:40:42.6806875Z ed3f4fc92f94: Pull complete
+2026-07-18T07:40:42.6819192Z 971d8ffba74c: Pull complete
+2026-07-18T07:40:42.6835189Z 115bb5c8bb8b: Pull complete
+2026-07-18T07:40:42.6860370Z 98d8c18b5328: Pull complete
+2026-07-18T07:40:42.6861230Z Digest: sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+2026-07-18T07:40:42.6862542Z Status: Downloaded newer image for postgres:16
+2026-07-18T07:40:42.6870106Z docker.io/library/postgres:16
+2026-07-18T07:40:42.6896596Z ##[command]/usr/bin/docker create --name d18d6a62c2904f7f9f266abf3d007a54_postgres16_1b5775 --label e10d70 --network github_network_fb2f9ddc18d641e89a1c40a4290101cc --network-alias postgres -p 5432:5432 --health-cmd "pg_isready -U postgres" --health-interval 10s --health-timeout 5s --health-retries 5 -e "POSTGRES_PASSWORD=postgres" -e "POSTGRES_USER=postgres" -e "POSTGRES_DB=fixture" -e GITHUB_ACTIONS=true -e CI=true postgres:16
+2026-07-18T07:40:43.6349419Z 9e92ff4ac1856c5d6c82fe7f02cce743afecf7826fbc9d8a5f0640db445110db
+2026-07-18T07:40:43.6370522Z ##[command]/usr/bin/docker start 9e92ff4ac1856c5d6c82fe7f02cce743afecf7826fbc9d8a5f0640db445110db
+2026-07-18T07:40:43.7952298Z 9e92ff4ac1856c5d6c82fe7f02cce743afecf7826fbc9d8a5f0640db445110db
+2026-07-18T07:40:43.7969222Z ##[command]/usr/bin/docker ps --all --filter id=9e92ff4ac1856c5d6c82fe7f02cce743afecf7826fbc9d8a5f0640db445110db --filter status=running --no-trunc --format "{{.ID}} {{.Status}}"
+2026-07-18T07:40:43.8260787Z 9e92ff4ac1856c5d6c82fe7f02cce743afecf7826fbc9d8a5f0640db445110db Up Less than a second (health: starting)
+2026-07-18T07:40:43.8281396Z ##[command]/usr/bin/docker port 9e92ff4ac1856c5d6c82fe7f02cce743afecf7826fbc9d8a5f0640db445110db
+2026-07-18T07:40:43.8439370Z 5432/tcp -> 0.0.0.0:5432
+2026-07-18T07:40:43.8445369Z 5432/tcp -> [::]:5432
+2026-07-18T07:40:43.8486893Z ##[endgroup]
+2026-07-18T07:40:43.8494504Z ##[group]Waiting for all services to be ready
+2026-07-18T07:40:43.8505195Z ##[command]/usr/bin/docker inspect --format="{{if .Config.Healthcheck}}{{print .State.Health.Status}}{{end}}" 9e92ff4ac1856c5d6c82fe7f02cce743afecf7826fbc9d8a5f0640db445110db
+2026-07-18T07:40:43.8648978Z starting
+2026-07-18T07:40:43.8669450Z postgres service is starting, waiting 2 seconds before checking again.
+2026-07-18T07:40:45.8672274Z ##[command]/usr/bin/docker inspect --format="{{if .Config.Healthcheck}}{{print .State.Health.Status}}{{end}}" 9e92ff4ac1856c5d6c82fe7f02cce743afecf7826fbc9d8a5f0640db445110db
+2026-07-18T07:40:45.8807850Z starting
+2026-07-18T07:40:45.8828556Z postgres service is starting, waiting 4 seconds before checking again.
+2026-07-18T07:40:50.2088831Z ##[command]/usr/bin/docker inspect --format="{{if .Config.Healthcheck}}{{print .State.Health.Status}}{{end}}" 9e92ff4ac1856c5d6c82fe7f02cce743afecf7826fbc9d8a5f0640db445110db
+2026-07-18T07:40:50.2223364Z starting
+2026-07-18T07:40:50.2246533Z postgres service is starting, waiting 7 seconds before checking again.
+2026-07-18T07:40:57.3916859Z ##[command]/usr/bin/docker inspect --format="{{if .Config.Healthcheck}}{{print .State.Health.Status}}{{end}}" 9e92ff4ac1856c5d6c82fe7f02cce743afecf7826fbc9d8a5f0640db445110db
+2026-07-18T07:40:57.4049826Z healthy
+2026-07-18T07:40:57.4071463Z postgres service is healthy.
+2026-07-18T07:40:57.4072179Z ##[endgroup]
+2026-07-18T07:40:57.4269725Z ##[group]Run apt-get update && apt-get install -y --no-install-recommends postgresql-client
+2026-07-18T07:40:57.4270406Z [36;1mapt-get update && apt-get install -y --no-install-recommends postgresql-client[0m
+2026-07-18T07:40:57.4274251Z shell: bash --noprofile --norc -e -o pipefail {0}
+2026-07-18T07:40:57.4275147Z ##[endgroup]
+2026-07-18T07:40:57.9111934Z Get:1 http://security.ubuntu.com/ubuntu resolute-security InRelease [137 kB]
+2026-07-18T07:40:57.9198222Z Get:2 http://archive.ubuntu.com/ubuntu resolute InRelease [136 kB]
+2026-07-18T07:40:58.5606668Z Get:3 http://archive.ubuntu.com/ubuntu resolute-updates InRelease [137 kB]
+2026-07-18T07:40:58.5634783Z Get:4 http://security.ubuntu.com/ubuntu resolute-security/restricted amd64 Packages [303 kB]
+2026-07-18T07:40:58.8073131Z Get:5 http://archive.ubuntu.com/ubuntu resolute-backports InRelease [136 kB]
+2026-07-18T07:40:58.9565658Z Get:6 http://security.ubuntu.com/ubuntu resolute-security/main amd64 Packages [361 kB]
+2026-07-18T07:40:59.0338056Z Get:7 http://archive.ubuntu.com/ubuntu resolute/main amd64 Packages [1874 kB]
+2026-07-18T07:40:59.0658485Z Get:8 http://security.ubuntu.com/ubuntu resolute-security/universe amd64 Packages [170 kB]
+2026-07-18T07:40:59.5482238Z Get:9 http://archive.ubuntu.com/ubuntu resolute/restricted amd64 Packages [189 kB]
+2026-07-18T07:40:59.5659856Z Get:10 http://archive.ubuntu.com/ubuntu resolute/multiverse amd64 Packages [352 kB]
+2026-07-18T07:40:59.5986396Z Get:11 http://archive.ubuntu.com/ubuntu resolute/universe amd64 Packages [20.1 MB]
+2026-07-18T07:41:00.0540117Z Get:12 http://archive.ubuntu.com/ubuntu resolute-updates/restricted amd64 Packages [316 kB]
+2026-07-18T07:41:00.0569528Z Get:13 http://archive.ubuntu.com/ubuntu resolute-updates/universe amd64 Packages [261 kB]
+2026-07-18T07:41:00.0571498Z Get:14 http://archive.ubuntu.com/ubuntu resolute-updates/multiverse amd64 Packages [3584 B]
+2026-07-18T07:41:00.0573113Z Get:15 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 Packages [442 kB]
+2026-07-18T07:41:00.6478970Z Fetched 24.9 MB in 3s (7952 kB/s)
+2026-07-18T07:41:01.1747184Z Reading package lists...
+2026-07-18T07:41:01.7103680Z Reading package lists...
+2026-07-18T07:41:01.8296250Z Building dependency tree...
+2026-07-18T07:41:01.8296694Z Reading state information...
+2026-07-18T07:41:01.8841132Z Solving dependencies...
+2026-07-18T07:41:01.9588522Z The following additional packages will be installed:
+2026-07-18T07:41:01.9589443Z   libgdbm-compat4t64 libgdbm6t64 libgssapi-krb5-2 libk5crypto3 libkeyutils1
+2026-07-18T07:41:01.9590408Z   libkrb5-3 libkrb5support0 libldap-common libldap2 libperl5.40 libpq5
+2026-07-18T07:41:01.9591662Z   libreadline8t64 libsasl2-2 libsasl2-modules-db netbase perl
+2026-07-18T07:41:01.9592520Z   perl-modules-5.40 postgresql-client-18 postgresql-client-common
+2026-07-18T07:41:01.9593197Z   readline-common
+2026-07-18T07:41:01.9605306Z Suggested packages:
+2026-07-18T07:41:01.9605939Z   gdbm-l10n krb5-doc krb5-user libpq-oauth perl-doc libterm-readline-gnu-perl
+2026-07-18T07:41:01.9606984Z   | libterm-readline-perl-perl make libtap-harness-archive-perl postgresql-18
+2026-07-18T07:41:01.9607672Z   postgresql-doc-18 readline-doc
+2026-07-18T07:41:01.9608077Z Recommended packages:
+2026-07-18T07:41:01.9608459Z   krb5-locales ca-certificates libsasl2-modules
+2026-07-18T07:41:01.9939095Z The following NEW packages will be installed:
+2026-07-18T07:41:01.9939819Z   libgdbm-compat4t64 libgdbm6t64 libgssapi-krb5-2 libk5crypto3 libkeyutils1
+2026-07-18T07:41:01.9940618Z   libkrb5-3 libkrb5support0 libldap-common libldap2 libperl5.40 libpq5
+2026-07-18T07:41:01.9945637Z   libreadline8t64 libsasl2-2 libsasl2-modules-db netbase perl
+2026-07-18T07:41:01.9946491Z   perl-modules-5.40 postgresql-client postgresql-client-18
+2026-07-18T07:41:01.9947255Z   postgresql-client-common readline-common
+2026-07-18T07:41:02.2598701Z 0 upgraded, 21 newly installed, 0 to remove and 1 not upgraded.
+2026-07-18T07:41:02.2599334Z Need to get 11.2 MB of archives.
+2026-07-18T07:41:02.2600014Z After this operation, 60.5 MB of additional disk space will be used.
+2026-07-18T07:41:02.2600642Z Get:1 http://archive.ubuntu.com/ubuntu resolute/main amd64 libkrb5support0 amd64 1.22.1-2ubuntu4 [33.3 kB]
+2026-07-18T07:41:02.5513601Z Get:2 http://archive.ubuntu.com/ubuntu resolute/main amd64 libk5crypto3 amd64 1.22.1-2ubuntu4 [82.0 kB]
+2026-07-18T07:41:02.7542448Z Get:3 http://archive.ubuntu.com/ubuntu resolute/main amd64 libkeyutils1 amd64 1.6.3-6ubuntu3 [10.6 kB]
+2026-07-18T07:41:02.7785605Z Get:4 http://archive.ubuntu.com/ubuntu resolute/main amd64 libkrb5-3 amd64 1.22.1-2ubuntu4 [361 kB]
+2026-07-18T07:41:03.0315201Z Get:5 http://archive.ubuntu.com/ubuntu resolute/main amd64 libgssapi-krb5-2 amd64 1.22.1-2ubuntu4 [147 kB]
+2026-07-18T07:41:03.0778385Z Get:6 http://archive.ubuntu.com/ubuntu resolute/main amd64 readline-common all 8.3-4 [61.5 kB]
+2026-07-18T07:41:03.0966677Z Get:7 http://archive.ubuntu.com/ubuntu resolute/main amd64 libreadline8t64 amd64 8.3-4 [164 kB]
+2026-07-18T07:41:03.1363434Z Get:8 http://archive.ubuntu.com/ubuntu resolute/main amd64 netbase all 6.5build1 [13.0 kB]
+2026-07-18T07:41:03.1397497Z Get:9 http://archive.ubuntu.com/ubuntu resolute/main amd64 libgdbm6t64 amd64 1.26-1build1 [36.5 kB]
+2026-07-18T07:41:03.1469029Z Get:10 http://archive.ubuntu.com/ubuntu resolute/main amd64 libgdbm-compat4t64 amd64 1.26-1build1 [6796 B]
+2026-07-18T07:41:03.1487825Z Get:11 http://archive.ubuntu.com/ubuntu resolute/main amd64 libldap-common all 2.6.10+dfsg-1ubuntu5 [36.0 kB]
+2026-07-18T07:41:03.1556261Z Get:12 http://archive.ubuntu.com/ubuntu resolute/main amd64 libsasl2-modules-db amd64 2.1.28+dfsg1-9ubuntu3 [21.1 kB]
+2026-07-18T07:41:03.1597570Z Get:13 http://archive.ubuntu.com/ubuntu resolute/main amd64 libsasl2-2 amd64 2.1.28+dfsg1-9ubuntu3 [54.0 kB]
+2026-07-18T07:41:03.1689368Z Get:14 http://archive.ubuntu.com/ubuntu resolute/main amd64 libldap2 amd64 2.6.10+dfsg-1ubuntu5 [204 kB]
+2026-07-18T07:41:03.2790820Z Get:15 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 perl-modules-5.40 all 5.40.1-7ubuntu0.1 [3212 kB]
+2026-07-18T07:41:03.5199013Z Get:16 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libperl5.40 amd64 5.40.1-7ubuntu0.1 [4885 kB]
+2026-07-18T07:41:03.6644647Z Get:17 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 libpq5 amd64 18.4-0ubuntu0.26.04.1 [159 kB]
+2026-07-18T07:41:03.6664820Z Get:18 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 perl amd64 5.40.1-7ubuntu0.1 [262 kB]
+2026-07-18T07:41:03.6715345Z Get:19 http://archive.ubuntu.com/ubuntu resolute/main amd64 postgresql-client-common all 290ubuntu1 [49.4 kB]
+2026-07-18T07:41:03.6725255Z Get:20 http://archive.ubuntu.com/ubuntu resolute-updates/main amd64 postgresql-client-18 amd64 18.4-0ubuntu0.26.04.1 [1399 kB]
+2026-07-18T07:41:03.6956433Z Get:21 http://archive.ubuntu.com/ubuntu resolute/main amd64 postgresql-client all 18+290ubuntu1 [15.2 kB]
+2026-07-18T07:41:03.8033731Z debconf: unable to initialize frontend: Dialog
+2026-07-18T07:41:03.8034234Z debconf: (TERM is not set, so the dialog frontend is not usable.)
+2026-07-18T07:41:03.8035093Z debconf: falling back to frontend: Readline
+2026-07-18T07:41:03.8035836Z debconf: unable to initialize frontend: Readline
+2026-07-18T07:41:03.8048874Z debconf: (Can't locate Term/ReadLine.pm in @INC (you may need to install the Term::ReadLine module) (@INC entries checked: /etc/perl /usr/local/lib/x86_64-linux-gnu/perl/5.40.1 /usr/local/share/perl/5.40.1 /usr/lib/x86_64-linux-gnu/perl5/5.40 /usr/share/perl5 /usr/lib/x86_64-linux-gnu/perl-base /usr/lib/x86_64-linux-gnu/perl/5.40 /usr/share/perl/5.40 /usr/local/lib/site_perl) at /usr/share/perl5/Debconf/FrontEnd/Readline.pm line 8, <STDIN> line 21.)
+2026-07-18T07:41:03.8050419Z debconf: falling back to frontend: Teletype
+2026-07-18T07:41:03.8107697Z debconf: unable to initialize frontend: Teletype
+2026-07-18T07:41:03.8108373Z debconf: (This frontend requires a controlling tty.)
+2026-07-18T07:41:03.8108723Z debconf: falling back to frontend: Noninteractive
+2026-07-18T07:41:04.3959519Z Fetched 11.2 MB in 2s (6629 kB/s)
+2026-07-18T07:41:04.4096077Z Selecting previously unselected package libkrb5support0:amd64.
+2026-07-18T07:41:04.4101247Z (Reading database ... 
+2026-07-18T07:41:04.4102349Z (Reading database ... 5%
+2026-07-18T07:41:04.4103243Z (Reading database ... 10%
+2026-07-18T07:41:04.4103671Z (Reading database ... 15%
+2026-07-18T07:41:04.4103950Z (Reading database ... 20%
+2026-07-18T07:41:04.4104151Z (Reading database ... 25%
+2026-07-18T07:41:04.4104440Z (Reading database ... 30%
+2026-07-18T07:41:04.4104988Z (Reading database ... 35%
+2026-07-18T07:41:04.4105363Z (Reading database ... 40%
+2026-07-18T07:41:04.4105754Z (Reading database ... 45%
+2026-07-18T07:41:04.4106150Z (Reading database ... 50%
+2026-07-18T07:41:04.4106523Z (Reading database ... 55%
+2026-07-18T07:41:04.4106885Z (Reading database ... 60%
+2026-07-18T07:41:04.4107260Z (Reading database ... 65%
+2026-07-18T07:41:04.4125707Z (Reading database ... 70%
+2026-07-18T07:41:04.4129704Z (Reading database ... 75%
+2026-07-18T07:41:04.4132966Z (Reading database ... 80%
+2026-07-18T07:41:04.4135860Z (Reading database ... 85%
+2026-07-18T07:41:04.4138210Z (Reading database ... 90%
+2026-07-18T07:41:04.4150441Z (Reading database ... 95%
+2026-07-18T07:41:04.4150822Z (Reading database ... 100%
+2026-07-18T07:41:04.4151330Z (Reading database ... 7724 files and directories currently installed.)
+2026-07-18T07:41:04.4154123Z Preparing to unpack .../00-libkrb5support0_1.22.1-2ubuntu4_amd64.deb ...
+2026-07-18T07:41:04.4174384Z Unpacking libkrb5support0:amd64 (1.22.1-2ubuntu4) ...
+2026-07-18T07:41:04.4308124Z Selecting previously unselected package libk5crypto3:amd64.
+2026-07-18T07:41:04.4314798Z Preparing to unpack .../01-libk5crypto3_1.22.1-2ubuntu4_amd64.deb ...
+2026-07-18T07:41:04.4323503Z Unpacking libk5crypto3:amd64 (1.22.1-2ubuntu4) ...
+2026-07-18T07:41:04.4453545Z Selecting previously unselected package libkeyutils1:amd64.
+2026-07-18T07:41:04.4460652Z Preparing to unpack .../02-libkeyutils1_1.6.3-6ubuntu3_amd64.deb ...
+2026-07-18T07:41:04.4471104Z Unpacking libkeyutils1:amd64 (1.6.3-6ubuntu3) ...
+2026-07-18T07:41:04.4589475Z Selecting previously unselected package libkrb5-3:amd64.
+2026-07-18T07:41:04.4596884Z Preparing to unpack .../03-libkrb5-3_1.22.1-2ubuntu4_amd64.deb ...
+2026-07-18T07:41:04.4606332Z Unpacking libkrb5-3:amd64 (1.22.1-2ubuntu4) ...
+2026-07-18T07:41:04.4780442Z Selecting previously unselected package libgssapi-krb5-2:amd64.
+2026-07-18T07:41:04.4787080Z Preparing to unpack .../04-libgssapi-krb5-2_1.22.1-2ubuntu4_amd64.deb ...
+2026-07-18T07:41:04.4795991Z Unpacking libgssapi-krb5-2:amd64 (1.22.1-2ubuntu4) ...
+2026-07-18T07:41:04.4932811Z Selecting previously unselected package readline-common.
+2026-07-18T07:41:04.4939477Z Preparing to unpack .../05-readline-common_8.3-4_all.deb ...
+2026-07-18T07:41:04.4949842Z Unpacking readline-common (8.3-4) ...
+2026-07-18T07:41:04.5085318Z Selecting previously unselected package libreadline8t64:amd64.
+2026-07-18T07:41:04.5092852Z Preparing to unpack .../06-libreadline8t64_8.3-4_amd64.deb ...
+2026-07-18T07:41:04.5134190Z Adding 'diversion of /lib/x86_64-linux-gnu/libhistory.so.8 to /lib/x86_64-linux-gnu/libhistory.so.8.usr-is-merged by libreadline8t64'
+2026-07-18T07:41:04.5167100Z Adding 'diversion of /lib/x86_64-linux-gnu/libhistory.so.8.2 to /lib/x86_64-linux-gnu/libhistory.so.8.2.usr-is-merged by libreadline8t64'
+2026-07-18T07:41:04.5199386Z Adding 'diversion of /lib/x86_64-linux-gnu/libreadline.so.8 to /lib/x86_64-linux-gnu/libreadline.so.8.usr-is-merged by libreadline8t64'
+2026-07-18T07:41:04.5231705Z Adding 'diversion of /lib/x86_64-linux-gnu/libreadline.so.8.2 to /lib/x86_64-linux-gnu/libreadline.so.8.2.usr-is-merged by libreadline8t64'
+2026-07-18T07:41:04.5248445Z Unpacking libreadline8t64:amd64 (8.3-4) ...
+2026-07-18T07:41:04.5398788Z Selecting previously unselected package netbase.
+2026-07-18T07:41:04.5406738Z Preparing to unpack .../07-netbase_6.5build1_all.deb ...
+2026-07-18T07:41:04.5416392Z Unpacking netbase (6.5build1) ...
+2026-07-18T07:41:04.5540039Z Selecting previously unselected package libgdbm6t64:amd64.
+2026-07-18T07:41:04.5546999Z Preparing to unpack .../08-libgdbm6t64_1.26-1build1_amd64.deb ...
+2026-07-18T07:41:04.5556222Z Unpacking libgdbm6t64:amd64 (1.26-1build1) ...
+2026-07-18T07:41:04.5677472Z Selecting previously unselected package libgdbm-compat4t64:amd64.
+2026-07-18T07:41:04.5684535Z Preparing to unpack .../09-libgdbm-compat4t64_1.26-1build1_amd64.deb ...
+2026-07-18T07:41:04.5694954Z Unpacking libgdbm-compat4t64:amd64 (1.26-1build1) ...
+2026-07-18T07:41:04.5810068Z Selecting previously unselected package libldap-common.
+2026-07-18T07:41:04.5817020Z Preparing to unpack .../10-libldap-common_2.6.10+dfsg-1ubuntu5_all.deb ...
+2026-07-18T07:41:04.5825713Z Unpacking libldap-common (2.6.10+dfsg-1ubuntu5) ...
+2026-07-18T07:41:04.5945131Z Selecting previously unselected package libsasl2-modules-db:amd64.
+2026-07-18T07:41:04.5945960Z Preparing to unpack .../11-libsasl2-modules-db_2.1.28+dfsg1-9ubuntu3_amd64.deb ...
+2026-07-18T07:41:04.5953777Z Unpacking libsasl2-modules-db:amd64 (2.1.28+dfsg1-9ubuntu3) ...
+2026-07-18T07:41:04.6079061Z Selecting previously unselected package libsasl2-2:amd64.
+2026-07-18T07:41:04.6086132Z Preparing to unpack .../12-libsasl2-2_2.1.28+dfsg1-9ubuntu3_amd64.deb ...
+2026-07-18T07:41:04.6095718Z Unpacking libsasl2-2:amd64 (2.1.28+dfsg1-9ubuntu3) ...
+2026-07-18T07:41:04.6233996Z Selecting previously unselected package libldap2:amd64.
+2026-07-18T07:41:04.6241101Z Preparing to unpack .../13-libldap2_2.6.10+dfsg-1ubuntu5_amd64.deb ...
+2026-07-18T07:41:04.6251893Z Unpacking libldap2:amd64 (2.6.10+dfsg-1ubuntu5) ...
+2026-07-18T07:41:04.6392849Z Selecting previously unselected package perl-modules-5.40.
+2026-07-18T07:41:04.6400246Z Preparing to unpack .../14-perl-modules-5.40_5.40.1-7ubuntu0.1_all.deb ...
+2026-07-18T07:41:04.6409091Z Unpacking perl-modules-5.40 (5.40.1-7ubuntu0.1) ...
+2026-07-18T07:41:04.8475848Z Selecting previously unselected package libperl5.40:amd64.
+2026-07-18T07:41:04.8492182Z Preparing to unpack .../15-libperl5.40_5.40.1-7ubuntu0.1_amd64.deb ...
+2026-07-18T07:41:04.8502722Z Unpacking libperl5.40:amd64 (5.40.1-7ubuntu0.1) ...
+2026-07-18T07:41:04.9850937Z Selecting previously unselected package libpq5:amd64.
+2026-07-18T07:41:04.9863594Z Preparing to unpack .../16-libpq5_18.4-0ubuntu0.26.04.1_amd64.deb ...
+2026-07-18T07:41:04.9871427Z Unpacking libpq5:amd64 (18.4-0ubuntu0.26.04.1) ...
+2026-07-18T07:41:04.9997428Z Selecting previously unselected package perl.
+2026-07-18T07:41:05.0007077Z Preparing to unpack .../17-perl_5.40.1-7ubuntu0.1_amd64.deb ...
+2026-07-18T07:41:05.0013760Z Unpacking perl (5.40.1-7ubuntu0.1) ...
+2026-07-18T07:41:05.0200365Z Selecting previously unselected package postgresql-client-common.
+2026-07-18T07:41:05.0208513Z Preparing to unpack .../18-postgresql-client-common_290ubuntu1_all.deb ...
+2026-07-18T07:41:05.0269088Z Unpacking postgresql-client-common (290ubuntu1) ...
+2026-07-18T07:41:05.0410041Z Selecting previously unselected package postgresql-client-18.
+2026-07-18T07:41:05.0418840Z Preparing to unpack .../19-postgresql-client-18_18.4-0ubuntu0.26.04.1_amd64.deb ...
+2026-07-18T07:41:05.0430925Z Unpacking postgresql-client-18 (18.4-0ubuntu0.26.04.1) ...
+2026-07-18T07:41:05.0958177Z Selecting previously unselected package postgresql-client.
+2026-07-18T07:41:05.0968698Z Preparing to unpack .../20-postgresql-client_18+290ubuntu1_all.deb ...
+2026-07-18T07:41:05.0977079Z Unpacking postgresql-client (18+290ubuntu1) ...
+2026-07-18T07:41:05.1138803Z Setting up libkeyutils1:amd64 (1.6.3-6ubuntu3) ...
+2026-07-18T07:41:05.1159643Z Setting up libgdbm6t64:amd64 (1.26-1build1) ...
+2026-07-18T07:41:05.1178230Z Setting up libgdbm-compat4t64:amd64 (1.26-1build1) ...
+2026-07-18T07:41:05.1196974Z Setting up libldap-common (2.6.10+dfsg-1ubuntu5) ...
+2026-07-18T07:41:05.1227952Z Setting up libkrb5support0:amd64 (1.22.1-2ubuntu4) ...
+2026-07-18T07:41:05.1248477Z Setting up libsasl2-modules-db:amd64 (2.1.28+dfsg1-9ubuntu3) ...
+2026-07-18T07:41:05.1267595Z Setting up libk5crypto3:amd64 (1.22.1-2ubuntu4) ...
+2026-07-18T07:41:05.1286004Z Setting up libsasl2-2:amd64 (2.1.28+dfsg1-9ubuntu3) ...
+2026-07-18T07:41:05.1305073Z Setting up perl-modules-5.40 (5.40.1-7ubuntu0.1) ...
+2026-07-18T07:41:05.1324463Z Setting up netbase (6.5build1) ...
+2026-07-18T07:41:05.1378284Z Setting up libkrb5-3:amd64 (1.22.1-2ubuntu4) ...
+2026-07-18T07:41:05.1397668Z Setting up readline-common (8.3-4) ...
+2026-07-18T07:41:05.1434312Z Setting up libldap2:amd64 (2.6.10+dfsg-1ubuntu5) ...
+2026-07-18T07:41:05.1453309Z Setting up libperl5.40:amd64 (5.40.1-7ubuntu0.1) ...
+2026-07-18T07:41:05.1472537Z Setting up perl (5.40.1-7ubuntu0.1) ...
+2026-07-18T07:41:05.1520019Z Setting up libgssapi-krb5-2:amd64 (1.22.1-2ubuntu4) ...
+2026-07-18T07:41:05.1553137Z Setting up libreadline8t64:amd64 (8.3-4) ...
+2026-07-18T07:41:05.1571719Z Setting up postgresql-client-common (290ubuntu1) ...
+2026-07-18T07:41:05.1647737Z Setting up libpq5:amd64 (18.4-0ubuntu0.26.04.1) ...
+2026-07-18T07:41:05.1667813Z Setting up postgresql-client-18 (18.4-0ubuntu0.26.04.1) ...
+2026-07-18T07:41:05.4436509Z update-alternatives: using /usr/share/postgresql/18/man/man1/psql.1.gz to provide /usr/share/man/man1/psql.1.gz (psql.1.gz) in auto mode
+2026-07-18T07:41:05.4756514Z Setting up postgresql-client (18+290ubuntu1) ...
+2026-07-18T07:41:05.4778064Z Processing triggers for libc-bin (2.43-2ubuntu2) ...
+2026-07-18T07:41:05.5198962Z ##[group]Run test "$(psql -h postgres -U postgres -d fixture -Atc 'SELECT 41 + 1')" = 42
+2026-07-18T07:41:05.5199559Z [36;1mtest "$(psql -h postgres -U postgres -d fixture -Atc 'SELECT 41 + 1')" = 42[0m
+2026-07-18T07:41:05.5200123Z shell: bash --noprofile --norc -e -o pipefail {0}
+2026-07-18T07:41:05.5200406Z env:
+2026-07-18T07:41:05.5200589Z   PGPASSWORD: postgres
+2026-07-18T07:41:05.5200799Z ##[endgroup]
+2026-07-18T07:41:05.6159474Z Stop and remove container: a271e117ae3a402fb3eea75ad7b4b141_ubuntu2604_66c230
+2026-07-18T07:41:05.6163711Z ##[command]/usr/bin/docker rm --force f7ac3eb1f67b504652aadc5f3182fc27f9ac7a0f8da6f0459b33ba16c42e528a
+2026-07-18T07:41:05.8387865Z f7ac3eb1f67b504652aadc5f3182fc27f9ac7a0f8da6f0459b33ba16c42e528a
+2026-07-18T07:41:05.8413775Z Print service container logs: d18d6a62c2904f7f9f266abf3d007a54_postgres16_1b5775
+2026-07-18T07:41:05.8418617Z ##[command]/usr/bin/docker logs --details 9e92ff4ac1856c5d6c82fe7f02cce743afecf7826fbc9d8a5f0640db445110db
+2026-07-18T07:41:05.8553143Z  The files belonging to this database system will be owned by user "postgres".
+2026-07-18T07:41:05.8558366Z  initdb: warning: enabling "trust" authentication for local connections
+2026-07-18T07:41:05.8559071Z  initdb: hint: You can change this by editing pg_hba.conf or using the option -A, or --auth-local and --auth-host, the next time you run initdb.
+2026-07-18T07:41:05.8560021Z  2026-07-18 07:40:44.663 UTC [1] LOG:  starting PostgreSQL 16.14 (Debian 16.14-1.pgdg13+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-07-18T07:41:05.8560702Z  2026-07-18 07:40:44.663 UTC [1] LOG:  listening on IPv4 address "0.0.0.0", port 5432
+2026-07-18T07:41:05.8561155Z  2026-07-18 07:40:44.663 UTC [1] LOG:  listening on IPv6 address "::", port 5432
+2026-07-18T07:41:05.8561645Z  2026-07-18 07:40:44.664 UTC [1] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-07-18T07:41:05.8562167Z  2026-07-18 07:40:44.667 UTC [63] LOG:  database system was shut down at 2026-07-18 07:40:44 UTC
+2026-07-18T07:41:05.8562630Z  2026-07-18 07:40:44.671 UTC [1] LOG:  database system is ready to accept connections
+2026-07-18T07:41:05.8562997Z  This user must also own the server process.
+2026-07-18T07:41:05.8563233Z  
+2026-07-18T07:41:05.8563475Z  The database cluster will be initialized with locale "en_US.utf8".
+2026-07-18T07:41:05.8563872Z  The default database encoding has accordingly been set to "UTF8".
+2026-07-18T07:41:05.8564247Z  The default text search configuration will be set to "english".
+2026-07-18T07:41:05.8564749Z  
+2026-07-18T07:41:05.8564972Z  Data page checksums are disabled.
+2026-07-18T07:41:05.8565189Z  
+2026-07-18T07:41:05.8565443Z  fixing permissions on existing directory /var/lib/postgresql/data ... ok
+2026-07-18T07:41:05.8565793Z  creating subdirectories ... ok
+2026-07-18T07:41:05.8566092Z  selecting dynamic shared memory implementation ... posix
+2026-07-18T07:41:05.8566398Z  selecting default max_connections ... 100
+2026-07-18T07:41:05.8566655Z  selecting default shared_buffers ... 128MB
+2026-07-18T07:41:05.8566908Z  selecting default time zone ... Etc/UTC
+2026-07-18T07:41:05.8567152Z  creating configuration files ... ok
+2026-07-18T07:41:05.8567386Z  running bootstrap script ... ok
+2026-07-18T07:41:05.8567643Z  performing post-bootstrap initialization ... ok
+2026-07-18T07:41:05.8567912Z  syncing data to disk ... ok
+2026-07-18T07:41:05.8568110Z  
+2026-07-18T07:41:05.8568248Z  
+2026-07-18T07:41:05.8568446Z  Success. You can now start the database server using:
+2026-07-18T07:41:05.8568710Z  
+2026-07-18T07:41:05.8568911Z      pg_ctl -D /var/lib/postgresql/data -l logfile start
+2026-07-18T07:41:05.8569395Z  
+2026-07-18T07:41:05.8569973Z  waiting for server to start....2026-07-18 07:40:44.365 UTC [47] LOG:  starting PostgreSQL 16.14 (Debian 16.14-1.pgdg13+1) on x86_64-pc-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit
+2026-07-18T07:41:05.8570778Z  2026-07-18 07:40:44.365 UTC [47] LOG:  listening on Unix socket "/var/run/postgresql/.s.PGSQL.5432"
+2026-07-18T07:41:05.8571743Z  2026-07-18 07:40:44.368 UTC [50] LOG:  database system was shut down at 2026-07-18 07:40:44 UTC
+2026-07-18T07:41:05.8572343Z  2026-07-18 07:40:44.371 UTC [47] LOG:  database system is ready to accept connections
+2026-07-18T07:41:05.8572834Z   done
+2026-07-18T07:41:05.8572994Z  server started
+2026-07-18T07:41:05.8573167Z  CREATE DATABASE
+2026-07-18T07:41:05.8573339Z  
+2026-07-18T07:41:05.8573481Z  
+2026-07-18T07:41:05.8573963Z  /usr/local/bin/docker-entrypoint.sh: ignoring /docker-entrypoint-initdb.d/*
+2026-07-18T07:41:05.8574334Z  
+2026-07-18T07:41:05.8574764Z  2026-07-18 07:40:44.543 UTC [47] LOG:  received fast shutdown request
+2026-07-18T07:41:05.8575258Z  waiting for server to shut down....2026-07-18 07:40:44.544 UTC [47] LOG:  aborting any active transactions
+2026-07-18T07:41:05.8575882Z  2026-07-18 07:40:44.546 UTC [47] LOG:  background worker "logical replication launcher" (PID 53) exited with exit code 1
+2026-07-18T07:41:05.8576368Z  2026-07-18 07:40:44.546 UTC [48] LOG:  shutting down
+2026-07-18T07:41:05.8576715Z  2026-07-18 07:40:44.547 UTC [48] LOG:  checkpoint starting: shutdown immediate
+2026-07-18T07:41:05.8577714Z  2026-07-18 07:40:44.561 UTC [48] LOG:  checkpoint complete: wrote 926 buffers (5.7%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.011 s, sync=0.003 s, total=0.015 s; sync files=301, longest=0.001 s, average=0.001 s; distance=4273 kB, estimate=4273 kB; lsn=0/191F0E8, redo lsn=0/191F0E8
+2026-07-18T07:41:05.8578706Z  2026-07-18 07:40:44.567 UTC [47] LOG:  database system is shut down
+2026-07-18T07:41:05.8579004Z   done
+2026-07-18T07:41:05.8579161Z  server stopped
+2026-07-18T07:41:05.8579327Z  
+2026-07-18T07:41:05.8579525Z  PostgreSQL init process complete; ready for start up.
+2026-07-18T07:41:05.8579786Z  
+2026-07-18T07:41:05.8583215Z Stop and remove container: d18d6a62c2904f7f9f266abf3d007a54_postgres16_1b5775
+2026-07-18T07:41:05.8584077Z ##[command]/usr/bin/docker rm --force 9e92ff4ac1856c5d6c82fe7f02cce743afecf7826fbc9d8a5f0640db445110db
+2026-07-18T07:41:05.9789412Z 9e92ff4ac1856c5d6c82fe7f02cce743afecf7826fbc9d8a5f0640db445110db
+2026-07-18T07:41:05.9814274Z Remove container network: github_network_fb2f9ddc18d641e89a1c40a4290101cc
+2026-07-18T07:41:05.9819532Z ##[command]/usr/bin/docker network rm github_network_fb2f9ddc18d641e89a1c40a4290101cc
+2026-07-18T07:41:06.0426680Z github_network_fb2f9ddc18d641e89a1c40a4290101cc
+2026-07-18T07:41:06.0500943Z Cleaning up orphan processes

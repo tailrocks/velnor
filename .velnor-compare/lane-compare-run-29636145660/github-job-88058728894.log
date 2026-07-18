@@ -1,0 +1,278 @@
+﻿2026-07-18T07:40:35.2599792Z Current runner version: '2.335.1'
+2026-07-18T07:40:35.2615890Z ##[group]Runner Image Provisioner
+2026-07-18T07:40:35.2616506Z Hosted Compute Agent
+2026-07-18T07:40:35.2616847Z Version: 20260707.563
+2026-07-18T07:40:35.2617234Z Commit: 02667638d2b423fbc733a8e32a88b44996a3ba6e
+2026-07-18T07:40:35.2617656Z Build Date: 2026-07-07T19:33:50Z
+2026-07-18T07:40:35.2618043Z Worker ID: {75e96474-ccfc-44d4-80ea-ee43d4e7bf30}
+2026-07-18T07:40:35.2618516Z Azure Region: westus3
+2026-07-18T07:40:35.2618853Z ##[endgroup]
+2026-07-18T07:40:35.2619725Z ##[group]Operating System
+2026-07-18T07:40:35.2620120Z Ubuntu
+2026-07-18T07:40:35.2620421Z 26.04
+2026-07-18T07:40:35.2620772Z LTS
+2026-07-18T07:40:35.2621082Z ##[endgroup]
+2026-07-18T07:40:35.2621401Z ##[group]Runner Image
+2026-07-18T07:40:35.2621771Z Image: ubuntu-26.04
+2026-07-18T07:40:35.2622336Z Version: 20260714.74.1
+2026-07-18T07:40:35.2623115Z Included Software: https://github.com/actions/runner-images/blob/ubuntu26/20260714.74/images/ubuntu/Ubuntu2604-Readme.md
+2026-07-18T07:40:35.2623936Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu26%2F20260714.74
+2026-07-18T07:40:35.2624510Z ##[endgroup]
+2026-07-18T07:40:35.2625196Z ##[group]GITHUB_TOKEN Permissions
+2026-07-18T07:40:35.2626592Z Actions: read
+2026-07-18T07:40:35.2626930Z Contents: read
+2026-07-18T07:40:35.2627241Z Metadata: read
+2026-07-18T07:40:35.2627604Z ##[endgroup]
+2026-07-18T07:40:35.2628878Z Secret source: Actions
+2026-07-18T07:40:35.2629325Z Prepare workflow directory
+2026-07-18T07:40:35.2863088Z Prepare all required actions
+2026-07-18T07:40:35.2886803Z Getting action download info
+2026-07-18T07:40:35.5489922Z Download action repository 'actions/checkout@v6' (SHA:df4cb1c069e1874edd31b4311f1884172cec0e10)
+2026-07-18T07:40:35.6080134Z Download action repository 'jdx/mise-action@v4' (SHA:dad1bfd3df957f44999b559dd69dc1671cb4e9ea)
+2026-07-18T07:40:36.4404154Z Complete job name: Cache off (GitHub)
+2026-07-18T07:40:36.4925785Z ##[group]Run actions/checkout@v6
+2026-07-18T07:40:36.4926631Z with:
+2026-07-18T07:40:36.4927325Z   repository: tailrocks/velnor-actions-fixture
+2026-07-18T07:40:36.4933228Z   token: ***
+2026-07-18T07:40:36.4933834Z   ssh-strict: true
+2026-07-18T07:40:36.4934459Z   ssh-user: git
+2026-07-18T07:40:36.4935094Z   persist-credentials: true
+2026-07-18T07:40:36.4935786Z   clean: true
+2026-07-18T07:40:36.4936419Z   sparse-checkout-cone-mode: true
+2026-07-18T07:40:36.4937150Z   fetch-depth: 1
+2026-07-18T07:40:36.4937767Z   fetch-tags: false
+2026-07-18T07:40:36.4938404Z   show-progress: true
+2026-07-18T07:40:36.4939045Z   lfs: false
+2026-07-18T07:40:36.4939651Z   submodules: false
+2026-07-18T07:40:36.4940294Z   set-safe-directory: true
+2026-07-18T07:40:36.4941105Z ##[endgroup]
+2026-07-18T07:40:36.5605185Z Syncing repository: tailrocks/velnor-actions-fixture
+2026-07-18T07:40:36.5607957Z ##[group]Getting Git version info
+2026-07-18T07:40:36.5610012Z Working directory is '/home/runner/work/velnor-actions-fixture/velnor-actions-fixture'
+2026-07-18T07:40:36.5612396Z [command]/usr/bin/git version
+2026-07-18T07:40:36.5613452Z git version 2.53.0
+2026-07-18T07:40:36.5616601Z ##[endgroup]
+2026-07-18T07:40:36.5622442Z Temporarily overriding HOME='/home/runner/work/_temp/d7dfc29b-220c-4179-a914-04dd25e9005d' before making global git config changes
+2026-07-18T07:40:36.5625077Z Adding repository directory to the temporary git global config as a safe directory
+2026-07-18T07:40:36.5627599Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:40:36.5634914Z Deleting the contents of '/home/runner/work/velnor-actions-fixture/velnor-actions-fixture'
+2026-07-18T07:40:36.5637903Z ##[group]Determining repository object format
+2026-07-18T07:40:36.5639977Z ##[endgroup]
+2026-07-18T07:40:36.5641795Z ##[group]Initializing the repository
+2026-07-18T07:40:36.5644008Z [command]/usr/bin/git init /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:40:36.5719978Z hint: Using 'master' as the name for the initial branch. This default branch name
+2026-07-18T07:40:36.5722414Z hint: will change to "main" in Git 3.0. To configure the initial branch name
+2026-07-18T07:40:36.5725047Z hint: to use in all of your new repositories, which will suppress this warning,
+2026-07-18T07:40:36.5726657Z hint: call:
+2026-07-18T07:40:36.5727673Z hint:
+2026-07-18T07:40:36.5728823Z hint: 	git config --global init.defaultBranch <name>
+2026-07-18T07:40:36.5730449Z hint:
+2026-07-18T07:40:36.5731798Z hint: Names commonly chosen instead of 'master' are 'main', 'trunk' and
+2026-07-18T07:40:36.5734202Z hint: 'development'. The just-created branch can be renamed via this command:
+2026-07-18T07:40:36.5735967Z hint:
+2026-07-18T07:40:36.5736984Z hint: 	git branch -m <name>
+2026-07-18T07:40:36.5738140Z hint:
+2026-07-18T07:40:36.5739591Z hint: Disable this message with "git config set advice.defaultBranchName false"
+2026-07-18T07:40:36.5742326Z Initialized empty Git repository in /home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git/
+2026-07-18T07:40:36.5746722Z [command]/usr/bin/git remote add origin https://github.com/tailrocks/velnor-actions-fixture
+2026-07-18T07:40:36.5789140Z ##[endgroup]
+2026-07-18T07:40:36.5790448Z ##[group]Disabling automatic garbage collection
+2026-07-18T07:40:36.5792555Z [command]/usr/bin/git config --local gc.auto 0
+2026-07-18T07:40:36.5819690Z ##[endgroup]
+2026-07-18T07:40:36.5821056Z ##[group]Setting up auth
+2026-07-18T07:40:36.5822296Z Removing SSH command configuration
+2026-07-18T07:40:36.5824741Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-07-18T07:40:36.5852458Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-07-18T07:40:36.6120924Z Removing HTTP extra header
+2026-07-18T07:40:36.6126927Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-07-18T07:40:36.6154812Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-07-18T07:40:36.6363008Z Removing includeIf entries pointing to credentials config files
+2026-07-18T07:40:36.6366397Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-07-18T07:40:36.6392741Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-07-18T07:40:36.6596900Z [command]/usr/bin/git config --file /home/runner/work/_temp/git-credentials-108171bd-c3a4-40e5-882e-dea4e49d282d.config http.https://github.com/.extraheader AUTHORIZATION: basic ***
+2026-07-18T07:40:36.6625793Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git.path /home/runner/work/_temp/git-credentials-108171bd-c3a4-40e5-882e-dea4e49d282d.config
+2026-07-18T07:40:36.6649880Z [command]/usr/bin/git config --local includeIf.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-108171bd-c3a4-40e5-882e-dea4e49d282d.config
+2026-07-18T07:40:36.6674564Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-108171bd-c3a4-40e5-882e-dea4e49d282d.config
+2026-07-18T07:40:36.6700021Z [command]/usr/bin/git config --local includeIf.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-108171bd-c3a4-40e5-882e-dea4e49d282d.config
+2026-07-18T07:40:36.6722410Z ##[endgroup]
+2026-07-18T07:40:36.6723449Z ##[group]Fetching the repository
+2026-07-18T07:40:36.6728147Z [command]/usr/bin/git -c protocol.version=2 fetch --no-tags --prune --no-recurse-submodules --depth=1 origin +1ef5d108eab61e103e09efd08e1afcd3078048ae:refs/remotes/origin/main
+2026-07-18T07:40:37.1260056Z From https://github.com/tailrocks/velnor-actions-fixture
+2026-07-18T07:40:37.1260650Z  * [new ref]         1ef5d108eab61e103e09efd08e1afcd3078048ae -> origin/main
+2026-07-18T07:40:37.1287717Z [command]/usr/bin/git branch --list --remote origin/main
+2026-07-18T07:40:37.1309563Z   origin/main
+2026-07-18T07:40:37.1315581Z [command]/usr/bin/git rev-parse refs/remotes/origin/main
+2026-07-18T07:40:37.1335337Z 1ef5d108eab61e103e09efd08e1afcd3078048ae
+2026-07-18T07:40:37.1338658Z ##[endgroup]
+2026-07-18T07:40:37.1338990Z ##[group]Determining the checkout info
+2026-07-18T07:40:37.1339651Z ##[endgroup]
+2026-07-18T07:40:37.1342187Z [command]/usr/bin/git sparse-checkout disable
+2026-07-18T07:40:37.1370732Z [command]/usr/bin/git config --local --unset-all extensions.worktreeConfig
+2026-07-18T07:40:37.1392568Z ##[group]Checking out the ref
+2026-07-18T07:40:37.1394829Z [command]/usr/bin/git checkout --progress --force -B main refs/remotes/origin/main
+2026-07-18T07:40:37.1440638Z Switched to a new branch 'main'
+2026-07-18T07:40:37.1442151Z branch 'main' set up to track 'origin/main'.
+2026-07-18T07:40:37.1446696Z ##[endgroup]
+2026-07-18T07:40:37.1474711Z [command]/usr/bin/git log -1 --format=%H
+2026-07-18T07:40:37.1494311Z 1ef5d108eab61e103e09efd08e1afcd3078048ae
+2026-07-18T07:40:37.1667715Z ##[group]Run jdx/mise-action@v4
+2026-07-18T07:40:37.1667923Z with:
+2026-07-18T07:40:37.1668068Z   install: true
+2026-07-18T07:40:37.1668218Z   bootstrap: false
+2026-07-18T07:40:37.1668366Z   cache: true
+2026-07-18T07:40:37.1668506Z   cache_save: true
+2026-07-18T07:40:37.1668658Z   cache_key_prefix: mise-v1
+2026-07-18T07:40:37.1668825Z   experimental: false
+2026-07-18T07:40:37.1668973Z   log_level: info
+2026-07-18T07:40:37.1669118Z   reshim: false
+2026-07-18T07:40:37.1669268Z   add_shims_to_path: true
+2026-07-18T07:40:37.1670568Z   github_token: ***
+2026-07-18T07:40:37.1670723Z   fetch_from_github: true
+2026-07-18T07:40:37.1670882Z   env: true
+2026-07-18T07:40:37.1671019Z   wings_enabled: false
+2026-07-18T07:40:37.1671175Z ##[endgroup]
+2026-07-18T07:40:37.2432855Z ##[group]Restoring mise cache
+2026-07-18T07:40:37.2463492Z [command]/usr/bin/ldd --version
+2026-07-18T07:40:37.2512436Z ldd (Ubuntu GLIBC 2.43-2ubuntu2) 2.43
+2026-07-18T07:40:37.2532540Z Copyright (C) 2024 Free Software Foundation, Inc.
+2026-07-18T07:40:37.2533411Z This is free software; see the source for copying conditions.  There is NO
+2026-07-18T07:40:37.2534023Z warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+2026-07-18T07:40:37.2534474Z Written by Roland McGrath and Ulrich Drepper.
+2026-07-18T07:40:37.5089284Z mise cache not found for mise-v1-linux-x64-ubuntu26-3f09e7651569c6e9f5932bf3b371578afcca89e11d6d3f7e9e0323072f13665b
+2026-07-18T07:40:37.5091576Z ##[group]Setup mise
+2026-07-18T07:40:37.5102706Z [command]/usr/local/bin/zstd --version
+2026-07-18T07:40:37.5127376Z *** Zstandard CLI (64-bit) v1.5.7, by Yann Collet ***
+2026-07-18T07:40:37.5140279Z Using curl to download mise
+2026-07-18T07:40:37.6219130Z [command]/usr/bin/ldd --version
+2026-07-18T07:40:37.6245038Z ldd (Ubuntu GLIBC 2.43-2ubuntu2) 2.43
+2026-07-18T07:40:37.6245446Z Copyright (C) 2024 Free Software Foundation, Inc.
+2026-07-18T07:40:37.6245867Z This is free software; see the source for copying conditions.  There is NO
+2026-07-18T07:40:37.6246314Z warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+2026-07-18T07:40:37.6246597Z Written by Roland McGrath and Ulrich Drepper.
+2026-07-18T07:40:37.6258789Z [command]/usr/bin/curl -fsSL https://github.com/jdx/mise/releases/download/v2026.7.7/mise-v2026.7.7-linux-x64.tar.zst --output /tmp/mise-action-CuRkvU/mise-v2026.7.7-linux-x64.tar.zst
+2026-07-18T07:40:38.5033847Z Verified mise-v2026.7.7-linux-x64.tar.zst against signed checksums
+2026-07-18T07:40:38.5044944Z [command]/usr/bin/tar --zstd -xf /tmp/mise-action-CuRkvU/mise-v2026.7.7-linux-x64.tar.zst -C /tmp/mise-action-CuRkvU
+2026-07-18T07:40:38.6063324Z [command]/usr/bin/mv /tmp/mise-action-CuRkvU/mise/bin/mise /home/runner/.local/share/mise/bin/mise
+2026-07-18T07:40:38.6461940Z ##[group]Setting env vars
+2026-07-18T07:40:38.6519413Z Setting MISE_LOG_LEVEL=info
+2026-07-18T07:40:38.6521654Z Setting MISE_GITHUB_TOKEN=***
+2026-07-18T07:40:38.6522911Z Setting MISE_TRUSTED_CONFIG_PATHS=/home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:40:38.6523292Z Setting MISE_YES=1
+2026-07-18T07:40:38.6523484Z Adding /home/runner/.local/share/mise/shims to PATH
+2026-07-18T07:40:38.6523946Z ##[group]Running mise --version
+2026-07-18T07:40:38.6524275Z [command]/home/runner/.local/share/mise/bin/mise --version
+2026-07-18T07:40:38.6543727Z 2026.7.7 linux-x64 (2026-07-15)
+2026-07-18T07:40:38.6598038Z ##[endgroup]
+2026-07-18T07:40:38.6708430Z ##[group]Running mise install
+2026-07-18T07:40:38.6715484Z [command]/home/runner/.local/share/mise/bin/mise install
+2026-07-18T07:40:39.2837255Z [2mmise[0m [34mrust[0m@1.97.1     [1/3] install
+2026-07-18T07:40:39.2837742Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [1/3] install
+2026-07-18T07:40:39.2838249Z [2mmise[0m [34mjust[0m@1.52.0     [1/3] install
+2026-07-18T07:40:39.3009740Z info: syncing channel updates for 1.97.1-x86_64-unknown-linux-gnu
+2026-07-18T07:40:39.4334712Z info: latest update on 2026-07-16 for version 1.97.1 (8bab26f4f 2026-07-14)
+2026-07-18T07:40:39.4335337Z info: downloading 3 components
+2026-07-18T07:40:40.5340814Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [1/3] download cargo-binstall-x86_64-unknown-linux-musl.tgz
+2026-07-18T07:40:40.6813283Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [2/3] verify GitHub artifact attestations
+2026-07-18T07:40:40.9334626Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [2/3] ✓ GitHub artifact attestations verified
+2026-07-18T07:40:40.9335671Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [2/3] checksum cargo-binstall-x86_64-unknown-linux-musl.tgz
+2026-07-18T07:40:40.9377463Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [3/3] extract cargo-binstall-x86_64-unknown-linux-musl.tgz
+2026-07-18T07:40:40.9882154Z [2mmise[0m [34mcargo-binstall[0m@1.21.0 [38;5;10m✓[0m installed
+2026-07-18T07:40:41.5939769Z [2mmise[0m [34mjust[0m@1.52.0     [1/3] download just-1.52.0-x86_64-unknown-linux-musl.tar.gz
+2026-07-18T07:40:41.6771344Z [2mmise[0m [34mjust[0m@1.52.0     [2/3] checksum just-1.52.0-x86_64-unknown-linux-musl.tar.gz
+2026-07-18T07:40:41.6793454Z [2mmise[0m [34mjust[0m@1.52.0     [3/3] extract just-1.52.0-x86_64-unknown-linux-musl.tar.gz
+2026-07-18T07:40:41.6949028Z [2mmise[0m [34mjust[0m@1.52.0   [38;5;10m✓[0m installed
+2026-07-18T07:40:45.6718824Z [2mmise[0m [34mrust[0m@1.97.1     [1/3]   1.97.1-x86_64-unknown-linux-gnu installed - rustc 1.97.1 (8bab26f4f 2026-07-14)
+2026-07-18T07:40:45.6935621Z [2mmise[0m [34mrust[0m@1.97.1     [1/3] rustc -V
+2026-07-18T07:40:45.7050066Z [2mmise[0m [34mrust[0m@1.97.1     [1/3] rustc 1.97.1 (8bab26f4f 2026-07-14)
+2026-07-18T07:40:45.7052405Z [2mmise[0m [34mrust[0m@1.97.1   [38;5;10m✓[0m installed
+2026-07-18T07:40:45.7072556Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3] install
+2026-07-18T07:40:45.7166367Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3]  INFO resolve: Resolving package: 'cargo-nextest@=0.9.137'
+2026-07-18T07:40:49.4396653Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3]  WARN The package cargo-nextest v0.9.137 (x86_64-unknown-linux-gnu) has been downloaded from github.com
+2026-07-18T07:40:49.4397532Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3]  INFO This will install the following binaries:
+2026-07-18T07:40:49.4398420Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3]  INFO   - cargo-nextest => /home/runner/.local/share/mise/installs/cargo-cargo-nextest/0.9.137/bin/cargo-nextest
+2026-07-18T07:40:49.4399147Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3]  INFO Installing binaries...
+2026-07-18T07:40:49.4403085Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [1/3]  INFO Done in 3.731139658s
+2026-07-18T07:40:49.4419976Z [2mmise[0m [34mcargo:cargo-nextest[0m@0.9.137 [38;5;10m✓[0m installed
+2026-07-18T07:40:49.4508972Z ##[endgroup]
+2026-07-18T07:40:49.4510231Z ##[group]Saving mise cache
+2026-07-18T07:40:49.4675999Z [command]/usr/bin/tar --posix -cf cache.tzst --exclude cache.tzst -P -C /home/runner/work/velnor-actions-fixture/velnor-actions-fixture --files-from manifest.txt --use-compress-program zstdmt
+2026-07-18T07:40:50.9233072Z Sent 25559040 of 53241206 (48.0%), 24.4 MBs/sec
+2026-07-18T07:40:51.4942383Z Sent 53241206 of 53241206 (100.0%), 32.3 MBs/sec
+2026-07-18T07:40:51.7211058Z Cache saved from /home/runner/.local/share/mise with key: mise-v1-linux-x64-ubuntu26-3f09e7651569c6e9f5932bf3b371578afcca89e11d6d3f7e9e0323072f13665b
+2026-07-18T07:40:51.7212113Z ##[endgroup]
+2026-07-18T07:40:51.7212686Z ##[group]Running mise ls
+2026-07-18T07:40:51.7221362Z [command]/home/runner/.local/share/mise/bin/mise ls
+2026-07-18T07:40:51.7351378Z cargo-binstall       1.21.0            ~/work/velnor-actions-fixture/velnor-actions-fixture/mise.toml  1.21.0
+2026-07-18T07:40:51.7352144Z cargo:cargo-nextest  0.9.137           ~/work/velnor-actions-fixture/velnor-actions-fixture/mise.toml  0.9.137
+2026-07-18T07:40:51.7352838Z just                 1.52.0            ~/work/velnor-actions-fixture/velnor-actions-fixture/mise.toml  1.52.0
+2026-07-18T07:40:51.7353495Z rust                 1.97.1 (symlink)  ~/work/velnor-actions-fixture/velnor-actions-fixture/mise.toml  1.97.1
+2026-07-18T07:40:51.7364413Z ##[endgroup]
+2026-07-18T07:40:51.7366410Z ##[group]Exporting mise environment variables
+2026-07-18T07:40:51.7516752Z [command]/home/runner/.local/share/mise/bin/mise env --json
+2026-07-18T07:40:51.7639687Z {
+2026-07-18T07:40:51.7639957Z   "CARGO_HOME": "/home/runner/.cargo",
+2026-07-18T07:40:51.7641436Z   "PATH": "/home/runner/.cargo/bin:/home/runner/.local/share/mise/installs/cargo-binstall/1.21.0:/home/runner/.local/share/mise/installs/cargo-cargo-nextest/0.9.137/bin:/home/runner/.local/share/mise/installs/just/1.52.0:/home/runner/.local/share/mise/shims:/home/runner/.local/share/mise/bin:/snap/bin:/home/runner/.local/bin:/opt/pipx_bin:/home/runner/.cargo/bin:/home/runner/.config/composer/vendor/bin:/usr/local/.ghcup/bin:/home/runner/.dotnet/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin",
+2026-07-18T07:40:51.7642685Z   "RUSTUP_HOME": "/home/runner/.rustup",
+2026-07-18T07:40:51.7642869Z   "RUSTUP_TOOLCHAIN": "1.97.1"
+2026-07-18T07:40:51.7643016Z }
+2026-07-18T07:40:51.7654234Z ##[endgroup]
+2026-07-18T07:40:51.7785448Z ##[group]Run test -z "${RUSTC_WRAPPER:-}"
+2026-07-18T07:40:51.7785674Z [36;1mtest -z "${RUSTC_WRAPPER:-}"[0m
+2026-07-18T07:40:51.7936254Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-07-18T07:40:51.7936467Z env:
+2026-07-18T07:40:51.7936592Z   MISE_LOG_LEVEL: info
+2026-07-18T07:40:51.7937968Z   MISE_GITHUB_TOKEN: ***
+2026-07-18T07:40:51.7938215Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:40:51.7938468Z   MISE_YES: 1
+2026-07-18T07:40:51.7938597Z   CARGO_HOME: /home/runner/.cargo
+2026-07-18T07:40:51.7938762Z   RUSTUP_HOME: /home/runner/.rustup
+2026-07-18T07:40:51.7938918Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-07-18T07:40:51.7939072Z ##[endgroup]
+2026-07-18T07:40:51.8031167Z ##[group]Run cargo check -p app-a --locked
+2026-07-18T07:40:51.8031362Z [36;1mcargo check -p app-a --locked[0m
+2026-07-18T07:40:51.8070824Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-07-18T07:40:51.8071018Z env:
+2026-07-18T07:40:51.8071141Z   MISE_LOG_LEVEL: info
+2026-07-18T07:40:51.8072615Z   MISE_GITHUB_TOKEN: ***
+2026-07-18T07:40:51.8072858Z   MISE_TRUSTED_CONFIG_PATHS: /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:40:51.8073109Z   MISE_YES: 1
+2026-07-18T07:40:51.8073237Z   CARGO_HOME: /home/runner/.cargo
+2026-07-18T07:40:51.8073395Z   RUSTUP_HOME: /home/runner/.rustup
+2026-07-18T07:40:51.8073553Z   RUSTUP_TOOLCHAIN: 1.97.1
+2026-07-18T07:40:51.8073697Z ##[endgroup]
+2026-07-18T07:40:51.8549814Z     Checking shared v0.1.0 (/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/crates/shared)
+2026-07-18T07:40:51.8687109Z     Checking app-a v0.1.0 (/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/crates/app-a)
+2026-07-18T07:40:51.8816826Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.05s
+2026-07-18T07:40:51.8910334Z Post job cleanup.
+2026-07-18T07:40:51.9473202Z [command]/usr/bin/git version
+2026-07-18T07:40:51.9506759Z git version 2.53.0
+2026-07-18T07:40:51.9533481Z Temporarily overriding HOME='/home/runner/work/_temp/9146fe2f-01b6-4981-ae4e-8e5151901b59' before making global git config changes
+2026-07-18T07:40:51.9533986Z Adding repository directory to the temporary git global config as a safe directory
+2026-07-18T07:40:51.9538574Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/velnor-actions-fixture/velnor-actions-fixture
+2026-07-18T07:40:51.9565836Z Removing SSH command configuration
+2026-07-18T07:40:51.9570225Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-07-18T07:40:51.9598443Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-07-18T07:40:51.9823823Z Removing HTTP extra header
+2026-07-18T07:40:51.9827908Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-07-18T07:40:51.9857970Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-07-18T07:40:52.0081575Z Removing includeIf entries pointing to credentials config files
+2026-07-18T07:40:52.0086925Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-07-18T07:40:52.0107761Z includeif.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git.path
+2026-07-18T07:40:52.0108375Z includeif.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git/worktrees/*.path
+2026-07-18T07:40:52.0108881Z includeif.gitdir:/github/workspace/.git.path
+2026-07-18T07:40:52.0109202Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-07-18T07:40:52.0114348Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git.path
+2026-07-18T07:40:52.0131695Z /home/runner/work/_temp/git-credentials-108171bd-c3a4-40e5-882e-dea4e49d282d.config
+2026-07-18T07:40:52.0138637Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git.path /home/runner/work/_temp/git-credentials-108171bd-c3a4-40e5-882e-dea4e49d282d.config
+2026-07-18T07:40:52.0167031Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git/worktrees/*.path
+2026-07-18T07:40:52.0185252Z /home/runner/work/_temp/git-credentials-108171bd-c3a4-40e5-882e-dea4e49d282d.config
+2026-07-18T07:40:52.0192091Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/velnor-actions-fixture/velnor-actions-fixture/.git/worktrees/*.path /home/runner/work/_temp/git-credentials-108171bd-c3a4-40e5-882e-dea4e49d282d.config
+2026-07-18T07:40:52.0217272Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+2026-07-18T07:40:52.0234888Z /github/runner_temp/git-credentials-108171bd-c3a4-40e5-882e-dea4e49d282d.config
+2026-07-18T07:40:52.0240372Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path /github/runner_temp/git-credentials-108171bd-c3a4-40e5-882e-dea4e49d282d.config
+2026-07-18T07:40:52.0265695Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-07-18T07:40:52.0284581Z /github/runner_temp/git-credentials-108171bd-c3a4-40e5-882e-dea4e49d282d.config
+2026-07-18T07:40:52.0291165Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path /github/runner_temp/git-credentials-108171bd-c3a4-40e5-882e-dea4e49d282d.config
+2026-07-18T07:40:52.0317104Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-07-18T07:40:52.0515347Z Removing credentials config '/home/runner/work/_temp/git-credentials-108171bd-c3a4-40e5-882e-dea4e49d282d.config'
+2026-07-18T07:40:52.0627883Z Cleaning up orphan processes

@@ -375,3 +375,42 @@ same-version local-artifact sentence is superseded and must not be used.
 - Clean Velnor-only run `29634781889` and combined parity run `29634836133`
   also passed. The combined run completed `compare-results` successfully,
   proving the GitHub and Velnor job/step result sets remain equivalent.
+
+## 2026-07-18 — Plan 047 target drift resolution
+
+- The java-monorepo plan was written against `7b3dfdb3`; current `origin/main`
+  is `18e534e2`. The scoped drift is 85 insertions and 36 deletions across the
+  five existing workflow files plus `.github/AGENTS.md`, primarily refreshed
+  pins and lane prose. All plan-named defects and symbols remain present.
+- Under the program's progress-STOP override, work proceeds from current main
+  by symbol relocation. The user's existing
+  `feature/lightdash-migration-finish` checkout remains untouched; the single
+  program branch lives in a separate worktree at
+  `/Users/donbeave/Projects/ChainArgos/java-monorepo-velnor-estate`.
+
+## 2026-07-18 — Plan 046 audit and compare evidence
+
+- The new audit intentionally reports the fixture's remaining floating action
+  refs and non-uniform workflow names instead of treating plan 041's lane proof
+  as a static-contract waiver. Plan 058 owns that reconciliation; weakening the
+  audit would contradict the latest/freshness and uniform-shape laws.
+- `audit-ci` found the expected pre-migration violations in holla and the
+  expected remaining warnings/errors in java-monorepo; after plan 047's static
+  edits, java-monorepo has no ERROR except concerns deferred by the plan's
+  explicit workflow-name scope.
+- Fixture both-lane run `29636145660` passed. `velnor-tools compare --class d`
+  reported every Velnor job inside 60 seconds and no information-loss rows,
+  including exact `Initialize containers` and `Stop containers` service steps.
+  Sanitized logs, job JSON, and the report are committed under
+  `.velnor-compare/lane-compare-run-29636145660/`; no rendered HTML is present.
+
+## 2026-07-18 — java-monorepo paths-filter runner defect
+
+- Program-branch push runs `29636133868` and `29636133883` failed because the
+  native paths-filter adapter diffed base `18e534e2` against head `dbbab7f8`
+  after shallow checkout had fetched only the head. Sentry journal evidence was
+  `fatal: Invalid revision range ...`; the workflow was not weakened.
+- Upstream dorny/paths-filter v4 fetches both refs at depth 10 and uses the
+  merge-base (`base...head`) comparison. Velnor now matches that behavior in
+  `97e84e4`, with a shallow-fetch regression test in `5092237`. v0.1.54 is
+  being delivered through the signed apt chain before the controlled rerun.
