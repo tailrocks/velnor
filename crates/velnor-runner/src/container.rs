@@ -713,10 +713,6 @@ impl ServiceContainerSpec {
             "--detach".into(),
             "--name".into(),
             self.name.clone(),
-            "--network".into(),
-            self.network.clone(),
-            "--network-alias".into(),
-            self.network_alias.clone(),
         ];
         for (name, value) in &self.env {
             args.extend(["-e".into(), format!("{name}={value}")]);
@@ -725,6 +721,16 @@ impl ServiceContainerSpec {
             args.extend(["-p".into(), port.clone()]);
         }
         args.extend(self.options.iter().cloned());
+        // Runner-owned network policy must win over any network-shaped token
+        // present in the expanded service options. Docker uses the final
+        // occurrence, so append the per-job network and workflow service key
+        // as its DNS alias after user options.
+        args.extend([
+            "--network".into(),
+            self.network.clone(),
+            "--network-alias".into(),
+            self.network_alias.clone(),
+        ]);
         args.extend([self.image.clone()]);
         args
     }
@@ -1555,16 +1561,16 @@ mod tests {
                 "--detach",
                 "--name",
                 "velnor-service-postgres",
-                "--network",
-                "velnor-net-1",
-                "--network-alias",
-                "postgres",
                 "-e",
                 "POSTGRES_PASSWORD=postgres",
                 "-p",
                 "5432:5432",
                 "--health-cmd",
                 "pg_isready",
+                "--network",
+                "velnor-net-1",
+                "--network-alias",
+                "postgres",
                 "postgres:16"
             ]
         );
@@ -1578,6 +1584,30 @@ mod tests {
                 "inspect",
                 "--format={{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
                 "velnor-service-postgres"
+            ]
+        );
+    }
+
+    #[test]
+    fn service_runner_network_overrides_expanded_options() {
+        let service = ServiceContainerSpec {
+            name: "velnor-service-postgres".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "velnor-net-owned".into(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: vec!["--network".into(), "unexpected".into()],
+        };
+        let args = service.start_args();
+        assert_eq!(
+            &args[args.len() - 5..],
+            [
+                "--network",
+                "velnor-net-owned",
+                "--network-alias",
+                "postgres",
+                "postgres:16"
             ]
         );
     }

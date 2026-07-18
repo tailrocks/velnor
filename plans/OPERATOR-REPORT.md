@@ -167,3 +167,27 @@ same-version local-artifact sentence is superseded and must not be used.
   restarts any daemon. A build failure fails the apt transaction instead of
   silently running a stale image. Full gates passed (570 nextest tests, fmt,
   clippy, actionlint, and postinst shell syntax).
+
+## 2026-07-18 — Fixture 0.1.38 service/Kache contract failures
+
+- Source release run `29627247170` and signed apt publisher run `29627608735`
+  passed. Isolated `gpgv` verification reported a good signature, both public
+  architecture indexes advertised `0.1.38`, and Sentry installed it only with
+  `apt-get update && apt-get install -y velnor-runner`. Package, image label,
+  Kache, and sccache verified as `0.1.38`, `0.1.38`, `0.10.0`, and `0.16.0`.
+- Clean fixture run `29627820008` passed the former missing-Kache-image point,
+  then exposed two runner defects: the Postgres service key was not resolvable
+  through Docker DNS, and the native Kache action did not persist
+  `RUSTC_WRAPPER=kache` for the following step. Remaining jobs were canceled;
+  fixture semantics were unchanged.
+- Root causes: service network/alias arguments preceded expanded service
+  options instead of being final runner policy, and native shell adapters do
+  not collect the `GITHUB_ENV` file they create. The fix makes the owned
+  network/alias the final Docker options and returns Kache's three environment
+  values directly as action state. Regression tests cover both enabling
+  structures; the complete runner crate suite passed (539 tests).
+- Host-window decision: capacity admission correctly kept fixture slot 2
+  offline while the other fleets reserved more than 600 GiB. Registry checks
+  proved the blockchain-nodes, agent-brown, and jackin fleets idle, so those
+  three Velnor-owned daemons were temporarily drained for the fixture campaign.
+  The default fleet was left running because one registration was busy.
