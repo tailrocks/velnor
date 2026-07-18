@@ -1767,9 +1767,11 @@ where
         let mut trace = Vec::new();
         let mirror_store =
             crate::container::git_mirror_store_host(&container.temp_host, &self.trust_scope);
-        if let Err(error) =
+        let checkout_result = {
+            let _span = tracing::info_span!("job-checkout").entered();
             execute_checkout_with_mirror(&mut self.runner, &plan, &mut trace, Some(&mirror_store))
-        {
+        };
+        if let Err(error) = checkout_result {
             if let Some(failure) = error.downcast_ref::<StepLogicFailure>() {
                 return Ok(failure.to_step_result(Some(trace.join("\n"))));
             }
@@ -2778,6 +2780,7 @@ where
     }
 
     pub(crate) fn start_job_environment(&mut self, container: &JobContainerSpec) -> Result<()> {
+        let _span = tracing::info_span!("job-container-boot").entered();
         if let Err(error) = self.start_job_environment_once(container) {
             eprintln!("Docker job environment start failed, removing stale resources: {error:#}");
             self.cleanup_stale(container);
