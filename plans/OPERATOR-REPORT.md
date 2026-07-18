@@ -867,3 +867,40 @@ same-version local-artifact sentence is superseded and must not be used.
   `2e629c9` replaces mise's Cargo-source installations of cargo-audit and
   cargo-nextest with their current release-binary GitHub backends, eliminating
   CI tool compilation while retaining mise as the sole tool authority.
+- The final-wave workflows exposed two additional approved runner-correctness
+  gaps. Playground run `29653464429` showed typed format expressions in a
+  script step's `workingDirectory` were not evaluated, so Java commands ran at
+  `/__w` instead of `services/<matrix.service>`. Commits `b7f3999` and
+  `165ebdf` now mirror current actions/runner step-input evaluation and prove
+  literal/expression values override job defaults. Jackin run `29653808678`
+  then proved the strict mise manifest lacked the estate's current v4 inputs.
+  Commit `d46b0b7` admits only mise 2026.7.7, `cache_key_prefix=mise-v2`, and
+  boolean `cache_save`, matching upstream v4.2.0 while retaining Velnor's
+  local-only persistent store and rejecting every adjacent value/backend. All
+  621 tests and the remaining runner gates passed.
+- Velnor v0.1.75 was built from that combined series by source/deb runs
+  `29654104954` and `29654104930`, published through signed apt run
+  `29654223125`, and installed on Sentry exclusively with `apt-get update &&
+  apt-get install velnor-runner`. During verification the package correctly
+  remained `half-configured` until its foreground job-image build finished;
+  final package/candidate and image label all report 0.1.75, with mise
+  2026.7.7, sccache 0.16.0, and Kache 0.10.0.
+- The first concurrent v0.1.75 campaign uncovered a P0 cross-daemon GC defect.
+  Schemalane admission logs at 17:43:27–17:43:47 UTC show its reclaim pass
+  deleting active target scopes for Schemalane, playground, pg-bigdecimal,
+  tracing-request-level, and Velnor plus the entire Cargo registry/git and mise
+  installs/cache classes. Playground run `29654451958` consequently observed
+  corrupted Rust and three Java toolchains; its working-directory fix itself
+  was proven because Gradle started in each expected `/__w/services/*` path.
+  Root cause: jobs leased only target/actions-cache scopes, Cargo and mise were
+  unleased, GC candidates were class-wide, and lease publication could race a
+  destructive snapshot. Every affected Velnor result from that window is
+  invalidated; the workflows remain unchanged.
+- Signed commit `232bae1` removes the enabling structure: typed exact GC keys,
+  per-repository executable candidates, shared-store and multi-holder job
+  leases for every mounted class, and a filesystem coordinator held across
+  lease snapshots and deletion. Lease creation occurs only after trust and
+  strict-capability validation and its guards live through result upload.
+  Same-repository four-job and cross-repository regressions prove active stores
+  cannot be reclaimed while inactive peer scopes remain eligible. Formatting,
+  strict clippy, all 625 nextest tests, and actionlint pass.
