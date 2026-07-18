@@ -3940,6 +3940,7 @@ fn execute_script_job_inner(
         .with_initial_order(checkout_order)
         .with_trailing_post_action_count(cleanup_checkout_plans.len())
         .with_workflow_env(crate::runtime_env::job_environment_variables(job))
+        .with_trust_scope(trust_scope)
         .with_secret_masks(job_secret_mask_values(job));
     if let Some(sender) = step_start_sender {
         executor = executor.with_step_start_sender(sender);
