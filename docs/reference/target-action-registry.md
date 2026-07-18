@@ -21,10 +21,9 @@ it is not an execution allowlist.
 > inputs/outputs/behavior, and match it — do not guess from docs or memory.
 >
 > **Scope of analysis is consumer-driven.** We do **not** reimplement every
-> upstream feature — only the features the two consumer repos actually use:
->
-> - **Jackin** — `jackin-project/jackin`
-> - **ChainArgos** — `ChainArgos/java-monorepo`
+> upstream feature — only the features the 13-repository estate actually uses.
+> The authoritative estate and local-clone map live in
+> `VELNOR_PROJECTS_SETUP.md` §1 and §13.
 >
 > A feature absent from both consumers is out of focus until one adopts it. The
 > **Features in focus** column is the intersection of "upstream supports it" and
@@ -53,7 +52,8 @@ ref must also exist in the compiled manifest.
 | `actions/upload-artifact` | v7 | TS | [main](https://github.com/actions/upload-artifact) | glob, `if-no-files-found`, `include-hidden-files`, `retention-days`, outputs (`artifact-id`, `artifact-url`, `artifact-digest`) |
 | `actions/download-artifact` | v8 | TS | [main](https://github.com/actions/download-artifact) | pattern/name, `merge-multiple`, `download-path` |
 | `actions/upload-pages-artifact` | v5 | composite | [main](https://github.com/actions/upload-pages-artifact) | path, single-file tar contract for Pages |
-| `actions/deploy-pages` | v5 | TS | [main](https://github.com/actions/deploy-pages) | `page_url` output (synthetic for now — see checklist §3) |
+| `actions/configure-pages` | v6 | TS | [main](https://github.com/actions/configure-pages) | Existing Pages site lookup, `base_url` / `origin` / `host` / `base_path` outputs, `GITHUB_PAGES=true`; enablement and generator mutation are outside the approved estate surface. |
+| `actions/deploy-pages` | v5 | TS | [main](https://github.com/actions/deploy-pages) | artifact lookup, OIDC-backed Pages deployment create/status loop, `page_url` and `status` outputs (completion tracked by plan 042) |
 
 ## Rust / setup / tooling
 
