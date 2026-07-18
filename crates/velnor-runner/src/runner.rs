@@ -1614,7 +1614,19 @@ async fn run_v2(
         Err(first_error) => {
             let active = crate::capacity::active_scopes(&run_root, Duration::from_secs(24 * 3600))
                 .map_err(local_failure)?;
-            let needed = args.job_peak_bytes.min(free);
+            let (_, active_reserved) =
+                crate::capacity::reservation_summary(&run_root).map_err(local_failure)?;
+            let hysteresis = if run_root.join("capacity-backpressure").exists() {
+                args.job_peak_bytes / 5
+            } else {
+                0
+            };
+            let required = args
+                .emergency_reserve_bytes
+                .saturating_add(active_reserved)
+                .saturating_add(args.job_peak_bytes)
+                .saturating_add(hysteresis);
+            let needed = required.saturating_sub(free);
             let log_root = crate::storage::StorageLayout::resolve()
                 .map(|layout| layout.log_root)
                 .unwrap_or_else(|| config_dir.join("logs"));
@@ -1625,8 +1637,10 @@ async fn run_v2(
                 log_root,
                 mode: "resolved",
             };
-            let _ =
-                crate::cache::reclaim(&reclaim_layout, needed, &active).map_err(local_failure)?;
+            if needed > 0 {
+                let _ = crate::cache::reclaim(&reclaim_layout, needed, &active)
+                    .map_err(local_failure)?;
+            }
             let free_after = free_space_bytes(&work_root).unwrap_or(free);
             controller
                 .reserve_with_free_bytes(free_after)
