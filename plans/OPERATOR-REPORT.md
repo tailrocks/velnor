@@ -1029,3 +1029,18 @@ same-version local-artifact sentence is superseded and must not be used.
   <https://github.com/tailrocks/schemalane/pull/2> merged as `60cfd5c`; its
   remote program branch was deleted, the local checkout is clean on `main`,
   the exact unit is inactive, and no exact-prefix registration remains.
+- Plan 053 resumed after the approved exact artifact-retention implementation
+  (`1`, `7`, `14`, `30`, `90` days) removed its stale capability block.
+  Parallax PR <https://github.com/tailrocks/parallax/pull/21> remains open on
+  exact head `c54c39eb2930703f7b58d256b985035f16af4d88`; its worktree is clean,
+  its signed static series is `92e4a68c`, `7e3412b9`, and `c54c39eb`, and all
+  earlier workflow runs are completed. Actionlint, YAML parsing, workflow
+  policy, classifier, Oxfmt, format, and strict clippy gates pass. Workspace
+  nextest ran 630/645 tests before fail-fast: 629 passed, one failed, and nine
+  were skipped. The failure is the out-of-scope Rust contract test
+  `release_callers_use_one_packager_and_verified_sdk`: tuple field nine still
+  forbids `workflow_dispatch` in `release.yml`, while plan 053 deliberately
+  adds the required dispatch lanes for its release dry-run. Workflow semantics
+  and Rust sources remain unchanged pending resolution through the plan's
+  established static contract boundary. No new Velnor dispatch occurs until
+  installed apt and job image both report v0.1.81.
