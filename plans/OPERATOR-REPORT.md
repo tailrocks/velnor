@@ -600,3 +600,12 @@ same-version local-artifact sentence is superseded and must not be used.
   `mise env --redacted --json`. The native adapter now performs the same
   operation through mode-0600 files on the mounted job temp directory, then
   deletes them; environment documents never enter the live or uploaded log.
+- v0.1.64 source release runs
+  <https://github.com/tailrocks/velnor/actions/runs/29642286481> and
+  <https://github.com/tailrocks/velnor/actions/runs/29642286484> built both
+  architectures successfully, then failed delivery because the baked `gh`
+  shim had no executable in the repository-scoped install mount. The image
+  seed marker incorrectly lived in the daemon-shared mise cache, so the first
+  repository marked every other repository as seeded. The marker now lives in
+  the same trust/repository-scoped executable store it governs; workflow
+  commands and release semantics remain unchanged.

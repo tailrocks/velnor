@@ -2979,7 +2979,13 @@ where
         if image_id.is_empty() {
             return Ok(());
         }
-        let marker = store.join(".velnor-seeded-image");
+        // Executable installs are repository-scoped. A marker in the shared
+        // download-cache root lets the first repository suppress seeding for
+        // every later repository, leaving baked shims (notably `gh`) dangling.
+        // Keep the image marker beside the exact executable store it governs.
+        let marker = container
+            .mise_executable_store_host()
+            .join(".velnor-seeded-image");
         if fs::read_to_string(&marker)
             .map(|seeded| seeded.trim() == image_id)
             .unwrap_or(false)
