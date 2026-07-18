@@ -104,7 +104,7 @@ until a new target workflow needs more.
 | `actions/download-artifact` | `DownloadArtifact` | `name`, `pattern`, all-artifacts mode, `path`, container-visible `download-path` output, `merge-multiple`, latest directory layout semantics, safe zip extraction, and Results Service v4 ListArtifacts/GetSignedArtifactURL transport across jobs, slots, and hosts |
 | `actions/upload-pages-artifact` | `UploadPagesArtifact` | package pages directory and expose artifact handoff |
 | `actions/deploy-pages` | `DeployPages` | pages artifact name and deployment output `page_url` |
-| `dorny/paths-filter` | `PathsFilter` | evaluate target multiline filters for push, PR, workflow dispatch |
+| `dorny/paths-filter` | `PathsFilter` | evaluate target multiline filters for push and PR; for workflow dispatch and other non-PR events, match current upstream by diffing the checked-out ref from the repository default branch's merge base |
 | `jdx/mise-action` | `Mise` | install mise when missing, install requested tools, persist executable installs and rustup state in the same trust/repository scope, update `GITHUB_PATH`, export every non-`PATH` string from `mise env --json`, and register the redacted environment values as log masks without streaming either environment document |
 | `mozilla-actions/sccache-action` | `Sccache` | configure env/path/cache, fail honestly when `sccache` is unavailable so target `continue-on-error` gates work |
 | `rui314/setup-mold` | `SetupMold` | install/link mold for later Rust builds |

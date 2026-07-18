@@ -623,3 +623,18 @@ same-version local-artifact sentence is superseded and must not be used.
   same GitHub Release. The general release writer is now idempotent: it creates
   the release only when absent and uploads its own assets with `--clobber`, so
   both release workflows can safely converge on one tag.
+- Java Velnor run
+  <https://github.com/ChainArgos/java-monorepo/actions/runs/29642797679>
+  confirmed mise exported `RUSTUP_TOOLCHAIN=1.97.1`, but Clippy linted the
+  entire workspace while GitHub run
+  <https://github.com/ChainArgos/java-monorepo/actions/runs/29642876348>
+  selected the nine path-filtered packages and passed. A recoverable rename of
+  only the inactive Velnor-owned format/lint target bucket followed by run
+  <https://github.com/ChainArgos/java-monorepo/actions/runs/29643164464>
+  disproved target-cache contamination. The native paths-filter adapter was
+  incorrectly diffing `HEAD` against itself on `workflow_dispatch`; current
+  upstream defaults to the repository default branch and its merge base. The
+  adapter now fetches that remote-tracking ref and uses the upstream diff
+  boundary. The quarantined bucket remains at
+  `/var/lib/velnor/work/_velnor_targets/trusted/ChainArgos_java-monorepo/.github_workflows_rust.yml/Format_and_lint__Velnor_.quarantine-pre-1.97.1`
+  until the succeeding proof permits safe removal.

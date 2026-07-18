@@ -2761,6 +2761,10 @@ where
                 }
             });
             if missing {
+                let fetch_base = base.strip_prefix("origin/").map_or_else(
+                    || base.to_string(),
+                    |branch| format!("+refs/heads/{branch}:refs/remotes/origin/{branch}"),
+                );
                 let fetch_args = vec![
                     "-C".to_string(),
                     workspace.display().to_string(),
@@ -2768,7 +2772,7 @@ where
                     "--no-tags".to_string(),
                     "--depth=10".to_string(),
                     "origin".to_string(),
-                    base.to_string(),
+                    fetch_base,
                     head.to_string(),
                 ];
                 let fetched = self.runner.run("git", &fetch_args)?;
@@ -5600,6 +5604,16 @@ fn paths_filter_base_ref(state: &JobExecutionState) -> Option<String> {
                 .filter(|value| !value.is_empty())
         })
         .or_else(|| state.env.get("GITHUB_BASE_REF").cloned())
+        // Current dorny/paths-filter defaults non-PR events (including
+        // workflow_dispatch) to repository.default_branch and compares from
+        // its merge base. Use the remote-tracking name because checkout is a
+        // detached, depth-one SHA and has no local default-branch ref.
+        .or_else(|| {
+            state
+                .resolve_context_data_expression("github.event.repository.default_branch")
+                .filter(|value| !value.is_empty())
+                .map(|branch| format!("origin/{branch}"))
+        })
 }
 
 fn paths_filter_head_ref(state: &JobExecutionState) -> Option<String> {
@@ -8236,6 +8250,25 @@ mod tests {
         );
 
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn paths_filter_dispatch_defaults_to_remote_default_branch() {
+        let state = JobExecutionState::new_with_context(
+            &[("GITHUB_SHA".into(), "head-sha".into())],
+            &[(
+                "github".into(),
+                serde_json::json!({
+                    "event": {"repository": {"default_branch": "main"}}
+                }),
+            )],
+        );
+
+        assert_eq!(
+            paths_filter_base_ref(&state).as_deref(),
+            Some("origin/main")
+        );
+        assert_eq!(paths_filter_head_ref(&state).as_deref(), Some("head-sha"));
     }
 
     #[test]
