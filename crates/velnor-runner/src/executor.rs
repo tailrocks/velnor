@@ -2003,6 +2003,13 @@ where
         let working_directory = native_input(action, &action_state, "working_directory");
         let script = setup_mise_script(install, &install_args, &working_directory);
         let mut result = self.native_shell(container, state, &script, timeout)?;
+        // A shell failure can occur before the environment export files are
+        // written (for example, a failed tool install or `mise env`). Preserve
+        // that step failure and its diagnostics instead of turning it into a
+        // daemon-cycle error while trying to read a file that cannot exist.
+        if result.code != 0 {
+            return Ok(native_command_result(result, StepCommandState::default()));
+        }
         let temp_host = state
             .temp_host
             .as_deref()
