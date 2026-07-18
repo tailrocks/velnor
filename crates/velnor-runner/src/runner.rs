@@ -44,7 +44,7 @@ use crate::{
         github_job_container_spec, github_normalized_job_plan, job_container_name,
         system_connection_access_token, GitHubJobContainerPaths,
     },
-    job_message::{ActionReferenceType, AgentJobRequestMessage},
+    job_message::{ActionReferenceType, AgentJobRequestMessage, VariableValue},
     platform,
     protocol::{
         decode_jit_config, AcquireJobOutcome, BrokerClient, DistributedTaskClient, GitHubApiError,
@@ -2519,6 +2519,7 @@ async fn handle_job_request(
     }
     let early_context = job_context_data(&job);
     let mut job = job;
+    hydrate_identity_variables_from_context(&mut job, &early_context);
     apply_workflow_script_step_names(&mut job, &early_context).await;
     let capacity_run_root = crate::storage::StorageLayout::resolve()
         .map(|layout| layout.run_root)
@@ -4450,6 +4451,38 @@ fn job_context_data(job: &AgentJobRequestMessage) -> Vec<(String, Value)> {
         }
     }
     expanded.into_iter().collect()
+}
+
+/// Current V2 messages carry GitHub identity in `ContextData.github`; older
+/// messages duplicated it into `Variables` as `github.*`. Normalize the
+/// current representation into the internal variable view used by storage
+/// identity and checkout code, without overriding any explicit variable.
+fn hydrate_identity_variables_from_context(
+    job: &mut AgentJobRequestMessage,
+    context_data: &[(String, Value)],
+) {
+    for name in [
+        "github.repository",
+        "github.repository_id",
+        "github.repository_owner",
+        "github.repository_owner_id",
+        "github.workflow",
+        "github.workflow_ref",
+        "github.workflow_sha",
+        "github.run_id",
+        "github.sha",
+    ] {
+        let Some(value) = context_string(context_data, name).filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        job.variables
+            .entry(name.to_string())
+            .or_insert(VariableValue {
+                value: Some(value),
+                is_secret: false,
+            });
+    }
 }
 
 fn expand_broker_context_value(value: Value) -> Value {
@@ -6943,6 +6976,38 @@ jobs:
         assert_eq!(
             context_string(&context, "github.token").as_deref(),
             Some("token-123")
+        );
+    }
+
+    #[test]
+    fn current_v2_context_hydrates_storage_identity_variables() {
+        let mut job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanId": "plan" },
+            "Timeline": { "Id": "timeline" },
+            "JobId": "job",
+            "JobDisplayName": "job",
+            "RequestId": 1,
+            "ContextData": {
+                "github": { "d": [
+                    { "k": "repository", "v": "tailrocks/fixture" },
+                    { "k": "workflow", "v": "compat" },
+                    { "k": "workflow_ref", "v": "tailrocks/fixture/.github/workflows/compat.yml@refs/heads/main" }
+                ], "t": 2 }
+            }
+        }))
+        .unwrap();
+        let context = job_context_data(&job);
+
+        hydrate_identity_variables_from_context(&mut job, &context);
+
+        assert_eq!(
+            crate::github_adapter::job_variable(&job, "github.repository"),
+            Some("tailrocks/fixture")
+        );
+        assert_eq!(
+            crate::github_adapter::job_variable(&job, "github.workflow"),
+            Some("compat")
         );
     }
 
