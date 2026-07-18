@@ -548,6 +548,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     }
 
     let dir = config::config_dir(args.config_dir.clone())?;
+    wait_for_prior_slot_teardown(&dir).await?;
     preflight_before_executable_run(&args, &dir).map_err(local_failure)?;
     let stored = config::load(&dir).map_err(local_failure)?;
     let agent_id = stored.settings.agent_id.ok_or_else(|| {
@@ -1156,6 +1157,10 @@ async fn recycle_daemon_slot(
     configure(configure_args)
         .await
         .with_context(|| format!("recycle JIT config for daemon slot-{slot_index}"))?;
+    println!(
+        "forensics.lifecycle event=next-jit-ready timestamp={}",
+        unix_now_iso8601()
+    );
     Ok(())
 }
 
@@ -2611,6 +2616,7 @@ async fn handle_job_request(
         let step_logs_publisher =
             start_step_log_publisher(job.clone(), step_log_receiver, console_log_path);
         let config_dir = config_dir.to_path_buf();
+        let teardown_config_dir = config_dir.clone();
         let work_dir = args.work_dir.clone();
         let docker_host_work_dir = args.docker_host_work_dir.clone();
         let docker_image = args.docker_image.clone();
@@ -2743,12 +2749,12 @@ async fn handle_job_request(
         .await;
         renewal.abort();
         completion?;
-        println!("forensics.lifecycle: completion-posted");
+        println!(
+            "forensics.lifecycle event=completion-posted timestamp={}",
+            unix_now_iso8601()
+        );
         if let Some(teardown) = teardown {
-            tokio::task::spawn_blocking(move || teardown.run())
-                .await
-                .context("join post-completion teardown task")?;
-            println!("forensics.lifecycle: teardown-done");
+            spawn_post_completion_teardown(teardown_config_dir, teardown);
         }
         println!(
             "Job completed with result {:?} and message acknowledged.",
@@ -3999,6 +4005,10 @@ fn execute_script_job_inner(
         actions_environment_url(job),
         &plan.execution.temp_host,
     );
+    println!(
+        "forensics.lifecycle event=last-step-end timestamp={}",
+        unix_now_iso8601()
+    );
     if summary_result.is_err() {
         if let Err(error) = executor.cleanup(&plan.execution.job_container) {
             eprintln!("Warning: cleanup failed after executor error: {error:#}");
@@ -4260,6 +4270,53 @@ impl TeardownHandle {
             );
         }
     }
+}
+
+type SlotTeardownTasks = std::collections::HashMap<PathBuf, std::thread::JoinHandle<()>>;
+
+static SLOT_TEARDOWN_TASKS: std::sync::OnceLock<std::sync::Mutex<SlotTeardownTasks>> =
+    std::sync::OnceLock::new();
+
+fn slot_teardown_tasks() -> &'static std::sync::Mutex<SlotTeardownTasks> {
+    SLOT_TEARDOWN_TASKS.get_or_init(|| std::sync::Mutex::new(SlotTeardownTasks::new()))
+}
+
+fn spawn_post_completion_teardown(config_dir: PathBuf, teardown: TeardownHandle) {
+    let task = std::thread::spawn(move || {
+        teardown.run();
+        println!(
+            "forensics.lifecycle event=teardown-done timestamp={}",
+            unix_now_iso8601()
+        );
+    });
+    register_slot_teardown_task(config_dir, task);
+}
+
+fn register_slot_teardown_task(config_dir: PathBuf, task: std::thread::JoinHandle<()>) {
+    let displaced = slot_teardown_tasks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(config_dir, task);
+    // A slot starts at most one job per JIT cycle. Joining here is a defensive
+    // fail-closed guard if a caller ever violates that ownership invariant.
+    if let Some(displaced) = displaced {
+        let _ = displaced.join();
+    }
+}
+
+async fn wait_for_prior_slot_teardown(config_dir: &Path) -> Result<()> {
+    let task = slot_teardown_tasks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(config_dir);
+    let Some(task) = task else {
+        return Ok(());
+    };
+    tokio::task::spawn_blocking(move || task.join())
+        .await
+        .context("join prior slot teardown task")?
+        .map_err(|_| anyhow::anyhow!("prior slot teardown task panicked"))?;
+    Ok(())
 }
 
 struct PrecreatedJobEnvironment {
@@ -9727,5 +9784,56 @@ runs:
             log.started_at, log.completed_at,
             "synthetic step: started == completed so duration shows 0s"
         );
+    }
+
+    #[tokio::test]
+    async fn next_slot_run_waits_for_detached_teardown() {
+        let key = std::env::temp_dir().join(format!("velnor-tail-{}", uuid::Uuid::new_v4()));
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        register_slot_teardown_task(
+            key.clone(),
+            std::thread::spawn(move || release_receiver.recv().unwrap()),
+        );
+
+        let mut waiter = tokio::spawn(async move { wait_for_prior_slot_teardown(&key).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut waiter)
+                .await
+                .is_err(),
+            "the next run crossed the teardown ownership boundary"
+        );
+        release_sender.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn slot_without_prior_teardown_proceeds_immediately() {
+        let key = std::env::temp_dir().join(format!("velnor-tail-{}", uuid::Uuid::new_v4()));
+        tokio::time::timeout(
+            Duration::from_millis(25),
+            wait_for_prior_slot_teardown(&key),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn completed_teardown_is_consumed_once() {
+        let key = std::env::temp_dir().join(format!("velnor-tail-{}", uuid::Uuid::new_v4()));
+        register_slot_teardown_task(key.clone(), std::thread::spawn(|| {}));
+
+        wait_for_prior_slot_teardown(&key).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(25),
+            wait_for_prior_slot_teardown(&key),
+        )
+        .await
+        .unwrap()
+        .unwrap();
     }
 }
