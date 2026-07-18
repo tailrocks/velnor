@@ -1581,37 +1581,57 @@ mod tests {
 
     #[test]
     fn maps_working_directory_with_matrix_format_expr() {
-        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([{
-            "enabled": true,
-            "reference": { "type": "Script" },
-            "inputs": {
-                "map": [
-                    {
-                        "Key": { "lit": "script", "type": 0 },
-                        "Value": { "lit": "./gradlew test", "type": 0 }
-                    },
-                    {
-                        "Key": { "lit": "workingDirectory", "type": 0 },
-                        "Value": {
-                            "expr": "format('services/{0}', matrix.service)",
-                            "type": 3
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "enabled": true,
+                "reference": { "type": "Script" },
+                "inputs": {
+                    "map": [
+                        {
+                            "Key": { "lit": "script", "type": 0 },
+                            "Value": { "lit": "./gradlew test", "type": 0 }
+                        },
+                        {
+                            "Key": { "lit": "workingDirectory", "type": 0 },
+                            "Value": {
+                                "expr": "format('services/{0}', matrix.service)",
+                                "type": 3
+                            }
                         }
-                    }
-                ],
-                "type": 2
+                    ],
+                    "type": 2
+                }
+            },
+            {
+                "enabled": true,
+                "reference": { "type": "Script" },
+                "inputs": {
+                    "script": "./gradlew test",
+                    "workingDirectory": "services/literal"
+                }
             }
-        }]))
+        ]))
         .unwrap();
 
         let context = vec![(
             "matrix".to_string(),
             serde_json::json!({"service": "catalog"}),
         )];
-        let script_steps = github_script_steps_with_context(&steps, "/__w", &[], &context).unwrap();
+        let defaults = vec![serde_json::json!({
+            "run": { "working-directory": "services/default" }
+        })];
+        let script_steps =
+            github_script_steps_with_context(&steps, "/__w", &defaults, &context).unwrap();
 
+        // Step input expressions are evaluated first and override job defaults,
+        // matching actions/runner's evaluated input -> default lookup order.
         assert_eq!(
             script_steps[0].working_directory_container,
             "/__w/services/catalog"
+        );
+        assert_eq!(
+            script_steps[1].working_directory_container,
+            "/__w/services/literal"
         );
     }
 }
