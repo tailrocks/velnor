@@ -638,3 +638,24 @@ same-version local-artifact sentence is superseded and must not be used.
   boundary. The quarantined bucket remains at
   `/var/lib/velnor/work/_velnor_targets/trusted/ChainArgos_java-monorepo/.github_workflows_rust.yml/Format_and_lint__Velnor_.quarantine-pre-1.97.1`
   until the succeeding proof permits safe removal.
+- v0.1.66 Velnor Debian run
+  <https://github.com/tailrocks/velnor/actions/runs/29643421015> and signed apt
+  publication run
+  <https://github.com/tailrocks/velnor-apt/actions/runs/29643516294> passed.
+  Sentry was upgraded exclusively through the signed apt source; package and
+  job image report 0.1.66 and the default/Java and dogfood services are active.
+- Deleting two dogfood registrations that GitHub reported offline while their
+  daemon was active exposed a self-heal defect: the idle slots retained their
+  now-invalid registration IDs and retried `invalid_client` instead of
+  re-registering. The three active release builds were not interrupted; the
+  parallel tarball run `29643421010` was cancelled, the Debian delivery was
+  allowed to finish, and the dogfood instance was then restarted to recreate
+  all five slots. Future stale cleanup distinguishes registrations belonging
+  to a currently active daemon from abandoned registrations. Durable automatic
+  recovery of a registration deleted externally remains runner follow-up.
+- Corrected Java Velnor run
+  <https://github.com/ChainArgos/java-monorepo/actions/runs/29643642046>
+  passed every job. Its default-branch diff selected the same nine package
+  gates as GitHub and format/lint passed. The recoverable target-bucket rename
+  had disproved cache contamination; after this green proof, the explicit
+  Velnor-owned quarantine path recorded above was removed.
