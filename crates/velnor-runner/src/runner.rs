@@ -5416,7 +5416,7 @@ async fn upload_job_log_artifact(job: &AgentJobRequestMessage, step_logs: &[Step
     })
     .await;
     match outcome {
-        Ok(Ok(())) => println!("Uploaded job-log.txt artifact."),
+        Ok(Ok(_)) => println!("Uploaded job-log.txt artifact."),
         Ok(Err(e)) => eprintln!("Best-effort job-log artifact upload failed: {e:#}"),
         Err(e) => eprintln!("Best-effort job-log artifact task join failed: {e:#}"),
     }

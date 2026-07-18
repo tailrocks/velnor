@@ -300,7 +300,14 @@ pub static ACTIONS: &[ActionCapability] = &[
             allowed("cd2ce8fcbc39b97be8ca5fce6e763baed58fa128", "v5"),
             allowed("v5", "fixture transition until plan 041")
         ],
-        &[InputRule::Any("artifact_name")]
+        &[
+            InputRule::Any("token"),
+            InputRule::Any("timeout"),
+            InputRule::Any("error_count"),
+            InputRule::Any("reporting_interval"),
+            InputRule::Literal("preview", &["true", "false"]),
+            InputRule::Any("artifact_name")
+        ]
     ),
     capability!(
         "dorny/paths-filter",

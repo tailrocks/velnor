@@ -3393,7 +3393,7 @@ pub fn upload_artifact_blocking(
     job_id: &str,
     name: &str,
     files: &[(String, Vec<u8>)], // (archive path, content)
-) -> Result<()> {
+) -> Result<String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
@@ -3522,8 +3522,21 @@ pub fn upload_artifact_blocking(
         "size": zip_size.to_string()
     }))
     .context("serialize FinalizeArtifact")?;
-    curl_post(&finalize_url, &finalize_body).context("FinalizeArtifact request")?;
-    Ok(())
+    let finalize_text =
+        curl_post(&finalize_url, &finalize_body).context("FinalizeArtifact request")?;
+    let finalize: serde_json::Value =
+        serde_json::from_str(&finalize_text).context("FinalizeArtifact parse")?;
+    let artifact_id = finalize
+        .get("artifact_id")
+        .or_else(|| finalize.get("artifactId"))
+        .and_then(|value| match value {
+            serde_json::Value::String(value) => Some(value.clone()),
+            serde_json::Value::Number(value) => Some(value.to_string()),
+            _ => None,
+        })
+        .filter(|value| !value.is_empty())
+        .context("FinalizeArtifact: missing artifact_id")?;
+    Ok(artifact_id)
 }
 
 #[cfg(test)]

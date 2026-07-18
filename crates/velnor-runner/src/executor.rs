@@ -1842,7 +1842,7 @@ where
             NativeActionAdapter::DownloadArtifact => native_download_artifact(action, state),
             NativeActionAdapter::UploadPagesArtifact => native_upload_pages_artifact(action, state),
             NativeActionAdapter::ConfigurePages => native_configure_pages(action, state),
-            NativeActionAdapter::DeployPages => Ok(native_deploy_pages(action, state)),
+            NativeActionAdapter::DeployPages => native_deploy_pages(action, state),
             NativeActionAdapter::Mise => self.native_mise(_container, action, state, timeout),
             NativeActionAdapter::Sccache => self.native_sccache(_container, action, state, timeout),
             NativeActionAdapter::Kache => self.native_kache(_container, action, state, timeout),
@@ -3916,7 +3916,7 @@ fn native_upload_artifact(
         });
     }
 
-    let artifact_id = artifact_id_for_name(state, &name);
+    let mut artifact_id = artifact_id_for_name(state, &name);
     let digest = hash_artifact_dir(&artifact_dir)?;
     let results_url = action_state
         .env
@@ -3945,7 +3945,7 @@ fn native_upload_artifact(
                 }
             }
             if !zip_files.is_empty() {
-                if let Err(e) = crate::protocol::upload_artifact_blocking(
+                match crate::protocol::upload_artifact_blocking(
                     &results_url,
                     runtime_token,
                     &plan_id,
@@ -3953,20 +3953,23 @@ fn native_upload_artifact(
                     &name,
                     &zip_files,
                 ) {
-                    let message =
-                        format!("Results Service artifact upload failed for '{name}': {e:#}\n");
-                    eprintln!("{message}");
-                    return Ok(StepExecutionResult {
-                        exit_code: 1,
-                        state: StepCommandState::default(),
-                        skipped: false,
-                        failure_ignored: false,
-                        stdout: format!(
-                            "Saved local artifact '{name}' with {} path(s)\n",
-                            uploaded.len()
-                        ),
-                        stderr: message,
-                    });
+                    Ok(id) => artifact_id = id,
+                    Err(e) => {
+                        let message =
+                            format!("Results Service artifact upload failed for '{name}': {e:#}\n");
+                        eprintln!("{message}");
+                        return Ok(StepExecutionResult {
+                            exit_code: 1,
+                            state: StepCommandState::default(),
+                            skipped: false,
+                            failure_ignored: false,
+                            stdout: format!(
+                                "Saved local artifact '{name}' with {} path(s)\n",
+                                uploaded.len()
+                            ),
+                            stderr: message,
+                        });
+                    }
                 }
             }
         }
@@ -4164,26 +4167,285 @@ fn pages_site_outputs(html_url: &str) -> Result<BTreeMap<String, String>> {
 fn native_deploy_pages(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
-) -> StepExecutionResult {
+) -> Result<StepExecutionResult> {
     let action_state = state.with_env(state.resolve_env(&action.env));
     let repository = action_state
         .env
         .get("GITHUB_REPOSITORY")
-        .cloned()
-        .unwrap_or_default();
-    let page_url = pages_url_for_repository(&repository);
+        .filter(|value| !value.is_empty())
+        .context("actions/deploy-pages requires GITHUB_REPOSITORY")?;
+    let build_version = action_state
+        .env
+        .get("GITHUB_SHA")
+        .filter(|value| !value.is_empty())
+        .context("actions/deploy-pages requires GITHUB_SHA")?;
+    let github_token = {
+        let input = native_input(action, &action_state, "token");
+        if input.is_empty() {
+            action_state
+                .env
+                .get("GITHUB_TOKEN")
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            input
+        }
+    };
+    if github_token.is_empty() {
+        bail!("actions/deploy-pages requires input 'token' or GITHUB_TOKEN");
+    }
+    let runtime_token = action_state
+        .env
+        .get("ACTIONS_RUNTIME_TOKEN")
+        .filter(|value| !value.is_empty())
+        .context("actions/deploy-pages requires ACTIONS_RUNTIME_TOKEN")?;
+    let results_url = action_state
+        .env
+        .get("ACTIONS_RESULTS_URL")
+        .filter(|value| !value.is_empty())
+        .context("actions/deploy-pages requires ACTIONS_RESULTS_URL")?
+        .trim_end_matches('/');
+    let oidc_url = action_state
+        .env
+        .get("ACTIONS_ID_TOKEN_REQUEST_URL")
+        .filter(|value| !value.is_empty())
+        .context("actions/deploy-pages requires ACTIONS_ID_TOKEN_REQUEST_URL")?;
+    let oidc_request_token = action_state
+        .env
+        .get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+        .filter(|value| !value.is_empty())
+        .context("actions/deploy-pages requires ACTIONS_ID_TOKEN_REQUEST_TOKEN")?;
+    let (plan_id, job_id) = artifact_backend_ids_from_token(runtime_token)
+        .context("actions/deploy-pages runtime token is missing workflow backend IDs")?;
     let artifact_name = native_input_or(&action_state, action, "artifact_name", "github-pages");
-    StepExecutionResult {
+    let api_url = action_state
+        .env
+        .get("GITHUB_API_URL")
+        .map(String::as_str)
+        .unwrap_or("https://api.github.com")
+        .trim_end_matches('/');
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("velnor-runner")
+        .build()
+        .context("build Pages HTTP client")?;
+
+    let artifacts: Value = pages_json_response(
+        client
+            .post(format!(
+                "{results_url}/twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts"
+            ))
+            .bearer_auth(runtime_token)
+            .json(&serde_json::json!({
+                "workflow_run_backend_id": plan_id,
+                "workflow_job_run_backend_id": job_id,
+                "name_filter": {"value": artifact_name}
+            }))
+            .send()
+            .context("list Pages artifacts")?,
+        "list Pages artifacts",
+    )?;
+    let matching = artifacts
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|artifact| artifact.get("name").and_then(Value::as_str) == Some(&artifact_name))
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        bail!(
+            "expected exactly one Pages artifact named '{artifact_name}', found {}",
+            matching.len()
+        );
+    }
+    let artifact_id = matching[0]
+        .get("database_id")
+        .or_else(|| matching[0].get("databaseId"))
+        .or_else(|| matching[0].get("id"))
+        .filter(|value| value.is_string() || value.is_number())
+        .cloned()
+        .context("Pages artifact is missing database_id")?;
+
+    let oidc: Value = pages_json_response(
+        client
+            .get(oidc_url)
+            .bearer_auth(oidc_request_token)
+            .send()
+            .context("request Pages OIDC token")?,
+        "request Pages OIDC token",
+    )?;
+    let oidc_token = oidc
+        .get("value")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("Pages OIDC response is missing value")?;
+    let preview = native_input_or(&action_state, action, "preview", "false") == "true";
+    let mut payload = serde_json::json!({
+        "artifact_id": artifact_id,
+        "pages_build_version": build_version,
+        "oidc_token": oidc_token
+    });
+    if preview {
+        payload["preview"] = Value::Bool(true);
+    }
+    let deployment: Value = pages_json_response(
+        client
+            .post(format!("{api_url}/repos/{repository}/pages/deployments"))
+            .bearer_auth(&github_token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .json(&payload)
+            .send()
+            .context("create Pages deployment")?,
+        "create Pages deployment",
+    )?;
+    let deployment_id = deployment
+        .get("id")
+        .and_then(json_scalar_string)
+        .or_else(|| {
+            deployment
+                .get("status_url")
+                .and_then(Value::as_str)
+                .and_then(|url| url.rsplit('/').next())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| build_version.clone());
+    let mut page_url = deployment
+        .get("page_url")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| pages_url_for_repository(repository));
+    let timeout = native_u64_input(action, &action_state, "timeout", 600_000).min(600_000);
+    let interval = native_u64_input(action, &action_state, "reporting_interval", 5_000);
+    let max_errors = native_u64_input(action, &action_state, "error_count", 10).max(1);
+    let started = std::time::Instant::now();
+    let status_url = format!("{api_url}/repos/{repository}/pages/deployments/{deployment_id}");
+    let mut errors = 0_u64;
+    loop {
+        if interval > 0 {
+            std::thread::sleep(Duration::from_millis(interval));
+        }
+        let response = client
+            .get(&status_url)
+            .bearer_auth(&github_token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send();
+        match response {
+            Ok(response) if response.status().is_success() => {
+                let status: Value = response.json().context("decode Pages deployment status")?;
+                if let Some(url) = status.get("page_url").and_then(Value::as_str) {
+                    page_url = url.to_string();
+                }
+                match status.get("status").and_then(Value::as_str).unwrap_or("") {
+                    "succeed" => break,
+                    "deployment_failed"
+                    | "deployment_content_failed"
+                    | "deployment_cancelled"
+                    | "deployment_lost" => {
+                        bail!(
+                            "Pages deployment {deployment_id} failed with status {}",
+                            status["status"]
+                        )
+                    }
+                    _ => {}
+                }
+            }
+            Ok(response) => {
+                errors += 1;
+                if errors >= max_errors {
+                    cancel_pages_deployment(
+                        &client,
+                        api_url,
+                        repository,
+                        &deployment_id,
+                        &github_token,
+                    );
+                    bail!(
+                        "Pages deployment status failed with HTTP {}",
+                        response.status()
+                    );
+                }
+            }
+            Err(error) => {
+                errors += 1;
+                if errors >= max_errors {
+                    cancel_pages_deployment(
+                        &client,
+                        api_url,
+                        repository,
+                        &deployment_id,
+                        &github_token,
+                    );
+                    return Err(error).context("get Pages deployment status");
+                }
+            }
+        }
+        if started.elapsed() >= Duration::from_millis(timeout) {
+            cancel_pages_deployment(&client, api_url, repository, &deployment_id, &github_token);
+            bail!("Pages deployment {deployment_id} timed out after {timeout} ms");
+        }
+    }
+
+    Ok(StepExecutionResult {
         exit_code: 0,
         state: StepCommandState {
-            outputs: [("page_url".to_string(), page_url.clone())].into(),
+            outputs: [
+                ("page_url".to_string(), page_url.clone()),
+                ("status".to_string(), "succeed".to_string()),
+            ]
+            .into(),
             ..StepCommandState::default()
         },
         skipped: false,
         failure_ignored: false,
         stdout: format!("Deployed Pages artifact '{artifact_name}' to {page_url}\n"),
         stderr: String::new(),
+    })
+}
+
+fn pages_json_response(response: reqwest::blocking::Response, operation: &str) -> Result<Value> {
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().unwrap_or_default();
+        bail!("{operation} failed with HTTP {status}: {}", body.trim());
     }
+    response
+        .json()
+        .with_context(|| format!("decode {operation} response"))
+}
+
+fn json_scalar_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn native_u64_input(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+    name: &str,
+    default: u64,
+) -> u64 {
+    native_input(action, state, name).parse().unwrap_or(default)
+}
+
+fn cancel_pages_deployment(
+    client: &reqwest::blocking::Client,
+    api_url: &str,
+    repository: &str,
+    deployment_id: &str,
+    token: &str,
+) {
+    let _ = client
+        .post(format!(
+            "{api_url}/repos/{repository}/pages/deployments/{deployment_id}/cancel"
+        ))
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send();
 }
 
 fn native_docker_metadata(
@@ -8706,6 +8968,107 @@ type=sha,format=long,prefix=,enable=true"
     }
 
     #[test]
+    fn deploy_pages_runs_artifact_oidc_create_and_status_loop() {
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+        let responses = [
+            r#"{"artifacts":[{"name":"github-pages","database_id":42,"size":123}]}"#,
+            r#"{"value":"oidc-token"}"#,
+            r#"{"id":7,"status_url":"status/7","page_url":"https://initial.example/"}"#,
+            r#"{"status":"queued"}"#,
+            r#"{"status":"succeed","page_url":"https://deployed.example/"}"#,
+        ];
+        let server = std::thread::spawn(move || {
+            for body in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    let text = String::from_utf8_lossy(&request);
+                    let header_end = text.find("\r\n\r\n");
+                    let content_length = text
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if header_end.is_some_and(|end| request.len() >= end + 4 + content_length) {
+                        break;
+                    }
+                }
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&request).to_string());
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+        let base = format!("http://{address}");
+        let runtime_token = runtime_token_with_results_scope("plan-1", "job-1");
+        let state = JobExecutionState::new(&[
+            ("GITHUB_REPOSITORY".into(), "octocat/example".into()),
+            ("GITHUB_SHA".into(), "abc123".into()),
+            ("GITHUB_TOKEN".into(), "github-token".into()),
+            ("GITHUB_API_URL".into(), base.clone()),
+            ("ACTIONS_RESULTS_URL".into(), base.clone()),
+            ("ACTIONS_RUNTIME_TOKEN".into(), runtime_token),
+            (
+                "ACTIONS_ID_TOKEN_REQUEST_URL".into(),
+                format!("{base}/oidc"),
+            ),
+            (
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN".into(),
+                "oidc-request-token".into(),
+            ),
+        ]);
+        let result = native_deploy_pages(
+            &NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::DeployPages,
+                inputs: [("reporting_interval".into(), "0".into())].into(),
+                env: Vec::new(),
+            },
+            &state,
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(
+            result.state.outputs["page_url"],
+            "https://deployed.example/"
+        );
+        let requests = requests.lock().unwrap();
+        assert!(requests[0].starts_with(
+            "POST /twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts HTTP/1.1"
+        ));
+        assert!(requests[0].contains("\"workflow_run_backend_id\":\"plan-1\""));
+        assert!(requests[1].starts_with("GET /oidc HTTP/1.1"));
+        assert!(requests[2].starts_with("POST /repos/octocat/example/pages/deployments HTTP/1.1"));
+        assert!(requests[2].contains("\"artifact_id\":42"));
+        assert!(requests[2].contains("\"oidc_token\":\"oidc-token\""));
+        assert!(requests[3].starts_with("GET /repos/octocat/example/pages/deployments/7 HTTP/1.1"));
+        assert!(requests[4].starts_with("GET /repos/octocat/example/pages/deployments/7 HTTP/1.1"));
+    }
+
+    #[test]
     fn native_docker_build_push_honors_load_input_separately() {
         let temp = temp_dir();
         fs::create_dir_all(temp.join("work")).unwrap();
@@ -12937,7 +13300,9 @@ fi"#
                     .into(),
                     env: Vec::new(),
                 },
-                condition: Some("steps.pages-artifact.outputs.artifact_id != ''".into()),
+                // The full network-backed deployment is covered by
+                // deploy_pages_runs_artifact_oidc_create_and_status_loop.
+                condition: Some("false".into()),
                 continue_on_error: false,
                 timeout_minutes: None,
             },
@@ -12986,10 +13351,7 @@ fi"#
             results[2].state.outputs["artifact_id"],
             expected_artifact_id
         );
-        assert_eq!(
-            results[3].state.outputs["page_url"],
-            "https://jackin-project.github.io/jackin/"
-        );
+        assert!(results[3].skipped);
         let node_calls = executor
             .runner()
             .calls
