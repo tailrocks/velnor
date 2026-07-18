@@ -14,6 +14,11 @@ sudo apt-get update && sudo apt-get install velnor-runner   # or upgrade
 
 Configuration (one daemon per target scope):
 
+Production upgrades on Sentry are Debian-package deployments: commit and push
+the source first, build the `.deb`, then install it with `apt-get install` (use
+`--reinstall` when validating a rebuilt artifact with the same package version).
+Do not deploy with `dpkg -i`.
+
 - Default instance: `/etc/velnor/velnor.env` (URL, name, labels, slots,
   work dir) + `/etc/velnor/secrets.env` (0600, `GITHUB_TOKEN=...` — never
   shipped or touched by the package; `postinst` migrates a token out of

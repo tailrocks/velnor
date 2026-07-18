@@ -132,6 +132,12 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-07-18: **Sentry deployments use Debian apt only** (operator): every
+  Velnor version deployed to the live host is first committed and pushed,
+  packaged as a Debian artifact, and installed through `apt` (including
+  `--reinstall` when validating another build of the same package version).
+  Direct `dpkg -i` deployment is prohibited.
+
 - 2026-07-18: **One active prompt; legacy prompts and completed plans purged**:
   the `prompts/` goal-prompt system (all sequences complete since 2026-06-11)
   and the DONE plan files 001–013/016–032 plus `plans/goal-execution-prompt.md`
