@@ -3936,8 +3936,23 @@ fn execute_script_job_inner(
     // work. The guard removes a successfully pre-created environment if any
     // later planning step returns early; a failed pre-create is retried by the
     // executor's normal lazy startup path.
+    let initialize_containers_step = (!container.services.is_empty()).then(|| {
+        let step_id = uuid::Uuid::new_v4().to_string();
+        if let Some(sender) = &step_start_sender {
+            let _ = sender.send(StepStartEvent {
+                step_id: step_id.clone(),
+                display_name: "Initialize containers".to_string(),
+                order: 2,
+            });
+        }
+        (step_id, unix_now_iso8601())
+    });
     let precreated_environment = PrecreatedJobEnvironment::spawn(container.clone());
-    let mut checkout_order: i32 = 1;
+    let mut checkout_order: i32 = if initialize_containers_step.is_some() {
+        2
+    } else {
+        1
+    };
     let mut checkout_duration = Duration::ZERO;
     // Eager checkout logs also belong in the downloadable job-log artifact —
     // they only travelled the live channel before, so the artifact was the one
@@ -4058,6 +4073,33 @@ fn execute_script_job_inner(
     let post_step_log_sender = step_log_sender.clone();
     let (environment_started, container_boot_duration) = precreated_environment.claim();
     let container_boot_ms = duration_ms(container_boot_duration);
+    let initialize_containers_log = initialize_containers_step.map(|(step_id, started_at)| {
+        let log = StepLog {
+            step_id,
+            display_name: "Initialize containers".to_string(),
+            order: 2,
+            started_at,
+            completed_at: unix_now_iso8601(),
+            lines: vec![format!(
+                "Initialized {} service container(s) on the runner-owned job network.",
+                container.services.len()
+            )],
+            masks: Vec::new(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        };
+        if let Some(sender) = &step_log_sender {
+            let _ = sender.send(log.clone());
+        }
+        log
+    });
     let mut executor = DockerScriptExecutor::new(command_runner)
         .with_job_environment_started(environment_started)
         .with_initial_order(checkout_order)
@@ -4196,6 +4238,47 @@ fn execute_script_job_inner(
         extra_step_logs.push(post_log);
     }
 
+    let services_removed = !plan.execution.job_container.services.is_empty();
+    if services_removed {
+        post_order += 1;
+        let stop_step_id = uuid::Uuid::new_v4().to_string();
+        let stop_started_at = unix_now_iso8601();
+        if let Some(sender) = &post_step_start_sender {
+            let _ = sender.send(StepStartEvent {
+                step_id: stop_step_id.clone(),
+                display_name: "Stop containers".to_string(),
+                order: post_order,
+            });
+        }
+        let mut service_executor = DockerScriptExecutor::new(command_runner);
+        service_executor.cleanup_services(&plan.execution.job_container)?;
+        let stop_log = StepLog {
+            step_id: stop_step_id,
+            display_name: "Stop containers".to_string(),
+            order: post_order,
+            started_at: stop_started_at,
+            completed_at: unix_now_iso8601(),
+            lines: vec![format!(
+                "Stopped {} service container(s).",
+                plan.execution.job_container.services.len()
+            )],
+            masks: Vec::new(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        };
+        if let Some(sender) = &post_step_log_sender {
+            let _ = sender.send(stop_log.clone());
+        }
+        extra_step_logs.push(stop_log);
+    }
+
     // Synthetic "Complete job" step matching GitHub-hosted runner output.
     let complete_step_id = uuid::Uuid::new_v4().to_string();
     let complete_order = post_order + 1;
@@ -4231,6 +4314,7 @@ fn execute_script_job_inner(
     extra_step_logs.push(complete_log);
 
     let mut all_step_logs = vec![setup_log];
+    all_step_logs.extend(initialize_containers_log);
     all_step_logs.extend(eager_checkout_step_logs);
     all_step_logs.extend(summary.step_logs);
     all_step_logs.extend(extra_step_logs);
@@ -4242,6 +4326,7 @@ fn execute_script_job_inner(
         teardown: Some(TeardownHandle {
             container: plan.execution.job_container,
             job_dir: job_dir.to_path_buf(),
+            services_removed,
         }),
         timings: ExecutionTimings {
             first_step_ms,
@@ -4343,12 +4428,18 @@ struct ScriptJobResult {
 struct TeardownHandle {
     container: crate::container::JobContainerSpec,
     job_dir: PathBuf,
+    services_removed: bool,
 }
 
 impl TeardownHandle {
     fn run(self) {
         let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
-        if let Err(error) = executor.cleanup(&self.container) {
+        let cleanup = if self.services_removed {
+            executor.cleanup_job_and_network(&self.container)
+        } else {
+            executor.cleanup(&self.container)
+        };
+        if let Err(error) = cleanup {
             eprintln!("Warning: post-completion Docker teardown failed: {error:#}");
         }
         if let Err(error) = fs::remove_dir_all(&self.job_dir) {
