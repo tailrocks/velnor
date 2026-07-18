@@ -168,6 +168,7 @@ const ARTIFACT_INPUTS: &[InputRule] = &[
     InputRule::Literal("include-hidden-files", &["true", "false"]),
     InputRule::Literal("overwrite", &["true", "false"]),
     InputRule::Literal("compression-level", &["0"]),
+    InputRule::Literal("retention-days", &["1", "7", "14", "30", "90"]),
 ];
 const DOWNLOAD_INPUTS: &[InputRule] = &[
     InputRule::Any("name"),
@@ -1010,7 +1011,7 @@ mod tests {
         let approved = job(
             "actions/upload-artifact",
             Some("043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
-            serde_json::json!({"name": "seed", "path": "target.tar.zst", "compression-level": "0"}),
+            serde_json::json!({"name": "seed", "path": "target.tar.zst", "compression-level": "0", "retention-days": "7"}),
         );
         validate_job_with_context(&approved, &[]).unwrap();
 
@@ -1021,6 +1022,14 @@ mod tests {
         ));
         assert_eq!(errors[0].field, "with.compression-level");
         assert_eq!(errors[0].accepted, ["0"]);
+
+        let errors = violations(&job(
+            "actions/upload-artifact",
+            Some("043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"),
+            serde_json::json!({"retention-days": "2"}),
+        ));
+        assert_eq!(errors[0].field, "with.retention-days");
+        assert_eq!(errors[0].accepted, ["1", "7", "14", "30", "90"]);
     }
 
     #[test]

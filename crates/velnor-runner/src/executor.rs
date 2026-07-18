@@ -4118,6 +4118,13 @@ fn native_upload_artifact(
     // upload-artifact defines it as no compression (ZIP Stored).
     let store_uncompressed =
         artifact_store_uncompressed(&native_input(action, &action_state, "compression-level"));
+    let retention_days = artifact_retention_days(
+        &native_input(action, &action_state, "retention-days"),
+        action_state
+            .env
+            .get("GITHUB_RETENTION_DAYS")
+            .map(String::as_str),
+    );
     let artifact_dir = artifact_store_dir(state)?.join(sanitize_artifact_name(&name));
     if artifact_dir.exists() {
         // Always overwrite in Velnor: re-runs on the same slot reuse the artifact store,
@@ -4196,7 +4203,10 @@ fn native_upload_artifact(
                     &job_id,
                     &name,
                     &zip_files,
-                    store_uncompressed,
+                    crate::protocol::ArtifactUploadOptions {
+                        store_uncompressed,
+                        retention_days,
+                    },
                 ) {
                     Ok(id) => artifact_id = id,
                     Err(e) => {
@@ -4247,6 +4257,12 @@ fn native_upload_artifact(
 
 fn artifact_store_uncompressed(compression_level: &str) -> bool {
     compression_level.trim() == "0"
+}
+
+fn artifact_retention_days(input: &str, repository_max: Option<&str>) -> Option<u8> {
+    let requested = input.trim().parse::<u8>().ok()?;
+    let maximum = repository_max.and_then(|value| value.trim().parse::<u8>().ok());
+    Some(maximum.map_or(requested, |limit| requested.min(limit)))
 }
 
 fn native_download_artifact(
@@ -13298,6 +13314,9 @@ fi"#
     fn native_upload_artifact_expands_target_release_globs() {
         assert!(artifact_store_uncompressed("0"));
         assert!(!artifact_store_uncompressed(""));
+        assert_eq!(artifact_retention_days("14", Some("7")), Some(7));
+        assert_eq!(artifact_retention_days("7", Some("90")), Some(7));
+        assert_eq!(artifact_retention_days("", Some("90")), None);
 
         let temp = temp_dir();
         fs::create_dir_all(temp.join("work")).unwrap();
