@@ -3898,6 +3898,11 @@ fn execute_script_job_inner(
         fs::create_dir_all(&path)
             .with_context(|| format!("create persistent store {}", path.display()))?;
     }
+    let repaired = crate::container::repair_cargo_git_store(&cargo_store)
+        .context("repair persistent Cargo git store")?;
+    if repaired > 0 {
+        eprintln!("forensics.lifecycle: removed {repaired} orphaned Cargo git checkout(s)");
+    }
     seed_mise_store_from_image(docker_image, &mise_store);
     let container = github_job_container_spec(
         job,
