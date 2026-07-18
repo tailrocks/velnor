@@ -109,8 +109,10 @@ echo "deb [signed-by=/etc/apt/keyrings/velnor.gpg] https://velnor-apt.tailrocks.
   | sudo tee /etc/apt/sources.list.d/velnor.list
 sudo apt update
 sudo apt install velnor-runner
-# then set the token + config:
-sudo nano /etc/velnor/velnor.env      # GITHUB_TOKEN=..., URL=..., LABELS=...
+# then set non-secret config and the operator-owned token separately:
+sudo nano /etc/velnor/velnor.env      # URL=..., NAME=..., LABELS=..., SLOTS=...
+sudo install -m 0600 /dev/null /etc/velnor/secrets.env
+sudo nano /etc/velnor/secrets.env     # GITHUB_TOKEN=...
 sudo systemctl enable --now velnor-daemon
 ```
 
@@ -136,7 +138,9 @@ avoids the deprecated global `apt-key` / `trusted.gpg.d`).
    validate package contents/size, attach assets to both matching Releases, and
    dispatch `tailrocks/velnor-apt`'s `Publish apt repo` workflow.
 3. Monitor the apt publish and Pages deployment. Verify the signed index and
-   candidate before touching a host:
+   candidate before touching a host. `apt-get update` performs the signature
+   verification using the repository-scoped key; it must complete without a
+   signature warning:
    ```bash
    curl -fsSL https://velnor-apt.tailrocks.com/dists/stable/InRelease | head
    apt-cache policy velnor-runner
@@ -147,18 +151,20 @@ avoids the deprecated global `apt-key` / `trusted.gpg.d`).
    sudo apt-get update
    sudo apt-get install velnor-runner
    dpkg-query -W velnor-runner
+   docker image inspect velnor/job-ubuntu:26.04 \
+     --format '{{ index .Config.Labels "org.opencontainers.image.version" }}'
    sudo systemctl start velnor-daemon velnor-daemon@fixture # plus instances
    ```
 5. Run doctor and the fixture smoke. Roll back only to a previously published
    apt version (`apt-get install velnor-runner=<version>`); never sideload a
    release asset.
 
-Verified 2026-07-18: `tailrocks/velnor-apt` publishes amd64+arm64 with a signed
-reprepro index through GitHub Actions Pages; Sentry has the scoped keyring and
-source configured. Release `v0.1.35` is the current installed baseline; the
-program branch publishes `v0.1.36` through the same signed pipeline before
-fixture V-A verification. The
-source package run is
-[`29623974593`](https://github.com/tailrocks/velnor/actions/runs/29623974593)
-and the signed repository/Pages run is
-[`29624452820`](https://github.com/tailrocks/velnor-apt/actions/runs/29624452820).
+Verified 2026-07-18 against both repositories and the live host:
+`tailrocks/velnor-apt` publishes amd64+arm64 with a signed reprepro index
+through GitHub Actions Pages; Sentry has the scoped keyring and source
+configured. The v0.1.37 source package run is
+[`29626653677`](https://github.com/tailrocks/velnor/actions/runs/29626653677)
+and its signed repository/Pages run is
+[`29627062793`](https://github.com/tailrocks/velnor-apt/actions/runs/29627062793).
+The v0.1.38 package is the next deployment candidate; every later deployment
+must follow this same tag-to-signed-apt chain.

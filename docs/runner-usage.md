@@ -12,6 +12,11 @@ The runner installs and upgrades via apt (repo: `velnor-apt.tailrocks.com`):
 sudo apt-get update && sudo apt-get install velnor-runner   # or upgrade
 ```
 
+For first-install repository/keyring setup and the maintainer's complete
+tag-to-signed-repository publication procedure, follow
+[Debian package + apt-native repository](debian-apt-repo.md). Production
+servers never install a local release asset.
+
 Configuration (one daemon per target scope):
 
 Production upgrades on Sentry come only from that signed repository. Commit and
