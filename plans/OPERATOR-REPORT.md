@@ -484,3 +484,8 @@ same-version local-artifact sentence is superseded and must not be used.
   `lfs` input. Current `actions/runner` evaluates step inputs against expression
   context before action handling (`Runner.Worker/ActionRunner.cs`); Velnor now
   follows that order and tests the exact estate expression.
+- Local GPG tag signing for `v0.1.57` could not use the configured curses
+  pinentry in this non-interactive session (`Inappropriate ioctl for device`).
+  The release uses an annotated tag; every source commit retains DCO signoff,
+  and server package authenticity is verified by the repository-scoped signed
+  apt `InRelease` chain. No 1Password approval or secret export was requested.
