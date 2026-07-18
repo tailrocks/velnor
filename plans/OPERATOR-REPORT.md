@@ -557,3 +557,20 @@ same-version local-artifact sentence is superseded and must not be used.
   removes macOS artifacts/formula blocks and preserves Linux amd64/arm64
   tarball, Homebrew-on-Linux, and Debian delivery. The deviation is also
   prominent in the PR description.
+- The configured GPG tag key requires an interactive pinentry. Because this
+  campaign forbids operator approval, v0.1.60 uses an annotated tag; every
+  program commit still carries the required DCO signoff. No credential or
+  signing prompt was bypassed.
+- Bootstrap recovery used the workflow's GitHub lane because the installed
+  v0.1.58 runner could not consume its own cross-job release artifacts. Debian
+  release run <https://github.com/tailrocks/velnor/actions/runs/29639975111>
+  and signed apt publication run
+  <https://github.com/tailrocks/velnor-apt/actions/runs/29640107569> passed;
+  Sentry then upgraded exclusively through apt to package and image 0.1.60.
+- Java run <https://github.com/ChainArgos/java-monorepo/actions/runs/29640241554>
+  exposed the remaining mise root cause. The adapter injected `CARGO_HOME` and
+  `RUSTUP_HOME` only while mise installed tools, causing mise's Rust backend to
+  publish the image-baked rustup proxy path and select 1.97.0. A controlled
+  v0.1.60 image reproduction selected 1.97.1 when those non-upstream overrides
+  were absent. The fix matches current `jdx/mise-action`: retain truthful job
+  step storage variables, but do not override mise's own Rust resolution.

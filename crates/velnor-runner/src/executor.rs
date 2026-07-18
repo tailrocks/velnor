@@ -3183,9 +3183,11 @@ export MISE_DATA_DIR="$mise_home"
 export MISE_CACHE_DIR="$mise_home/cache"
 export MISE_CONFIG_DIR="$mise_home/config"
 export MISE_TRUSTED_CONFIG_PATHS="/__w"
-# Ensure mise itself can find cargo for 'cargo:' backend tools.
-export CARGO_HOME=/github/home/.cargo
-export RUSTUP_HOME=/root/.rustup
+# Match mise-action's process environment: do not override CARGO_HOME or
+# RUSTUP_HOME while mise resolves tools. Those overrides make mise's Rust
+# backend publish the image-baked rustup proxy directory as its active bin
+# path, silently selecting the baked toolchain instead of rust-toolchain.toml.
+# Cargo remains discoverable through PATH for cargo-backed mise tools.
 install_args={install_args}
 working_directory={working_directory}
 if [ -n "$working_directory" ]; then
@@ -7717,6 +7719,8 @@ mod tests {
         assert!(script.contains("cargo-audit"));
         assert!(script.contains("cargo-deny"));
         assert!(script.contains("cargo-shear"));
+        assert!(!script.contains("export CARGO_HOME="));
+        assert!(!script.contains("export RUSTUP_HOME="));
     }
 
     fn host_temp_script_path(container_path: &str, temp: &Path) -> PathBuf {
