@@ -300,7 +300,6 @@ pub fn repository_action_plans(
         let git_ref = reference
             .git_ref
             .clone()
-            .or_else(|| native_action_adapter(repository).map(|_| NATIVE_ACTION_REF.to_string()))
             .ok_or_else(|| anyhow::anyhow!("repository action '{repository}' missing ref"))?;
         let repository_dir = repository_dir(actions_host, repository, &git_ref);
         let action_dir = action_dir(
@@ -501,6 +500,7 @@ pub struct DockerActionInvocation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeActionInvocation {
+    pub git_ref: String,
     pub adapter: NativeActionAdapter,
     pub inputs: BTreeMap<String, String>,
     pub env: Vec<(String, String)>,
@@ -668,6 +668,7 @@ impl ResolvedAction {
 
 pub fn native_invocation_from_plan(plan: &RepositoryActionPlan) -> Option<NativeActionInvocation> {
     native_action_adapter(&plan.repository).map(|adapter| NativeActionInvocation {
+        git_ref: plan.git_ref.clone(),
         adapter,
         inputs: plan.inputs.clone(),
         env: plan.env.clone(),
@@ -1057,7 +1058,7 @@ fn action_dir(
     Ok(dir)
 }
 
-fn string_inputs(step: &ActionStep) -> Result<BTreeMap<String, String>> {
+pub(crate) fn string_inputs(step: &ActionStep) -> Result<BTreeMap<String, String>> {
     string_input_map(step.inputs.as_ref())
 }
 
@@ -1574,7 +1575,7 @@ runs:
     }
 
     #[test]
-    fn native_repository_action_plan_does_not_require_ref() {
+    fn native_repository_action_plan_requires_ref() {
         let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
             {
                 "id": "cache",
@@ -1590,14 +1591,10 @@ runs:
         ]))
         .unwrap();
 
-        let plans = repository_action_plans(&steps, Path::new("/tmp/actions")).unwrap();
-
-        assert_eq!(plans.len(), 1);
-        assert_eq!(plans[0].repository, "actions/cache");
-        assert_eq!(plans[0].git_ref, NATIVE_ACTION_REF);
+        let error = repository_action_plans(&steps, Path::new("/tmp/actions")).unwrap_err();
         assert_eq!(
-            native_invocation_from_plan(&plans[0]).unwrap().adapter,
-            NativeActionAdapter::Cache
+            error.to_string(),
+            "repository action 'actions/cache' missing ref"
         );
     }
 

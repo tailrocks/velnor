@@ -1,0 +1,798 @@
+use std::collections::BTreeMap;
+use std::fmt;
+
+use anyhow::Result;
+use serde::Serialize;
+
+use crate::action::{string_inputs, NativeActionAdapter, NATIVE_ACTION_REF};
+use crate::cli::{CapabilitiesArgs, CapabilitiesCommand};
+use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
+
+pub const MANIFEST_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy)]
+pub struct CapabilityManifest {
+    pub version: u32,
+    pub actions: &'static [ActionCapability],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ActionCapability {
+    pub repository: &'static str,
+    pub adapter: NativeActionAdapter,
+    pub allowed_refs: &'static [AllowedRef],
+    pub inputs: &'static [InputRule],
+    pub notes: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AllowedRef {
+    pub value: &'static str,
+    pub release: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum InputRule {
+    Any(&'static str),
+    Literal(&'static str, &'static [&'static str]),
+    Forbidden(&'static str),
+}
+
+impl InputRule {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Any(name) | Self::Literal(name, _) | Self::Forbidden(name) => name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CapabilityViolation {
+    pub step: String,
+    pub repository: String,
+    pub action_ref: String,
+    pub field: String,
+    pub received: String,
+    pub accepted: Vec<String>,
+    pub manifest_version: u32,
+}
+
+impl fmt::Display for CapabilityViolation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "unsupported capability in step '{}': action {}@{}, field '{}' received '{}'; accepted: {}; manifest version {}",
+            self.step,
+            self.repository,
+            self.action_ref,
+            self.field,
+            self.received,
+            if self.accepted.is_empty() {
+                "none".to_string()
+            } else {
+                self.accepted.join(", ")
+            },
+            self.manifest_version
+        )
+    }
+}
+
+impl std::error::Error for CapabilityViolation {}
+
+const fn allowed(value: &'static str, release: &'static str) -> AllowedRef {
+    AllowedRef { value, release }
+}
+
+const CHECKOUT_REFS: &[AllowedRef] = &[
+    allowed(NATIVE_ACTION_REF, "broker-managed checkout"),
+    allowed("9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0", "v7"),
+    allowed("df4cb1c069e1874edd31b4311f1884172cec0e10", "v6"),
+    allowed("34e114876b0b11c390a56381ad16ebd13914f8d5", "v4"),
+    allowed("v4", "fixture transition until plan 041"),
+    allowed("v6", "fixture transition until plan 041"),
+    allowed("v7", "fixture transition until plan 041"),
+];
+const CACHE_REFS: &[AllowedRef] = &[
+    allowed("55cc8345863c7cc4c66a329aec7e433d2d1c52a9", "v6"),
+    allowed("27d5ce7f107fe9357f9df03efb73ab90386fccae", "v5"),
+];
+const UPLOAD_REFS: &[AllowedRef] = &[
+    allowed("043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "v7"),
+    allowed("ea165f8d65b6e75b540449e92b4886f43607fa02", "v4"),
+    allowed("v7", "fixture transition until plan 041"),
+];
+const DOWNLOAD_REFS: &[AllowedRef] = &[
+    allowed("3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", "v8"),
+    allowed("v8", "fixture transition until plan 041"),
+];
+const MISE_REFS: &[AllowedRef] = &[
+    allowed("dad1bfd3df957f44999b559dd69dc1671cb4e9ea", "v4.2.1"),
+    allowed("e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d", "v4.2.0"),
+    allowed("dba19683ed58901619b14f395a24841710cb4925", "v4.1.0"),
+    allowed("v4", "fixture transition until plan 041"),
+];
+const SCCACHE_REFS: &[AllowedRef] = &[
+    allowed("9e7fa8a12102821edf02ca5dbea1acd0f89a2696", "v0.0.10"),
+    allowed("1583d6b38d7be47f593cb472781bbb21cab4321e", "v0.0.10"),
+    allowed("v0.0.10", "fixture transition until plan 041"),
+];
+const MOLD_REFS: &[AllowedRef] = &[
+    allowed("9c9c13bf4c3f1adef0cc596abc155580bcb04444", "v1"),
+    allowed("v1", "fixture transition until plan 041"),
+];
+const RUST_CACHE_REFS: &[AllowedRef] = &[
+    allowed("42dc69e1aa15d09112580998cf2ef0119e2e91ae", "v2"),
+    allowed("c19371144df3bb44fab255c43d04cbc2ab54d1c4", "v2"),
+    allowed("e18b497796c12c097a38f9edb9d0641fb99eee32", "v2"),
+    allowed("v2", "fixture transition until plan 041"),
+];
+const PATHS_REFS: &[AllowedRef] = &[
+    allowed("7b450fff21473bca461d4b92ce414b9d0420d706", "v4"),
+    allowed("v4", "fixture transition until plan 041"),
+];
+const RUNTIME_REFS: &[AllowedRef] = &[
+    allowed("04d248b84655b509d8c44dc1d6f990c879747487", "v4"),
+    allowed("v4", "fixture transition until plan 041"),
+];
+const RENOVATE_REFS: &[AllowedRef] = &[
+    allowed("22e0a16091fc706b04affe6ae53d5e3358ac4023", "v44"),
+    allowed("693b9ef15eec82123529a37c782242f091365961", "v43"),
+];
+const BUILDX_REFS: &[AllowedRef] = &[
+    allowed("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c", "v4"),
+    allowed("v4", "fixture transition until plan 041"),
+];
+const LOGIN_REFS: &[AllowedRef] = &[
+    allowed("af1e73f918a031802d376d3c8bbc3fe56130a9b0", "v4"),
+    allowed("v4", "fixture transition until plan 041"),
+];
+const BAKE_REFS: &[AllowedRef] = &[
+    allowed("d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b", "v7"),
+    allowed("v7", "fixture transition until plan 041"),
+];
+
+const CACHE_INPUTS: &[InputRule] = &[
+    InputRule::Any("path"),
+    InputRule::Any("key"),
+    InputRule::Any("restore-keys"),
+    InputRule::Literal("fail-on-cache-miss", &["true", "false"]),
+    InputRule::Literal("lookup-only", &["true", "false"]),
+];
+const ARTIFACT_INPUTS: &[InputRule] = &[
+    InputRule::Any("name"),
+    InputRule::Any("path"),
+    InputRule::Literal("if-no-files-found", &["warn", "error", "ignore"]),
+    InputRule::Literal("include-hidden-files", &["true", "false"]),
+    InputRule::Literal("overwrite", &["true", "false"]),
+];
+const DOWNLOAD_INPUTS: &[InputRule] = &[
+    InputRule::Any("name"),
+    InputRule::Any("pattern"),
+    InputRule::Any("path"),
+    InputRule::Literal("merge-multiple", &["true", "false"]),
+];
+const MISE_INPUTS: &[InputRule] = &[
+    InputRule::Literal("install", &["true", "false"]),
+    InputRule::Any("install_args"),
+    InputRule::Any("working_directory"),
+    InputRule::Any("github_token"),
+];
+const SCCACHE_INPUTS: &[InputRule] = &[
+    InputRule::Literal("version", &["v0.16.0"]),
+    InputRule::Literal("disable_annotations", &["false"]),
+    InputRule::Forbidden("token"),
+];
+const RUST_CACHE_INPUTS: &[InputRule] = &[
+    InputRule::Any("shared-key"),
+    InputRule::Any("cache-directories"),
+    InputRule::Literal("cache-on-failure", &["true", "false"]),
+];
+const BUILDX_INPUTS: &[InputRule] = &[
+    InputRule::Any("name"),
+    InputRule::Literal("driver", &["docker-container"]),
+    InputRule::Literal("install", &["true", "false"]),
+];
+const LOGIN_INPUTS: &[InputRule] = &[
+    InputRule::Any("registry"),
+    InputRule::Any("username"),
+    InputRule::Any("password"),
+];
+const BUILD_PUSH_INPUTS: &[InputRule] = &[
+    InputRule::Any("context"),
+    InputRule::Any("file"),
+    InputRule::Any("platforms"),
+    InputRule::Any("tags"),
+    InputRule::Any("labels"),
+    InputRule::Any("build-args"),
+    InputRule::Any("cache-from"),
+    InputRule::Any("cache-to"),
+    InputRule::Any("outputs"),
+    InputRule::Literal("push", &["true", "false"]),
+    InputRule::Literal("load", &["true", "false"]),
+];
+
+macro_rules! capability {
+    ($repo:literal, $adapter:ident, $refs:expr, $inputs:expr) => {
+        ActionCapability {
+            repository: $repo,
+            adapter: NativeActionAdapter::$adapter,
+            allowed_refs: $refs,
+            inputs: $inputs,
+            notes: "native Rust adapter; estate pin sweep 2026-07-18",
+        }
+    };
+}
+
+pub static ACTIONS: &[ActionCapability] = &[
+    capability!(
+        "actions/checkout",
+        Checkout,
+        CHECKOUT_REFS,
+        &[
+            InputRule::Any("repository"),
+            InputRule::Any("ref"),
+            InputRule::Any("token"),
+            InputRule::Literal("persist-credentials", &["true", "false"]),
+            InputRule::Any("path"),
+            InputRule::Literal("clean", &["true", "false"]),
+            InputRule::Any("fetch-depth"),
+            InputRule::Literal("fetch-tags", &["true", "false"]),
+            InputRule::Literal("lfs", &["true", "false"]),
+        ]
+    ),
+    capability!("actions/cache", Cache, CACHE_REFS, CACHE_INPUTS),
+    capability!(
+        "actions/upload-artifact",
+        UploadArtifact,
+        UPLOAD_REFS,
+        ARTIFACT_INPUTS
+    ),
+    capability!(
+        "actions/download-artifact",
+        DownloadArtifact,
+        DOWNLOAD_REFS,
+        DOWNLOAD_INPUTS
+    ),
+    capability!(
+        "actions/upload-pages-artifact",
+        UploadPagesArtifact,
+        &[
+            allowed("fc324d3547104276b827a68afc52ff2a11cc49c9", "v5"),
+            allowed("v5", "fixture transition until plan 041")
+        ],
+        &[InputRule::Any("path"), InputRule::Any("name")]
+    ),
+    capability!(
+        "actions/deploy-pages",
+        DeployPages,
+        &[
+            allowed("cd2ce8fcbc39b97be8ca5fce6e763baed58fa128", "v5"),
+            allowed("v5", "fixture transition until plan 041")
+        ],
+        &[InputRule::Any("artifact_name")]
+    ),
+    capability!(
+        "dorny/paths-filter",
+        PathsFilter,
+        PATHS_REFS,
+        &[
+            InputRule::Any("filters"),
+            InputRule::Any("base"),
+            InputRule::Any("ref"),
+            InputRule::Any("list-files"),
+            InputRule::Any("working-directory")
+        ]
+    ),
+    capability!("jdx/mise-action", Mise, MISE_REFS, MISE_INPUTS),
+    capability!(
+        "mozilla-actions/sccache-action",
+        Sccache,
+        SCCACHE_REFS,
+        SCCACHE_INPUTS
+    ),
+    capability!("rui314/setup-mold", SetupMold, MOLD_REFS, &[]),
+    capability!(
+        "extractions/setup-just",
+        SetupJust,
+        &[allowed("53165ef7e734c5c07cb06b3c8e7b647c5aa16db3", "v4")],
+        &[]
+    ),
+    capability!(
+        "swatinem/rust-cache",
+        RustCache,
+        RUST_CACHE_REFS,
+        RUST_CACHE_INPUTS
+    ),
+    capability!(
+        "crazy-max/ghaction-github-runtime",
+        GitHubRuntimeExport,
+        RUNTIME_REFS,
+        &[]
+    ),
+    capability!(
+        "renovatebot/github-action",
+        Renovate,
+        RENOVATE_REFS,
+        &[
+            InputRule::Any("token"),
+            InputRule::Any("renovate-version"),
+            InputRule::Any("renovate-image")
+        ]
+    ),
+    capability!(
+        "docker/setup-buildx-action",
+        DockerSetupBuildx,
+        BUILDX_REFS,
+        BUILDX_INPUTS
+    ),
+    capability!("docker/login-action", DockerLogin, LOGIN_REFS, LOGIN_INPUTS),
+    capability!(
+        "docker/metadata-action",
+        DockerMetadata,
+        &[
+            allowed("dc802804100637a589fabce1cb79ff13a1411302", "v6"),
+            allowed("v6", "fixture transition until plan 041"),
+        ],
+        &[InputRule::Any("images"), InputRule::Any("tags")]
+    ),
+    capability!(
+        "docker/build-push-action",
+        DockerBuildPush,
+        &[
+            allowed("53b7df96c91f9c12dcc8a07bcb9ccacbed38856a", "v7"),
+            allowed("v7", "fixture transition until plan 041"),
+        ],
+        BUILD_PUSH_INPUTS
+    ),
+    capability!(
+        "docker/bake-action",
+        DockerBake,
+        BAKE_REFS,
+        &[
+            InputRule::Any("files"),
+            InputRule::Any("set"),
+            InputRule::Literal("push", &["true", "false"]),
+            InputRule::Any("targets")
+        ]
+    ),
+    capability!(
+        "hadolint/hadolint-action",
+        Hadolint,
+        &[allowed(
+            "2332a7b74a6de0dda2e2221d575162eba76ba5e5",
+            "v3.3.0"
+        )],
+        &[
+            InputRule::Any("dockerfile"),
+            InputRule::Any("config"),
+            InputRule::Literal("recursive", &["true", "false"]),
+            InputRule::Any("output-file"),
+            InputRule::Literal("no-color", &["true", "false"]),
+            InputRule::Literal("no-fail", &["true", "false"]),
+            InputRule::Literal("verbose", &["true", "false"]),
+            InputRule::Any("format"),
+            InputRule::Any("failure-threshold"),
+            InputRule::Any("override-error"),
+            InputRule::Any("override-warning"),
+            InputRule::Any("override-info"),
+            InputRule::Any("override-style"),
+            InputRule::Any("ignore"),
+            InputRule::Any("trusted-registries")
+        ]
+    ),
+    capability!(
+        "docker/setup-qemu-action",
+        SetupQemu,
+        &[allowed("c7c53464625b32c7a7e944ae62b3e17d2b600130", "v3")],
+        &[
+            InputRule::Any("image"),
+            InputRule::Any("platforms"),
+            InputRule::Literal("reset", &["true", "false"])
+        ]
+    ),
+    capability!(
+        "sigstore/cosign-installer",
+        CosignInstaller,
+        &[allowed(
+            "6f9f17788090df1f26f669e9d70d6ae9567deba6",
+            "v4.1.2"
+        )],
+        &[
+            InputRule::Any("cosign-release"),
+            InputRule::Any("install-dir")
+        ]
+    ),
+];
+
+pub static MANIFEST: CapabilityManifest = CapabilityManifest {
+    version: MANIFEST_VERSION,
+    actions: ACTIONS,
+};
+
+pub fn find(repository: &str) -> Option<&'static ActionCapability> {
+    ACTIONS
+        .iter()
+        .find(|capability| capability.repository.eq_ignore_ascii_case(repository))
+}
+
+pub fn violations(job: &AgentJobRequestMessage) -> Vec<CapabilityViolation> {
+    let mut violations = Vec::new();
+    for (index, step) in job
+        .steps
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| step.enabled)
+    {
+        if step.reference_type() != Some(ActionReferenceType::Repository) {
+            continue;
+        }
+        let Some(reference) = step.reference.as_ref() else {
+            continue;
+        };
+        let Some(repository) = reference.name.as_deref() else {
+            continue;
+        };
+        if repository.starts_with("./")
+            || reference
+                .path
+                .as_deref()
+                .is_some_and(|path| path.starts_with("./"))
+        {
+            continue;
+        }
+        let step_name = step
+            .display_name_template()
+            .or_else(|| step.name.clone())
+            .unwrap_or_else(|| format!("step-{index}"));
+        let action_ref = reference.git_ref.as_deref().unwrap_or(
+            if repository.eq_ignore_ascii_case("actions/checkout") {
+                NATIVE_ACTION_REF
+            } else {
+                "<missing>"
+            },
+        );
+        let Some(capability) = find(repository) else {
+            violations.push(violation(
+                &step_name,
+                repository,
+                action_ref,
+                "uses",
+                repository,
+                ACTIONS
+                    .iter()
+                    .map(|item| item.repository.to_string())
+                    .collect(),
+            ));
+            continue;
+        };
+        if !capability
+            .allowed_refs
+            .iter()
+            .any(|candidate| candidate.value == action_ref)
+        {
+            violations.push(violation(
+                &step_name,
+                repository,
+                action_ref,
+                "ref",
+                action_ref,
+                capability
+                    .allowed_refs
+                    .iter()
+                    .map(|item| format!("{} ({})", item.value, item.release))
+                    .collect(),
+            ));
+        }
+        let inputs = match string_inputs(step) {
+            Ok(inputs) => inputs,
+            Err(error) => {
+                violations.push(violation(
+                    &step_name,
+                    repository,
+                    action_ref,
+                    "inputs",
+                    &error.to_string(),
+                    Vec::new(),
+                ));
+                continue;
+            }
+        };
+        validate_inputs(
+            &mut violations,
+            &step_name,
+            repository,
+            action_ref,
+            capability,
+            &inputs,
+        );
+    }
+    violations
+}
+
+fn validate_inputs(
+    violations: &mut Vec<CapabilityViolation>,
+    step: &str,
+    repository: &str,
+    action_ref: &str,
+    capability: &ActionCapability,
+    inputs: &BTreeMap<String, String>,
+) {
+    for (name, value) in inputs {
+        match capability
+            .inputs
+            .iter()
+            .copied()
+            .find(|rule| rule.name().eq_ignore_ascii_case(name))
+        {
+            Some(InputRule::Any(_)) => {}
+            Some(InputRule::Literal(_, allowed))
+                if allowed
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(value.trim())) => {}
+            Some(InputRule::Literal(_, allowed)) => violations.push(violation(
+                step,
+                repository,
+                action_ref,
+                &format!("with.{name}"),
+                value,
+                allowed.iter().map(|value| (*value).to_string()).collect(),
+            )),
+            Some(InputRule::Forbidden(_)) => violations.push(violation(
+                step,
+                repository,
+                action_ref,
+                &format!("with.{name}"),
+                value,
+                vec!["input must be absent".to_string()],
+            )),
+            None => violations.push(violation(
+                step,
+                repository,
+                action_ref,
+                &format!("with.{name}"),
+                value,
+                capability
+                    .inputs
+                    .iter()
+                    .map(|rule| rule.name().to_string())
+                    .collect(),
+            )),
+        }
+    }
+}
+
+fn violation(
+    step: &str,
+    repository: &str,
+    action_ref: &str,
+    field: &str,
+    received: &str,
+    accepted: Vec<String>,
+) -> CapabilityViolation {
+    CapabilityViolation {
+        step: step.to_string(),
+        repository: repository.to_ascii_lowercase(),
+        action_ref: action_ref.to_string(),
+        field: field.to_string(),
+        received: received.to_string(),
+        accepted,
+        manifest_version: MANIFEST_VERSION,
+    }
+}
+
+pub fn validate_job(job: &AgentJobRequestMessage) -> Result<()> {
+    if let Some(violation) = violations(job).into_iter().next() {
+        return Err(violation.into());
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct ExportManifest<'a> {
+    version: u32,
+    actions: Vec<ExportAction<'a>>,
+}
+#[derive(Serialize)]
+struct ExportAction<'a> {
+    repository: &'a str,
+    adapter: String,
+    allowed_refs: Vec<&'a str>,
+    inputs: Vec<&'a str>,
+    notes: &'a str,
+}
+
+pub fn to_json() -> Result<String> {
+    let actions = MANIFEST
+        .actions
+        .iter()
+        .map(|item| ExportAction {
+            repository: item.repository,
+            adapter: format!("{:?}", item.adapter),
+            allowed_refs: item
+                .allowed_refs
+                .iter()
+                .map(|reference| reference.value)
+                .collect(),
+            inputs: item.inputs.iter().map(|input| input.name()).collect(),
+            notes: item.notes,
+        })
+        .collect();
+    Ok(serde_json::to_string_pretty(&ExportManifest {
+        version: MANIFEST.version,
+        actions,
+    })?)
+}
+
+pub fn run(args: CapabilitiesArgs) -> Result<()> {
+    match args.command {
+        CapabilitiesCommand::Export => println!("{}", to_json()?),
+        CapabilitiesCommand::Check { job_dump } => {
+            let bytes = std::fs::read(&job_dump)?;
+            let job: AgentJobRequestMessage = serde_json::from_slice(&bytes)?;
+            let violations = violations(&job);
+            if violations.is_empty() {
+                println!(
+                    "job is compatible with capability manifest version {}",
+                    MANIFEST_VERSION
+                );
+            } else {
+                for violation in &violations {
+                    eprintln!("{violation}");
+                }
+                anyhow::bail!(
+                    "job has {} capability violation(s) against manifest version {}",
+                    violations.len(),
+                    MANIFEST_VERSION
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(
+        repository: &str,
+        action_ref: Option<&str>,
+        inputs: serde_json::Value,
+    ) -> AgentJobRequestMessage {
+        serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "manifest test",
+            "jobName": "test",
+            "requestId": 1,
+            "steps": [{
+                "type": "Action",
+                "displayName": "target action",
+                "reference": {
+                    "type": "Repository",
+                    "name": repository,
+                    "ref": action_ref
+                },
+                "inputs": inputs
+            }]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn manifest_covers_every_native_adapter() {
+        let expected = [
+            NativeActionAdapter::Checkout,
+            NativeActionAdapter::Cache,
+            NativeActionAdapter::UploadArtifact,
+            NativeActionAdapter::DownloadArtifact,
+            NativeActionAdapter::UploadPagesArtifact,
+            NativeActionAdapter::DeployPages,
+            NativeActionAdapter::PathsFilter,
+            NativeActionAdapter::Mise,
+            NativeActionAdapter::Sccache,
+            NativeActionAdapter::SetupMold,
+            NativeActionAdapter::SetupJust,
+            NativeActionAdapter::RustCache,
+            NativeActionAdapter::GitHubRuntimeExport,
+            NativeActionAdapter::Renovate,
+            NativeActionAdapter::DockerSetupBuildx,
+            NativeActionAdapter::DockerLogin,
+            NativeActionAdapter::DockerMetadata,
+            NativeActionAdapter::DockerBuildPush,
+            NativeActionAdapter::DockerBake,
+            NativeActionAdapter::Hadolint,
+            NativeActionAdapter::SetupQemu,
+            NativeActionAdapter::CosignInstaller,
+        ];
+        for adapter in expected {
+            assert!(
+                ACTIONS.iter().any(|item| item.adapter == adapter),
+                "missing {adapter:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_exports_json() {
+        let value: serde_json::Value = serde_json::from_str(&to_json().unwrap()).unwrap();
+        assert_eq!(value["version"], MANIFEST_VERSION);
+        assert_eq!(value["actions"].as_array().unwrap().len(), ACTIONS.len());
+    }
+
+    #[test]
+    fn validate_job_rejects_unknown_repository() {
+        let errors = violations(&job("owner/unknown", Some("abc"), serde_json::json!({})));
+        assert_eq!(errors[0].field, "uses");
+    }
+
+    #[test]
+    fn validate_job_rejects_unapproved_ref() {
+        let errors = violations(&job(
+            "actions/cache",
+            Some("bad-ref"),
+            serde_json::json!({}),
+        ));
+        assert_eq!(errors[0].field, "ref");
+    }
+
+    #[test]
+    fn validate_job_rejects_forbidden_input() {
+        let errors = violations(&job(
+            "mozilla-actions/sccache-action",
+            Some("9e7fa8a12102821edf02ca5dbea1acd0f89a2696"),
+            serde_json::json!({"token": "secret"}),
+        ));
+        assert_eq!(errors[0].field, "with.token");
+    }
+
+    #[test]
+    fn validate_job_accepts_estate_shaped_job() {
+        validate_job(&job(
+            "jdx/mise-action",
+            Some("dad1bfd3df957f44999b559dd69dc1671cb4e9ea"),
+            serde_json::json!({"install_args": "rust zig", "github_token": "masked"}),
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_job_rejects_invalid_literal() {
+        let errors = violations(&job(
+            "actions/cache",
+            Some("55cc8345863c7cc4c66a329aec7e433d2d1c52a9"),
+            serde_json::json!({"lookup-only": "perhaps"}),
+        ));
+        assert_eq!(errors[0].field, "with.lookup-only");
+    }
+
+    #[test]
+    fn validate_job_requires_non_checkout_ref() {
+        let errors = violations(&job("actions/cache", None, serde_json::json!({})));
+        assert_eq!(errors[0].received, "<missing>");
+    }
+
+    #[test]
+    fn capabilities_check_accepts_sanitized_job_dump() {
+        let path = std::env::temp_dir().join(format!(
+            "velnor-capabilities-check-{}-{}.json",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let job = job(
+            "actions/cache",
+            Some("55cc8345863c7cc4c66a329aec7e433d2d1c52a9"),
+            serde_json::json!({"path": "target", "key": "linux-target"}),
+        );
+        std::fs::write(&path, serde_json::to_vec(&job).unwrap()).unwrap();
+        let result = run(CapabilitiesArgs {
+            command: CapabilitiesCommand::Check {
+                job_dump: path.clone(),
+            },
+        });
+        let _ = std::fs::remove_file(path);
+        result.unwrap();
+    }
+}

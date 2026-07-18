@@ -1526,6 +1526,8 @@ fn daemon_slot_run_args(
         emergency_reserve_bytes: args.emergency_reserve_bytes,
         job_peak_bytes: args.job_peak_bytes,
         node_action_image: args.node_action_image.clone(),
+        diagnostic_node_sidecar: args.diagnostic_node_sidecar,
+        skip_capability_validation: args.skip_capability_validation,
         work_dir: daemon_slot_child_path(args.work_dir.as_deref(), slot_index, slot_count),
         docker_host_work_dir: daemon_slot_child_path(
             args.docker_host_work_dir.as_deref(),
@@ -2591,6 +2593,11 @@ async fn handle_job_request(
         let resource_options = job_resource_options(&args.job_cpus, &args.job_memory);
         let node_action_image = args.node_action_image.clone();
         validate_job_trust_policy(&job, &args.trust_scope)?;
+        if !args.skip_capability_validation {
+            crate::manifest::validate_job(&job)?;
+        }
+        let allow_unknown_action_diagnostics =
+            args.skip_capability_validation && args.diagnostic_node_sidecar;
         let trust_scope = args.trust_scope.clone();
         let run_service_url = run_service_job.run_service_url.clone();
         let billing_owner_id = run_service_job.billing_owner_id.clone();
@@ -2609,6 +2616,7 @@ async fn handle_job_request(
                 &docker_image,
                 resource_options,
                 &node_action_image,
+                allow_unknown_action_diagnostics,
                 &trust_scope,
                 &run_service_url,
                 billing_owner_id,
@@ -3683,6 +3691,7 @@ fn execute_script_job(
     docker_image: &str,
     resource_options: Vec<String>,
     node_action_image: &str,
+    allow_unknown_action_diagnostics: bool,
     trust_scope: &str,
     run_service_url: &str,
     billing_owner_id: Option<String>,
@@ -3699,6 +3708,7 @@ fn execute_script_job(
         docker_image,
         resource_options,
         node_action_image,
+        allow_unknown_action_diagnostics,
         trust_scope,
         run_service_url,
         billing_owner_id,
@@ -3724,6 +3734,7 @@ fn execute_script_job_inner(
     docker_image: &str,
     resource_options: Vec<String>,
     node_action_image: &str,
+    allow_unknown_action_diagnostics: bool,
     trust_scope: &str,
     run_service_url: &str,
     billing_owner_id: Option<String>,
@@ -3884,6 +3895,7 @@ fn execute_script_job_inner(
         &local_actions,
         &actions,
         &runtime_checkout_plans,
+        allow_unknown_action_diagnostics,
     )?;
 
     let container = github_job_container_spec(
@@ -4617,6 +4629,7 @@ fn same_action(left: &RepositoryActionPlan, right: &RepositoryActionPlan) -> boo
         && left.source_path == right.source_path
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ordered_executable_steps(
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
@@ -4625,6 +4638,7 @@ fn ordered_executable_steps(
     local_actions: &[(LocalActionPlan, ActionMetadata)],
     actions_host: &std::path::Path,
     runtime_checkout_plans: &[CheckoutPlan],
+    allow_unknown_action_diagnostics: bool,
 ) -> Result<Vec<ExecutableStep>> {
     let mut ordered = Vec::new();
     let mut script_iter = script_steps.iter();
@@ -4696,6 +4710,7 @@ fn ordered_executable_steps(
                                     parent_condition,
                                     parent_continue_on_error,
                                     "",
+                                    allow_unknown_action_diagnostics,
                                 )?;
                             }
                             CompositeActionInvocation::Outputs(outputs) => {
@@ -4758,6 +4773,7 @@ fn ordered_executable_steps(
                     None,
                     false,
                     &step_display_name,
+                    allow_unknown_action_diagnostics,
                 )?;
             }
             _ => bail!("unsupported enabled step in job"),
@@ -4766,6 +4782,7 @@ fn ordered_executable_steps(
     Ok(ordered)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_resolved_action_steps(
     ordered: &mut Vec<ExecutableStep>,
     action: &ResolvedAction,
@@ -4774,6 +4791,7 @@ fn append_resolved_action_steps(
     parent_condition: Option<&str>,
     parent_continue_on_error: bool,
     display_name: &str,
+    allow_unknown_action_diagnostics: bool,
 ) -> Result<()> {
     let continue_on_error = parent_continue_on_error || action.plan.continue_on_error;
     if let Some(invocation) = action.native_invocation() {
@@ -4791,14 +4809,21 @@ fn append_resolved_action_steps(
         bail!("{message}");
     }
     match &action.runtime {
-        ActionRuntime::JavaScript { .. } => ordered.push(ExecutableStep::JavaScript {
-            step_id: action.plan.step_id.clone(),
-            display_name: display_name.to_string(),
-            invocation: action.javascript_invocation(actions_host)?,
-            condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
-            continue_on_error,
-            timeout_minutes: action.plan.timeout_minutes,
-        }),
+        ActionRuntime::JavaScript { .. } if allow_unknown_action_diagnostics => {
+            ordered.push(ExecutableStep::JavaScript {
+                step_id: action.plan.step_id.clone(),
+                display_name: display_name.to_string(),
+                invocation: action.javascript_invocation(actions_host)?,
+                condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
+                continue_on_error,
+                timeout_minutes: action.plan.timeout_minutes,
+            })
+        }
+        ActionRuntime::JavaScript { .. } => bail!(
+            "unknown action '{}@{}' reached execution — capability validation must reject this earlier",
+            action.plan.repository,
+            action.plan.git_ref
+        ),
         ActionRuntime::Docker { .. } => ordered.push(ExecutableStep::Docker {
             step_id: action.plan.step_id.clone(),
             display_name: display_name.to_string(),
@@ -4859,6 +4884,7 @@ fn append_resolved_action_steps(
                             action_condition.as_deref(),
                             continue_on_error,
                             "",
+                            allow_unknown_action_diagnostics,
                         )?;
                     }
                     CompositeActionInvocation::Outputs(outputs) => {
@@ -6361,6 +6387,8 @@ mod tests {
             emergency_reserve_bytes: 10 * 1024 * 1024 * 1024,
             job_peak_bytes: 30 * 1024 * 1024 * 1024,
             node_action_image: String::new(),
+            diagnostic_node_sidecar: false,
+            skip_capability_validation: false,
             work_dir: None,
             docker_host_work_dir: None,
             skip_preflight: false,
@@ -6787,6 +6815,8 @@ jobs:
             emergency_reserve_bytes: 10 * 1024 * 1024 * 1024,
             job_peak_bytes: 30 * 1024 * 1024 * 1024,
             node_action_image: String::new(),
+            diagnostic_node_sidecar: false,
+            skip_capability_validation: false,
             work_dir: None,
             docker_host_work_dir: None,
             skip_preflight: false,
@@ -8143,6 +8173,7 @@ runs:
             &[(local_plan, metadata)],
             Path::new("/tmp/actions"),
             &[],
+            false,
         )
         .unwrap();
 
@@ -8216,6 +8247,7 @@ runs:
             &[],
             Path::new("/tmp/actions"),
             &runtime_checkout_plans,
+            false,
         )
         .unwrap();
 
@@ -8390,6 +8422,7 @@ runs:
             &[(local_plan, local_metadata)],
             Path::new("/tmp/actions"),
             &[],
+            true,
         )
         .unwrap();
 
@@ -8420,7 +8453,7 @@ runs:
     }
 
     #[test]
-    fn ordered_steps_match_repository_action_source_path() {
+    fn unknown_javascript_action_requires_diagnostic_flags() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
             "plan": { "planId": "plan" },
@@ -8486,8 +8519,15 @@ runs:
         ];
 
         let plans = vec![resolved[1].plan.clone()];
+        let error =
+            ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[], false)
+                .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unknown action 'acme/action@v1' reached execution"));
         let ordered =
-            ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[]).unwrap();
+            ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[], true)
+                .unwrap();
 
         let ExecutableStep::JavaScript { invocation, .. } = &ordered[0] else {
             panic!("repository action should expand to JavaScript step")
@@ -8539,9 +8579,17 @@ runs:
                 runtime: metadata.runtime().unwrap(),
                 metadata: metadata.clone(),
             }];
-            let error =
-                ordered_executable_steps(&job, &[], &[plan], &resolved, &[], actions_host, &[])
-                    .unwrap_err();
+            let error = ordered_executable_steps(
+                &job,
+                &[],
+                &[plan],
+                &resolved,
+                &[],
+                actions_host,
+                &[],
+                false,
+            )
+            .unwrap_err();
             assert!(
                 error.to_string().contains("jdx/mise-action"),
                 "expected error for {repository} to mention jdx/mise-action, got: {error}"
@@ -8602,7 +8650,7 @@ runs:
         let resolved = resolve_actions_from_cache(&plans, actions_host);
 
         let ordered =
-            ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[])
+            ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[], false)
                 .unwrap_or_else(|error| panic!("plan target action inventory: {error:#}"));
 
         assert!(
@@ -8681,9 +8729,17 @@ runs:
             metadata,
         };
 
-        let ordered =
-            ordered_executable_steps(&job, &[], &plans, &[resolved], &[], actions_host, &[])
-                .unwrap();
+        let ordered = ordered_executable_steps(
+            &job,
+            &[],
+            &plans,
+            &[resolved],
+            &[],
+            actions_host,
+            &[],
+            false,
+        )
+        .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native {
@@ -8706,7 +8762,7 @@ runs:
     }
 
     #[test]
-    fn native_repository_actions_ignore_pinned_ref_metadata() {
+    fn native_repository_actions_preserve_pinned_ref_metadata() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
             "plan": { "planId": "plan" },
@@ -8719,7 +8775,7 @@ runs:
                 "reference": {
                     "type": "Repository",
                     "name": "actions/cache",
-                    "ref": "pinned-sha-ignored-by-native-adapter"
+                    "ref": "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
                 },
                 "inputs": {
                     "key": "linux-cache",
@@ -8732,7 +8788,8 @@ runs:
         let plans = repository_action_plans(&job.steps, actions_host).unwrap();
 
         let ordered =
-            ordered_executable_steps(&job, &[], &plans, &[], &[], actions_host, &[]).unwrap();
+            ordered_executable_steps(&job, &[], &plans, &[], &[], actions_host, &[], false)
+                .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native { invocation, .. } = &ordered[0] else {
@@ -8744,10 +8801,14 @@ runs:
         );
         assert_eq!(invocation.inputs["key"], "linux-cache");
         assert_eq!(invocation.inputs["path"], "~/.cargo");
+        assert_eq!(
+            invocation.git_ref,
+            "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+        );
     }
 
     #[test]
-    fn native_repository_actions_do_not_require_ref_metadata() {
+    fn native_repository_actions_require_ref_metadata() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
             "plan": { "planId": "plan" },
@@ -8769,21 +8830,11 @@ runs:
         }))
         .unwrap();
         let actions_host = Path::new("/tmp/actions");
-        let plans = repository_action_plans(&job.steps, actions_host).unwrap();
-
-        let ordered =
-            ordered_executable_steps(&job, &[], &plans, &[], &[], actions_host, &[]).unwrap();
-
-        assert_eq!(ordered.len(), 1);
-        let ExecutableStep::Native { invocation, .. } = &ordered[0] else {
-            panic!("known native action should not require downloaded action metadata")
-        };
+        let error = repository_action_plans(&job.steps, actions_host).unwrap_err();
         assert_eq!(
-            invocation.adapter,
-            crate::action::NativeActionAdapter::Cache
+            error.to_string(),
+            "repository action 'actions/cache' missing ref"
         );
-        assert_eq!(invocation.inputs["key"], "linux-cache");
-        assert_eq!(invocation.inputs["path"], "~/.cargo");
     }
 
     #[test]
@@ -8843,9 +8894,17 @@ runs:
             metadata,
         };
 
-        let ordered =
-            ordered_executable_steps(&job, &[], &plans, &[resolved], &[], actions_host, &[])
-                .unwrap();
+        let ordered = ordered_executable_steps(
+            &job,
+            &[],
+            &plans,
+            &[resolved],
+            &[],
+            actions_host,
+            &[],
+            false,
+        )
+        .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native {
@@ -8940,9 +8999,17 @@ runs:
             metadata: upload_metadata,
         };
 
-        let ordered =
-            ordered_executable_steps(&job, &[], &plans, &[pages, upload], &[], actions_host, &[])
-                .unwrap();
+        let ordered = ordered_executable_steps(
+            &job,
+            &[],
+            &plans,
+            &[pages, upload],
+            &[],
+            actions_host,
+            &[],
+            false,
+        )
+        .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native {

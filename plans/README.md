@@ -58,7 +58,7 @@ every repo (§2.12; `audit-ci` rule 11 enforces it).
 
 | Plan | Title | Priority | Effort | Depends on | Maps to | Status |
 |------|-------|----------|--------|------------|---------|--------|
-| 033 | Strict capability manifest; no unknown-action fallback | P0 | L | — | V0.14; contract gates 1–3,6,7 | IN PROGRESS |
+| 033 | Strict capability manifest; no unknown-action fallback | P0 | L | — | V0.14; contract gates 1–3,6,7 | DONE: versioned ref/input manifest, pre-side-effect validation, diagnostic-only Node fallback, export/check CLI, eight focused tests, and all gates green |
 | 034 | Compiler-cache backend seam (sccache v0.16.0 baked, kache, off) | P0 | L | 033 | contract gates 4–5; V2.2/V2.3 | TODO |
 | 035 | Canonical storage contract + fail-closed identity | P0 | L | — | V0.11; P0 unknown-repo bug | DONE: canonical resolver/catalog/CLI, legacy readability, fail-closed identity, packaging, and all gates green |
 | 036 | Capacity controller — leases, reservations, reclaim-before-accept | P0 | L | 035 (037 couples) | V0.12/V0.13 | DONE: serialized reservations, emergency floor/hysteresis, lease-safe shortfall reclaim, explicit backpressure, doctor output, live host proof, and all gates green |

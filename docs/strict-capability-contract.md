@@ -1,6 +1,6 @@
 # Strict Capability and Local Compiler-Cache Contract
 
-Status: accepted direction; implementation requires its own reviewed change  
+Status: accepted direction; manifest/ref/input gates implemented by plan 033
 Date: 2026-07-18
 
 ## Law
@@ -19,13 +19,14 @@ does not expand the surface.
 
 ## Current architectural gaps
 
-The present runner does not yet satisfy this law:
+Plan 033 closed the first product-path enforcement gaps:
 
 - native adapters are selected by repository name without enforcing an approved
-  action ref;
-- the native sccache adapter ignores invocation inputs;
-- unknown JavaScript actions may execute in a Node sidecar;
-- input allowlists and allowed-value schemas are not centralized.
+  action ref **(closed: plan 033)**;
+- the native sccache adapter ignores invocation inputs **(closed: plan 033)**;
+- unknown JavaScript actions may execute in a Node sidecar **(closed: plan 033)**;
+- input allowlists and allowed-value schemas are not centralized
+  **(closed: plan 033)**.
 
 These are enabling structures for silent divergence. Replace repository-name
 dispatch with a typed, versioned manifest and remove unknown-action fallback
@@ -150,9 +151,13 @@ action post step owns reporting.
 ## Implementation and proof gates
 
 1. Add typed ref/input/value validation before every execution side effect.
+   **Implemented by plan 033.** Remaining job/container/expression dimensions
+   extend the same manifest in subsequent plans.
 2. Remove unknown-action sidecar fallback from the product path.
+   **Implemented by plan 033;** both diagnostic flags are required to reach it.
 3. Make every native adapter declare and test its exact surface; an ignored
-   provided input is a failure.
+   provided input is a failure. **Implemented by plan 033.** Surface changes
+   require a manifest version bump.
 4. Add native Rust Kache setup/post/store/report support and refactor sccache
    through the common backend seam.
 5. Bake both pinned binaries into the Ubuntu image; never compile during a job.
@@ -162,4 +167,3 @@ action post step owns reporting.
    of silently expanding support.
 8. Run the matched local and disk-pressure experiments in
    [storage-and-disk-pressure-2026-07-18.md](storage-and-disk-pressure-2026-07-18.md).
-
