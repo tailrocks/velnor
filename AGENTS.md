@@ -132,6 +132,14 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-07-18: **Cargo downloads shared; extracted trees job-local**: the first
+  Schemalane campaign proved Cargo's package-cache locking does not make a
+  registry `src` tree safe across concurrent containers (`.cargo-ok` creation
+  raced with `EEXIST`). Velnor shares only immutable registry archives/indexes
+  and bare git databases; extracted registry sources and git checkouts remain
+  in the job home. This preserves zero-download warm runs without exposing
+  mutable materialization trees across slots.
+
 - 2026-07-18: **Persistent Cargo targets preserve workspace semantics**:
   `VELNOR_CARGO_TARGET_PERSIST` mounts the scoped host bucket at the ordinary
   `/__w/target` workspace path. Target generations invalidate artifacts when

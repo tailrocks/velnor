@@ -102,19 +102,25 @@ impl JobContainerSpec {
             ),
             "-v".into(),
             self.mount_arg(&self.home_host, "/github/home"),
-            // Host-persistent cargo registry/git stores (daemon-shared, like
-            // sccache): downloads land on the host once and every later job —
-            // on any slot — starts with a warm registry. Cargo's own file
-            // locking makes concurrent jobs on the shared store safe.
+            // Share immutable Cargo downloads and indexes across the daemon,
+            // but keep extracted registry sources and git checkouts in the
+            // job home. Separate containers can otherwise race while creating
+            // `.cargo-ok` in the same extracted crate (Cargo's package-cache
+            // lock does not serialize that mutation across container jobs).
             "-v".into(),
             self.mount_arg(
-                &cargo_store_host(&self.temp_host).join("registry"),
-                "/github/home/.cargo/registry",
+                &cargo_store_host(&self.temp_host).join("registry/cache"),
+                "/github/home/.cargo/registry/cache",
             ),
             "-v".into(),
             self.mount_arg(
-                &cargo_store_host(&self.temp_host).join("git"),
-                "/github/home/.cargo/git",
+                &cargo_store_host(&self.temp_host).join("registry/index"),
+                "/github/home/.cargo/registry/index",
+            ),
+            "-v".into(),
+            self.mount_arg(
+                &cargo_store_host(&self.temp_host).join("git/db"),
+                "/github/home/.cargo/git/db",
             ),
             // $CARGO_HOME/bin holds executable proxies on PATH, so it is
             // shared only inside one trust/repository scope. Registry/git data
@@ -958,8 +964,9 @@ pub(crate) fn kache_host(temp_host: &Path) -> PathBuf {
     )
 }
 
-/// Host-persistent cargo registry + git store, daemon-shared like sccache.
-/// Mounted at /github/home/.cargo/{registry,git} in every job container.
+/// Host-persistent Cargo download/index store, daemon-shared like sccache.
+/// Extracted registry sources and git checkouts remain job-local because they
+/// are mutable during materialization and are unsafe to share across slots.
 pub(crate) fn cargo_store_host(temp_host: &Path) -> PathBuf {
     crate::storage::cache_class_path(&daemon_store_root(temp_host), "cargo", "_velnor_cargo")
 }
@@ -1320,12 +1327,12 @@ mod tests {
         let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
 
         assert_eq!(
-            cargo_store_host(temp).join("registry"),
-            PathBuf::from("/var/lib/velnor/work/_velnor_cargo/registry")
+            cargo_store_host(temp).join("registry/cache"),
+            PathBuf::from("/var/lib/velnor/work/_velnor_cargo/registry/cache")
         );
         assert_eq!(
-            cargo_store_host(temp).join("git"),
-            PathBuf::from("/var/lib/velnor/work/_velnor_cargo/git")
+            cargo_store_host(temp).join("git/db"),
+            PathBuf::from("/var/lib/velnor/work/_velnor_cargo/git/db")
         );
         assert_eq!(
             mise_store_host(temp).join("cache"),
@@ -1362,8 +1369,19 @@ mod tests {
         assert!(args
             .contains(&"/tmp/_velnor_mise/installs/trusted/acme_repo:/opt/mise/installs".into()));
         assert!(args.contains(&"/tmp/_velnor_mise/rustup/trusted/acme_repo:/root/.rustup".into()));
-        assert!(args.contains(&"/tmp/_velnor_cargo/registry:/github/home/.cargo/registry".into()));
-        assert!(args.contains(&"/tmp/_velnor_cargo/git:/github/home/.cargo/git".into()));
+        assert!(args.contains(
+            &"/tmp/_velnor_cargo/registry/cache:/github/home/.cargo/registry/cache".into()
+        ));
+        assert!(args.contains(
+            &"/tmp/_velnor_cargo/registry/index:/github/home/.cargo/registry/index".into()
+        ));
+        assert!(args.contains(&"/tmp/_velnor_cargo/git/db:/github/home/.cargo/git/db".into()));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.ends_with(":/github/home/.cargo/registry/src")));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.ends_with(":/github/home/.cargo/git/checkouts")));
         assert!(args.contains(&"/tmp/_velnor_mise/cache:/opt/mise/cache".into()));
         assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"HOME=/github/home".into()));
