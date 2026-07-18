@@ -8,12 +8,29 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      lanes:
+        type: choice
+        default: velnor
+        options: [velnor, github, both]
+
+concurrency:
+  group: renovate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   renovate:
-    runs-on: ubuntu-24.04
+    name: Renovate (${{ matrix.config.lane }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - name: Self-hosted Renovate
         # The PAT named "tailrocks-renovate" (fine-grained, not classic) must be
@@ -24,6 +41,7 @@ jobs:
         env:
           RENOVATE_REPOSITORIES: ${{ github.repository }}
           RENOVATE_ONBOARDING: false
+          RENOVATE_DRY_RUN: ${{ matrix.config.writer && 'null' || 'full' }}
           # Pin the git author identity so the DCO sign-off trailer in
           # renovate.json::commitBody always matches the commit-author
           # email. DCO-2 requires the Signed-off-by email to equal the
