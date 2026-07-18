@@ -2747,7 +2747,7 @@ async fn handle_job_request(
         if let Some(teardown) = teardown {
             tokio::task::spawn_blocking(move || teardown.run())
                 .await
-                .context("join post-completion teardown task")??;
+                .context("join post-completion teardown task")?;
             println!("forensics.lifecycle: teardown-done");
         }
         println!(
@@ -4241,13 +4241,17 @@ struct TeardownHandle {
 }
 
 impl TeardownHandle {
-    fn run(self) -> Result<()> {
+    fn run(self) {
         let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
         if let Err(error) = executor.cleanup(&self.container) {
             eprintln!("Warning: post-completion Docker teardown failed: {error:#}");
         }
-        fs::remove_dir_all(&self.job_dir)
-            .with_context(|| format!("remove job workspace {}", self.job_dir.display()))
+        if let Err(error) = fs::remove_dir_all(&self.job_dir) {
+            eprintln!(
+                "Warning: post-completion workspace teardown failed for {}: {error}",
+                self.job_dir.display()
+            );
+        }
     }
 }
 
