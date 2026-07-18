@@ -72,7 +72,7 @@ pub fn github_job_container_spec(
     }
 }
 
-fn github_cargo_target_store_host(
+pub(crate) fn github_cargo_target_store_host(
     job: &AgentJobRequestMessage,
     temp_host: &std::path::Path,
     trust_scope: &str,
