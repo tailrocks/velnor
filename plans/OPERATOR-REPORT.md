@@ -1044,3 +1044,12 @@ same-version local-artifact sentence is superseded and must not be used.
   and Rust sources remain unchanged pending resolution through the plan's
   established static contract boundary. No new Velnor dispatch occurs until
   installed apt and job image both report v0.1.81.
+- Parallax signed commit `3553deda` resolves that sole stale assertion without
+  changing production or workflow behavior: the test requires the exact
+  estate-standard dispatch description, `velnor` default, and
+  `velnor`/`github`/`both` options while retaining stable-release safeguards.
+  Actionlint, YAML parsing, workflow policy, classifier (12/12), Oxfmt (493
+  files), format, strict clippy, and nextest (645 passed; 9 skipped) are green.
+  PR <https://github.com/tailrocks/parallax/pull/21> records the minimal
+  higher-priority-standard deviation. Apt package, candidate, image label,
+  nextest, and five Rust targets were verified at v0.1.82 before dispatch.
