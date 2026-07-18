@@ -20,6 +20,7 @@ use tokio::{
     sync::mpsc::UnboundedReceiver,
     task::{JoinHandle, JoinSet},
 };
+use tracing::Instrument as _;
 
 use crate::{
     action::{
@@ -2406,6 +2407,7 @@ async fn handle_v2_message(
         .run_service_url
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("V2 runner job request missing run_service_url"))?;
+    let pickup_span = tracing::info_span!("job-pickup");
     let job_value = run_service
         .acquire_job(
             run_service_url,
@@ -2413,6 +2415,7 @@ async fn handle_v2_message(
             std::env::consts::OS,
             reference.billing_owner_id.as_deref(),
         )
+        .instrument(pickup_span)
         .await?;
     let job_value = match job_value {
         AcquireJobOutcome::Acquired(value) => value,
@@ -2733,6 +2736,7 @@ async fn handle_job_request(
         let outputs = job_result.outputs;
         let step_logs = job_result.step_logs;
         let teardown = job_result.teardown;
+        let finalize_span = tracing::info_span!("job-finalize");
         let completion = complete_run_service_job_refreshing(
             &run_service_job.client,
             &stored_for_refresh,
@@ -2746,6 +2750,7 @@ async fn handle_job_request(
             None,
             false,
         )
+        .instrument(finalize_span)
         .await;
         renewal.abort();
         completion?;
@@ -3895,12 +3900,15 @@ fn execute_script_job_inner(
             });
         }
         let mut checkout_trace = Vec::new();
-        let checkout_result = crate::checkout::execute_checkout_with_mirror(
-            &mut command_runner,
-            plan,
-            &mut checkout_trace,
-            Some(&git_mirror_store),
-        );
+        let checkout_result = {
+            let _span = tracing::info_span!("job-checkout").entered();
+            crate::checkout::execute_checkout_with_mirror(
+                &mut command_runner,
+                plan,
+                &mut checkout_trace,
+                Some(&git_mirror_store),
+            )
+        };
         let exit_code = if checkout_result.is_ok() { 0 } else { 1 };
         if let Err(ref e) = checkout_result {
             eprintln!("Checkout failed: {e:#}");
@@ -4001,15 +4009,18 @@ fn execute_script_job_inner(
     if let Some(sender) = step_log_sender {
         executor = executor.with_step_log_sender(sender);
     }
-    let summary_result = executor.execute_ordered_steps_without_cleanup(
-        &plan.execution.job_container,
-        &plan.steps,
-        &plan.execution.env,
-        &plan.execution.context_data,
-        job.job_outputs.as_ref(),
-        actions_environment_url(job),
-        &plan.execution.temp_host,
-    );
+    let summary_result = {
+        let _span = tracing::info_span!("job-steps").entered();
+        executor.execute_ordered_steps_without_cleanup(
+            &plan.execution.job_container,
+            &plan.steps,
+            &plan.execution.env,
+            &plan.execution.context_data,
+            job.job_outputs.as_ref(),
+            actions_environment_url(job),
+            &plan.execution.temp_host,
+        )
+    };
     println!(
         "forensics.lifecycle event=last-step-end timestamp={}",
         unix_now_iso8601()
@@ -4288,6 +4299,7 @@ fn slot_teardown_tasks() -> &'static std::sync::Mutex<SlotTeardownTasks> {
 
 fn spawn_post_completion_teardown(config_dir: PathBuf, teardown: TeardownHandle) {
     let task = std::thread::spawn(move || {
+        let _span = tracing::info_span!("job-teardown").entered();
         teardown.run();
         println!(
             "forensics.lifecycle event=teardown-done timestamp={}",
