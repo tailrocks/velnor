@@ -1,7 +1,7 @@
 use aho_corasick::{AhoCorasick, MatchKind};
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -56,7 +56,7 @@ use crate::{
     },
     runtime_env::job_runtime_env,
     script_step::{StepAnnotation, StepAnnotationLevel},
-    slot_log::{self, SlotForensics},
+    slot_log::{self, SlotForensics, LIFECYCLE_LOG},
 };
 
 const JOB_CANCELLATION_MESSAGE: &str = "JobCancellation";
@@ -103,6 +103,31 @@ struct RunServiceJobContext {
 struct AcquiredJobIdentity {
     plan_id: String,
     job_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct JobTimingRecord {
+    v: u8,
+    job_id: String,
+    pickup_ms: u64,
+    first_step_ms: u64,
+    checkout_ms: u64,
+    container_boot_ms: u64,
+    steps_ms: u64,
+    finalize_ms: u64,
+    teardown_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ExecutionTimings {
+    first_step_ms: u64,
+    checkout_ms: u64,
+    container_boot_ms: u64,
+    steps_ms: u64,
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 impl AcquiredJobIdentity {
@@ -1902,6 +1927,7 @@ async fn run_v2(
                     &args,
                     stored.settings.disable_update,
                     &stored.settings.agent_name,
+                    &forensics,
                     message,
                 )
                 .instrument(message_span)
@@ -2318,6 +2344,7 @@ async fn handle_v2_message(
     args: &RunArgs,
     disable_update: bool,
     runner_name: &str,
+    forensics: &SlotForensics,
     message: crate::protocol::TaskAgentMessage,
 ) -> Result<V2MessageAction> {
     println!(
@@ -2407,6 +2434,7 @@ async fn handle_v2_message(
         .run_service_url
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("V2 runner job request missing run_service_url"))?;
+    let pickup_started = Instant::now();
     let pickup_span = tracing::info_span!("job-pickup");
     let job_value = run_service
         .acquire_job(
@@ -2489,11 +2517,14 @@ async fn handle_v2_message(
         broker_cancellation,
         runner_name,
         job,
+        forensics,
+        duration_ms(pickup_started.elapsed()),
     )
     .await?;
     Ok(V2MessageAction::JobHandled)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_job_request(
     config_dir: &std::path::Path,
     args: &RunArgs,
@@ -2501,6 +2532,8 @@ async fn handle_job_request(
     broker_cancellation: BrokerCancellationContext,
     runner_name: &str,
     job: AgentJobRequestMessage,
+    forensics: &SlotForensics,
+    pickup_ms: u64,
 ) -> Result<()> {
     println!(
         "Parsed job request {} for job '{}' ({} step(s), {} endpoint(s)).",
@@ -2710,6 +2743,7 @@ async fn handle_job_request(
                         environment_url: None,
                         step_logs: Vec::new(),
                         teardown: None,
+                        timings: ExecutionTimings::default(),
                     }
                 } else {
                     let infrastructure_failure_category =
@@ -2737,6 +2771,8 @@ async fn handle_job_request(
         let outputs = job_result.outputs;
         let step_logs = job_result.step_logs;
         let teardown = job_result.teardown;
+        let execution_timings = job_result.timings;
+        let finalize_started = Instant::now();
         let finalize_span = tracing::info_span!("job-finalize");
         let completion = complete_run_service_job_refreshing(
             &run_service_job.client,
@@ -2753,14 +2789,33 @@ async fn handle_job_request(
         )
         .instrument(finalize_span)
         .await;
+        let finalize_ms = duration_ms(finalize_started.elapsed());
         renewal.abort();
         completion?;
         println!(
             "forensics.lifecycle event=completion-posted timestamp={}",
             unix_now_iso8601()
         );
+        let timing_record = JobTimingRecord {
+            v: 1,
+            job_id: job.job_id.clone(),
+            pickup_ms,
+            first_step_ms: pickup_ms.saturating_add(execution_timings.first_step_ms),
+            checkout_ms: execution_timings.checkout_ms,
+            container_boot_ms: execution_timings.container_boot_ms,
+            steps_ms: execution_timings.steps_ms,
+            finalize_ms,
+            teardown_ms: 0,
+        };
         if let Some(teardown) = teardown {
-            spawn_post_completion_teardown(teardown_config_dir, teardown);
+            spawn_post_completion_teardown(
+                teardown_config_dir,
+                teardown,
+                forensics.clone(),
+                timing_record,
+            );
+        } else if let Ok(json) = serde_json::to_string(&timing_record) {
+            forensics.lifecycle(&format!("job-timing {json}"));
         }
         println!(
             "Job completed with result {:?} and message acknowledged.",
@@ -3791,6 +3846,7 @@ fn execute_script_job_inner(
     step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
     daemon_id: String,
 ) -> Result<ScriptJobResult> {
+    let execution_started = Instant::now();
     let workspace = job_dir.join("workspace");
     let temp = job_dir.join("temp");
     let home = job_dir.join("home");
@@ -3882,6 +3938,7 @@ fn execute_script_job_inner(
     // executor's normal lazy startup path.
     let precreated_environment = PrecreatedJobEnvironment::spawn(container.clone());
     let mut checkout_order: i32 = 1;
+    let mut checkout_duration = Duration::ZERO;
     // Eager checkout logs also belong in the downloadable job-log artifact —
     // they only travelled the live channel before, so the artifact was the one
     // place the checkout step was missing.
@@ -3901,6 +3958,7 @@ fn execute_script_job_inner(
             });
         }
         let mut checkout_trace = Vec::new();
+        let checkout_started = Instant::now();
         let checkout_result = {
             let _span = tracing::info_span!("job-checkout").entered();
             crate::checkout::execute_checkout_with_mirror(
@@ -3910,6 +3968,7 @@ fn execute_script_job_inner(
                 Some(&git_mirror_store),
             )
         };
+        checkout_duration = checkout_duration.saturating_add(checkout_started.elapsed());
         let exit_code = if checkout_result.is_ok() { 0 } else { 1 };
         if let Err(ref e) = checkout_result {
             eprintln!("Checkout failed: {e:#}");
@@ -3997,8 +4056,10 @@ fn execute_script_job_inner(
     // Keep clones for synthetic steps after executor (senders are moved into executor below).
     let post_step_start_sender = step_start_sender.clone();
     let post_step_log_sender = step_log_sender.clone();
+    let (environment_started, container_boot_duration) = precreated_environment.claim();
+    let container_boot_ms = duration_ms(container_boot_duration);
     let mut executor = DockerScriptExecutor::new(command_runner)
-        .with_job_environment_started(precreated_environment.claim())
+        .with_job_environment_started(environment_started)
         .with_initial_order(checkout_order)
         .with_trailing_post_action_count(cleanup_checkout_plans.len())
         .with_workflow_env(crate::runtime_env::job_environment_variables(job))
@@ -4010,6 +4071,8 @@ fn execute_script_job_inner(
     if let Some(sender) = step_log_sender {
         executor = executor.with_step_log_sender(sender);
     }
+    let steps_started = Instant::now();
+    let first_step_ms = duration_ms(execution_started.elapsed());
     let summary_result = {
         let _span = tracing::info_span!("job-steps").entered();
         executor.execute_ordered_steps_without_cleanup(
@@ -4022,6 +4085,7 @@ fn execute_script_job_inner(
             &plan.execution.temp_host,
         )
     };
+    let steps_ms = duration_ms(steps_started.elapsed());
     println!(
         "forensics.lifecycle event=last-step-end timestamp={}",
         unix_now_iso8601()
@@ -4179,6 +4243,12 @@ fn execute_script_job_inner(
             container: plan.execution.job_container,
             job_dir: job_dir.to_path_buf(),
         }),
+        timings: ExecutionTimings {
+            first_step_ms,
+            checkout_ms: duration_ms(checkout_duration),
+            container_boot_ms,
+            steps_ms,
+        },
     })
 }
 
@@ -4266,6 +4336,7 @@ struct ScriptJobResult {
     environment_url: Option<String>,
     step_logs: Vec<StepLog>,
     teardown: Option<TeardownHandle>,
+    timings: ExecutionTimings,
 }
 
 #[derive(Debug, Clone)]
@@ -4298,10 +4369,20 @@ fn slot_teardown_tasks() -> &'static std::sync::Mutex<SlotTeardownTasks> {
     SLOT_TEARDOWN_TASKS.get_or_init(|| std::sync::Mutex::new(SlotTeardownTasks::new()))
 }
 
-fn spawn_post_completion_teardown(config_dir: PathBuf, teardown: TeardownHandle) {
+fn spawn_post_completion_teardown(
+    config_dir: PathBuf,
+    teardown: TeardownHandle,
+    forensics: SlotForensics,
+    mut timing_record: JobTimingRecord,
+) {
     let task = std::thread::spawn(move || {
         let _span = tracing::info_span!("job-teardown").entered();
+        let teardown_started = Instant::now();
         teardown.run();
+        timing_record.teardown_ms = duration_ms(teardown_started.elapsed());
+        if let Ok(json) = serde_json::to_string(&timing_record) {
+            forensics.lifecycle(&format!("job-timing {json}"));
+        }
         println!(
             "forensics.lifecycle event=teardown-done timestamp={}",
             unix_now_iso8601()
@@ -4339,21 +4420,25 @@ async fn wait_for_prior_slot_teardown(config_dir: &Path) -> Result<()> {
 
 struct PrecreatedJobEnvironment {
     container: crate::container::JobContainerSpec,
-    task: Option<std::thread::JoinHandle<Result<()>>>,
+    task: Option<std::thread::JoinHandle<(Result<()>, Duration)>>,
     claimed: bool,
+    boot_duration: Duration,
 }
 
 impl PrecreatedJobEnvironment {
     fn spawn(container: crate::container::JobContainerSpec) -> Self {
         let task_container = container.clone();
         let task = std::thread::spawn(move || {
+            let started = Instant::now();
             let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
-            executor.start_job_environment(&task_container)
+            let result = executor.start_job_environment(&task_container);
+            (result, started.elapsed())
         });
         Self {
             container,
             task: Some(task),
             claimed: false,
+            boot_duration: Duration::ZERO,
         }
     }
 
@@ -4362,8 +4447,12 @@ impl PrecreatedJobEnvironment {
             return self.claimed;
         };
         match task.join() {
-            Ok(Ok(())) => true,
-            Ok(Err(error)) => {
+            Ok((Ok(()), duration)) => {
+                self.boot_duration = duration;
+                true
+            }
+            Ok((Err(error), duration)) => {
+                self.boot_duration = duration;
                 eprintln!(
                     "Warning: Docker environment pre-create failed; retrying lazily: {error:#}"
                 );
@@ -4376,9 +4465,9 @@ impl PrecreatedJobEnvironment {
         }
     }
 
-    fn claim(mut self) -> bool {
+    fn claim(mut self) -> (bool, Duration) {
         self.claimed = self.join();
-        self.claimed
+        (self.claimed, self.boot_duration)
     }
 }
 
@@ -6236,6 +6325,136 @@ async fn remove_one(args: &RemoveArgs, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+const DEFAULT_SLO_PICKUP_MS: u64 = 3_000;
+const DEFAULT_SLO_FIRST_STEP_MS: u64 = 5_000;
+const DEFAULT_SLO_FINALIZE_MS: u64 = 2_000;
+const DEFAULT_SLO_TEARDOWN_MS: u64 = 2_000;
+const DEFAULT_SLO_SAMPLE_SIZE: usize = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimingPercentiles {
+    pickup_p50: u64,
+    pickup_p95: u64,
+    first_step_p50: u64,
+    first_step_p95: u64,
+    finalize_p50: u64,
+    finalize_p95: u64,
+    teardown_p50: u64,
+    teardown_p95: u64,
+}
+
+fn parse_job_timing_line(line: &str) -> Option<JobTimingRecord> {
+    let (_, json) = line.split_once("job-timing ")?;
+    serde_json::from_str(json.trim()).ok()
+}
+
+fn percentile(values: &mut [u64], percentile: usize) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    let rank = (values.len() * percentile).div_ceil(100).saturating_sub(1);
+    values[rank.min(values.len() - 1)]
+}
+
+fn timing_percentiles(records: &[JobTimingRecord]) -> Option<TimingPercentiles> {
+    if records.is_empty() {
+        return None;
+    }
+    let mut pickup: Vec<_> = records.iter().map(|record| record.pickup_ms).collect();
+    let mut first_step: Vec<_> = records.iter().map(|record| record.first_step_ms).collect();
+    let mut finalize: Vec<_> = records.iter().map(|record| record.finalize_ms).collect();
+    let mut teardown: Vec<_> = records.iter().map(|record| record.teardown_ms).collect();
+    Some(TimingPercentiles {
+        pickup_p50: percentile(&mut pickup.clone(), 50),
+        pickup_p95: percentile(&mut pickup, 95),
+        first_step_p50: percentile(&mut first_step.clone(), 50),
+        first_step_p95: percentile(&mut first_step, 95),
+        finalize_p50: percentile(&mut finalize.clone(), 50),
+        finalize_p95: percentile(&mut finalize, 95),
+        teardown_p50: percentile(&mut teardown.clone(), 50),
+        teardown_p95: percentile(&mut teardown, 95),
+    })
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn recent_job_timings(config_base: &Path, slots: usize, limit: usize) -> Vec<JobTimingRecord> {
+    let Ok(slot_dirs) = daemon_slot_config_dirs(config_base, slots) else {
+        return Vec::new();
+    };
+    let mut records = Vec::new();
+    for slot_dir in slot_dirs {
+        for file_name in [format!("{LIFECYCLE_LOG}.1"), LIFECYCLE_LOG.to_string()] {
+            let path = slot_dir.join("logs").join(file_name);
+            let Ok(contents) = fs::read_to_string(path) else {
+                continue;
+            };
+            records.extend(contents.lines().filter_map(parse_job_timing_line));
+        }
+    }
+    let keep_from = records.len().saturating_sub(limit);
+    records.drain(..keep_from);
+    records
+}
+
+fn print_doctor_slos(records: &[JobTimingRecord]) {
+    let Some(summary) = timing_percentiles(records) else {
+        println!("timing SLOs: no completed job-timing records yet");
+        return;
+    };
+    let pickup_budget = env_u64("VELNOR_SLO_PICKUP_MS", DEFAULT_SLO_PICKUP_MS);
+    let first_step_budget = env_u64("VELNOR_SLO_FIRST_STEP_MS", DEFAULT_SLO_FIRST_STEP_MS);
+    let finalize_budget = env_u64("VELNOR_SLO_FINALIZE_MS", DEFAULT_SLO_FINALIZE_MS);
+    let teardown_budget = env_u64("VELNOR_SLO_TEARDOWN_MS", DEFAULT_SLO_TEARDOWN_MS);
+    println!("timing SLOs: samples={}", records.len());
+    for (name, p50, p95, budget) in [
+        (
+            "pickup",
+            summary.pickup_p50,
+            summary.pickup_p95,
+            pickup_budget,
+        ),
+        (
+            "pickup-to-first-step",
+            summary.first_step_p50,
+            summary.first_step_p95,
+            first_step_budget,
+        ),
+        (
+            "finalize",
+            summary.finalize_p50,
+            summary.finalize_p95,
+            finalize_budget,
+        ),
+        (
+            "teardown",
+            summary.teardown_p50,
+            summary.teardown_p95,
+            teardown_budget,
+        ),
+    ] {
+        let state = timing_slo_state(p95, budget);
+        println!("  {name}: p50={p50}ms p95={p95}ms budget={budget}ms {state}");
+        if p95 > budget {
+            eprintln!("WARNING: timing SLO breach: {name} p95={p95}ms exceeds {budget}ms");
+        }
+    }
+}
+
+fn timing_slo_state(p95: u64, budget: u64) -> &'static str {
+    if p95 > budget {
+        "WARN"
+    } else {
+        "PASS"
+    }
+}
+
 /// Fleet health probe: list this daemon's registered runners on GitHub and
 /// fail (non-zero exit) when none are online, so a systemd timer surfaces a
 /// dead fleet loudly instead of jobs queueing in silence (master-plan P1.4).
@@ -6300,6 +6519,15 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         "capacity: free={} reserved={} reservations={} active_leases={}; cache logical={} physical={}",
         free, reserved_bytes, reservation_count, active_leases, cache_logical, cache_physical
     );
+    let config_base = config::config_dir(None)?;
+    let sample_size = usize::try_from(env_u64(
+        "VELNOR_SLO_SAMPLE_SIZE",
+        DEFAULT_SLO_SAMPLE_SIZE as u64,
+    ))
+    .unwrap_or(DEFAULT_SLO_SAMPLE_SIZE)
+    .max(1);
+    let timing_records = recent_job_timings(&config_base, args.slots, sample_size);
+    print_doctor_slos(&timing_records);
     for runner in &mine {
         println!(
             "  {} [{}{}]",
@@ -8228,6 +8456,7 @@ jobs:
             &run_args(false, false, false),
             true,
             "velnor",
+            &SlotForensics::new(PathBuf::from("/tmp"), "test".to_string()),
             message,
         )
         .await
@@ -9917,5 +10146,79 @@ runs:
         .await
         .unwrap()
         .unwrap();
+    }
+
+    fn timing_record(job_id: &str, pickup_ms: u64) -> JobTimingRecord {
+        JobTimingRecord {
+            v: 1,
+            job_id: job_id.to_string(),
+            pickup_ms,
+            first_step_ms: 30,
+            checkout_ms: 20,
+            container_boot_ms: 30,
+            steps_ms: 40,
+            finalize_ms: 50,
+            teardown_ms: 60,
+        }
+    }
+
+    #[test]
+    fn timing_record_round_trips_as_versioned_json() {
+        let record = timing_record("job-1", 10);
+        let json = serde_json::to_string(&record).unwrap();
+        assert_eq!(
+            serde_json::from_str::<JobTimingRecord>(&json).unwrap(),
+            record
+        );
+        assert!(json.contains("\"v\":1"));
+    }
+
+    #[test]
+    fn timing_parser_ignores_unrelated_and_malformed_lines() {
+        assert!(parse_job_timing_line("broker session created").is_none());
+        assert!(parse_job_timing_line("job-timing not-json").is_none());
+        let record = timing_record("job-2", 11);
+        let line = format!(
+            "2026-07-18T00:00:00Z runner=slot-1 job-timing {}",
+            serde_json::to_string(&record).unwrap()
+        );
+        assert_eq!(parse_job_timing_line(&line), Some(record));
+    }
+
+    #[test]
+    fn timing_percentiles_report_pickup_to_first_step() {
+        let mut slow = timing_record("slow", 9_000);
+        slow.first_step_ms = 4_000;
+        let summary = timing_percentiles(&[timing_record("fast", 100), slow]).unwrap();
+        assert_eq!(summary.pickup_p50, 100);
+        assert_eq!(summary.pickup_p95, 9_000);
+        assert_eq!(summary.first_step_p95, 4_000);
+    }
+
+    #[test]
+    fn doctor_timing_slo_marks_pass_and_breach() {
+        assert_eq!(timing_slo_state(3_000, 3_000), "PASS");
+        assert_eq!(timing_slo_state(3_001, 3_000), "WARN");
+    }
+
+    #[test]
+    fn recent_job_timings_reads_rotated_logs_and_honors_limit() {
+        let root = std::env::temp_dir().join(format!("velnor-timing-{}", uuid::Uuid::new_v4()));
+        let logs = root.join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let old = timing_record("old", 1);
+        let current = timing_record("current", 2);
+        fs::write(
+            logs.join(format!("{LIFECYCLE_LOG}.1")),
+            format!("job-timing {}\n", serde_json::to_string(&old).unwrap()),
+        )
+        .unwrap();
+        fs::write(
+            logs.join(LIFECYCLE_LOG),
+            format!("job-timing {}\n", serde_json::to_string(&current).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(recent_job_timings(&root, 1, 1), vec![current]);
+        fs::remove_dir_all(root).unwrap();
     }
 }
