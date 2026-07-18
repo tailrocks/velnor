@@ -1999,9 +1999,25 @@ where
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
         let install = input_truthy(&native_input_or(&action_state, action, "install", "true"));
+        let version = native_input(action, &action_state, "version");
         let install_args = native_input(action, &action_state, "install_args");
         let working_directory = native_input(action, &action_state, "working_directory");
-        let script = setup_mise_script(install, &install_args, &working_directory);
+        let cache_key_prefix =
+            native_input_or(&action_state, action, "cache_key_prefix", "mise-v2");
+        let cache_save = input_truthy(&native_input_or(
+            &action_state,
+            action,
+            "cache_save",
+            "true",
+        ));
+        let script = setup_mise_script(
+            install,
+            &version,
+            &install_args,
+            &working_directory,
+            &cache_key_prefix,
+            cache_save,
+        );
         let mut result = self.native_shell(container, state, &script, timeout)?;
         // A shell failure can occur before the environment export files are
         // written (for example, a failed tool install or `mise env`). Preserve
@@ -3196,10 +3212,20 @@ fn rewrite_command_file_env_for_action_container(env: &mut [(String, String)]) {
     }
 }
 
-fn setup_mise_script(install: bool, install_args: &str, working_directory: &str) -> String {
+fn setup_mise_script(
+    install: bool,
+    version: &str,
+    install_args: &str,
+    working_directory: &str,
+    cache_key_prefix: &str,
+    cache_save: bool,
+) -> String {
+    let version = shell_single_quote(version);
     let install_args = shell_single_quote(install_args);
     let working_directory = shell_single_quote(working_directory);
+    let cache_key_prefix = shell_single_quote(cache_key_prefix);
     let install_flag = if install { "1" } else { "" };
+    let cache_save_flag = if cache_save { "1" } else { "" };
     format!(
         r#"set -e
 # Use the euid's home (/root) so rustup-init doesn't fail the $HOME vs euid check.
@@ -3224,18 +3250,37 @@ export MISE_TRUSTED_CONFIG_PATHS="/__w"
 # backend publish the image-baked rustup proxy directory as its active bin
 # path, silently selecting the baked toolchain instead of rust-toolchain.toml.
 # Cargo remains discoverable through PATH for cargo-backed mise tools.
+requested_version={version}
+install_requested="{install_flag}"
+cache_key_prefix={cache_key_prefix}
+cache_save_requested="{cache_save_flag}"
+# Upstream cache_save controls archive publication after installation, not
+# mutation of the action's local mise directory. Velnor replaces that remote
+# archive transport with its repository-scoped persistent mount, so both
+# policies use the local store and neither enables a remote backend.
+echo "Velnor local mise cache: generation=$cache_key_prefix cache_save=$cache_save_requested"
+if [ -n "$requested_version" ] || [ -n "$install_requested" ]; then
+  # All slots share the mounted mise binary and tool store. One lock covers
+  # the version transition, tool installation, and environment export so a
+  # concurrent job cannot observe a mixed generation.
+  exec 9>"$mise_home/cache/.velnor-install.lock"
+  flock -x 9
+fi
+if [ -n "$requested_version" ]; then
+  # mise-action v4 makes an explicit version observable even when a different
+  # binary already exists. This is the same exact self-update command used by
+  # upstream v4 when the installed and requested versions differ.
+  installed_version=$(mise --version | awk '{{print $1}}' | sed 's/^v//')
+  if [ "$installed_version" != "$requested_version" ]; then
+    mise self-update "$requested_version" -y
+  fi
+fi
 install_args={install_args}
 working_directory={working_directory}
 if [ -n "$working_directory" ]; then
   cd "$working_directory"
 fi
-if [ -n "{install_flag}" ]; then
-  # All slots share the host-mounted mise cache and repository-scoped rustup
-  # store. Serialize mutation so concurrent jobs cannot observe or publish a
-  # half-installed toolchain. The descriptor remains held through the
-  # environment export below and closes automatically when this script exits.
-  exec 9>"$mise_home/cache/.velnor-install.lock"
-  flock -x 9
+if [ -n "$install_requested" ]; then
   # Trust the workspace config so mise actually reads mise.toml from the checkout.
   for f in "/__w/mise.toml" "/__w/.mise.toml" "/__w/.mise/config.toml"; do
     [ -f "$f" ] && mise trust "$f" 2>/dev/null || true
@@ -7772,11 +7817,17 @@ mod tests {
 
     #[test]
     fn mise_setup_exports_cargo_backend_tool_bins() {
-        let script = setup_mise_script(true, "", "");
+        let script = setup_mise_script(true, "2026.7.7", "", "", "mise-v2", false);
 
         assert!(script.contains("mise bin-paths"));
         assert!(script.contains(r#"flock -x 9"#));
+        assert_eq!(script.matches(r#"flock -x 9"#).count(), 1);
+        assert!(!script.contains(r#"flock -x 8"#));
         assert!(script.contains(r#".velnor-install.lock"#));
+        assert!(script.contains(r#"mise self-update "$requested_version" -y"#));
+        assert!(script.contains("requested_version='2026.7.7'"));
+        assert!(script.contains("cache_key_prefix='mise-v2'"));
+        assert!(script.contains("cache_save_requested=\"\""));
         assert!(script.contains("-type d -empty -exec rm -rf"));
         assert!(script.contains(r#"find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d"#));
         assert!(script.contains(r#"find "$mise_home/installs" -mindepth 3 -maxdepth 3"#));

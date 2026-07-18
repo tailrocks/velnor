@@ -61,7 +61,7 @@ ref must also exist in the compiled manifest.
 | Action | Major | Kind | Source (latest) | Features in focus |
 |--------|-------|------|-----------------|-------------------|
 | `dorny/paths-filter` | v4 | TS | [master](https://github.com/dorny/paths-filter) | YAML rules, glob, per-rule boolean + `_count` + `_files` + `changes`, git-diff source |
-| `jdx/mise-action` | v4 | TS | [main](https://github.com/jdx/mise-action) | install, `install_args`, working-directory, `MISE_*` env, PATH injection (incl. Python-via-mise) |
+| `jdx/mise-action` | v4 | TS | [main](https://github.com/jdx/mise-action) | exact approved `version`, install, `install_args`, working-directory, approved local `cache_key_prefix`/`cache_save`, `MISE_*` env, PATH injection (incl. Python-via-mise) |
 | `extractions/setup-just` | v4 | TS | [main](https://github.com/extractions/setup-just) | just version resolution + PATH |
 | `Swatinem/rust-cache` | v2 | TS | [master](https://github.com/Swatinem/rust-cache) | `shared-key`, `cache-directories`, `cache-on-failure`, outputs |
 | `mozilla-actions/sccache-action` | v0 | TS | [master](https://github.com/mozilla-actions/sccache-action) | server start + env injection, soft-fail gates, `--show-stats` |

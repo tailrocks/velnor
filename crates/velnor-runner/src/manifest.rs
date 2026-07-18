@@ -175,10 +175,13 @@ const DOWNLOAD_INPUTS: &[InputRule] = &[
     InputRule::Literal("merge-multiple", &["true", "false"]),
 ];
 const MISE_INPUTS: &[InputRule] = &[
+    InputRule::Literal("version", &["2026.7.7"]),
     InputRule::Literal("install", &["true", "false"]),
     InputRule::Any("install_args"),
     InputRule::Any("working_directory"),
     InputRule::Any("github_token"),
+    InputRule::Literal("cache_key_prefix", &["mise-v2"]),
+    InputRule::Literal("cache_save", &["true", "false"]),
 ];
 const SCCACHE_INPUTS: &[InputRule] = &[
     InputRule::Literal("version", &["v0.16.0"]),
@@ -971,11 +974,34 @@ mod tests {
             &job(
                 "jdx/mise-action",
                 Some("dad1bfd3df957f44999b559dd69dc1671cb4e9ea"),
-                serde_json::json!({"install_args": "rust zig", "github_token": "masked"}),
+                serde_json::json!({
+                    "version": "2026.7.7",
+                    "install_args": "rust zig",
+                    "github_token": "masked",
+                    "cache_key_prefix": "mise-v2",
+                    "cache_save": "false"
+                }),
             ),
             &[],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn validate_job_rejects_unapproved_mise_cache_surface() {
+        let errors = violations(&job(
+            "jdx/mise-action",
+            Some("dad1bfd3df957f44999b559dd69dc1671cb4e9ea"),
+            serde_json::json!({"cache_key_prefix": "unapproved-generation"}),
+        ));
+        assert_eq!(errors[0].field, "with.cache_key_prefix");
+
+        let errors = violations(&job(
+            "jdx/mise-action",
+            Some("dad1bfd3df957f44999b559dd69dc1671cb4e9ea"),
+            serde_json::json!({"version": "2025.1.0"}),
+        ));
+        assert_eq!(errors[0].field, "with.version");
     }
 
     #[test]
