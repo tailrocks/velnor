@@ -2690,6 +2690,15 @@ async fn handle_job_request(
                 .await?;
                 return Err(error);
             }
+            if let Err(error) = preflight_local_action_closure(&job, &early_context) {
+                complete_acquired_job_failure(
+                    &run_service_job,
+                    &AcquiredJobIdentity::from_job(&job),
+                    Some("nested_capability_validation".to_string()),
+                )
+                .await?;
+                return Err(error);
+            }
         }
         // Lease publication mutates the runtime store, so it must follow all
         // trust and strict-capability checks. Keep the guards through result
@@ -4884,6 +4893,185 @@ fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowS
         path,
         sha,
     })
+}
+
+fn preflight_local_action_closure(
+    job: &AgentJobRequestMessage,
+    context_data: &[(String, Value)],
+) -> Result<()> {
+    let local_paths: Vec<String> = job
+        .steps
+        .iter()
+        .filter(|step| step.enabled)
+        .filter_map(|step| step.reference.as_ref())
+        .filter_map(|reference| {
+            reference
+                .path
+                .as_deref()
+                .or(reference.name.as_deref())
+                .filter(|value| value.starts_with("./"))
+                .map(ToOwned::to_owned)
+        })
+        .collect();
+    if local_paths.is_empty() {
+        return Ok(());
+    }
+    let source = workflow_source_context(context_data)
+        .context("local action preflight requires exact workflow repository and SHA")?;
+    let token = job
+        .system_connection()
+        .and_then(system_connection_access_token)
+        .context("local action preflight requires the job access token")?;
+    let api_url = context_string(context_data, "github.api_url")
+        .unwrap_or_else(|| "https://api.github.com".to_string());
+    preflight_local_paths(
+        &source.repository,
+        &source.sha,
+        &local_paths,
+        &token,
+        &api_url,
+    )
+}
+
+fn preflight_local_paths(
+    repository: &str,
+    sha: &str,
+    paths: &[String],
+    token: &str,
+    api_url: &str,
+) -> Result<()> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("velnor-runner")
+        .build()?;
+    let mut visited = std::collections::BTreeSet::new();
+    for path in paths {
+        preflight_action_metadata(
+            &client,
+            api_url,
+            token,
+            repository,
+            sha,
+            path.trim_start_matches("./"),
+            &mut visited,
+            0,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn preflight_action_metadata(
+    client: &reqwest::blocking::Client,
+    api_url: &str,
+    token: &str,
+    repository: &str,
+    action_ref: &str,
+    action_path: &str,
+    visited: &mut std::collections::BTreeSet<String>,
+    depth: usize,
+) -> Result<()> {
+    const MAX_COMPOSITE_DEPTH: usize = 10;
+    if depth > MAX_COMPOSITE_DEPTH {
+        bail!("composite action depth exceeded {MAX_COMPOSITE_DEPTH}");
+    }
+    let key = format!("{repository}@{action_ref}:{action_path}");
+    if !visited.insert(key) {
+        return Ok(());
+    }
+    let metadata =
+        fetch_action_metadata(client, api_url, token, repository, action_ref, action_path)?;
+    if !metadata.runs.using.eq_ignore_ascii_case("composite") {
+        return Ok(());
+    }
+    for step in &metadata.runs.steps {
+        let Some(uses) = step.uses.as_deref() else {
+            continue;
+        };
+        if uses.starts_with("docker://") {
+            bail!("unsupported nested container action '{uses}' in {repository}@{action_ref}");
+        }
+        if uses.starts_with("./") {
+            preflight_action_metadata(
+                client,
+                api_url,
+                token,
+                repository,
+                action_ref,
+                uses.trim_start_matches("./"),
+                visited,
+                depth + 1,
+            )?;
+            continue;
+        }
+        let (target, target_ref) = uses
+            .rsplit_once('@')
+            .with_context(|| format!("nested action uses is missing @ref: {uses}"))?;
+        let mut segments = target.split('/');
+        let owner = segments.next().context("nested action owner is missing")?;
+        let repo = segments
+            .next()
+            .context("nested action repository is missing")?;
+        let target_repository = format!("{owner}/{repo}");
+        let target_path = segments.collect::<Vec<_>>().join("/");
+        crate::manifest::validate_resolved_action(
+            step.name.as_deref().unwrap_or("nested-action"),
+            &target_repository,
+            target_ref,
+            &step.with,
+        )?;
+        preflight_action_metadata(
+            client,
+            api_url,
+            token,
+            &target_repository,
+            target_ref,
+            &target_path,
+            visited,
+            depth + 1,
+        )?;
+    }
+    Ok(())
+}
+
+fn fetch_action_metadata(
+    client: &reqwest::blocking::Client,
+    api_url: &str,
+    token: &str,
+    repository: &str,
+    action_ref: &str,
+    action_path: &str,
+) -> Result<crate::action::ActionMetadata> {
+    let base = api_url.trim_end_matches('/');
+    let directory = action_path.trim_matches('/');
+    let candidates = ["action.yml", "action.yaml"];
+    let mut last_status = None;
+    for file in candidates {
+        let metadata_path = if directory.is_empty() {
+            file.to_string()
+        } else {
+            format!("{directory}/{file}")
+        };
+        let response = client
+            .get(format!(
+                "{base}/repos/{repository}/contents/{metadata_path}?ref={action_ref}"
+            ))
+            .bearer_auth(token)
+            .header("Accept", "application/vnd.github.raw+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()?;
+        last_status = Some(response.status());
+        if response.status().is_success() {
+            return crate::action::parse_action_metadata(&response.text()?)
+                .with_context(|| format!("parse {repository}@{action_ref}:{metadata_path}"));
+        }
+        if response.status() != reqwest::StatusCode::NOT_FOUND {
+            response.error_for_status()?;
+        }
+    }
+    bail!(
+        "action metadata not found for {repository}@{action_ref}:{directory} (last status {})",
+        last_status.map_or_else(|| "none".to_string(), |status| status.to_string())
+    )
 }
 
 fn context_string(context_data: &[(String, Value)], path: &str) -> Option<String> {
@@ -9275,6 +9463,46 @@ runs:
                 "expected error for {repository} to mention jdx/mise-action, got: {error}"
             );
         }
+    }
+
+    #[test]
+    fn local_composite_unknown_nested_action_fails_read_only_preflight() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let size = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.contains(
+                "GET /repos/acme/repo/contents/.github/actions/local/action.yml?ref=deadbeef"
+            ));
+            let body =
+                "name: local\nruns:\n  using: composite\n  steps:\n    - uses: acme/unknown@v1\n";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let error = preflight_local_paths(
+            "acme/repo",
+            "deadbeef",
+            &["./.github/actions/local".into()],
+            "token",
+            &api,
+        )
+        .unwrap_err();
+        server.join().unwrap();
+        assert!(error.to_string().contains("unsupported capability"));
+        // This preflight owns no executor, cache, service, or container handle;
+        // rejection therefore happens before any of those mutable phases exist.
     }
 
     #[test]
