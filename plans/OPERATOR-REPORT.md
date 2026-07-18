@@ -101,3 +101,17 @@ same-version local-artifact sentence is superseded and must not be used.
   worker closure. This is the smaller pure-data boundary and runs immediately
   after trust validation, before `execute_script_job` can create `_work`,
   download an action, mutate a cache, or create a container.
+
+## 2026-07-18 — Plan 034 Kache topology decision
+
+- Primary-source inspection of Kache v0.10.0 confirmed that its SQLite index,
+  content-addressed blobs, daemon socket, event log, and transfers live below
+  one `KACHE_CACHE_DIR`. Velnor therefore binds that whole root as the selected
+  20 GiB local store; it never mounts Kache and sccache together.
+- The arm64 Ubuntu job-image build completed locally and verified the pinned
+  release checksums plus `sccache 0.16.0` and `kache 0.10.0`. Kache remains a
+  non-default canary until plan 041 and the representative concurrency/crash
+  soak prove the documented shared SQLite/socket lifecycle safe.
+- Context7 was required by repository policy but its MCP tools were unavailable
+  in this execution environment. The documented fallback used exact upstream
+  tags/commits and release assets from the primary repositories instead.

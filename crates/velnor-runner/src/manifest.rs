@@ -6,9 +6,10 @@ use serde::Serialize;
 
 use crate::action::{string_inputs, NativeActionAdapter, NATIVE_ACTION_REF};
 use crate::cli::{CapabilitiesArgs, CapabilitiesCommand};
+use crate::compiler_cache::CompilerCacheBackend;
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 
-pub const MANIFEST_VERSION: u32 = 1;
+pub const MANIFEST_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CapabilityManifest {
@@ -182,6 +183,20 @@ const SCCACHE_INPUTS: &[InputRule] = &[
     InputRule::Literal("disable_annotations", &["false"]),
     InputRule::Forbidden("token"),
 ];
+const KACHE_INPUTS: &[InputRule] = &[
+    InputRule::Literal("version", &["v0.10.0"]),
+    InputRule::Literal("github-cache", &["false"]),
+    InputRule::Literal("cache-executables", &["false"]),
+    InputRule::Literal("pr-comment", &["false"]),
+    InputRule::Literal("max-size", &["20GiB"]),
+    InputRule::Forbidden("token"),
+    InputRule::Forbidden("sync"),
+    InputRule::Forbidden("warm"),
+    InputRule::Forbidden("manifest-key"),
+    InputRule::Forbidden("namespace"),
+    InputRule::Forbidden("min-compile-ms"),
+    InputRule::Forbidden("cache-key-prefix"),
+];
 const RUST_CACHE_INPUTS: &[InputRule] = &[
     InputRule::Any("shared-key"),
     InputRule::Any("cache-directories"),
@@ -289,6 +304,12 @@ pub static ACTIONS: &[ActionCapability] = &[
         Sccache,
         SCCACHE_REFS,
         SCCACHE_INPUTS
+    ),
+    capability!(
+        "kunobi-ninja/kache-action",
+        Kache,
+        &[allowed("49398d37113c616fdb61be434cb497e3c2c8f3e6", "v1")],
+        KACHE_INPUTS
     ),
     capability!("rui314/setup-mold", SetupMold, MOLD_REFS, &[]),
     capability!(
@@ -506,7 +527,143 @@ pub fn violations(job: &AgentJobRequestMessage) -> Vec<CapabilityViolation> {
             &inputs,
         );
     }
+    validate_compiler_cache_topology(job, &mut violations);
     violations
+}
+
+pub fn compiler_cache_backend(job: &AgentJobRequestMessage) -> CompilerCacheBackend {
+    let mut sccache = false;
+    let mut kache = false;
+    for step in job.steps.iter().filter(|step| step.enabled) {
+        let repository = step
+            .reference
+            .as_ref()
+            .and_then(|reference| reference.name.as_deref());
+        sccache |= repository
+            .is_some_and(|name| name.eq_ignore_ascii_case("mozilla-actions/sccache-action"));
+        kache |=
+            repository.is_some_and(|name| name.eq_ignore_ascii_case("kunobi-ninja/kache-action"));
+    }
+    match (sccache, kache) {
+        (true, false) => CompilerCacheBackend::Sccache,
+        (false, true) => CompilerCacheBackend::Kache,
+        _ => CompilerCacheBackend::Off,
+    }
+}
+
+fn validate_compiler_cache_topology(
+    job: &AgentJobRequestMessage,
+    violations: &mut Vec<CapabilityViolation>,
+) {
+    let wrappers = job
+        .steps
+        .iter()
+        .filter(|step| step.enabled)
+        .filter_map(|step| {
+            step.reference
+                .as_ref()
+                .and_then(|reference| reference.name.as_deref())
+        })
+        .filter(|repository| {
+            repository.eq_ignore_ascii_case("mozilla-actions/sccache-action")
+                || repository.eq_ignore_ascii_case("kunobi-ninja/kache-action")
+        })
+        .collect::<Vec<_>>();
+    if wrappers
+        .iter()
+        .any(|repository| repository.eq_ignore_ascii_case("mozilla-actions/sccache-action"))
+        && wrappers
+            .iter()
+            .any(|repository| repository.eq_ignore_ascii_case("kunobi-ninja/kache-action"))
+    {
+        violations.push(violation(
+            "job preflight",
+            "compiler-cache",
+            "mixed",
+            "compiler-cache.backend",
+            "sccache+kache",
+            vec!["off".into(), "sccache".into(), "kache".into()],
+        ));
+    }
+
+    let mut environment = Vec::new();
+    for value in &job.environment_variables {
+        collect_environment_names(value, &mut environment);
+    }
+    for step in job.steps.iter().filter(|step| step.enabled) {
+        if let Some(value) = &step.environment {
+            collect_environment_names(value, &mut environment);
+        }
+    }
+    environment.extend(job.variables.keys().cloned());
+    environment.sort_unstable();
+    environment.dedup();
+    for name in environment {
+        let upper = name.to_ascii_uppercase().replace('-', "_");
+        let forbidden = upper == "SCCACHE_DIR"
+            || upper.starts_with("SCCACHE_BUCKET")
+            || upper.starts_with("SCCACHE_ENDPOINT")
+            || upper.starts_with("SCCACHE_REGION")
+            || upper.starts_with("SCCACHE_S3_")
+            || upper.starts_with("SCCACHE_REDIS")
+            || upper.starts_with("SCCACHE_MEMCACHED")
+            || upper.starts_with("SCCACHE_GCS")
+            || upper.starts_with("SCCACHE_AZURE")
+            || upper.starts_with("SCCACHE_WEBDAV")
+            || upper == "KACHE_CACHE_DIR"
+            || upper.starts_with("KACHE_S3_")
+            || upper.starts_with("KACHE_REMOTE")
+            || upper.starts_with("KACHE_PLANNER");
+        if forbidden {
+            violations.push(violation(
+                "job preflight",
+                "compiler-cache",
+                "environment",
+                &format!("env.{name}"),
+                "provided",
+                vec!["variable must be absent; local stores are runner-owned".into()],
+            ));
+        }
+    }
+}
+
+fn collect_environment_names(value: &serde_json::Value, names: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(name) = object
+                .get("Key")
+                .or_else(|| object.get("key"))
+                .and_then(template_literal)
+            {
+                names.push(name.to_string());
+            } else {
+                names.extend(
+                    object
+                        .keys()
+                        .filter(|key| !matches!(key.as_str(), "type" | "Type" | "map" | "Map"))
+                        .cloned(),
+                );
+            }
+            for nested in object.get("map").or_else(|| object.get("Map")).into_iter() {
+                collect_environment_names(nested, names);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for nested in values {
+                collect_environment_names(nested, names);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn template_literal(value: &serde_json::Value) -> Option<&str> {
+    value.as_str().or_else(|| {
+        value
+            .as_object()
+            .and_then(|object| object.get("lit").or_else(|| object.get("Lit")))
+            .and_then(serde_json::Value::as_str)
+    })
 }
 
 fn validate_inputs(
@@ -693,6 +850,7 @@ mod tests {
             NativeActionAdapter::PathsFilter,
             NativeActionAdapter::Mise,
             NativeActionAdapter::Sccache,
+            NativeActionAdapter::Kache,
             NativeActionAdapter::SetupMold,
             NativeActionAdapter::SetupJust,
             NativeActionAdapter::RustCache,
@@ -794,5 +952,75 @@ mod tests {
         });
         let _ = std::fs::remove_file(path);
         result.unwrap();
+    }
+
+    #[test]
+    fn dual_cache_wrappers_rejected() {
+        let mut target = job(
+            "mozilla-actions/sccache-action",
+            Some("9e7fa8a12102821edf02ca5dbea1acd0f89a2696"),
+            serde_json::json!({}),
+        );
+        let kache_step = job(
+            "kunobi-ninja/kache-action",
+            Some("49398d37113c616fdb61be434cb497e3c2c8f3e6"),
+            serde_json::json!({
+                "version": "v0.10.0",
+                "github-cache": "false",
+                "cache-executables": "false",
+                "pr-comment": "false",
+                "max-size": "20GiB"
+            }),
+        )
+        .steps
+        .remove(0);
+        target.steps.push(kache_step);
+        let errors = violations(&target);
+        assert!(errors
+            .iter()
+            .any(|error| error.field == "compiler-cache.backend"));
+        assert_eq!(compiler_cache_backend(&target), CompilerCacheBackend::Off);
+    }
+
+    #[test]
+    fn remote_cache_env_rejected_but_legacy_gha_flag_tolerated() {
+        let mut target = job(
+            "mozilla-actions/sccache-action",
+            Some("9e7fa8a12102821edf02ca5dbea1acd0f89a2696"),
+            serde_json::json!({}),
+        );
+        target.environment_variables = vec![serde_json::json!({
+            "SCCACHE_GHA_ENABLED": "true",
+            "SCCACHE_BUCKET": "remote"
+        })];
+        let errors = violations(&target);
+        assert!(errors
+            .iter()
+            .any(|error| error.field == "env.SCCACHE_BUCKET"));
+        assert!(!errors
+            .iter()
+            .any(|error| error.field == "env.SCCACHE_GHA_ENABLED"));
+    }
+
+    #[test]
+    fn backend_selection_matches_single_wrapper_or_off() {
+        let sccache = job(
+            "mozilla-actions/sccache-action",
+            Some("9e7fa8a12102821edf02ca5dbea1acd0f89a2696"),
+            serde_json::json!({}),
+        );
+        let kache = job(
+            "kunobi-ninja/kache-action",
+            Some("49398d37113c616fdb61be434cb497e3c2c8f3e6"),
+            serde_json::json!({}),
+        );
+        let mut off = sccache.clone();
+        off.steps.clear();
+        assert_eq!(
+            compiler_cache_backend(&sccache),
+            CompilerCacheBackend::Sccache
+        );
+        assert_eq!(compiler_cache_backend(&kache), CompilerCacheBackend::Kache);
+        assert_eq!(compiler_cache_backend(&off), CompilerCacheBackend::Off);
     }
 }
