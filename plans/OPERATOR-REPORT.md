@@ -926,3 +926,20 @@ same-version local-artifact sentence is superseded and must not be used.
   Contract, manifest, runtime, and protocol tests cover the boundary; format,
   strict clippy, all 628 nextest tests, and actionlint pass. The workflow was
   not changed.
+- Plan-055 cold runs passed on v0.1.76 (`pg-bigdecimal` `29655422456`, 175 s;
+  `tracing-request-level` `29655424934`, 189 s), but their immediate both-lane
+  runs `29655544301` and `29655546964` compiled cargo-nextest again and are not
+  valid V-C evidence. Admission history at 18:16:18–18:16:24 UTC proves the
+  capacity controller reclaimed inactive targets, Cargo, and finally the
+  repo-scoped mise/rustup stores to preserve the required 30 GiB reservation
+  per advertised slot plus the 10 GiB floor during concurrent pools. This was
+  required reserve enforcement, not periodic GC; weakening leases, budgets,
+  or recent-store eligibility would falsely advertise safe capacity or shift
+  deletion to another owned store.
+- The structural no-tool-compile fix is signed commit `c24dd41`: both the
+  packaged job image and Velnor's own mise declaration now seed the estate's
+  current cargo-nextest 0.9.140 instead of 0.9.137. Thus a legitimate complete
+  repo-store reclaim still starts with the required prebuilt tool. The current
+  shared image seeds were audited as Rust 1.97.1, rust-script 0.36.0, just
+  1.56.0, protoc 35.1, and gh 2.96.0. All 628 tests and every runner static
+  gate pass.
