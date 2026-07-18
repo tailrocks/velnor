@@ -30,7 +30,7 @@ Velnor already implements the **three-cache model** jackin proposes for containe
 
 | Jackin layer | Velnor today |
 |--------------|--------------|
-| Shared downloads (registry/git) | Host `_velnor_cargo/{registry,git}` mounted into every job (`HOME` truthful) |
+| Shared downloads (registry/git) | Host `_velnor_cargo/registry/{cache,index}` and `_velnor_cargo/git/db` mounted into every job (`HOME` truthful); mutable `registry/src` and `git/checkouts` stay job-local |
 | Shared compiler results | Host `_velnor_sccache` → container `SCCACHE_DIR=/var/cache/sccache` |
 | Scoped build outputs | Opt-in `VELNOR_CARGO_TARGET_PERSIST` → `_velnor_targets/<trust>/<repo>/<workflow>/<job-bucket>` |
 | Trust isolation | Executable cargo/mise bins scoped by trust+repo; targets include trust scope |
@@ -219,7 +219,7 @@ Capture these in estate AGENTS / `VELNOR_PROJECTS_SETUP.md` when standardizing r
 
 ## 9. Summary
 
-The jackin research validates Velnor’s **shared registry + shared compiler cache + scoped targets** architecture, and exposes the missing half: **hygiene**.
+The jackin research validates Velnor’s **shared registry downloads + shared compiler cache + scoped targets** architecture, and exposes the missing half: **hygiene**. Extracted Cargo sources and git checkouts are job-local because concurrent container materialization is not safe in one mutable tree.
 
 **Highest-value Velnor improvements:**
 

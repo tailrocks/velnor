@@ -79,8 +79,9 @@ A. **Truthful step env, layered** — drop HOME/RUSTUP_HOME/CARGO_HOME from
 
 B. **Host-persistent stores mounted into every job container** (under the
    daemon-shared work root, sibling of `_velnor_sccache`):
-   - `_velnor_cargo/registry` → `/github/home/.cargo/registry`
-   - `_velnor_cargo/git`      → `/github/home/.cargo/git`
+   - `_velnor_cargo/registry/cache` → `/github/home/.cargo/registry/cache`
+   - `_velnor_cargo/registry/index` → `/github/home/.cargo/registry/index`
+   - `_velnor_cargo/git/db`          → `/github/home/.cargo/git/db`
    - `_velnor_mise`           → `/opt/mise` (seeded from the job image's
      baked `/opt/mise` once per image digest, then accretes job-installed
      tools: GraalVM installs once per fleet, not per job)
@@ -89,7 +90,9 @@ B. **Host-persistent stores mounted into every job container** (under the
      per-job-class persistent incremental state; cargo's own build-dir lock
      serializes the rare same-bucket concurrency). Velnor does not export a
      synthetic `CARGO_TARGET_DIR`.
-   Cargo registry/git are concurrency-safe by cargo's own file locking.
+   Immutable Cargo downloads, indexes, and bare git databases are shared.
+   Extracted `registry/src` and `git/checkouts` trees are job-local: Cargo's
+   package-cache lock did not prevent cross-container `.cargo-ok` races.
 
 C. **Cache adapter: persistent-path no-op** — `~/.cargo/registry|git`,
    `/opt/mise`, sccache and target paths resolve to host-persistent
