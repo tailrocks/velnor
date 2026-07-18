@@ -8,6 +8,8 @@ mod compiler_cache;
 mod config;
 mod container;
 mod executor;
+mod fs_copy;
+mod git_mirror;
 mod github_adapter;
 mod job_message;
 mod manifest;

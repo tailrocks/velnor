@@ -150,10 +150,40 @@ fn has_unsupported_enabled_action(steps: &[ActionStep]) -> bool {
     })
 }
 
+#[cfg(test)]
 pub fn execute_checkout<R>(runner: &mut R, plan: &CheckoutPlan, log: &mut Vec<String>) -> Result<()>
 where
     R: CommandRunner,
 {
+    execute_checkout_with_mirror(runner, plan, log, None)
+}
+
+pub fn execute_checkout_with_mirror<R>(
+    runner: &mut R,
+    plan: &CheckoutPlan,
+    log: &mut Vec<String>,
+    mirror_store: Option<&Path>,
+) -> Result<()>
+where
+    R: CommandRunner,
+{
+    let mirror = mirror_store.and_then(|store| {
+        match crate::git_mirror::ensure_mirror(
+            runner,
+            store,
+            &plan.clone_url,
+            plan.token.as_deref(),
+        ) {
+            Ok(mirror) => Some(mirror),
+            Err(error) => {
+                eprintln!(
+                    "Warning: git mirror refresh failed for {}; using direct checkout: {error:#}",
+                    plan.clone_url
+                );
+                None
+            }
+        }
+    });
     fetch_git_ref(
         runner,
         &plan.clone_url,
@@ -165,6 +195,7 @@ where
         plan.persist_credentials,
         plan.clean,
         plan.lfs,
+        mirror.as_deref(),
         log,
     )?;
     normalize_checkout_mtimes(runner, &plan.destination, log);
@@ -343,6 +374,7 @@ pub fn fetch_git_ref<R>(
     persist_credentials: bool,
     clean: bool,
     lfs: bool,
+    mirror: Option<&Path>,
     log: &mut Vec<String>,
 ) -> Result<()>
 where
@@ -383,9 +415,6 @@ where
         "-c".to_string(),
         "protocol.version=2".to_string(),
     ];
-    if let Some(token) = token {
-        fetch.extend(["-c".to_string(), git_basic_auth_header(token)]);
-    }
     fetch.extend(["fetch".to_string(), "--prune".to_string()]);
     match fetch_depth {
         Some(depth) => {
@@ -407,7 +436,19 @@ where
             ]);
         }
     }
-    run_git(runner, &fetch, log)?;
+    let fetch_env = git_auth_env(clone_url, token);
+    if let Some(mirror) = mirror {
+        let mut accelerated = fetch.clone();
+        if let Some(origin) = accelerated
+            .iter_mut()
+            .find(|value| value.as_str() == "origin")
+        {
+            *origin = path_arg(mirror);
+        }
+        run_git_with_env_and_display(runner, &accelerated, &fetch, &fetch_env, log)?;
+    } else {
+        run_git_with_env_and_display(runner, &fetch, &fetch, &fetch_env, log)?;
+    }
 
     // For lfs:true, the git-lfs smudge filter runs during checkout and downloads
     // LFS blobs — it authenticates via the persisted http.<host>.extraheader, so
@@ -495,18 +536,40 @@ fn persist_git_credentials<R>(
 where
     R: CommandRunner,
 {
-    run_git(
-        runner,
+    let key = git_extraheader_key(clone_url);
+    let _ = runner.run(
+        "git",
         &[
             "-C".to_string(),
             path_arg(destination),
             "config".to_string(),
             "--local".to_string(),
-            git_extraheader_key(clone_url),
-            git_basic_auth_value(token),
+            "--unset-all".to_string(),
+            key.clone(),
         ],
-        log,
+    );
+    log.push(format!(
+        "[command]git -C {} config --local {} AUTHORIZATION: ***",
+        path_arg(destination),
+        key
+    ));
+    let config_path = destination.join(".git/config");
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create checkout config dir {}", parent.display()))?;
+    }
+    let mut config = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&config_path)
+        .with_context(|| format!("open checkout config {}", config_path.display()))?;
+    writeln!(
+        config,
+        "\n[http \"{}\"]\n\textraheader = {}",
+        git_extraheader_scope(clone_url),
+        git_basic_auth_value(token)
     )
+    .with_context(|| format!("write checkout credential {}", config_path.display()))
 }
 
 fn run_git<R>(runner: &mut R, args: &[String], log: &mut Vec<String>) -> Result<()>
@@ -531,6 +594,40 @@ where
             format!(
                 "git {} failed with code {}: {}",
                 format_git_args(args),
+                result.code,
+                result.stderr
+            ),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn run_git_with_env_and_display<R>(
+    runner: &mut R,
+    args: &[String],
+    display_args: &[String],
+    env: &[(String, String)],
+    log: &mut Vec<String>,
+) -> Result<()>
+where
+    R: CommandRunner,
+{
+    log.push(format!("[command]git {}", format_git_args(display_args)));
+    let result = runner.run_with_env("git", args, env)?;
+    for line in result.stdout.lines().chain(result.stderr.lines()) {
+        let trimmed = line.trim_end();
+        if !trimmed.is_empty() {
+            log.push(trimmed.to_string());
+        }
+    }
+    if result.code != 0 {
+        return Err(StepLogicFailure::new(
+            result.code,
+            "",
+            format!(
+                "git {} failed with code {}: {}",
+                format_git_args(display_args),
                 result.code,
                 result.stderr
             ),
@@ -907,12 +1004,17 @@ fn git_basic_auth_value(token: &str) -> String {
     format!("AUTHORIZATION: basic {encoded}")
 }
 
-/// Build the full git -c argument for the http.extraheader using basic auth.
-fn git_basic_auth_header(token: &str) -> String {
-    format!("http.extraheader={}", git_basic_auth_value(token))
+pub(crate) fn git_auth_env(clone_url: &str, token: Option<&str>) -> Vec<(String, String)> {
+    token.map_or_else(Vec::new, |token| {
+        vec![
+            ("GIT_CONFIG_COUNT".into(), "1".into()),
+            ("GIT_CONFIG_KEY_0".into(), git_extraheader_key(clone_url)),
+            ("GIT_CONFIG_VALUE_0".into(), git_basic_auth_value(token)),
+        ]
+    })
 }
 
-fn git_extraheader_key(clone_url: &str) -> String {
+pub(crate) fn git_extraheader_key(clone_url: &str) -> String {
     Url::parse(clone_url)
         .ok()
         .and_then(|url| {
@@ -920,6 +1022,16 @@ fn git_extraheader_key(clone_url: &str) -> String {
             Some(format!("http.{}://{host}/.extraheader", url.scheme()))
         })
         .unwrap_or_else(|| "http.https://github.com/.extraheader".to_string())
+}
+
+fn git_extraheader_scope(clone_url: &str) -> String {
+    Url::parse(clone_url)
+        .ok()
+        .and_then(|url| {
+            let host = url.host_str()?;
+            Some(format!("{}://{host}/", url.scheme()))
+        })
+        .unwrap_or_else(|| "https://github.com/".to_string())
 }
 
 fn format_git_args(args: &[String]) -> String {
@@ -946,6 +1058,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingRunner {
         calls: Vec<(String, Vec<String>)>,
+        env_calls: Vec<Vec<(String, String)>>,
     }
 
     impl CommandRunner for RecordingRunner {
@@ -956,6 +1069,16 @@ mod tests {
                 stdout: String::new(),
                 stderr: String::new(),
             })
+        }
+
+        fn run_with_env(
+            &mut self,
+            program: &str,
+            args: &[String],
+            env: &[(String, String)],
+        ) -> Result<CommandResult> {
+            self.env_calls.push(env.to_vec());
+            self.run(program, args)
         }
     }
 
@@ -1008,8 +1131,15 @@ mod tests {
             .iter()
             .any(|(_, args)| args.contains(&"fetch".to_string())
                 && args.contains(&"abc123".to_string())
-                && args.contains(&"--depth=1".to_string())
-                && args.iter().any(|arg| arg.contains("AUTHORIZATION: basic "))));
+                && args.contains(&"--depth=1".to_string())));
+        assert!(runner.env_calls.iter().any(|env| env
+            .iter()
+            .any(|(name, value)| name == "GIT_CONFIG_VALUE_0"
+                && value.starts_with("AUTHORIZATION: basic "))));
+        assert!(!runner
+            .calls
+            .iter()
+            .any(|(_, args)| args.iter().any(|arg| arg.contains("AUTHORIZATION: basic "))));
         assert!(runner.calls.iter().any(|(_, args)| args.ends_with(&[
             "checkout".into(),
             "--force".into(),
@@ -1024,13 +1154,88 @@ mod tests {
             .calls
             .iter()
             .any(|(_, args)| args.ends_with(&["clean".into(), "-ffdx".into()])));
-        assert!(runner.calls.iter().any(|(_, args)| {
-            args.len() >= 2
-                && args[args.len() - 2] == "http.https://github.com/.extraheader"
-                && args[args.len() - 1].starts_with("AUTHORIZATION: basic ")
-        }));
+        let config = std::fs::read_to_string(temp.join(".git/config")).unwrap();
+        assert!(config.contains("extraheader = AUTHORIZATION: basic "));
 
         std::fs::remove_dir_all(temp).ok();
+    }
+
+    #[test]
+    fn checkout_uses_refreshed_mirror_without_changing_command_trace() {
+        let root = std::env::temp_dir().join(format!("velnor-checkout-{}", uuid::Uuid::new_v4()));
+        let mirror_store = root.join("mirrors");
+        let plan = test_checkout_plan(root.join("workspace"));
+        let mut runner = RecordingRunner::default();
+        let mut log = Vec::new();
+
+        execute_checkout_with_mirror(&mut runner, &plan, &mut log, Some(&mirror_store)).unwrap();
+
+        let mirror = mirror_store.join("acme__repo.git");
+        assert!(runner.calls.iter().any(|(_, args)| {
+            args.contains(&"fetch".to_string()) && args.contains(&path_arg(&mirror))
+        }));
+        assert!(log.iter().any(|line| {
+            line.contains("git -C") && line.contains("fetch") && line.contains("origin abc123")
+        }));
+        assert!(!log.iter().any(|line| line.contains(&path_arg(&mirror))));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn checkout_falls_back_to_origin_when_mirror_refresh_fails() {
+        #[derive(Default)]
+        struct MirrorFailRunner(RecordingRunner);
+        impl CommandRunner for MirrorFailRunner {
+            fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
+                self.0.calls.push((program.to_string(), args.to_vec()));
+                let mirror_fetch = args.iter().any(|arg| arg == "+refs/*:refs/*");
+                Ok(CommandResult {
+                    code: i32::from(mirror_fetch),
+                    stdout: String::new(),
+                    stderr: if mirror_fetch {
+                        "simulated mirror failure".into()
+                    } else {
+                        String::new()
+                    },
+                })
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("velnor-checkout-{}", uuid::Uuid::new_v4()));
+        let plan = test_checkout_plan(root.join("workspace"));
+        let mut runner = MirrorFailRunner::default();
+
+        execute_checkout_with_mirror(
+            &mut runner,
+            &plan,
+            &mut Vec::new(),
+            Some(&root.join("mirrors")),
+        )
+        .unwrap();
+
+        assert!(runner.0.calls.iter().any(|(_, args)| {
+            args.contains(&"fetch".to_string()) && args.contains(&"origin".to_string())
+        }));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    fn test_checkout_plan(destination: PathBuf) -> CheckoutPlan {
+        CheckoutPlan {
+            step_id: "checkout".into(),
+            display_name: "Checkout".into(),
+            clone_url: "https://github.com/acme/repo.git".into(),
+            version: Some("abc123".into()),
+            destination,
+            token: None,
+            fetch_depth: Some(1),
+            fetch_tags: false,
+            persist_credentials: false,
+            clean: true,
+            lfs: false,
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }
     }
 
     #[test]
