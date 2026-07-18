@@ -5293,6 +5293,14 @@ fn append_resolved_action_steps(
     allow_unknown_action_diagnostics: bool,
 ) -> Result<()> {
     let continue_on_error = parent_continue_on_error || action.plan.continue_on_error;
+    if !allow_unknown_action_diagnostics && !action.plan.repository.starts_with("./") {
+        crate::manifest::validate_resolved_action(
+            &action.plan.step_id,
+            &action.plan.repository,
+            &action.plan.git_ref,
+            &action.plan.inputs,
+        )?;
+    }
     if let Some(invocation) = action.native_invocation() {
         ordered.push(ExecutableStep::Native {
             step_id: action.plan.step_id.clone(),
@@ -9196,9 +9204,7 @@ runs:
         let error =
             ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[], false)
                 .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("unknown action 'acme/action@v1' reached execution"));
+        assert!(error.to_string().contains("unsupported capability"));
         let ordered =
             ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[], true)
                 .unwrap();

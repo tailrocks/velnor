@@ -1901,6 +1901,7 @@ where
             NativeActionAdapter::GitHubRuntimeExport => {
                 Ok(native_github_runtime_export(action, state))
             }
+            NativeActionAdapter::GitHubScript => native_github_script(action, state),
             NativeActionAdapter::PathsFilter => self.native_paths_filter(action, state),
             NativeActionAdapter::DockerSetupBuildx => {
                 self.native_docker_setup_buildx(_container, action, state, timeout)
@@ -4847,6 +4848,257 @@ fn native_github_runtime_export(
         stdout,
         stderr: String::new(),
     }
+}
+
+fn native_github_script(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    const CONTRACT_OUTPUT: &str = "core.setOutput('docs-xtask', process.env.CONTRACT)";
+    const PREPARED_RUNTIME: &str =
+        "return await import(process.env.JACKIN_ACTION_RUNTIME).then(({ main }) => main())";
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let script = native_input(action, &action_state, "script");
+    if script == CONTRACT_OUTPUT {
+        let contract = action_state
+            .env
+            .get("CONTRACT")
+            .cloned()
+            .unwrap_or_default();
+        return Ok(native_success_with_state(StepCommandState {
+            outputs: [("docs-xtask".into(), contract)].into(),
+            ..StepCommandState::default()
+        }));
+    }
+    if script != PREPARED_RUNTIME {
+        bail!("unsupported native github-script body: {script}");
+    }
+    native_restore_prepared_jackin_tools(&action_state, state)
+}
+
+fn native_success_with_state(command_state: StepCommandState) -> StepExecutionResult {
+    StepExecutionResult {
+        exit_code: 0,
+        state: command_state,
+        skipped: false,
+        failure_ignored: false,
+        stdout: String::new(),
+        stderr: String::new(),
+    }
+}
+
+fn native_restore_prepared_jackin_tools(
+    action_state: &JobExecutionState,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = &action_state.env;
+    let enabled = |name: &str, default: bool| {
+        env.get(name)
+            .map(|value| value == "true")
+            .unwrap_or(default)
+    };
+    let include_tools = enabled("JACKIN_INCLUDE_TOOLS", false);
+    let include_xtask = enabled("JACKIN_INCLUDE_XTASK", true);
+    let allow_miss = enabled("JACKIN_ALLOW_MISS", false);
+    let mut tools_hit = include_tools && enabled("JACKIN_TOOLS_CACHE_HIT", false);
+    let mut xtask_hit = include_xtask && enabled("JACKIN_XTASK_CACHE_HIT", false);
+    let workspace_input = env
+        .get("JACKIN_WORKSPACE")
+        .context("native github-script requires JACKIN_WORKSPACE")?;
+    let workspace = resolve_host_path(state, workspace_input)
+        .context("JACKIN_WORKSPACE does not map to the job workspace")?;
+    let tools_dir = workspace.join(".ci-prebuilt-tools");
+    let xtask_dir = workspace.join(".ci-prebuilt-xtask");
+
+    if include_tools && !tools_hit {
+        let artifact = format!(
+            "ci-tools-{}-{}-{}",
+            required_env(env, "JACKIN_RUNNER_OS")?,
+            required_env(env, "JACKIN_RUNNER_ARCH")?,
+            required_env(env, "JACKIN_TOOLS_CONTRACT")?
+        );
+        tools_hit = restore_repository_artifact(env, &artifact, &tools_dir, allow_miss)?;
+    }
+    if include_xtask && !xtask_hit {
+        let prefix = format!(
+            "ci-xtask-{}-{}-",
+            required_env(env, "JACKIN_RUNNER_OS")?,
+            required_env(env, "JACKIN_RUNNER_ARCH")?
+        );
+        let primary = format!("{prefix}{}", required_env(env, "JACKIN_XTASK_CONTRACT")?);
+        xtask_hit = restore_repository_artifact(env, &primary, &xtask_dir, true)?;
+        if !xtask_hit {
+            if let Some(fallback) = env
+                .get("JACKIN_FALLBACK_XTASK_CONTRACT")
+                .filter(|value| !value.is_empty())
+            {
+                xtask_hit = restore_repository_artifact(
+                    env,
+                    &format!("{prefix}{fallback}"),
+                    &xtask_dir,
+                    allow_miss,
+                )?;
+            } else if !allow_miss {
+                bail!("prepared CI xtask artifact not found: {primary}");
+            }
+        }
+    }
+
+    let mut command_state = StepCommandState::default();
+    command_state
+        .outputs
+        .insert("tools-hit".into(), tools_hit.to_string());
+    command_state
+        .outputs
+        .insert("xtask-hit".into(), xtask_hit.to_string());
+    command_state
+        .env
+        .insert("CI_TOOLS_PATH".into(), tools_dir.display().to_string());
+    command_state
+        .env
+        .insert("CI_TOOLS_HIT".into(), tools_hit.to_string());
+    if include_tools && tools_hit {
+        for entry in fs::read_dir(&tools_dir).context("read prepared tools directory")? {
+            let path = entry?.path();
+            if path.is_file() {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+            }
+        }
+        command_state
+            .path
+            .push(to_container_path(state, &tools_dir));
+        let cargo_fuzz = tools_dir.join("cargo-fuzz");
+        if cargo_fuzz.exists() {
+            command_state
+                .env
+                .insert("CI_CARGO_FUZZ".into(), cargo_fuzz.display().to_string());
+        }
+    }
+    if include_xtask {
+        command_state
+            .env
+            .insert("CI_XTASK_HIT".into(), xtask_hit.to_string());
+        let xtask = if xtask_hit {
+            let prepared = xtask_dir.join("jackin-xtask");
+            fs::set_permissions(&prepared, fs::Permissions::from_mode(0o755))?;
+            prepared
+        } else {
+            workspace.join("target/debug/jackin-xtask")
+        };
+        command_state
+            .env
+            .insert("CI_XTASK".into(), xtask.display().to_string());
+        let metadata = xtask_dir.join("workspace-metadata.json");
+        if metadata.exists() {
+            command_state
+                .env
+                .insert("CI_METADATA".into(), metadata.display().to_string());
+        }
+    }
+    Ok(native_success_with_state(command_state))
+}
+
+fn required_env<'a>(env: &'a BTreeMap<String, String>, name: &str) -> Result<&'a str> {
+    env.get(name)
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+        .with_context(|| format!("native github-script requires {name}"))
+}
+
+fn restore_repository_artifact(
+    env: &BTreeMap<String, String>,
+    name: &str,
+    destination: &Path,
+    allow_miss: bool,
+) -> Result<bool> {
+    let token = required_env(env, "JACKIN_TOKEN")?;
+    let repository = required_env(env, "JACKIN_REPOSITORY")?;
+    let (owner, repo) = repository
+        .split_once('/')
+        .context("JACKIN_REPOSITORY must be owner/repo")?;
+    let api = env
+        .get("GITHUB_API_URL")
+        .map(String::as_str)
+        .unwrap_or("https://api.github.com")
+        .trim_end_matches('/');
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("velnor-runner")
+        .build()?;
+    let deadline = std::time::Instant::now()
+        + if allow_miss {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_secs(55)
+        };
+    loop {
+        let response = client
+            .get(format!(
+                "{api}/repos/{owner}/{repo}/actions/artifacts?name={name}&per_page=10"
+            ))
+            .bearer_auth(token)
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()?
+            .error_for_status()?;
+        let body: serde_json::Value = response.json()?;
+        if let Some(id) = body["artifacts"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["expired"] != true))
+            .and_then(|item| item["id"].as_u64())
+        {
+            let archive = client
+                .get(format!(
+                    "{api}/repos/{owner}/{repo}/actions/artifacts/{id}/zip"
+                ))
+                .bearer_auth(token)
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .send()?
+                .error_for_status()?
+                .bytes()?;
+            fs::create_dir_all(destination)?;
+            let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive))?;
+            for index in 0..zip.len() {
+                let mut file = zip.by_index(index)?;
+                let relative = file
+                    .enclosed_name()
+                    .context("artifact archive contains an unsafe path")?
+                    .to_path_buf();
+                let target = destination.join(relative);
+                if file.is_dir() {
+                    fs::create_dir_all(&target)?;
+                } else {
+                    if let Some(parent) = target.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    let mut output = fs::File::create(target)?;
+                    std::io::copy(&mut file, &mut output)?;
+                }
+            }
+            return Ok(true);
+        }
+        if std::time::Instant::now() >= deadline {
+            if allow_miss {
+                return Ok(false);
+            }
+            bail!("prepared CI artifact not found: {name}");
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+fn to_container_path(state: &JobExecutionState, host: &Path) -> String {
+    let workspace_host = state.workspace_host.as_deref().unwrap_or(host);
+    let workspace_container = state
+        .env
+        .get("GITHUB_WORKSPACE")
+        .map(String::as_str)
+        .unwrap_or("/__w");
+    host.strip_prefix(workspace_host)
+        .map(|relative| Path::new(workspace_container).join(relative))
+        .unwrap_or_else(|_| host.to_path_buf())
+        .display()
+        .to_string()
 }
 
 fn native_input(action: &NativeActionInvocation, state: &JobExecutionState, name: &str) -> String {
@@ -8237,6 +8489,23 @@ mod tests {
         );
 
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_github_script_copies_exact_contract_output() {
+        let action = NativeActionInvocation {
+            git_ref: "373c709c69115d41ff229c7e5df9f8788daa9553".into(),
+            adapter: NativeActionAdapter::GitHubScript,
+            inputs: [(
+                "script".into(),
+                "core.setOutput('docs-xtask', process.env.CONTRACT)".into(),
+            )]
+            .into(),
+            env: vec![("CONTRACT".into(), "contract-sha".into())],
+        };
+        let state = JobExecutionState::new(&[]);
+        let result = native_github_script(&action, &state).unwrap();
+        assert_eq!(result.state.outputs["docs-xtask"], "contract-sha");
     }
 
     #[test]
