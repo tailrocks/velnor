@@ -38,3 +38,11 @@ human-only actions for plans 014–015 and 033–059.
 - Human action: grant the daemon credential that permission in each
   organization, create the restricted trusted/fork runner groups described in
   `docs/org-fleet-migration.md`, then run the documented tailrocks-first smoke.
+
+## 2026-07-18 — Debian deployment process (operator decision)
+
+All live Sentry Velnor deployments must use the Debian standard process: the
+change is committed with DCO signoff and pushed, a `.deb` is built from that
+exact commit, and the artifact is installed through `apt`. Direct `dpkg -i`
+deployment is prohibited. Same-version host validation uses
+`apt-get install --reinstall -y ./velnor-runner_<version>_amd64.deb`.
