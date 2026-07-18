@@ -357,3 +357,21 @@ same-version local-artifact sentence is superseded and must not be used.
   (172 KiB during the fixture campaign). It has no persisted `remote.origin.url`
   and therefore no credential-bearing remote. Trace close events measured warm
   checkout at 407–454 ms, under plan 044's one-second acceptance threshold.
+
+## 2026-07-18 — Fixture Kache cross-lane fallback
+
+- GitHub-lane run `29634562086` proved the pinned upstream Kache action
+  deliberately skips `RUSTC_WRAPPER` when both GitHub cache and S3 are
+  disabled. Enabling either backend would expand the approved local-only
+  capability surface, so no remote backend was enabled.
+- Plan 041 explicitly accepts three-lane proof with `cache-kache` disabled.
+  Its literal `if: false` form is rejected by actionlint's `if-cond` rule, so
+  the closest working expression is the false repository-identity guard
+  `github.repository == 'tailrocks/velnor-kache-canary-disabled'`. The job and
+  its assertions remain visible and unchanged for a future separately approved
+  backend decision.
+- Clean GitHub-only fixture run `29634753256` passed with the Kache canary
+  skipped. No fixture workload or successful assertion was weakened.
+- Clean Velnor-only run `29634781889` and combined parity run `29634836133`
+  also passed. The combined run completed `compare-results` successfully,
+  proving the GitHub and Velnor job/step result sets remain equivalent.
