@@ -90,7 +90,7 @@ V-A). Do not open estate PRs before 041's operator verification.
 | 053 | tailrocks/parallax | 2 | L | 051 (pattern), 042 (attest) | IN PROGRESS — retention implemented; static revalidation pending v0.1.81 host convergence |
 | 054 | tailrocks/termrock | 3 | M | 042 (Pages) | BLOCKED — both lanes fail pre-existing out-of-scope rustfmt drift |
 | 055 | schemalane + pg-bigdecimal + tracing-request-level (Class D trio) | 3 | M | 040 (schemalane services) | DONE: all three PRs merged; V-B/V-C passed and final no-change Velnor logs contain no dependency downloads/compiles or tool installs |
-| 056 | tailrocks/parallax-telemetry-playground | 3 | S | — | IN PROGRESS |
+| 056 | tailrocks/parallax-telemetry-playground | 3 | S | — | DONE |
 | 057 | tailrocks/tablerock | 3 | S | — | BLOCKED — target AGENTS forbids branch/PR; plan drift would delete current coverage |
 | 058 | Phase 4: estate enforcement + docs reconcile + required checks | 4 | M | 046, 047–057 | TODO |
 
