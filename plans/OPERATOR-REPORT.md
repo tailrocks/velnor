@@ -414,3 +414,45 @@ same-version local-artifact sentence is superseded and must not be used.
   merge-base (`base...head`) comparison. Velnor now matches that behavior in
   `97e84e4`, with a shallow-fetch regression test in `5092237`. v0.1.54 is
   being delivered through the signed apt chain before the controlled rerun.
+
+## 2026-07-18 — Plan 048 target drift resolution
+
+- blockchain-nodes advanced from planned `d156fe4` to `47d0a65`. The scoped
+  diff is four insertions and four deletions in `build-publish.yml` (dependency
+  pin refresh); all plan-named structures remain present. Work proceeds from
+  current main on the sole `velnor-estate-standard` branch in the separate
+  `/Users/donbeave/Projects/ChainArgos/blockchain-nodes-velnor-estate`
+  worktree, leaving the user's main checkout untouched.
+
+## 2026-07-18 — Plan 048 single-writer fallback
+
+- blockchain-nodes' existing Rust helper inseparably performs Buildx
+  `--push` plus manifest publication, while plan 048 keeps that helper out of
+  scope. The closest contract-conformant `both` implementation uses the
+  helper's existing `build-dry` task on the non-writer lane and the real
+  `build` task only on the writer lane. Both lanes retain the same workflow
+  step set; the secondary validates the exact generated commands without
+  Docker Hub mutation. PR #651 records this prominently.
+
+## 2026-07-18 — Acquired-job rejection recovery
+
+- java-monorepo run `29636133868` attempt 2 exposed unsupported
+  `docker/setup-buildx-action` input `cleanup: false` (manifest v2 accepts
+  `name`, `driver`, and `install`). The unnecessary override was removed in
+  `dd508dbf`; no capability was silently expanded.
+- The strict pre-execution rejection escaped after GitHub marked the JIT
+  runner busy, so the run stayed in progress and the registration could not
+  be deleted (HTTP 422). Normal cancel plus the force-cancel endpoint were
+  attempted; after GitHub released the registration the stale runner was
+  removed and the run concluded cancelled. Commit `3d0077d` now posts an
+  explicit failed completion for step-mapping, trust-policy, and capability
+  validation failures before returning the runner error. v0.1.55 carries the
+  fix through apt.
+
+## 2026-07-18 — Plan 059 completion
+
+- The committed host denominator is
+  `docs/host-baseline-2026-07-18.md`: root use 36%, zero persistent
+  `unknown-repository` identities, no stale owned containers/networks, and no
+  deletion outside exact Velnor-owned paths. Fixture both-lane run
+  `29636145660` is the final post-cleanup smoke and parity proof.
