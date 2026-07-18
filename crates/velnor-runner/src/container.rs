@@ -741,6 +741,18 @@ impl ServiceContainerSpec {
             self.name.clone(),
         ]
     }
+
+    pub fn id_args(&self) -> Vec<String> {
+        vec![
+            "inspect".into(),
+            "--format={{.Id}}".into(),
+            self.name.clone(),
+        ]
+    }
+
+    pub fn mapped_ports_args(&self) -> Vec<String> {
+        vec!["port".into(), self.name.clone()]
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1568,6 +1580,31 @@ mod tests {
                 "velnor-service-postgres"
             ]
         );
+    }
+
+    #[test]
+    fn container_job_reaches_service_by_shared_network_alias() {
+        let job = spec();
+        let service = ServiceContainerSpec {
+            name: "velnor-service-postgres".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: job.network.clone(),
+            env: Vec::new(),
+            ports: vec!["5432".into()],
+            options: Vec::new(),
+        };
+        let job_args = job.start_args();
+        let service_args = service.start_args();
+        assert!(job_args
+            .windows(2)
+            .any(|pair| pair == ["--network", "velnor-net-1"]));
+        assert!(service_args
+            .windows(2)
+            .any(|pair| pair == ["--network", "velnor-net-1"]));
+        assert!(service_args
+            .windows(2)
+            .any(|pair| pair == ["--network-alias", "postgres"]));
     }
 
     #[test]

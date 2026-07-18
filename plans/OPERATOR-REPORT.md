@@ -115,3 +115,19 @@ same-version local-artifact sentence is superseded and must not be used.
 - Context7 was required by repository policy but its MCP tools were unavailable
   in this execution environment. The documented fallback used exact upstream
   tags/commits and release assets from the primary repositories instead.
+
+## 2026-07-18 — Plan 040 upstream service-container inventory
+
+- Current `actions/runner` `JobExtension.cs` evaluates the modern
+  `AgentJobRequestMessage.JobServiceContainers` mapping and assigns each key as
+  the service network alias. `AgentJobRequestMessage.OnDeserialized` confirms
+  `Resources.Containers`/sidecars are only the legacy feature-flag fallback.
+- `DockerCommandManager.DockerCreate` puts the job and services on the same
+  per-job network, adds `--network-alias <service-id>`, and publishes each
+  declared port. Container jobs therefore reach `<service-id>:<container-port>`;
+  host jobs use the published host port.
+- `ContainerOperationProvider.StartContainer` waits for health, then populates
+  `job.services.<id>.id`, `.network`, and `.ports[container-port]` from Docker's
+  actual mapping. It does not synthesize service host/port environment
+  variables. Velnor now matches that surface and preserves legacy broker input
+  only as a fallback. Fixture Postgres acceptance remains plan 041's V-A gate.

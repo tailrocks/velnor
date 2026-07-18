@@ -375,6 +375,32 @@ fn job_container_options(job: &AgentJobRequestMessage) -> Vec<String> {
 
 fn service_containers(job: &AgentJobRequestMessage) -> Vec<ServiceContainerSpec> {
     let network = job_network_name(job);
+    if let Some(services) = job
+        .job_service_containers
+        .as_ref()
+        .map(expand_template_token)
+        .and_then(|value| value.as_object().cloned())
+    {
+        return services
+            .into_iter()
+            .filter_map(|(alias, container)| {
+                let image = container_image(&container)?.to_string();
+                Some(ServiceContainerSpec {
+                    name: format!(
+                        "velnor-service-{}-{}",
+                        sanitize_path_segment(&job.job_id),
+                        sanitize_path_segment(&alias)
+                    ),
+                    image,
+                    network_alias: alias,
+                    network: network.clone(),
+                    env: container_env(&container),
+                    ports: container_ports(&container),
+                    options: container_options(&container).unwrap_or_default(),
+                })
+            })
+            .collect();
+    }
     job.resources
         .containers
         .iter()
@@ -403,6 +429,71 @@ fn service_containers(job: &AgentJobRequestMessage) -> Vec<ServiceContainerSpec>
             })
         })
         .collect()
+}
+
+fn container_ports(value: &Value) -> Vec<String> {
+    let mut ports = value
+        .as_object()
+        .and_then(|object| object.get("ports").or_else(|| object.get("Ports")))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    ports.sort();
+    ports
+}
+
+/// Convert the current V2 broker TemplateToken JSON (`map` entries with
+/// `Key`/`Value`) into ordinary JSON. `actions/runner` evaluates
+/// `JobServiceContainers` directly; `Resources.Containers` is only the legacy
+/// deserialization fallback retained for the old feature flag.
+fn expand_template_token(value: &Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return value.clone();
+    };
+    if let Some(entries) = object
+        .get("map")
+        .or_else(|| object.get("Map"))
+        .and_then(Value::as_array)
+    {
+        let mut expanded = serde_json::Map::new();
+        for entry in entries {
+            let Some(pair) = entry.as_object() else {
+                continue;
+            };
+            let key = pair
+                .get("key")
+                .or_else(|| pair.get("Key"))
+                .map(expand_template_token)
+                .and_then(|value| value.as_str().map(ToOwned::to_owned));
+            let value = pair
+                .get("value")
+                .or_else(|| pair.get("Value"))
+                .map(expand_template_token);
+            if let (Some(key), Some(value)) = (key, value) {
+                expanded.insert(key, value);
+            }
+        }
+        return Value::Object(expanded);
+    }
+    if let Some(sequence) = object
+        .get("seq")
+        .or_else(|| object.get("Seq"))
+        .and_then(Value::as_array)
+    {
+        return Value::Array(sequence.iter().map(expand_template_token).collect());
+    }
+    if let Some(scalar) = object.get("value").or_else(|| object.get("Value")) {
+        return expand_template_token(scalar);
+    }
+    Value::Object(
+        object
+            .iter()
+            .map(|(key, value)| (key.clone(), expand_template_token(value)))
+            .collect(),
+    )
 }
 
 fn service_env(container: &ContainerResource) -> Vec<(String, String)> {
@@ -434,6 +525,9 @@ fn service_ports(container: &ContainerResource) -> Vec<String> {
 }
 
 fn container_image(value: &Value) -> Option<&str> {
+    if let Some(image) = value.as_str().filter(|image| !image.is_empty()) {
+        return Some(image);
+    }
     value
         .as_object()
         .and_then(|object| {
@@ -1148,6 +1242,46 @@ mod tests {
                 ports: vec!["5432:5432".into()],
                 options: vec!["--health-cmd".into(), "pg_isready -U postgres".into()],
             }]
+        );
+    }
+
+    #[test]
+    fn service_containers_prefer_v2_job_service_tokens() {
+        let scalar = |value: &str| serde_json::json!({ "type": 0, "value": value });
+        let service = serde_json::json!({
+            "type": 2,
+            "map": [
+                { "Key": scalar("image"), "Value": scalar("postgres:16") },
+                { "Key": scalar("ports"), "Value": { "type": 1, "seq": [scalar("5432")] } },
+                { "Key": scalar("env"), "Value": { "type": 2, "map": [
+                    { "Key": scalar("POSTGRES_PASSWORD"), "Value": scalar("postgres") }
+                ] } }
+            ]
+        });
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Services",
+            "requestId": 1,
+            "jobServiceContainers": { "type": 2, "map": [
+                { "Key": scalar("postgres"), "Value": service }
+            ] },
+            "resources": { "containers": [
+                { "alias": "legacy", "image": "redis:7" }
+            ] }
+        }))
+        .unwrap();
+
+        let services = service_containers(&job);
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].network_alias, "postgres");
+        assert_eq!(services[0].image, "postgres:16");
+        assert_eq!(services[0].ports, vec!["5432"]);
+        assert_eq!(
+            services[0].env,
+            vec![("POSTGRES_PASSWORD".into(), "postgres".into())]
         );
     }
 }

@@ -939,12 +939,17 @@ where
         temp_host: &Path,
     ) -> Result<JobExecutionSummary> {
         self.start_job_environment(container)?;
+        let mut runtime_context = context_data.to_vec();
+        if let Some(services) = self.service_context(container)? {
+            runtime_context.retain(|(name, _)| !name.eq_ignore_ascii_case("services"));
+            runtime_context.push(("services".to_string(), services));
+        }
 
         let result = self.execute_ordered_steps_in_started_container(
             container,
             steps,
             base_env,
-            context_data,
+            &runtime_context,
             job_outputs,
             environment_url,
             temp_host,
@@ -954,6 +959,47 @@ where
             eprintln!("Warning: cleanup failed after ordered job steps: {error:#}");
         }
         result
+    }
+
+    fn service_context(&mut self, container: &JobContainerSpec) -> Result<Option<Value>> {
+        if container.services.is_empty() {
+            return Ok(None);
+        }
+        let mut services = serde_json::Map::new();
+        for service in &container.services {
+            let id = self
+                .run_docker(&service.id_args())?
+                .stdout
+                .trim()
+                .to_string();
+            let ports_output = self.run_docker(&service.mapped_ports_args())?.stdout;
+            let mut ports = serde_json::Map::new();
+            for line in ports_output.lines() {
+                let Some((container_port, address)) = line.split_once(" -> ") else {
+                    continue;
+                };
+                let Some((_, host_port)) = address.rsplit_once(':') else {
+                    continue;
+                };
+                ports
+                    .entry(
+                        container_port
+                            .trim_end_matches("/tcp")
+                            .trim_end_matches("/udp")
+                            .to_string(),
+                    )
+                    .or_insert_with(|| Value::String(host_port.to_string()));
+            }
+            services.insert(
+                service.network_alias.clone(),
+                serde_json::json!({
+                    "id": id,
+                    "network": service.network,
+                    "ports": ports,
+                }),
+            );
+        }
+        Ok(Some(Value::Object(services)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6641,6 +6687,45 @@ mod tests {
                 stderr: String::new(),
             })
         }
+    }
+
+    struct ServiceContextRunner;
+
+    impl CommandRunner for ServiceContextRunner {
+        fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+            let stdout = match args.first().map(String::as_str) {
+                Some("inspect") => "container-id\n",
+                Some("port") => "5432/tcp -> 0.0.0.0:32768\n5432/tcp -> [::]:32768\n",
+                _ => "",
+            };
+            Ok(CommandResult {
+                code: 0,
+                stdout: stdout.into(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn service_context_exposes_mapped_ports() {
+        let temp = temp_dir();
+        let mut job = container(&temp);
+        job.services.push(ServiceContainerSpec {
+            name: "velnor-service-postgres".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "velnor-net".into(),
+            env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
+            ports: vec!["5432".into()],
+            options: vec!["--health-cmd".into(), "pg_isready -U postgres".into()],
+        });
+        let mut executor = DockerScriptExecutor::new(ServiceContextRunner);
+        let context = executor.service_context(&job).unwrap().unwrap();
+
+        assert_eq!(context["postgres"]["id"], "container-id");
+        assert_eq!(context["postgres"]["network"], "velnor-net");
+        assert_eq!(context["postgres"]["ports"]["5432"], "32768");
+        fs::remove_dir_all(temp).ok();
     }
 
     #[derive(Default)]
