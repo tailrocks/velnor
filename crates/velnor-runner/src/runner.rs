@@ -3804,6 +3804,22 @@ fn execute_script_job_inner(
             .with_context(|| format!("create persistent store {}", path.display()))?;
     }
     seed_mise_store_from_image(docker_image, &mise_store);
+    let container = github_job_container_spec(
+        job,
+        GitHubJobContainerPaths {
+            workspace_host: workspace.clone(),
+            temp_host: temp.clone(),
+            home_host: home.clone(),
+            actions_host: actions.clone(),
+            tools_host: tools.clone(),
+            docker_host_work_dir,
+        },
+        docker_image,
+        resource_options,
+        node_action_image,
+        daemon_id,
+        trust_scope,
+    );
     let context_data = job_context_data(job);
     // Synthetic "Set up job" step matching GitHub-hosted runner output.
     let setup_step_id = uuid::Uuid::new_v4().to_string();
@@ -3846,6 +3862,12 @@ fn execute_script_job_inner(
         .into_iter()
         .map(|plan| resolve_checkout_plan_context(plan, &base_env, &context_data))
         .collect::<Vec<_>>();
+    // Capability validation has already accepted the complete job. Start the
+    // Docker environment while checkout performs host-side network and disk
+    // work. The guard removes a successfully pre-created environment if any
+    // later planning step returns early; a failed pre-create is retried by the
+    // executor's normal lazy startup path.
+    let precreated_environment = PrecreatedJobEnvironment::spawn(container.clone());
     let mut checkout_order: i32 = 1;
     // Eager checkout logs also belong in the downloadable job-log artifact —
     // they only travelled the live channel before, so the artifact was the one
@@ -3933,22 +3955,6 @@ fn execute_script_job_inner(
         allow_unknown_action_diagnostics,
     )?;
 
-    let container = github_job_container_spec(
-        job,
-        GitHubJobContainerPaths {
-            workspace_host: workspace,
-            temp_host: temp.clone(),
-            home_host: home,
-            actions_host: actions,
-            tools_host: tools,
-            docker_host_work_dir,
-        },
-        docker_image,
-        resource_options,
-        node_action_image,
-        daemon_id,
-        trust_scope,
-    );
     let plan = github_normalized_job_plan(
         job,
         run_service_url,
@@ -3972,6 +3978,7 @@ fn execute_script_job_inner(
     let post_step_start_sender = step_start_sender.clone();
     let post_step_log_sender = step_log_sender.clone();
     let mut executor = DockerScriptExecutor::new(command_runner)
+        .with_job_environment_started(precreated_environment.claim())
         .with_initial_order(checkout_order)
         .with_trailing_post_action_count(cleanup_checkout_plans.len())
         .with_workflow_env(crate::runtime_env::job_environment_variables(job))
@@ -4251,6 +4258,63 @@ impl TeardownHandle {
                 "Warning: post-completion workspace teardown failed for {}: {error}",
                 self.job_dir.display()
             );
+        }
+    }
+}
+
+struct PrecreatedJobEnvironment {
+    container: crate::container::JobContainerSpec,
+    task: Option<std::thread::JoinHandle<Result<()>>>,
+    claimed: bool,
+}
+
+impl PrecreatedJobEnvironment {
+    fn spawn(container: crate::container::JobContainerSpec) -> Self {
+        let task_container = container.clone();
+        let task = std::thread::spawn(move || {
+            let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+            executor.start_job_environment(&task_container)
+        });
+        Self {
+            container,
+            task: Some(task),
+            claimed: false,
+        }
+    }
+
+    fn join(&mut self) -> bool {
+        let Some(task) = self.task.take() else {
+            return self.claimed;
+        };
+        match task.join() {
+            Ok(Ok(())) => true,
+            Ok(Err(error)) => {
+                eprintln!(
+                    "Warning: Docker environment pre-create failed; retrying lazily: {error:#}"
+                );
+                false
+            }
+            Err(_) => {
+                eprintln!("Warning: Docker environment pre-create panicked; retrying lazily");
+                false
+            }
+        }
+    }
+
+    fn claim(mut self) -> bool {
+        self.claimed = self.join();
+        self.claimed
+    }
+}
+
+impl Drop for PrecreatedJobEnvironment {
+    fn drop(&mut self) {
+        if self.claimed || !self.join() {
+            return;
+        }
+        let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+        if let Err(error) = executor.cleanup(&self.container) {
+            eprintln!("Warning: abandoned pre-created environment cleanup failed: {error:#}");
         }
     }
 }
