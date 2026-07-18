@@ -54,6 +54,7 @@ ref must also exist in the compiled manifest.
 | `actions/upload-pages-artifact` | v5 | composite | [main](https://github.com/actions/upload-pages-artifact) | path, single-file tar contract for Pages |
 | `actions/configure-pages` | v6 | TS | [main](https://github.com/actions/configure-pages) | Existing Pages site lookup, `base_url` / `origin` / `host` / `base_path` outputs, `GITHUB_PAGES=true`; enablement and generator mutation are outside the approved estate surface. |
 | `actions/deploy-pages` | v5 | TS | [main](https://github.com/actions/deploy-pages) | artifact lookup, OIDC-backed Pages deployment create/status loop, `page_url` and `status` outputs (completion tracked by plan 042) |
+| `actions/attest-build-provenance` | v4 | composite → `actions/attest` v4 | [main](https://github.com/actions/attest-build-provenance) | **Explicit rejection:** estate uses file `subject-path` provenance. Current upstream requires Sigstore bundle generation and GitHub attestation publication; keep the step on the GitHub writer lane until a native Rust client is fixture-proven. No JavaScript fallback. |
 
 ## Rust / setup / tooling
 
