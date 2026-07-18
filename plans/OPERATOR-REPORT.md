@@ -489,3 +489,19 @@ same-version local-artifact sentence is superseded and must not be used.
   The release uses an annotated tag; every source commit retains DCO signoff,
   and server package authenticity is verified by the repository-scoped signed
   apt `InRelease` chain. No 1Password approval or secret export was requested.
+
+### 2026-07-18 — Plan 048 blocked by lane-independent package sources
+
+- Velnor run <https://github.com/ChainArgos/blockchain-nodes/actions/runs/29637999142>
+  and GitHub run <https://github.com/ChainArgos/blockchain-nodes/actions/runs/29638091607>
+  pass sweep/base/build and fail the same three leaf packages. This proves
+  runner parity and exhausts the plan's GitHub-lane fallback.
+- `arbitrum`: upstream tag `offchainlabs/nitro-node:v3.11.2-db30ef0` does not
+  exist. `fraxtal-op-node`: its upstream image has no `/bin/sh`, but the
+  repository Dockerfile executes `RUN ls`. `op-node`: the selected source is
+  missing generated `op-core/superchain/superchain-configs.zip`.
+- Plan 048 explicitly excludes Dockerfiles and package source/configuration.
+  Changing workflow semantics would mask the repository defects, so the static
+  estate branch/PR remains pushed but unmerged. Resolve those three package
+  sources in `ChainArgos/blockchain-nodes`, then rerun the documented three
+  lanes; no Velnor capability expansion is needed.

@@ -82,7 +82,7 @@ V-A). Do not open estate PRs before 041's operator verification.
 | Plan | Repo | Phase | Effort | Extra deps | Status |
 |------|------|-------|--------|-----------|--------|
 | 047 | ChainArgos/java-monorepo | 1 | M | — | IN PROGRESS |
-| 048 | ChainArgos/blockchain-nodes | 1 | S/M | — | IN PROGRESS |
+| 048 | ChainArgos/blockchain-nodes | 1 | S/M | — | BLOCKED: both lanes identically fail three pre-existing package builds; fixes require out-of-scope Dockerfile/package-source changes (runs `29637999142`, `29638091607`) |
 | 049 | jackin-project/jackin (stacks on PR #810) | 1 | L | 047 (pattern) | TODO |
 | 050 | tailrocks/velnor (dogfood) | 2 | M | 039 (fleet label) | IN PROGRESS |
 | 051 | tailrocks/holla | 2 | S | — | TODO |
