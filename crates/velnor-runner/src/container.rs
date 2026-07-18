@@ -199,6 +199,12 @@ impl JobContainerSpec {
         args.extend(self.options.iter().cloned());
         args.extend(self.resource_options.iter().cloned());
 
+        // GitHub-hosted Ubuntu jobs expose localhost over IPv4. Docker also
+        // assigns localhost to ::1, which can split same-process servers and
+        // clients across address families (for example Vite binds ::1 while
+        // Bun fetches 127.0.0.1). Keep loopback behavior lane-identical.
+        args.extend(["--sysctl".into(), "net.ipv6.conf.all.disable_ipv6=1".into()]);
+
         if self.mount_docker_socket {
             args.extend([
                 "-v".into(),
@@ -1418,6 +1424,9 @@ mod tests {
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"NODE_OPTIONS=--max-old-space-size=4096".into()));
         assert!(args.windows(2).any(|pair| pair == ["--cpus", "2"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair == ["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"] }));
         assert!(args.windows(2).any(|pair| pair == ["--memory", "8g"]));
         let cpus_pos = args.iter().position(|arg| arg == "--cpus").unwrap();
         let memory_pos = args.iter().position(|arg| arg == "--memory").unwrap();
