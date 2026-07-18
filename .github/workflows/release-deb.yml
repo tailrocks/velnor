@@ -94,7 +94,10 @@ jobs:
       - name: Install cargo-deb
         # cargo.binstall_only + quickinstall are repository policy: download
         # the verified prebuilt artifact or fail; never compile tooling in CI.
-        run: mise install 'cargo:cargo-deb' && mise exec -- cargo-deb --version
+        run: |
+          mise exec cargo-binstall -- cargo binstall cargo-deb@3.7.0 \
+            --disable-strategies compile --no-confirm --force
+          cargo-deb --version
 
       - name: Build
         run: |
