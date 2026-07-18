@@ -1,5 +1,9 @@
 FROM ubuntu:26.04@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb
 
+ARG VELNOR_IMAGE_VERSION=development
+LABEL org.opencontainers.image.version="${VELNOR_IMAGE_VERSION}" \
+      org.opencontainers.image.source="https://github.com/tailrocks/velnor"
+
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         bash \

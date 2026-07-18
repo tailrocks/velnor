@@ -28,6 +28,18 @@ case "$1" in
     if [ -d /run/systemd/system ]; then
       systemctl daemon-reload || true
       systemctl enable velnor-daemon.service || true
+      # Native adapters rely on exact tools baked into the package-matched job
+      # image. Never restart a fleet onto a stale image after an apt upgrade.
+      package_version=$(dpkg-query -W -f='${Version}' velnor-runner)
+      image_version=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' velnor/job-ubuntu:26.04 2>/dev/null || true)
+      if [ "$image_version" != "$package_version" ]; then
+        echo "Building velnor/job-ubuntu:26.04 for package $package_version..."
+        DOCKER_BUILDKIT=1 docker build --pull \
+          --build-arg "VELNOR_IMAGE_VERSION=$package_version" \
+          --file /usr/share/velnor/job-ubuntu.Dockerfile \
+          --tag velnor/job-ubuntu:26.04 \
+          /usr/share/velnor
+      fi
       # Restart only if it was already running (clean upgrade); fresh installs
       # stay stopped until the operator fills in /etc/velnor/velnor.env.
       systemctl try-restart velnor-daemon.service || true
