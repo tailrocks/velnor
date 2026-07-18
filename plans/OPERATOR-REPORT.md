@@ -1019,3 +1019,13 @@ same-version local-artifact sentence is superseded and must not be used.
   `28f9f54`; both remote program branches were deleted and both local
   checkouts now track clean `main`. The exact campaign systemd units are
   inactive and no exact-prefix runner registrations remain.
+- Plan 055 is fully complete. Schemalane's final accepted lane evidence is
+  standalone Velnor `29655442422`, standalone GitHub `29655584441`, and both
+  `29656696148`. Its V-C cold/warm/no-change rounds are
+  `29656696148`/`29657441253`/`29657699348`; Velnor job durations improved
+  from 27/150/137 seconds (audit/integration/Rust) to 20/67/27 and then
+  19/33/21 seconds. The final three Velnor job logs contain no dependency
+  download, dependency compilation, or tool-install markers. Schemalane PR
+  <https://github.com/tailrocks/schemalane/pull/2> merged as `60cfd5c`; its
+  remote program branch was deleted, the local checkout is clean on `main`,
+  the exact unit is inactive, and no exact-prefix registration remains.
