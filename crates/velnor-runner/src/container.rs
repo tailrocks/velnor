@@ -102,6 +102,14 @@ impl JobContainerSpec {
             ),
             "-v".into(),
             self.mount_arg(&self.home_host, "/github/home"),
+            // Playwright's browser payload is a versioned download cache, not
+            // workspace output. Persist it per trust/repository so unchanged
+            // jobs do not download Chromium and FFmpeg on every fresh container.
+            "-v".into(),
+            self.mount_arg(
+                &self.playwright_browser_store_host(),
+                "/github/home/.cache/ms-playwright",
+            ),
             // Share immutable Cargo downloads and indexes across the daemon,
             // but keep extracted registry sources and git checkouts in the
             // job home. Separate containers can otherwise race while creating
@@ -713,6 +721,13 @@ impl JobContainerSpec {
         )
     }
 
+    fn playwright_browser_store_host(&self) -> PathBuf {
+        self.repository_store_key().map_or_else(
+            || self.home_host.join(".cache/ms-playwright"),
+            |repository| playwright_browser_store_host(&self.temp_host, &repository),
+        )
+    }
+
     fn docker_host_path(&self, host_path: &Path) -> PathBuf {
         let Some(docker_work_dir) = &self.docker_host_work_dir else {
             return host_path.to_path_buf();
@@ -1075,6 +1090,15 @@ pub(crate) fn cargo_target_store_host(temp_host: &Path) -> PathBuf {
     crate::storage::cache_class_path(&daemon_store_root(temp_host), "targets", "_velnor_targets")
 }
 
+/// Host-persistent Playwright browser downloads, scoped by trust + repository.
+pub(crate) fn playwright_browser_store_host(temp_host: &Path, repository: &str) -> PathBuf {
+    let root =
+        crate::storage::cache_class_path(&daemon_store_root(temp_host), "caches", "_velnor_caches");
+    crate::storage::append_legacy_trust(root, &crate::github_adapter::cargo_target_trust_scope())
+        .join(sanitize_store_key(repository))
+        .join("playwright")
+}
+
 /// Resolve the daemon-shared store root from a job temp dir
 /// (`…/work/slot-N/<job>/temp` → `…/work`).
 fn daemon_store_root(temp_host: &Path) -> PathBuf {
@@ -1364,6 +1388,10 @@ mod tests {
         assert!(args.contains(&"/tmp/temp:/tmp".into()));
         assert!(args.contains(&"/tmp/_velnor_sccache:/var/cache/sccache".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
+        assert!(args.contains(
+            &"/tmp/_velnor_caches/trusted/acme_repo/playwright:/github/home/.cache/ms-playwright"
+                .into()
+        ));
         assert!(args
             .contains(&"/tmp/_velnor_cargo/bin/trusted/acme_repo:/github/home/.cargo/bin".into()));
         assert!(args
