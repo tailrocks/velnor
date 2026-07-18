@@ -970,3 +970,25 @@ same-version local-artifact sentence is superseded and must not be used.
   Debian `Version` and target-derived `Architecture` before content/size
   checks or upload. This removes persistent-target ordering from package
   identity. Format, strict clippy, all 629 tests, and actionlint pass.
+- Corrected v0.1.79 general release `29656472830`, Debian release
+  `29656472842`, and signed apt publish `29656518717` passed. The published
+  index contains embedded package version 0.1.79 for amd64/arm64; Sentry was
+  upgraded only with apt. Installed version, candidate, and job-image label
+  all report 0.1.79. The image proves cargo-nextest 0.9.140 and all five
+  audited Rust targets are preinstalled.
+- Final Schemalane both-lane run `29656696148` passed all six paired jobs on
+  v0.1.79 with unchanged workflow semantics. Its earlier standalone Velnor
+  `29655442422` and GitHub `29655584441` runs also passed.
+- Jackin v0.1.79 run `29656702930` proved compression level 0 now passes, then
+  strict validation rejected its already-present artifact `retention-days`.
+  The program branches were audited before expanding the exact surface:
+  Jackin uses 1/7/90 days and Parallax uses 14/30/90; the remaining available
+  program branches use none. The user's binding runner-fix rule explicitly
+  authorizes this observed estate surface and reopens plan 053 rather than
+  leaving its Velnor divergence blocked.
+- Signed commit `aada21b` admits only literal retention values 1, 7, 14, 30,
+  and 90. Matching current actions/toolkit behavior, the adapter clamps to the
+  repository's `GITHUB_RETENTION_DAYS` maximum and sends RFC3339 `expires_at`
+  through Results Service CreateArtifact; every other value remains rejected.
+  Contract, manifest, runtime, and protocol coverage passes with all 631 tests,
+  format, strict clippy, and actionlint. No workflow was weakened.
