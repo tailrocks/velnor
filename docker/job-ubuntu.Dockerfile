@@ -15,19 +15,49 @@ RUN apt-get update \
         docker-buildx \
         docker.io \
         file \
+        fonts-freefont-ttf \
+        fonts-ipafont-gothic \
+        fonts-liberation \
+        fonts-noto-color-emoji \
+        fonts-tlwg-loma-otf \
+        fonts-unifont \
+        fonts-wqy-zenhei \
         git \
         git-lfs \
         jq \
         libbz2-dev \
+        libasound2t64 \
+        libatk-bridge2.0-0t64 \
+        libatk1.0-0t64 \
+        libatspi2.0-0t64 \
+        libcairo2 \
         libclang-dev \
+        libcups2t64 \
+        libdbus-1-3 \
+        libdrm2 \
         libffi-dev \
+        libfontconfig1 \
+        libfreetype6 \
+        libgbm1 \
+        libglib2.0-0t64 \
         liblzma-dev \
         libncurses-dev \
+        libnspr4 \
+        libnss3 \
+        libpango-1.0-0 \
         libreadline-dev \
         libsasl2-dev \
         libsqlite3-dev \
         libssl-dev \
         libzstd-dev \
+        libx11-6 \
+        libxcb1 \
+        libxcomposite1 \
+        libxdamage1 \
+        libxext6 \
+        libxfixes3 \
+        libxkbcommon0 \
+        libxrandr2 \
         mold \
         openssh-client \
         pipx \
@@ -41,6 +71,9 @@ RUN apt-get update \
         unzip \
         util-linux \
         xz-utils \
+        xfonts-cyrillic \
+        xfonts-scalable \
+        xvfb \
         zip \
         zstd \
     && rm -rf /var/lib/apt/lists/*
