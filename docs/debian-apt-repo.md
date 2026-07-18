@@ -164,10 +164,10 @@ avoids the deprecated global `apt-key` / `trusted.gpg.d`).
 Verified 2026-07-18 against both repositories and the live host:
 `tailrocks/velnor-apt` publishes amd64+arm64 with a signed reprepro index
 through GitHub Actions Pages; Sentry has the scoped keyring and source
-configured. The v0.1.37 source package run is
-[`29626653677`](https://github.com/tailrocks/velnor/actions/runs/29626653677)
+configured. The v0.1.58 dual-architecture source package run is
+[`29638641012`](https://github.com/tailrocks/velnor/actions/runs/29638641012)
 and its signed repository/Pages run is
-[`29627062793`](https://github.com/tailrocks/velnor-apt/actions/runs/29627062793).
+[`29638791029`](https://github.com/tailrocks/velnor-apt/actions/runs/29638791029).
 Those run URLs are historical proof of the chain, not a current version pin;
 every later deployment must follow this same tag-to-signed-apt chain and verify
 the candidate reported by `apt-cache policy` before changing a host.
