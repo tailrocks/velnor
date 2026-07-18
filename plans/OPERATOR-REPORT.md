@@ -574,3 +574,10 @@ same-version local-artifact sentence is superseded and must not be used.
   v0.1.60 image reproduction selected 1.97.1 when those non-upstream overrides
   were absent. The fix matches current `jdx/mise-action`: retain truthful job
   step storage variables, but do not override mise's own Rust resolution.
+- Java v0.1.61 run
+  <https://github.com/ChainArgos/java-monorepo/actions/runs/29640840497>
+  proved the earlier override had also persisted a poisoned, Velnor-owned
+  install link: `_velnor_mise/.../rust/1.97.1 -> /root/.cargo/bin`, with aliases
+  retaining it. The adapter now removes only Rust/tool links targeting the two
+  known container-local Cargo proxy paths and their dangling aliases before
+  reinstalling. Valid installs and non-Velnor paths are untouched.
