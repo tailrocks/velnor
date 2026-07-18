@@ -485,7 +485,12 @@ fn expand_template_token(value: &Value) -> Value {
     {
         return Value::Array(sequence.iter().map(expand_template_token).collect());
     }
-    if let Some(scalar) = object.get("value").or_else(|| object.get("Value")) {
+    if let Some(scalar) = object
+        .get("lit")
+        .or_else(|| object.get("Lit"))
+        .or_else(|| object.get("value"))
+        .or_else(|| object.get("Value"))
+    {
         return expand_template_token(scalar);
     }
     Value::Object(
@@ -1247,7 +1252,9 @@ mod tests {
 
     #[test]
     fn service_containers_prefer_v2_job_service_tokens() {
-        let scalar = |value: &str| serde_json::json!({ "type": 0, "value": value });
+        // Current V2 TemplateToken literals use `lit`; `value` is retained by
+        // the decoder only as a compatibility fallback for primitive JSON.
+        let scalar = |value: &str| serde_json::json!({ "type": 0, "lit": value });
         let service = serde_json::json!({
             "type": 2,
             "map": [
