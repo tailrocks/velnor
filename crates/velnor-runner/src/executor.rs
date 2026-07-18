@@ -4226,6 +4226,7 @@ fn native_deploy_pages(
         .trim_end_matches('/');
     let client = reqwest::blocking::Client::builder()
         .user_agent("velnor-runner")
+        .timeout(Duration::from_secs(30))
         .build()
         .context("build Pages HTTP client")?;
 
@@ -4314,7 +4315,12 @@ fn native_deploy_pages(
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| pages_url_for_repository(repository));
-    let timeout = native_u64_input(action, &action_state, "timeout", 600_000).min(600_000);
+    let requested_timeout = native_u64_input(action, &action_state, "timeout", 600_000);
+    let timeout = if requested_timeout == 0 {
+        600_000
+    } else {
+        requested_timeout.min(600_000)
+    };
     let interval = native_u64_input(action, &action_state, "reporting_interval", 5_000);
     let max_errors = native_u64_input(action, &action_state, "error_count", 10).max(1);
     let started = std::time::Instant::now();
