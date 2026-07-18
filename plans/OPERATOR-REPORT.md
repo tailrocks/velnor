@@ -191,3 +191,11 @@ same-version local-artifact sentence is superseded and must not be used.
   proved the blockchain-nodes, agent-brown, and jackin fleets idle, so those
   three Velnor-owned daemons were temporarily drained for the fixture campaign.
   The default fleet was left running because one registration was busy.
+- v0.1.39 source run `29628055096` and publisher run `29628454180` passed;
+  public signature/index and the Sentry apt installation verified `0.1.39`.
+  Fixture retry `29628618869` still could not resolve `postgres`, proving the
+  first network fix was incomplete; it was canceled after evidence capture.
+  The remaining enabling structure was identical on the job side: expanded
+  job options followed its runner network argument. v0.1.40 makes the owned
+  network final for both job and service containers and adds separate
+  precedence regressions for both paths.
