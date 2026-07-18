@@ -5033,29 +5033,32 @@ fn restore_repository_artifact(
             std::time::Duration::from_secs(55)
         };
     loop {
-        let response = client
-            .get(format!(
-                "{api}/repos/{owner}/{repo}/actions/artifacts?name={name}&per_page=10"
-            ))
-            .bearer_auth(token)
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()?
-            .error_for_status()?;
-        let body: serde_json::Value = response.json()?;
+        let list_url =
+            format!("{api}/repos/{owner}/{repo}/actions/artifacts?name={name}&per_page=10");
+        let body: serde_json::Value = serde_json::from_slice(&repository_artifact_response(
+            || {
+                client
+                    .get(&list_url)
+                    .bearer_auth(token)
+                    .header("X-GitHub-Api-Version", "2022-11-28")
+            },
+            "list repository artifacts",
+        )?)?;
         if let Some(id) = body["artifacts"]
             .as_array()
             .and_then(|items| items.iter().find(|item| item["expired"] != true))
             .and_then(|item| item["id"].as_u64())
         {
-            let archive = client
-                .get(format!(
-                    "{api}/repos/{owner}/{repo}/actions/artifacts/{id}/zip"
-                ))
-                .bearer_auth(token)
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .send()?
-                .error_for_status()?
-                .bytes()?;
+            let archive_url = format!("{api}/repos/{owner}/{repo}/actions/artifacts/{id}/zip");
+            let archive = repository_artifact_response(
+                || {
+                    client
+                        .get(&archive_url)
+                        .bearer_auth(token)
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                },
+                "download repository artifact",
+            )?;
             fs::create_dir_all(destination)?;
             let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive))?;
             for index in 0..zip.len() {
@@ -5085,6 +5088,37 @@ fn restore_repository_artifact(
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
     }
+}
+
+fn repository_artifact_response(
+    mut request: impl FnMut() -> reqwest::blocking::RequestBuilder,
+    operation: &str,
+) -> Result<Vec<u8>> {
+    const MAX_ATTEMPTS: usize = 3;
+    for attempt in 1..=MAX_ATTEMPTS {
+        let outcome = request()
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .and_then(reqwest::blocking::Response::bytes)
+            .map(|body| body.to_vec());
+        match outcome {
+            Ok(body) => return Ok(body),
+            Err(error) if attempt < MAX_ATTEMPTS && repository_artifact_retryable(&error) => {
+                std::thread::sleep(std::time::Duration::from_secs(attempt as u64));
+            }
+            Err(error) => return Err(error).with_context(|| operation.to_string()),
+        }
+    }
+    unreachable!("repository artifact retry loop always returns")
+}
+
+fn repository_artifact_retryable(error: &reqwest::Error) -> bool {
+    error.is_timeout()
+        || error.is_connect()
+        || error.is_body()
+        || error.status().is_some_and(|status| {
+            status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+        })
 }
 
 fn to_container_path(state: &JobExecutionState, host: &Path) -> String {
@@ -8506,6 +8540,34 @@ mod tests {
         let state = JobExecutionState::new(&[]);
         let result = native_github_script(&action, &state).unwrap();
         assert_eq!(result.state.outputs["docs-xtask"], "contract-sha");
+    }
+
+    #[test]
+    fn repository_artifact_request_retries_server_failure() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for (status, body) in [("500 Internal Server Error", "retry"), ("200 OK", "ready")] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let client = reqwest::blocking::Client::new();
+
+        let body = repository_artifact_response(|| client.get(&url), "test artifact").unwrap();
+
+        server.join().unwrap();
+        assert_eq!(body, b"ready");
     }
 
     #[test]
