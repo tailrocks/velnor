@@ -120,8 +120,21 @@ fn github_script_step_with_context(
             "Working-Directory",
         ],
     )
-    .or(defaults.working_directory.as_deref())
-    .map(|path| workspace_path(workspace_container, path))
+    .map(String::from)
+    .or_else(|| {
+        evaluate_script_format_expr(
+            inputs,
+            &[
+                "workingDirectory",
+                "working-directory",
+                "WorkingDirectory",
+                "Working-Directory",
+            ],
+            context_data,
+        )
+    })
+    .or_else(|| defaults.working_directory.clone())
+    .map(|path| workspace_path(workspace_container, &path))
     .unwrap_or_else(|| workspace_container.to_string());
 
     // Prefer the broker-sent DisplayName. GitHub's Name/ContextName fields
@@ -1564,5 +1577,41 @@ mod tests {
         assert_eq!(script_steps.len(), 1);
         // matrix.package is resolvable from context_data → eagerly substituted.
         assert_eq!(script_steps[0].script, "just clippy \"app-b\"");
+    }
+
+    #[test]
+    fn maps_working_directory_with_matrix_format_expr() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([{
+            "enabled": true,
+            "reference": { "type": "Script" },
+            "inputs": {
+                "map": [
+                    {
+                        "Key": { "lit": "script", "type": 0 },
+                        "Value": { "lit": "./gradlew test", "type": 0 }
+                    },
+                    {
+                        "Key": { "lit": "workingDirectory", "type": 0 },
+                        "Value": {
+                            "expr": "format('services/{0}', matrix.service)",
+                            "type": 3
+                        }
+                    }
+                ],
+                "type": 2
+            }
+        }]))
+        .unwrap();
+
+        let context = vec![(
+            "matrix".to_string(),
+            serde_json::json!({"service": "catalog"}),
+        )];
+        let script_steps = github_script_steps_with_context(&steps, "/__w", &[], &context).unwrap();
+
+        assert_eq!(
+            script_steps[0].working_directory_container,
+            "/__w/services/catalog"
+        );
     }
 }
