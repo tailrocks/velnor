@@ -904,3 +904,25 @@ same-version local-artifact sentence is superseded and must not be used.
   Same-repository four-job and cross-repository regressions prove active stores
   cannot be reclaimed while inactive peer scopes remain eligible. Formatting,
   strict clippy, all 625 nextest tests, and actionlint pass.
+- Velnor v0.1.76 was released from signed program head `ba32723`: general
+  release run `29655095091`, Debian release run `29655095074`, and signed apt
+  publisher run `29655217787` all passed. Sentry was upgraded exclusively by
+  `apt-get`; dpkg status, apt candidate, and the package-built job-image label
+  all report 0.1.76. The image carries mise 2026.7.7, sccache 0.16.0, and
+  Kache 0.10.0. No direct `.deb` or local binary deployment was used.
+- Before the v0.1.76 playground retry, every campaign daemon was inactive and
+  the repository had no runner registrations. The poisoned resources were
+  resolved by exact canonical path and only these inactive Velnor-owned scopes
+  were removed: repo-scoped mise installs, repo-scoped rustup, and the
+  workspace-v2 target tree for `tailrocks_parallax-telemetry-playground`.
+  Cargo archives, the git mirror, unrelated repositories, and Docker resources
+  were untouched.
+- Jackin v0.1.76 run `29655466293` then failed strict validation before side
+  effects because its approved `actions/upload-artifact@v4` seed uses literal
+  `compression-level: 0`. The estate-program instruction that every Velnor
+  divergence is fixed in the runner authorizes this exact required surface.
+  Signed commit `8c34a1d` admits only literal `0`, writes ZIP Stored entries to
+  Results Service, and continues rejecting every adjacent compression value.
+  Contract, manifest, runtime, and protocol tests cover the boundary; format,
+  strict clippy, all 628 nextest tests, and actionlint pass. The workflow was
+  not changed.
