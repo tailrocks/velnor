@@ -6610,7 +6610,9 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         "capacity: free={} reserved={} reservations={} active_leases={}; cache logical={} physical={}",
         free, reserved_bytes, reservation_count, active_leases, cache_logical, cache_physical
     );
-    let config_base = config::config_dir(None)?;
+    let config_base = config::config_dir(None)?
+        .join("daemons")
+        .join(sanitize_daemon_config_component(&args.name));
     let sample_size = usize::try_from(env_u64(
         "VELNOR_SLO_SAMPLE_SIZE",
         DEFAULT_SLO_SAMPLE_SIZE as u64,
