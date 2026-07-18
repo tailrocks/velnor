@@ -3399,12 +3399,40 @@ fn artifact_zip_bytes(files: &[(String, Vec<u8>)], store_uncompressed: bool) -> 
     Ok(zip.finish().context("zip finish")?.into_inner())
 }
 
+fn artifact_create_request(
+    plan_id: &str,
+    job_id: &str,
+    name: &str,
+    retention_days: Option<u8>,
+    now: time::OffsetDateTime,
+) -> Result<serde_json::Value> {
+    let mut request = serde_json::json!({
+        "workflow_run_backend_id": plan_id,
+        "workflow_job_run_backend_id": job_id,
+        "name": name,
+        "version": 4
+    });
+    if let Some(days) = retention_days {
+        let expires_at = (now + time::Duration::days(i64::from(days)))
+            .format(&time::format_description::well_known::Rfc3339)
+            .context("format artifact expiration")?;
+        request["expires_at"] = serde_json::Value::String(expires_at);
+    }
+    Ok(request)
+}
+
 /// Upload artifact files to GitHub's Results Service (artifact v4 format).
 ///
 /// Uses synchronous `reqwest::blocking` — safe to call from `tokio::task::spawn_blocking`
 /// threads (the Velnor job executor context).
 ///
 /// Flow: CreateArtifact → PUT zip to signed URL → FinalizeArtifact
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ArtifactUploadOptions {
+    pub store_uncompressed: bool,
+    pub retention_days: Option<u8>,
+}
+
 pub fn upload_artifact_blocking(
     results_service_url: &str,
     token: &str,
@@ -3412,7 +3440,7 @@ pub fn upload_artifact_blocking(
     job_id: &str,
     name: &str,
     files: &[(String, Vec<u8>)], // (archive path, content)
-    store_uncompressed: bool,
+    options: ArtifactUploadOptions,
 ) -> Result<String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -3468,13 +3496,14 @@ pub fn upload_artifact_blocking(
 
     // 1. CreateArtifact → signed upload URL.
     let create_url = format!("{base}/{SERVICE}/CreateArtifact");
-    let create_body = serde_json::to_string(&serde_json::json!({
-        "workflow_run_backend_id": plan_id,
-        "workflow_job_run_backend_id": job_id,
-        "name": name,
-        "version": 4
-    }))
-    .context("serialize CreateArtifact")?;
+    let create_request = artifact_create_request(
+        plan_id,
+        job_id,
+        name,
+        options.retention_days,
+        time::OffsetDateTime::now_utc(),
+    )?;
+    let create_body = serde_json::to_string(&create_request).context("serialize CreateArtifact")?;
     let create_text = curl_post(&create_url, &create_body).context("CreateArtifact request")?;
     let create_resp: serde_json::Value =
         serde_json::from_str(&create_text).context("CreateArtifact parse")?;
@@ -3490,7 +3519,7 @@ pub fn upload_artifact_blocking(
 
     // 2. Create zip archive and PUT to signed URL.
     // The signed URL is itself a credential — keep it off argv via --config.
-    let zip_bytes = artifact_zip_bytes(files, store_uncompressed)?;
+    let zip_bytes = artifact_zip_bytes(files, options.store_uncompressed)?;
     let zip_size = zip_bytes.len() as u64;
 
     let zip_path = write_secret_file("zip", &zip_bytes).context("write zip temp file")?;
@@ -3729,6 +3758,17 @@ mod tests {
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         let file = archive.by_index(0).unwrap();
         assert_eq!(file.compression(), zip::CompressionMethod::Stored);
+    }
+
+    #[test]
+    fn artifact_retention_sets_results_service_expiration() {
+        let now = time::OffsetDateTime::parse(
+            "2026-07-18T00:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap();
+        let request = artifact_create_request("plan", "job", "seed", Some(14), now).unwrap();
+        assert_eq!(request["expires_at"], "2026-08-01T00:00:00Z");
     }
 
     #[test]
