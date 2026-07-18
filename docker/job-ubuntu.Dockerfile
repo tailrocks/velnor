@@ -30,6 +30,7 @@ RUN apt-get update \
         libzstd-dev \
         mold \
         openssh-client \
+        pipx \
         pkg-config \
         protobuf-compiler \
         python3 \
@@ -38,6 +39,7 @@ RUN apt-get update \
         uuid-dev \
         zlib1g-dev \
         unzip \
+        util-linux \
         xz-utils \
         zip \
         zstd \

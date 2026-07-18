@@ -3230,6 +3230,12 @@ if [ -n "$working_directory" ]; then
   cd "$working_directory"
 fi
 if [ -n "{install_flag}" ]; then
+  # All slots share the host-mounted mise cache and repository-scoped rustup
+  # store. Serialize mutation so concurrent jobs cannot observe or publish a
+  # half-installed toolchain. The descriptor remains held through the
+  # environment export below and closes automatically when this script exits.
+  exec 9>"$mise_home/cache/.velnor-install.lock"
+  flock -x 9
   # Trust the workspace config so mise actually reads mise.toml from the checkout.
   for f in "/__w/mise.toml" "/__w/.mise.toml" "/__w/.mise/config.toml"; do
     [ -f "$f" ] && mise trust "$f" 2>/dev/null || true
@@ -7769,6 +7775,8 @@ mod tests {
         let script = setup_mise_script(true, "", "");
 
         assert!(script.contains("mise bin-paths"));
+        assert!(script.contains(r#"flock -x 9"#));
+        assert!(script.contains(r#".velnor-install.lock"#));
         assert!(script.contains("-type d -empty -exec rm -rf"));
         assert!(script.contains(r#"find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d"#));
         assert!(script.contains(r#"find "$mise_home/installs" -mindepth 3 -maxdepth 3"#));
