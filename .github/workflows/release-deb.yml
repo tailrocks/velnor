@@ -25,46 +25,53 @@ on:
         description: "Existing tag to (re)build the .deb(s) for (e.g. v0.1.0)."
         type: string
         required: true
+      lanes:
+        type: choice
+        default: velnor
+        options: [velnor, github, both]
 
 permissions:
   contents: write # create/upload the GitHub Release asset on the source repo
 
+concurrency:
+  group: release-deb-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-deb:
+    name: Build deb ${{ matrix.target }} (${{ matrix.config.lane }})
+    timeout-minutes: 45
     # Linux-only .deb builds for the velnor-apt repository.
     # Uses the exact same jdx/mise-action + zigbuild pattern as holla (and jackin).
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            zigbuild: true
-          # aarch64 builds cleanly since OpenSSL is vendored (no :arm64 system
-          # packages needed); zigbuild provides the cross toolchain.
-          - target: aarch64-unknown-linux-gnu
-            zigbuild: true
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
 
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.config.runner }}
     env:
       VERSION: ${{ github.event.inputs.tag && github.event.inputs.tag || github.ref_name }}
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      SCCACHE_GHA_ENABLED: "false"
+      SCCACHE_CACHE_SIZE: 20G
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - name: Install mold linker
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
 
       - id: sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         continue-on-error: true
-        env:
-          SCCACHE_GHA_ENABLED: "true"
-
-      - name: Enable sccache
-        if: steps.sccache.outcome == 'success'
-        run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        with:
+          version: v0.16.0
+          disable_annotations: "false"
 
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
@@ -85,9 +92,6 @@ jobs:
           restore-keys: |
             cargo-registry-${{ runner.os }}-
 
-      - name: Install mold linker
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-
       # OpenSSL is vendored (native-tls-vendored), so no system libssl or
       # cross :arm64 packages are needed — zigbuild supplies the toolchain.
 
@@ -100,14 +104,7 @@ jobs:
           cargo-deb --version
 
       - name: Build
-        run: |
-          if [ "${{ matrix.zigbuild }}" = "true" ]; then
-            # Use modern glibc target (no .2.17) because we only target latest Debian
-            # for the .deb packages (see "latest and greatest Debian only" requirement).
-            cargo zigbuild --release --locked --target ${{ matrix.target }}
-          else
-            cargo build --release --locked --target ${{ matrix.target }}
-          fi
+        run: cargo zigbuild --release --locked --target ${{ matrix.target }}
 
       - name: Build .deb (version pinned to the tag)
         env:
@@ -143,7 +140,7 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: velnor-runner-deb-${{ matrix.target }}
+          name: velnor-runner-deb-${{ matrix.config.lane }}-${{ matrix.target }}
           path: |
             velnor-runner-*.deb
             velnor-runner-*.deb.sha256
@@ -151,20 +148,32 @@ jobs:
   attach-and-deliver:
     needs: build-deb
     if: always()
-    runs-on: ubuntu-latest
+    name: Deliver deb (${{ matrix.config.lane }})
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
     permissions:
       contents: write
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        if: matrix.config.writer
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        if: matrix.config.writer
         with:
           path: artifacts
+          pattern: velnor-runner-deb-${{ matrix.config.lane }}-*
           merge-multiple: true
 
       - name: Attach .deb(s) to the GitHub Release (source)
+        if: matrix.config.writer
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -184,6 +193,7 @@ jobs:
           gh release upload "$TAG" artifacts/velnor-runner-*-unknown-linux-gnu.deb artifacts/velnor-runner-*-unknown-linux-gnu.deb.sha256 --clobber
 
       - name: Push .deb(s) to velnor-apt + trigger publish (optional)
+        if: matrix.config.writer
         # Same pattern as holla: the source may be private (or we want consistent
         # delivery). velnor-apt publishes from its *own* release. So we upload the
         # .deb(s) to a velnor-apt release (same tag), then trigger its publish workflow.
