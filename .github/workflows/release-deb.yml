@@ -123,7 +123,20 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
-          DEB_SRC=$(find "target/${{ matrix.target }}/debian" -maxdepth 1 -name "velnor-runner_*.deb" | head -1)
+          shopt -s nullglob
+          debs=("target/${{ matrix.target }}/debian/velnor-runner_${VERSION}_"*.deb)
+          [ "${#debs[@]}" -eq 1 ] \
+            || { echo "expected exactly one velnor-runner ${VERSION} deb, found ${#debs[@]}" >&2; exit 1; }
+          DEB_SRC="${debs[0]}"
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-gnu) EXPECTED_ARCH=amd64 ;;
+            aarch64-unknown-linux-gnu) EXPECTED_ARCH=arm64 ;;
+            *) echo "unsupported Debian target: ${{ matrix.target }}" >&2; exit 1 ;;
+          esac
+          [ "$(dpkg-deb -f "$DEB_SRC" Version)" = "$VERSION" ] \
+            || { echo "deb metadata version does not match tag $VERSION" >&2; exit 1; }
+          [ "$(dpkg-deb -f "$DEB_SRC" Architecture)" = "$EXPECTED_ARCH" ] \
+            || { echo "deb metadata architecture does not match $EXPECTED_ARCH" >&2; exit 1; }
           # Guard: a deb without the binary is ~4KB (the 0.1.2 incident —
           # cargo-deb's explicit assets list had dropped the implicit binary).
           # Require the packaged binary to be present and the deb to be sane.
