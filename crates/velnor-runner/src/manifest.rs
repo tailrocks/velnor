@@ -460,6 +460,13 @@ pub fn find(repository: &str) -> Option<&'static ActionCapability> {
 }
 
 pub fn violations(job: &AgentJobRequestMessage) -> Vec<CapabilityViolation> {
+    violations_with_context(job, &[])
+}
+
+pub fn violations_with_context(
+    job: &AgentJobRequestMessage,
+    context_data: &[(String, serde_json::Value)],
+) -> Vec<CapabilityViolation> {
     let mut violations = Vec::new();
     for (index, step) in job
         .steps
@@ -528,7 +535,15 @@ pub fn violations(job: &AgentJobRequestMessage) -> Vec<CapabilityViolation> {
             ));
         }
         let inputs = match string_inputs(step) {
-            Ok(inputs) => inputs,
+            Ok(inputs) => inputs
+                .into_iter()
+                .map(|(name, value)| {
+                    (
+                        name,
+                        crate::executor::render_context_expressions(&value, context_data),
+                    )
+                })
+                .collect(),
             Err(error) => {
                 violations.push(violation(
                     &step_name,
@@ -760,8 +775,14 @@ fn violation(
     }
 }
 
-pub fn validate_job(job: &AgentJobRequestMessage) -> Result<()> {
-    if let Some(violation) = violations(job).into_iter().next() {
+pub fn validate_job_with_context(
+    job: &AgentJobRequestMessage,
+    context_data: &[(String, serde_json::Value)],
+) -> Result<()> {
+    if let Some(violation) = violations_with_context(job, context_data)
+        .into_iter()
+        .next()
+    {
         return Err(violation.into());
     }
     Ok(())
@@ -946,12 +967,29 @@ mod tests {
 
     #[test]
     fn validate_job_accepts_estate_shaped_job() {
-        validate_job(&job(
-            "jdx/mise-action",
-            Some("dad1bfd3df957f44999b559dd69dc1671cb4e9ea"),
-            serde_json::json!({"install_args": "rust zig", "github_token": "masked"}),
-        ))
+        validate_job_with_context(
+            &job(
+                "jdx/mise-action",
+                Some("dad1bfd3df957f44999b559dd69dc1671cb4e9ea"),
+                serde_json::json!({"install_args": "rust zig", "github_token": "masked"}),
+            ),
+            &[],
+        )
         .unwrap();
+    }
+
+    #[test]
+    fn validate_job_expands_matrix_literals_before_capability_checks() {
+        let job = job(
+            "actions/checkout",
+            Some("9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"),
+            serde_json::json!({"lfs": "${{ matrix.package == 'heimdall' }}"}),
+        );
+        let context = vec![(
+            "matrix".to_string(),
+            serde_json::json!({"package": "arbitrum"}),
+        )];
+        validate_job_with_context(&job, &context).unwrap();
     }
 
     #[test]
