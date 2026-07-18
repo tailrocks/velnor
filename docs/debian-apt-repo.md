@@ -157,9 +157,12 @@ avoids the deprecated global `apt-key` / `trusted.gpg.d`).
      --format '{{ index .Config.Labels "org.opencontainers.image.version" }}'
    sudo systemctl start velnor-daemon velnor-daemon@fixture # plus instances
    ```
-5. Run doctor and the fixture smoke. Roll back only to a previously published
-   apt version (`apt-get install velnor-runner=<version>`); never sideload a
-   release asset.
+5. Run doctor and the fixture smoke. The Pages index intentionally contains
+   only the version selected by the latest publish. To roll back, dispatch
+   `tailrocks/velnor-apt`'s `Publish apt repo` with the previously released tag,
+   wait for its signed publish and Pages deployment, run `apt-get update`, and
+   verify that version is the candidate before
+   `apt-get install velnor-runner=<version>`. Never sideload a release asset.
 
 Verified 2026-07-18 against both repositories and the live host:
 `tailrocks/velnor-apt` publishes amd64+arm64 with a signed reprepro index
