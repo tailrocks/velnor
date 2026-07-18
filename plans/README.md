@@ -84,7 +84,7 @@ V-A). Do not open estate PRs before 041's operator verification.
 | 047 | ChainArgos/java-monorepo | 1 | M | — | IN PROGRESS |
 | 048 | ChainArgos/blockchain-nodes | 1 | S/M | — | IN PROGRESS |
 | 049 | jackin-project/jackin (stacks on PR #810) | 1 | L | 047 (pattern) | TODO |
-| 050 | tailrocks/velnor (dogfood) | 2 | M | 039 (fleet label) | TODO |
+| 050 | tailrocks/velnor (dogfood) | 2 | M | 039 (fleet label) | IN PROGRESS |
 | 051 | tailrocks/holla | 2 | S | — | TODO |
 | 052 | tailrocks/ruxel | 2 | S | — | TODO |
 | 053 | tailrocks/parallax | 2 | L | 051 (pattern), 042 (attest) | TODO |
