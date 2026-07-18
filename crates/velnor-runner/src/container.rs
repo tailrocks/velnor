@@ -79,8 +79,6 @@ impl JobContainerSpec {
             "--detach".into(),
             "--name".into(),
             self.name.clone(),
-            "--network".into(),
-            self.network.clone(),
             "--workdir".into(),
             "/__w".into(),
             "-v".into(),
@@ -194,6 +192,11 @@ impl JobContainerSpec {
             ]);
         }
         self.append_docker_cli_mounts(&mut args);
+
+        // The per-job network is runner policy. Keep it after expanded job
+        // and daemon resource options so the job cannot be displaced from the
+        // network shared with its workflow services.
+        args.extend(["--network".into(), self.network.clone()]);
 
         // PID 1 tails a live console file instead of /dev/null, so
         // `docker logs <job-container>` mirrors the GitHub UI step output.
@@ -1610,6 +1613,18 @@ mod tests {
                 "postgres:16"
             ]
         );
+    }
+
+    #[test]
+    fn job_runner_network_overrides_expanded_options() {
+        let mut job = spec();
+        job.options = vec!["--network".into(), "unexpected".into()];
+        let args = job.start_args();
+        let network_pairs = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--network")
+            .collect::<Vec<_>>();
+        assert_eq!(network_pairs.last().unwrap()[1], "velnor-net-1");
     }
 
     #[test]
