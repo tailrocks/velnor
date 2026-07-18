@@ -2,66 +2,84 @@ on:
   push:
     tags:
       - 'v[0-9]*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag
+        type: string
+        required: true
+      lanes:
+        type: choice
+        default: velnor
+        options: [velnor, github, both]
 
 permissions:
   contents: read
 
 concurrency:
-  group: release
+  group: release-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   check-version:
-    runs-on: ubuntu-latest
+    name: Check version (${{ matrix.config.lane }})
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
 
       - name: Extract version from tag
         id: version
         run: |
-          version="${GITHUB_REF#refs/tags/v}"
+          version="${{ inputs.tag || github.ref_name }}"
+          version="${version#v}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   build:
     needs: check-version
+    name: Build ${{ matrix.target }} (${{ matrix.config.lane }})
+    timeout-minutes: 45
     strategy:
+      fail-fast: false
       matrix:
-        include:
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            zigbuild: true
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            zigbuild: true
-    runs-on: ${{ matrix.os }}
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
     env:
       VERSION: ${{ needs.check-version.outputs.version }}
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      SCCACHE_GHA_ENABLED: "false"
+      SCCACHE_CACHE_SIZE: 20G
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - name: Install mold linker
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
 
       - id: sccache
         uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
         continue-on-error: true
-        env:
-          SCCACHE_GHA_ENABLED: "true"
-
-      - name: Enable sccache
-        if: steps.sccache.outcome == 'success'
-        run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        with:
+          version: v0.16.0
+          disable_annotations: "false"
 
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
-          install_args: "${{ matrix.zigbuild && 'rust zig cargo-binstall cargo:cargo-zigbuild' || 'rust' }}"
+          install_args: "rust zig cargo-binstall cargo:cargo-zigbuild"
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Add Rust target
@@ -79,17 +97,8 @@ jobs:
           restore-keys: |
             cargo-registry-${{ runner.os }}-
 
-      - name: Install mold linker
-        if: runner.os == 'Linux'
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-
       - name: Build
-        run: |
-          if [ "${{ matrix.zigbuild }}" = "true" ]; then
-            cargo zigbuild -p velnor-runner --release --locked --target ${{ matrix.target }}.2.17
-          else
-            cargo build -p velnor-runner --release --locked --target ${{ matrix.target }}
-          fi
+        run: cargo zigbuild -p velnor-runner --release --locked --target ${{ matrix.target }}.2.17
 
       - name: Package
         run: |
@@ -100,43 +109,52 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: velnor-runner-${{ matrix.target }}
+          name: velnor-runner-${{ matrix.config.lane }}-${{ matrix.target }}
           path: |
             velnor-runner-*.tar.gz
             velnor-runner-*.tar.gz.sha256
 
   release:
     needs: [check-version, build]
-    runs-on: ubuntu-latest
+    name: Publish release (${{ matrix.config.lane }})
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
     permissions:
       contents: write
     outputs:
-      arm64_macos: ${{ steps.shas.outputs.arm64_macos }}
-      x86_macos: ${{ steps.shas.outputs.x86_macos }}
       arm64_linux: ${{ steps.shas.outputs.arm64_linux }}
       x86_linux: ${{ steps.shas.outputs.x86_linux }}
     env:
       VERSION: ${{ needs.check-version.outputs.version }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        if: matrix.config.writer
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        if: matrix.config.writer
         with:
           path: artifacts
+          pattern: velnor-runner-${{ matrix.config.lane }}-*
           merge-multiple: true
 
       - name: Read platform SHA256s
+        if: matrix.config.writer
         id: shas
         run: |
           read_sha() { awk '{print $1}' "artifacts/$1.sha256"; }
           {
-            echo "arm64_macos=$(read_sha "velnor-runner-${VERSION}-aarch64-apple-darwin.tar.gz")"
-            echo "x86_macos=$(read_sha "velnor-runner-${VERSION}-x86_64-apple-darwin.tar.gz")"
             echo "arm64_linux=$(read_sha "velnor-runner-${VERSION}-aarch64-unknown-linux-gnu.tar.gz")"
             echo "x86_linux=$(read_sha "velnor-runner-${VERSION}-x86_64-unknown-linux-gnu.tar.gz")"
           } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
+        if: matrix.config.writer
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
