@@ -609,3 +609,17 @@ same-version local-artifact sentence is superseded and must not be used.
   repository marked every other repository as seeded. The marker now lives in
   the same trust/repository-scoped executable store it governs; workflow
   commands and release semantics remain unchanged.
+- Recovery v0.1.65 Debian run
+  <https://github.com/tailrocks/velnor/actions/runs/29642522113> and signed apt
+  publication run
+  <https://github.com/tailrocks/velnor-apt/actions/runs/29642646740> passed on
+  the documented GitHub bootstrap lane. Sentry advertised candidate 0.1.65
+  and was upgraded from 0.1.63 exclusively with `apt-get update` and
+  `apt-get install velnor-runner`; package, rebuilt job image, and active Java
+  and dogfood services all report 0.1.65.
+- The parallel general release run
+  <https://github.com/tailrocks/velnor/actions/runs/29642523160> built both
+  tarballs, then raced the Debian delivery job that had already created the
+  same GitHub Release. The general release writer is now idempotent: it creates
+  the release only when absent and uploads its own assets with `--clobber`, so
+  both release workflows can safely converge on one tag.

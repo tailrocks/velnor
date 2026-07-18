@@ -158,11 +158,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v${VERSION}" \
+          tag="v${VERSION}"
+          gh release view "$tag" >/dev/null 2>&1 \
+            || gh release create "$tag" --title "$tag" --generate-notes
+          gh release upload "$tag" \
             artifacts/velnor-runner-*.tar.gz \
             artifacts/velnor-runner-*.tar.gz.sha256 \
-            --title "v${VERSION}" \
-            --generate-notes
+            --clobber
 
   # Homebrew: to be added modeled exactly on holla's release.yml `homebrew` job
   # once the tailrocks/homebrew-velnor tap and its push token exist
