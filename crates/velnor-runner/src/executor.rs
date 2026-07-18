@@ -8588,6 +8588,52 @@ type=sha,format=long,prefix=,enable=true"
     }
 
     #[test]
+    fn configure_pages_fetches_site_and_exports_environment() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("GET /repos/octocat/example/pages HTTP/1.1"));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer test-token"));
+            let body = r#"{"html_url":"https://octocat.github.io/example/"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let state = JobExecutionState::new(&[
+            ("GITHUB_REPOSITORY".into(), "octocat/example".into()),
+            ("GITHUB_API_URL".into(), format!("http://{address}")),
+            ("GITHUB_TOKEN".into(), "test-token".into()),
+        ]);
+        let result = native_configure_pages(
+            &NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::ConfigurePages,
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+            },
+            &state,
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.state.outputs["base_path"], "/example");
+        assert_eq!(result.state.env["GITHUB_PAGES"], "true");
+    }
+
+    #[test]
     fn configure_pages_adapter_is_registered() {
         assert_eq!(
             crate::action::native_action_adapter("actions/configure-pages"),
