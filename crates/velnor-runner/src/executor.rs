@@ -18,14 +18,14 @@ use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -5638,19 +5638,12 @@ struct JobExecutionState {
     masks: Vec<String>,
     composite_stack: Vec<String>,
     composite_conclusion_stack: Vec<CompositeConclusionFrame>,
-    hash_files_cache: Arc<Mutex<HashMap<HashFilesCacheKey, String>>>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct CompositeConclusionFrame {
     step_id: String,
     conclusions: BTreeMap<String, StepOutcome>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct HashFilesCacheKey {
-    workspace: PathBuf,
-    patterns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5715,7 +5708,6 @@ impl JobExecutionState {
             masks: Vec::new(),
             composite_stack: Vec::new(),
             composite_conclusion_stack: Vec::new(),
-            hash_files_cache: Arc::new(Mutex::new(HashMap::new())),
         };
         state.env = state
             .env
@@ -5758,7 +5750,6 @@ impl JobExecutionState {
             masks: self.masks.clone(),
             composite_stack: self.composite_stack.clone(),
             composite_conclusion_stack: self.composite_conclusion_stack.clone(),
-            hash_files_cache: Arc::clone(&self.hash_files_cache),
         };
         state
             .env
@@ -5783,7 +5774,6 @@ impl JobExecutionState {
             masks: self.masks.clone(),
             composite_stack: self.composite_stack.clone(),
             composite_conclusion_stack: self.composite_conclusion_stack.clone(),
-            hash_files_cache: Arc::clone(&self.hash_files_cache),
         };
         for (name, value) in env {
             state.env.insert(name, value);
@@ -6047,20 +6037,11 @@ impl JobExecutionState {
 
     fn resolve_hash_files_expression(&self, patterns: Vec<String>) -> Option<String> {
         let workspace = self.workspace_host.as_ref()?;
-        let key = HashFilesCacheKey {
-            workspace: workspace.clone(),
-            patterns,
-        };
-        if let Ok(cache) = self.hash_files_cache.lock() {
-            if let Some(value) = cache.get(&key).cloned() {
-                return Some(value);
-            }
-        }
-        let value = hash_files(&key.workspace, &key.patterns);
-        if let Ok(mut cache) = self.hash_files_cache.lock() {
-            cache.insert(key, value.clone());
-        }
-        Some(value)
+        // Match actions/runner's HashFilesFunction: evaluate against the
+        // workspace as it exists at this expression call. In particular, an
+        // evaluation before checkout may correctly be empty, but must not
+        // poison the same expression after checkout has populated the tree.
+        Some(hash_files(workspace, &patterns))
     }
 
     /// Evaluate `format('template', arg0, arg1, ...)` using the full state resolver
@@ -11844,23 +11825,19 @@ fi"#
     }
 
     #[test]
-    fn hash_files_resolution_memoizes_identical_patterns_per_job() {
+    fn hash_files_resolution_observes_files_created_after_an_empty_evaluation() {
         let temp = temp_dir();
         let workspace = temp.join("work");
         fs::create_dir_all(&workspace).unwrap();
-        fs::write(workspace.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
-        let state = JobExecutionState::new_internal(&[], &[], Some(workspace), None);
+        let state = JobExecutionState::new_internal(&[], &[], Some(workspace.clone()), None);
 
         let expression = "hash=${{ hashFiles('Cargo.toml') }}";
         let first = state.resolve_expressions(expression);
+        fs::write(workspace.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
         let second = state.resolve_expressions(expression);
 
-        assert_eq!(first, second);
-        assert!(!first.ends_with("hash="));
-        let cache = state.hash_files_cache.lock().unwrap();
-        assert_eq!(cache.len(), 1);
-        let key = cache.keys().next().unwrap();
-        assert_eq!(key.patterns, vec!["Cargo.toml".to_string()]);
+        assert_eq!(first, "hash=");
+        assert_ne!(second, "hash=");
         fs::remove_dir_all(temp).unwrap();
     }
 
