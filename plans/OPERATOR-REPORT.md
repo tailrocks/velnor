@@ -505,3 +505,30 @@ same-version local-artifact sentence is superseded and must not be used.
   estate branch/PR remains pushed but unmerged. Resolve those three package
   sources in `ChainArgos/blockchain-nodes`, then rerun the documented three
   lanes; no Velnor capability expansion is needed.
+
+### 2026-07-18 — Apt-only v0.1.58 deployment and campaign capacity
+
+- Java verification exposed a legacy Cargo checkout whose matching bare
+  repository had already been reclaimed. Commit `cfdc931` repairs that
+  runner-owned orphan under an atomic lock before Cargo executes. All 613
+  workspace tests and static gates passed; source release run
+  <https://github.com/tailrocks/velnor/actions/runs/29638641012> and signed apt
+  publication run
+  <https://github.com/tailrocks/velnor-apt/actions/runs/29638791029> are green.
+- Sentry upgraded from 0.1.57 to 0.1.58 exclusively with `apt-get update` and
+  `apt-get install velnor-runner`. The signed repository advertised candidate
+  0.1.58, `dpkg-query` reports 0.1.58, the rebuilt job image OCI version is
+  0.1.58, and the Java and dogfood systemd instances restarted active.
+- The dedicated dogfood daemon uses five slots. The Java campaign daemon was
+  reduced from ten to four slots so 30-GiB per-slot reservations fit the
+  recorded host capacity; blockchain and fixture instances remain stopped
+  until their own controlled windows. This is fleet scheduling, not workflow
+  weakening.
+- Three Testcontainers PostgreSQL containers (`eager_johnson`,
+  `zen_chandrasekhar`, and `affectionate_noyce`) have no Velnor ownership
+  labels. Plan 059's owned-resource-only safety rule forbids guessing, so they
+  were not deleted.
+- Plan 050 removes the old macOS release artifacts because the binding estate
+  standard is Ubuntu-only. Linux amd64/arm64 artifacts retain identical
+  dual-lane jobs and single-writer publication; this is a documented scope
+  substitution, not a runner workaround.
