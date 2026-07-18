@@ -690,9 +690,9 @@ All questions below were resolved during Phase 0/P1; answers inline.
    dispatch a fresh fixture workflow after JIT lands?
 6. Cleanup: should Velnor keep failed JIT runner configs for debugging behind a
    flag, or always delete them by default?
-7. Artifact/cache: **Phase 0 decision: one-host shared-workdir transport is
-   sufficient.** The `_velnor_artifacts/{run_id}-{attempt}/` and
-   `_velnor_caches/` directories on the daemon host serve all jobs in the same
-   run because Phase 0 proof runs on a single host. GitHub service-backed
-   artifact/cache transport (Results Service file APIs) is deferred post-Phase 0
-   for multi-host support.
+7. Artifact/cache: the earlier Phase-0 one-host artifact decision is
+   superseded. Upload and download use Results Service v4
+   (Create/Finalize/List/GetSignedArtifactURL) so job placement never changes
+   correctness; `_velnor_artifacts/{run_id}-{attempt}/` is diagnostic/offline
+   fallback only. `_velnor_caches/` remains an explicitly owned runner-local
+   acceleration store under the storage contract.

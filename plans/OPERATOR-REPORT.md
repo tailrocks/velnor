@@ -532,3 +532,28 @@ same-version local-artifact sentence is superseded and must not be used.
   standard is Ubuntu-only. Linux amd64/arm64 artifacts retain identical
   dual-lane jobs and single-writer publication; this is a documented scope
   substitution, not a runner workaround.
+
+### 2026-07-18 — Java parity and cross-slot artifact root causes
+
+- Java Velnor run
+  <https://github.com/ChainArgos/java-monorepo/actions/runs/29638934505>
+  failed Clippy under the image-baked Rust 1.97.0 while GitHub run
+  <https://github.com/ChainArgos/java-monorepo/actions/runs/29639140341>
+  passed with the repository-pinned 1.97.1. The native mise adapter had placed
+  `/root/.cargo/bin` before mise's selected toolchain after setup. Commit
+  `b28cf0f` reverses that precedence after installation while retaining the
+  baked toolchain only as a fallback; the workflow remains unchanged.
+- v0.1.59 release run
+  <https://github.com/tailrocks/velnor/actions/runs/29639441884> proved a second
+  runner defect: upload-artifact finalized both packages in Results Service,
+  but download-artifact searched only the consuming slot's local filesystem.
+  The earlier one-slot unit fixture masked this class. Native downloads now
+  follow the official current artifact toolkit path: ListArtifacts,
+  GetSignedArtifactURL, credential-safe zip download, and path-safe extraction.
+- Plan 051 stated that Holla's release artifact set should stay unchanged,
+  while higher-priority `VELNOR_PROJECTS_SETUP.md` §2.0/§2.2 forbids macOS
+  execution and requires Ubuntu cross-build or a proven blocker. Apple targets
+  require the Apple SDK and cannot be produced by Ubuntu zigbuild, so PR #36
+  removes macOS artifacts/formula blocks and preserves Linux amd64/arm64
+  tarball, Homebrew-on-Linux, and Debian delivery. The deviation is also
+  prominent in the PR description.
