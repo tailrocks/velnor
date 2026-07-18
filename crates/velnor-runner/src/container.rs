@@ -688,7 +688,7 @@ impl JobContainerSpec {
         )
     }
 
-    fn mise_executable_store_host(&self) -> PathBuf {
+    pub(crate) fn mise_executable_store_host(&self) -> PathBuf {
         self.repository_store_key().map_or_else(
             || {
                 eprintln!(
