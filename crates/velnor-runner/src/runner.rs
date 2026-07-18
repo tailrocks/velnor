@@ -3868,6 +3868,7 @@ fn execute_script_job_inner(
         .into_iter()
         .map(|plan| resolve_checkout_plan_context(plan, &base_env, &context_data))
         .collect::<Vec<_>>();
+    let git_mirror_store = crate::container::git_mirror_store_host(&temp, trust_scope);
     // Capability validation has already accepted the complete job. Start the
     // Docker environment while checkout performs host-side network and disk
     // work. The guard removes a successfully pre-created environment if any
@@ -3894,8 +3895,12 @@ fn execute_script_job_inner(
             });
         }
         let mut checkout_trace = Vec::new();
-        let checkout_result =
-            crate::checkout::execute_checkout(&mut command_runner, plan, &mut checkout_trace);
+        let checkout_result = crate::checkout::execute_checkout_with_mirror(
+            &mut command_runner,
+            plan,
+            &mut checkout_trace,
+            Some(&git_mirror_store),
+        );
         let exit_code = if checkout_result.is_ok() { 0 } else { 1 };
         if let Err(ref e) = checkout_result {
             eprintln!("Checkout failed: {e:#}");

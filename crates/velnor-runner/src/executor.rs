@@ -5,7 +5,7 @@ use crate::{
         DockerActionInvocation, JavaScriptActionInvocation, NativeActionAdapter,
         NativeActionInvocation,
     },
-    checkout::{configure_safe_directory, execute_checkout, CheckoutPlan},
+    checkout::{configure_safe_directory, execute_checkout_with_mirror, CheckoutPlan},
     container::{kache_host, sccache_host, JobContainerSpec, Shell},
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
     workflow_command::parse_workflow_commands,
@@ -1765,7 +1765,11 @@ where
             *version = state.resolve_expressions(version);
         }
         let mut trace = Vec::new();
-        if let Err(error) = execute_checkout(&mut self.runner, &plan, &mut trace) {
+        let mirror_store =
+            crate::container::git_mirror_store_host(&container.temp_host, &self.trust_scope);
+        if let Err(error) =
+            execute_checkout_with_mirror(&mut self.runner, &plan, &mut trace, Some(&mirror_store))
+        {
             if let Some(failure) = error.downcast_ref::<StepLogicFailure>() {
                 return Ok(failure.to_step_result(Some(trace.join("\n"))));
             }
@@ -4933,7 +4937,7 @@ fn copy_artifact_source(source: &Path, artifact_dir: &Path, include_hidden: bool
         let file_name = source
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("artifact source has no file name"))?;
-        fs::copy(source, artifact_dir.join(file_name))
+        crate::fs_copy::clone_or_copy(source, &artifact_dir.join(file_name))
             .with_context(|| format!("copy artifact file {}", source.display()))?;
         Ok(())
     }
@@ -4946,7 +4950,7 @@ fn copy_cache_source(source: &Path, destination: &Path) -> Result<()> {
         let file_name = source
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("cache source has no file name"))?;
-        fs::copy(source, destination.join(file_name))
+        crate::fs_copy::clone_or_copy(source, &destination.join(file_name))
             .with_context(|| format!("copy cache file {}", source.display()))?;
         Ok(())
     }
@@ -4967,7 +4971,7 @@ fn copy_dir_contents(source: &Path, destination: &Path) -> Result<()> {
                 fs::create_dir_all(parent)
                     .with_context(|| format!("create {}", parent.display()))?;
             }
-            fs::copy(&source_path, &destination_path)
+            crate::fs_copy::clone_or_copy(&source_path, &destination_path)
                 .with_context(|| format!("copy {}", source_path.display()))?;
         }
     }
@@ -4991,7 +4995,7 @@ fn copy_artifact_download_contents(source: &Path, destination: &Path) -> Result<
                     .with_context(|| format!("create {}", parent.display()))?;
                 normalize_artifact_dir_permissions(parent)?;
             }
-            fs::copy(&source_path, &destination_path)
+            crate::fs_copy::clone_or_copy(&source_path, &destination_path)
                 .with_context(|| format!("copy {}", source_path.display()))?;
             normalize_artifact_file_permissions(&destination_path)?;
         }
@@ -5038,7 +5042,7 @@ fn copy_dir_contents_filtered(
                 .with_context(|| format!("create directory {}", target.display()))?;
             copy_dir_contents_filtered(&path, &target, include_hidden)?;
         } else {
-            fs::copy(&path, &target)
+            crate::fs_copy::clone_or_copy(&path, &target)
                 .with_context(|| format!("copy {} to {}", path.display(), target.display()))?;
         }
     }
@@ -9693,7 +9697,11 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .runner()
             .calls
             .iter()
-            .find(|(program, args)| program == "git" && args.contains(&"fetch".to_string()))
+            .find(|(program, args)| {
+                program == "git"
+                    && args.contains(&"fetch".to_string())
+                    && !args.contains(&"+refs/*:refs/*".to_string())
+            })
             .unwrap();
         assert!(fetch.1.contains(&"def456".to_string()));
         assert!(!fetch

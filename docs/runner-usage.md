@@ -98,6 +98,14 @@ legacy `/var/lib/velnor*/work/_velnor_*` class into its matching canonical
 trust/class path. Velnor reads an existing legacy class only while its
 canonical destination is absent, so migration is explicit and reversible.
 Use `velnor-runner storage paths` and `storage status` to inspect resolution.
+Primary-repository bare mirrors live in the regenerable `git-mirrors` cache
+class (`/var/cache/velnor/v1/<trust-scope>/git-mirrors`). Each mirror is keyed
+by owner/repository, locked across slots during delta fetch, and never stores a
+remote URL or credential. Checkout fetches locally from the refreshed mirror
+while preserving the normal checkout trace and falls back to its direct origin
+when refresh fails. Cache and artifact tree copies try the filesystem's native
+reflink operation first (XFS `FICLONE` on production Linux, `clonefile` on
+macOS) and transparently fall back to a byte copy when unsupported.
 
 ## Current runner state
 

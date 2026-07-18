@@ -969,6 +969,10 @@ pub(crate) fn mise_store_host(temp_host: &Path) -> PathBuf {
     crate::storage::cache_class_path(&daemon_store_root(temp_host), "mise", "_velnor_mise")
 }
 
+pub(crate) fn git_mirror_store_host(temp_host: &Path, trust_scope: &str) -> PathBuf {
+    crate::git_mirror::store_root(&daemon_store_root(temp_host), trust_scope)
+}
+
 /// Host-persistent mise executable store, scoped by trust + repository.
 pub(crate) fn mise_executable_store_host(temp_host: &Path, repository: &str) -> PathBuf {
     mise_executable_store_host_for_scope(
