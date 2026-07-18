@@ -469,3 +469,18 @@ same-version local-artifact sentence is superseded and must not be used.
   `job-checkout`, `job-container-boot`, `job-steps`, `job-finalize`, and
   `job-teardown`. Fixture run `29636145660` carries adapter post steps and the
   versioned lifecycle `job-timing` records used by compare and doctor.
+### 2026-07-18 — Documentation lookup fallback and estate runner defects
+
+- Context7 MCP was not exposed in this execution environment while validating
+  current mise installation behavior. I used mise's official documentation and
+  proved the Aqua-backed `cargo-nextest` install locally; this avoids the cargo
+  backend's source-build fallback in CI.
+- Java run <https://github.com/ChainArgos/java-monorepo/actions/runs/29636991525>
+  was canceled after the GitHub lane spent more than five minutes compiling
+  `cargo-nextest`; the program branch now installs its pinned prebuilt Aqua
+  artifact instead.
+- Blockchain run <https://github.com/ChainArgos/blockchain-nodes/actions/runs/29637290031>
+  proved Velnor validated the raw `${{ matrix.package == 'heimdall' }}` checkout
+  `lfs` input. Current `actions/runner` evaluates step inputs against expression
+  context before action handling (`Runner.Worker/ActionRunner.cs`); Velnor now
+  follows that order and tests the exact estate expression.

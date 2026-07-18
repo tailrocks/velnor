@@ -2636,7 +2636,7 @@ async fn handle_job_request(
             return Err(error);
         }
         if !args.skip_capability_validation {
-            if let Err(error) = crate::manifest::validate_job(&job) {
+            if let Err(error) = crate::manifest::validate_job_with_context(&job, &early_context) {
                 complete_acquired_job_failure(
                     &run_service_job,
                     &AcquiredJobIdentity::from_job(&job),
