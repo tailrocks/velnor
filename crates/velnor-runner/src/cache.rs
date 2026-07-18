@@ -1,6 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, fs,
+    fs::{File, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -15,10 +17,17 @@ use crate::{
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
 pub(crate) fn run(args: CacheArgs) -> Result<()> {
+    let budgets = BTreeMap::from([
+        (CacheStore::Targets, args.budget_targets_bytes),
+        (CacheStore::ActionsCache, args.budget_caches_bytes),
+        (CacheStore::Artifacts, args.budget_artifacts_bytes),
+        (CacheStore::Cargo, args.budget_cargo_bytes),
+        (CacheStore::Mise, args.budget_mise_bytes),
+    ]);
     let work_root = work_root(args.config_dir, args.work_dir)?;
     match args.command {
-        CacheCommand::Du => run_du(&work_root),
-        CacheCommand::Gc(gc) => run_gc(&work_root, gc),
+        CacheCommand::Du => run_du(&work_root, &budgets),
+        CacheCommand::Gc(gc) => run_gc(&work_root, gc, budgets),
     }
 }
 
@@ -29,13 +38,25 @@ fn work_root(config_dir: Option<PathBuf>, work_dir: Option<PathBuf>) -> Result<P
     Ok(config::config_dir(config_dir)?.join("_work"))
 }
 
-fn run_du(work_root: &Path) -> Result<()> {
+fn run_du(work_root: &Path, budgets: &BTreeMap<CacheStore, u64>) -> Result<()> {
     let stores = store_roots(work_root);
     println!("work_dir\t{}", work_root.display());
-    println!("kind\tbytes\tpath");
+    println!("kind\tlogical_bytes\tphysical_bytes\tbudget_bytes\tpressure\tpath");
     for store in &stores {
-        let bytes = dir_size(&store.path)?;
-        println!("store\t{}\t{}", bytes, store.path.display());
+        let (logical, physical, _) = size_physical_and_modified(&store.path)?;
+        let budget = budgets.get(&store.kind).copied().unwrap_or(0);
+        println!(
+            "store\t{}\t{}\t{}\t{}\t{}",
+            logical,
+            physical,
+            budget,
+            if budget > 0 && physical > budget {
+                "HIGH"
+            } else {
+                "ok"
+            },
+            store.path.display()
+        );
     }
 
     println!("scope\tstore\tbytes\tscope");
@@ -47,10 +68,37 @@ fn run_du(work_root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_gc(work_root: &Path, args: CacheGcArgs) -> Result<()> {
-    if !args.dry_run {
-        bail!("destructive cache gc is not implemented in this spike; pass --dry-run");
+pub fn accounting_summary(work_root: &Path) -> Result<(u64, u64)> {
+    let mut logical = 0u64;
+    let mut physical = 0u64;
+    for store in store_roots(work_root) {
+        let (store_logical, store_physical, _) = size_physical_and_modified(&store.path)?;
+        logical = logical.saturating_add(store_logical);
+        physical = physical.saturating_add(store_physical);
     }
+    Ok((logical, physical))
+}
+
+fn run_gc(
+    work_root: &Path,
+    args: CacheGcArgs,
+    class_budgets: BTreeMap<CacheStore, u64>,
+) -> Result<()> {
+    if !args.dry_run && !args.yes {
+        bail!("destructive cache gc requires --yes");
+    }
+    let run_root = crate::storage::StorageLayout::resolve()
+        .map(|layout| layout.run_root)
+        .unwrap_or_else(|| work_root.join("_velnor_runtime"));
+    let in_use_scopes = match crate::capacity::active_scopes(&run_root, Duration::from_secs(86400))
+    {
+        Ok(scopes) => scopes,
+        Err(error) if args.force_no_lease_check => {
+            eprintln!("WARNING: bypassing active-scope lease check: {error:#}");
+            BTreeSet::new()
+        }
+        Err(error) => return Err(error).context("read active cache-scope leases"),
+    };
 
     let listing = cache_listing(work_root)?;
     let max_age = args
@@ -63,7 +111,8 @@ fn run_gc(work_root: &Path, args: CacheGcArgs) -> Result<()> {
         keep_newest_per_target_scope: args.keep_newest_targets,
         max_age,
         max_total_bytes: args.max_size_bytes,
-        in_use_scopes: BTreeSet::new(),
+        class_budgets,
+        in_use_scopes,
     };
     let candidates = select_eviction_candidates(&listing, &policy);
 
@@ -71,7 +120,28 @@ fn run_gc(work_root: &Path, args: CacheGcArgs) -> Result<()> {
     println!("work_dir\t{}", work_root.display());
     println!("candidate_count\t{}", candidates.len());
     println!("store\tbytes\tscope\treason\tpath");
+    if args.dry_run {
+        for candidate in candidates {
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
+                candidate.store,
+                candidate.bytes,
+                candidate.scope_key(),
+                candidate.reason,
+                candidate.path.display()
+            );
+        }
+        return Ok(());
+    }
+
+    let log_root = crate::storage::StorageLayout::resolve()
+        .map(|layout| layout.log_root)
+        .unwrap_or_else(|| work_root.join("_velnor_logs"));
+    let _lock = GcLeaderLock::acquire(&run_root)?;
     for candidate in candidates {
+        let result = fs::remove_dir_all(&candidate.path);
+        let outcome = if result.is_ok() { "deleted" } else { "failed" };
+        append_gc_history(&log_root, &candidate, outcome)?;
         println!(
             "{}\t{}\t{}\t{}\t{}",
             candidate.store,
@@ -80,7 +150,53 @@ fn run_gc(work_root: &Path, args: CacheGcArgs) -> Result<()> {
             candidate.reason,
             candidate.path.display()
         );
+        if let Err(error) = result {
+            eprintln!(
+                "gc deletion failed for {}: {error}",
+                candidate.path.display()
+            );
+        }
     }
+    Ok(())
+}
+
+struct GcLeaderLock {
+    _file: File,
+}
+
+impl GcLeaderLock {
+    fn acquire(run_root: &Path) -> Result<Self> {
+        fs::create_dir_all(run_root)
+            .with_context(|| format!("create GC runtime dir {}", run_root.display()))?;
+        let path = run_root.join("gc.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("open GC leader lock {}", path.display()))?;
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+            .with_context(|| "another gc holds the lock")?;
+        Ok(Self { _file: file })
+    }
+}
+
+fn append_gc_history(log_root: &Path, candidate: &EvictionCandidate, outcome: &str) -> Result<()> {
+    fs::create_dir_all(log_root)
+        .with_context(|| format!("create GC log dir {}", log_root.display()))?;
+    let path = log_root.join("gc-history.jsonl");
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    let line = serde_json::json!({
+        "store": candidate.store.to_string(),
+        "scope": candidate.scope_key(),
+        "logical_bytes": candidate.bytes,
+        "reason": candidate.reason,
+        "path": candidate.path,
+        "outcome": outcome,
+    });
+    writeln!(file, "{line}")?;
+    eprintln!("gc.history {line}");
     Ok(())
 }
 
@@ -94,6 +210,10 @@ struct StoreRoot {
 }
 
 fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
+    let targets = crate::container::cargo_target_store_host(work_root);
+    let targets_legacy = is_legacy_store(&targets);
+    let actions_cache = crate::storage::cache_class_path(work_root, "caches", "_velnor_caches");
+    let actions_cache_legacy = is_legacy_store(&actions_cache);
     vec![
         StoreRoot {
             kind: CacheStore::Cargo,
@@ -111,16 +231,16 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
         },
         StoreRoot {
             kind: CacheStore::Targets,
-            path: crate::container::cargo_target_store_host(work_root),
-            scope_depth: 4,
-            candidate_depth: 4,
+            path: targets,
+            scope_depth: if targets_legacy { 4 } else { 3 },
+            candidate_depth: if targets_legacy { 4 } else { 3 },
             gc_managed: true,
         },
         StoreRoot {
             kind: CacheStore::ActionsCache,
-            path: work_root.join("_velnor_caches"),
-            scope_depth: 2,
-            candidate_depth: 3,
+            path: actions_cache,
+            scope_depth: if actions_cache_legacy { 2 } else { 1 },
+            candidate_depth: if actions_cache_legacy { 3 } else { 2 },
             gc_managed: true,
         },
         StoreRoot {
@@ -138,6 +258,11 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             gc_managed: false,
         },
     ]
+}
+
+fn is_legacy_store(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with("_velnor_"))
 }
 
 fn scoped_sizes(store: &StoreRoot) -> Result<BTreeMap<String, u64>> {
@@ -187,6 +312,115 @@ fn cache_listing(work_root: &Path) -> Result<Vec<CacheEntry>> {
     Ok(entries)
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReclaimReport {
+    pub freed_bytes: u64,
+    pub deleted: Vec<PathBuf>,
+    pub failures: Vec<String>,
+}
+
+pub fn reclaim(
+    layout: &crate::storage::StorageLayout,
+    target_bytes: u64,
+    in_use_scopes: &BTreeSet<String>,
+) -> Result<ReclaimReport> {
+    reclaim_work_root(
+        &layout.cache_root,
+        &layout.run_root,
+        &layout.log_root,
+        target_bytes,
+        in_use_scopes,
+    )
+}
+
+pub(crate) fn reclaim_work_root(
+    work_root: &Path,
+    run_root: &Path,
+    log_root: &Path,
+    target_bytes: u64,
+    in_use_scopes: &BTreeSet<String>,
+) -> Result<ReclaimReport> {
+    let _lock = GcLeaderLock::acquire(run_root)?;
+    let mut entries = cache_listing(work_root)?;
+    entries.retain(|entry| !in_use_scopes.contains(&entry.scope_key()));
+    entries.sort_by(|left, right| {
+        reclaim_priority(left.store)
+            .cmp(&reclaim_priority(right.store))
+            .then_with(|| left.modified.cmp(&right.modified))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    let mut report = ReclaimReport::default();
+    for entry in entries {
+        if report.freed_bytes >= target_bytes {
+            break;
+        }
+        let candidate = EvictionCandidate {
+            path: entry.path,
+            store: entry.store,
+            scope: entry.scope,
+            bytes: entry.bytes,
+            reason: "reclaim-target".into(),
+        };
+        match fs::remove_dir_all(&candidate.path) {
+            Ok(()) => {
+                report.freed_bytes = report.freed_bytes.saturating_add(candidate.bytes);
+                report.deleted.push(candidate.path.clone());
+                append_gc_history(log_root, &candidate, "deleted")?;
+            }
+            Err(error) => {
+                report
+                    .failures
+                    .push(format!("{}: {error}", candidate.path.display()));
+                append_gc_history(log_root, &candidate, "failed")?;
+            }
+        }
+    }
+    if report.freed_bytes < target_bytes {
+        let _ = prune_owned_builder(0)?;
+    }
+    Ok(report)
+}
+
+pub fn prune_owned_builder(max_used_space_bytes: u64) -> Result<bool> {
+    let inspect = std::process::Command::new("docker")
+        .args(["buildx", "inspect", "velnor-builder"])
+        .output();
+    let Ok(inspect) = inspect else {
+        return Ok(false);
+    };
+    if !inspect.status.success() {
+        return Ok(false);
+    }
+    let limit = format!("{max_used_space_bytes}B");
+    let status = std::process::Command::new("docker")
+        .args([
+            "buildx",
+            "prune",
+            "--builder",
+            "velnor-builder",
+            "--force",
+            "--max-used-space",
+            &limit,
+        ])
+        .status()
+        .context("prune Velnor-owned buildx builder")?;
+    if !status.success() {
+        bail!("Velnor-owned buildx builder prune failed: {status}");
+    }
+    Ok(true)
+}
+
+fn reclaim_priority(store: CacheStore) -> u8 {
+    match store {
+        CacheStore::Artifacts => 0,
+        CacheStore::ActionsCache => 1,
+        CacheStore::Targets => 2,
+        CacheStore::Cargo => 3,
+        CacheStore::Mise => 4,
+        CacheStore::Sccache => 5,
+    }
+}
+
 fn collect_candidates(
     store: &StoreRoot,
     path: &Path,
@@ -218,8 +452,38 @@ fn collect_candidates(
     Ok(())
 }
 
-fn dir_size(path: &Path) -> Result<u64> {
-    Ok(size_and_modified(path)?.0)
+fn size_physical_and_modified(path: &Path) -> Result<(u64, u64, SystemTime)> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((0, 0, SystemTime::UNIX_EPOCH));
+        }
+        Err(error) => return Err(error).with_context(|| format!("stat {}", path.display())),
+    };
+    let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    if metadata.is_file() {
+        return Ok((
+            metadata.len(),
+            metadata.blocks().saturating_mul(512),
+            modified,
+        ));
+    }
+    if !metadata.is_dir() {
+        return Ok((0, 0, modified));
+    }
+    let mut logical: u64 = 0;
+    let mut physical: u64 = 0;
+    let mut newest = modified;
+    for entry in fs::read_dir(path).with_context(|| format!("read {}", path.display()))? {
+        let (child_logical, child_physical, child_modified) =
+            size_physical_and_modified(&entry?.path())?;
+        logical = logical.saturating_add(child_logical);
+        physical = physical.saturating_add(child_physical);
+        newest = newest.max(child_modified);
+    }
+    Ok((logical, physical, newest))
 }
 
 fn size_and_modified(path: &Path) -> Result<(u64, SystemTime)> {
@@ -311,6 +575,7 @@ pub(crate) struct EvictionPolicy {
     pub(crate) keep_newest_per_target_scope: usize,
     pub(crate) max_age: Duration,
     pub(crate) max_total_bytes: Option<u64>,
+    pub(crate) class_budgets: BTreeMap<CacheStore, u64>,
     pub(crate) in_use_scopes: BTreeSet<String>,
 }
 
@@ -389,6 +654,33 @@ pub(crate) fn select_eviction_candidates(
         }
     }
 
+    for (store, budget) in &policy.class_budgets {
+        if *budget == 0 {
+            continue;
+        }
+        let mut remaining: u64 = entries
+            .iter()
+            .filter(|entry| entry.store == *store)
+            .map(|entry| entry.bytes)
+            .sum();
+        let mut oldest: Vec<&CacheEntry> = entries
+            .iter()
+            .filter(|entry| entry.store == *store && !in_use(entry, policy))
+            .collect();
+        oldest.sort_by(|left, right| {
+            left.modified
+                .cmp(&right.modified)
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        for entry in oldest {
+            if remaining <= *budget {
+                break;
+            }
+            remaining = remaining.saturating_sub(entry.bytes);
+            add_candidate(&mut candidates, entry, "over-class-budget");
+        }
+    }
+
     candidates.into_values().collect()
 }
 
@@ -452,6 +744,7 @@ mod tests {
             keep_newest_per_target_scope: 2,
             max_age: DAY * 30,
             max_total_bytes: None,
+            class_budgets: BTreeMap::new(),
             in_use_scopes: BTreeSet::new(),
         }
     }
@@ -548,6 +841,21 @@ mod tests {
     }
 
     #[test]
+    fn cache_gc_enforces_per_class_budget_oldest_first() {
+        let entries = vec![
+            entry("/cache/old", CacheStore::ActionsCache, &["old"], 10, 60),
+            entry("/cache/new", CacheStore::ActionsCache, &["new"], 1, 50),
+        ];
+        let mut policy = policy();
+        policy.max_age = DAY * 365;
+        policy.class_budgets.insert(CacheStore::ActionsCache, 60);
+        let candidates = select_eviction_candidates(&entries, &policy);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].path, Path::new("/cache/old"));
+        assert!(candidates[0].reason.contains("over-class-budget"));
+    }
+
+    #[test]
     fn cache_gc_skips_in_use_scopes() {
         let entries = vec![
             entry(
@@ -572,5 +880,57 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].path, PathBuf::from("/cache/idle"));
+    }
+
+    #[test]
+    fn gc_leader_lock_excludes_second_reaper() {
+        let root = std::env::temp_dir().join(format!("velnor-gc-lock-{}", uuid::Uuid::new_v4()));
+        let first = GcLeaderLock::acquire(&root).unwrap();
+        assert!(GcLeaderLock::acquire(&root).is_err());
+        drop(first);
+        assert!(GcLeaderLock::acquire(&root).is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn gc_without_yes_refuses() {
+        let args = CacheGcArgs {
+            dry_run: false,
+            yes: false,
+            force_no_lease_check: false,
+            keep_newest_targets: 3,
+            max_age_days: 30,
+            max_size_bytes: None,
+        };
+        assert!(run_gc(Path::new("/does-not-matter"), args, BTreeMap::new())
+            .unwrap_err()
+            .to_string()
+            .contains("requires --yes"));
+    }
+
+    #[test]
+    fn reclaim_stops_at_target_and_skips_in_use_scope() {
+        let root = std::env::temp_dir().join(format!("velnor-reclaim-{}", uuid::Uuid::new_v4()));
+        let work = root.join("work");
+        let active = work.join("_velnor_caches/trusted/active/key");
+        let first = work.join("_velnor_caches/trusted/first/key");
+        let second = work.join("_velnor_caches/trusted/second/key");
+        for path in [&active, &first, &second] {
+            fs::create_dir_all(path).unwrap();
+            fs::write(path.join("data"), vec![0; 16]).unwrap();
+        }
+        let report = reclaim_work_root(
+            &work,
+            &root.join("run"),
+            &root.join("log"),
+            16,
+            &BTreeSet::from(["trusted/active".into()]),
+        )
+        .unwrap();
+        assert_eq!(report.deleted.len(), 1);
+        assert!(active.exists());
+        assert_eq!(first.exists() as u8 + second.exists() as u8, 1);
+        assert!(root.join("log/gc-history.jsonl").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -1458,6 +1458,8 @@ fn daemon_slot_run_args(
         job_cpus: args.job_cpus.clone(),
         job_memory: args.job_memory.clone(),
         trust_scope: args.trust_scope.clone(),
+        emergency_reserve_bytes: args.emergency_reserve_bytes,
+        job_peak_bytes: args.job_peak_bytes,
         node_action_image: args.node_action_image.clone(),
         work_dir: daemon_slot_child_path(args.work_dir.as_deref(), slot_index, slot_count),
         docker_host_work_dir: daemon_slot_child_path(
@@ -1571,6 +1573,51 @@ async fn run_v2(
     agent_id: i64,
     token: OAuthAccessToken,
 ) -> Result<()> {
+    let work_root = crate::container::daemon_shared_root(
+        args.work_dir
+            .clone()
+            .unwrap_or_else(|| config_dir.join("_work")),
+    );
+    let run_root = crate::storage::StorageLayout::resolve()
+        .map(|layout| layout.run_root)
+        .unwrap_or_else(|| daemon_capacity_run_root(&config_dir));
+    let controller = crate::capacity::CapacityController {
+        run_root: run_root.clone(),
+        emergency_reserve_bytes: args.emergency_reserve_bytes,
+        job_peak_bytes: args.job_peak_bytes,
+    };
+    let free = free_space_bytes(&work_root)
+        .ok_or_else(|| anyhow::anyhow!("capacity backpressure: cannot measure free bytes"))
+        .map_err(local_failure)?;
+    let reservation = match controller.reserve_with_free_bytes(free) {
+        Ok(reservation) => reservation,
+        Err(first_error) => {
+            let active = crate::capacity::active_scopes(&run_root, Duration::from_secs(24 * 3600))
+                .map_err(local_failure)?;
+            let needed = args.job_peak_bytes.min(free);
+            let log_root = crate::storage::StorageLayout::resolve()
+                .map(|layout| layout.log_root)
+                .unwrap_or_else(|| config_dir.join("logs"));
+            let reclaim_layout = crate::storage::StorageLayout {
+                cache_root: work_root.clone(),
+                lib_root: config_dir.clone(),
+                run_root: run_root.clone(),
+                log_root,
+                mode: "resolved",
+            };
+            let _ =
+                crate::cache::reclaim(&reclaim_layout, needed, &active).map_err(local_failure)?;
+            let free_after = free_space_bytes(&work_root).unwrap_or(free);
+            controller
+                .reserve_with_free_bytes(free_after)
+                .with_context(|| {
+                    format!("{first_error:#}; reclaim completed but reservation still unavailable")
+                })
+                .map_err(local_failure)?
+        }
+    };
+    let _reserved_bytes = reservation.bytes;
+    let _reservation = reservation;
     let server_url_v2 = stored.settings.server_url_v2.as_deref().ok_or_else(|| {
         anyhow::anyhow!("runner config enables V2 flow but missing server_url_v2")
     })?;
@@ -1810,6 +1857,15 @@ async fn run_v2(
     }
 
     run_result
+}
+
+fn daemon_capacity_run_root(config_dir: &Path) -> PathBuf {
+    let base = config_dir
+        .parent()
+        .filter(|parent| parent.file_name().is_some_and(|name| name == "slots"))
+        .and_then(Path::parent)
+        .unwrap_or(config_dir);
+    base.join("run")
 }
 
 /// Proactively refresh OAuth credentials for an idle slot. Best-effort: a
@@ -2351,6 +2407,47 @@ async fn handle_job_request(
     let early_context = job_context_data(&job);
     let mut job = job;
     apply_workflow_script_step_names(&mut job, &early_context).await;
+    let capacity_run_root = crate::storage::StorageLayout::resolve()
+        .map(|layout| layout.run_root)
+        .unwrap_or_else(|| daemon_capacity_run_root(config_dir));
+    let _storage_leases = crate::github_adapter::job_variable(&job, "github.repository")
+        .filter(|repository| !repository.is_empty())
+        .zip(
+            crate::github_adapter::job_variable(&job, "github.workflow")
+                .filter(|workflow| !workflow.is_empty()),
+        )
+        .map(
+            |(repository, workflow)| -> Result<Vec<crate::capacity::ScopeLease>> {
+                let target_scope = format!(
+                    "{}/{}/{}/{}",
+                    crate::container::sanitize_store_key(&args.trust_scope),
+                    crate::container::sanitize_store_key(repository),
+                    crate::container::sanitize_store_key(workflow),
+                    crate::container::sanitize_store_key(&job.job_display_name)
+                );
+                let cache_scope = format!(
+                    "{}/{}/{}",
+                    crate::container::sanitize_store_key(&args.trust_scope),
+                    crate::container::sanitize_store_key(repository),
+                    crate::container::sanitize_store_key(&job.job_id)
+                );
+                Ok(vec![
+                    crate::capacity::ScopeLease::acquire(
+                        &capacity_run_root,
+                        "targets",
+                        &target_scope,
+                        Duration::from_secs(24 * 3600),
+                    )?,
+                    crate::capacity::ScopeLease::acquire(
+                        &capacity_run_root,
+                        "caches",
+                        &cache_scope,
+                        Duration::from_secs(24 * 3600),
+                    )?,
+                ])
+            },
+        )
+        .transpose()?;
     let script_steps = match crate::script_step::github_script_steps_with_context(
         &job.steps,
         "/__w",
@@ -5811,6 +5908,23 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
     }
 
     let scope = GitHubScope::parse(&args.url)?;
+    let layout = crate::storage::StorageLayout::resolve();
+    let run_root = layout
+        .as_ref()
+        .map(|layout| layout.run_root.clone())
+        .unwrap_or_else(|| PathBuf::from("/tmp/velnor-doctor"));
+    let cache_root = layout
+        .as_ref()
+        .map(|layout| layout.cache_root.clone())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let free = free_space_bytes(&cache_root).unwrap_or(0);
+    let (reservation_count, reserved_bytes) =
+        crate::capacity::reservation_summary(&run_root).unwrap_or((0, 0));
+    let active_leases = crate::capacity::active_scopes(&run_root, Duration::from_secs(24 * 3600))
+        .map(|scopes| scopes.len())
+        .unwrap_or(0);
+    let (cache_logical, cache_physical) =
+        crate::cache::accounting_summary(&cache_root).unwrap_or((0, 0));
     let runners = RegistrationClient::new()?
         .list_runners(&scope, pat)
         .await
@@ -5838,6 +5952,10 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
     println!(
         "doctor: {} — {online}/{} expected runner(s) online ({} registered, {busy} busy) for prefix '{}'",
         args.url, args.slots, mine.len(), args.name
+    );
+    println!(
+        "capacity: free={} reserved={} reservations={} active_leases={}; cache logical={} physical={}",
+        free, reserved_bytes, reservation_count, active_leases, cache_logical, cache_physical
     );
     for runner in &mine {
         println!(
@@ -6137,6 +6255,8 @@ mod tests {
             job_cpus: String::new(),
             job_memory: String::new(),
             trust_scope: "trusted".into(),
+            emergency_reserve_bytes: 10 * 1024 * 1024 * 1024,
+            job_peak_bytes: 30 * 1024 * 1024 * 1024,
             node_action_image: String::new(),
             work_dir: None,
             docker_host_work_dir: None,
@@ -6561,6 +6681,8 @@ jobs:
             job_cpus: String::new(),
             job_memory: String::new(),
             trust_scope: "trusted".into(),
+            emergency_reserve_bytes: 10 * 1024 * 1024 * 1024,
+            job_peak_bytes: 30 * 1024 * 1024 * 1024,
             node_action_image: String::new(),
             work_dir: None,
             docker_host_work_dir: None,

@@ -59,6 +59,7 @@ clap.workspace = true
 jsonwebtoken.workspace = true
 reqwest.workspace = true
 rayon.workspace = true
+rustix = { version = "1.1.4", features = ["fs"] }
 rsa.workspace = true
 serde.workspace = true
 serde_json.workspace = true

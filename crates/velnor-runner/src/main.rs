@@ -1,5 +1,6 @@
 mod action;
 mod cache;
+mod capacity;
 mod checkout;
 mod cli;
 mod command_files;
