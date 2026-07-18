@@ -323,7 +323,7 @@ fn github_output_expression(value: &Value) -> Option<&str> {
         .and_then(github_output_expression)
 }
 
-fn job_variable<'a>(job: &'a AgentJobRequestMessage, name: &str) -> Option<&'a str> {
+pub(crate) fn job_variable<'a>(job: &'a AgentJobRequestMessage, name: &str) -> Option<&'a str> {
     job.variables
         .get(name)
         .and_then(|value| value.value.as_deref())

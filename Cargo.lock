@@ -2526,6 +2526,7 @@ dependencies = [
  "rayon",
  "reqwest",
  "rsa",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",

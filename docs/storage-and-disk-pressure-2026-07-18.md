@@ -159,6 +159,9 @@ remain useful for attribution.
 
 ## Active-job-safe reclamation
 
+Implementation status: filesystem scope leases and lease-aware destructive GC
+are closed by plans 036–037.
+
 Every active job holds a kernel-backed shared lease for each mounted managed
 scope. GC takes a non-blocking exclusive lease before deleting or rotating that
 scope. The kernel releases leases after process death; a heartbeat and catalog
@@ -179,6 +182,10 @@ period only when no live lease exists. This addresses the dozens of lingering
 slot directories observed on Sentry.
 
 ## Filesystem-wide pressure controller
+
+Implementation status: pre-session reservations, emergency reserve,
+reclaim-before-advertise, and explicit backpressure are closed by plan 036;
+class-budget and owned-builder reclamation are closed by plan 037.
 
 One coordinator per filesystem polls free bytes/inodes, reacts after large
 writes and job transitions, and uses hysteresis. Defaults must be bounded but

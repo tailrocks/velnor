@@ -61,6 +61,41 @@ pub struct CacheArgs {
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
 
+    #[arg(
+        long,
+        env = "VELNOR_BUDGET_TARGETS_BYTES",
+        default_value_t = 214_748_364_800u64
+    )]
+    pub budget_targets_bytes: u64,
+
+    #[arg(
+        long,
+        env = "VELNOR_BUDGET_CACHES_BYTES",
+        default_value_t = 53_687_091_200u64
+    )]
+    pub budget_caches_bytes: u64,
+
+    #[arg(
+        long,
+        env = "VELNOR_BUDGET_ARTIFACTS_BYTES",
+        default_value_t = 21_474_836_480u64
+    )]
+    pub budget_artifacts_bytes: u64,
+
+    #[arg(
+        long,
+        env = "VELNOR_BUDGET_CARGO_BYTES",
+        default_value_t = 21_474_836_480u64
+    )]
+    pub budget_cargo_bytes: u64,
+
+    #[arg(
+        long,
+        env = "VELNOR_BUDGET_MISE_BYTES",
+        default_value_t = 21_474_836_480u64
+    )]
+    pub budget_mise_bytes: u64,
+
     #[command(subcommand)]
     pub command: CacheCommand,
 }
@@ -69,15 +104,23 @@ pub struct CacheArgs {
 pub enum CacheCommand {
     /// Report store sizes by store and scope. Read-only.
     Du,
-    /// Preview cache eviction candidates. Destructive GC is not implemented in this spike.
+    /// Preview or execute bounded cache eviction.
     Gc(CacheGcArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct CacheGcArgs {
-    /// Print candidates without deleting anything. Required in this spike.
+    /// Print candidates without deleting anything.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Confirm deletion for a destructive GC run.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Permit destructive GC before plan 036 lease wiring is active.
+    #[arg(long)]
+    pub force_no_lease_check: bool,
 
     /// Keep this many newest target buckets per trust/repo/workflow/job scope.
     #[arg(long, default_value_t = 3)]
@@ -239,6 +282,22 @@ pub struct RunArgs {
     #[arg(long, env = "VELNOR_TRUST_SCOPE", default_value = "trusted")]
     pub trust_scope: String,
 
+    /// Filesystem bytes never available to new jobs.
+    #[arg(
+        long,
+        env = "VELNOR_EMERGENCY_RESERVE_BYTES",
+        default_value_t = 10_737_418_240u64
+    )]
+    pub emergency_reserve_bytes: u64,
+
+    /// Conservative disk reservation for every advertised slot.
+    #[arg(
+        long,
+        env = "VELNOR_JOB_PEAK_BYTES",
+        default_value_t = 32_212_254_720u64
+    )]
+    pub job_peak_bytes: u64,
+
     /// Override Docker image used to run JavaScript actions. By default Velnor uses the action's declared Node runtime image.
     #[arg(long, default_value = "")]
     pub node_action_image: String,
@@ -355,6 +414,22 @@ pub struct DaemonArgs {
     /// Trust boundary for this daemon/pool. "trusted" keeps full capabilities; any other value disables shared Docker socket access and rejects user secrets.
     #[arg(long, env = "VELNOR_TRUST_SCOPE", default_value = "trusted")]
     pub trust_scope: String,
+
+    /// Filesystem bytes never available to new jobs.
+    #[arg(
+        long,
+        env = "VELNOR_EMERGENCY_RESERVE_BYTES",
+        default_value_t = 10_737_418_240u64
+    )]
+    pub emergency_reserve_bytes: u64,
+
+    /// Conservative disk reservation for every advertised slot.
+    #[arg(
+        long,
+        env = "VELNOR_JOB_PEAK_BYTES",
+        default_value_t = 32_212_254_720u64
+    )]
+    pub job_peak_bytes: u64,
 
     /// Override Docker image used to run JavaScript actions. By default Velnor uses the action's declared Node runtime image.
     #[arg(long, default_value = "")]
