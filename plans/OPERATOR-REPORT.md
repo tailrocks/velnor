@@ -764,3 +764,35 @@ same-version local-artifact sentence is superseded and must not be used.
   weaken current coverage. No branch or file was changed. Human-only decision:
   reconcile Tablerock's trunk-only `AGENTS.md` with the estate branch model and
   re-plan from `0bb0119`; do not delete the new coverage.
+- Plan 055 static delivery is signed and pushed: Schemalane `b02994b` in
+  <https://github.com/tailrocks/schemalane/pull/2>, pg-bigdecimal `42b6e05`
+  in <https://github.com/tailrocks/pg-bigdecimal/pull/1>, and
+  tracing-request-level `3670236` in
+  <https://github.com/tailrocks/tracing-request-level/pull/1>. Local format,
+  clippy, nextest, doc, actionlint, policy, DCO, and pin gates pass. Schemalane
+  exercises its database through testcontainers, so adding a redundant YAML
+  service would change semantics. The other two intentionally do not commit
+  `Cargo.lock`; clean-checkout `--locked` failed with exit 101, so their
+  canonical gates omit that inapplicable flag. PR-created runs `29649999281`,
+  `29650000793`, and `29650002002` were cancelled before controlled dispatch.
+- Plan 056 static delivery is signed and pushed as `7049da8` in
+  <https://github.com/tailrocks/parallax-telemetry-playground/pull/7>.
+  Actionlint, Rust gates, the 76-scenario suite, workflow policy, DCO, and
+  pin checks pass. PR-created run `29649859177` was cancelled before the
+  controlled verification campaign.
+- Parallax run `29649939459` proves an unapproved capability surface rather
+  than a workflow defect. Three native `actions/upload-artifact@v7` failure
+  handlers use `retention-days: 14`; Velnor manifest v2 accepts only `name`,
+  `path`, `if-no-files-found`, `include-hidden-files`, and `overwrite`, and
+  rejected the complete expanded jobs before side effects. The strict
+  capability contract requires explicit operator approval before adding an
+  input with storage-lifetime implications, while this campaign forbids
+  asking or waiting. The canonical workflow is retained unchanged and the
+  item is recorded for a future explicit capability decision.
+- Cancellation handling diverged from GitHub runner behavior during Parallax
+  run `29649548414`: after GitHub cancellation, Velnor continued an active
+  mise build and systemd drain did not complete. Because the run was already
+  explicitly stale/cancelled, its owned cgroup was killed and GitHub's
+  force-cancel endpoint completed the run. This is runner backlog evidence:
+  cancellation must promptly terminate the active step and release the job;
+  workflow semantics were not changed to hide it.
