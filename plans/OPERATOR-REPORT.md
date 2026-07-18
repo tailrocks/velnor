@@ -943,3 +943,17 @@ same-version local-artifact sentence is superseded and must not be used.
   shared image seeds were audited as Rust 1.97.1, rust-script 0.36.0, just
   1.56.0, protoc 35.1, and gh 2.96.0. All 628 tests and every runner static
   gate pass.
+- The v0.1.77 general release run `29655877360` exposed a second cold-store
+  concurrency defect: its aarch64 job and the concurrent Debian aarch64 job
+  both mutated the shared repo rustup distribution with `rustup target add`;
+  one downloaded `rust-std` and rolled back while the Debian job succeeded.
+  The Debian release `29655877347` and apt publisher `29655986800` passed, but
+  the failed general run is not valid release evidence.
+- Signed commit `0165c45` removes that mutable cold path. The package image
+  preinstalls every standard target found across the checked-out estate under
+  Rust 1.97.1: aarch64/x86_64 Linux GNU, x86_64 Linux musl, and aarch64/x86_64
+  Apple Darwin. Image preflight fails if rustup or any member of this exact set
+  is absent. Thus standard `rustup target add` steps are read-only no-ops after
+  a fresh image seed instead of racing distribution mutation. Format, strict
+  clippy, all 629 nextest tests, and actionlint pass; workflows remain
+  unchanged.
