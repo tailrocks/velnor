@@ -61,8 +61,8 @@ every repo (§2.12; `audit-ci` rule 11 enforces it).
 | 033 | Strict capability manifest; no unknown-action fallback | P0 | L | — | V0.14; contract gates 1–3,6,7 | IN PROGRESS |
 | 034 | Compiler-cache backend seam (sccache v0.16.0 baked, kache, off) | P0 | L | 033 | contract gates 4–5; V2.2/V2.3 | TODO |
 | 035 | Canonical storage contract + fail-closed identity | P0 | L | — | V0.11; P0 unknown-repo bug | DONE: canonical resolver/catalog/CLI, legacy readability, fail-closed identity, packaging, and all gates green |
-| 036 | Capacity controller — leases, reservations, reclaim-before-accept | P0 | L | 035 (037 couples) | V0.12/V0.13 | IN PROGRESS |
-| 037 | Destructive cache GC + physical accounting | P0 | M/L | 035 | V0.7/V0.8 | IN PROGRESS |
+| 036 | Capacity controller — leases, reservations, reclaim-before-accept | P0 | L | 035 (037 couples) | V0.12/V0.13 | DONE: serialized reservations, emergency floor/hysteresis, lease-safe shortfall reclaim, explicit backpressure, doctor output, live host proof, and all gates green |
+| 037 | Destructive cache GC + physical accounting | P0 | M/L | 035 | V0.7/V0.8 | DONE: guarded destructive GC, leader lock, physical budgets/history, owned-builder boundary, live cleanup, and all gates green |
 | 038 | Job-env defaults (SCCACHE_CACHE_SIZE/BASEDIRS, CARGO_INCREMENTAL=0) | P0 | S | — | V0.9 | DONE: defaults, precedence tests, docs, and all runner gates green |
 | 039 | Org-level JIT + multi-repo fleet ops | P0 | M | — | V0.1 | BLOCKED: code/runbook and gates complete; all local and daemon credentials return HTTP 403 for org runner-group administration |
 | 040 | `services:` parity (host/port env, alias) | P0 | M | — | V0.5 | IN PROGRESS |
