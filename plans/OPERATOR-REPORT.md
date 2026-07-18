@@ -1006,3 +1006,16 @@ same-version local-artifact sentence is superseded and must not be used.
 - Playground's latest-head GitHub run `29656744438` passed after signed target
   commit `0c9da1d` declared rustfmt and clippy as mise-managed Rust components,
   removing implicit GitHub-image provisioning while keeping mise authoritative.
+- Plan 055 is complete for pg-bigdecimal and tracing-request-level. Final
+  tracing evidence on apt/image v0.1.80 passed: standalone both
+  `29657407165` (Velnor 22 s / GitHub 77 s), V-C cold `29657468067`
+  (44 s / 77 s), warm `29657519723` (20 s / 82 s), and no-change
+  `29657578558` (23 s / 85 s). The Velnor no-change log has no dependency
+  downloads, dependency compilation, or tool installation; only first-party
+  doc-test and package verification compilation appears. Pg-bigdecimal PR
+  <https://github.com/tailrocks/pg-bigdecimal/pull/1> merged as `dd6f1c1` and
+  tracing-request-level PR
+  <https://github.com/tailrocks/tracing-request-level/pull/1> merged as
+  `28f9f54`; both remote program branches were deleted and both local
+  checkouts now track clean `main`. The exact campaign systemd units are
+  inactive and no exact-prefix runner registrations remain.
