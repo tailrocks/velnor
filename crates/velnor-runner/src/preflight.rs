@@ -199,13 +199,13 @@ fn verify_job_image_tools(runner: &mut dyn CommandRunner, docker_image: &str) ->
         docker_image.to_string(),
         "sh".to_string(),
         "-c".to_string(),
-        "command -v sh >/dev/null && command -v bash >/dev/null && command -v git >/dev/null"
+        "command -v sh >/dev/null && command -v bash >/dev/null && command -v git >/dev/null && command -v file >/dev/null"
             .to_string(),
     ];
     let result = runner.run("docker", &args)?;
     if result.code != 0 {
         bail!(
-            "Docker image '{}' is missing target job tools sh, bash, or git. stderr: {}",
+            "Docker image '{}' is missing target job tools sh, bash, git, or file. stderr: {}",
             docker_image,
             result.stderr
         );
@@ -419,7 +419,7 @@ mod tests {
             1
         );
         assert!(image_tools_call.1.contains(
-            &"command -v sh >/dev/null && command -v bash >/dev/null && command -v git >/dev/null"
+            &"command -v sh >/dev/null && command -v bash >/dev/null && command -v git >/dev/null && command -v file >/dev/null"
                 .to_string()
         ));
         let script_call = &runner.calls[4];
