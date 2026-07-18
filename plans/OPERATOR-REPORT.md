@@ -810,3 +810,39 @@ same-version local-artifact sentence is superseded and must not be used.
   <https://github.com/tailrocks/parallax/pull/21>. Cancellation again required
   force-cancel plus termination of the already-cancelled owned systemd cgroup;
   the Parallax unit is disabled and its runner registrations are deleted.
+- Termrock verification exposed two runner defects without weakening its
+  workflow. Run `29650609270` showed that a failed native mise install was
+  followed by an attempt to read the nonexistent `_velnor/mise-env.json`;
+  signed Velnor commit `f458497` now returns the failed step result directly.
+  Velnor v0.1.72 was built by runs `29650748123` and `29650748129`, published
+  by `velnor-apt` run `29650875407`, and installed on Sentry exclusively by
+  apt. Run `29651045178` then showed four jobs concurrently mutating one
+  repository rustup tree, producing partial component state. Signed commit
+  `3594332` serializes shared mise installation with an advisory `flock`, adds
+  the pipx and util-linux runtime prerequisites, and preserves concurrency
+  after installation. Its formatting, strict clippy, 619-test nextest, and
+  actionlint gates passed. Velnor v0.1.73 was built by runs `29651170586` and
+  `29651170620`, published by `velnor-apt` run `29651299231`, and installed
+  on Sentry exclusively by apt; dpkg and the rebuilt job-image label both
+  reported 0.1.73.
+- Before the v0.1.73 retry, the inactive poisoned Velnor-owned cache path
+  `/var/cache/velnor/v1/trusted/mise/rustup/tailrocks_termrock` was resolved
+  after the Termrock unit stopped and removed under the owned-resource guard.
+  During the preceding apt image rebuild, exact stale container
+  `5351794961ee` from an already-cancelled Parallax job held only
+  `/var/lib/velnor-parallax/...` mounts and was removed; no broad Docker prune
+  or non-Velnor deletion was performed.
+- Termrock commits `f276f86` and `ba45fe7` declare current `uv` as the mise
+  pipx backend and commit its generated lock entry. This follows mise's
+  current pipx backend dependency model and fixes the initial GitHub error
+  that `pipx:reuse` had no backend, followed by the locked-install error that
+  `uv@0.11.29` was absent from `mise.lock`. Clean GitHub run `29651936604`
+  passed mise installation, gitleaks, actionlint, and docs-quality before
+  failing `cargo fmt --all -- --check`. Clean Velnor run `29651695696` failed
+  the identical formatting gate on pre-existing source drift in the
+  completion-menu sources; the other three Rust jobs passed on each lane.
+  Plan 054 explicitly excludes Rust source edits, so every in-scope fallback
+  is exhausted and the plan is BLOCKED rather than masking the defect in YAML.
+  The GitHub run's semver job remained in its cold full-tool installation for
+  more than two minutes and was cancelled under the monitoring rule after the
+  parity blocker was established. PR: <https://github.com/tailrocks/termrock/pull/4>.
