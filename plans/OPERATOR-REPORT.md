@@ -308,3 +308,17 @@ same-version local-artifact sentence is superseded and must not be used.
   Following plan 045's documented fallback, the timing record omits queue wait
   rather than deriving a false value; doctor will use the locally measured
   broker-message-to-acquire/pickup interval.
+
+## 2026-07-18 — Release tooling compile defect
+
+- v0.1.47 Debian run `29632781256` remained in `Install cargo-deb` on both
+  architectures for more than two minutes. Investigation showed the
+  `cargo:cargo-deb` mise backend had no external cargo-binstall available and
+  therefore fell back to `cargo install`; the workflow comment claiming it
+  used a prebuilt tool was false. The stale run was canceled.
+- Current mise documentation confirms `cargo.binstall_only=true` forbids the
+  source-build fallback and `cargo.binstall_quickinstall=true` permits the
+  external prebuilt artifact host. A local forced dry run with pinned
+  cargo-binstall 1.21.0 verified the signed cargo-deb 3.7.0 artifact for the
+  host platform. The release workflow now installs cargo-binstall through
+  mise first and fails closed if no prebuilt cargo-deb exists.
