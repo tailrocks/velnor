@@ -4,7 +4,9 @@ use std::fmt;
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::action::{string_inputs, NativeActionAdapter, NATIVE_ACTION_REF};
+use crate::action::{
+    string_inputs, unsupported_action_error, NativeActionAdapter, NATIVE_ACTION_REF,
+};
 use crate::cli::{CapabilitiesArgs, CapabilitiesCommand};
 use crate::compiler_cache::CompilerCacheBackend;
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
@@ -487,16 +489,16 @@ pub fn violations(job: &AgentJobRequestMessage) -> Vec<CapabilityViolation> {
             },
         );
         let Some(capability) = find(repository) else {
+            let accepted = unsupported_action_error(repository)
+                .map(|message| vec![message.to_string()])
+                .unwrap_or_else(|| {
+                    ACTIONS
+                        .iter()
+                        .map(|item| item.repository.to_string())
+                        .collect()
+                });
             violations.push(violation(
-                &step_name,
-                repository,
-                action_ref,
-                "uses",
-                repository,
-                ACTIONS
-                    .iter()
-                    .map(|item| item.repository.to_string())
-                    .collect(),
+                &step_name, repository, action_ref, "uses", repository, accepted,
             ));
             continue;
         };
@@ -860,6 +862,7 @@ mod tests {
             NativeActionAdapter::UploadArtifact,
             NativeActionAdapter::DownloadArtifact,
             NativeActionAdapter::UploadPagesArtifact,
+            NativeActionAdapter::ConfigurePages,
             NativeActionAdapter::DeployPages,
             NativeActionAdapter::PathsFilter,
             NativeActionAdapter::Mise,
@@ -898,6 +901,20 @@ mod tests {
     fn validate_job_rejects_unknown_repository() {
         let errors = violations(&job("owner/unknown", Some("abc"), serde_json::json!({})));
         assert_eq!(errors[0].field, "uses");
+    }
+
+    #[test]
+    fn validate_job_rejects_attestation_with_writer_lane_guidance() {
+        let errors = violations(&job(
+            "actions/attest-build-provenance",
+            Some("0f67c3f4856b2e3261c31976d6725780e5e4c373"),
+            serde_json::json!({"subject-path": "release.tar.gz"}),
+        ));
+        assert_eq!(errors[0].field, "uses");
+        assert!(errors[0]
+            .accepted
+            .iter()
+            .any(|message| message.contains("GitHub writer lane")));
     }
 
     #[test]
