@@ -199,13 +199,13 @@ fn verify_job_image_tools(runner: &mut dyn CommandRunner, docker_image: &str) ->
         docker_image.to_string(),
         "sh".to_string(),
         "-c".to_string(),
-        "command -v sh >/dev/null && command -v bash >/dev/null && command -v git >/dev/null && command -v file >/dev/null"
+        "command -v sh >/dev/null && command -v bash >/dev/null && command -v git >/dev/null && command -v file >/dev/null && command -v rustup >/dev/null && installed=$(rustup target list --installed) && for target in aarch64-apple-darwin aarch64-unknown-linux-gnu x86_64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-linux-musl; do printf '%s\\n' \"$installed\" | grep -qxF \"$target\" || exit 1; done"
             .to_string(),
     ];
     let result = runner.run("docker", &args)?;
     if result.code != 0 {
         bail!(
-            "Docker image '{}' is missing target job tools sh, bash, git, or file. stderr: {}",
+            "Docker image '{}' is missing target job tools or preinstalled estate Rust targets. stderr: {}",
             docker_image,
             result.stderr
         );
@@ -418,10 +418,9 @@ mod tests {
                 .count(),
             1
         );
-        assert!(image_tools_call.1.contains(
-            &"command -v sh >/dev/null && command -v bash >/dev/null && command -v git >/dev/null && command -v file >/dev/null"
-                .to_string()
-        ));
+        assert!(image_tools_call.1.iter().any(|value| value.starts_with(
+            "command -v sh >/dev/null && command -v bash >/dev/null && command -v git >/dev/null && command -v file >/dev/null"
+        )));
         let script_call = &runner.calls[4];
         assert_eq!(script_call.0, "docker");
         assert!(script_call.1.windows(2).any(|pair| {
@@ -543,6 +542,24 @@ mod tests {
 
         assert!(error.to_string().contains("missing target job tools"));
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn preflight_requires_all_estate_rust_targets_in_job_image() {
+        let mut runner = RecordingRunner::default();
+
+        verify_job_image_tools(&mut runner, "velnor/job-ubuntu:26.04").unwrap();
+
+        let command = runner.calls[0].1.last().unwrap();
+        for target in [
+            "aarch64-apple-darwin",
+            "aarch64-unknown-linux-gnu",
+            "x86_64-apple-darwin",
+            "x86_64-unknown-linux-gnu",
+            "x86_64-unknown-linux-musl",
+        ] {
+            assert!(command.contains(target));
+        }
     }
 
     #[test]

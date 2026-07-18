@@ -112,6 +112,12 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     mise use --global rust@1.97.1 'cargo:cargo-nextest@0.9.140' 'cargo:rust-script@0.36.0' just@1.56.0 protoc@35.1 gh@2.96.0 && \
     mise reshim && \
     rustup component add rustfmt clippy && \
+    rustup target add \
+      aarch64-apple-darwin \
+      aarch64-unknown-linux-gnu \
+      x86_64-apple-darwin \
+      x86_64-unknown-linux-gnu \
+      x86_64-unknown-linux-musl && \
     mise exec -- rustc --version && \
     mise exec -- cargo nextest --version && \
     mise exec -- rust-script --version && \
