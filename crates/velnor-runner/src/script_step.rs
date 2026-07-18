@@ -973,10 +973,9 @@ fn script_with_path_prelude(script: &str, path_prepend: &[String]) -> String {
     // exported HOME=/root + CARGO_HOME=/root/.cargo (an OrbStack dev-host
     // workaround), which silently redirected every cargo download into the
     // unmounted container /root — the cargo-registry cache could never save
-    // and warm restores were invisible to steps. PATH keeps /root/.cargo/bin
-    // (image-baked rustup proxies) ahead of the mise shims, so cargo resolves
-    // even though mise's rust backend derives its bin path from $CARGO_HOME
-    // (empty bind at job start).
+    // and warm restores were invisible to steps. Native mise setup prepends its
+    // repository-selected shims/tool bins ahead of the image-baked rustup
+    // fallback; jobs without mise retain the normal image PATH.
     let mut prelude = Vec::new();
     if !path_prepend.is_empty() {
         let joined = path_prepend
