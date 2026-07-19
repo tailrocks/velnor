@@ -2471,6 +2471,21 @@ where
         let action_state = state.with_env(state.resolve_env(&action.env));
         let name = native_input_or(&action_state, action, "name", "velnor-builder");
         let driver = native_input_or(&action_state, action, "driver", "docker-container");
+        let buildkitd_config_inline =
+            native_input(action, &action_state, "buildkitd-config-inline");
+        let buildkitd_config_container = if buildkitd_config_inline.is_empty() {
+            None
+        } else {
+            let config_name = format!("buildkitd-config-{}.toml", sanitize_artifact_name(&name));
+            let config_host = state
+                .temp_host
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("setup-buildx requires a runner temp directory"))?
+                .join(&config_name);
+            fs::write(&config_host, &buildkitd_config_inline)
+                .with_context(|| format!("write BuildKit config {}", config_host.display()))?;
+            Some(format!("/__t/{config_name}"))
+        };
         let inspect_args = vec!["buildx".to_string(), "inspect".to_string(), name.clone()];
         let inspect_result =
             self.container_docker(container, &action_state, &inspect_args, None, timeout)?;
@@ -2487,6 +2502,9 @@ where
                 driver,
                 "--use".to_string(),
             ];
+            if let Some(config) = buildkitd_config_container {
+                args.extend(["--config".to_string(), config]);
+            }
             if input_truthy(&native_input_or(&action_state, action, "install", "false")) {
                 args.push("--bootstrap".to_string());
             }
@@ -5537,9 +5555,15 @@ fn resolve_container_path(state: &JobExecutionState, path: &str) -> String {
 
 fn artifact_source_is_hidden(state: &JobExecutionState, source: &Path) -> bool {
     let relative = state
-        .workspace_host
+        .cargo_target_host
         .as_deref()
         .and_then(|base| source.strip_prefix(base).ok())
+        .or_else(|| {
+            state
+                .workspace_host
+                .as_deref()
+                .and_then(|base| source.strip_prefix(base).ok())
+        })
         .or_else(|| {
             state
                 .temp_host
@@ -9586,6 +9610,10 @@ mod tests {
                         ("name".into(), "velnor-builder".into()),
                         ("driver".into(), "docker-container".into()),
                         ("install".into(), "true".into()),
+                        (
+                            "buildkitd-config-inline".into(),
+                            "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]\n".into(),
+                        ),
                     ]
                     .into(),
                     env: Vec::new(),
@@ -9748,9 +9776,14 @@ type=sha,format=long,prefix=,enable=true"
         ));
         let runner = executor.runner();
         let calls = docker_call_strings(&runner.calls);
-        assert!(calls
-            .iter()
-            .any(|c| c.contains("'buildx' 'create' '--name' 'velnor-builder'")));
+        assert!(calls.iter().any(
+            |c| c.contains("'buildx' 'create' '--name' 'velnor-builder'")
+                && c.contains("'--config' '/__t/buildkitd-config-velnor-builder.toml'")
+        ));
+        assert_eq!(
+            fs::read_to_string(temp.join("buildkitd-config-velnor-builder.toml")).unwrap(),
+            "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]\n"
+        );
         let login_call = runner.calls.iter().position(|(program, args)| {
             program == "docker"
                 && args.join(" ").contains(
@@ -13853,10 +13886,14 @@ fi"#
     #[test]
     fn native_upload_artifact_reads_persistent_workspace_target_mount() {
         let temp = temp_dir();
-        let target = temp.join("target-store");
+        // Persistent buckets deliberately include workflow/job identity. A
+        // workflow filename starts with `.github`, but that host-only parent
+        // must not make ordinary target files hidden from upload-artifact.
+        let target = temp.join(".github_workflows_ci.yml/Check__Velnor_");
         fs::create_dir_all(target.join("cargo-timings")).unwrap();
         fs::write(target.join("cargo-timings/cargo-timing.html"), "timing\n").unwrap();
         fs::write(target.join("sccache-check.txt"), "stats\n").unwrap();
+        fs::write(target.join(".private"), "hidden\n").unwrap();
         let mut spec = container(&temp);
         spec.cargo_target_host = Some(target);
         let steps = vec![ExecutableStep::Native {
@@ -13895,6 +13932,7 @@ fi"#
             fs::read_to_string(artifact.join("sccache-check.txt")).unwrap(),
             "stats\n"
         );
+        assert!(!artifact.join(".private").exists());
         fs::remove_dir_all(temp).unwrap();
     }
 

@@ -278,6 +278,12 @@ docker run --rm \
     --require-docker-socket
 ```
 
+The canonical job image includes the current architecture-pinned Node.js
+runtime (v26.5.0) as a base-runner tool. This matches GitHub-hosted semantics
+for ordinary run steps and lets tools such as Oxlint's type-aware plugin invoke
+`node` without a workflow-only installation. Runner preflight rejects an image
+that lacks Node or any required estate Rust target.
+
 The same path mapping is required for `daemon` and `run`:
 
 ```sh

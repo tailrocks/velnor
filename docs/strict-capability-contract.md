@@ -69,6 +69,23 @@ repository + allowed immutable commits
 the step, action/ref, field, received value, accepted alternatives, reason, and
 manifest version.
 
+Manifest version 3 adds two exact estate inputs without creating generic
+fallbacks:
+
+- `dorny/paths-filter` accepts only an explicitly empty `token`, which matches
+  upstream's local-git mode and grants no API or secret access;
+- `docker/setup-buildx-action` accepts only the reviewed Docker Hub mirror
+  configuration `[registry."docker.io"]` with
+  `mirrors = ["mirror.gcr.io"]`. The native adapter writes that literal to the
+  job's private runner-temp mount and passes it to `docker buildx create
+  --config`, matching the pinned upstream action. It adds mirror network reads
+  but no credential, trust, persistent-store, or host-mount surface. Existing
+  builders remain reused exactly as upstream does.
+
+These inputs are required by Jackin's already-approved Docs and Construct
+contracts. Unit fixtures cover both exact values and Jackin's program-branch
+lane run is the end-to-end proof; other values remain preflight failures.
+
 ## Approved compiler-cache topology
 
 Both tools support local caching. Sccache defaults to local disk when no remote
