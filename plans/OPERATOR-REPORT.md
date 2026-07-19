@@ -1138,3 +1138,15 @@ same-version local-artifact sentence is superseded and must not be used.
   were deleted. Plan 053 is BLOCKED under its explicit Velnor-capability STOP:
   source/test or workflow changes are out of plan scope and would weaken the
   GitHub-proven contract; no contract-conformant runner-side fallback remains.
+- Jackin Docs run `29668245057` exposed an eager-execution-preparation mismatch:
+  Velnor tried to read `.github/actions/download-ci-xtask/action.yml` even though
+  the parent condition is deterministically false for PR #810's branch
+  `workflow_dispatch`. The latest official `actions/runner` source was consulted
+  before changing code: `ActionManager.PrepareActionsAsync` documents local
+  composites as prepared mid-job, while `StepsRunner` evaluates the step `if`
+  before execution. The runner now proves only immutable `github`-context false
+  conditions early and emits the skipped composite without reading workspace
+  metadata; conditions involving `steps`, `needs`, `env`, matrix/runner state, or
+  status functions remain runtime-bound. Strict pre-side-effect capability
+  validation is unchanged. Exact Jackin-shape and dynamic-condition regression
+  tests pass; deployment and live rerun evidence will follow through apt only.
