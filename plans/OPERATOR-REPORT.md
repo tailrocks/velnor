@@ -1190,3 +1190,13 @@ same-version local-artifact sentence is superseded and must not be used.
   The earlier report entry's claim that upstream processes every pattern as
   an independent search root is superseded by this direct source/live proof.
   No Jackin workflow or source was changed.
+- The v0.1.96 follow-up Docs proof (`29670131940`) narrowed the remaining
+  digest mismatch to glob matching itself: Velnor produced `ed4422…` because
+  `globset`'s default `*` crossed `/`, so `crates/*/Cargo.toml` incorrectly
+  included six nested `crates/*/fuzz/Cargo.toml` files. Current
+  `actions/runner` minimatch treats `/` as a literal separator; its printed
+  130-file sequence excludes those nested manifests. The hash matcher now
+  enables literal-separator semantics, with a direct nested-manifest
+  regression. The search-root and file ordering otherwise matched the
+  official printed sequence exactly. Run `29670131940` remains the live
+  fallback evidence; Jackin remains unchanged.
