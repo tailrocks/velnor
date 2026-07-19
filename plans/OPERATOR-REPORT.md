@@ -1111,3 +1111,30 @@ same-version local-artifact sentence is superseded and must not be used.
   reviewed TOML into private runner temp and passes `--config` exactly as the
   pinned upstream setup-buildx action does; arbitrary config remains rejected.
   Full gates pass: format, strict clippy, actionlint, and 641/641 nextest tests.
+- v0.1.92 was published and deployed to Sentry only through the signed apt
+  repository. General release `29666943694`, Debian release `29666943672`, and
+  apt publish `29667088079` passed. Sentry reports installed package and apt
+  candidate 0.1.92; the canonical image label is 0.1.92 and proves Node
+  v26.5.0 plus cargo-nextest 0.9.140. The image tag advanced only after the
+  post-install BuildKit export finalized, so campaign dispatch was held until
+  the label and tools were directly verified. Three explicitly labeled stale
+  Velnor job containers from inactive Parallax/Playground daemons were stopped
+  and removed by exact id; no unlabeled or non-Velnor resource was touched.
+- Plan 053 exhausted its documented runner-side fallback on exact Parallax
+  head `107610a0e480c85896f08570ad94944de03ea7f2`. The same-head GitHub run
+  `29664024963` passed, including Browser Breadth job `88131344906`, Browser
+  Contracts job `88131344938`, and Ui job `88131344912`. Clean v0.1.92 Velnor
+  runs `29667311944`, `29667756115`, and `29667963964` each ran after old-run
+  cancellation checks, daemon drain, exact stale-registration deletion, and
+  fresh JIT registration. All ordinary Rust/UI gates passed, including the
+  Node-dependent Ui job, but Browser Breadth reproducibly captured the overview
+  loading skeleton instead of the committed populated golden: exactly 3,683
+  pixels differed on all three attempts. Run `29667756115` also exposed the
+  existing investigation CRUD race (saved note read back empty). The final
+  fallback changed only the pool envelope from four slots/four CPUs to two
+  slots/eight CPUs; run `29667963964` reproduced both failures, ruling out the
+  documented slot-contention/resource-quota hypothesis. The canonical 4-slot,
+  4-CPU configuration was restored, the unit was stopped, and registrations
+  were deleted. Plan 053 is BLOCKED under its explicit Velnor-capability STOP:
+  source/test or workflow changes are out of plan scope and would weaken the
+  GitHub-proven contract; no contract-conformant runner-side fallback remains.
