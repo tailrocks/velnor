@@ -20,12 +20,15 @@ conclusions in the GitHub UI — is **achieved and in production**:
   replaces only the runner side, over GitHub's current V2 JIT/broker/
   run-service/Results Service protocol, executing every assigned Linux job
   in an isolated Docker container.
-- Three production repositories run **dual-lane with Velnor as the default**
-  (`github`/`both` selectable per run): `ChainArgos/java-monorepo`,
-  `ChainArgos/blockchain-nodes`, `ChainArgos/jackin-agent-brown`.
-- The rest of the estate runs GitHub-hosted but is **switch-ready**: Velnor
-  must support every feature those repositories use so any of them can move
-  at any moment (see master-plan §3a).
+- The 2026-07-18 estate program standardized the thirteen repositories in
+  `VELNOR_PROJECTS_SETUP.md` on one YAML surface: Velnor by default, pinned
+  Ubuntu 26.04 selectable with `lanes=github`, and paired parity with
+  `lanes=both`. Repositories whose delivery is blocked retain their pushed
+  program branch and exact evidence; their current `main` is not represented
+  as migrated until its PR can merge.
+- Velnor must support every approved feature these repositories use. An
+  unapproved security/storage/network surface fails explicitly under the
+  strict capability contract rather than silently falling back.
 - The runner ships as a Debian package from a fully automatic
   tag → CI → deb → apt chain, operates unattended under systemd
   (never-exit supervision, credential diagnosis, watchdog, doctor timers),

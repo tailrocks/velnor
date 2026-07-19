@@ -132,6 +132,16 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-07-19: **Estate program terminal reconciliation**: phases 0–4 reached
+  terminal state. Completed repositories use the Velnor-default / pinned
+  Ubuntu 26.04 / `both` contract; blocked deliveries retain exact evidence
+  and are not described as merged. v0.1.98 was published and installed on
+  Sentry exclusively through the signed Debian apt repository. The final
+  campaign report is `docs/ci-performance-report-2026-07-19.md`. Decisions
+  §12.1 (required checks), §12.7 (GitHub-lane remote compiler cache), and
+  §12.8 (scheduled parity) remain human-only: no branch-protection change,
+  cache trust expansion, or standard-changing schedule was inferred.
+
 - 2026-07-18: **Cargo downloads shared; extracted trees job-local**: the first
   Schemalane campaign proved Cargo's package-cache locking does not make a
   registry `src` tree safe across concurrent containers (`.cargo-ok` creation

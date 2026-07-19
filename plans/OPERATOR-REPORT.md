@@ -1213,3 +1213,60 @@ same-version local-artifact sentence is superseded and must not be used.
   Velnor now hydrates that exact job-level environment surface without
   overriding explicit variables; a compact-V2 regression proves
   `GITHUB_RUN_ATTEMPT=3` and `GITHUB_RUN_NUMBER=42`. Jackin remains unchanged.
+
+## 2026-07-19 — v0.1.98 apt deployment and Jackin final-gate evidence
+
+- Published apt run <https://github.com/tailrocks/velnor-apt/actions/runs/29671080801>
+  succeeded. Sentry was upgraded through the Debian repository only:
+  `apt-get update` followed by
+  `apt-get install -y velnor-runner=0.1.98`. `dpkg-query` and
+  `apt-cache policy` both report `0.1.98`; image
+  `velnor/job-ubuntu:26.04` carries version label `0.1.98` and digest
+  `sha256:6d6e7316a88554efd9f1d7e665191ff8932201d409b7e13b0f15be51292c4619`.
+- Jackin Docs is green on Velnor
+  (<https://github.com/jackin-project/jackin/actions/runs/29676495826>,
+  including green attempt-2 performance audit), GitHub
+  (<https://github.com/jackin-project/jackin/actions/runs/29676695763>), and
+  both (<https://github.com/jackin-project/jackin/actions/runs/29677070745>).
+  Attempt 2 contains no dependency download or `Compiling` markers; the
+  mise adapter emits its no-op group and reports completion without
+  installing a tool.
+- Jackin CI is green on Velnor
+  (<https://github.com/jackin-project/jackin/actions/runs/29677129499>),
+  GitHub (<https://github.com/jackin-project/jackin/actions/runs/29677193582>),
+  and both (<https://github.com/jackin-project/jackin/actions/runs/29677241726>).
+  Plan 049 requested direct dispatches of `rust-nextest.yml`, but GitHub
+  rejects that with HTTP 422 because it is intentionally `workflow_call`
+  only; the three CI dispatches are its contract-conformant caller proof.
+- Preview Velnor run
+  <https://github.com/jackin-project/jackin/actions/runs/29677351289> fails
+  both archive jobs before execution because a cache miss makes the
+  `actions/attest-build-provenance@v4` steps active. Manifest version 3
+  explicitly rejects that action until a native Rust Sigstore bundle and
+  GitHub attestation API client is separately approved and fixture-proven.
+  Expanding this security/network capability without approval is forbidden;
+  changing the workflow to hide the gap is also forbidden. Plan 049 is
+  therefore BLOCKED at this gate; GitHub/`both` Preview dispatches cannot
+  satisfy parity while the Velnor arm is contractually rejected.
+- One aborted Docs `both` attempt briefly overlapped because GitHub's run-list
+  API lagged a delayed dispatch. Runs `29676977757`/`29676979853` were
+  cancelled, the daemon was drained, exact registrations deleted, and the
+  sole replacement `29677070745` was dispatched only after four fresh
+  runners were online.
+
+## 2026-07-19 — Velnor dogfood plan 050 completion
+
+- CI Velnor <https://github.com/tailrocks/velnor/actions/runs/29677471132>,
+  GitHub <https://github.com/tailrocks/velnor/actions/runs/29677531106>, and
+  both <https://github.com/tailrocks/velnor/actions/runs/29677683522> are
+  green from `velnor-estate-standard`. The `both` run has identical Format,
+  Clippy, Test, Deny, and Actionlint workload jobs on both lanes.
+- Velnor attempt 2 of run `29677471132` completed in 33 seconds. Its full log
+  has zero dependency-download markers, zero `Compiling` lines, and no tool
+  installs; mise emits only its no-op group and completion line. This passes
+  the Class B no-change budget of 90 seconds.
+- GitHub release recovery drill
+  <https://github.com/tailrocks/velnor/actions/runs/29677911853> rebuilt
+  tag `v0.1.98` for x86_64 and aarch64 and completed the single writer
+  publish job successfully. This proves releases remain operable while the
+  Velnor fleet is unavailable.
