@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
@@ -7403,13 +7403,37 @@ fn parse_hash_files(expression: &str) -> Option<Vec<String>> {
 }
 
 fn hash_files(workspace: &Path, patterns: &[String]) -> String {
-    let Ok(globs) = build_globs(patterns) else {
+    let Ok(globs) = build_ordered_globs(patterns) else {
         return String::new();
     };
+    let mut files = Vec::new();
+    collect_workspace_files(workspace, &mut files);
+    files.sort();
+    let excluded = globs
+        .iter()
+        .filter(|(negative, _)| *negative)
+        .map(|(_, matcher)| matcher)
+        .collect::<Vec<_>>();
+    let mut seen = BTreeSet::new();
     let mut matches = Vec::new();
-    collect_hash_file_matches(workspace, workspace, &globs, &mut matches);
-    matches.sort();
-    matches.dedup();
+    // actions/runner's bundled @actions/glob generator preserves the ordered
+    // search roots derived from the pattern list. Do not globally sort the
+    // union: hashFiles('z', 'a') hashes z before a even though each search
+    // root's own results are lexical.
+    for (_, matcher) in globs.iter().filter(|(negative, _)| !*negative) {
+        for path in &files {
+            let Ok(relative) = path.strip_prefix(workspace) else {
+                continue;
+            };
+            let relative = normalize_path(relative);
+            if matcher.is_match(&relative)
+                && !excluded.iter().any(|negative| negative.is_match(&relative))
+                && seen.insert(path.clone())
+            {
+                matches.push(path.clone());
+            }
+        }
+    }
     if matches.is_empty() {
         return String::new();
     }
@@ -7429,20 +7453,26 @@ fn hash_files(workspace: &Path, patterns: &[String]) -> String {
     hex_digest(&digest)
 }
 
+fn build_ordered_globs(patterns: &[String]) -> Result<Vec<(bool, globset::GlobMatcher)>> {
+    let mut globs = Vec::new();
+    for pattern in patterns {
+        let (negative, pattern) = pattern
+            .strip_prefix('!')
+            .map_or((false, pattern.as_str()), |pattern| (true, pattern));
+        globs.push((negative, Glob::new(pattern)?.compile_matcher()));
+    }
+    Ok(globs)
+}
+
 fn build_globs(patterns: &[String]) -> Result<globset::GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
         builder.add(Glob::new(pattern)?);
     }
-    builder.build().context("build hashFiles glob set")
+    builder.build().context("build glob set")
 }
 
-fn collect_hash_file_matches(
-    workspace: &Path,
-    dir: &Path,
-    globs: &globset::GlobSet,
-    matches: &mut Vec<PathBuf>,
-) {
+fn collect_workspace_files(dir: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -7452,18 +7482,13 @@ fn collect_hash_file_matches(
             continue;
         };
         if file_type.is_dir() {
-            collect_hash_file_matches(workspace, &path, globs, matches);
+            collect_workspace_files(&path, files);
             continue;
         }
         if !file_type.is_file() {
             continue;
         }
-        let Ok(relative) = path.strip_prefix(workspace) else {
-            continue;
-        };
-        if globs.is_match(normalize_path(relative)) {
-            matches.push(path);
-        }
+        files.push(path);
     }
 }
 
@@ -12405,8 +12430,10 @@ fi"#
         .unwrap();
         fs::write(workspace.join("ignored.txt"), "ignored\n").unwrap();
         let mut expected_hash = Sha256::new();
-        expected_hash.update(Sha256::digest(b"image = 'app'\n"));
+        // Official hashFiles preserves the expression's pattern/search-root
+        // order: **/*.rs, then **/build.toml, then justfile.
         expected_hash.update(Sha256::digest(b"fn main() {}\n"));
+        expected_hash.update(Sha256::digest(b"image = 'app'\n"));
         expected_hash.update(Sha256::digest(b"build:\n"));
         let digest = expected_hash.finalize();
         let expected = hex_digest(&digest);
@@ -12478,6 +12505,33 @@ fi"#
         assert_eq!(
             digest,
             "04ffe0aff7d100a890dfec2e0c951e89fa45e2afb6b9f96bafabf15f15ba1c35"
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn hash_files_preserves_official_pattern_search_order() {
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("alpha.txt"), "alpha\n").unwrap();
+        fs::write(workspace.join("zeta.txt"), "zeta\n").unwrap();
+
+        let actual = hash_files(
+            &workspace,
+            &["zeta.txt".to_string(), "alpha.txt".to_string()],
+        );
+        let mut expected = Sha256::new();
+        expected.update(sha256_file_digest(&workspace.join("zeta.txt")).unwrap());
+        expected.update(sha256_file_digest(&workspace.join("alpha.txt")).unwrap());
+
+        assert_eq!(actual, hex_digest(&expected.finalize()));
+        assert_ne!(
+            actual,
+            hash_files(
+                &workspace,
+                &["alpha.txt".to_string(), "zeta.txt".to_string()]
+            )
         );
         fs::remove_dir_all(temp).unwrap();
     }
@@ -13492,8 +13546,8 @@ fi"#
         fs::create_dir_all(temp.join("work/digests")).unwrap();
         fs::write(temp.join("work/digests/linux-amd64.digest"), "sha256:abc\n").unwrap();
         let mut expected_hash = Sha256::new();
-        expected_hash.update(Sha256::digest(b"image = 'app'\n"));
         expected_hash.update(Sha256::digest(b"fn main() {}\n"));
+        expected_hash.update(Sha256::digest(b"image = 'app'\n"));
         expected_hash.update(Sha256::digest(b"build:\n"));
         let digest = expected_hash.finalize();
         let expected_hash = hex_digest(&digest);

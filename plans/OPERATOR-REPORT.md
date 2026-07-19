@@ -1160,3 +1160,18 @@ same-version local-artifact sentence is superseded and must not be used.
   without assuming prior-step success and is covered by the exact wrapped
   Jackin condition. Run `29668860705` is retained as failed fallback evidence;
   the next apt-only release and clean dispatch will verify the correction.
+- v0.1.94 fixed the skipped-composite boundary: clean Docs run `29669141095`
+  completed `changes (Velnor)` successfully and launched every downstream job.
+  It then exposed a second runner divergence in the already-approved
+  `hashFiles()` capability. For the unchanged Jackin fallback-contract tree,
+  the current official `actions/runner` bundled hashFiles script returns
+  `eaa8c83455073462af7e0408429b408a359de838378d8874964707aeb12d3906`
+  (artifact `8434416746` exists), while Velnor returned
+  `f97ad26f9c652a3846f5e980f9bb43576e3f101202dbc2b6550b7080cecc2ebb`
+  (no artifact exists). Root cause: Velnor globally sorted the union of
+  matches; upstream preserves the pattern-derived search-root order and sorts
+  within each root. The runner now preserves pattern order, deduplicates first
+  occurrence, and applies exclusions before streaming per-file SHA-256
+  digests. A deliberately reverse-lexical regression proves the ordering.
+  Jackin source/workflows remain unchanged; run `29669141095` is retained as
+  the live fallback evidence for this runner-side correction.
