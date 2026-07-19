@@ -6766,6 +6766,44 @@ impl JobExecutionState {
     }
 }
 
+/// Return true only when a step condition is provably false from immutable
+/// GitHub job context before execution begins. Local composite actions are
+/// prepared mid-job by actions/runner, after their parent condition has been
+/// evaluated; this narrow preflight proof lets the planner preserve that
+/// behavior without treating runtime `steps`, `needs`, or `env` state as
+/// known early.
+pub(crate) fn condition_is_statically_false(
+    condition: Option<&str>,
+    base_env: &[(String, String)],
+    context_data: &[(String, Value)],
+) -> bool {
+    let Some(condition) = condition else {
+        return false;
+    };
+    let lower = condition.to_ascii_lowercase();
+    if !lower.contains("github.")
+        || [
+            "steps.",
+            "needs.",
+            "env.",
+            "job.",
+            "matrix.",
+            "strategy.",
+            "runner.",
+            "secrets.",
+            "success(",
+            "failure(",
+            "cancelled(",
+            "always(",
+        ]
+        .iter()
+        .any(|runtime| lower.contains(runtime))
+    {
+        return false;
+    }
+    !JobExecutionState::new_with_context(base_env, context_data).evaluate_condition(Some(condition))
+}
+
 fn missing_context_value(expression: &str) -> Option<String> {
     let expression = expression.trim();
     if expression.starts_with("github.event.") {
@@ -16778,5 +16816,33 @@ bitcoin-processor-app.push=true")
             filtered.iter().any(|(k, _)| k == "PATH"),
             "PATH must be preserved: {filtered:?}"
         );
+    }
+
+    #[test]
+    fn immutable_github_condition_can_prove_local_action_is_skipped() {
+        let context = vec![(
+            "github".to_string(),
+            serde_json::json!({
+                "ref": "refs/heads/perf/subminute-ci",
+                "event_name": "workflow_dispatch"
+            }),
+        )];
+        let condition = "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')";
+
+        assert!(condition_is_statically_false(
+            Some(condition),
+            &[],
+            &context
+        ));
+        assert!(!condition_is_statically_false(
+            Some("steps.changes.outputs.docs == 'true'"),
+            &[],
+            &context
+        ));
+        assert!(!condition_is_statically_false(
+            Some("always() && github.ref != ''"),
+            &[],
+            &context
+        ));
     }
 }

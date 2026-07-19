@@ -44,6 +44,14 @@ Local composite actions are not deferred until checkout: preflight reads their
 and validates the complete closure before storage leases, checkout, cache or
 service mutation, action-container setup, or job-container creation. Metadata
 fetching is read-only and uses the job token plus the advertised GitHub API URL.
+That validation read is distinct from execution preparation. Matching the
+current `actions/runner` `ActionManager`/`StepsRunner` boundary, Velnor does not
+read a local composite from the checked-out workspace when its parent `if` is
+already provably false from immutable `github` context. Runtime-dependent
+conditions remain unresolved until execution and never qualify for this
+shortcut. Thus every potentially executable capability is still validated,
+while a skipped local action cannot fail merely because its workspace metadata
+is absent.
 
 Capability-affecting inputs must be literal or statically resolvable during
 preflight. A runtime-dependent value is rejected unless the manifest declares a

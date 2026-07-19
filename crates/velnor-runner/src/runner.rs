@@ -38,7 +38,8 @@ use crate::{
     cli::{ConfigureArgs, DaemonArgs, DoctorArgs, PreflightArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     executor::{
-        DockerScriptExecutor, ExecutableStep, ProcessCommandRunner, StepLog, StepStartEvent,
+        condition_is_statically_false, DockerScriptExecutor, ExecutableStep, ProcessCommandRunner,
+        StepLog, StepStartEvent,
     },
     github_adapter::{
         github_job_container_spec, github_normalized_job_plan, job_container_name,
@@ -4120,12 +4121,36 @@ fn execute_script_job_inner(
     }
     let local_action_plans =
         local_action_plans_with_context(&job.steps, &workspace, &context_data)?;
+    let statically_skipped_local_actions = job
+        .steps
+        .iter()
+        .filter(|step| is_local_action_step(step))
+        .zip(local_action_plans.iter())
+        .filter(|(step, _)| {
+            condition_is_statically_false(step.condition.as_deref(), &base_env, &context_data)
+        })
+        .map(|(_, plan)| plan.step_id.clone())
+        .collect::<BTreeSet<_>>();
     let local_actions = local_action_plans
         .iter()
-        .map(|plan| Ok((plan.clone(), resolve_local_action(plan)?)))
+        .map(|plan| {
+            let metadata = if statically_skipped_local_actions.contains(&plan.step_id) {
+                None
+            } else {
+                Some(resolve_local_action(plan)?)
+            };
+            Ok((plan.clone(), metadata))
+        })
         .collect::<Result<Vec<_>>>()?;
+    let resolved_local_actions = local_actions
+        .iter()
+        .filter_map(|(plan, metadata)| metadata.clone().map(|metadata| (plan.clone(), metadata)))
+        .collect::<Vec<_>>();
     let mut repository_action_plans = repository_action_plans(&job.steps, &actions)?;
-    repository_action_plans.extend(composite_repository_action_plans(&local_actions, &actions)?);
+    repository_action_plans.extend(composite_repository_action_plans(
+        &resolved_local_actions,
+        &actions,
+    )?);
     let resolved_actions = if repository_action_plans.is_empty() {
         Vec::new()
     } else {
@@ -5347,7 +5372,7 @@ fn ordered_executable_steps(
     script_steps: &[crate::script_step::ScriptStep],
     repository_action_plans: &[RepositoryActionPlan],
     resolved_actions: &[ResolvedAction],
-    local_actions: &[(LocalActionPlan, ActionMetadata)],
+    local_actions: &[(LocalActionPlan, Option<ActionMetadata>)],
     actions_host: &std::path::Path,
     runtime_checkout_plans: &[CheckoutPlan],
     allow_unknown_action_diagnostics: bool,
@@ -5383,6 +5408,12 @@ fn ordered_executable_steps(
                         env: crate::script_step::step_environment(step)?,
                         condition: parent_condition.map(ToOwned::to_owned),
                     });
+                    let Some(metadata) = metadata else {
+                        ordered.push(ExecutableStep::CompositeEnd {
+                            step_id: plan.step_id.clone(),
+                        });
+                        continue;
+                    };
                     for invocation in
                         composite_action_invocations(plan, metadata, "/__w", actions_host)?
                     {
@@ -9103,7 +9134,7 @@ runs:
             &script_steps,
             &[],
             &[],
-            &[(local_plan, metadata)],
+            &[(local_plan, Some(metadata))],
             Path::new("/tmp/actions"),
             &[],
             false,
@@ -9352,7 +9383,7 @@ runs:
             &[],
             &[],
             &[resolved],
-            &[(local_plan, local_metadata)],
+            &[(local_plan, Some(local_metadata))],
             Path::new("/tmp/actions"),
             &[],
             true,
@@ -10692,5 +10723,52 @@ runs:
         .unwrap();
         assert_eq!(recent_job_timings(&root, 1, 1), vec![current]);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordered_steps_do_not_read_statically_skipped_local_composite() {
+        let condition = "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')";
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Docs changes",
+            "requestId": 1,
+            "steps": [{
+                "id": "download-ci-xtask",
+                "reference": {
+                    "type": "Repository",
+                    "name": "./.github/actions/download-ci-xtask"
+                },
+                "condition": condition
+            }]
+        }))
+        .unwrap();
+        let plan = LocalActionPlan {
+            step_id: "download-ci-xtask".into(),
+            action_dir: Path::new("/path/that/does/not/exist").into(),
+            inputs: BTreeMap::new(),
+        };
+
+        let ordered = ordered_executable_steps(
+            &job,
+            &[],
+            &[],
+            &[],
+            &[(plan, None)],
+            Path::new("/tmp/actions"),
+            &[],
+            false,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &ordered[..],
+            [
+                ExecutableStep::CompositeStart { step_id, condition: Some(actual), .. },
+                ExecutableStep::CompositeEnd { .. }
+            ] if step_id == "download-ci-xtask" && actual == condition
+        ));
     }
 }
