@@ -1200,3 +1200,16 @@ same-version local-artifact sentence is superseded and must not be used.
   regression. The search-root and file ordering otherwise matched the
   official printed sequence exactly. Run `29670131940` remains the live
   fallback evidence; Jackin remains unchanged.
+- v0.1.97 Docs run `29670543019` proved the full `hashFiles()` correction:
+  every functional Docs job passed, including repository and built-site link
+  checks. Cold mise tool installation made its performance audit fail as
+  expected. The clean warm follow-up `29670777166` completed all functional
+  jobs quickly but its audit exposed a separate current-V2 environment bug:
+  `GITHUB_RUN_ATTEMPT must be set`. GitHub supplied `run_attempt` in compact
+  `ContextData.github`, while Velnor hydrated only identity fields into the
+  variable view consumed by runtime env. Current official
+  `actions/runner` `GitHubContext.GetRuntimeEnvironmentVariables()` exports
+  the complete allowlisted GitHub context, including run attempt and number.
+  Velnor now hydrates that exact job-level environment surface without
+  overriding explicit variables; a compact-V2 regression proves
+  `GITHUB_RUN_ATTEMPT=3` and `GITHUB_RUN_NUMBER=42`. Jackin remains unchanged.
