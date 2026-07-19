@@ -11,7 +11,7 @@ use crate::{
     workflow_command::parse_workflow_commands,
 };
 use anyhow::{bail, Context, Result};
-use globset::{Glob, GlobSetBuilder};
+use globset::{Glob, GlobBuilder, GlobSetBuilder};
 use rayon::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -7455,7 +7455,13 @@ fn build_ordered_globs(patterns: &[String]) -> Result<Vec<(bool, globset::GlobMa
         let (negative, pattern) = pattern
             .strip_prefix('!')
             .map_or((false, pattern.as_str()), |pattern| (true, pattern));
-        globs.push((negative, Glob::new(pattern)?.compile_matcher()));
+        globs.push((
+            negative,
+            GlobBuilder::new(pattern)
+                .literal_separator(true)
+                .build()?
+                .compile_matcher(),
+        ));
     }
     Ok(globs)
 }
@@ -12572,6 +12578,23 @@ fi"#
                 &["alpha.txt".to_string(), "zeta.txt".to_string()]
             )
         );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn hash_files_star_does_not_cross_path_separators() {
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(workspace.join("crates/direct")).unwrap();
+        fs::create_dir_all(workspace.join("crates/direct/fuzz")).unwrap();
+        fs::write(workspace.join("crates/direct/Cargo.toml"), "direct\n").unwrap();
+        fs::write(workspace.join("crates/direct/fuzz/Cargo.toml"), "nested\n").unwrap();
+
+        let actual = hash_files(&workspace, &["crates/*/Cargo.toml".to_string()]);
+        let mut expected = Sha256::new();
+        expected.update(sha256_file_digest(&workspace.join("crates/direct/Cargo.toml")).unwrap());
+
+        assert_eq!(actual, hex_digest(&expected.finalize()));
         fs::remove_dir_all(temp).unwrap();
     }
 
