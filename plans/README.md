@@ -87,7 +87,7 @@ V-A). Do not open estate PRs before 041's operator verification.
 | 050 | tailrocks/velnor (dogfood) | 2 | M | 039 (fleet label) | IN PROGRESS |
 | 051 | tailrocks/holla | 2 | S | — | DONE: PR #36 merged; Velnor/GitHub/both green; 57 s no-change budget passed |
 | 052 | tailrocks/ruxel | 2 | S | — | DONE — PR #2 merged; final three-lane and 52 s zero-install rerun green |
-| 053 | tailrocks/parallax | 2 | L | 051 (pattern), 042 (attest) | IN PROGRESS — static gates green; v0.1.91 Velnor verification active after target-artifact fix |
+| 053 | tailrocks/parallax | 2 | L | 051 (pattern), 042 (attest) | BLOCKED — static and GitHub gates pass, but three v0.1.92 Velnor runs reproducibly capture the shell visual loading skeleton (3,683 pixels); the documented 2-slot/8-CPU fallback also failed, and workflow/source weakening is forbidden |
 | 054 | tailrocks/termrock | 3 | M | 042 (Pages) | BLOCKED — both lanes fail pre-existing out-of-scope rustfmt drift |
 | 055 | schemalane + pg-bigdecimal + tracing-request-level (Class D trio) | 3 | M | 040 (schemalane services) | DONE: all three PRs merged; V-B/V-C passed and final no-change Velnor logs contain no dependency downloads/compiles or tool installs |
 | 056 | tailrocks/parallax-telemetry-playground | 3 | S | — | DONE |
