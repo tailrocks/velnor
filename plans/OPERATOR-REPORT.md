@@ -1175,3 +1175,18 @@ same-version local-artifact sentence is superseded and must not be used.
   digests. A deliberately reverse-lexical regression proves the ordering.
   Jackin source/workflows remain unchanged; run `29669141095` is retained as
   the live fallback evidence for this runner-side correction.
+- The first v0.1.95 live proof (`jackin-project/jackin` Docs run
+  `29669690816`) proved skipped composites and artifact download execution,
+  but refined the `hashFiles()` root cause: Velnor produced contract
+  `2f6ebaa260307664127d508543ce54ea62e2f438c7e73bb51feb514e4d083960`
+  while the official bundled runner script still produced
+  `eaa8c83455073462af7e0408429b408a359de838378d8874964707aeb12d3906`.
+  Direct execution of current `actions/runner` source showed that search-root
+  order alone is insufficient: it removes roots covered by any candidate
+  ancestor and traverses each remaining root lexically with the complete
+  ordered matcher set. For Jackin the roots are the three literal files,
+  `.cargo`, and one combined `crates` root. Velnor now implements that exact
+  root collapse/traversal plus upstream ordered negation and re-inclusion.
+  The earlier report entry's claim that upstream processes every pattern as
+  an independent search root is superseded by this direct source/live proof.
+  No Jackin workflow or source was changed.
