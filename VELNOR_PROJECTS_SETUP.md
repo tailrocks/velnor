@@ -790,7 +790,7 @@ verification (V-B three-lane dispatch, V-C timing) runs **from the repo's
 program branch before merge** — the same configuration must be proven on
 GitHub and on Velnor for everything the branch changes.
 
-### Phase 0 — Contract + runner readiness
+### Phase 0 — Contract + runner readiness — terminal 2026-07-18
 
 1. Land / keep this document as law.  
 2. Snippet pack: inline matrix + `setup-rust-ci` (fixture first).  
@@ -804,7 +804,7 @@ GitHub and on Velnor for everything the branch changes.
    host are not trustworthy. The durable fix remains V0.7–V0.13; this is the
    one-time test-bed reset.
 
-### Phase 1 — Reference alignment
+### Phase 1 — Reference alignment — terminal 2026-07-19
 
 | # | Repo | Focus |
 |---|------|--------|
@@ -812,7 +812,7 @@ GitHub and on Velnor for everything the branch changes.
 | 2 | blockchain-nodes | `lanes`; pin; selected-lane sweep; QEMU action |
 | 3 | jackin | Default **velnor**; 26.04; no macOS; AGENTS; #810 L1 |
 
-### Phase 2 — Dogfood + mid-tier
+### Phase 2 — Dogfood + mid-tier — terminal 2026-07-19
 
 | # | Repo | Focus |
 |---|------|--------|
@@ -821,7 +821,7 @@ GitHub and on Velnor for everything the branch changes.
 | 6 | ruxel | Lanes + pin + ansible/uv |
 | 7 | parallax | Full lanes; no macOS |
 
-### Phase 3 — Libraries + cleanup
+### Phase 3 — Libraries + cleanup — terminal 2026-07-19
 
 | # | Repo | Focus |
 |---|------|--------|
@@ -832,12 +832,15 @@ GitHub and on Velnor for everything the branch changes.
 | 12 | parallax-telemetry-playground | Class E |
 | 13 | tablerock | Replace with Class D |
 
-### Phase 4 — Enforcement
+### Phase 4 — Enforcement — terminal 2026-07-19
 
-1. `velnor-tools audit-ci` against all 13.  
-2. Fixture snippets for standard patterns.  
-3. Reconcile `docs/master-plan.md`, `docs/mission.md`, `AGENTS.md` with **Velnor default everywhere**.  
-4. Required-check strategy (operator: final state = Velnor required).
+1. `velnor-tools audit-ci` against all 13 — executed; errors map to the
+   evidence-backed blocked delivery rows in `plans/README.md`.
+2. Fixture snippets for standard patterns — complete.
+3. Reconcile `docs/master-plan.md`, `docs/mission.md`, `AGENTS.md` with
+   **Velnor default everywhere** — complete.
+4. Required-check strategy — human-only repository administration remains
+   recorded in `plans/OPERATOR-REPORT.md`; no policy was guessed.
 
 ### Dual-runner verification protocol (every repo, every migration PR)
 
