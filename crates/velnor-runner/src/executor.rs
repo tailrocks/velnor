@@ -6780,7 +6780,31 @@ pub(crate) fn condition_is_statically_false(
     let Some(condition) = condition else {
         return false;
     };
-    let lower = condition.to_ascii_lowercase();
+    immutable_github_expression_is_false(
+        strip_expression(condition),
+        &JobExecutionState::new_with_context(base_env, context_data),
+    )
+}
+
+fn immutable_github_expression_is_false(expression: &str, state: &JobExecutionState) -> bool {
+    let expression = expression.trim();
+    if let Some(inner) = strip_wrapping_parentheses(expression) {
+        return immutable_github_expression_is_false(inner, state);
+    }
+    // A conjunction is false when any operand is independently provable
+    // false. GitHub's broker prefixes ordinary step conditions with
+    // `success() &&`; the immutable operand can still prove the whole value.
+    if let Some((left, right)) = split_top_level(expression, "&&") {
+        return immutable_github_expression_is_false(left, state)
+            || immutable_github_expression_is_false(right, state);
+    }
+    // A disjunction is false only when both operands are independently
+    // provable false.
+    if let Some((left, right)) = split_top_level(expression, "||") {
+        return immutable_github_expression_is_false(left, state)
+            && immutable_github_expression_is_false(right, state);
+    }
+    let lower = expression.to_ascii_lowercase();
     if !lower.contains("github.")
         || [
             "steps.",
@@ -6791,17 +6815,13 @@ pub(crate) fn condition_is_statically_false(
             "strategy.",
             "runner.",
             "secrets.",
-            "success(",
-            "failure(",
-            "cancelled(",
-            "always(",
         ]
         .iter()
         .any(|runtime| lower.contains(runtime))
     {
         return false;
     }
-    !JobExecutionState::new_with_context(base_env, context_data).evaluate_condition(Some(condition))
+    !state.evaluate_condition(Some(expression))
 }
 
 fn missing_context_value(expression: &str) -> Option<String> {
@@ -16834,13 +16854,18 @@ bitcoin-processor-app.push=true")
             &[],
             &context
         ));
+        assert!(condition_is_statically_false(
+            Some(&format!("success() && ({condition})")),
+            &[],
+            &context
+        ));
         assert!(!condition_is_statically_false(
             Some("steps.changes.outputs.docs == 'true'"),
             &[],
             &context
         ));
         assert!(!condition_is_statically_false(
-            Some("always() && github.ref != ''"),
+            Some("success() && github.ref != ''"),
             &[],
             &context
         ));

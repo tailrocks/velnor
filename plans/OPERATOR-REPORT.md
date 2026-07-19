@@ -1150,3 +1150,13 @@ same-version local-artifact sentence is superseded and must not be used.
   status functions remain runtime-bound. Strict pre-side-effect capability
   validation is unchanged. Exact Jackin-shape and dynamic-condition regression
   tests pass; deployment and live rerun evidence will follow through apt only.
+- The first v0.1.93 live rerun (`29668860705`) proved that GitHub's V2 broker
+  wraps the YAML predicate in its implicit status guard (`success() && (...)`).
+  The initial immutable-context guard conservatively refused every status
+  function and therefore still reached the eager workspace read. The fallback
+  now uses a three-valued structural proof: either false operand proves an
+  `&&` false, while both operands must independently prove an `||` false.
+  Runtime/status-only operands remain unknown. This matches the broker payload
+  without assuming prior-step success and is covered by the exact wrapped
+  Jackin condition. Run `29668860705` is retained as failed fallback evidence;
+  the next apt-only release and clean dispatch will verify the correction.
