@@ -1070,3 +1070,25 @@ same-version local-artifact sentence is superseded and must not be used.
   `29659385146` passed; Sentry installed version, apt candidate, and image label
   all report 0.1.83. The exact playground unit is inactive and no repository
   runner registrations remain.
+- Parallax Velnor run `29665689918` exposed a runner-side mount-resolution
+  defect: native artifact upload resolved relative `target/**` and absolute
+  `/__w/target/**` paths against the ordinary checkout mount, even though
+  persistent Cargo targets are a distinct `/__w/target` bind mount. No
+  workflow workaround was made. Signed runner commit `0f9537c` carries the
+  structural fix and regression coverage; format, strict clippy, all 639
+  nextest tests, and actionlint pass. General release `29665880774`, Debian
+  release `29665880796`, and apt publication `29666015235` passed. Sentry was
+  upgraded exclusively through apt; installed package, apt candidate, and job
+  image all report v0.1.91. Replacement Parallax Velnor run `29666212587` is
+  the current exact-head verification.
+- Plan 049 found two existing-plan assumption gaps. `rust-nextest.yml` is a
+  reusable `workflow_call` contract rather than a dispatchable workflow, so
+  GitHub correctly rejected a direct dispatch with HTTP 422. Its required
+  behavior will be proven through CI's `refresh-package` caller input, keeping
+  the reusable interface intact. Separately, Docs still hardcoded
+  `ubuntu-26.04`, contrary to the plan and estate standard. Signed Jackin
+  commit `185359306` adds the canonical three-lane dispatch matrix to every
+  Docs job, lane-isolated caches, and writer-only mutations. It also avoids
+  undefined matrix-output ownership when verifying the canonical Pages URL.
+  Actionlint and diff hygiene pass; the commit was pushed directly to PR #810's
+  existing `perf/subminute-ci` branch as required.
