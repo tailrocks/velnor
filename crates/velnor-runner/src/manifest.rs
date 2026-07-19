@@ -11,7 +11,7 @@ use crate::cli::{CapabilitiesArgs, CapabilitiesCommand};
 use crate::compiler_cache::CompilerCacheBackend;
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 
-pub const MANIFEST_VERSION: u32 = 2;
+pub const MANIFEST_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CapabilityManifest {
@@ -225,6 +225,10 @@ const BUILDX_INPUTS: &[InputRule] = &[
     InputRule::Any("name"),
     InputRule::Literal("driver", &["docker-container"]),
     InputRule::Literal("install", &["true", "false"]),
+    InputRule::Literal(
+        "buildkitd-config-inline",
+        &["[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]"],
+    ),
 ];
 const LOGIN_INPUTS: &[InputRule] = &[
     InputRule::Any("registry"),
@@ -341,7 +345,10 @@ pub static ACTIONS: &[ActionCapability] = &[
             InputRule::Any("base"),
             InputRule::Any("ref"),
             InputRule::Any("list-files"),
-            InputRule::Any("working-directory")
+            InputRule::Any("working-directory"),
+            // An explicitly empty token is the upstream action's supported
+            // way to force local git classification without API calls.
+            InputRule::Literal("token", &[""])
         ]
     ),
     capability!("jdx/mise-action", Mise, MISE_REFS, MISE_INPUTS),
@@ -1095,6 +1102,49 @@ mod tests {
         ));
         assert_eq!(errors[0].field, "with.retention-days");
         assert_eq!(errors[0].accepted, ["1", "7", "14", "30", "90"]);
+    }
+
+    #[test]
+    fn validate_job_accepts_only_reviewed_local_paths_filter_token() {
+        validate_job_with_context(
+            &job(
+                "dorny/paths-filter",
+                Some("7b450fff21473bca461d4b92ce414b9d0420d706"),
+                serde_json::json!({"filters": "docs: docs/**", "token": ""}),
+            ),
+            &[],
+        )
+        .unwrap();
+
+        let errors = violations(&job(
+            "dorny/paths-filter",
+            Some("7b450fff21473bca461d4b92ce414b9d0420d706"),
+            serde_json::json!({"filters": "docs: docs/**", "token": "secret"}),
+        ));
+        assert_eq!(errors[0].field, "with.token");
+        assert_eq!(errors[0].accepted, [""]);
+    }
+
+    #[test]
+    fn validate_job_accepts_only_reviewed_buildkit_mirror_config() {
+        let approved = "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]";
+        validate_job_with_context(
+            &job(
+                "docker/setup-buildx-action",
+                Some("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"),
+                serde_json::json!({"buildkitd-config-inline": approved}),
+            ),
+            &[],
+        )
+        .unwrap();
+
+        let errors = violations(&job(
+            "docker/setup-buildx-action",
+            Some("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"),
+            serde_json::json!({"buildkitd-config-inline": "[registry.\"docker.io\"]\n  insecure = true\n"}),
+        ));
+        assert_eq!(errors[0].field, "with.buildkitd-config-inline");
+        assert_eq!(errors[0].accepted, [approved]);
     }
 
     #[test]

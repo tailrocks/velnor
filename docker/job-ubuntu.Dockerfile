@@ -96,6 +96,28 @@ ENV HOME=/root \
     CARGO_NET_RETRY=10 \
     CARGO_HTTP_TIMEOUT=120
 
+# GitHub-hosted Ubuntu exposes Node to ordinary run steps independently of an
+# action's bundled runtime. Type-aware Oxlint plugins and other estate tools
+# rely on that base-runner contract even when Bun is their package manager.
+# Install the latest stable Node release as an architecture-pinned, verified
+# system tool; jobs never download or compile it.
+ARG NODE_VERSION=v26.5.0
+ARG NODE_SHA256_X86_64=9f619528f1db5ddc41dccf54211066fb42228d69a156733c69cb9d6cc92e358c
+ARG NODE_SHA256_AARCH64=036df0b49662ebb350eb56f1cac603699b1e9ed1e2603ee129fefda473479030
+RUN ver="$NODE_VERSION" && \
+    case "$(uname -m)" in \
+      x86_64) arch="x64"; sha="$NODE_SHA256_X86_64" ;; \
+      aarch64|arm64) arch="arm64"; sha="$NODE_SHA256_AARCH64" ;; \
+      *) echo "unsupported arch $(uname -m) for Node.js" >&2; exit 1 ;; \
+    esac && \
+    tmp="$(mktemp -d)" && \
+    curl -fsSL "https://nodejs.org/dist/${ver}/node-${ver}-linux-${arch}.tar.xz" -o "$tmp/node.tar.xz" && \
+    echo "$sha  $tmp/node.tar.xz" | sha256sum -c - && \
+    tar -xJf "$tmp/node.tar.xz" -C /usr/local --strip-components=1 && \
+    rm -rf "$tmp" && \
+    node --version && \
+    npm --version
+
 ARG SCCACHE_VERSION=v0.16.0
 ARG SCCACHE_SHA256_X86_64=aec995a83ad3dff3d14b6314e08858b7b73d35ca85a5bcf3d3a9ec07dee35588
 ARG SCCACHE_SHA256_AARCH64=f73a5c39f96bb6ebb89cc7915cf182260d4cbf30765322c5e793d0fe8bd80784

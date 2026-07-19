@@ -1092,3 +1092,22 @@ same-version local-artifact sentence is superseded and must not be used.
   undefined matrix-output ownership when verifying the canonical Pages URL.
   Actionlint and diff hygiene pass; the commit was pushed directly to PR #810's
   existing `perf/subminute-ci` branch as required.
+- Root-cause review of replacement Parallax run `29666212587` showed that
+  v0.1.91 did resolve the persistent target files, but upload-artifact's
+  hidden-file filter then inspected the host-only bucket component
+  `.github_workflows_ci.yml` and rejected every ordinary file. The corrected
+  boundary strips the persistent target root before applying workflow-visible
+  hidden semantics; an exact bucket-shaped regression test covers it.
+- The same run's UI failure was not a repository lint defect. Oxlint 1.73.0's
+  type-aware plugin invoked `node`; GitHub-hosted Ubuntu provided it, while the
+  Velnor image returned `env: 'node': No such file or directory`. The canonical
+  image now pins verified Node v26.5.0 binaries for amd64/arm64 and preflight
+  requires Node, so workflows retain identical semantics with no job-time
+  install. The version and checksums came from Node's official release index.
+- Jackin's automatic Docs/Construct failures exposed two exact approved inputs
+  missing from manifest v2: local-only paths-filter `token: ""`, and the
+  reviewed Docker Hub `mirror.gcr.io` BuildKit configuration. Manifest v3
+  admits only those literal values. The native Buildx adapter writes the
+  reviewed TOML into private runner temp and passes `--config` exactly as the
+  pinned upstream setup-buildx action does; arbitrary config remains rejected.
+  Full gates pass: format, strict clippy, actionlint, and 641/641 nextest tests.
