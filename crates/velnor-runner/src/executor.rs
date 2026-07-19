@@ -7406,31 +7406,27 @@ fn hash_files(workspace: &Path, patterns: &[String]) -> String {
     let Ok(globs) = build_ordered_globs(patterns) else {
         return String::new();
     };
-    let mut files = Vec::new();
-    collect_workspace_files(workspace, &mut files);
-    files.sort();
-    let excluded = globs
-        .iter()
-        .filter(|(negative, _)| *negative)
-        .map(|(_, matcher)| matcher)
-        .collect::<Vec<_>>();
+    let search_roots = hash_file_search_roots(workspace, patterns);
     let mut seen = BTreeSet::new();
     let mut matches = Vec::new();
-    // actions/runner's bundled @actions/glob generator preserves the ordered
-    // search roots derived from the pattern list. Do not globally sort the
-    // union: hashFiles('z', 'a') hashes z before a even though each search
-    // root's own results are lexical.
-    for (_, matcher) in globs.iter().filter(|(negative, _)| !*negative) {
-        for path in &files {
+    // actions/runner's bundled @actions/glob generator preserves its ordered
+    // search roots, removes roots covered by another candidate ancestor, and
+    // traverses each remaining root lexically with the complete matcher set.
+    for root in search_roots {
+        let mut files = Vec::new();
+        if root.is_file() {
+            files.push(root);
+        } else {
+            collect_workspace_files(&root, &mut files);
+            files.sort();
+        }
+        for path in files {
             let Ok(relative) = path.strip_prefix(workspace) else {
                 continue;
             };
             let relative = normalize_path(relative);
-            if matcher.is_match(&relative)
-                && !excluded.iter().any(|negative| negative.is_match(&relative))
-                && seen.insert(path.clone())
-            {
-                matches.push(path.clone());
+            if ordered_globs_match(&globs, &relative) && seen.insert(path.clone()) {
+                matches.push(path);
             }
         }
     }
@@ -7462,6 +7458,49 @@ fn build_ordered_globs(patterns: &[String]) -> Result<Vec<(bool, globset::GlobMa
         globs.push((negative, Glob::new(pattern)?.compile_matcher()));
     }
     Ok(globs)
+}
+
+fn ordered_globs_match(globs: &[(bool, globset::GlobMatcher)], path: &str) -> bool {
+    let mut matched = false;
+    for (negative, matcher) in globs {
+        if matcher.is_match(path) {
+            matched = !negative;
+        }
+    }
+    matched
+}
+
+fn hash_file_search_roots(workspace: &Path, patterns: &[String]) -> Vec<PathBuf> {
+    let candidates = patterns
+        .iter()
+        .filter_map(|pattern| {
+            let pattern = pattern.strip_prefix('!').unwrap_or(pattern);
+            if pattern.is_empty() {
+                return None;
+            }
+            let mut root = PathBuf::new();
+            for segment in pattern.split('/') {
+                if segment.contains(['*', '?', '[', ']', '{', '}']) {
+                    break;
+                }
+                if !segment.is_empty() && segment != "." {
+                    root.push(segment);
+                }
+            }
+            Some(workspace.join(root))
+        })
+        .collect::<Vec<_>>();
+
+    candidates
+        .iter()
+        .enumerate()
+        .filter(|(index, candidate)| {
+            !candidates.iter().enumerate().any(|(other_index, other)| {
+                index != &other_index && candidate != &other && candidate.starts_with(other)
+            })
+        })
+        .map(|(_, candidate)| candidate.clone())
+        .collect()
 }
 
 fn build_globs(patterns: &[String]) -> Result<globset::GlobSet> {
@@ -12430,10 +12469,10 @@ fi"#
         .unwrap();
         fs::write(workspace.join("ignored.txt"), "ignored\n").unwrap();
         let mut expected_hash = Sha256::new();
-        // Official hashFiles preserves the expression's pattern/search-root
-        // order: **/*.rs, then **/build.toml, then justfile.
-        expected_hash.update(Sha256::digest(b"fn main() {}\n"));
+        // All patterns share the same ancestor search root, so the official
+        // globber traverses that root lexically with the combined matcher.
         expected_hash.update(Sha256::digest(b"image = 'app'\n"));
+        expected_hash.update(Sha256::digest(b"fn main() {}\n"));
         expected_hash.update(Sha256::digest(b"build:\n"));
         let digest = expected_hash.finalize();
         let expected = hex_digest(&digest);
@@ -13546,8 +13585,8 @@ fi"#
         fs::create_dir_all(temp.join("work/digests")).unwrap();
         fs::write(temp.join("work/digests/linux-amd64.digest"), "sha256:abc\n").unwrap();
         let mut expected_hash = Sha256::new();
-        expected_hash.update(Sha256::digest(b"fn main() {}\n"));
         expected_hash.update(Sha256::digest(b"image = 'app'\n"));
+        expected_hash.update(Sha256::digest(b"fn main() {}\n"));
         expected_hash.update(Sha256::digest(b"build:\n"));
         let digest = expected_hash.finalize();
         let expected_hash = hex_digest(&digest);
