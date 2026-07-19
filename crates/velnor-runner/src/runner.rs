@@ -2553,7 +2553,7 @@ async fn handle_job_request(
     }
     let early_context = job_context_data(&job);
     let mut job = job;
-    hydrate_identity_variables_from_context(&mut job, &early_context);
+    hydrate_github_variables_from_context(&mut job, &early_context);
     apply_workflow_script_step_names(&mut job, &early_context).await;
     let capacity_run_root = crate::storage::StorageLayout::resolve()
         .map(|layout| layout.run_root)
@@ -4760,24 +4760,41 @@ fn job_context_data(job: &AgentJobRequestMessage) -> Vec<(String, Value)> {
     expanded.into_iter().collect()
 }
 
-/// Current V2 messages carry GitHub identity in `ContextData.github`; older
-/// messages duplicated it into `Variables` as `github.*`. Normalize the
-/// current representation into the internal variable view used by storage
-/// identity and checkout code, without overriding any explicit variable.
-fn hydrate_identity_variables_from_context(
+/// Current V2 messages carry the official GitHub environment context in
+/// `ContextData.github`; older messages duplicated those values into
+/// `Variables` as `github.*`. Normalize the current representation into the
+/// internal variable view used by runtime env, storage, and checkout without
+/// overriding any explicit variable.
+fn hydrate_github_variables_from_context(
     job: &mut AgentJobRequestMessage,
     context_data: &[(String, Value)],
 ) {
     for name in [
+        "github.actor",
+        "github.actor_id",
+        "github.api_url",
+        "github.base_ref",
+        "github.event_name",
+        "github.graphql_url",
+        "github.head_ref",
+        "github.ref",
+        "github.ref_name",
+        "github.ref_protected",
+        "github.ref_type",
         "github.repository",
         "github.repository_id",
         "github.repository_owner",
         "github.repository_owner_id",
+        "github.retention_days",
+        "github.run_attempt",
+        "github.run_id",
+        "github.run_number",
+        "github.server_url",
+        "github.sha",
+        "github.triggering_actor",
         "github.workflow",
         "github.workflow_ref",
         "github.workflow_sha",
-        "github.run_id",
-        "github.sha",
     ] {
         let Some(value) = context_string(context_data, name).filter(|value| !value.is_empty())
         else {
@@ -7673,7 +7690,7 @@ jobs:
     }
 
     #[test]
-    fn current_v2_context_hydrates_storage_identity_variables() {
+    fn current_v2_context_hydrates_official_github_environment() {
         let mut job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "MessageType": "PipelineAgentJobRequest",
             "Plan": { "PlanId": "plan" },
@@ -7685,14 +7702,16 @@ jobs:
                 "github": { "d": [
                     { "k": "repository", "v": "tailrocks/fixture" },
                     { "k": "workflow", "v": "compat" },
-                    { "k": "workflow_ref", "v": "tailrocks/fixture/.github/workflows/compat.yml@refs/heads/main" }
+                    { "k": "workflow_ref", "v": "tailrocks/fixture/.github/workflows/compat.yml@refs/heads/main" },
+                    { "k": "run_attempt", "v": "3" },
+                    { "k": "run_number", "v": "42" }
                 ], "t": 2 }
             }
         }))
         .unwrap();
         let context = job_context_data(&job);
 
-        hydrate_identity_variables_from_context(&mut job, &context);
+        hydrate_github_variables_from_context(&mut job, &context);
 
         assert_eq!(
             crate::github_adapter::job_variable(&job, "github.repository"),
@@ -7702,6 +7721,9 @@ jobs:
             crate::github_adapter::job_variable(&job, "github.workflow"),
             Some("compat")
         );
+        let env = crate::runtime_env::job_runtime_env(&job);
+        assert!(env.contains(&("GITHUB_RUN_ATTEMPT".into(), "3".into())));
+        assert!(env.contains(&("GITHUB_RUN_NUMBER".into(), "42".into())));
     }
 
     #[test]
