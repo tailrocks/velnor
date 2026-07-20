@@ -88,6 +88,8 @@
       "name":"tailrocks/holla",
       "path":"/Users/donbeave/Projects/tailrocks/holla-project/holla",
       "concerns": {
+        "rust-ci":{"classification":"required","evidence":"Both primary tests and integration clippy compile Rust and must use the identical canonical setup stack.","implementations":[{"workflow":"ci.yml","job_ids":["rust","integration"],"canonical_markers":["actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0","rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444","mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e","jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"]}]},
+        "cargo-cache":{"classification":"required","evidence":"Every Holla compiling job uses the canonical lane-scoped local compiler and Cargo registry cache contract.","implementations":[{"workflow":"ci.yml","job_ids":["rust","integration"],"canonical_markers":["SCCACHE_GHA_ENABLED=false","mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9","cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-"]}]},
         "artifacts":{"classification":"applicable","evidence":"Release workflows produce Debian and cross-built binary artifacts.","implementations":[{"workflow":"release.yml","canonical_markers":["actions/upload-artifact@"]}]},
         "preview":{"classification":"applicable","evidence":"preview.yml publishes prerelease previews.","implementations":[{"workflow":"preview.yml"}]},
         "release":{"classification":"applicable","evidence":"release.yml and release-deb.yml publish distinct approved release products.","implementations":[{"workflow":"release.yml","job_ids":["release"]},{"workflow":"release-deb.yml"}]},
@@ -98,6 +100,8 @@
       "name":"tailrocks/velnor",
       "path":"/Users/donbeave/Projects/tailrocks/velnor-project/velnor",
       "concerns": {
+        "rust-ci":{"classification":"required","evidence":"Velnor test and clippy jobs compile the workspace and must use the identical canonical setup stack.","implementations":[{"workflow":"ci.yml","job_ids":["rust","clippy"],"canonical_markers":["actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0","rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444","mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e","jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"]}]},
+        "cargo-cache":{"classification":"required","evidence":"Every Velnor compiling job uses the canonical lane-scoped local compiler and Cargo registry cache contract.","implementations":[{"workflow":"ci.yml","job_ids":["rust","clippy"],"canonical_markers":["SCCACHE_GHA_ENABLED=false","mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9","cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-"]}]},
         "integration-services":{"classification":"repo-specific","evidence":"Runner protocol, fixture, and daemon integration tests are Velnor-specific.","implementations":[]},
         "docker-build":{"classification":"non-applicable","evidence":"Velnor releases native runner archives and Debian packages; the canonical job-image Dockerfile is packaged and validated but no repository workflow builds or publishes an OCI image.","implementations":[]},
         "artifacts":{"classification":"applicable","evidence":"Release workflows transport Debian packages and release evidence.","implementations":[{"workflow":"release-deb.yml","canonical_markers":["actions/upload-artifact@"]}]},
@@ -109,6 +113,8 @@
       "name":"tailrocks/ruxel",
       "path":"/Users/donbeave/Projects/tailrocks/ruxel",
       "concerns": {
+        "rust-ci":{"classification":"required","evidence":"Primary tests, clippy, and agent cross-build all compile Rust and use the canonical setup stack.","implementations":[{"workflow":"ci.yml","job_ids":["rust","clippy","agent-cross"],"canonical_markers":["actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0","rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444","mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e","jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"]}]},
+        "cargo-cache":{"classification":"required","evidence":"Every Ruxel compiling job uses the canonical lane-scoped local compiler and Cargo registry cache contract.","implementations":[{"workflow":"ci.yml","job_ids":["rust","clippy","agent-cross"],"canonical_markers":["SCCACHE_GHA_ENABLED=false","mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9","cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-"]}]},
         "integration-services":{"classification":"repo-specific","evidence":"Ansible and uv oracle checks are Ruxel product-specific commands inside ci.yml.","implementations":[]},
         "release":{"classification":"non-applicable","evidence":"No repository-local release workflow exists on the delivered surface.","implementations":[]}
       }
@@ -117,6 +123,8 @@
       "name":"tailrocks/termrock",
       "path":"/Users/donbeave/Projects/tailrocks/termrock",
       "concerns": {
+        "rust-ci":{"classification":"required","evidence":"The primary, latest-toolchain, crossterm, and semver jobs comprise Termrock's Rust compile graph.","implementations":[{"workflow":"ci.yml","job_ids":["rust","latest-toolchain","crossterm-platform","semver-candidate"],"canonical_markers":["actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0","rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444","mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e","jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"]}]},
+        "cargo-cache":{"classification":"required","evidence":"Every Termrock compiling job uses the canonical lane-scoped local compiler and Cargo registry cache contract.","implementations":[{"workflow":"ci.yml","job_ids":["rust","latest-toolchain","crossterm-platform","semver-candidate"],"canonical_markers":["SCCACHE_GHA_ENABLED=false","mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9","cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-"]}]},
         "docs-pages":{"classification":"applicable","evidence":"docs.yml builds and deploys the Termrock documentation site.","implementations":[{"workflow":"docs.yml","job_ids":["docs"]}]},
         "artifacts":{"classification":"applicable","evidence":"Documentation and release workflows transport generated outputs.","implementations":[{"workflow":"docs.yml","canonical_markers":["actions/upload-pages-artifact@"]}]},
         "release":{"classification":"applicable","evidence":"release.yml publishes Termrock releases.","implementations":[{"workflow":"release.yml","job_ids":["release"]}]}
@@ -126,6 +134,8 @@
       "name":"tailrocks/schemalane",
       "path":"/Users/donbeave/Projects/tailrocks/schemalane",
       "concerns": {
+        "rust-ci":{"classification":"required","evidence":"Library validation and PostgreSQL integration both compile Rust through the canonical setup stack.","implementations":[{"workflow":"ci.yml","job_ids":["rust","integration"],"canonical_markers":["actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0","rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444","mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e","jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"]}]},
+        "cargo-cache":{"classification":"required","evidence":"Every Schemalane compiling job uses the canonical lane-scoped local compiler and Cargo registry cache contract.","implementations":[{"workflow":"ci.yml","job_ids":["rust","integration"],"canonical_markers":["SCCACHE_GHA_ENABLED=false","mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9","cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-"]}]},
         "integration-services":{"classification":"required","evidence":"Schemalane's database contract requires PostgreSQL integration coverage; the canonical integration job uses repository-parameterized testcontainers rather than a YAML service declaration.","implementations":[{"workflow":"ci.yml","job_ids":["integration"]}]},
         "release":{"classification":"applicable","evidence":"release.yml publishes the library crate.","implementations":[{"workflow":"release.yml","job_ids":["release"]}]}
       }
