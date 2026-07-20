@@ -1,15 +1,142 @@
-[
-  "/Users/donbeave/Projects/ChainArgos/java-monorepo",
-  "/Users/donbeave/Projects/ChainArgos/blockchain-nodes",
-  "/Users/donbeave/Projects/jackin-project/jackin",
-  "/Users/donbeave/Projects/tailrocks/parallax-project/parallax",
-  "/Users/donbeave/Projects/tailrocks/parallax-project/parallax-telemetry-playground",
-  "/Users/donbeave/Projects/tailrocks/tablerock",
-  "/Users/donbeave/Projects/tailrocks/holla-project/holla",
-  "/Users/donbeave/Projects/tailrocks/velnor-project/velnor",
-  "/Users/donbeave/Projects/tailrocks/ruxel",
-  "/Users/donbeave/Projects/tailrocks/termrock",
-  "/Users/donbeave/Projects/tailrocks/schemalane",
-  "/Users/donbeave/Projects/tailrocks/pg-bigdecimal",
-  "/Users/donbeave/Projects/tailrocks/tracing-request-level"
-]
+{
+  "version": 1,
+  "defaults": {
+    "lane-selection": {"classification":"required","evidence":"Every estate code repository must default automatic events to Velnor and expose github/both through the canonical ci.yml matrix.","implementations":[{"workflow":"ci.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]}]},
+    "checkout": {"classification":"required","evidence":"Every estate code repository consumes checked-out source in CI.","implementations":[{"workflow":"ci.yml","canonical_markers":["actions/checkout@","persist-credentials: false"]}]},
+    "tool-setup": {"classification":"required","evidence":"Estate law requires committed mise configuration and the pinned mise action for CI tools.","implementations":[{"workflow":"ci.yml","canonical_markers":["jdx/mise-action@"]}]},
+    "rust-ci": {"classification":"required","evidence":"All 13 repositories contain Rust source or a Rust CI/build helper requiring canonical validation.","implementations":[{"workflow":"ci.yml","job_ids":["rust"]}]},
+    "integration-services": {"classification":"non-applicable","evidence":"No independently required service-backed integration concern is present unless overridden by repository product evidence.","implementations":[]},
+    "cargo-cache": {"classification":"required","evidence":"Every estate repository compiles Rust code or Rust automation and therefore requires the standard local sccache plus Cargo registry cache contract.","implementations":[{"workflow":"ci.yml","canonical_markers":["mozilla-actions/sccache-action@","SCCACHE_GHA_ENABLED: \"false\"","actions/cache@"]}]},
+    "docker-build": {"classification":"non-applicable","evidence":"No image product/build concern is present unless overridden by repository product evidence.","implementations":[]},
+    "artifacts": {"classification":"non-applicable","evidence":"No cross-job or published artifact concern is present unless overridden by repository workflow evidence.","implementations":[]},
+    "docs-pages": {"classification":"non-applicable","evidence":"No documentation build or Pages surface is present unless overridden by repository workflow evidence.","implementations":[]},
+    "preview": {"classification":"non-applicable","evidence":"No preview product surface is present unless overridden by repository workflow evidence.","implementations":[]},
+    "release": {"classification":"non-applicable","evidence":"No repository-local publish/tag workflow is present unless overridden by repository workflow evidence.","implementations":[]},
+    "renovate": {"classification":"non-applicable","evidence":"Renovate is externally hosted unless a repository-local execution workflow is recorded.","implementations":[]},
+    "workflow-safety": {"classification":"required","evidence":"Every executable estate workflow requires bounded concurrency and job timeout safety; ci.yml is the universal baseline.","implementations":[{"workflow":"ci.yml","canonical_markers":["concurrency:","timeout-minutes:"]}]}
+  },
+  "repositories": [
+    {
+      "name":"ChainArgos/java-monorepo",
+      "path":"/Users/donbeave/Projects/ChainArgos/java-monorepo",
+      "concerns": {
+        "integration-services":{"classification":"repo-specific","evidence":"Ansible and Kestra workflows exercise product-specific integration surfaces; their commands and services remain explicit repository parameters.","implementations":[]},
+        "docker-build":{"classification":"applicable","evidence":"rust-docker.yml and kestra-build-publish.yml build product images.","implementations":[{"workflow":"rust-docker.yml","canonical_markers":["docker/setup-buildx-action@"]},{"workflow":"kestra-build-publish.yml","canonical_markers":["docker/setup-buildx-action@"]}]},
+        "artifacts":{"classification":"repo-specific","evidence":"Package and image fan-in is tied to the monorepo build graph.","implementations":[]},
+        "release":{"classification":"repo-specific","evidence":"Image publication is coupled to product build workflows rather than a generic tag release.","implementations":[]},
+        "renovate":{"classification":"applicable","evidence":"renovate.yml runs repository-local Renovate.","implementations":[{"workflow":"renovate.yml"}]}
+      }
+    },
+    {
+      "name":"ChainArgos/blockchain-nodes",
+      "path":"/Users/donbeave/Projects/ChainArgos/blockchain-nodes",
+      "concerns": {
+        "rust-ci":{"classification":"repo-specific","evidence":"Rust-script is the Docker factory control plane; build-publish sweep validates it instead of a library test job.","implementations":[]},
+        "docker-build":{"classification":"required","evidence":"The repository product is a multi-architecture blockchain image factory.","implementations":[{"workflow":"build-publish.yml","canonical_markers":["docker/setup-buildx-action@"]}]},
+        "artifacts":{"classification":"non-applicable","evidence":"Images publish directly to the registry; no Results Service artifact fan-in is used.","implementations":[]},
+        "release":{"classification":"repo-specific","evidence":"Image publication occurs in build-publish.yml with a single-writer lane rather than tag assets.","implementations":[]},
+        "renovate":{"classification":"applicable","evidence":"renovate.yml runs repository-local Renovate.","implementations":[{"workflow":"renovate.yml"}]}
+      }
+    },
+    {
+      "name":"jackin-project/jackin",
+      "path":"/Users/donbeave/Projects/tailrocks/jackin-project/jackin",
+      "concerns": {
+        "integration-services":{"classification":"repo-specific","evidence":"Construct, capsule, and exact-result graphs are Jackin product-specific orchestration.","implementations":[]},
+        "docker-build":{"classification":"applicable","evidence":"construct.yml builds and publishes the Jackin image.","implementations":[{"workflow":"construct.yml","canonical_markers":["docker/setup-buildx-action@"]}]},
+        "artifacts":{"classification":"applicable","evidence":"CI and construct workflows use cross-job result artifacts.","implementations":[{"workflow":"ci.yml","canonical_markers":["actions/upload-artifact@","actions/download-artifact@"]}]},
+        "docs-pages":{"classification":"applicable","evidence":"docs.yml builds and deploys the documentation site.","implementations":[{"workflow":"docs.yml"}]},
+        "preview":{"classification":"applicable","evidence":"preview.yml produces preview artifacts and attestations.","implementations":[{"workflow":"preview.yml"}]},
+        "release":{"classification":"applicable","evidence":"release.yml publishes Jackin releases.","implementations":[{"workflow":"release.yml","job_ids":["release"]}]},
+        "renovate":{"classification":"applicable","evidence":"renovate.yml runs repository-local Renovate.","implementations":[{"workflow":"renovate.yml"}]}
+      }
+    },
+    {
+      "name":"tailrocks/parallax",
+      "path":"/Users/donbeave/Projects/tailrocks/parallax-project/parallax",
+      "concerns": {
+        "integration-services":{"classification":"repo-specific","evidence":"storage-integration.yml and scheduled-measurement.yml exercise Parallax-specific telemetry/storage systems.","implementations":[]},
+        "docker-build":{"classification":"applicable","evidence":"Parallax release and preview surfaces build container images.","implementations":[{"workflow":"release.yml","canonical_markers":["docker/setup-buildx-action@"]}]},
+        "artifacts":{"classification":"applicable","evidence":"CI, preview, and release transport binaries and reports between jobs.","implementations":[{"workflow":"ci.yml","canonical_markers":["actions/upload-artifact@"]}]},
+        "preview":{"classification":"applicable","evidence":"preview.yml is the product preview workflow.","implementations":[{"workflow":"preview.yml"}]},
+        "release":{"classification":"applicable","evidence":"release.yml publishes product releases.","implementations":[{"workflow":"release.yml","job_ids":["release"]}]}
+      }
+    },
+    {
+      "name":"tailrocks/parallax-telemetry-playground",
+      "path":"/Users/donbeave/Projects/tailrocks/parallax-project/parallax-telemetry-playground",
+      "concerns": {
+        "integration-services":{"classification":"repo-specific","evidence":"The playground itself is a polyglot telemetry integration sample; its Java/Rust commands are repository parameters.","implementations":[]}
+      }
+    },
+    {
+      "name":"tailrocks/tablerock",
+      "path":"/Users/donbeave/Projects/tailrocks/tablerock",
+      "concerns": {
+        "integration-services":{"classification":"repo-specific","evidence":"Native Swift/FFI parity is a TableRock product concern, currently represented by checks.yml.","implementations":[]},
+        "artifacts":{"classification":"repo-specific","evidence":"Generated Swift bindings and native evidence are repository-specific outputs.","implementations":[]}
+      }
+    },
+    {
+      "name":"tailrocks/holla",
+      "path":"/Users/donbeave/Projects/tailrocks/holla-project/holla",
+      "concerns": {
+        "artifacts":{"classification":"applicable","evidence":"Release workflows produce Debian and cross-built binary artifacts.","implementations":[{"workflow":"release.yml","canonical_markers":["actions/upload-artifact@"]}]},
+        "preview":{"classification":"applicable","evidence":"preview.yml publishes prerelease previews.","implementations":[{"workflow":"preview.yml"}]},
+        "release":{"classification":"applicable","evidence":"release.yml and release-deb.yml publish distinct approved release products.","implementations":[{"workflow":"release.yml","job_ids":["release"]},{"workflow":"release-deb.yml"}]},
+        "renovate":{"classification":"applicable","evidence":"renovate.yml runs repository-local Renovate.","implementations":[{"workflow":"renovate.yml"}]}
+      }
+    },
+    {
+      "name":"tailrocks/velnor",
+      "path":"/Users/donbeave/Projects/tailrocks/velnor-project/velnor",
+      "concerns": {
+        "integration-services":{"classification":"repo-specific","evidence":"Runner protocol, fixture, and daemon integration tests are Velnor-specific.","implementations":[]},
+        "docker-build":{"classification":"applicable","evidence":"CI and release surfaces build the Ubuntu runner image and Debian package environment.","implementations":[{"workflow":"release.yml","canonical_markers":["docker/setup-buildx-action@"]}]},
+        "artifacts":{"classification":"applicable","evidence":"Release workflows transport Debian packages and release evidence.","implementations":[{"workflow":"release-deb.yml","canonical_markers":["actions/upload-artifact@"]}]},
+        "release":{"classification":"applicable","evidence":"release.yml and release-deb.yml publish Velnor releases through the signed apt path.","implementations":[{"workflow":"release.yml","job_ids":["release"]},{"workflow":"release-deb.yml"}]},
+        "renovate":{"classification":"applicable","evidence":"renovate.yml runs repository-local Renovate.","implementations":[{"workflow":"renovate.yml"}]}
+      }
+    },
+    {
+      "name":"tailrocks/ruxel",
+      "path":"/Users/donbeave/Projects/tailrocks/ruxel",
+      "concerns": {
+        "integration-services":{"classification":"repo-specific","evidence":"Ansible and uv oracle checks are Ruxel product-specific commands inside ci.yml.","implementations":[]},
+        "release":{"classification":"non-applicable","evidence":"No repository-local release workflow exists on the delivered surface.","implementations":[]}
+      }
+    },
+    {
+      "name":"tailrocks/termrock",
+      "path":"/Users/donbeave/Projects/tailrocks/termrock",
+      "concerns": {
+        "docs-pages":{"classification":"applicable","evidence":"docs.yml builds and deploys the Termrock documentation site.","implementations":[{"workflow":"docs.yml","job_ids":["docs"]}]},
+        "artifacts":{"classification":"applicable","evidence":"Documentation and release workflows transport generated outputs.","implementations":[{"workflow":"docs.yml","canonical_markers":["actions/upload-pages-artifact@"]}]},
+        "release":{"classification":"applicable","evidence":"release.yml publishes Termrock releases.","implementations":[{"workflow":"release.yml","job_ids":["release"]}]}
+      }
+    },
+    {
+      "name":"tailrocks/schemalane",
+      "path":"/Users/donbeave/Projects/tailrocks/schemalane",
+      "concerns": {
+        "integration-services":{"classification":"required","evidence":"Schemalane's database contract requires PostgreSQL integration coverage.","implementations":[{"workflow":"ci.yml","job_ids":["integration"],"canonical_markers":["services:","postgres"]}]},
+        "release":{"classification":"applicable","evidence":"release.yml publishes the library crate.","implementations":[{"workflow":"release.yml","job_ids":["release"]}]}
+      }
+    },
+    {
+      "name":"tailrocks/pg-bigdecimal",
+      "path":"/Users/donbeave/Projects/tailrocks/pg-bigdecimal",
+      "concerns": {
+        "integration-services":{"classification":"repo-specific","evidence":"PostgreSQL compatibility tests are encoded as repository commands in canonical ci.yml without a separately managed service concern.","implementations":[]},
+        "release":{"classification":"applicable","evidence":"release.yml publishes the library crate.","implementations":[{"workflow":"release.yml","job_ids":["release"]}]}
+      }
+    },
+    {
+      "name":"tailrocks/tracing-request-level",
+      "path":"/Users/donbeave/Projects/tailrocks/tracing-request-level",
+      "concerns": {
+        "release":{"classification":"applicable","evidence":"release.yml publishes the library crate.","implementations":[{"workflow":"release.yml","job_ids":["release"]}]}
+      }
+    }
+  ]
+}
