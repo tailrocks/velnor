@@ -32,7 +32,8 @@
       "path":"/Users/donbeave/Projects/ChainArgos/blockchain-nodes",
       "concerns": {
         "rust-ci":{"classification":"repo-specific","evidence":"Rust-script is the Docker factory control plane; build-publish sweep validates it instead of a library test job.","implementations":[]},
-        "docker-build":{"classification":"required","evidence":"The repository product is a multi-architecture blockchain image factory.","implementations":[{"workflow":"build-publish.yml","canonical_markers":["docker/setup-buildx-action@"]}]},
+        "cargo-cache":{"classification":"repo-specific","evidence":"The Rust-script control plane caches compiled scripts by an explicit source hash; product compilation occurs in registry-cached BuildKit layers rather than Cargo CI jobs.","implementations":[]},
+        "docker-build":{"classification":"required","evidence":"The repository product is a multi-architecture blockchain image factory.","implementations":[{"workflow":"ci.yml","canonical_markers":["docker/setup-buildx-action@"]}]},
         "artifacts":{"classification":"non-applicable","evidence":"Images publish directly to the registry; no Results Service artifact fan-in is used.","implementations":[]},
         "release":{"classification":"repo-specific","evidence":"Image publication occurs in build-publish.yml with a single-writer lane rather than tag assets.","implementations":[]},
         "renovate":{"classification":"applicable","evidence":"renovate.yml runs repository-local Renovate.","implementations":[{"workflow":"renovate.yml"}]}
