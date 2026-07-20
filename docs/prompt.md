@@ -67,7 +67,7 @@ only the gate needed to resolve uncertainty or changed behavior.
 | 046 | DONE | `velnor-tools audit-ci` and lane comparison. |
 | 047 | BLOCKED | java-monorepo PR #1753 and all technical gates were green; branch policy required an authorized human merge. Re-check current PR state before acting. |
 | 048 | BLOCKED | blockchain-nodes fails the same three pre-existing package builds on GitHub and Velnor; Dockerfile/package-source fixes were outside the approved plan. |
-| 049 | BLOCKED | Jackin PR #810 Docs and CI parity passed; Preview requires the explicitly unapproved `actions/attest-build-provenance@v4` Sigstore/GitHub-attestation surface. |
+| 049 | BLOCKED | Exact estate audit of PR #810 SHA `1853593` finds 18 remaining workflow-contract errors. Repair requires workflow-capable push credentials; Preview separately requires explicit approval of the proposed native `actions/attest-build-provenance@v4` surface. |
 | 050 | DONE | Velnor dogfood three-lane proof, 33-second clean rerun, and release recovery drill. PR #100 was open and green at baseline; its current delivery state must be reconciled. |
 | 051 | DONE | Holla PR #36 merged; parity and 57-second clean rerun passed. |
 | 052 | DONE | Ruxel PR #2 merged; parity and 52-second clean rerun passed. |

@@ -1441,3 +1441,20 @@ same-version local-artifact sentence is superseded and must not be used.
   Read-only API inspection found every `main` unprotected except TermRock,
   whose protection has no required checks. No branch policy was changed; §12.1
   remains an operator decision.
+
+### 2026-07-21 exact Jackin PR-head audit correction
+
+- A detached, read-only worktree at PR #810 SHA
+  `185359306977eba6f12d935c30cef7d387490063` replaced the stale local checkout
+  in a temporary estate manifest. The result is 18 errors, not the earlier
+  presumed clean state: CI lane/canonical-marker drift, missing compiler-cache
+  setup in scheduled/reusable compile jobs, and three forbidden construct lane
+  conditionals.
+- The operator's normal Jackin checkout remains untouched on its dirty
+  `docs/native-macos-usage-menu-bar` branch. No PR #810 edit or commit was made:
+  Jackin rules require every commit to be pushed immediately, while the active
+  OAuth token cannot update workflows and the SSH agent refuses signing.
+- This correction reopens plan 049's non-attestation work. Once credentials are
+  repaired, continue on the existing `perf/subminute-ci` PR branch, eliminate
+  all 18 errors structurally, run the exact estate audit again, and only then
+  perform the attestation-dependent preview proof after approval.
