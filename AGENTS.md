@@ -120,17 +120,31 @@ Rarely use Python or shell. Use them only when the task cannot reasonably be don
 
 ## HARD RULE: Keep direction docs and the execution prompt consistent
 
-`docs/` is the single source of truth for direction: [docs/mission.md](docs/mission.md), [docs/vision.md](docs/vision.md), [docs/roadmap.md](docs/roadmap.md) (the plan), and [docs/comparison.md](docs/comparison.md). The single active execution prompt ([plans/estate-program-goal-prompt.md](plans/estate-program-goal-prompt.md)), the plan library (`plans/`), and the rest of the repository defer to it. The old `prompts/` goal-prompt system is retired — its sequences completed 2026-06-11 and the files were removed 2026-07-18; there is exactly ONE active prompt at a time.
+`docs/` is the single source of truth for direction: [docs/mission.md](docs/mission.md), [docs/vision.md](docs/vision.md), [docs/roadmap.md](docs/roadmap.md) (the plan), and [docs/comparison.md](docs/comparison.md). The single active execution prompt ([docs/prompt.md](docs/prompt.md)), the plan library (`plans/`), and the rest of the repository defer to it. The old `prompts/` goal-prompt system is retired — its sequences completed 2026-06-11 and the files were removed 2026-07-18; there is exactly ONE active prompt at a time.
 
 Whenever a discussion or change affects the **vision, plan, or roadmap**:
 
 1. Update the relevant file in `docs/` first.
 2. Record the direction change here in `AGENTS.md` (so the decision is captured where every agent reads it).
-3. Reconcile `plans/README.md` and `plans/estate-program-goal-prompt.md` so they do not go stale.
+3. Reconcile `plans/README.md` and `docs/prompt.md` so they do not go stale.
 
 Never let a prompt, README, or doc describe a direction that the current vision/plan/roadmap no longer holds. If the prompt and `docs/` disagree, `docs/` wins — fix the prompt.
 
 ### Direction change log
+
+- 2026-07-21: **Uniformity is concern-based; active prompt moved to docs**
+  ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) §2.12): repositories
+  are not padded with irrelevant no-op jobs. Every concern shared by multiple
+  repositories, and every concern required by a repository's class/product
+  surface, uses the identical canonical filename, job id, lane matrix, step
+  order, pins, inputs, env, cache keys, timeout/concurrency, writer gate, and
+  aggregator. Missing required concerns are added from the canonical template;
+  genuinely non-applicable concerns are explicitly classified and omitted.
+  Repository-specific commands/paths/targets remain parameters, not alternate
+  implementations. `audit-ci` must enforce both missing-required coverage and
+  canonical equivalence of applicable concerns. The single `/goal` execution
+  prompt now lives at `docs/prompt.md`; `plans/` contains plans and its index,
+  not a second direction prompt.
 
 - 2026-07-19: **Estate program terminal reconciliation**: phases 0–4 reached
   terminal state. Completed repositories use the Velnor-default / pinned
@@ -176,8 +190,7 @@ Never let a prompt, README, or doc describe a direction that the current vision/
   the `prompts/` goal-prompt system (all sequences complete since 2026-06-11)
   and the DONE plan files 001–013/016–032 plus `plans/goal-execution-prompt.md`
   are deleted — history stays in git (pre-cleanup tree at `17136f9`). The only
-  active execution prompt is
-  [plans/estate-program-goal-prompt.md](plans/estate-program-goal-prompt.md)
+  active execution prompt is [docs/prompt.md](docs/prompt.md)
   (program 033–059 **plus** outstanding 014 systemd hardening and 015
   run-log-capture purge, which fold into the program's host window).
   Branch hygiene: superseded branches `docs/velnor-projects-setup` (first
@@ -198,10 +211,11 @@ Never let a prompt, README, or doc describe a direction that the current vision/
   plus dogfood CI on that one branch) and the fixture included; per-feature
   commits, never per-feature branches; every V-B/V-C dual-runner
   verification dispatches from the program branch before merge. §2.12 makes
-  uniformity literal: identical workflow filenames (`ci.yml`, `release.yml`,
-  `docs.yml`, `preview.yml`, `renovate.yml`), job ids, dispatch input, cache
-  keys, concurrency groups, and a shared `.github/AGENTS.md` template across
-  all repos; `audit-ci` enforces names as well as behavior. New Phase-0 gate:
+  uniformity literal for every common or required concern: identical workflow
+  filenames, job ids, dispatch input, cache keys, concurrency groups, and a
+  shared `.github/AGENTS.md` template wherever applicable; non-applicable
+  concerns are classified rather than faked. `audit-ci` enforces required
+  coverage, names, and behavior. New Phase-0 gate:
   the Velnor host is cleaned to a recorded baseline (stale runners, leftover
   Docker resources, legacy `unknown-repository` trees, over-budget BuildKit
   stores — owned-resource deletion only) before any verification campaign;

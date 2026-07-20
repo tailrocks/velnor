@@ -6,7 +6,7 @@ their history lives in git (the 2026-07-03 deep-audit generation, plans
 pre-cleanup tree at tag/commit `17136f9` for the archived files).
 
 The single active execution prompt for the whole program is
-[`estate-program-goal-prompt.md`](estate-program-goal-prompt.md) — pass its
+[`docs/prompt.md`](../docs/prompt.md) — pass its
 body to `/goal`. There are no other active prompts; the old `prompts/`
 goal-prompt system is retired (all its sequences completed 2026-06-11).
 
@@ -50,9 +50,13 @@ jackin-project/jackin PR #810; the whole jackin delivery stacks there and
 merges with that PR (operator decision 2026-07-18, setup-doc §12.5). Every
 V-B three-lane dispatch and V-C timing run executes **from the repo's
 program branch before merge** — both runners must prove the exact same
-configuration. Uniform shape is law: same workflow filenames, job ids, input
-names, cache keys, concurrency groups, and `.github/AGENTS.md` template in
-every repo (§2.12; `audit-ci` rule 11 enforces it).
+configuration. Uniform shape is concern-based law: every concern common to
+multiple repositories or required by a repository's class/product surface uses
+the same canonical workflow filename, job ids, input names, step order, pins,
+environment, cache keys, timeout/concurrency, writer gate, aggregator, and
+`.github/AGENTS.md` shared block. Missing required concerns are added;
+genuinely non-applicable concerns are classified and omitted, never replaced
+with no-op jobs (§2.12; `audit-ci` must enforce both coverage and equivalence).
 
 ## Execution order & status — runner (velnor)
 
@@ -82,17 +86,17 @@ V-A). Do not open estate PRs before 041's operator verification.
 | Plan | Repo | Phase | Effort | Extra deps | Status |
 |------|------|-------|--------|-----------|--------|
 | 047 | ChainArgos/java-monorepo | 1 | M | — | BLOCKED — all gates green; branch policy requires human approval/merge |
-| 048 | ChainArgos/blockchain-nodes | 1 | S/M | — | BLOCKED: both lanes identically fail three pre-existing package builds; fixes require out-of-scope Dockerfile/package-source changes (runs `29637999142`, `29638091607`) |
+| 048 | ChainArgos/blockchain-nodes | 1 | S/M | — | IN PROGRESS — source defects fixed on PR #651 (`6a46c93`); local amd64 image proof green for all three former failures; fresh V-B/V-C evidence remains |
 | 049 | jackin-project/jackin (stacks on PR #810) | 1 | L | 047 (pattern) | BLOCKED — Docs and CI three-lane gates are green, but Preview Velnor requires explicitly unapproved attest-build-provenance v4 capability (run `29677351289`) |
-| 050 | tailrocks/velnor (dogfood) | 2 | M | 039 (fleet label) | DONE — three lanes green, 33 s zero-install rerun passes Class B budget, and GitHub release recovery drill green |
+| 050 | tailrocks/velnor (dogfood) | 2 | M | 039 (fleet label) | DONE implementation — three lanes green, 33 s zero-install rerun passes Class B budget, and GitHub release recovery drill green; whole-program PR #100 remains open and clean at `c233c92` |
 | 051 | tailrocks/holla | 2 | S | — | DONE: PR #36 merged; Velnor/GitHub/both green; 57 s no-change budget passed |
 | 052 | tailrocks/ruxel | 2 | S | — | DONE — PR #2 merged; final three-lane and 52 s zero-install rerun green |
-| 053 | tailrocks/parallax | 2 | L | 051 (pattern), 042 (attest) | BLOCKED — static and GitHub gates pass, but three v0.1.92 Velnor runs reproducibly capture the shell visual loading skeleton (3,683 pixels); the documented 2-slot/8-CPU fallback also failed, and workflow/source weakening is forbidden |
-| 054 | tailrocks/termrock | 3 | M | 042 (Pages) | BLOCKED — both lanes fail pre-existing out-of-scope rustfmt drift |
-| 055 | schemalane + pg-bigdecimal + tracing-request-level (Class D trio) | 3 | M | 040 (schemalane services) | DONE: all three PRs merged; V-B/V-C passed and final no-change Velnor logs contain no dependency downloads/compiles or tool installs |
+| 053 | tailrocks/parallax | 2 | L | 051 (pattern), 042 (attest) | BLOCKED — prior visual-parity defect remains; additionally PR #21 head has 19 Phase-4 errors, while repository law permits direct-main work only and forbids branch/PR mutation; operator must reconcile delivery path before fixes |
+| 054 | tailrocks/termrock | 3 | M | 042 (Pages) | BLOCKED — source/workflow fixes are on trunk (`1d38a7a`..`b799612`); fresh `both` run `29780236893` proved GitHub jobs start while all Velnor jobs remain unassigned past two minutes; org runner-group access remains HTTP 403 |
+| 055 | schemalane + pg-bigdecimal + tracing-request-level (Class D trio) | 3 | M | 040 (schemalane services) | DONE original delivery; Phase-4 convergence follow-ups are open as PRs #3/#2/#2 under plan 058, with GitHub proofs green and current `both` runs awaiting runner-group access |
 | 056 | tailrocks/parallax-telemetry-playground | 3 | S | — | DONE |
-| 057 | tailrocks/tablerock | 3 | S | — | BLOCKED — target AGENTS forbids branch/PR; plan drift would delete current coverage |
-| 058 | Phase 4: estate enforcement + docs reconcile + required checks | 4 | M | 046, 047–057 | IN PROGRESS — estate audit and final docs/campaign reconciliation active |
+| 057 | tailrocks/tablerock | 3 | S | — | BLOCKED — trunk-only delivery is clear and coverage must be preserved, but mandatory current-code gate fails strict clippy with 191 errors across user-modified source; workflow rewrite would land red CI |
+| 058 | Phase 4: concern-based estate convergence, enforcement, docs reconcile, required checks | 4 | L | 046, 047–057 | IN PROGRESS — inventory every concern; add missing required concerns; converge common implementations; extend audit-ci for missing-required/canonical-drift; then finish audit and reconciliation |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) |
 REJECTED (one-line rationale).
@@ -124,6 +128,12 @@ REJECTED (one-line rationale).
   tailrocks org migration or an interim repo-level daemon).
 - 053/054 writer-gate attest/Pages steps until 042 completes those adapters.
 - 058 runs last; it re-baselines the §2.11 budgets from measured data.
+- 058 also owns the 2026-07-21 concern-based uniformity clarification: build a
+  machine-readable per-repo concern inventory, converge every common/applicable
+  concern to one canonical implementation, add missing class/product-required
+  concerns, classify genuine non-applicability, and extend `audit-ci` to fail
+  both missing-required coverage and canonical drift. It must not add fake jobs
+  for concerns a repository does not have.
 - 014's systemd hardening smoke and 059's host window share the same live
   host access — schedule together.
 

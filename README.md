@@ -35,9 +35,10 @@ defers to it.
 
 ## Working on Velnor
 
-Large, scoped work is driven by **goal prompts** in [`prompts/`](prompts/) — run
-them with `/goal` (Claude Code or Codex), one per day, in the recommended
-sequence. See [`prompts/README.md`](prompts/README.md).
+Large, scoped work is driven by the single active
+[`docs/prompt.md`](docs/prompt.md) — pass its body to `/goal` in Codex. The old
+multi-prompt sequence is retired; current direction and execution state live in
+`docs/` and `plans/README.md`.
 
 Contributor rules are in [`AGENTS.md`](AGENTS.md).
 

@@ -44,6 +44,16 @@ expanded job against
 effect. Unsupported refs, inputs, values, and combinations fail clearly. New
 surface requires explicit operator approval.
 
+**Estate uniformity is concern-based.** Repositories do not gain meaningless
+jobs merely to look alike. First inventory which CI concerns each repository
+actually has and which baseline concerns its class requires. Every shared or
+required concern then uses the same canonical workflow name, job id, lane
+matrix, step order, pinned actions, inputs, environment, cache keys, timeouts,
+concurrency, writer gate, and required aggregator. Repository-specific work may
+differ only where its product surface differs. Missing required concerns are
+added from the canonical template; non-applicable concerns are documented and
+omitted, never represented by fake no-op jobs.
+
 ## Implementation Goal
 
 Velnor is a GitHub Actions-compatible runner daemon with a Rust runtime.
