@@ -94,7 +94,7 @@
       "path":"/Users/donbeave/Projects/tailrocks/velnor-project/velnor",
       "concerns": {
         "integration-services":{"classification":"repo-specific","evidence":"Runner protocol, fixture, and daemon integration tests are Velnor-specific.","implementations":[]},
-        "docker-build":{"classification":"applicable","evidence":"CI and release surfaces build the Ubuntu runner image and Debian package environment.","implementations":[{"workflow":"release.yml","canonical_markers":["docker/setup-buildx-action@"]}]},
+        "docker-build":{"classification":"non-applicable","evidence":"Velnor releases native runner archives and Debian packages; the canonical job-image Dockerfile is packaged and validated but no repository workflow builds or publishes an OCI image.","implementations":[]},
         "artifacts":{"classification":"applicable","evidence":"Release workflows transport Debian packages and release evidence.","implementations":[{"workflow":"release-deb.yml","canonical_markers":["actions/upload-artifact@"]}]},
         "release":{"classification":"applicable","evidence":"release.yml and release-deb.yml publish Velnor releases through the signed apt path.","implementations":[{"workflow":"release.yml","job_ids":["release"]},{"workflow":"release-deb.yml"}]},
         "renovate":{"classification":"applicable","evidence":"renovate.yml runs repository-local Renovate.","implementations":[{"workflow":"renovate.yml"}]}
