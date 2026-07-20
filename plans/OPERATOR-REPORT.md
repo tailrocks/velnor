@@ -1299,3 +1299,22 @@ same-version local-artifact sentence is superseded and must not be used.
   trunk as required by repository law (`241746e`..`c3f9324`). The full local
   gate passed. Automatic Docs/Rust runs `29775367029` and `29775367114` were
   cancelled when the repository runner API proved zero registered runners.
+- Program-head audits now report zero errors for blockchain-nodes,
+  java-monorepo, Jackin PR #810, Holla, the telemetry playground, Ruxel,
+  Schemalane, pg-bigdecimal, Termrock, tracing-request-level, and Velnor.
+  Java's primary Rust graph moved to `ci.yml` at `86f6517f`; Ruxel PR #3
+  canonicalizes its Rust identifier/reporting; Velnor commit `ffe92b9` does
+  the same for dogfood CI. Automatic Java/Ruxel runs were cancelled after
+  their repository runner APIs returned zero registrations.
+- Parallax PR #21 head still has 19 Phase-4 errors (nine ad-hoc compiler-cache
+  reports plus cache/setup/release drift). Its repository law permits direct
+  `main` commits only and forbids branch/PR mutation, while `main` does not
+  contain the program branch. No unauthorized branch fix was made; operator
+  delivery-path reconciliation is required in addition to the existing visual
+  parity blocker.
+- TableRock's expanded current workflow coverage cannot yet be replaced by the
+  old Class-D template. The mandatory current-code gate proved fmt clean but
+  strict workspace clippy fails with 191 errors across user-modified source
+  (including 97 `collapsible_if` and 80 `field_reassign_with_default`
+  instances). Plan 057's STOP condition therefore applies: landing the new CI
+  now would make trunk red, and overlapping the in-progress source is unsafe.
