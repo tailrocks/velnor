@@ -20,6 +20,7 @@
       "name":"ChainArgos/java-monorepo",
       "path":"/Users/donbeave/Projects/ChainArgos/java-monorepo",
       "concerns": {
+        "rust-ci":{"classification":"repo-specific","evidence":"The production monorepo uses path-classified per-package Rust jobs and an aggregate required check; package identities are explicit repository parameters under the approved Class-A L2/L3 model.","implementations":[]},
         "integration-services":{"classification":"repo-specific","evidence":"Ansible and Kestra workflows exercise product-specific integration surfaces; their commands and services remain explicit repository parameters.","implementations":[]},
         "docker-build":{"classification":"applicable","evidence":"rust-docker.yml and kestra-build-publish.yml build product images.","implementations":[{"workflow":"rust-docker.yml","canonical_markers":["docker/setup-buildx-action@"]},{"workflow":"kestra-build-publish.yml","canonical_markers":["docker/setup-buildx-action@"]}]},
         "artifacts":{"classification":"repo-specific","evidence":"Package and image fan-in is tied to the monorepo build graph.","implementations":[]},
