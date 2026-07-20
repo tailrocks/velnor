@@ -1369,3 +1369,10 @@ same-version local-artifact sentence is superseded and must not be used.
   operator action: grant org runner administration, then add these six
   repositories (and every remaining estate repository) to the trusted Velnor
   group before redispatch.
+
+### 2026-07-21 Velnor program delivery
+
+- Velnor PR #100 head `62bcf55` passed the current Velnor CI run
+  `29780533701`: actionlint, format, deny, clippy, 649 tests, aggregate, and
+  DCO all green. GitHub accepted an ordinary non-bypassing squash merge as
+  `c493a2f512097abad887007f94ec10445e3c26b4`.
