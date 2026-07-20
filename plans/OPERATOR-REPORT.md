@@ -1329,3 +1329,22 @@ same-version local-artifact sentence is superseded and must not be used.
 - The Velnor branch full local gate after concern enforcement is green:
   actionlint, fmt, strict workspace clippy, advisories, and all 648 nextest
   tests pass. PR #100's current remote checks are also green.
+
+### 2026-07-21 ordered concern follow-up
+
+- The concern auditor now validates exact pins in declared order and scopes
+  signatures to every declared job. The complete compile graphs for Holla,
+  Velnor, Ruxel, Termrock, and Schemalane are explicitly inventoried.
+- Fresh offline estate audit: ten repositories have zero errors. Remaining
+  local-checkout errors are confined to jackin (checkout is an unrelated
+  dirty branch; PR #810 head audits clean), Parallax (delivery-path decision
+  pending), and TableRock (pre-existing source gate failure blocks trunk
+  workflow delivery).
+- Java monorepo compile jobs were structurally reordered to the canonical
+  mold -> sccache -> mise -> Cargo-cache stack; estate audit is zero-error at
+  commit `c138ef8c`.
+- Velnor's full local gate is green after the expanded inventory: actionlint,
+  fmt, strict workspace clippy, advisories, and 649/649 nextest tests.
+- Holla's first GitHub-only proof was green at run `29779357054`. Its complete
+  integration stack was then converged at `15307d5`; replacement proof run
+  `29779741417` is the only monitored run for that head.
