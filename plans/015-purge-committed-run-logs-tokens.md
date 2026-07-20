@@ -119,6 +119,64 @@ If the operator declines the history rewrite, record that decision in the PR and
 `plans/README.md` (the working-tree removal + policy still land). Do **not**
 force-push without confirmation.
 
+#### Refreshed coordinated-window inventory (2026-07-21)
+
+- The capture entered history at
+  `55ed22fe3162228876c1c5829d3c4d966b28e0d2` and was removed at
+  `d7e75af8867bfd43ed48c84af2087350c6fdca8e`.
+- It is reachable from `main`, `velnor-estate-standard`, 12 fetched origin
+  refs including `origin/HEAD`, and 97 release tags (`v0.1.2` through
+  `v0.1.98`, with the repository's existing tag sequence). Rewriting only
+  `main` is insufficient.
+- Rewriting the release tags changes their commit targets. The coordinated
+  notice must therefore include release/apt maintainers and consumers that
+  verify tag or commit identities; old signed provenance cannot be represented
+  as proving the rewritten commit ids.
+
+#### Exact coordinated procedure (execute only after explicit confirmation)
+
+1. Announce a write freeze covering branches, tags, releases, Renovate, and
+   open pull requests. Record the start time and require collaborators to stop
+   pushing. Temporarily authorize force updates only for this named window;
+   never broadly disable protections without a recorded owner and rollback.
+2. Create two fresh `--mirror` clones. Make one immutable backup archive and
+   record its SHA-256 outside the repository. Use the second as the rewrite
+   work clone. Never use a developer checkout with unrelated refs.
+3. In the work clone, fetch/prune once after the freeze, record
+   `git show-ref`, then run:
+
+   ```text
+   git filter-repo --path .velnor-compare/velnor-job.html --invert-paths
+   ```
+
+4. Before pushing, prove the path absent from every rewritten head and tag:
+
+   ```text
+   git log --all --oneline -- .velnor-compare/velnor-job.html
+   git rev-list --objects --all | rg -F '.velnor-compare/velnor-job.html'
+   ```
+
+   Both commands must produce no output. Do not inspect or print the removed
+   blob contents.
+5. Restore the GitHub remote removed by `filter-repo`, dry-run explicit head
+   and tag refspecs, inspect the target list, then force-push only
+   `refs/heads/*` and `refs/tags/*`. Never push `refs/pull/*`, GitHub internal
+   refs, or an unreviewed `--mirror` refset.
+6. Re-fetch from GitHub into a third fresh clone and repeat the two absence
+   checks. Also query all remote heads/tags, compare their names with the
+   pre-rewrite `show-ref` inventory, and verify the current default branch,
+   releases, branch protections, required checks, and apt publication refs.
+7. Restore protections, end the freeze, and send the collaborator notice:
+   discard old clones and re-clone; do not merge/rebase/push old histories;
+   recreate still-needed PR branches from the rewritten base; update any
+   pinned commit identities and provenance records explicitly.
+
+Rollback during the window uses the untouched backup mirror and the same
+reviewed `refs/heads/*`/`refs/tags/*` refspecs, followed by a third-clone
+verification. After collaborators resume on rewritten history, rollback is a
+second coordinated rewrite and requires a new freeze; it is not an informal
+push-back operation.
+
 **Verify** (only after an approved rewrite): `git log --all --oneline -- '.velnor-compare/*.html'`
 returns nothing.
 

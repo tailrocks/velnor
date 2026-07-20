@@ -1376,3 +1376,14 @@ same-version local-artifact sentence is superseded and must not be used.
   `29780533701`: actionlint, format, deny, clippy, 649 tests, aggregate, and
   DCO all green. GitHub accepted an ordinary non-bypassing squash merge as
   `c493a2f512097abad887007f94ec10445e3c26b4`.
+
+### 2026-07-21 plan 015 rewrite preparation refresh
+
+- Read-only reachability inspection confirms capture-introduction commit
+  `55ed22f` is still reachable from current heads and 97 release tags. The
+  removal commit remains `d7e75af`; no capture exists at current HEAD.
+- Plan 015 now contains the exact coordinated freeze, immutable mirror backup,
+  all-head/all-tag rewrite, protected-ref handling, third-clone verification,
+  rollback, and collaborator/reclone procedure. It explicitly records that
+  release tag commit identities and old provenance change. No history was
+  rewritten and no approval boundary was crossed.
