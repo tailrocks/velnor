@@ -119,7 +119,7 @@
       "name":"tailrocks/schemalane",
       "path":"/Users/donbeave/Projects/tailrocks/schemalane",
       "concerns": {
-        "integration-services":{"classification":"required","evidence":"Schemalane's database contract requires PostgreSQL integration coverage.","implementations":[{"workflow":"ci.yml","job_ids":["integration"],"canonical_markers":["services:","postgres"]}]},
+        "integration-services":{"classification":"required","evidence":"Schemalane's database contract requires PostgreSQL integration coverage; the canonical integration job uses repository-parameterized testcontainers rather than a YAML service declaration.","implementations":[{"workflow":"ci.yml","job_ids":["integration"]}]},
         "release":{"classification":"applicable","evidence":"release.yml publishes the library crate.","implementations":[{"workflow":"release.yml","job_ids":["release"]}]}
       }
     },
