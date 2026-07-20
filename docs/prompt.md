@@ -71,7 +71,7 @@ only the gate needed to resolve uncertainty or changed behavior.
 | 050 | DONE | Velnor dogfood three-lane proof, 33-second clean rerun, and release recovery drill. PR #100 was open and green at baseline; its current delivery state must be reconciled. |
 | 051 | DONE | Holla PR #36 merged; parity and 57-second clean rerun passed. |
 | 052 | DONE | Ruxel PR #2 merged; parity and 52-second clean rerun passed. |
-| 053 | BLOCKED | Parallax PR #21: GitHub passed, but three Velnor runs reproduced the 3,683-pixel loading-skeleton mismatch; the 2-slot/8-CPU fallback also failed. |
+| 053 | BLOCKED | Direct-main convergence is locally committed as `8190a6d`; 539 UI tests, type/format checks, actionlint, workflow-policy fixtures, and 163 focused Rust tests pass, and estate audit reports zero Parallax errors. Push is rejected because OAuth lacks `workflow` and SSH signing is unavailable; Ubuntu visual proof and the Darwin-release decision therefore remain. |
 | 054 | BLOCKED | Termrock PR #4 lanes fail identical pre-existing rustfmt drift outside the estate plan. |
 | 055 | DONE | Schemalane, pg-bigdecimal, and tracing-request-level merged with clean V-B/V-C proof. |
 | 056 | DONE | Parallax telemetry playground merged and passed. |

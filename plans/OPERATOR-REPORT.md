@@ -1398,3 +1398,27 @@ same-version local-artifact sentence is superseded and must not be used.
 - No manifest, runtime, fixture, or Jackin capability change was made. The
   proposal's explicit yes/no decision remains required before native Rust
   implementation.
+
+### 2026-07-21 Parallax direct-main recovery and credential blocker
+
+- Reconciled the abandoned PR #21 program work onto Parallax `main` without
+  importing commit `588dc2d` or changing any golden screenshot. Local commit
+  `8190a6d` includes the application-state race fix, current action pins,
+  canonical lane surface, local-only compiler caches, and the canonical
+  `release` writer job.
+- Verification passed: 539 UI tests; UI format and type checks; actionlint;
+  workflow-policy fixtures; Rust formatting; 163 focused Rust tests; and zero
+  Parallax errors from the estate auditor. The no-update visual run differs by
+  3,559/3,544 pixels along text/icon edges when macOS Chromium is compared with
+  Linux-authored goldens. No snapshot was rewritten; Ubuntu CI remains the
+  authoritative visual proof.
+- Delivery is blocked before remote verification. HTTPS rejected the workflow
+  update because the active OAuth token lacks `workflow`; SSH authentication
+  failed because the agent refused the ED25519 signing request. Required
+  operator action: refresh `gh` authentication with `workflow` scope or unlock
+  the registered SSH key, then push Parallax `main` commit `8190a6d`.
+- Parallax stable release still builds native Darwin archives with Apple
+  `dsymutil`, codesign, and linker header padding. Plan 053 explicitly requires
+  an operator decision if no valid Ubuntu cross-build exists; this surface was
+  preserved rather than silently dropping Apple artifacts or claiming Ubuntu
+  equivalence.
