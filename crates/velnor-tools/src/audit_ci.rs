@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::Args;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -42,6 +42,7 @@ pub struct AuditCiArgs {
 enum Severity {
     Error,
     Warn,
+    Info,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -83,19 +84,116 @@ impl Finding {
             message: message.into(),
         }
     }
+
+    fn info(
+        rule: &'static str,
+        file: &str,
+        path: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            severity: Severity::Info,
+            rule,
+            file: file.to_string(),
+            path: path.into(),
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct EstateManifest {
+    version: u32,
+    #[serde(default)]
+    defaults: BTreeMap<String, ConcernContract>,
+    repositories: Vec<EstateRepository>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EstateRepository {
+    name: String,
+    path: PathBuf,
+    concerns: BTreeMap<String, ConcernContract>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum ConcernClassification {
+    Required,
+    Applicable,
+    NonApplicable,
+    RepoSpecific,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConcernContract {
+    classification: ConcernClassification,
+    evidence: String,
+    #[serde(default)]
+    implementations: Vec<ConcernImplementation>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConcernImplementation {
+    workflow: String,
+    #[serde(default)]
+    job_ids: Vec<String>,
+    #[serde(default)]
+    canonical_markers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WorkflowAuditProfile {
+    workload_override: Option<bool>,
+    legacy_uniform_warnings: bool,
 }
 
 pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
-    let roots = if let Some(estate) = &args.estate {
+    let estate = if let Some(estate) = &args.estate {
         let text = fs::read_to_string(estate)
             .with_context(|| format!("read estate file {}", estate.display()))?;
-        serde_json::from_str::<Vec<PathBuf>>(&text)
-            .with_context(|| format!("parse estate JSON {}", estate.display()))?
+        Some(
+            serde_json::from_str::<EstateManifest>(&text)
+                .with_context(|| format!("parse estate manifest {}", estate.display()))?,
+        )
     } else {
-        vec![args.repo_path.clone()]
+        None
     };
     let mut all = BTreeMap::new();
-    for root in roots {
+    if let Some(estate) = &estate {
+        if estate.version != 1 {
+            bail!(
+                "unsupported estate manifest version {} (expected 1)",
+                estate.version
+            );
+        }
+        for repo in &estate.repositories {
+            let canonical = repo.path.canonicalize().with_context(|| {
+                format!(
+                    "estate repository {} path {} does not exist",
+                    repo.name,
+                    repo.path.display()
+                )
+            })?;
+            let workload_files = concern_implementations(repo, &estate.defaults, "lane-selection")
+                .map(|concern| {
+                    concern
+                        .implementations
+                        .iter()
+                        .map(|implementation| implementation.workflow.as_str())
+                        .collect::<BTreeSet<_>>()
+                })
+                .unwrap_or_default();
+            let mut findings =
+                audit_repo_profile(&canonical, args.offline, Some(&workload_files), false)?;
+            findings.extend(audit_concern_contract(repo, &estate.defaults, &canonical)?);
+            findings.sort_by(|left, right| {
+                (&left.file, &left.path, left.rule).cmp(&(&right.file, &right.path, right.rule))
+            });
+            all.insert(repo.name.clone(), findings);
+        }
+    } else {
+        let root = &args.repo_path;
         let canonical = root.canonicalize().unwrap_or(root.clone());
         all.insert(
             canonical.display().to_string(),
@@ -144,7 +242,141 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
     Ok(())
 }
 
+fn audit_concern_contract(
+    repo: &EstateRepository,
+    defaults: &BTreeMap<String, ConcernContract>,
+    root: &Path,
+) -> Result<Vec<Finding>> {
+    const REQUIRED_CONCERNS: [&str; 13] = [
+        "lane-selection",
+        "checkout",
+        "tool-setup",
+        "rust-ci",
+        "integration-services",
+        "cargo-cache",
+        "docker-build",
+        "artifacts",
+        "docs-pages",
+        "preview",
+        "release",
+        "renovate",
+        "workflow-safety",
+    ];
+    let mut findings = Vec::new();
+    for name in REQUIRED_CONCERNS {
+        if !repo.concerns.contains_key(name) && !defaults.contains_key(name) {
+            findings.push(Finding::error(
+                "missing-required",
+                "config/estate-repositories.json",
+                format!("$.repositories[{}].concerns.{name}", repo.name),
+                "classify this concern with evidence; absence is not non-applicability",
+            ));
+        }
+    }
+    for name in REQUIRED_CONCERNS {
+        let Some(concern) = repo.concerns.get(name).or_else(|| defaults.get(name)) else {
+            continue;
+        };
+        if concern.evidence.trim().is_empty() {
+            findings.push(Finding::error(
+                "missing-required",
+                "config/estate-repositories.json",
+                format!("$.repositories[{}].concerns.{name}.evidence", repo.name),
+                "add evidence for this classification",
+            ));
+        }
+        match concern.classification {
+            ConcernClassification::NonApplicable | ConcernClassification::RepoSpecific => {
+                let rule = match concern.classification {
+                    ConcernClassification::NonApplicable => "non-applicable",
+                    ConcernClassification::RepoSpecific => "repo-specific",
+                    _ => unreachable!(),
+                };
+                findings.push(Finding::info(
+                    rule,
+                    "config/estate-repositories.json",
+                    format!("$.repositories[{}].concerns.{name}", repo.name),
+                    &concern.evidence,
+                ));
+            }
+            ConcernClassification::Required | ConcernClassification::Applicable => {
+                if concern.implementations.is_empty() {
+                    findings.push(Finding::error(
+                        "missing-required",
+                        "config/estate-repositories.json",
+                        format!(
+                            "$.repositories[{}].concerns.{name}.implementations",
+                            repo.name
+                        ),
+                        "required/applicable concern must name every implementing workflow",
+                    ));
+                    continue;
+                }
+                for implementation in &concern.implementations {
+                    let workflow = &implementation.workflow;
+                    let path = root.join(".github/workflows").join(workflow);
+                    if !path.is_file() {
+                        findings.push(Finding::error(
+                            "missing-required",
+                            &format!(".github/workflows/{workflow}"),
+                            "$",
+                            format!(
+                                "{name} is classified {:?} but its workflow is absent",
+                                concern.classification
+                            ),
+                        ));
+                        continue;
+                    }
+                    let text = fs::read_to_string(&path)
+                        .with_context(|| format!("read concern workflow {}", path.display()))?;
+                    let yaml: Value = serde_yaml::from_str(&text)
+                        .with_context(|| format!("parse concern workflow {}", path.display()))?;
+                    let jobs = object_get(&yaml, "jobs").and_then(Value::as_mapping);
+                    for job_id in &implementation.job_ids {
+                        if jobs.is_none_or(|jobs| mapping_get(jobs, job_id).is_none()) {
+                            findings.push(Finding::error(
+                                "canonical-drift",
+                                &format!(".github/workflows/{workflow}"),
+                                format!("$.jobs.{job_id}"),
+                                format!("{name} must use canonical job id {job_id}"),
+                            ));
+                        }
+                    }
+                    for marker in &implementation.canonical_markers {
+                        if !text.contains(marker) {
+                            findings.push(Finding::error(
+                                "canonical-drift",
+                                &format!(".github/workflows/{workflow}"),
+                                "$",
+                                format!("{name} is missing canonical marker {marker:?}"),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(findings)
+}
+
+fn concern_implementations<'a>(
+    repo: &'a EstateRepository,
+    defaults: &'a BTreeMap<String, ConcernContract>,
+    name: &str,
+) -> Option<&'a ConcernContract> {
+    repo.concerns.get(name).or_else(|| defaults.get(name))
+}
+
 fn audit_repo(root: &Path, offline: bool) -> Result<Vec<Finding>> {
+    audit_repo_profile(root, offline, None, true)
+}
+
+fn audit_repo_profile(
+    root: &Path,
+    offline: bool,
+    workload_files: Option<&BTreeSet<&str>>,
+    legacy_uniform_warnings: bool,
+) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
     if !root.join(".github/AGENTS.md").is_file() {
         findings.push(Finding::error(
@@ -174,7 +406,23 @@ fn audit_repo(root: &Path, offline: bool) -> Result<Vec<Finding>> {
         let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         let yaml: Value =
             serde_yaml::from_str(&text).with_context(|| format!("parse {}", path.display()))?;
-        audit_workflow(&relative, &text, &yaml, offline, &mut latest, &mut findings);
+        let workload = workload_files.map(|files| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| files.contains(name))
+        });
+        audit_workflow(
+            &relative,
+            &text,
+            &yaml,
+            offline,
+            WorkflowAuditProfile {
+                workload_override: workload,
+                legacy_uniform_warnings,
+            },
+            &mut latest,
+            &mut findings,
+        );
     }
     findings.sort_by(|left, right| {
         (&left.file, &left.path, left.rule).cmp(&(&right.file, &right.path, right.rule))
@@ -187,10 +435,13 @@ fn audit_workflow(
     text: &str,
     yaml: &Value,
     offline: bool,
+    profile: WorkflowAuditProfile,
     latest: &mut BTreeMap<String, Option<String>>,
     findings: &mut Vec<Finding>,
 ) {
-    let workload = has_trigger(yaml, "push") || has_trigger(yaml, "pull_request");
+    let workload = profile
+        .workload_override
+        .unwrap_or_else(|| has_trigger(yaml, "push") || has_trigger(yaml, "pull_request"));
     let file_name = Path::new(file)
         .file_name()
         .and_then(|name| name.to_str())
@@ -202,7 +453,7 @@ fn audit_workflow(
         "preview.yml",
         "renovate.yml",
     ];
-    if !canonical_files.contains(&file_name) {
+    if profile.legacy_uniform_warnings && !canonical_files.contains(&file_name) {
         findings.push(Finding::warn(
             "uniform-workflow-name",
             file,
@@ -210,7 +461,7 @@ fn audit_workflow(
             "rename this executable concern to a canonical workflow filename",
         ));
     }
-    if workload && file_name != "ci.yml" {
+    if profile.legacy_uniform_warnings && workload && file_name != "ci.yml" {
         findings.push(Finding::warn(
             "uniform-workflow-name",
             file,
@@ -261,7 +512,8 @@ fn audit_workflow(
             "release",
             "ci-required",
         ];
-        if workload && !canonical_jobs.contains(&job_id.as_str()) {
+        if profile.legacy_uniform_warnings && workload && !canonical_jobs.contains(&job_id.as_str())
+        {
             findings.push(Finding::warn(
                 "uniform-job-id",
                 file,
@@ -688,6 +940,10 @@ mod tests {
             yaml,
             &value,
             true,
+            WorkflowAuditProfile {
+                workload_override: None,
+                legacy_uniform_warnings: true,
+            },
             &mut BTreeMap::new(),
             &mut findings,
         );
@@ -819,9 +1075,50 @@ jobs:
     }
 
     #[test]
-    fn estate_json_parses_path_list() {
-        let paths: Vec<PathBuf> = serde_json::from_str(r#"["/one","/two"]"#).unwrap();
-        assert_eq!(paths.len(), 2);
+    fn estate_manifest_parses_classified_repository() {
+        let manifest: EstateManifest = serde_json::from_str(
+            r#"{"version":1,"defaults":{},"repositories":[{"name":"one","path":"/one","concerns":{}}]}"#,
+        )
+        .unwrap();
+        assert_eq!(manifest.repositories.len(), 1);
+        assert_eq!(manifest.repositories[0].name, "one");
+    }
+
+    #[test]
+    fn omitted_concern_is_not_treated_as_non_applicable() {
+        let root = TestRepo::new();
+        let repo = EstateRepository {
+            name: "example/repo".to_string(),
+            path: root.path.clone(),
+            concerns: BTreeMap::new(),
+        };
+        let findings = audit_concern_contract(&repo, &BTreeMap::new(), &root.path).unwrap();
+        assert!(has_rule(&findings, "missing-required"));
+    }
+
+    #[test]
+    fn repository_parameter_does_not_create_canonical_drift() {
+        let root = TestRepo::new();
+        fs::write(root.path.join(".github/workflows/ci.yml"), BASE).unwrap();
+        let repo = EstateRepository {
+            name: "example/repo".to_string(),
+            path: root.path.clone(),
+            concerns: BTreeMap::from([(
+                "rust-ci".to_string(),
+                ConcernContract {
+                    classification: ConcernClassification::Required,
+                    evidence: "Rust repository".to_string(),
+                    implementations: vec![ConcernImplementation {
+                        workflow: "ci.yml".to_string(),
+                        job_ids: vec!["rust".to_string()],
+                        canonical_markers: vec!["cargo test".to_string()],
+                    }],
+                },
+            )]),
+        };
+        let defaults = required_concern_defaults();
+        let findings = audit_concern_contract(&repo, &defaults, &root.path).unwrap();
+        assert!(!has_rule(&findings, "canonical-drift"));
     }
 
     #[test]
@@ -840,4 +1137,58 @@ jobs:
         }
         fs::remove_dir_all(base).unwrap();
     }
+
+    struct TestRepo {
+        path: PathBuf,
+    }
+
+    impl TestRepo {
+        fn new() -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("velnor-concern-test-{nonce}"));
+            fs::create_dir_all(path.join(".github/workflows")).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn required_concern_defaults() -> BTreeMap<String, ConcernContract> {
+        REQUIRED_CONCERNS_FOR_TESTS
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_string(),
+                    ConcernContract {
+                        classification: ConcernClassification::NonApplicable,
+                        evidence: "test classification".to_string(),
+                        implementations: Vec::new(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    const REQUIRED_CONCERNS_FOR_TESTS: [&str; 13] = [
+        "lane-selection",
+        "checkout",
+        "tool-setup",
+        "rust-ci",
+        "integration-services",
+        "cargo-cache",
+        "docker-build",
+        "artifacts",
+        "docs-pages",
+        "preview",
+        "release",
+        "renovate",
+        "workflow-safety",
+    ];
 }
