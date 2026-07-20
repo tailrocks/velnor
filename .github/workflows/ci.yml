@@ -165,13 +165,19 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Cache rustup toolchain
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      - name: Install mold linker
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+
+      - id: sccache
+        uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
         with:
-          path: |
-            ~/.rustup/toolchains
-            ~/.rustup/update-hashes
-          key: rustup-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}
+          version: v0.16.0
+          disable_annotations: "false"
+
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+        with:
+          install_args: "rust cargo-binstall cargo:cargo-nextest"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cache Cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -181,32 +187,9 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/src
             ~/.cargo/git/db
-          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            cargo-registry-${{ runner.os }}-
-
-      - name: Install mold linker
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-
-      - id: sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
-        continue-on-error: true
-        with:
-          version: v0.16.0
-          disable_annotations: "false"
-
-      - name: Cache mise cargo tools
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ~/.local/share/mise/installs/cargo-cargo-nextest
-          key: mise-cargo-nextest-${{ runner.os }}-${{ hashFiles('mise.toml') }}
-          restore-keys: |
-            mise-cargo-nextest-${{ runner.os }}-
-
-      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
-        with:
-          install_args: "rust cargo-binstall cargo:cargo-nextest"
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+            cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-
 
       - run: cargo nextest run --workspace --locked --color=always
 
