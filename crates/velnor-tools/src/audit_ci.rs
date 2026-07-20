@@ -247,7 +247,7 @@ fn audit_concern_contract(
     defaults: &BTreeMap<String, ConcernContract>,
     root: &Path,
 ) -> Result<Vec<Finding>> {
-    const REQUIRED_CONCERNS: [&str; 13] = [
+    const REQUIRED_CONCERNS: [&str; 14] = [
         "lane-selection",
         "checkout",
         "tool-setup",
@@ -260,6 +260,7 @@ fn audit_concern_contract(
         "preview",
         "release",
         "renovate",
+        "required-aggregator",
         "workflow-safety",
     ];
     let mut findings = Vec::new();
@@ -1144,6 +1145,23 @@ jobs:
     }
 
     #[test]
+    fn required_aggregator_cannot_be_omitted() {
+        let root = TestRepo::new();
+        let repo = EstateRepository {
+            name: "example/repo".to_string(),
+            path: root.path.clone(),
+            concerns: BTreeMap::new(),
+        };
+        let mut defaults = required_concern_defaults();
+        defaults.remove("required-aggregator");
+        let findings = audit_concern_contract(&repo, &defaults, &root.path).unwrap();
+        assert!(findings.iter().any(|finding| {
+            finding.rule == "missing-required"
+                && finding.path.ends_with("concerns.required-aggregator")
+        }));
+    }
+
+    #[test]
     fn repository_parameter_does_not_create_canonical_drift() {
         let root = TestRepo::new();
         fs::write(root.path.join(".github/workflows/ci.yml"), BASE).unwrap();
@@ -1254,7 +1272,7 @@ jobs:
             .collect()
     }
 
-    const REQUIRED_CONCERNS_FOR_TESTS: [&str; 13] = [
+    const REQUIRED_CONCERNS_FOR_TESTS: [&str; 14] = [
         "lane-selection",
         "checkout",
         "tool-setup",
@@ -1267,6 +1285,7 @@ jobs:
         "preview",
         "release",
         "renovate",
+        "required-aggregator",
         "workflow-safety",
     ];
 }

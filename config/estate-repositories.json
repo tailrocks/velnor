@@ -13,6 +13,7 @@
     "preview": {"classification":"non-applicable","evidence":"No preview product surface is present unless overridden by repository workflow evidence.","implementations":[]},
     "release": {"classification":"non-applicable","evidence":"No repository-local publish/tag workflow is present unless overridden by repository workflow evidence.","implementations":[]},
     "renovate": {"classification":"non-applicable","evidence":"Renovate is externally hosted unless a repository-local execution workflow is recorded.","implementations":[]},
+    "required-aggregator": {"classification":"required","evidence":"Every estate CI surface exposes one stable lane-suffixed aggregate result for branch protection; requiring selected leaf jobs can silently omit later jobs.","implementations":[{"workflow":"ci.yml","job_ids":["ci-required"],"canonical_markers":["toJSON(needs)"]}]},
     "workflow-safety": {"classification":"required","evidence":"Every executable estate workflow requires bounded concurrency and job timeout safety; ci.yml is the universal baseline.","implementations":[{"workflow":"ci.yml","canonical_markers":["concurrency:","timeout-minutes:"]}]}
   },
   "repositories": [

@@ -1422,3 +1422,22 @@ same-version local-artifact sentence is superseded and must not be used.
   an operator decision if no valid Ubuntu cross-build exists; this surface was
   preserved rather than silently dropping Apple artifacts or claiming Ubuntu
   equivalence.
+
+### 2026-07-21 stable required-check aggregation
+
+- Phase-4 review found the earlier required-check handoff structurally unsafe:
+  most repositories exposed only leaf jobs, so a later workflow job could be
+  added without becoming required. `audit-ci` now classifies a stable aggregate
+  result as a required concern instead of relying on prose.
+- Canonical `CI required (<lane>)` aggregators were committed on the current
+  program heads: Java `4ef12b2`, blockchain-nodes `367817f`, Holla `bb1a338`,
+  Ruxel `d8380df`, Schemalane `8058791`, pg-bigdecimal `dcdb6fa`,
+  tracing-request-level `106641a`, TermRock `f20f271`, and Parallax telemetry
+  playground `8fba93b`. Actionlint is green across all nine workflows.
+- These workflow commits are local only because the unchanged GitHub token
+  still lacks `workflow` scope and SSH signing remains unavailable. No repeated
+  push was attempted after the identical credential failure was proven.
+- `docs/required-check-handoff.md` records exact contexts and prerequisites.
+  Read-only API inspection found every `main` unprotected except TermRock,
+  whose protection has no required checks. No branch policy was changed; §12.1
+  remains an operator decision.

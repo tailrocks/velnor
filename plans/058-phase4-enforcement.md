@@ -157,7 +157,7 @@ The estate sweep IS the test. Campaign report completeness per step 2.
 - [ ] `audit-ci` tests and estate output prove missing-required and canonical-drift enforcement
 - [ ] Performance report committed with three-round data
 - [ ] Docs/AGENTS reconciled; §12 decisions 1/7/8 recorded
-- [ ] Required-check checklist delivered to operator
+- [x] Required-check checklist delivered to operator
 - [ ] plans/README.md final statuses updated for the whole 033–058 set
 
 ## STOP conditions

@@ -85,18 +85,18 @@ V-A). Do not open estate PRs before 041's operator verification.
 
 | Plan | Repo | Phase | Effort | Extra deps | Status |
 |------|------|-------|--------|-----------|--------|
-| 047 | ChainArgos/java-monorepo | 1 | M | — | BLOCKED — all gates green; branch policy requires human approval/merge |
-| 048 | ChainArgos/blockchain-nodes | 1 | S/M | — | IN PROGRESS — source defects fixed on PR #651 (`6a46c93`); local amd64 image proof green for all three former failures; fresh V-B/V-C evidence remains |
+| 047 | ChainArgos/java-monorepo | 1 | M | — | BLOCKED — all prior gates green; canonical aggregate commit `4ef12b2` is local pending workflow-capable credentials, then PR #1753 needs fresh proof and human approval/merge |
+| 048 | ChainArgos/blockchain-nodes | 1 | S/M | — | IN PROGRESS — source defects fixed on PR #651 (`6a46c93`); local amd64 image proof green for all three former failures; aggregate commit `367817f` awaits workflow-capable credentials and fresh V-B/V-C evidence |
 | 049 | jackin-project/jackin (stacks on PR #810) | 1 | L | 047 (pattern) | BLOCKED — Docs/CI lanes are green; Preview needs explicit approval of the exact native attest v4.1.1 surface in `docs/capability-proposal-attest-build-provenance-v4.md` (run `29677351289`) |
 | 050 | tailrocks/velnor (dogfood) | 2 | M | 039 (fleet label) | DONE and delivered — three lanes green, 33 s zero-install rerun passes Class B budget, GitHub recovery drill green, and whole-program PR #100 merged as `c493a2f` |
-| 051 | tailrocks/holla | 2 | S | — | DONE: PR #36 merged; Velnor/GitHub/both green; 57 s no-change budget passed |
-| 052 | tailrocks/ruxel | 2 | S | — | DONE — PR #2 merged; final three-lane and 52 s zero-install rerun green |
+| 051 | tailrocks/holla | 2 | S | — | BLOCKED — original delivery passed; Phase-4 PR #37 plus local aggregate `bb1a338` require workflow-capable credentials, org runner-group access, fresh proof, and merge |
+| 052 | tailrocks/ruxel | 2 | S | — | BLOCKED — original delivery passed; Phase-4 PR #3 plus local aggregate `d8380df` require workflow-capable credentials, org runner-group access, fresh proof, and merge |
 | 053 | tailrocks/parallax | 2 | L | 051 (pattern), 042 (attest) | BLOCKED — direct-main convergence is committed locally as `8190a6d`: application race fix and local code gates pass, estate audit has zero errors, and goldens remain unchanged. Push is rejected because OAuth lacks `workflow` and the SSH agent refuses signing. Ubuntu visual proof and the Darwin-release decision remain after credential repair. |
-| 054 | tailrocks/termrock | 3 | M | 042 (Pages) | BLOCKED — source/workflow fixes are on trunk (`1d38a7a`..`b799612`); fresh `both` run `29780236893` proved GitHub jobs start while all Velnor jobs remain unassigned past two minutes; org runner-group access remains HTTP 403 |
-| 055 | schemalane + pg-bigdecimal + tracing-request-level (Class D trio) | 3 | M | 040 (schemalane services) | DONE original delivery; Phase-4 convergence follow-ups are open as PRs #3/#2/#2 under plan 058, with GitHub proofs green and current `both` runs awaiting runner-group access |
-| 056 | tailrocks/parallax-telemetry-playground | 3 | S | — | DONE |
+| 054 | tailrocks/termrock | 3 | M | 042 (Pages) | BLOCKED — source/workflow fixes are on trunk (`1d38a7a`..`b799612`); aggregate `f20f271` is local pending workflow-capable credentials; Velnor access remains HTTP 403 |
+| 055 | schemalane + pg-bigdecimal + tracing-request-level (Class D trio) | 3 | M | 040 (schemalane services) | BLOCKED — Phase-4 PRs #3/#2/#2 plus local aggregates `8058791`/`dcdb6fa`/`106641a` await workflow-capable credentials, org runner-group access, fresh proof, and merge |
+| 056 | tailrocks/parallax-telemetry-playground | 3 | S | — | BLOCKED — original delivery passed; canonical aggregate `8fba93b` is committed locally but workflow-capable push credentials are unavailable |
 | 057 | tailrocks/tablerock | 3 | S | — | BLOCKED — trunk-only delivery is clear and coverage must be preserved, but mandatory current-code gate fails strict clippy with 191 errors across user-modified source; workflow rewrite would land red CI |
-| 058 | Phase 4: concern-based estate convergence, enforcement, docs reconcile, required checks | 4 | L | 046, 047–057 | IN PROGRESS — inventory every concern; add missing required concerns; converge common implementations; extend audit-ci for missing-required/canonical-drift; then finish audit and reconciliation |
+| 058 | Phase 4: concern-based estate convergence, enforcement, docs reconcile, required checks | 4 | L | 046, 047–057 | IN PROGRESS — concern inventory and enforcement now include stable required aggregators; exact policy handoff exists. Delivery/proof, operator decisions, and final zero-error audits remain |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) |
 REJECTED (one-line rationale).

@@ -51,3 +51,6 @@ Start here:
 - [Storage and disk pressure](storage-and-disk-pressure-2026-07-18.md): live
   Sentry evidence, canonical paths, leases, reclaim-before-register, and the
   compiler-cache comparison method.
+- [Required-check handoff](required-check-handoff.md): exact post-delivery
+  status contexts, current protection inventory, and the operator procedure
+  for decision §12.1.
