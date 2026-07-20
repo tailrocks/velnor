@@ -599,6 +599,14 @@ fn audit_steps(
                 ));
             }
         }
+        if run.contains("sccache --show-stats") || run.contains("kache --show-stats") {
+            findings.push(Finding::error(
+                "cache-reporting",
+                file,
+                format!("{path}.run"),
+                "remove ad-hoc cache CLI reporting; the setup action/native adapter post step owns the report",
+            ));
+        }
         if run.contains("self-hosted")
             || run.contains("velnor-target-mvp")
             || run.contains("ubuntu-26.04")
@@ -1049,6 +1057,15 @@ jobs:
         let findings = audit(&yaml);
         assert!(has_rule(&findings, "lane-conditional"));
         assert!(has_rule(&findings, "deprecated"));
+    }
+
+    #[test]
+    fn rejects_ad_hoc_compiler_cache_reporting() {
+        let yaml = BASE.replace(
+            "      - run: cargo test",
+            "      - run: cargo test\n      - run: sccache --show-stats",
+        );
+        assert!(has_rule(&audit(&yaml), "cache-reporting"));
     }
 
     #[test]
