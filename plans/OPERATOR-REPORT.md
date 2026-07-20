@@ -1347,4 +1347,5 @@ same-version local-artifact sentence is superseded and must not be used.
   fmt, strict workspace clippy, advisories, and 649/649 nextest tests.
 - Holla's first GitHub-only proof was green at run `29779357054`. Its complete
   integration stack was then converged at `15307d5`; replacement proof run
-  `29779741417` is the only monitored run for that head.
+  `29779741417` is green for Test, Format, and Clippy and supersedes the first
+  run.
