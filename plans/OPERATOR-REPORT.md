@@ -1270,3 +1270,32 @@ same-version local-artifact sentence is superseded and must not be used.
   tag `v0.1.98` for x86_64 and aarch64 and completed the single writer
   publish job successfully. This proves releases remain operable while the
   Velnor fleet is unavailable.
+
+## 2026-07-21 — Phase-4 concern inventory and repaired delivery blockers
+
+- `velnor-tools audit-ci` now consumes a versioned, evidence-backed inventory
+  of all 13 repositories and all 13 concern classes. It reports explicit
+  `missing-required`, `canonical-drift`, `non-applicable`, and
+  `repo-specific` findings. The previous path-only estate file named a
+  nonexistent Jackin clone, and trigger inference incorrectly treated every
+  Renovate push workflow as a workload lane; both enabling structures are
+  removed in commits `41f0743` and `5c2cbee`.
+- The first inventory-authoritative sweep records 260 errors: Holla and the
+  telemetry playground are clean; the three Class-D release-id findings are
+  corrected by schemalane PR #3, pg-bigdecimal PR #2, and
+  tracing-request-level PR #2. Their automatic Velnor checks were cancelled
+  after the repository runner API proved `total_count=0`; no stale queued run
+  was left waiting.
+- Blockchain-nodes PR #651 commit `6a46c93` corrects all three prior package
+  blockers: Nitro v3.11.2 uses published release commit `3599aca`; external
+  shellless-image stages no longer run meaningless `RUN ls` probes and the
+  Rust harness rejects that probe class; op-node invokes upstream
+  `just build-superchain-go`. Local `linux/amd64` BuildKit loads succeeded for
+  arbitrum, fraxtal-op-node, and op-node. The PR remains unmerged under its
+  repository's explicit human-confirmation rule, and still needs fresh V-B/V-C
+  evidence.
+- Termrock's pre-existing formatting and clippy defects were corrected on
+  trunk (`1d38a7a`), and the program workflows were delivered directly to
+  trunk as required by repository law (`241746e`..`c3f9324`). The full local
+  gate passed. Automatic Docs/Rust runs `29775367029` and `29775367114` were
+  cancelled when the repository runner API proved zero registered runners.
