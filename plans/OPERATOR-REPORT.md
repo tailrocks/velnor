@@ -1318,3 +1318,14 @@ same-version local-artifact sentence is superseded and must not be used.
   (including 97 `collapsible_if` and 80 `field_reassign_with_default`
   instances). Plan 057's STOP condition therefore applies: landing the new CI
   now would make trunk red, and overlapping the in-progress source is unsafe.
+- Phase-4 follow-up GitHub-lane proofs are green for Ruxel
+  (`29778608488`), pg-bigdecimal (`29778618175`), and
+  tracing-request-level (`29778623286`), and Schemalane (`29778613234`);
+  Schemalane includes green PostgreSQL integration, security, Rust, docs, and
+  package jobs. Velnor-lane proof is
+  still unavailable because all four repository runner APIs report zero
+  registrations; their unschedulable automatic Velnor runs were cancelled
+  before dispatch.
+- The Velnor branch full local gate after concern enforcement is green:
+  actionlint, fmt, strict workspace clippy, advisories, and all 648 nextest
+  tests pass. PR #100's current remote checks are also green.

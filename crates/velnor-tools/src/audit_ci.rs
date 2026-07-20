@@ -342,14 +342,44 @@ fn audit_concern_contract(
                             ));
                         }
                     }
-                    for marker in &implementation.canonical_markers {
-                        if !text.contains(marker) {
-                            findings.push(Finding::error(
-                                "canonical-drift",
-                                &format!(".github/workflows/{workflow}"),
-                                "$",
-                                format!("{name} is missing canonical marker {marker:?}"),
-                            ));
+                    let marker_sources = if implementation.job_ids.is_empty() {
+                        vec![("$".to_string(), text.clone())]
+                    } else {
+                        let workflow_env =
+                            object_get(&yaml, "env").map(compact).unwrap_or_default();
+                        implementation
+                            .job_ids
+                            .iter()
+                            .filter_map(|job_id| {
+                                jobs.and_then(|jobs| mapping_get(jobs, job_id)).map(|job| {
+                                    (
+                                        format!("$.jobs.{job_id}"),
+                                        format!("{workflow_env}\n{}", compact(job)),
+                                    )
+                                })
+                            })
+                            .collect()
+                    };
+                    for (job_path, source) in marker_sources {
+                        let mut marker_offset = 0;
+                        for marker in &implementation.canonical_markers {
+                            if let Some(relative) = source[marker_offset..].find(marker) {
+                                marker_offset += relative + marker.len();
+                            } else if source.contains(marker) {
+                                findings.push(Finding::error(
+                                    "canonical-drift",
+                                    &format!(".github/workflows/{workflow}"),
+                                    &job_path,
+                                    format!("{name} canonical marker {marker:?} is out of order"),
+                                ));
+                            } else {
+                                findings.push(Finding::error(
+                                    "canonical-drift",
+                                    &format!(".github/workflows/{workflow}"),
+                                    &job_path,
+                                    format!("{name} is missing canonical marker {marker:?}"),
+                                ));
+                            }
                         }
                     }
                 }
@@ -1136,6 +1166,37 @@ jobs:
         let defaults = required_concern_defaults();
         let findings = audit_concern_contract(&repo, &defaults, &root.path).unwrap();
         assert!(!has_rule(&findings, "canonical-drift"));
+    }
+
+    #[test]
+    fn canonical_markers_must_keep_declared_order() {
+        let root = TestRepo::new();
+        fs::write(root.path.join(".github/workflows/ci.yml"), BASE).unwrap();
+        let mut defaults = required_concern_defaults();
+        defaults.insert(
+            "rust-ci".to_string(),
+            ConcernContract {
+                classification: ConcernClassification::Required,
+                evidence: "Rust repository".to_string(),
+                implementations: vec![ConcernImplementation {
+                    workflow: "ci.yml".to_string(),
+                    job_ids: vec!["rust".to_string()],
+                    canonical_markers: vec![
+                        "cargo test".to_string(),
+                        "actions/checkout@".to_string(),
+                    ],
+                }],
+            },
+        );
+        let repo = EstateRepository {
+            name: "example/repo".to_string(),
+            path: root.path.clone(),
+            concerns: BTreeMap::new(),
+        };
+        let findings = audit_concern_contract(&repo, &defaults, &root.path).unwrap();
+        assert!(findings.iter().any(|finding| {
+            finding.rule == "canonical-drift" && finding.message.contains("out of order")
+        }));
     }
 
     #[test]
