@@ -87,7 +87,7 @@ V-A). Do not open estate PRs before 041's operator verification.
 |------|------|-------|--------|-----------|--------|
 | 047 | ChainArgos/java-monorepo | 1 | M | — | BLOCKED — all gates green; branch policy requires human approval/merge |
 | 048 | ChainArgos/blockchain-nodes | 1 | S/M | — | IN PROGRESS — source defects fixed on PR #651 (`6a46c93`); local amd64 image proof green for all three former failures; fresh V-B/V-C evidence remains |
-| 049 | jackin-project/jackin (stacks on PR #810) | 1 | L | 047 (pattern) | BLOCKED — Docs and CI three-lane gates are green, but Preview Velnor requires explicitly unapproved attest-build-provenance v4 capability (run `29677351289`) |
+| 049 | jackin-project/jackin (stacks on PR #810) | 1 | L | 047 (pattern) | BLOCKED — Docs/CI lanes are green; Preview needs explicit approval of the exact native attest v4.1.1 surface in `docs/capability-proposal-attest-build-provenance-v4.md` (run `29677351289`) |
 | 050 | tailrocks/velnor (dogfood) | 2 | M | 039 (fleet label) | DONE and delivered — three lanes green, 33 s zero-install rerun passes Class B budget, GitHub recovery drill green, and whole-program PR #100 merged as `c493a2f` |
 | 051 | tailrocks/holla | 2 | S | — | DONE: PR #36 merged; Velnor/GitHub/both green; 57 s no-change budget passed |
 | 052 | tailrocks/ruxel | 2 | S | — | DONE — PR #2 merged; final three-lane and 52 s zero-install rerun green |

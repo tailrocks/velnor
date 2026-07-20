@@ -17,6 +17,10 @@
 - **Category**: dx / perf
 - **Planned at**: velnor repo commit `48b04ad`, target repo commit `ad00e3cd6`, 2026-07-18
 
+The mandatory strict-capability approval request is fully specified in
+[`../docs/capability-proposal-attest-build-provenance-v4.md`](../docs/capability-proposal-attest-build-provenance-v4.md).
+Do not implement it without an explicit yes to that exact surface.
+
 ## Why this matters
 
 jackin is the most sophisticated estate pipeline and today defaults to the

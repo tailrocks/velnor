@@ -1387,3 +1387,14 @@ same-version local-artifact sentence is superseded and must not be used.
   rollback, and collaborator/reclone procedure. It explicitly records that
   release tag commit identities and old provenance change. No history was
   rewritten and no approval boundary was crossed.
+
+### 2026-07-21 Jackin attestation approval proposal
+
+- `docs/capability-proposal-attest-build-provenance-v4.md` now defines the
+  complete approval boundary: exact v4.1.1 commit, Jackin's sole
+  `subject-path` value, rejected adjacent inputs, outputs, failure semantics,
+  OIDC/Sigstore/GitHub API trust and network effects, job-local storage,
+  upstream action and actions/runner evidence, and V-A/Jackin proof gates.
+- No manifest, runtime, fixture, or Jackin capability change was made. The
+  proposal's explicit yes/no decision remains required before native Rust
+  implementation.
