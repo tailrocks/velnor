@@ -1349,3 +1349,23 @@ same-version local-artifact sentence is superseded and must not be used.
   integration stack was then converged at `15307d5`; replacement proof run
   `29779741417` is green for Test, Format, and Clippy and supersedes the first
   run.
+
+### 2026-07-21 org runner-group access diagnosis
+
+- Velnor PR #100 run `29780129302` proves the tailrocks org fleet is live and
+  authorized for the Velnor repository; all six Velnor jobs completed green.
+  Therefore repository-level runner count zero is not evidence of fleet
+  absence.
+- Fresh `both` dispatches for Termrock (`29780236893`), Holla
+  (`29780316255`), Ruxel (`29780315623`), Schemalane (`29780315559`),
+  pg-bigdecimal (`29780315549`), and tracing-request-level (`29780315485`)
+  showed GitHub jobs starting while every Velnor job remained unassigned for
+  more than two minutes. The Termrock job API returned the expected
+  `self-hosted`/`velnor-target-mvp` labels with empty runner and runner-group
+  names. All six runs were cancelled immediately after diagnosis.
+- Root cause is the org runner group's repository access list, not workflow
+  syntax or a missing fleet. The authenticated identity still receives HTTP
+  403 for org runner/group APIs and cannot add the repositories. Minimum
+  operator action: grant org runner administration, then add these six
+  repositories (and every remaining estate repository) to the trusted Velnor
+  group before redispatch.
