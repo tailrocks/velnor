@@ -1,13 +1,18 @@
 mod action;
 mod cache;
+mod capacity;
 mod checkout;
 mod cli;
 mod command_files;
+mod compiler_cache;
 mod config;
 mod container;
 mod executor;
+mod fs_copy;
+mod git_mirror;
 mod github_adapter;
 mod job_message;
+mod manifest;
 mod plan;
 mod platform;
 mod preflight;
@@ -17,6 +22,7 @@ mod runtime_env;
 mod script_step;
 mod sd_notify;
 mod slot_log;
+mod storage;
 mod telemetry;
 mod workflow_command;
 
@@ -44,12 +50,14 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Cache(args) => cache::run(args),
+        Command::Capabilities(args) => manifest::run(args),
         Command::Configure(args) => runner::configure(args).await,
         Command::Daemon(args) => runner::daemon(args).await,
         Command::Preflight(args) => preflight::preflight(args),
         Command::Run(args) => runner::run(args).await,
         Command::Remove(args) => runner::remove(args).await,
         Command::Status(args) => runner::status(args).await,
+        Command::Storage(args) => storage::run(args),
         Command::Doctor(args) => runner::doctor(args).await,
     }
 }

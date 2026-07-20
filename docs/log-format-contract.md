@@ -16,6 +16,7 @@ lines.
 | **Uploaded job log blob** (Results Service `upload_job_log`, powers GitHub's native per-job log download / `gh run view --log`) | `runner.rs` `build_combined_job_log` + `iso8601_with_blob_precision` | **`YYYY-MM-DDTHH:MM:SS.fffffffZ <content>`** — same raw-download format as step blobs | GitHub's native log archive expects the official runner job-log blob. The `job-log.txt` artifact is only a fallback, not the primary path. |
 | **V1 timeline feed** (`append_timeline_record_feed`) | `runner.rs` timeline publishers | RAW content (masked) | Same rendering rule as the live feed. |
 | **Step metadata times** (`started_at`/`completed_at` on Twirp steps, timeline records) | `executor.rs` `unix_now_rfc3339`, `runner.rs` `unix_now_iso8601` call sites assigning fields | RFC3339 field values, never prefixed onto lines | These are struct fields, not line content. |
+| **Job summaries and forensic timing records** (`$GITHUB_STEP_SUMMARY`, slot `lifecycle.log`) | Native adapters in `executor.rs`; lifecycle instrumentation in `runner.rs` | Structured Markdown or one-line JSON, respectively; never copied into step log lines | These are additive, out-of-band observability channels and do not alter any live or uploaded log-line shape. |
 | **Local console mirror** (`append_job_console`, `docker logs`) | `runner.rs` | Velnor's own format (free) | Not rendered by GitHub. |
 
 ## Regression history (why this document exists)

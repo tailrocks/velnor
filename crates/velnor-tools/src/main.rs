@@ -1,3 +1,4 @@
+mod audit_ci;
 mod lane_compare;
 
 use anyhow::{bail, Context, Result};
@@ -62,6 +63,10 @@ enum CommandKind {
     TargetSmoke(TargetSmokeArgs),
     /// Check fixture lane pattern: matrix.config has both lanes, runs-on uses matrix variable, steps are lane-agnostic.
     CheckFixtureLanes(CheckFixtureLanesArgs),
+    /// Audit a repository or estate against the Velnor CI contract.
+    AuditCi(audit_ci::AuditCiArgs),
+    /// Compare GitHub and Velnor lanes (promoted alias of lane-compare).
+    Compare(lane_compare::LaneCompareArgs),
     /// Diff the GitHub-hosted and Velnor lanes of one run via the GitHub API (equal-or-better gate).
     LaneCompare(lane_compare::LaneCompareArgs),
 }
@@ -502,6 +507,8 @@ async fn main() -> Result<()> {
         CommandKind::FixtureSmoke(args) => fixture_smoke(&root, args),
         CommandKind::TargetSmoke(args) => target_smoke(&root, args),
         CommandKind::CheckFixtureLanes(args) => check_fixture_lanes(args).await,
+        CommandKind::AuditCi(args) => audit_ci::audit_ci(args),
+        CommandKind::Compare(args) => lane_compare::lane_compare(&root, args),
         CommandKind::LaneCompare(args) => lane_compare::lane_compare(&root, args),
     }
 }
@@ -794,24 +801,25 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
             ".github/workflows/compat.yml",
             vec![
                 ("matrix config lanes", "matrix.config"),
-                ("github lane entry", r#""lane":"github""#),
-                ("velnor lane entry", r#""lane":"velnor""#),
-                ("matrix runner", "fromJSON(matrix.config.runner)"),
+                ("inline lane ternary", "inputs.lanes == 'both'"),
+                ("github lane entry", r#""lane":"GitHub""#),
+                ("velnor lane entry", r#""lane":"Velnor""#),
+                ("pinned GitHub runner", "ubuntu-26.04"),
+                ("matrix runner", "matrix.config.runner"),
                 ("bash run defaults", "shell: bash"),
                 ("path filtering", "dorny/paths-filter@v4"),
                 ("mise tool installer", "jdx/mise-action@v4"),
-                ("setup-just", "extractions/setup-just@v4"),
                 ("mold linker", "rui314/setup-mold@v1"),
-                ("sccache action", "mozilla-actions/sccache-action@v0.0.10"),
-                ("sccache GHA enabled env", "SCCACHE_GHA_ENABLED: \"true\""),
-                ("sccache stats in summary", "sccache --show-stats"),
-                ("rust cache", "Swatinem/rust-cache@v2"),
-                (
-                    "rust cache shared-key with lane",
-                    "shared-key: fixture-${{ matrix.config.lane }}",
-                ),
-                ("cargo bin cache", "actions/cache@v5"),
-                ("cargo bin cache restore-keys", "restore-keys:"),
+                ("sccache action", "mozilla-actions/sccache-action@1583d6b"),
+                ("sccache local env", "SCCACHE_GHA_ENABLED: \"false\""),
+                ("cargo cache", "actions/cache@55cc834"),
+                ("cargo cache restore-keys", "restore-keys:"),
+                ("cache off job", "cache-off:"),
+                ("cache sccache job", "cache-sccache:"),
+                ("cache kache job", "cache-kache:"),
+                ("Postgres services job", "services-postgres:"),
+                ("services declaration", "services:"),
+                ("Postgres health check", "pg_isready"),
                 ("artifact upload", "actions/upload-artifact@v7"),
                 ("artifact download", "actions/download-artifact@v8"),
                 ("command env file", "GITHUB_ENV"),
@@ -837,9 +845,9 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
             ".github/workflows/docker.yml",
             vec![
                 ("matrix config lanes", "matrix.config"),
-                ("github lane entry", r#""lane":"github""#),
-                ("velnor lane entry", r#""lane":"velnor""#),
-                ("matrix runner", "fromJSON(matrix.config.runner)"),
+                ("github lane entry", r#""lane":"GitHub""#),
+                ("velnor lane entry", r#""lane":"Velnor""#),
+                ("matrix runner", "matrix.config.runner"),
                 (
                     "GitHub runtime export",
                     "crazy-max/ghaction-github-runtime@v4",
@@ -877,9 +885,9 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
             ".github/workflows/pages.yml",
             vec![
                 ("matrix config lanes", "matrix.config"),
-                ("github lane entry", r#""lane":"github""#),
-                ("velnor lane entry", r#""lane":"velnor""#),
-                ("matrix runner", "fromJSON(matrix.config.runner)"),
+                ("github lane entry", r#""lane":"GitHub""#),
+                ("velnor lane entry", r#""lane":"Velnor""#),
+                ("matrix runner", "matrix.config.runner"),
                 ("pages write permission", "pages: write"),
                 ("OIDC token permission", "id-token: write"),
                 ("upload pages artifact", "actions/upload-pages-artifact@v5"),
@@ -899,11 +907,11 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
             ".github/workflows/renovate.yml",
             vec![
                 ("matrix config lanes", "matrix.config"),
-                ("github lane entry", r#""lane":"github""#),
-                ("velnor lane entry", r#""lane":"velnor""#),
-                ("matrix runner", "fromJSON(matrix.config.runner)"),
-                ("renovate action", "renovatebot/github-action@v46"),
-                ("renovate token env", "RENOVATE_TOKEN:"),
+                ("github lane entry", r#""lane":"GitHub""#),
+                ("velnor lane entry", r#""lane":"Velnor""#),
+                ("matrix runner", "matrix.config.runner"),
+                ("renovate action", "renovatebot/github-action@693b9ef"),
+                ("renovate token env", "GH_RENOVATE_TOKEN:"),
             ],
         ),
         (
@@ -4124,6 +4132,10 @@ fn write_target_evidence(
 fn fixture_parity_workflows() -> Vec<(&'static str, &'static str)> {
     vec![
         (".github/workflows/compat.yml", "compat"),
+        (".github/workflows/compat.yml", "cache-off"),
+        (".github/workflows/compat.yml", "cache-sccache"),
+        (".github/workflows/compat.yml", "cache-kache"),
+        (".github/workflows/compat.yml", "services-postgres"),
         (".github/workflows/docker.yml", "docker"),
         (".github/workflows/pages.yml", "build"),
         (".github/workflows/renovate.yml", "renovate"),
@@ -4218,12 +4230,16 @@ fn check_matrix_parity_job(
         Some(config) => {
             if let Some(entries) = config.as_sequence() {
                 // Inline sequence — check for both lanes directly
-                let has_github = entries
-                    .iter()
-                    .any(|e| e.get("lane").and_then(|l| l.as_str()) == Some("github"));
-                let has_velnor = entries
-                    .iter()
-                    .any(|e| e.get("lane").and_then(|l| l.as_str()) == Some("velnor"));
+                let has_github = entries.iter().any(|e| {
+                    e.get("lane")
+                        .and_then(|l| l.as_str())
+                        .is_some_and(|lane| lane.eq_ignore_ascii_case("github"))
+                });
+                let has_velnor = entries.iter().any(|e| {
+                    e.get("lane")
+                        .and_then(|l| l.as_str())
+                        .is_some_and(|lane| lane.eq_ignore_ascii_case("velnor"))
+                });
                 if !has_github {
                     issues.push(format!("{ctx}: matrix.config missing lane: github entry"));
                 }
@@ -4231,8 +4247,14 @@ fn check_matrix_parity_job(
                     issues.push(format!("{ctx}: matrix.config missing lane: velnor entry"));
                 }
             } else if let Some(expr) = config.as_str() {
-                // Expression form: fromJSON(needs.matrix-setup.outputs.configs)
-                if expr.contains("matrix-setup") {
+                // Canonical inline fromJSON expression carries both literal
+                // lane records and consumes no selector runner.
+                if expr.contains(r#""lane":"Velnor""#)
+                    && expr.contains(r#""lane":"GitHub""#)
+                    && expr.contains("ubuntu-26.04")
+                {
+                    // Complete canonical form.
+                } else if expr.contains("matrix-setup") {
                     // Verify matrix-setup job has both lanes in its script
                     let setup_script = workflow_yaml
                         .get("jobs")
@@ -4254,7 +4276,7 @@ fn check_matrix_parity_job(
                     }
                 } else {
                     issues.push(format!(
-                        "{ctx}: strategy.matrix.config must be a sequence or use fromJSON(needs.matrix-setup.outputs.configs)"
+                        "{ctx}: strategy.matrix.config must contain the canonical inline Velnor/GitHub records"
                     ));
                 }
             } else {
@@ -4263,11 +4285,11 @@ fn check_matrix_parity_job(
         }
     }
 
-    // 2. runs-on must use matrix.config.runner via fromJSON
+    // 2. runs-on must use the already-typed matrix.config.runner value.
     let runs_on = job.get("runs-on").and_then(|r| r.as_str()).unwrap_or("");
     if !runs_on.contains("matrix.config.runner") {
         issues.push(format!(
-            "{ctx}: runs-on must use '${{{{ fromJSON(matrix.config.runner) }}}}', found: '{runs_on}'"
+            "{ctx}: runs-on must use '${{{{ matrix.config.runner }}}}', found: '{runs_on}'"
         ));
     }
 

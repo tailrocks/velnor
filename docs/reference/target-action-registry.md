@@ -1,26 +1,29 @@
-# Target Action Registry (source-of-truth)
+# Target Action Registry (upstream research index)
+
+The compiled code authority for accepted repositories, exact refs, inputs, and
+literal values is
+[`crates/velnor-runner/src/manifest.rs`](../../crates/velnor-runner/src/manifest.rs).
+This document links upstream behavior used to review changes to that manifest;
+it is not an execution allowlist.
 
 > **What this is:** the authoritative list of action families Velnor's native
 > adapters replace, with a direct link to each action's **latest** source so we
 > can read the original TypeScript / composite / Docker behavior before
 > implementing or changing an adapter.
 >
-> **One version: latest.** Velnor tracks the **latest** behavior of each action
-> only — it does **not** support historical versions. Velnor routes by action
-> *family* and ignores the pinned `@ref` (contract §66), so the exact tag in any
-> workflow does not matter. Only the **major** is recorded below as a coarse
-> marker. When upstream changes behavior in a way a consumer relies on, update
-> the Velnor adapter to match — that is the maintenance model.
+> **Latest behavior, exact refs.** Velnor implements the latest approved
+> behavior and executes only refs listed in the compiled manifest. Transitional
+> estate/fixture refs remain explicit entries until their migration plan lands;
+> refs are never ignored.
 >
 > **Rule:** *the latest upstream source is the contract.* When you implement or
 > modify an adapter, open the **Source** link, read the real
 > inputs/outputs/behavior, and match it — do not guess from docs or memory.
 >
 > **Scope of analysis is consumer-driven.** We do **not** reimplement every
-> upstream feature — only the features the two consumer repos actually use:
->
-> - **Jackin** — `jackin-project/jackin`
-> - **ChainArgos** — `ChainArgos/java-monorepo`
+> upstream feature — only the features the 13-repository estate actually uses.
+> The authoritative estate and local-clone map live in
+> `VELNOR_PROJECTS_SETUP.md` §1 and §13.
 >
 > A feature absent from both consumers is out of focus until one adopts it. The
 > **Features in focus** column is the intersection of "upstream supports it" and
@@ -37,8 +40,8 @@ gh api repos/<owner>/<repo>/releases/latest --jq '.tag_name'
 ```
 
 The fixture-snippet assertions in `crates/velnor-tools/src/main.rs`
-(`fixture_required_snippets`) track the fixture's *actual* tags; they are
-routing markers, not behavior pins.
+(`fixture_required_snippets`) track the fixture's actual refs. Every accepted
+ref must also exist in the compiled manifest.
 
 ## Core `actions/*`
 
@@ -49,14 +52,16 @@ routing markers, not behavior pins.
 | `actions/upload-artifact` | v7 | TS | [main](https://github.com/actions/upload-artifact) | glob, `if-no-files-found`, `include-hidden-files`, `retention-days`, outputs (`artifact-id`, `artifact-url`, `artifact-digest`) |
 | `actions/download-artifact` | v8 | TS | [main](https://github.com/actions/download-artifact) | pattern/name, `merge-multiple`, `download-path` |
 | `actions/upload-pages-artifact` | v5 | composite | [main](https://github.com/actions/upload-pages-artifact) | path, single-file tar contract for Pages |
-| `actions/deploy-pages` | v5 | TS | [main](https://github.com/actions/deploy-pages) | `page_url` output (synthetic for now — see checklist §3) |
+| `actions/configure-pages` | v6 | TS | [main](https://github.com/actions/configure-pages) | Existing Pages site lookup, `base_url` / `origin` / `host` / `base_path` outputs, `GITHUB_PAGES=true`; enablement and generator mutation are outside the approved estate surface. |
+| `actions/deploy-pages` | v5 | TS | [main](https://github.com/actions/deploy-pages) | Results Service artifact lookup by workflow backend identity, Actions OIDC mint, Pages deployment create/status/cancel loop, timeout and error ceilings, preview payload, `page_url` and `status` outputs. |
+| `actions/attest-build-provenance` | v4 | composite → `actions/attest` v4 | [main](https://github.com/actions/attest-build-provenance) | **Explicit rejection:** estate uses file `subject-path` provenance. Current upstream requires Sigstore bundle generation and GitHub attestation publication; keep the step on the GitHub writer lane until a native Rust client is fixture-proven. No JavaScript fallback. |
 
 ## Rust / setup / tooling
 
 | Action | Major | Kind | Source (latest) | Features in focus |
 |--------|-------|------|-----------------|-------------------|
 | `dorny/paths-filter` | v4 | TS | [master](https://github.com/dorny/paths-filter) | YAML rules, glob, per-rule boolean + `_count` + `_files` + `changes`, git-diff source |
-| `jdx/mise-action` | v4 | TS | [main](https://github.com/jdx/mise-action) | install, `install_args`, working-directory, `MISE_*` env, PATH injection (incl. Python-via-mise) |
+| `jdx/mise-action` | v4 | TS | [main](https://github.com/jdx/mise-action) | exact approved `version`, install, `install_args`, working-directory, approved local `cache_key_prefix`/`cache_save`, `MISE_*` env, PATH injection (incl. Python-via-mise) |
 | `extractions/setup-just` | v4 | TS | [main](https://github.com/extractions/setup-just) | just version resolution + PATH |
 | `Swatinem/rust-cache` | v2 | TS | [master](https://github.com/Swatinem/rust-cache) | `shared-key`, `cache-directories`, `cache-on-failure`, outputs |
 | `mozilla-actions/sccache-action` | v0 | TS | [master](https://github.com/mozilla-actions/sccache-action) | server start + env injection, soft-fail gates, `--show-stats` |

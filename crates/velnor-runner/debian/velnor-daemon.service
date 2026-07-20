@@ -18,6 +18,7 @@ WatchdogSec=180
 # secrets.env win. The token is read from the GITHUB_TOKEN env var, never argv.
 Environment=VELNOR_JOB_CPUS=4
 Environment=VELNOR_JOB_MEMORY=12g
+Environment=VELNOR_STORAGE_ROOT=/var
 EnvironmentFile=/etc/velnor/velnor.env
 EnvironmentFile=-/etc/velnor/secrets.env
 ExecStart=/usr/bin/velnor-runner daemon \
@@ -40,7 +41,22 @@ TimeoutStopSec=10800
 # self-hosted CI runner host). Harden to a docker-group user later if desired.
 User=root
 StateDirectory=velnor
+CacheDirectory=velnor
+RuntimeDirectory=velnor
+LogsDirectory=velnor
 WorkingDirectory=/var/lib/velnor
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# State, work, and forensic logs all live below this root. Docker remains
+# reachable through /var/run/docker.sock; ProtectSystem=full leaves /var writable.
+# JIT slot credentials remain under the root user's configured runner state.
+ReadWritePaths=/var/lib/velnor /var/cache/velnor /run/velnor /var/log/velnor /root/.velnor/runner
 
 [Install]
 WantedBy=multi-user.target

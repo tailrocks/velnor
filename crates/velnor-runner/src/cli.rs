@@ -14,6 +14,8 @@ pub struct Cli {
 pub enum Command {
     /// Inspect Velnor's daemon-shared host cache stores.
     Cache(CacheArgs),
+    /// Inspect or validate against the compiled strict capability manifest.
+    Capabilities(CapabilitiesArgs),
     /// Create and store a GitHub JIT runner configuration.
     Configure(ConfigureArgs),
     /// Run one daemon process that manages one or more internal runner slots.
@@ -26,9 +28,43 @@ pub enum Command {
     Remove(RemoveArgs),
     /// Print local runner configuration status.
     Status(StatusArgs),
+    /// Inspect the canonical Velnor storage layout and catalog.
+    Storage(StorageArgs),
     /// Probe GitHub for this daemon's registered runners and fail loudly when
     /// the fleet is gone (run from a systemd timer for alerting).
     Doctor(DoctorArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CapabilitiesArgs {
+    #[command(subcommand)]
+    pub command: CapabilitiesCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CapabilitiesCommand {
+    /// Validate a sanitized broker job-message JSON dump.
+    Check { job_dump: PathBuf },
+    /// Export the compiled manifest as JSON.
+    Export,
+}
+
+#[derive(Debug, Args)]
+pub struct StorageArgs {
+    /// Store configuration under this directory for legacy/dev-mode resolution.
+    #[arg(long)]
+    pub config_dir: Option<PathBuf>,
+
+    #[command(subcommand)]
+    pub command: StorageCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StorageCommand {
+    /// Print every resolved storage root.
+    Paths,
+    /// Print bytes by canonical trust scope and class.
+    Status,
 }
 
 #[derive(Debug, Args)]
@@ -41,6 +77,41 @@ pub struct CacheArgs {
     #[arg(long)]
     pub config_dir: Option<PathBuf>,
 
+    #[arg(
+        long,
+        env = "VELNOR_BUDGET_TARGETS_BYTES",
+        default_value_t = 214_748_364_800u64
+    )]
+    pub budget_targets_bytes: u64,
+
+    #[arg(
+        long,
+        env = "VELNOR_BUDGET_CACHES_BYTES",
+        default_value_t = 53_687_091_200u64
+    )]
+    pub budget_caches_bytes: u64,
+
+    #[arg(
+        long,
+        env = "VELNOR_BUDGET_ARTIFACTS_BYTES",
+        default_value_t = 21_474_836_480u64
+    )]
+    pub budget_artifacts_bytes: u64,
+
+    #[arg(
+        long,
+        env = "VELNOR_BUDGET_CARGO_BYTES",
+        default_value_t = 21_474_836_480u64
+    )]
+    pub budget_cargo_bytes: u64,
+
+    #[arg(
+        long,
+        env = "VELNOR_BUDGET_MISE_BYTES",
+        default_value_t = 21_474_836_480u64
+    )]
+    pub budget_mise_bytes: u64,
+
     #[command(subcommand)]
     pub command: CacheCommand,
 }
@@ -49,15 +120,23 @@ pub struct CacheArgs {
 pub enum CacheCommand {
     /// Report store sizes by store and scope. Read-only.
     Du,
-    /// Preview cache eviction candidates. Destructive GC is not implemented in this spike.
+    /// Preview or execute bounded cache eviction.
     Gc(CacheGcArgs),
 }
 
 #[derive(Debug, Args)]
 pub struct CacheGcArgs {
-    /// Print candidates without deleting anything. Required in this spike.
+    /// Print candidates without deleting anything.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Confirm deletion for a destructive GC run.
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Permit destructive GC before plan 036 lease wiring is active.
+    #[arg(long)]
+    pub force_no_lease_check: bool,
 
     /// Keep this many newest target buckets per trust/repo/workflow/job scope.
     #[arg(long, default_value_t = 3)]
@@ -148,7 +227,7 @@ pub struct ConfigureArgs {
     #[arg(long)]
     pub pool_id: Option<i64>,
 
-    /// Runner group name is not supported by JIT setup; pass --pool-id for non-default groups.
+    /// Resolve this organization or enterprise runner group name through GitHub.
     #[arg(long)]
     pub pool_name: Option<String>,
 
@@ -219,9 +298,33 @@ pub struct RunArgs {
     #[arg(long, env = "VELNOR_TRUST_SCOPE", default_value = "trusted")]
     pub trust_scope: String,
 
+    /// Filesystem bytes never available to new jobs.
+    #[arg(
+        long,
+        env = "VELNOR_EMERGENCY_RESERVE_BYTES",
+        default_value_t = 10_737_418_240u64
+    )]
+    pub emergency_reserve_bytes: u64,
+
+    /// Conservative disk reservation for every advertised slot.
+    #[arg(
+        long,
+        env = "VELNOR_JOB_PEAK_BYTES",
+        default_value_t = 32_212_254_720u64
+    )]
+    pub job_peak_bytes: u64,
+
     /// Override Docker image used to run JavaScript actions. By default Velnor uses the action's declared Node runtime image.
     #[arg(long, default_value = "")]
     pub node_action_image: String,
+
+    /// Diagnostic only: permit the Node sidecar when capability validation is also skipped.
+    #[arg(long, env = "VELNOR_DIAGNOSTIC_NODE_SIDECAR")]
+    pub diagnostic_node_sidecar: bool,
+
+    /// Diagnostic only: skip the strict capability preflight.
+    #[arg(long, env = "VELNOR_SKIP_CAPABILITY_VALIDATION")]
+    pub skip_capability_validation: bool,
 
     /// Host work directory for Docker job state. Defaults under the runner config directory.
     #[arg(long)]
@@ -336,9 +439,33 @@ pub struct DaemonArgs {
     #[arg(long, env = "VELNOR_TRUST_SCOPE", default_value = "trusted")]
     pub trust_scope: String,
 
+    /// Filesystem bytes never available to new jobs.
+    #[arg(
+        long,
+        env = "VELNOR_EMERGENCY_RESERVE_BYTES",
+        default_value_t = 10_737_418_240u64
+    )]
+    pub emergency_reserve_bytes: u64,
+
+    /// Conservative disk reservation for every advertised slot.
+    #[arg(
+        long,
+        env = "VELNOR_JOB_PEAK_BYTES",
+        default_value_t = 32_212_254_720u64
+    )]
+    pub job_peak_bytes: u64,
+
     /// Override Docker image used to run JavaScript actions. By default Velnor uses the action's declared Node runtime image.
     #[arg(long, default_value = "")]
     pub node_action_image: String,
+
+    /// Diagnostic only: permit the Node sidecar when capability validation is also skipped.
+    #[arg(long, env = "VELNOR_DIAGNOSTIC_NODE_SIDECAR")]
+    pub diagnostic_node_sidecar: bool,
+
+    /// Diagnostic only: skip the strict capability preflight.
+    #[arg(long, env = "VELNOR_SKIP_CAPABILITY_VALIDATION")]
+    pub skip_capability_validation: bool,
 
     /// Base host work directory for Docker job state. For --slots > 1, each slot uses a slot-N child.
     #[arg(long)]

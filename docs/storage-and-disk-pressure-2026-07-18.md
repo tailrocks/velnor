@@ -81,6 +81,10 @@ all writable stores plus active-job peaks stays below filesystem capacity.
 
 ## Canonical on-disk contract
 
+Implementation status: canonical root resolution, explicit legacy readability,
+and fail-closed persistent identity are closed by plan 035. Capacity leases,
+physical accounting, and destructive reconciliation remain plans 036–037.
+
 Use one configurable prefix, defaulting to the normal Linux locations below.
 Do not hide persistent caches under a daemon's GitHub-compatible work tree.
 
@@ -105,7 +109,7 @@ Canonical cache hierarchy:
   <trust-scope>/
     cargo/{registry,git}/
     cargo/bin/<repository>/
-    mise/{cache,installs/<repository>}/
+    mise/{cache,installs/<repository>,rustup/<repository>}/
     compiler/sccache/
     compiler/kache/                 # canary only
     targets/<repository>/<workflow>/<job-class>/<contract-generation>/
@@ -121,11 +125,21 @@ if a required identity is unavailable; `unknown-*` is permitted only for an
 ephemeral, job-private path. Path components are normalized and hashed where
 necessary, while the catalog retains the human-readable value.
 
+Mise executable installs and the rustup state used by mise's Rust backend
+share the same trust/repository boundary. Persisting `/opt/mise/installs`
+without `/root/.rustup` is invalid: it records a selected Rust version while
+the actual compiler disappears with the job container. The job image seeds
+both stores, and later jobs mount both before tool resolution.
+
 The hierarchy is not permission by itself. Trust scope remains part of every
 cache key and mount. Untrusted jobs never receive trusted writable stores,
 compiler-cache credentials, executable tool stores, or the host Docker socket.
 
 ## Catalog and accounting
+
+Implementation status: the read-only class catalog and `storage paths/status`
+operator surface are closed by plan 035; the authoritative SQLite lifecycle,
+allocated-byte accounting, budgets, and audit history remain plans 036–037.
 
 Store an authoritative SQLite catalog under `/var/lib/velnor/storage.db`, with
 the filesystem as the reconciled source of physical truth. Do not use atime.
@@ -151,6 +165,9 @@ remain useful for attribution.
 
 ## Active-job-safe reclamation
 
+Implementation status: filesystem scope leases and lease-aware destructive GC
+are closed by plans 036–037.
+
 Every active job holds a kernel-backed shared lease for each mounted managed
 scope. GC takes a non-blocking exclusive lease before deleting or rotating that
 scope. The kernel releases leases after process death; a heartbeat and catalog
@@ -171,6 +188,10 @@ period only when no live lease exists. This addresses the dozens of lingering
 slot directories observed on Sentry.
 
 ## Filesystem-wide pressure controller
+
+Implementation status: pre-session reservations, emergency reserve,
+reclaim-before-advertise, and explicit backpressure are closed by plan 036;
+class-budget and owned-builder reclamation are closed by plan 037.
 
 One coordinator per filesystem polls free bytes/inodes, reacts after large
 writes and job transitions, and uses hysteresis. Defaults must be bounded but

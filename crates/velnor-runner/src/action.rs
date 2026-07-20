@@ -115,14 +115,17 @@ pub enum NativeActionAdapter {
     UploadArtifact,
     DownloadArtifact,
     UploadPagesArtifact,
+    ConfigurePages,
     DeployPages,
     PathsFilter,
     Mise,
     Sccache,
+    Kache,
     SetupMold,
     SetupJust,
     RustCache,
     GitHubRuntimeExport,
+    GitHubScript,
     Renovate,
     DockerSetupBuildx,
     DockerLogin,
@@ -141,14 +144,17 @@ pub fn native_action_adapter(repository: &str) -> Option<NativeActionAdapter> {
         "actions/upload-artifact" => Some(NativeActionAdapter::UploadArtifact),
         "actions/download-artifact" => Some(NativeActionAdapter::DownloadArtifact),
         "actions/upload-pages-artifact" => Some(NativeActionAdapter::UploadPagesArtifact),
+        "actions/configure-pages" => Some(NativeActionAdapter::ConfigurePages),
         "actions/deploy-pages" => Some(NativeActionAdapter::DeployPages),
         "dorny/paths-filter" => Some(NativeActionAdapter::PathsFilter),
         "jdx/mise-action" => Some(NativeActionAdapter::Mise),
         "mozilla-actions/sccache-action" => Some(NativeActionAdapter::Sccache),
+        "kunobi-ninja/kache-action" => Some(NativeActionAdapter::Kache),
         "rui314/setup-mold" => Some(NativeActionAdapter::SetupMold),
         "extractions/setup-just" => Some(NativeActionAdapter::SetupJust),
         "swatinem/rust-cache" => Some(NativeActionAdapter::RustCache),
         "crazy-max/ghaction-github-runtime" => Some(NativeActionAdapter::GitHubRuntimeExport),
+        "actions/github-script" => Some(NativeActionAdapter::GitHubScript),
         "renovatebot/github-action" => Some(NativeActionAdapter::Renovate),
         "docker/setup-buildx-action" => Some(NativeActionAdapter::DockerSetupBuildx),
         "docker/login-action" => Some(NativeActionAdapter::DockerLogin),
@@ -179,6 +185,16 @@ pub fn unsupported_action_error(repository: &str) -> Option<&'static str> {
             "baptiste0928/cargo-install is not supported on Velnor: it invokes cargo inside an \
              ephemeral node sidecar container that has no Rust tooling. \
              Use jdx/mise-action with a 'cargo:<crate> = \"latest\"' entry in mise.toml instead.",
+        ),
+        "embarkstudios/cargo-deny-action" => Some(
+            "EmbarkStudios/cargo-deny-action is not supported on Velnor: use jdx/mise-action \
+             with a pinned 'cargo:cargo-deny' tool and invoke cargo deny from a run step instead.",
+        ),
+        "actions/attest-build-provenance" => Some(
+            "actions/attest-build-provenance is not available on the Velnor product lane: its \
+             actions/attest v4 flow requires Sigstore bundle generation plus the GitHub \
+             attestation API. Keep this step gated to the GitHub writer lane until a native \
+             Rust attestation client is fixture-proven; JavaScript sidecar fallback is forbidden.",
         ),
         _ => None,
     }
@@ -300,7 +316,6 @@ pub fn repository_action_plans(
         let git_ref = reference
             .git_ref
             .clone()
-            .or_else(|| native_action_adapter(repository).map(|_| NATIVE_ACTION_REF.to_string()))
             .ok_or_else(|| anyhow::anyhow!("repository action '{repository}' missing ref"))?;
         let repository_dir = repository_dir(actions_host, repository, &git_ref);
         let action_dir = action_dir(
@@ -435,6 +450,7 @@ where
                 true,
                 true,
                 false,           // lfs: action repos don't use LFS
+                None,            // action bundles are not primary-repository mirrors
                 &mut Vec::new(), // action-repo fetch trace is internal, not surfaced
             )?;
         }
@@ -501,6 +517,7 @@ pub struct DockerActionInvocation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeActionInvocation {
+    pub git_ref: String,
     pub adapter: NativeActionAdapter,
     pub inputs: BTreeMap<String, String>,
     pub env: Vec<(String, String)>,
@@ -668,6 +685,7 @@ impl ResolvedAction {
 
 pub fn native_invocation_from_plan(plan: &RepositoryActionPlan) -> Option<NativeActionInvocation> {
     native_action_adapter(&plan.repository).map(|adapter| NativeActionInvocation {
+        git_ref: plan.git_ref.clone(),
         adapter,
         inputs: plan.inputs.clone(),
         env: plan.env.clone(),
@@ -1057,7 +1075,7 @@ fn action_dir(
     Ok(dir)
 }
 
-fn string_inputs(step: &ActionStep) -> Result<BTreeMap<String, String>> {
+pub(crate) fn string_inputs(step: &ActionStep) -> Result<BTreeMap<String, String>> {
     string_input_map(step.inputs.as_ref())
 }
 
@@ -1574,7 +1592,7 @@ runs:
     }
 
     #[test]
-    fn native_repository_action_plan_does_not_require_ref() {
+    fn native_repository_action_plan_requires_ref() {
         let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
             {
                 "id": "cache",
@@ -1590,14 +1608,10 @@ runs:
         ]))
         .unwrap();
 
-        let plans = repository_action_plans(&steps, Path::new("/tmp/actions")).unwrap();
-
-        assert_eq!(plans.len(), 1);
-        assert_eq!(plans[0].repository, "actions/cache");
-        assert_eq!(plans[0].git_ref, NATIVE_ACTION_REF);
+        let error = repository_action_plans(&steps, Path::new("/tmp/actions")).unwrap_err();
         assert_eq!(
-            native_invocation_from_plan(&plans[0]).unwrap().adapter,
-            NativeActionAdapter::Cache
+            error.to_string(),
+            "repository action 'actions/cache' missing ref"
         );
     }
 
@@ -3037,6 +3051,8 @@ runs:
         assert!(unsupported_action_error("DTOLNAY/RUST-TOOLCHAIN").is_some());
         assert!(unsupported_action_error("baptiste0928/cargo-install").is_some());
         assert!(unsupported_action_error("Baptiste0928/Cargo-Install").is_some());
+        assert!(unsupported_action_error("EmbarkStudios/cargo-deny-action").is_some());
+        assert!(unsupported_action_error("actions/attest-build-provenance").is_some());
         assert!(unsupported_action_error("jdx/mise-action").is_none());
         assert!(unsupported_action_error("owner/unknown-action").is_none());
         assert!(unsupported_action_error("dtolnay/rust-toolchain")
@@ -3045,6 +3061,12 @@ runs:
         assert!(unsupported_action_error("baptiste0928/cargo-install")
             .unwrap()
             .contains("jdx/mise-action"));
+        assert!(unsupported_action_error("EmbarkStudios/cargo-deny-action")
+            .unwrap()
+            .contains("cargo:cargo-deny"));
+        assert!(unsupported_action_error("actions/attest-build-provenance")
+            .unwrap()
+            .contains("GitHub writer lane"));
     }
 
     fn action_metadata_files(root: &Path) -> Vec<PathBuf> {

@@ -1,6 +1,6 @@
 [package]
 name = "velnor-runner"
-version = "0.1.34"
+version = "0.1.58"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -48,6 +48,7 @@ assets = [
   ["debian/velnor-doctor@.service", "lib/systemd/system/velnor-doctor@.service", "644"],
   ["debian/velnor-doctor@.timer", "lib/systemd/system/velnor-doctor@.timer", "644"],
   ["debian/velnor.env", "etc/velnor/velnor.env", "640"],
+  ["../../docker/job-ubuntu.Dockerfile", "usr/share/velnor/job-ubuntu.Dockerfile", "644"],
   ["../../README.md", "usr/share/doc/velnor-runner/README.md", "644"],
 ]
 
@@ -59,6 +60,7 @@ clap.workspace = true
 jsonwebtoken.workspace = true
 reqwest.workspace = true
 rayon.workspace = true
+rustix = { version = "1.1.4", features = ["fs"] }
 rsa.workspace = true
 serde.workspace = true
 serde_json.workspace = true

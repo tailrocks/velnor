@@ -12,6 +12,10 @@ use crate::{
 use serde_json::Value;
 use std::{collections::BTreeMap, path::PathBuf};
 
+/// Bump whenever target mounting or compiler-visible path semantics change.
+/// Old generations remain inactive, owned cache data and are reclaimed by GC.
+const CARGO_TARGET_GENERATION: &str = "workspace-v2";
+
 pub struct GitHubJobContainerPaths {
     pub workspace_host: PathBuf,
     pub temp_host: PathBuf,
@@ -30,7 +34,7 @@ pub fn github_job_container_spec(
     daemon_id: String,
     trust_scope: &str,
 ) -> JobContainerSpec {
-    // Opt-in persistent CARGO_TARGET_DIR. Buckets are scoped by the GitHub
+    // Opt-in persistent workspace target directory. Buckets are scoped by the GitHub
     // trust boundary plus workflow/job class so warm state cannot cross repos
     // or unrelated workflows when an operator enables the speed-up per daemon.
     let cargo_target_host = std::env::var("VELNOR_CARGO_TARGET_PERSIST")
@@ -64,25 +68,45 @@ pub fn github_job_container_spec(
         daemon_id,
         repository: job_variable(job, "github.repository").map(ToOwned::to_owned),
         cargo_target_host,
+        compiler_cache_backend: crate::manifest::compiler_cache_backend(job),
     }
 }
 
-fn github_cargo_target_store_host(
+pub(crate) fn github_cargo_target_store_host(
     job: &AgentJobRequestMessage,
     temp_host: &std::path::Path,
     trust_scope: &str,
 ) -> PathBuf {
-    crate::container::cargo_target_store_host(temp_host)
-        .join(crate::container::sanitize_store_key(
-            &cargo_target_trust_scope_from(Some(trust_scope)),
-        ))
-        .join(crate::container::sanitize_store_key(
-            job_variable(job, "github.repository").unwrap_or("unknown-repository"),
-        ))
-        .join(crate::container::sanitize_store_key(
-            job_variable(job, "github.workflow").unwrap_or("unknown-workflow"),
-        ))
-        .join(crate::container::sanitize_store_key(&job.job_display_name))
+    let Some(repository) = job_variable(job, "github.repository").filter(|value| !value.is_empty())
+    else {
+        eprintln!(
+            "forensics.lifecycle: persistent target store refused: missing github.repository"
+        );
+        return temp_host
+            .join("_velnor/ephemeral/targets")
+            .join(crate::container::sanitize_store_key(&job.job_id));
+    };
+    let workflow = job_variable(job, "github.workflow_ref")
+        .and_then(|value| value.split('@').next())
+        .and_then(|value| value.strip_prefix(&format!("{repository}/")))
+        .or_else(|| job_variable(job, "github.workflow"))
+        .filter(|value| !value.is_empty());
+    let Some(workflow) = workflow else {
+        eprintln!(
+            "forensics.lifecycle: persistent target store refused: missing github.workflow_ref and github.workflow"
+        );
+        return temp_host
+            .join("_velnor/ephemeral/targets")
+            .join(crate::container::sanitize_store_key(&job.job_id));
+    };
+    crate::storage::append_legacy_trust(
+        crate::container::cargo_target_store_host(temp_host),
+        &cargo_target_trust_scope_from(Some(trust_scope)),
+    )
+    .join(CARGO_TARGET_GENERATION)
+    .join(crate::container::sanitize_store_key(repository))
+    .join(crate::container::sanitize_store_key(workflow))
+    .join(crate::container::sanitize_store_key(&job.job_display_name))
 }
 
 pub(crate) fn cargo_target_trust_scope() -> String {
@@ -305,7 +329,7 @@ fn github_output_expression(value: &Value) -> Option<&str> {
         .and_then(github_output_expression)
 }
 
-fn job_variable<'a>(job: &'a AgentJobRequestMessage, name: &str) -> Option<&'a str> {
+pub(crate) fn job_variable<'a>(job: &'a AgentJobRequestMessage, name: &str) -> Option<&'a str> {
     job.variables
         .get(name)
         .and_then(|value| value.value.as_deref())
@@ -356,6 +380,32 @@ fn job_container_options(job: &AgentJobRequestMessage) -> Vec<String> {
 
 fn service_containers(job: &AgentJobRequestMessage) -> Vec<ServiceContainerSpec> {
     let network = job_network_name(job);
+    if let Some(services) = job
+        .job_service_containers
+        .as_ref()
+        .map(expand_template_token)
+        .and_then(|value| value.as_object().cloned())
+    {
+        return services
+            .into_iter()
+            .filter_map(|(alias, container)| {
+                let image = container_image(&container)?.to_string();
+                Some(ServiceContainerSpec {
+                    name: format!(
+                        "velnor-service-{}-{}",
+                        sanitize_path_segment(&job.job_id),
+                        sanitize_path_segment(&alias)
+                    ),
+                    image,
+                    network_alias: alias,
+                    network: network.clone(),
+                    env: container_env(&container),
+                    ports: container_ports(&container),
+                    options: container_options(&container).unwrap_or_default(),
+                })
+            })
+            .collect();
+    }
     job.resources
         .containers
         .iter()
@@ -384,6 +434,76 @@ fn service_containers(job: &AgentJobRequestMessage) -> Vec<ServiceContainerSpec>
             })
         })
         .collect()
+}
+
+fn container_ports(value: &Value) -> Vec<String> {
+    let mut ports = value
+        .as_object()
+        .and_then(|object| object.get("ports").or_else(|| object.get("Ports")))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    ports.sort();
+    ports
+}
+
+/// Convert the current V2 broker TemplateToken JSON (`map` entries with
+/// `Key`/`Value`) into ordinary JSON. `actions/runner` evaluates
+/// `JobServiceContainers` directly; `Resources.Containers` is only the legacy
+/// deserialization fallback retained for the old feature flag.
+fn expand_template_token(value: &Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return value.clone();
+    };
+    if let Some(entries) = object
+        .get("map")
+        .or_else(|| object.get("Map"))
+        .and_then(Value::as_array)
+    {
+        let mut expanded = serde_json::Map::new();
+        for entry in entries {
+            let Some(pair) = entry.as_object() else {
+                continue;
+            };
+            let key = pair
+                .get("key")
+                .or_else(|| pair.get("Key"))
+                .map(expand_template_token)
+                .and_then(|value| value.as_str().map(ToOwned::to_owned));
+            let value = pair
+                .get("value")
+                .or_else(|| pair.get("Value"))
+                .map(expand_template_token);
+            if let (Some(key), Some(value)) = (key, value) {
+                expanded.insert(key, value);
+            }
+        }
+        return Value::Object(expanded);
+    }
+    if let Some(sequence) = object
+        .get("seq")
+        .or_else(|| object.get("Seq"))
+        .and_then(Value::as_array)
+    {
+        return Value::Array(sequence.iter().map(expand_template_token).collect());
+    }
+    if let Some(scalar) = object
+        .get("lit")
+        .or_else(|| object.get("Lit"))
+        .or_else(|| object.get("value"))
+        .or_else(|| object.get("Value"))
+    {
+        return expand_template_token(scalar);
+    }
+    Value::Object(
+        object
+            .iter()
+            .map(|(key, value)| (key.clone(), expand_template_token(value)))
+            .collect(),
+    )
 }
 
 fn service_env(container: &ContainerResource) -> Vec<(String, String)> {
@@ -415,6 +535,9 @@ fn service_ports(container: &ContainerResource) -> Vec<String> {
 }
 
 fn container_image(value: &Value) -> Option<&str> {
+    if let Some(image) = value.as_str().filter(|image| !image.is_empty()) {
+        return Some(image);
+    }
     value
         .as_object()
         .and_then(|object| {
@@ -783,6 +906,7 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("ChainArgos/java-monorepo".into()),
             cargo_target_host: None,
+            compiler_cache_backend: crate::compiler_cache::CompilerCacheBackend::Sccache,
         };
         let plan = github_normalized_job_plan(
             &job,
@@ -854,9 +978,32 @@ mod tests {
         assert_eq!(
             host,
             std::path::PathBuf::from(
-                "/velnor/work/_velnor_targets/trusted/ChainArgos_java-monorepo/CI___Preview/Rust___test__ubuntu_"
+                "/velnor/work/_velnor_targets/trusted/workspace-v2/ChainArgos_java-monorepo/CI___Preview/Rust___test__ubuntu_"
             )
         );
+    }
+
+    #[test]
+    fn target_bucket_refuses_missing_repository_identity() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "RunnerJobRequest",
+            "plan": { "planId": "plan-1" },
+            "timeline": { "id": "timeline-1" },
+            "jobId": "job-1",
+            "jobDisplayName": "Rust",
+            "requestId": 42
+        }))
+        .unwrap();
+        let host = github_cargo_target_store_host(
+            &job,
+            std::path::Path::new("/velnor/work/job/temp"),
+            "trusted",
+        );
+        assert_eq!(
+            host,
+            std::path::Path::new("/velnor/work/job/temp/_velnor/ephemeral/targets/job-1")
+        );
+        assert!(!host.to_string_lossy().contains("_velnor_targets"));
     }
 
     #[test]
@@ -1105,6 +1252,48 @@ mod tests {
                 ports: vec!["5432:5432".into()],
                 options: vec!["--health-cmd".into(), "pg_isready -U postgres".into()],
             }]
+        );
+    }
+
+    #[test]
+    fn service_containers_prefer_v2_job_service_tokens() {
+        // Current V2 TemplateToken literals use `lit`; `value` is retained by
+        // the decoder only as a compatibility fallback for primitive JSON.
+        let scalar = |value: &str| serde_json::json!({ "type": 0, "lit": value });
+        let service = serde_json::json!({
+            "type": 2,
+            "map": [
+                { "Key": scalar("image"), "Value": scalar("postgres:16") },
+                { "Key": scalar("ports"), "Value": { "type": 1, "seq": [scalar("5432")] } },
+                { "Key": scalar("env"), "Value": { "type": 2, "map": [
+                    { "Key": scalar("POSTGRES_PASSWORD"), "Value": scalar("postgres") }
+                ] } }
+            ]
+        });
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Services",
+            "requestId": 1,
+            "jobServiceContainers": { "type": 2, "map": [
+                { "Key": scalar("postgres"), "Value": service }
+            ] },
+            "resources": { "containers": [
+                { "alias": "legacy", "image": "redis:7" }
+            ] }
+        }))
+        .unwrap();
+
+        let services = service_containers(&job);
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].network_alias, "postgres");
+        assert_eq!(services[0].image, "postgres:16");
+        assert_eq!(services[0].ports, vec!["5432"]);
+        assert_eq!(
+            services[0].env,
+            vec![("POSTGRES_PASSWORD".into(), "postgres".into())]
         );
     }
 }

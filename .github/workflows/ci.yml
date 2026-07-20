@@ -14,6 +14,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      lanes:
+        type: choice
+        default: velnor
+        options: [velnor, github, both]
 
 permissions:
   contents: read
@@ -25,12 +30,23 @@ concurrency:
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+  SCCACHE_GHA_ENABLED: "false"
+  SCCACHE_CACHE_SIZE: 20G
 
 jobs:
   fmt:
-    runs-on: ubuntu-latest
+    name: Format (${{ matrix.config.lane }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
 
       - name: Cache rustup toolchain
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -50,9 +66,17 @@ jobs:
       - run: cargo fmt --all --check
 
   actionlint:
-    runs-on: ubuntu-latest
+    name: Actionlint (${{ matrix.config.lane }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
           install_args: "actionlint"
@@ -60,84 +84,91 @@ jobs:
       - run: actionlint
 
   deny:
-    runs-on: ubuntu-latest
+    name: Deny (${{ matrix.config.lane }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
-          install_args: "rust cargo:cargo-deny"
+          install_args: "rust aqua:EmbarkStudios/cargo-deny"
           github_token: ${{ secrets.GITHUB_TOKEN }}
       - run: cargo deny check advisories
 
   clippy:
-    runs-on: ubuntu-latest
+    name: Clippy (${{ matrix.config.lane }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-
-      - name: Cache rustup toolchain
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
-          path: |
-            ~/.rustup/toolchains
-            ~/.rustup/update-hashes
-          key: rustup-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}
+          persist-credentials: false
 
-      - name: Cache Cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/index
-            ~/.cargo/registry/src
-            ~/.cargo/git/db
-          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            cargo-registry-${{ runner.os }}-
+      - name: Install mold linker
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
 
       - id: sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
-        continue-on-error: true
-
-      - name: Enable sccache
-        if: steps.sccache.outcome == 'success'
-        run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+        with:
+          version: v0.16.0
+          disable_annotations: "false"
 
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
           install_args: "rust"
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Cache target dir
+      - name: Cache Cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
-          path: target
-          key: cargo-target-${{ runner.os }}-${{ github.head_ref || github.ref_name }}-clippy-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+          key: cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            cargo-target-${{ runner.os }}-${{ github.head_ref || github.ref_name }}-clippy-
-            cargo-target-${{ runner.os }}-${{ github.base_ref || 'main' }}-clippy-
-            cargo-target-${{ runner.os }}-main-clippy-
+            cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-
 
       - run: rustup component add clippy
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: sccache stats
-        if: always() && steps.sccache.outcome == 'success'
-        run: sccache --show-stats
-
-  test:
-    runs-on: ubuntu-latest
+  rust:
+    name: Test (${{ matrix.config.lane }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-
-      - name: Cache rustup toolchain
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
-          path: |
-            ~/.rustup/toolchains
-            ~/.rustup/update-hashes
-          key: rustup-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}
+          persist-credentials: false
+
+      - name: Install mold linker
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+
+      - id: sccache
+        uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+        with:
+          version: v0.16.0
+          disable_annotations: "false"
+
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+        with:
+          install_args: "rust cargo-binstall cargo:cargo-nextest"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cache Cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
@@ -147,54 +178,22 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/src
             ~/.cargo/git/db
-          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            cargo-registry-${{ runner.os }}-
-
-      - id: sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
-        continue-on-error: true
-
-      - name: Enable sccache
-        if: steps.sccache.outcome == 'success'
-        run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-
-      - name: Cache mise cargo tools
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: ~/.local/share/mise/installs/cargo-cargo-nextest
-          key: mise-cargo-nextest-${{ runner.os }}-${{ hashFiles('mise.toml') }}
-          restore-keys: |
-            mise-cargo-nextest-${{ runner.os }}-
-
-      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
-        with:
-          install_args: "rust cargo:cargo-nextest"
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Cache target dir
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: target
-          key: cargo-target-${{ runner.os }}-${{ github.head_ref || github.ref_name }}-test-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: |
-            cargo-target-${{ runner.os }}-${{ github.head_ref || github.ref_name }}-test-
-            cargo-target-${{ runner.os }}-${{ github.base_ref || 'main' }}-test-
-            cargo-target-${{ runner.os }}-main-test-
+            cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-
 
       - run: cargo nextest run --workspace --locked --color=always
 
-
-      - name: sccache stats
-        if: always() && steps.sccache.outcome == 'success'
-        run: sccache --show-stats
-
   ci-required:
-    needs: [fmt, actionlint, deny, clippy, test]
+    needs: [fmt, actionlint, deny, clippy, rust]
     if: always()
-    runs-on: ubuntu-latest
+    name: CI required (${{ matrix.config.lane }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
+    runs-on: ${{ matrix.config.runner }}
     steps:
       - name: Fail on any failed or cancelled need
         env:

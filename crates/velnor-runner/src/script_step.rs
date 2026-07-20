@@ -120,8 +120,21 @@ fn github_script_step_with_context(
             "Working-Directory",
         ],
     )
-    .or(defaults.working_directory.as_deref())
-    .map(|path| workspace_path(workspace_container, path))
+    .map(String::from)
+    .or_else(|| {
+        evaluate_script_format_expr(
+            inputs,
+            &[
+                "workingDirectory",
+                "working-directory",
+                "WorkingDirectory",
+                "Working-Directory",
+            ],
+            context_data,
+        )
+    })
+    .or_else(|| defaults.working_directory.clone())
+    .map(|path| workspace_path(workspace_container, &path))
     .unwrap_or_else(|| workspace_container.to_string());
 
     // Prefer the broker-sent DisplayName. GitHub's Name/ContextName fields
@@ -973,10 +986,9 @@ fn script_with_path_prelude(script: &str, path_prepend: &[String]) -> String {
     // exported HOME=/root + CARGO_HOME=/root/.cargo (an OrbStack dev-host
     // workaround), which silently redirected every cargo download into the
     // unmounted container /root — the cargo-registry cache could never save
-    // and warm restores were invisible to steps. PATH keeps /root/.cargo/bin
-    // (image-baked rustup proxies) ahead of the mise shims, so cargo resolves
-    // even though mise's rust backend derives its bin path from $CARGO_HOME
-    // (empty bind at job start).
+    // and warm restores were invisible to steps. Native mise setup prepends its
+    // repository-selected shims/tool bins ahead of the image-baked rustup
+    // fallback; jobs without mise retain the normal image PATH.
     let mut prelude = Vec::new();
     if !path_prepend.is_empty() {
         let joined = path_prepend
@@ -1565,5 +1577,61 @@ mod tests {
         assert_eq!(script_steps.len(), 1);
         // matrix.package is resolvable from context_data → eagerly substituted.
         assert_eq!(script_steps[0].script, "just clippy \"app-b\"");
+    }
+
+    #[test]
+    fn maps_working_directory_with_matrix_format_expr() {
+        let steps: Vec<ActionStep> = serde_json::from_value(serde_json::json!([
+            {
+                "enabled": true,
+                "reference": { "type": "Script" },
+                "inputs": {
+                    "map": [
+                        {
+                            "Key": { "lit": "script", "type": 0 },
+                            "Value": { "lit": "./gradlew test", "type": 0 }
+                        },
+                        {
+                            "Key": { "lit": "workingDirectory", "type": 0 },
+                            "Value": {
+                                "expr": "format('services/{0}', matrix.service)",
+                                "type": 3
+                            }
+                        }
+                    ],
+                    "type": 2
+                }
+            },
+            {
+                "enabled": true,
+                "reference": { "type": "Script" },
+                "inputs": {
+                    "script": "./gradlew test",
+                    "workingDirectory": "services/literal"
+                }
+            }
+        ]))
+        .unwrap();
+
+        let context = vec![(
+            "matrix".to_string(),
+            serde_json::json!({"service": "catalog"}),
+        )];
+        let defaults = vec![serde_json::json!({
+            "run": { "working-directory": "services/default" }
+        })];
+        let script_steps =
+            github_script_steps_with_context(&steps, "/__w", &defaults, &context).unwrap();
+
+        // Step input expressions are evaluated first and override job defaults,
+        // matching actions/runner's evaluated input -> default lookup order.
+        assert_eq!(
+            script_steps[0].working_directory_container,
+            "/__w/services/catalog"
+        );
+        assert_eq!(
+            script_steps[1].working_directory_container,
+            "/__w/services/literal"
+        );
     }
 }

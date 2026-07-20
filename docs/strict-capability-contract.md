@@ -1,6 +1,6 @@
 # Strict Capability and Local Compiler-Cache Contract
 
-Status: accepted direction; implementation requires its own reviewed change  
+Status: accepted direction; manifest/ref/input gates implemented by plan 033
 Date: 2026-07-18
 
 ## Law
@@ -19,13 +19,14 @@ does not expand the surface.
 
 ## Current architectural gaps
 
-The present runner does not yet satisfy this law:
+Plan 033 closed the first product-path enforcement gaps:
 
 - native adapters are selected by repository name without enforcing an approved
-  action ref;
-- the native sccache adapter ignores invocation inputs;
-- unknown JavaScript actions may execute in a Node sidecar;
-- input allowlists and allowed-value schemas are not centralized.
+  action ref **(closed: plan 033)**;
+- the native sccache adapter ignores invocation inputs **(closed: plan 033)**;
+- unknown JavaScript actions may execute in a Node sidecar **(closed: plan 033)**;
+- input allowlists and allowed-value schemas are not centralized
+  **(closed: plan 033)**.
 
 These are enabling structures for silent divergence. Replace repository-name
 dispatch with a typed, versioned manifest and remove unknown-action fallback
@@ -37,6 +38,20 @@ GitHub sends Velnor an expanded job message. Before side effects Velnor validate
 job containers, services, options, shells, expressions, every `uses:` repository
 and immutable commit, all provided inputs and values, companion environment,
 trust requirements, mounts, network, stores, setup/main/post behavior and outputs.
+Local composite actions are not deferred until checkout: preflight reads their
+`action.yml`/`action.yaml` from the workflow repository at the exact
+`github.workflow_sha`, recursively resolves nested local and repository `uses:`,
+and validates the complete closure before storage leases, checkout, cache or
+service mutation, action-container setup, or job-container creation. Metadata
+fetching is read-only and uses the job token plus the advertised GitHub API URL.
+That validation read is distinct from execution preparation. Matching the
+current `actions/runner` `ActionManager`/`StepsRunner` boundary, Velnor does not
+read a local composite from the checked-out workspace when its parent `if` is
+already provably false from immutable `github` context. Runtime-dependent
+conditions remain unresolved until execution and never qualify for this
+shortcut. Thus every potentially executable capability is still validated,
+while a skipped local action cannot fail merely because its workspace metadata
+is absent.
 
 Capability-affecting inputs must be literal or statically resolvable during
 preflight. A runtime-dependent value is rejected unless the manifest declares a
@@ -61,6 +76,23 @@ repository + allowed immutable commits
 `capabilities export` lets estate CI audit workflows before merge. Errors name
 the step, action/ref, field, received value, accepted alternatives, reason, and
 manifest version.
+
+Manifest version 3 adds two exact estate inputs without creating generic
+fallbacks:
+
+- `dorny/paths-filter` accepts only an explicitly empty `token`, which matches
+  upstream's local-git mode and grants no API or secret access;
+- `docker/setup-buildx-action` accepts only the reviewed Docker Hub mirror
+  configuration `[registry."docker.io"]` with
+  `mirrors = ["mirror.gcr.io"]`. The native adapter writes that literal to the
+  job's private runner-temp mount and passes it to `docker buildx create
+  --config`, matching the pinned upstream action. It adds mirror network reads
+  but no credential, trust, persistent-store, or host-mount surface. Existing
+  builders remain reused exactly as upstream does.
+
+These inputs are required by Jackin's already-approved Docs and Construct
+contracts. Unit fixtures cover both exact values and Jackin's program-branch
+lane run is the end-to-end proof; other values remain preflight failures.
 
 ## Approved compiler-cache topology
 
@@ -139,7 +171,8 @@ inactive store below its backend ceiling under pressure.
 Production workflows select one backend and contain one setup action. Sccache
 remains the initial default because it is proven. A comparison fixture and small
 representative canary use literal `off`, `sccache`, and `kache` jobs with two
-separately pinned conditional action steps; both never run in one job.
+separately pinned conditional action steps; both never run in one job. Fixture
+backend-selection jobs and dual-lane proof land through plan 041.
 
 The GitHub-hosted lane uses the same local-only configuration. Its store lasts
 only for that job, so this is a compatibility/cold-baseline lane, not cross-run
@@ -150,16 +183,20 @@ action post step owns reporting.
 ## Implementation and proof gates
 
 1. Add typed ref/input/value validation before every execution side effect.
+   **Implemented by plan 033.** Remaining job/container/expression dimensions
+   extend the same manifest in subsequent plans.
 2. Remove unknown-action sidecar fallback from the product path.
+   **Implemented by plan 033;** both diagnostic flags are required to reach it.
 3. Make every native adapter declare and test its exact surface; an ignored
-   provided input is a failure.
+   provided input is a failure. **Implemented by plan 033.** Surface changes
+   require a manifest version bump.
 4. Add native Rust Kache setup/post/store/report support and refactor sccache
-   through the common backend seam.
+   through the common backend seam. **Implemented by plan 034.**
 5. Bake both pinned binaries into the Ubuntu image; never compile during a job.
+   **Implemented by plan 034.**
 6. Test every allowed value and every rejected input, value, ref, remote env,
    expression, dual-wrapper combination, and store override.
 7. Audit the estate with `capabilities check`; propose missing features instead
    of silently expanding support.
 8. Run the matched local and disk-pressure experiments in
    [storage-and-disk-pressure-2026-07-18.md](storage-and-disk-pressure-2026-07-18.md).
-

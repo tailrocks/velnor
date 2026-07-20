@@ -5,27 +5,27 @@ use crate::{
         DockerActionInvocation, JavaScriptActionInvocation, NativeActionAdapter,
         NativeActionInvocation,
     },
-    checkout::{configure_safe_directory, execute_checkout, CheckoutPlan},
-    container::{sccache_host, JobContainerSpec, Shell},
+    checkout::{configure_safe_directory, execute_checkout_with_mirror, CheckoutPlan},
+    container::{kache_host, sccache_host, JobContainerSpec, Shell},
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
     workflow_command::parse_workflow_commands,
 };
 use anyhow::{bail, Context, Result};
-use globset::{Glob, GlobSetBuilder};
+use globset::{Glob, GlobBuilder, GlobSetBuilder};
 use rayon::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -734,10 +734,14 @@ pub struct DockerScriptExecutor<R> {
     /// Job-secret mask values supplied by the runner. Combined with runtime
     /// ::add-mask:: values before building each docker exec argv.
     secret_masks: Vec<String>,
+    /// Operator-selected trust boundary. Credential-bearing native adapters
+    /// enforce this independently of Docker-socket availability.
+    trust_scope: String,
     /// Identity of the step currently executing — lets native adapters stream
     /// their output to the live feed (GitHub streams every step live, not
     /// just `run:` steps).
     live_step: Option<LiveStepIdentity>,
+    job_environment_started: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -762,7 +766,9 @@ where
             workflow_env: Vec::new(),
             job_timeout_minutes: None,
             secret_masks: Vec::new(),
+            trust_scope: "trusted".to_string(),
             live_step: None,
+            job_environment_started: false,
         }
     }
 
@@ -773,6 +779,11 @@ where
 
     pub fn with_secret_masks(mut self, masks: Vec<String>) -> Self {
         self.secret_masks = masks;
+        self
+    }
+
+    pub fn with_trust_scope(mut self, trust_scope: impl Into<String>) -> Self {
+        self.trust_scope = trust_scope.into();
         self
     }
 
@@ -798,6 +809,11 @@ where
 
     pub fn with_step_log_sender(mut self, sender: UnboundedSender<StepLog>) -> Self {
         self.step_log_sender = Some(sender);
+        self
+    }
+
+    pub fn with_job_environment_started(mut self, started: bool) -> Self {
+        self.job_environment_started = started;
         self
     }
 
@@ -852,7 +868,10 @@ where
         steps: &[ScriptStep],
         temp_host: &Path,
     ) -> Result<Vec<StepExecutionResult>> {
-        self.start_job_environment(container)?;
+        if !self.job_environment_started {
+            self.start_job_environment(container)?;
+            self.job_environment_started = true;
+        }
 
         let ordered = steps
             .iter()
@@ -938,9 +957,7 @@ where
         environment_url: Option<&Value>,
         temp_host: &Path,
     ) -> Result<JobExecutionSummary> {
-        self.start_job_environment(container)?;
-
-        let result = self.execute_ordered_steps_in_started_container(
+        let result = self.execute_ordered_steps_without_cleanup(
             container,
             steps,
             base_env,
@@ -954,6 +971,79 @@ where
             eprintln!("Warning: cleanup failed after ordered job steps: {error:#}");
         }
         result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_ordered_steps_without_cleanup(
+        &mut self,
+        container: &JobContainerSpec,
+        steps: &[ExecutableStep],
+        base_env: &[(String, String)],
+        context_data: &[(String, Value)],
+        job_outputs: Option<&Value>,
+        environment_url: Option<&Value>,
+        temp_host: &Path,
+    ) -> Result<JobExecutionSummary> {
+        if !self.job_environment_started {
+            self.start_job_environment(container)?;
+            self.job_environment_started = true;
+        }
+        let mut runtime_context = context_data.to_vec();
+        if let Some(services) = self.service_context(container)? {
+            runtime_context.retain(|(name, _)| !name.eq_ignore_ascii_case("services"));
+            runtime_context.push(("services".to_string(), services));
+        }
+
+        self.execute_ordered_steps_in_started_container(
+            container,
+            steps,
+            base_env,
+            &runtime_context,
+            job_outputs,
+            environment_url,
+            temp_host,
+        )
+    }
+
+    fn service_context(&mut self, container: &JobContainerSpec) -> Result<Option<Value>> {
+        if container.services.is_empty() {
+            return Ok(None);
+        }
+        let mut services = serde_json::Map::new();
+        for service in &container.services {
+            let id = self
+                .run_docker(&service.id_args())?
+                .stdout
+                .trim()
+                .to_string();
+            let ports_output = self.run_docker(&service.mapped_ports_args())?.stdout;
+            let mut ports = serde_json::Map::new();
+            for line in ports_output.lines() {
+                let Some((container_port, address)) = line.split_once(" -> ") else {
+                    continue;
+                };
+                let Some((_, host_port)) = address.rsplit_once(':') else {
+                    continue;
+                };
+                ports
+                    .entry(
+                        container_port
+                            .trim_end_matches("/tcp")
+                            .trim_end_matches("/udp")
+                            .to_string(),
+                    )
+                    .or_insert_with(|| Value::String(host_port.to_string()));
+            }
+            services.insert(
+                service.network_alias.clone(),
+                serde_json::json!({
+                    "id": id,
+                    "network": service.network,
+                    "ports": ports,
+                }),
+            );
+        }
+        Ok(Some(Value::Object(services)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -980,6 +1070,8 @@ where
             &container.workspace_host,
             temp_host,
         );
+        state.persistent_workspace_target = container.cargo_target_host.is_some();
+        state.cargo_target_host = container.cargo_target_host.clone();
         state.workflow_env = self
             .workflow_env
             .iter()
@@ -1637,14 +1729,18 @@ where
         env.extend(command_files.env.iter().cloned());
         rewrite_command_file_env_for_action_container(&mut env);
         let node_image = node_action_image(&action.node, &container.node_action_image);
-        let exec_args = container.run_node_action_args(
+        let secret_masks = action_state.secret_masks(&self.secret_masks);
+        let exec_args = container.prepare_run_node_action_args(
             "/__w",
             &env,
+            &secret_masks,
             &state.path,
             &node_image,
             entrypoint_container_path,
-        );
-        let step_result = self.runner.run_timeout("docker", &exec_args, timeout)?;
+        )?;
+        let step_result = self
+            .runner
+            .run_timeout("docker", exec_args.args(), timeout)?;
         let mut state = command_files.collect_state()?;
         state.merge(parse_workflow_commands_from_output(
             &step_result.stdout,
@@ -1671,7 +1767,13 @@ where
             *version = state.resolve_expressions(version);
         }
         let mut trace = Vec::new();
-        if let Err(error) = execute_checkout(&mut self.runner, &plan, &mut trace) {
+        let mirror_store =
+            crate::container::git_mirror_store_host(&container.temp_host, &self.trust_scope);
+        let checkout_result = {
+            let _span = tracing::info_span!("job-checkout").entered();
+            execute_checkout_with_mirror(&mut self.runner, &plan, &mut trace, Some(&mirror_store))
+        };
+        if let Err(error) = checkout_result {
             if let Some(failure) = error.downcast_ref::<StepLogicFailure>() {
                 return Ok(failure.to_step_result(Some(trace.join("\n"))));
             }
@@ -1742,14 +1844,18 @@ where
             .iter()
             .map(|value| state.resolve_expressions(value))
             .collect::<Vec<_>>();
-        let exec_args = container.run_docker_action_args(
+        let secret_masks = action_state.secret_masks(&self.secret_masks);
+        let exec_args = container.prepare_run_docker_action_args(
             "/github/workspace",
             &env,
+            &secret_masks,
             &action.image,
             entrypoint.as_deref(),
             &args,
-        );
-        let step_result = self.runner.run_timeout("docker", &exec_args, timeout)?;
+        )?;
+        let step_result = self
+            .runner
+            .run_timeout("docker", exec_args.args(), timeout)?;
         let mut state = command_files.collect_state()?;
         state.merge(parse_workflow_commands_from_output(
             &step_result.stdout,
@@ -1778,9 +1884,11 @@ where
             NativeActionAdapter::UploadArtifact => native_upload_artifact(action, state),
             NativeActionAdapter::DownloadArtifact => native_download_artifact(action, state),
             NativeActionAdapter::UploadPagesArtifact => native_upload_pages_artifact(action, state),
-            NativeActionAdapter::DeployPages => Ok(native_deploy_pages(action, state)),
+            NativeActionAdapter::ConfigurePages => native_configure_pages(action, state),
+            NativeActionAdapter::DeployPages => native_deploy_pages(action, state),
             NativeActionAdapter::Mise => self.native_mise(_container, action, state, timeout),
             NativeActionAdapter::Sccache => self.native_sccache(_container, action, state, timeout),
+            NativeActionAdapter::Kache => self.native_kache(_container, action, state, timeout),
             NativeActionAdapter::SetupMold => {
                 self.native_setup_mold(_container, action, state, timeout)
             }
@@ -1794,6 +1902,7 @@ where
             NativeActionAdapter::GitHubRuntimeExport => {
                 Ok(native_github_runtime_export(action, state))
             }
+            NativeActionAdapter::GitHubScript => native_github_script(action, state),
             NativeActionAdapter::PathsFilter => self.native_paths_filter(action, state),
             NativeActionAdapter::DockerSetupBuildx => {
                 self.native_docker_setup_buildx(_container, action, state, timeout)
@@ -1841,7 +1950,16 @@ where
                 let result = self.native_shell(
                     _container,
                     state,
-                    "sccache --show-stats 2>/dev/null || true; sccache --stop-server 2>/dev/null || true",
+                    "stats=$(sccache --show-stats 2>&1 || true); printf '%s\\n' \"$stats\"; if [ -n \"${GITHUB_STEP_SUMMARY:-}\" ]; then printf '## sccache statistics\\n```text\\n%s\\n```\\n' \"$stats\" >> \"$GITHUB_STEP_SUMMARY\"; fi; sccache --stop-server 2>/dev/null || true",
+                    timeout,
+                )?;
+                Ok(native_command_result(result, StepCommandState::default()))
+            }
+            NativeActionAdapter::Kache => {
+                let result = self.native_shell(
+                    _container,
+                    state,
+                    "stats=$(kache stats 2>&1 || true); printf '%s\\n' \"$stats\"; if [ -n \"${GITHUB_STEP_SUMMARY:-}\" ]; then printf '## Kache statistics\\n```text\\n%s\\n```\\n' \"$stats\" >> \"$GITHUB_STEP_SUMMARY\"; kache report --format github >> \"$GITHUB_STEP_SUMMARY\" 2>/dev/null || true; fi",
                     timeout,
                 )?;
                 Ok(native_command_result(result, StepCommandState::default()))
@@ -1883,19 +2001,56 @@ where
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
         let install = input_truthy(&native_input_or(&action_state, action, "install", "true"));
+        let version = native_input(action, &action_state, "version");
         let install_args = native_input(action, &action_state, "install_args");
         let working_directory = native_input(action, &action_state, "working_directory");
-        let script = setup_mise_script(install, &install_args, &working_directory);
+        let cache_key_prefix =
+            native_input_or(&action_state, action, "cache_key_prefix", "mise-v2");
+        let cache_save = input_truthy(&native_input_or(
+            &action_state,
+            action,
+            "cache_save",
+            "true",
+        ));
+        let script = setup_mise_script(
+            install,
+            &version,
+            &install_args,
+            &working_directory,
+            &cache_key_prefix,
+            cache_save,
+        );
         let mut result = self.native_shell(container, state, &script, timeout)?;
+        // A shell failure can occur before the environment export files are
+        // written (for example, a failed tool install or `mise env`). Preserve
+        // that step failure and its diagnostics instead of turning it into a
+        // daemon-cycle error while trying to read a file that cannot exist.
+        if result.code != 0 {
+            return Ok(native_command_result(result, StepCommandState::default()));
+        }
+        let temp_host = state
+            .temp_host
+            .as_deref()
+            .context("mise adapter requires the mounted job temp directory")?;
+        let env_path = temp_host.join("_velnor/mise-env.json");
+        let redacted_path = temp_host.join("_velnor/mise-env-redacted.json");
+        let exported_env = fs::read_to_string(&env_path)
+            .with_context(|| format!("read mise environment from {}", env_path.display()))?;
+        let redacted_env = fs::read_to_string(&redacted_path).with_context(|| {
+            format!(
+                "read mise redacted environment from {}",
+                redacted_path.display()
+            )
+        })?;
+        let (mut env, masks) = parse_mise_environment(&exported_env, &redacted_env)?;
+        let _ = fs::remove_file(&env_path);
+        let _ = fs::remove_file(&redacted_path);
         let mut path = vec![
             // Mise binary dir so subsequent steps can call `mise run ...` directly.
             "/opt/mise/bin".to_string(),
-            // Real cargo/rustc from rustup precedes the mise cargo shim so that
-            // `cargo install` inside mise tasks uses the actual toolchain. The mise
-            // shim exits with "cargo is not a valid shim" when rust/cargo are not
-            // in the active toolset but the real binary is not on PATH first.
-            "/root/.cargo/bin".to_string(),
-            // Mise shims for all other mise-managed tools
+            // Match mise-action: the repository-selected toolchain must win over
+            // anything baked into the job image. setup_mise_script keeps the
+            // rustup proxy ahead only while mise installs cargo-backed tools.
             "/opt/mise/shims".to_string(),
         ];
         // Add the active mise tool install bin dirs (emitted by setup_mise_script)
@@ -1912,6 +2067,10 @@ where
                 }
             }
         }
+        // Keep the image-baked rustup proxies as a final fallback for projects
+        // that do not select Rust through mise. They must never shadow an exact
+        // rust-toolchain.toml version resolved above.
+        path.push("/root/.cargo/bin".to_string());
         if result.stdout.contains("__VELNOR_MISE_BIN__") {
             let filtered: Vec<&str> = result
                 .stdout
@@ -1923,20 +2082,21 @@ where
                 result.stdout.push('\n');
             }
         }
+        env.extend([
+            ("MISE_DATA_DIR".to_string(), "/opt/mise".to_string()),
+            ("MISE_CACHE_DIR".to_string(), "/opt/mise/cache".to_string()),
+            (
+                "MISE_CONFIG_DIR".to_string(),
+                "/opt/mise/config".to_string(),
+            ),
+            ("MISE_TRUSTED_CONFIG_PATHS".to_string(), "/__w".to_string()),
+        ]);
         Ok(native_command_result(
             result,
             StepCommandState {
-                env: [
-                    ("MISE_DATA_DIR".to_string(), "/opt/mise".to_string()),
-                    ("MISE_CACHE_DIR".to_string(), "/opt/mise/cache".to_string()),
-                    (
-                        "MISE_CONFIG_DIR".to_string(),
-                        "/opt/mise/config".to_string(),
-                    ),
-                    ("MISE_TRUSTED_CONFIG_PATHS".to_string(), "/__w".to_string()),
-                ]
-                .into(),
+                env,
                 path,
+                masks,
                 ..StepCommandState::default()
             },
         ))
@@ -1951,6 +2111,21 @@ where
     ) -> Result<StepExecutionResult> {
         let result = self.native_shell(container, state, &sccache_setup_script(), timeout)?;
         Ok(native_command_result(result, StepCommandState::default()))
+    }
+
+    fn native_kache(
+        &mut self,
+        container: &JobContainerSpec,
+        _action: &NativeActionInvocation,
+        state: &JobExecutionState,
+        timeout: Duration,
+    ) -> Result<StepExecutionResult> {
+        let result = self.native_shell(container, state, &kache_setup_script(), timeout)?;
+        let mut command_state = StepCommandState::default();
+        command_state.set_env("KACHE_CACHE_DIR".into(), "/var/cache/kache".into());
+        command_state.set_env("KACHE_MAX_SIZE".into(), "20GiB".into());
+        command_state.set_env("RUSTC_WRAPPER".into(), "kache".into());
+        Ok(native_command_result(result, command_state))
     }
 
     fn native_setup_mold(
@@ -2271,9 +2446,17 @@ where
         if let Some(repository) = action_state.env.get("GITHUB_REPOSITORY") {
             set_env_value(&mut env, "RENOVATE_REPOSITORIES", repository);
         }
-        let args = container.run_docker_action_args("/github/workspace", &env, &image, None, &[]);
+        let secret_masks = action_state.secret_masks(&self.secret_masks);
+        let args = container.prepare_run_docker_action_args(
+            "/github/workspace",
+            &env,
+            &secret_masks,
+            &image,
+            None,
+            &[],
+        )?;
         Ok(native_command_result(
-            self.runner.run_timeout("docker", &args, timeout)?,
+            self.runner.run_timeout("docker", args.args(), timeout)?,
             StepCommandState::default(),
         ))
     }
@@ -2288,6 +2471,21 @@ where
         let action_state = state.with_env(state.resolve_env(&action.env));
         let name = native_input_or(&action_state, action, "name", "velnor-builder");
         let driver = native_input_or(&action_state, action, "driver", "docker-container");
+        let buildkitd_config_inline =
+            native_input(action, &action_state, "buildkitd-config-inline");
+        let buildkitd_config_container = if buildkitd_config_inline.is_empty() {
+            None
+        } else {
+            let config_name = format!("buildkitd-config-{}.toml", sanitize_artifact_name(&name));
+            let config_host = state
+                .temp_host
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("setup-buildx requires a runner temp directory"))?
+                .join(&config_name);
+            fs::write(&config_host, &buildkitd_config_inline)
+                .with_context(|| format!("write BuildKit config {}", config_host.display()))?;
+            Some(format!("/__t/{config_name}"))
+        };
         let inspect_args = vec!["buildx".to_string(), "inspect".to_string(), name.clone()];
         let inspect_result =
             self.container_docker(container, &action_state, &inspect_args, None, timeout)?;
@@ -2304,6 +2502,9 @@ where
                 driver,
                 "--use".to_string(),
             ];
+            if let Some(config) = buildkitd_config_container {
+                args.extend(["--config".to_string(), config]);
+            }
             if input_truthy(&native_input_or(&action_state, action, "install", "false")) {
                 args.push("--bootstrap".to_string());
             }
@@ -2346,6 +2547,14 @@ where
         );
         let username = native_input(action, &action_state, "username");
         let password = native_input(action, &action_state, "password");
+        if !password.is_empty()
+            && !crate::github_adapter::github_trust_scope_allows_host_docker(&self.trust_scope)
+        {
+            bail!(
+                "docker/login-action refuses registry credentials in trust scope '{}'; accepted trust scope: trusted",
+                self.trust_scope
+            );
+        }
         let args = vec![
             "login".to_string(),
             registry,
@@ -2581,6 +2790,46 @@ where
             .ok_or_else(|| anyhow::anyhow!("paths-filter requires a workspace"))?;
         let base = paths_filter_base_ref(state);
         let head = paths_filter_head_ref(state);
+        if let (Some(base), Some(head)) = (base.as_deref(), head.as_deref()) {
+            let missing = [base, head].iter().any(|git_ref| {
+                let args = vec![
+                    "-C".to_string(),
+                    workspace.display().to_string(),
+                    "cat-file".to_string(),
+                    "-e".to_string(),
+                    format!("{git_ref}^{{commit}}"),
+                ];
+                match self.runner.run("git", &args) {
+                    Ok(result) => result.code != 0,
+                    Err(_) => true,
+                }
+            });
+            if missing {
+                let fetch_base = base.strip_prefix("origin/").map_or_else(
+                    || base.to_string(),
+                    |branch| format!("+refs/heads/{branch}:refs/remotes/origin/{branch}"),
+                );
+                let fetch_args = vec![
+                    "-C".to_string(),
+                    workspace.display().to_string(),
+                    "fetch".to_string(),
+                    "--no-tags".to_string(),
+                    "--depth=10".to_string(),
+                    "origin".to_string(),
+                    fetch_base,
+                    head.to_string(),
+                ];
+                let fetched = self.runner.run("git", &fetch_args)?;
+                if fetched.code != 0 {
+                    bail!(
+                        "git {} failed with code {}: {}",
+                        fetch_args.join(" "),
+                        fetched.code,
+                        fetched.stderr
+                    );
+                }
+            }
+        }
         let mut args = vec![
             "-C".to_string(),
             workspace.display().to_string(),
@@ -2589,7 +2838,7 @@ where
         ];
         args.push(match (base.as_deref(), head.as_deref()) {
             (Some(base), Some(head)) if !base.is_empty() && !head.is_empty() => {
-                format!("{base}..{head}")
+                format!("{base}...{head}")
             }
             (Some(base), _) if !base.is_empty() => format!("{base}..HEAD"),
             _ => "HEAD".to_string(),
@@ -2615,25 +2864,38 @@ where
         Ok(files)
     }
 
-    fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
+    pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
+        let service_result = self.cleanup_services(container);
+        let network_result = self.run_docker(&container.remove_network_args());
+
+        container_result?;
+        service_result?;
+        network_result?;
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_services(&mut self, container: &JobContainerSpec) -> Result<()> {
         let service_results = container
             .services
             .iter()
             .rev()
             .map(|service| self.run_docker(&service.remove_args()))
             .collect::<Vec<_>>();
-        let network_result = self.run_docker(&container.remove_network_args());
-
-        container_result?;
         for service_result in service_results {
             service_result?;
         }
-        network_result?;
         Ok(())
     }
 
-    fn start_job_environment(&mut self, container: &JobContainerSpec) -> Result<()> {
+    pub(crate) fn cleanup_job_and_network(&mut self, container: &JobContainerSpec) -> Result<()> {
+        self.run_docker_remove_container(&container.remove_container_args())?;
+        self.run_docker(&container.remove_network_args())?;
+        Ok(())
+    }
+
+    pub(crate) fn start_job_environment(&mut self, container: &JobContainerSpec) -> Result<()> {
+        let _span = tracing::info_span!("job-container-boot").entered();
         if let Err(error) = self.start_job_environment_once(container) {
             eprintln!("Docker job environment start failed, removing stale resources: {error:#}");
             self.cleanup_stale(container);
@@ -2652,12 +2914,23 @@ where
                 container.temp_host.display()
             )
         })?;
-        fs::create_dir_all(sccache_host(&container.temp_host)).with_context(|| {
-            format!(
-                "create shared sccache directory for {}",
-                container.temp_host.display()
-            )
-        })?;
+        let cache_host = match container.compiler_cache_backend {
+            crate::compiler_cache::CompilerCacheBackend::Sccache => {
+                Some(sccache_host(&container.temp_host))
+            }
+            crate::compiler_cache::CompilerCacheBackend::Kache => {
+                Some(kache_host(&container.temp_host))
+            }
+            crate::compiler_cache::CompilerCacheBackend::Off => None,
+        };
+        if let Some(cache_host) = cache_host {
+            fs::create_dir_all(cache_host).with_context(|| {
+                format!(
+                    "create shared compiler-cache directory for {}",
+                    container.temp_host.display()
+                )
+            })?;
+        }
         // The temp dir is bind-mounted over the job container's /tmp. A plain
         // create_dir_all yields 0755 owned by the daemon user, which leaves the
         // container's /tmp non-sticky and unwritable by non-root sandbox users
@@ -2681,8 +2954,50 @@ where
             self.wait_for_service(service)?;
         }
         self.run_docker(&container.start_args())?;
+        // Docker accepts repeated network-shaped create options with behavior
+        // that depends on option placement. Reconcile the runner-owned
+        // topology explicitly after every container exists, before any step
+        // can observe it. This also makes each workflow service key the exact
+        // embedded-DNS alias on the per-job network.
+        if !container.services.is_empty() {
+            self.run_docker(&container.disconnect_network_args())?;
+            self.run_docker(&container.connect_network_args())?;
+            for service in &container.services {
+                self.run_docker(&service.disconnect_network_args())?;
+                self.run_docker(&service.connect_network_args())?;
+            }
+            self.verify_service_dns(container)?;
+        }
         if container.verify_bind_mounts {
             self.verify_bind_mounts(container)?;
+        }
+        Ok(())
+    }
+
+    fn verify_service_dns(&mut self, container: &JobContainerSpec) -> Result<()> {
+        for service in &container.services {
+            let lookup = self.runner.run(
+                "docker",
+                &container.service_dns_args(&service.network_alias),
+            )?;
+            if lookup.code == 0 {
+                continue;
+            }
+            let network = self
+                .runner
+                .run("docker", &container.inspect_network_args())?;
+            let resolver = self
+                .runner
+                .run("docker", &container.resolver_state_args())?;
+            bail!(
+                "service DNS preflight failed for alias '{}' in job '{}': getent code={}, stderr={}; network={}; resolv.conf={}",
+                service.network_alias,
+                container.name,
+                lookup.code,
+                lookup.stderr.trim(),
+                network.stdout.trim(),
+                resolver.stdout.trim()
+            );
         }
         Ok(())
     }
@@ -2712,7 +3027,13 @@ where
         if image_id.is_empty() {
             return Ok(());
         }
-        let marker = store.join(".velnor-seeded-image");
+        // Executable installs are repository-scoped. A marker in the shared
+        // download-cache root lets the first repository suppress seeding for
+        // every later repository, leaving baked shims (notably `gh`) dangling.
+        // Keep the image marker beside the exact executable store it governs.
+        let marker = container
+            .mise_executable_store_host()
+            .join(".velnor-seeded-image");
         if fs::read_to_string(&marker)
             .map(|seeded| seeded.trim() == image_id)
             .unwrap_or(false)
@@ -2911,10 +3232,20 @@ fn rewrite_command_file_env_for_action_container(env: &mut [(String, String)]) {
     }
 }
 
-fn setup_mise_script(install: bool, install_args: &str, working_directory: &str) -> String {
+fn setup_mise_script(
+    install: bool,
+    version: &str,
+    install_args: &str,
+    working_directory: &str,
+    cache_key_prefix: &str,
+    cache_save: bool,
+) -> String {
+    let version = shell_single_quote(version);
     let install_args = shell_single_quote(install_args);
     let working_directory = shell_single_quote(working_directory);
+    let cache_key_prefix = shell_single_quote(cache_key_prefix);
     let install_flag = if install { "1" } else { "" };
+    let cache_save_flag = if cache_save { "1" } else { "" };
     format!(
         r#"set -e
 # Use the euid's home (/root) so rustup-init doesn't fail the $HOME vs euid check.
@@ -2934,15 +3265,42 @@ export MISE_DATA_DIR="$mise_home"
 export MISE_CACHE_DIR="$mise_home/cache"
 export MISE_CONFIG_DIR="$mise_home/config"
 export MISE_TRUSTED_CONFIG_PATHS="/__w"
-# Ensure mise itself can find cargo for 'cargo:' backend tools.
-export CARGO_HOME=/github/home/.cargo
-export RUSTUP_HOME=/root/.rustup
+# Match mise-action's process environment: do not override CARGO_HOME or
+# RUSTUP_HOME while mise resolves tools. Those overrides make mise's Rust
+# backend publish the image-baked rustup proxy directory as its active bin
+# path, silently selecting the baked toolchain instead of rust-toolchain.toml.
+# Cargo remains discoverable through PATH for cargo-backed mise tools.
+requested_version={version}
+install_requested="{install_flag}"
+cache_key_prefix={cache_key_prefix}
+cache_save_requested="{cache_save_flag}"
+# Upstream cache_save controls archive publication after installation, not
+# mutation of the action's local mise directory. Velnor replaces that remote
+# archive transport with its repository-scoped persistent mount, so both
+# policies use the local store and neither enables a remote backend.
+echo "Velnor local mise cache: generation=$cache_key_prefix cache_save=$cache_save_requested"
+if [ -n "$requested_version" ] || [ -n "$install_requested" ]; then
+  # All slots share the mounted mise binary and tool store. One lock covers
+  # the version transition, tool installation, and environment export so a
+  # concurrent job cannot observe a mixed generation.
+  exec 9>"$mise_home/cache/.velnor-install.lock"
+  flock -x 9
+fi
+if [ -n "$requested_version" ]; then
+  # mise-action v4 makes an explicit version observable even when a different
+  # binary already exists. This is the same exact self-update command used by
+  # upstream v4 when the installed and requested versions differ.
+  installed_version=$(mise --version | awk '{{print $1}}' | sed 's/^v//')
+  if [ "$installed_version" != "$requested_version" ]; then
+    mise self-update "$requested_version" -y
+  fi
+fi
 install_args={install_args}
 working_directory={working_directory}
 if [ -n "$working_directory" ]; then
   cd "$working_directory"
 fi
-if [ -n "{install_flag}" ]; then
+if [ -n "$install_requested" ]; then
   # Trust the workspace config so mise actually reads mise.toml from the checkout.
   for f in "/__w/mise.toml" "/__w/.mise.toml" "/__w/.mise/config.toml"; do
     [ -f "$f" ] && mise trust "$f" 2>/dev/null || true
@@ -2973,10 +3331,42 @@ fi
   find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d 2>/dev/null || true
   find "$mise_home/installs" -mindepth 3 -maxdepth 3 -type d -name bin 2>/dev/null || true
 }} | awk 'NF && !seen[$0]++ {{ print "__VELNOR_MISE_BIN__" $0 }}'
+# Match mise-action's environment export. Write through the job temp mount so
+# values never enter the streamed action log; native_mise reads and deletes
+# these files, exports every non-PATH string, and registers redacted values as
+# masks before subsequent steps can emit them.
+umask 077
+mkdir -p /__t/_velnor
+mise env --redacted --json > /__t/_velnor/mise-env-redacted.json
+mise env --json > /__t/_velnor/mise-env.json
 echo "mise install completed, cargo: $(command -v cargo 2>/dev/null || echo 'not found')"
 mise --version
 "#,
     )
+}
+
+fn parse_mise_environment(
+    exported_json: &str,
+    redacted_json: &str,
+) -> Result<(BTreeMap<String, String>, Vec<String>)> {
+    let exported: BTreeMap<String, Value> =
+        serde_json::from_str(exported_json).context("parse mise environment JSON")?;
+    let redacted: BTreeMap<String, Value> =
+        serde_json::from_str(redacted_json).context("parse mise redacted environment JSON")?;
+    let env = exported
+        .into_iter()
+        .filter_map(|(key, value)| {
+            (key.to_uppercase() != "PATH")
+                .then(|| value.as_str().map(|value| (key, value.to_string())))
+                .flatten()
+        })
+        .collect();
+    let masks = redacted
+        .into_values()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .filter(|value| !value.is_empty())
+        .collect();
+    Ok((env, masks))
 }
 
 fn sccache_setup_script() -> String {
@@ -2988,20 +3378,8 @@ fn sccache_setup_script() -> String {
     // SCCACHE_GHA_ENABLED + the ACTIONS_RESULTS_URL/ACTIONS_RUNTIME_TOKEN env that
     // Velnor injects let sccache use the GitHub Actions cache backend.
     r#"set -e
-if ! command -v sccache >/dev/null 2>&1; then
-  ver="v0.15.0"
-  case "$(uname -m)" in
-    x86_64) arch="x86_64-unknown-linux-musl" ;;
-    aarch64|arm64) arch="aarch64-unknown-linux-musl" ;;
-    *) echo "unsupported arch $(uname -m) for sccache" >&2; exit 1 ;;
-  esac
-  tmp="$(mktemp -d)"
-  curl -fsSL "https://github.com/mozilla/sccache/releases/download/${ver}/sccache-${ver}-${arch}.tar.gz" -o "$tmp/sccache.tar.gz"
-  tar -xzf "$tmp/sccache.tar.gz" -C "$tmp"
-  install -m 0755 "$tmp/sccache-${ver}-${arch}/sccache" /usr/local/bin/sccache
-  rm -rf "$tmp"
-fi
-sccache --version
+command -v sccache >/dev/null 2>&1 || { echo 'sccache v0.16.0 must be preinstalled in the job image' >&2; exit 1; }
+sccache --version | grep -F 'sccache 0.16.0'
 # Velnor provides a fast, host-shared sccache cache bind-mounted at
 # /var/cache/sccache. Use that local backend instead of the GitHub Actions cache
 # service: this is not a GitHub-hosted cache environment, so SCCACHE_GHA_ENABLED
@@ -3016,8 +3394,30 @@ if [ -n "${GITHUB_ENV:-}" ]; then
 fi
 export SCCACHE_DIR="$SCCACHE_LOCAL_DIR"
 export SCCACHE_GHA_ENABLED=false
+export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-20G}"
+if [ -n "${GITHUB_ENV:-}" ]; then
+  echo "SCCACHE_CACHE_SIZE=$SCCACHE_CACHE_SIZE" >> "$GITHUB_ENV"
+fi
 # Best-effort: cargo will auto-start the server on first use anyway.
 sccache --start-server 2>/dev/null || true
+"#
+    .to_string()
+}
+
+fn kache_setup_script() -> String {
+    r#"set -e
+command -v kache >/dev/null 2>&1 || { echo 'kache v0.10.0 must be preinstalled in the job image' >&2; exit 1; }
+kache --version | grep -F 'kache 0.10.0'
+mkdir -p /var/cache/kache
+export KACHE_CACHE_DIR=/var/cache/kache
+export KACHE_MAX_SIZE=20GiB
+export RUSTC_WRAPPER=kache
+if [ -n "${GITHUB_ENV:-}" ]; then
+  echo 'KACHE_CACHE_DIR=/var/cache/kache' >> "$GITHUB_ENV"
+  echo 'KACHE_MAX_SIZE=20GiB' >> "$GITHUB_ENV"
+  echo 'RUSTC_WRAPPER=kache' >> "$GITHUB_ENV"
+fi
+kache stats >/dev/null
 "#
     .to_string()
 }
@@ -3200,6 +3600,7 @@ fn native_post_condition(adapter: NativeActionAdapter) -> Option<&'static str> {
         NativeActionAdapter::RustCache => Some("success() || env.CACHE_ON_FAILURE == 'true'"),
         // Sccache post step stops the server (always run, matches GitHub's behavior).
         NativeActionAdapter::Sccache => Some("always()"),
+        NativeActionAdapter::Kache => Some("always()"),
         // GitHub's setup-buildx post removes the builder it created.
         NativeActionAdapter::DockerSetupBuildx => Some("always()"),
         // GitHub's login-action post logs out (drops registry credentials).
@@ -3272,6 +3673,14 @@ fn native_cache(
     if !path.is_empty() {
         stdout.push_str(&format!("{ANSI_CYAN}Cache path: {path}{ANSI_RESET}\n"));
     }
+    let summary = if persistent_paths > 0 && persistent_paths == cache_paths(&path).len() {
+        "## Velnor cache report\n- Backend: actions/cache (native)\n- Store: host-persistent cache class\n- Result: host-persistent store — restore/save skipped\n".to_string()
+    } else {
+        format!(
+            "## Velnor cache report\n- Backend: actions/cache (native)\n- Key: `{key}`\n- Result: {}\n- Restore: {restore_ms} ms\n",
+            matched_key.as_deref().unwrap_or("miss")
+        )
+    };
 
     Ok(StepExecutionResult {
         exit_code: if fail_on_cache_miss && matched_key.is_none() {
@@ -3282,6 +3691,7 @@ fn native_cache(
         state: StepCommandState {
             outputs,
             state: state_values,
+            summary,
             ..StepCommandState::default()
         },
         skipped: false,
@@ -3328,11 +3738,20 @@ fn native_rust_cache(
     } else {
         format!("{ANSI_YELLOW}Rust cache miss for shared key '{shared_key}'{ANSI_RESET}\n")
     };
+    let summary = if persistent_target {
+        "## Velnor cache report\n- Backend: rust-cache (native)\n- Store: host-persistent target class\n- Result: host-persistent store — restore/save skipped\n".to_string()
+    } else {
+        format!(
+            "## Velnor cache report\n- Backend: rust-cache (native)\n- Key: `{shared_key}`\n- Result: {}\n- Restore: {restore_ms} ms\n",
+            if cache_hit { "hit" } else { "miss" }
+        )
+    };
     Ok(StepExecutionResult {
         exit_code: 0,
         state: StepCommandState {
             outputs,
             env: [("CACHE_ON_FAILURE".to_string(), cache_on_failure)].into(),
+            summary,
             ..StepCommandState::default()
         },
         skipped: false,
@@ -3371,7 +3790,12 @@ fn native_rust_cache_save(
         .get(step_id)
         .and_then(|outputs| outputs.get("cache-hit"))
         .is_some_and(|value| value == "true");
-    save_cache_result(&action_state, &key, &path, exact_hit)
+    let mut result = save_cache_result(&action_state, &key, &path, exact_hit)?;
+    result.state.summary = result
+        .state
+        .summary
+        .replace("actions/cache (native post)", "rust-cache (native post)");
+    Ok(result)
 }
 
 /// `type=gha` buildx cache options pay GitHub's cache API latency from the
@@ -3538,8 +3962,8 @@ fn velnor_persistent_cache_path(path: &str) -> bool {
     }
     path == "/opt/mise"
         || path.starts_with("/opt/mise/")
-        || path == "/__cargo_target"
-        || path.starts_with("/__cargo_target/")
+        || path == "/__w/target"
+        || path.starts_with("/__w/target/")
         || path == "/root/.rustup"
         || path.starts_with("/root/.rustup/")
         || path == "/var/cache/sccache"
@@ -3554,18 +3978,11 @@ fn rust_cache_covered_by_persistent_storage(
     if !paths.is_empty() {
         return paths.iter().all(|path| velnor_persistent_cache_path(path));
     }
-    state
-        .env
-        .get("CARGO_TARGET_DIR")
-        .is_some_and(|path| velnor_persistent_cache_path(path))
+    state.persistent_workspace_target
 }
 
 fn container_runtime_env(container: &JobContainerSpec) -> Vec<(String, String)> {
-    let mut env = container.env.clone();
-    if container.cargo_target_host.is_some() {
-        env.push(("CARGO_TARGET_DIR".into(), "/__cargo_target".into()));
-    }
-    env
+    container.env.clone()
 }
 
 fn save_cache_result(
@@ -3683,9 +4100,21 @@ fn cache_staging_name(cache_file_name: &str) -> String {
 }
 
 fn cache_save_step_result(exit_code: i32, stdout: &str, stderr: &str) -> StepExecutionResult {
+    let result = if stdout.contains("host-persistent storage") {
+        "host-persistent store — restore/save skipped"
+    } else if stderr.is_empty() {
+        "save completed"
+    } else {
+        "save skipped"
+    };
     StepExecutionResult {
         exit_code,
-        state: StepCommandState::default(),
+        state: StepCommandState {
+            summary: format!(
+                "## Velnor cache report\n- Backend: actions/cache (native post)\n- Result: {result}\n"
+            ),
+            ..StepCommandState::default()
+        },
         skipped: false,
         failure_ignored: false,
         stdout: stdout.to_string(),
@@ -3705,6 +4134,17 @@ fn native_upload_artifact(
     let include_hidden_files =
         input_truthy(&native_input(action, &action_state, "include-hidden-files"));
     let overwrite = input_truthy(&native_input(action, &action_state, "overwrite"));
+    // The strict manifest admits only the estate-approved v4 value `0`.
+    // upload-artifact defines it as no compression (ZIP Stored).
+    let store_uncompressed =
+        artifact_store_uncompressed(&native_input(action, &action_state, "compression-level"));
+    let retention_days = artifact_retention_days(
+        &native_input(action, &action_state, "retention-days"),
+        action_state
+            .env
+            .get("GITHUB_RETENTION_DAYS")
+            .map(String::as_str),
+    );
     let artifact_dir = artifact_store_dir(state)?.join(sanitize_artifact_name(&name));
     if artifact_dir.exists() {
         // Always overwrite in Velnor: re-runs on the same slot reuse the artifact store,
@@ -3747,7 +4187,7 @@ fn native_upload_artifact(
         });
     }
 
-    let artifact_id = artifact_id_for_name(state, &name);
+    let mut artifact_id = artifact_id_for_name(state, &name);
     let digest = hash_artifact_dir(&artifact_dir)?;
     let results_url = action_state
         .env
@@ -3776,28 +4216,35 @@ fn native_upload_artifact(
                 }
             }
             if !zip_files.is_empty() {
-                if let Err(e) = crate::protocol::upload_artifact_blocking(
+                match crate::protocol::upload_artifact_blocking(
                     &results_url,
                     runtime_token,
                     &plan_id,
                     &job_id,
                     &name,
                     &zip_files,
+                    crate::protocol::ArtifactUploadOptions {
+                        store_uncompressed,
+                        retention_days,
+                    },
                 ) {
-                    let message =
-                        format!("Results Service artifact upload failed for '{name}': {e:#}\n");
-                    eprintln!("{message}");
-                    return Ok(StepExecutionResult {
-                        exit_code: 1,
-                        state: StepCommandState::default(),
-                        skipped: false,
-                        failure_ignored: false,
-                        stdout: format!(
-                            "Saved local artifact '{name}' with {} path(s)\n",
-                            uploaded.len()
-                        ),
-                        stderr: message,
-                    });
+                    Ok(id) => artifact_id = id,
+                    Err(e) => {
+                        let message =
+                            format!("Results Service artifact upload failed for '{name}': {e:#}\n");
+                        eprintln!("{message}");
+                        return Ok(StepExecutionResult {
+                            exit_code: 1,
+                            state: StepCommandState::default(),
+                            skipped: false,
+                            failure_ignored: false,
+                            stdout: format!(
+                                "Saved local artifact '{name}' with {} path(s)\n",
+                                uploaded.len()
+                            ),
+                            stderr: message,
+                        });
+                    }
                 }
             }
         }
@@ -3828,6 +4275,16 @@ fn native_upload_artifact(
     })
 }
 
+fn artifact_store_uncompressed(compression_level: &str) -> bool {
+    compression_level.trim() == "0"
+}
+
+fn artifact_retention_days(input: &str, repository_max: Option<&str>) -> Option<u8> {
+    let requested = input.trim().parse::<u8>().ok()?;
+    let maximum = repository_max.and_then(|value| value.trim().parse::<u8>().ok());
+    Some(maximum.map_or(requested, |limit| requested.min(limit)))
+}
+
 fn native_download_artifact(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
@@ -3842,18 +4299,77 @@ fn native_download_artifact(
     fs::create_dir_all(&destination)
         .with_context(|| format!("create artifact download dir {}", destination.display()))?;
 
-    let store = artifact_store_dir(state)?;
-    let artifacts = matching_artifacts(&store, &name, &pattern)?;
-    for (artifact_name, artifact_dir) in &artifacts {
-        let target = if merge_multiple || !name.is_empty() {
-            destination.clone()
+    let downloaded_count = if let Some(runtime_token) = action_state
+        .env
+        .get("ACTIONS_RUNTIME_TOKEN")
+        .filter(|token| !token.is_empty())
+    {
+        let results_url = action_state
+            .env
+            .get("ACTIONS_RESULTS_URL")
+            .filter(|url| !url.is_empty())
+            .context("download-artifact requires ACTIONS_RESULTS_URL")?;
+        let (plan_id, job_id) = artifact_backend_ids_from_token(runtime_token)
+            .context("download-artifact runtime token is missing workflow backend IDs")?;
+        let remote = crate::protocol::download_artifacts_blocking(
+            results_url,
+            runtime_token,
+            &plan_id,
+            &job_id,
+        )?;
+        let matcher = if pattern.is_empty() {
+            None
         } else {
-            destination.join(artifact_name)
+            let mut builder = GlobSetBuilder::new();
+            builder.add(Glob::new(&pattern)?);
+            Some(builder.build().context("build artifact pattern")?)
         };
-        fs::create_dir_all(&target)
-            .with_context(|| format!("create artifact target {}", target.display()))?;
-        copy_artifact_download_contents(artifact_dir, &target)?;
-    }
+        let selected = remote
+            .into_iter()
+            .filter(|artifact| {
+                if !name.is_empty() {
+                    artifact.name == name
+                } else if let Some(matcher) = &matcher {
+                    matcher.is_match(&artifact.name)
+                } else {
+                    true
+                }
+            })
+            .collect::<Vec<_>>();
+        for artifact in &selected {
+            let target = if merge_multiple || !name.is_empty() {
+                destination.clone()
+            } else {
+                destination.join(&artifact.name)
+            };
+            for (relative, content) in &artifact.files {
+                let output = target.join(relative);
+                if let Some(parent) = output.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("create artifact target {}", parent.display()))?;
+                }
+                fs::write(&output, content)
+                    .with_context(|| format!("write artifact file {}", output.display()))?;
+            }
+        }
+        selected.len()
+    } else {
+        // Unit/offline fallback. Product jobs always carry Results Service
+        // credentials and therefore use the host-independent v4 path above.
+        let store = artifact_store_dir(state)?;
+        let artifacts = matching_artifacts(&store, &name, &pattern)?;
+        for (artifact_name, artifact_dir) in &artifacts {
+            let target = if merge_multiple || !name.is_empty() {
+                destination.clone()
+            } else {
+                destination.join(artifact_name)
+            };
+            fs::create_dir_all(&target)
+                .with_context(|| format!("create artifact target {}", target.display()))?;
+            copy_artifact_download_contents(artifact_dir, &target)?;
+        }
+        artifacts.len()
+    };
 
     let mut outputs = BTreeMap::new();
     outputs.insert(
@@ -3862,15 +4378,15 @@ fn native_download_artifact(
     );
 
     Ok(StepExecutionResult {
-        exit_code: if artifacts.is_empty() { 1 } else { 0 },
+        exit_code: if downloaded_count == 0 { 1 } else { 0 },
         state: StepCommandState {
             outputs,
             ..StepCommandState::default()
         },
         skipped: false,
         failure_ignored: false,
-        stdout: format!("Downloaded {} artifact(s)\n", artifacts.len()),
-        stderr: if artifacts.is_empty() {
+        stdout: format!("Downloaded {downloaded_count} artifact(s)\n"),
+        stderr: if downloaded_count == 0 {
             "No artifacts matched the requested name or pattern\n".to_string()
         } else {
             String::new()
@@ -3901,29 +4417,385 @@ fn native_upload_pages_artifact(
     })
 }
 
-fn native_deploy_pages(
+fn native_configure_pages(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
-) -> StepExecutionResult {
+) -> Result<StepExecutionResult> {
     let action_state = state.with_env(state.resolve_env(&action.env));
     let repository = action_state
         .env
         .get("GITHUB_REPOSITORY")
-        .cloned()
-        .unwrap_or_default();
-    let page_url = pages_url_for_repository(&repository);
-    let artifact_name = native_input_or(&action_state, action, "artifact_name", "github-pages");
-    StepExecutionResult {
+        .filter(|value| !value.trim().is_empty())
+        .context("actions/configure-pages requires GITHUB_REPOSITORY")?;
+    let api_url = action_state
+        .env
+        .get("GITHUB_API_URL")
+        .map(String::as_str)
+        .unwrap_or("https://api.github.com")
+        .trim_end_matches('/');
+    let token = {
+        let input = native_input(action, &action_state, "token");
+        if input.trim().is_empty() {
+            action_state
+                .env
+                .get("GITHUB_TOKEN")
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            input
+        }
+    };
+    if token.trim().is_empty() {
+        bail!("actions/configure-pages requires input 'token' or GITHUB_TOKEN");
+    }
+    let endpoint = format!("{api_url}/repos/{repository}/pages");
+    let response = reqwest::blocking::Client::new()
+        .get(&endpoint)
+        .bearer_auth(&token)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "velnor-runner")
+        .send()
+        .with_context(|| format!("get Pages site for {repository}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().unwrap_or_default();
+        bail!(
+            "get Pages site for {repository} failed with HTTP {status}: {}",
+            body.trim()
+        );
+    }
+    let page: Value = response
+        .json()
+        .with_context(|| format!("decode Pages site for {repository}"))?;
+    let html_url = page
+        .get("html_url")
+        .and_then(Value::as_str)
+        .context("Pages response is missing html_url")?;
+    let outputs = pages_site_outputs(html_url)?;
+    let base_url = outputs["base_url"].clone();
+
+    Ok(StepExecutionResult {
         exit_code: 0,
         state: StepCommandState {
-            outputs: [("page_url".to_string(), page_url.clone())].into(),
+            outputs,
+            env: [("GITHUB_PAGES".to_string(), "true".to_string())].into(),
+            ..StepCommandState::default()
+        },
+        skipped: false,
+        failure_ignored: false,
+        stdout: format!("Configured GitHub Pages at {base_url}\n"),
+        stderr: String::new(),
+    })
+}
+
+fn pages_site_outputs(html_url: &str) -> Result<BTreeMap<String, String>> {
+    let site_url = url::Url::parse(html_url).context("Pages html_url is invalid")?;
+    let base_url = site_url.as_str().trim_end_matches('/').to_string();
+    let base_path = site_url.path().trim_end_matches('/').to_string();
+    Ok([
+        ("base_url".to_string(), base_url),
+        (
+            "origin".to_string(),
+            site_url.origin().ascii_serialization(),
+        ),
+        (
+            "host".to_string(),
+            site_url.host_str().unwrap_or_default().to_string(),
+        ),
+        ("base_path".to_string(), base_path),
+    ]
+    .into())
+}
+
+fn native_deploy_pages(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let repository = action_state
+        .env
+        .get("GITHUB_REPOSITORY")
+        .filter(|value| !value.is_empty())
+        .context("actions/deploy-pages requires GITHUB_REPOSITORY")?;
+    let build_version = action_state
+        .env
+        .get("GITHUB_SHA")
+        .filter(|value| !value.is_empty())
+        .context("actions/deploy-pages requires GITHUB_SHA")?;
+    let github_token = {
+        let input = native_input(action, &action_state, "token");
+        if input.is_empty() {
+            action_state
+                .env
+                .get("GITHUB_TOKEN")
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            input
+        }
+    };
+    if github_token.is_empty() {
+        bail!("actions/deploy-pages requires input 'token' or GITHUB_TOKEN");
+    }
+    let runtime_token = action_state
+        .env
+        .get("ACTIONS_RUNTIME_TOKEN")
+        .filter(|value| !value.is_empty())
+        .context("actions/deploy-pages requires ACTIONS_RUNTIME_TOKEN")?;
+    let results_url = action_state
+        .env
+        .get("ACTIONS_RESULTS_URL")
+        .filter(|value| !value.is_empty())
+        .context("actions/deploy-pages requires ACTIONS_RESULTS_URL")?
+        .trim_end_matches('/');
+    let oidc_url = action_state
+        .env
+        .get("ACTIONS_ID_TOKEN_REQUEST_URL")
+        .filter(|value| !value.is_empty())
+        .context("actions/deploy-pages requires ACTIONS_ID_TOKEN_REQUEST_URL")?;
+    let oidc_request_token = action_state
+        .env
+        .get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+        .filter(|value| !value.is_empty())
+        .context("actions/deploy-pages requires ACTIONS_ID_TOKEN_REQUEST_TOKEN")?;
+    let (plan_id, job_id) = artifact_backend_ids_from_token(runtime_token)
+        .context("actions/deploy-pages runtime token is missing workflow backend IDs")?;
+    let artifact_name = native_input_or(&action_state, action, "artifact_name", "github-pages");
+    let api_url = action_state
+        .env
+        .get("GITHUB_API_URL")
+        .map(String::as_str)
+        .unwrap_or("https://api.github.com")
+        .trim_end_matches('/');
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("velnor-runner")
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("build Pages HTTP client")?;
+
+    let artifacts: Value = pages_json_response(
+        client
+            .post(format!(
+                "{results_url}/twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts"
+            ))
+            .bearer_auth(runtime_token)
+            .json(&serde_json::json!({
+                "workflow_run_backend_id": plan_id,
+                "workflow_job_run_backend_id": job_id,
+                "name_filter": {"value": artifact_name}
+            }))
+            .send()
+            .context("list Pages artifacts")?,
+        "list Pages artifacts",
+    )?;
+    let matching = artifacts
+        .get("artifacts")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|artifact| artifact.get("name").and_then(Value::as_str) == Some(&artifact_name))
+        .collect::<Vec<_>>();
+    if matching.len() != 1 {
+        bail!(
+            "expected exactly one Pages artifact named '{artifact_name}', found {}",
+            matching.len()
+        );
+    }
+    let artifact_id = matching[0]
+        .get("database_id")
+        .or_else(|| matching[0].get("databaseId"))
+        .or_else(|| matching[0].get("id"))
+        .filter(|value| value.is_string() || value.is_number())
+        .cloned()
+        .context("Pages artifact is missing database_id")?;
+
+    let oidc: Value = pages_json_response(
+        client
+            .get(oidc_url)
+            .bearer_auth(oidc_request_token)
+            .send()
+            .context("request Pages OIDC token")?,
+        "request Pages OIDC token",
+    )?;
+    let oidc_token = oidc
+        .get("value")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("Pages OIDC response is missing value")?;
+    let preview = native_input_or(&action_state, action, "preview", "false") == "true";
+    let mut payload = serde_json::json!({
+        "artifact_id": artifact_id,
+        "pages_build_version": build_version,
+        "oidc_token": oidc_token
+    });
+    if preview {
+        payload["preview"] = Value::Bool(true);
+    }
+    let deployment: Value = pages_json_response(
+        client
+            .post(format!("{api_url}/repos/{repository}/pages/deployments"))
+            .bearer_auth(&github_token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .json(&payload)
+            .send()
+            .context("create Pages deployment")?,
+        "create Pages deployment",
+    )?;
+    let deployment_id = deployment
+        .get("id")
+        .and_then(json_scalar_string)
+        .or_else(|| {
+            deployment
+                .get("status_url")
+                .and_then(Value::as_str)
+                .and_then(|url| url.rsplit('/').next())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| build_version.clone());
+    let mut page_url = deployment
+        .get("page_url")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| pages_url_for_repository(repository));
+    let requested_timeout = native_u64_input(action, &action_state, "timeout", 600_000);
+    let timeout = if requested_timeout == 0 {
+        600_000
+    } else {
+        requested_timeout.min(600_000)
+    };
+    let interval = native_u64_input(action, &action_state, "reporting_interval", 5_000);
+    let max_errors = native_u64_input(action, &action_state, "error_count", 10).max(1);
+    let started = std::time::Instant::now();
+    let status_url = format!("{api_url}/repos/{repository}/pages/deployments/{deployment_id}");
+    let mut errors = 0_u64;
+    loop {
+        if interval > 0 {
+            std::thread::sleep(Duration::from_millis(interval));
+        }
+        let response = client
+            .get(&status_url)
+            .bearer_auth(&github_token)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send();
+        match response {
+            Ok(response) if response.status().is_success() => {
+                let status: Value = response.json().context("decode Pages deployment status")?;
+                if let Some(url) = status.get("page_url").and_then(Value::as_str) {
+                    page_url = url.to_string();
+                }
+                match status.get("status").and_then(Value::as_str).unwrap_or("") {
+                    "succeed" => break,
+                    "deployment_failed"
+                    | "deployment_content_failed"
+                    | "deployment_cancelled"
+                    | "deployment_lost" => {
+                        bail!(
+                            "Pages deployment {deployment_id} failed with status {}",
+                            status["status"]
+                        )
+                    }
+                    _ => {}
+                }
+            }
+            Ok(response) => {
+                errors += 1;
+                if errors >= max_errors {
+                    cancel_pages_deployment(
+                        &client,
+                        api_url,
+                        repository,
+                        &deployment_id,
+                        &github_token,
+                    );
+                    bail!(
+                        "Pages deployment status failed with HTTP {}",
+                        response.status()
+                    );
+                }
+            }
+            Err(error) => {
+                errors += 1;
+                if errors >= max_errors {
+                    cancel_pages_deployment(
+                        &client,
+                        api_url,
+                        repository,
+                        &deployment_id,
+                        &github_token,
+                    );
+                    return Err(error).context("get Pages deployment status");
+                }
+            }
+        }
+        if started.elapsed() >= Duration::from_millis(timeout) {
+            cancel_pages_deployment(&client, api_url, repository, &deployment_id, &github_token);
+            bail!("Pages deployment {deployment_id} timed out after {timeout} ms");
+        }
+    }
+
+    Ok(StepExecutionResult {
+        exit_code: 0,
+        state: StepCommandState {
+            outputs: [
+                ("page_url".to_string(), page_url.clone()),
+                ("status".to_string(), "succeed".to_string()),
+            ]
+            .into(),
             ..StepCommandState::default()
         },
         skipped: false,
         failure_ignored: false,
         stdout: format!("Deployed Pages artifact '{artifact_name}' to {page_url}\n"),
         stderr: String::new(),
+    })
+}
+
+fn pages_json_response(response: reqwest::blocking::Response, operation: &str) -> Result<Value> {
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().unwrap_or_default();
+        bail!("{operation} failed with HTTP {status}: {}", body.trim());
     }
+    response
+        .json()
+        .with_context(|| format!("decode {operation} response"))
+}
+
+fn json_scalar_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn native_u64_input(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+    name: &str,
+    default: u64,
+) -> u64 {
+    native_input(action, state, name).parse().unwrap_or(default)
+}
+
+fn cancel_pages_deployment(
+    client: &reqwest::blocking::Client,
+    api_url: &str,
+    repository: &str,
+    deployment_id: &str,
+    token: &str,
+) {
+    let _ = client
+        .post(format!(
+            "{api_url}/repos/{repository}/pages/deployments/{deployment_id}/cancel"
+        ))
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send();
 }
 
 fn native_docker_metadata(
@@ -3997,6 +4869,323 @@ fn native_github_runtime_export(
     }
 }
 
+fn native_github_script(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    const CONTRACT_OUTPUT: &str = "core.setOutput('docs-xtask', process.env.CONTRACT)";
+    const PREPARED_RUNTIME: &str =
+        "return await import(process.env.JACKIN_ACTION_RUNTIME).then(({ main }) => main())";
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let script = native_input(action, &action_state, "script");
+    if script == CONTRACT_OUTPUT {
+        let contract = action_state
+            .env
+            .get("CONTRACT")
+            .cloned()
+            .unwrap_or_default();
+        return Ok(native_success_with_state(StepCommandState {
+            outputs: [("docs-xtask".into(), contract)].into(),
+            ..StepCommandState::default()
+        }));
+    }
+    if script != PREPARED_RUNTIME {
+        bail!("unsupported native github-script body: {script}");
+    }
+    native_restore_prepared_jackin_tools(&action_state, state)
+}
+
+fn native_success_with_state(command_state: StepCommandState) -> StepExecutionResult {
+    StepExecutionResult {
+        exit_code: 0,
+        state: command_state,
+        skipped: false,
+        failure_ignored: false,
+        stdout: String::new(),
+        stderr: String::new(),
+    }
+}
+
+fn native_restore_prepared_jackin_tools(
+    action_state: &JobExecutionState,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let env = &action_state.env;
+    let enabled = |name: &str, default: bool| {
+        env.get(name)
+            .map(|value| value == "true")
+            .unwrap_or(default)
+    };
+    let include_tools = enabled("JACKIN_INCLUDE_TOOLS", false);
+    let include_xtask = enabled("JACKIN_INCLUDE_XTASK", true);
+    let allow_miss = enabled("JACKIN_ALLOW_MISS", false);
+    let mut tools_hit = include_tools && enabled("JACKIN_TOOLS_CACHE_HIT", false);
+    let mut xtask_hit = include_xtask && enabled("JACKIN_XTASK_CACHE_HIT", false);
+    let workspace_input = env
+        .get("JACKIN_WORKSPACE")
+        .context("native github-script requires JACKIN_WORKSPACE")?;
+    let workspace = resolve_host_path(state, workspace_input)
+        .context("JACKIN_WORKSPACE does not map to the job workspace")?;
+    let tools_dir = workspace.join(".ci-prebuilt-tools");
+    let xtask_dir = workspace.join(".ci-prebuilt-xtask");
+
+    if tools_hit && !prepared_jackin_tools_complete(&tools_dir) {
+        tools_hit = false;
+    }
+
+    if include_tools && !tools_hit {
+        let artifact = format!(
+            "ci-tools-{}-{}-{}",
+            required_env(env, "JACKIN_RUNNER_OS")?,
+            required_env(env, "JACKIN_RUNNER_ARCH")?,
+            required_env(env, "JACKIN_TOOLS_CONTRACT")?
+        );
+        tools_hit = restore_repository_artifact(env, &artifact, &tools_dir, allow_miss)?;
+        if tools_hit && !prepared_jackin_tools_complete(&tools_dir) {
+            if !allow_miss {
+                bail!("prepared CI tools artifact is incomplete: {artifact}");
+            }
+            tools_hit = false;
+        }
+    }
+    if include_xtask && !xtask_hit {
+        let prefix = format!(
+            "ci-xtask-{}-{}-",
+            required_env(env, "JACKIN_RUNNER_OS")?,
+            required_env(env, "JACKIN_RUNNER_ARCH")?
+        );
+        let primary = format!("{prefix}{}", required_env(env, "JACKIN_XTASK_CONTRACT")?);
+        xtask_hit = restore_repository_artifact(env, &primary, &xtask_dir, true)?;
+        if !xtask_hit {
+            if let Some(fallback) = env
+                .get("JACKIN_FALLBACK_XTASK_CONTRACT")
+                .filter(|value| !value.is_empty())
+            {
+                xtask_hit = restore_repository_artifact(
+                    env,
+                    &format!("{prefix}{fallback}"),
+                    &xtask_dir,
+                    allow_miss,
+                )?;
+            } else if !allow_miss {
+                bail!("prepared CI xtask artifact not found: {primary}");
+            }
+        }
+    }
+
+    let mut command_state = StepCommandState::default();
+    command_state
+        .outputs
+        .insert("tools-hit".into(), tools_hit.to_string());
+    command_state
+        .outputs
+        .insert("xtask-hit".into(), xtask_hit.to_string());
+    command_state
+        .env
+        .insert("CI_TOOLS_PATH".into(), to_container_path(state, &tools_dir));
+    command_state
+        .env
+        .insert("CI_TOOLS_HIT".into(), tools_hit.to_string());
+    if include_tools && tools_hit {
+        for entry in fs::read_dir(&tools_dir).context("read prepared tools directory")? {
+            let path = entry?.path();
+            if path.is_file() {
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+            }
+        }
+        command_state
+            .path
+            .push(to_container_path(state, &tools_dir));
+        let cargo_fuzz = tools_dir.join("cargo-fuzz");
+        if cargo_fuzz.exists() {
+            command_state.env.insert(
+                "CI_CARGO_FUZZ".into(),
+                to_container_path(state, &cargo_fuzz),
+            );
+        }
+    }
+    if include_xtask {
+        command_state
+            .env
+            .insert("CI_XTASK_HIT".into(), xtask_hit.to_string());
+        let xtask = if xtask_hit {
+            let prepared = xtask_dir.join("jackin-xtask");
+            fs::set_permissions(&prepared, fs::Permissions::from_mode(0o755))?;
+            prepared
+        } else {
+            workspace.join("target/debug/jackin-xtask")
+        };
+        command_state
+            .env
+            .insert("CI_XTASK".into(), to_container_path(state, &xtask));
+        let metadata = xtask_dir.join("workspace-metadata.json");
+        if metadata.exists() {
+            command_state
+                .env
+                .insert("CI_METADATA".into(), to_container_path(state, &metadata));
+        }
+    }
+    Ok(native_success_with_state(command_state))
+}
+
+fn prepared_jackin_tools_complete(directory: &Path) -> bool {
+    const REQUIRED: &[&str] = &[
+        "sccache",
+        "cargo-nextest",
+        "cargo-deny",
+        "cargo-shear",
+        "cargo-audit",
+        "cargo-dylint",
+        "cargo-fuzz",
+        "cargo-hack",
+        "cargo-hakari",
+        "cargo-llvm-cov",
+        "cargo-mutants",
+        "cargo-zigbuild",
+        "dylint-link",
+        "weaver",
+    ];
+    REQUIRED.iter().all(|tool| directory.join(tool).is_file())
+}
+
+fn required_env<'a>(env: &'a BTreeMap<String, String>, name: &str) -> Result<&'a str> {
+    env.get(name)
+        .map(String::as_str)
+        .filter(|value| !value.is_empty())
+        .with_context(|| format!("native github-script requires {name}"))
+}
+
+fn restore_repository_artifact(
+    env: &BTreeMap<String, String>,
+    name: &str,
+    destination: &Path,
+    allow_miss: bool,
+) -> Result<bool> {
+    let token = required_env(env, "JACKIN_TOKEN")?;
+    let repository = required_env(env, "JACKIN_REPOSITORY")?;
+    let (owner, repo) = repository
+        .split_once('/')
+        .context("JACKIN_REPOSITORY must be owner/repo")?;
+    let api = env
+        .get("GITHUB_API_URL")
+        .map(String::as_str)
+        .unwrap_or("https://api.github.com")
+        .trim_end_matches('/');
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("velnor-runner")
+        .timeout(std::time::Duration::from_secs(120))
+        .build()?;
+    let deadline = std::time::Instant::now()
+        + if allow_miss {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_secs(55)
+        };
+    loop {
+        let list_url =
+            format!("{api}/repos/{owner}/{repo}/actions/artifacts?name={name}&per_page=10");
+        let body: serde_json::Value = serde_json::from_slice(&repository_artifact_response(
+            || {
+                client
+                    .get(&list_url)
+                    .bearer_auth(token)
+                    .header("X-GitHub-Api-Version", "2022-11-28")
+            },
+            "list repository artifacts",
+        )?)?;
+        if let Some(id) = body["artifacts"]
+            .as_array()
+            .and_then(|items| items.iter().find(|item| item["expired"] != true))
+            .and_then(|item| item["id"].as_u64())
+        {
+            let archive_url = format!("{api}/repos/{owner}/{repo}/actions/artifacts/{id}/zip");
+            let archive = repository_artifact_response(
+                || {
+                    client
+                        .get(&archive_url)
+                        .bearer_auth(token)
+                        .header("X-GitHub-Api-Version", "2022-11-28")
+                },
+                "download repository artifact",
+            )?;
+            fs::create_dir_all(destination)?;
+            let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive))?;
+            for index in 0..zip.len() {
+                let mut file = zip.by_index(index)?;
+                let relative = file
+                    .enclosed_name()
+                    .context("artifact archive contains an unsafe path")?
+                    .to_path_buf();
+                let target = destination.join(relative);
+                if file.is_dir() {
+                    fs::create_dir_all(&target)?;
+                } else {
+                    if let Some(parent) = target.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    let mut output = fs::File::create(target)?;
+                    std::io::copy(&mut file, &mut output)?;
+                }
+            }
+            return Ok(true);
+        }
+        if std::time::Instant::now() >= deadline {
+            if allow_miss {
+                return Ok(false);
+            }
+            bail!("prepared CI artifact not found: {name}");
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+fn repository_artifact_response(
+    mut request: impl FnMut() -> reqwest::blocking::RequestBuilder,
+    operation: &str,
+) -> Result<Vec<u8>> {
+    const MAX_ATTEMPTS: usize = 3;
+    for attempt in 1..=MAX_ATTEMPTS {
+        let outcome = request()
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .and_then(reqwest::blocking::Response::bytes)
+            .map(|body| body.to_vec());
+        match outcome {
+            Ok(body) => return Ok(body),
+            Err(error) if attempt < MAX_ATTEMPTS && repository_artifact_retryable(&error) => {
+                std::thread::sleep(std::time::Duration::from_secs(attempt as u64));
+            }
+            Err(error) => return Err(error).with_context(|| operation.to_string()),
+        }
+    }
+    unreachable!("repository artifact retry loop always returns")
+}
+
+fn repository_artifact_retryable(error: &reqwest::Error) -> bool {
+    error.is_timeout()
+        || error.is_connect()
+        || error.is_body()
+        || error.status().is_some_and(|status| {
+            status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+        })
+}
+
+fn to_container_path(state: &JobExecutionState, host: &Path) -> String {
+    let workspace_host = state.workspace_host.as_deref().unwrap_or(host);
+    let workspace_container = state
+        .env
+        .get("GITHUB_WORKSPACE")
+        .map(String::as_str)
+        .unwrap_or("/__w");
+    host.strip_prefix(workspace_host)
+        .map(|relative| Path::new(workspace_container).join(relative))
+        .unwrap_or_else(|_| host.to_path_buf())
+        .display()
+        .to_string()
+}
+
 fn native_input(action: &NativeActionInvocation, state: &JobExecutionState, name: &str) -> String {
     action
         .inputs
@@ -4046,14 +5235,23 @@ fn cache_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
     // caches their siblings saved (see container::daemon_shared_root).
     let repository = state
         .resolve_context_expression("github.repository")
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "unknown-repository".to_string());
-    Ok(crate::container::daemon_shared_root(shared_work_root(temp))
-        .join("_velnor_caches")
-        .join(crate::container::sanitize_store_key(
-            &crate::github_adapter::cargo_target_trust_scope(),
-        ))
-        .join(crate::container::sanitize_store_key(&repository)))
+        .filter(|value| !value.is_empty());
+    let Some(repository) = repository else {
+        eprintln!(
+            "forensics.lifecycle: persistent actions cache refused: missing github.repository"
+        );
+        return Ok(temp.join("_velnor/ephemeral/caches"));
+    };
+    let root = crate::storage::cache_class_path(
+        &crate::container::daemon_shared_root(shared_work_root(temp)),
+        "caches",
+        "_velnor_caches",
+    );
+    Ok(crate::storage::append_legacy_trust(
+        root,
+        &crate::github_adapter::cargo_target_trust_scope(),
+    )
+    .join(crate::container::sanitize_store_key(&repository)))
 }
 
 fn shared_work_root(temp: &Path) -> PathBuf {
@@ -4138,6 +5336,19 @@ fn artifact_glob_base_and_pattern(
     path: &str,
 ) -> Option<(PathBuf, String)> {
     let path = path.trim();
+    if path == "target" || path == "/__w/target" || path == "/github/workspace/target" {
+        return state
+            .cargo_target_host
+            .as_ref()
+            .map(|base| (base.clone(), String::new()));
+    }
+    for prefix in ["target/", "/__w/target/", "/github/workspace/target/"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            if let Some(base) = &state.cargo_target_host {
+                return Some((base.clone(), rest.to_string()));
+            }
+        }
+    }
     if let Some(rest) = path.strip_prefix("/__w/") {
         return state
             .workspace_host
@@ -4242,6 +5453,18 @@ fn resolve_host_path(state: &JobExecutionState, path: &str) -> Option<PathBuf> {
     if path.is_empty() {
         return None;
     }
+    if path == "target" || path == "/__w/target" || path == "/github/workspace/target" {
+        if let Some(base) = &state.cargo_target_host {
+            return Some(base.clone());
+        }
+    }
+    for prefix in ["target/", "/__w/target/", "/github/workspace/target/"] {
+        if let Some(rest) = path.strip_prefix(prefix) {
+            if let Some(base) = &state.cargo_target_host {
+                return Some(base.join(rest));
+            }
+        }
+    }
     if let Some(rest) = path.strip_prefix("/__w/") {
         return state.workspace_host.as_ref().map(|base| base.join(rest));
     }
@@ -4332,9 +5555,15 @@ fn resolve_container_path(state: &JobExecutionState, path: &str) -> String {
 
 fn artifact_source_is_hidden(state: &JobExecutionState, source: &Path) -> bool {
     let relative = state
-        .workspace_host
+        .cargo_target_host
         .as_deref()
         .and_then(|base| source.strip_prefix(base).ok())
+        .or_else(|| {
+            state
+                .workspace_host
+                .as_deref()
+                .and_then(|base| source.strip_prefix(base).ok())
+        })
         .or_else(|| {
             state
                 .temp_host
@@ -4361,7 +5590,7 @@ fn copy_artifact_source(source: &Path, artifact_dir: &Path, include_hidden: bool
         let file_name = source
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("artifact source has no file name"))?;
-        fs::copy(source, artifact_dir.join(file_name))
+        crate::fs_copy::clone_or_copy(source, &artifact_dir.join(file_name))
             .with_context(|| format!("copy artifact file {}", source.display()))?;
         Ok(())
     }
@@ -4374,7 +5603,7 @@ fn copy_cache_source(source: &Path, destination: &Path) -> Result<()> {
         let file_name = source
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("cache source has no file name"))?;
-        fs::copy(source, destination.join(file_name))
+        crate::fs_copy::clone_or_copy(source, &destination.join(file_name))
             .with_context(|| format!("copy cache file {}", source.display()))?;
         Ok(())
     }
@@ -4395,7 +5624,7 @@ fn copy_dir_contents(source: &Path, destination: &Path) -> Result<()> {
                 fs::create_dir_all(parent)
                     .with_context(|| format!("create {}", parent.display()))?;
             }
-            fs::copy(&source_path, &destination_path)
+            crate::fs_copy::clone_or_copy(&source_path, &destination_path)
                 .with_context(|| format!("copy {}", source_path.display()))?;
         }
     }
@@ -4419,7 +5648,7 @@ fn copy_artifact_download_contents(source: &Path, destination: &Path) -> Result<
                     .with_context(|| format!("create {}", parent.display()))?;
                 normalize_artifact_dir_permissions(parent)?;
             }
-            fs::copy(&source_path, &destination_path)
+            crate::fs_copy::clone_or_copy(&source_path, &destination_path)
                 .with_context(|| format!("copy {}", source_path.display()))?;
             normalize_artifact_file_permissions(&destination_path)?;
         }
@@ -4466,7 +5695,7 @@ fn copy_dir_contents_filtered(
                 .with_context(|| format!("create directory {}", target.display()))?;
             copy_dir_contents_filtered(&path, &target, include_hidden)?;
         } else {
-            fs::copy(&path, &target)
+            crate::fs_copy::clone_or_copy(&path, &target)
                 .with_context(|| format!("copy {} to {}", path.display(), target.display()))?;
         }
     }
@@ -4820,6 +6049,16 @@ fn paths_filter_base_ref(state: &JobExecutionState) -> Option<String> {
                 .filter(|value| !value.is_empty())
         })
         .or_else(|| state.env.get("GITHUB_BASE_REF").cloned())
+        // Current dorny/paths-filter defaults non-PR events (including
+        // workflow_dispatch) to repository.default_branch and compares from
+        // its merge base. Use the remote-tracking name because checkout is a
+        // detached, depth-one SHA and has no local default-branch ref.
+        .or_else(|| {
+            state
+                .resolve_context_data_expression("github.event.repository.default_branch")
+                .filter(|value| !value.is_empty())
+                .map(|branch| format!("origin/{branch}"))
+        })
 }
 
 fn paths_filter_head_ref(state: &JobExecutionState) -> Option<String> {
@@ -4840,6 +6079,10 @@ struct JobExecutionState {
     context_data: BTreeMap<String, Value>,
     workspace_host: Option<PathBuf>,
     temp_host: Option<PathBuf>,
+    /// Runner-internal storage fact; deliberately not exported to step env.
+    persistent_workspace_target: bool,
+    /// Host side of the dedicated `/__w/target` bind mount, when enabled.
+    cargo_target_host: Option<PathBuf>,
     outputs: BTreeMap<String, BTreeMap<String, String>>,
     action_states: BTreeMap<String, BTreeMap<String, String>>,
     outcomes: BTreeMap<String, StepOutcome>,
@@ -4848,19 +6091,12 @@ struct JobExecutionState {
     masks: Vec<String>,
     composite_stack: Vec<String>,
     composite_conclusion_stack: Vec<CompositeConclusionFrame>,
-    hash_files_cache: Arc<Mutex<HashMap<HashFilesCacheKey, String>>>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct CompositeConclusionFrame {
     step_id: String,
     conclusions: BTreeMap<String, StepOutcome>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct HashFilesCacheKey {
-    workspace: PathBuf,
-    patterns: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4916,6 +6152,8 @@ impl JobExecutionState {
             context_data: context_data.iter().cloned().collect(),
             workspace_host,
             temp_host,
+            persistent_workspace_target: false,
+            cargo_target_host: None,
             outputs: BTreeMap::new(),
             action_states: BTreeMap::new(),
             outcomes: BTreeMap::new(),
@@ -4924,7 +6162,6 @@ impl JobExecutionState {
             masks: Vec::new(),
             composite_stack: Vec::new(),
             composite_conclusion_stack: Vec::new(),
-            hash_files_cache: Arc::new(Mutex::new(HashMap::new())),
         };
         state.env = state
             .env
@@ -4958,6 +6195,8 @@ impl JobExecutionState {
             context_data: self.context_data.clone(),
             workspace_host: self.workspace_host.clone(),
             temp_host: self.temp_host.clone(),
+            persistent_workspace_target: self.persistent_workspace_target,
+            cargo_target_host: self.cargo_target_host.clone(),
             outputs: self.outputs.clone(),
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
@@ -4966,7 +6205,6 @@ impl JobExecutionState {
             masks: self.masks.clone(),
             composite_stack: self.composite_stack.clone(),
             composite_conclusion_stack: self.composite_conclusion_stack.clone(),
-            hash_files_cache: Arc::clone(&self.hash_files_cache),
         };
         state
             .env
@@ -4982,6 +6220,8 @@ impl JobExecutionState {
             context_data: self.context_data.clone(),
             workspace_host: self.workspace_host.clone(),
             temp_host: self.temp_host.clone(),
+            persistent_workspace_target: self.persistent_workspace_target,
+            cargo_target_host: self.cargo_target_host.clone(),
             outputs: self.outputs.clone(),
             action_states: self.action_states.clone(),
             outcomes: self.outcomes.clone(),
@@ -4990,7 +6230,6 @@ impl JobExecutionState {
             masks: self.masks.clone(),
             composite_stack: self.composite_stack.clone(),
             composite_conclusion_stack: self.composite_conclusion_stack.clone(),
-            hash_files_cache: Arc::clone(&self.hash_files_cache),
         };
         for (name, value) in env {
             state.env.insert(name, value);
@@ -5254,20 +6493,11 @@ impl JobExecutionState {
 
     fn resolve_hash_files_expression(&self, patterns: Vec<String>) -> Option<String> {
         let workspace = self.workspace_host.as_ref()?;
-        let key = HashFilesCacheKey {
-            workspace: workspace.clone(),
-            patterns,
-        };
-        if let Ok(cache) = self.hash_files_cache.lock() {
-            if let Some(value) = cache.get(&key).cloned() {
-                return Some(value);
-            }
-        }
-        let value = hash_files(&key.workspace, &key.patterns);
-        if let Ok(mut cache) = self.hash_files_cache.lock() {
-            cache.insert(key, value.clone());
-        }
-        Some(value)
+        // Match actions/runner's HashFilesFunction: evaluate against the
+        // workspace as it exists at this expression call. In particular, an
+        // evaluation before checkout may correctly be empty, but must not
+        // poison the same expression after checkout has populated the tree.
+        Some(hash_files(workspace, &patterns))
     }
 
     /// Evaluate `format('template', arg0, arg1, ...)` using the full state resolver
@@ -5534,6 +6764,64 @@ impl JobExecutionState {
         }
         Some(value)
     }
+}
+
+/// Return true only when a step condition is provably false from immutable
+/// GitHub job context before execution begins. Local composite actions are
+/// prepared mid-job by actions/runner, after their parent condition has been
+/// evaluated; this narrow preflight proof lets the planner preserve that
+/// behavior without treating runtime `steps`, `needs`, or `env` state as
+/// known early.
+pub(crate) fn condition_is_statically_false(
+    condition: Option<&str>,
+    base_env: &[(String, String)],
+    context_data: &[(String, Value)],
+) -> bool {
+    let Some(condition) = condition else {
+        return false;
+    };
+    immutable_github_expression_is_false(
+        strip_expression(condition),
+        &JobExecutionState::new_with_context(base_env, context_data),
+    )
+}
+
+fn immutable_github_expression_is_false(expression: &str, state: &JobExecutionState) -> bool {
+    let expression = expression.trim();
+    if let Some(inner) = strip_wrapping_parentheses(expression) {
+        return immutable_github_expression_is_false(inner, state);
+    }
+    // A conjunction is false when any operand is independently provable
+    // false. GitHub's broker prefixes ordinary step conditions with
+    // `success() &&`; the immutable operand can still prove the whole value.
+    if let Some((left, right)) = split_top_level(expression, "&&") {
+        return immutable_github_expression_is_false(left, state)
+            || immutable_github_expression_is_false(right, state);
+    }
+    // A disjunction is false only when both operands are independently
+    // provable false.
+    if let Some((left, right)) = split_top_level(expression, "||") {
+        return immutable_github_expression_is_false(left, state)
+            && immutable_github_expression_is_false(right, state);
+    }
+    let lower = expression.to_ascii_lowercase();
+    if !lower.contains("github.")
+        || [
+            "steps.",
+            "needs.",
+            "env.",
+            "job.",
+            "matrix.",
+            "strategy.",
+            "runner.",
+            "secrets.",
+        ]
+        .iter()
+        .any(|runtime| lower.contains(runtime))
+    {
+        return false;
+    }
+    !state.evaluate_condition(Some(expression))
 }
 
 fn missing_context_value(expression: &str) -> Option<String> {
@@ -6115,13 +7403,33 @@ fn parse_hash_files(expression: &str) -> Option<Vec<String>> {
 }
 
 fn hash_files(workspace: &Path, patterns: &[String]) -> String {
-    let Ok(globs) = build_globs(patterns) else {
+    let Ok(globs) = build_ordered_globs(patterns) else {
         return String::new();
     };
+    let search_roots = hash_file_search_roots(workspace, patterns);
+    let mut seen = BTreeSet::new();
     let mut matches = Vec::new();
-    collect_hash_file_matches(workspace, workspace, &globs, &mut matches);
-    matches.sort();
-    matches.dedup();
+    // actions/runner's bundled @actions/glob generator preserves its ordered
+    // search roots, removes roots covered by another candidate ancestor, and
+    // traverses each remaining root lexically with the complete matcher set.
+    for root in search_roots {
+        let mut files = Vec::new();
+        if root.is_file() {
+            files.push(root);
+        } else {
+            collect_workspace_files(&root, &mut files);
+            files.sort();
+        }
+        for path in files {
+            let Ok(relative) = path.strip_prefix(workspace) else {
+                continue;
+            };
+            let relative = normalize_path(relative);
+            if ordered_globs_match(&globs, &relative) && seen.insert(path.clone()) {
+                matches.push(path);
+            }
+        }
+    }
     if matches.is_empty() {
         return String::new();
     }
@@ -6141,20 +7449,75 @@ fn hash_files(workspace: &Path, patterns: &[String]) -> String {
     hex_digest(&digest)
 }
 
+fn build_ordered_globs(patterns: &[String]) -> Result<Vec<(bool, globset::GlobMatcher)>> {
+    let mut globs = Vec::new();
+    for pattern in patterns {
+        let (negative, pattern) = pattern
+            .strip_prefix('!')
+            .map_or((false, pattern.as_str()), |pattern| (true, pattern));
+        globs.push((
+            negative,
+            GlobBuilder::new(pattern)
+                .literal_separator(true)
+                .build()?
+                .compile_matcher(),
+        ));
+    }
+    Ok(globs)
+}
+
+fn ordered_globs_match(globs: &[(bool, globset::GlobMatcher)], path: &str) -> bool {
+    let mut matched = false;
+    for (negative, matcher) in globs {
+        if matcher.is_match(path) {
+            matched = !negative;
+        }
+    }
+    matched
+}
+
+fn hash_file_search_roots(workspace: &Path, patterns: &[String]) -> Vec<PathBuf> {
+    let candidates = patterns
+        .iter()
+        .filter_map(|pattern| {
+            let pattern = pattern.strip_prefix('!').unwrap_or(pattern);
+            if pattern.is_empty() {
+                return None;
+            }
+            let mut root = PathBuf::new();
+            for segment in pattern.split('/') {
+                if segment.contains(['*', '?', '[', ']', '{', '}']) {
+                    break;
+                }
+                if !segment.is_empty() && segment != "." {
+                    root.push(segment);
+                }
+            }
+            Some(workspace.join(root))
+        })
+        .collect::<Vec<_>>();
+
+    candidates
+        .iter()
+        .enumerate()
+        .filter(|(index, candidate)| {
+            !candidates.iter().enumerate().any(|(other_index, other)| {
+                index != &other_index && candidate != &other && candidate.starts_with(other)
+            })
+        })
+        .map(|(_, candidate)| candidate.clone())
+        .collect()
+}
+
 fn build_globs(patterns: &[String]) -> Result<globset::GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
         builder.add(Glob::new(pattern)?);
     }
-    builder.build().context("build hashFiles glob set")
+    builder.build().context("build glob set")
 }
 
-fn collect_hash_file_matches(
-    workspace: &Path,
-    dir: &Path,
-    globs: &globset::GlobSet,
-    matches: &mut Vec<PathBuf>,
-) {
+fn collect_workspace_files(dir: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -6164,18 +7527,13 @@ fn collect_hash_file_matches(
             continue;
         };
         if file_type.is_dir() {
-            collect_hash_file_matches(workspace, &path, globs, matches);
+            collect_workspace_files(&path, files);
             continue;
         }
         if !file_type.is_file() {
             continue;
         }
-        let Ok(relative) = path.strip_prefix(workspace) else {
-            continue;
-        };
-        if globs.is_match(normalize_path(relative)) {
-            matches.push(path);
-        }
+        files.push(path);
     }
 }
 
@@ -6414,6 +7772,112 @@ fn docker_run_container_name(args: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiler_cache_setup_scripts_never_download_tools() {
+        let sccache = sccache_setup_script();
+        let kache = kache_setup_script();
+        for script in [&sccache, &kache] {
+            assert!(!script.contains("curl"));
+            assert!(!script.contains("wget"));
+        }
+        assert!(sccache.contains("0.16.0"));
+        assert!(kache.contains("0.10.0"));
+    }
+
+    #[test]
+    fn compiler_cache_post_actions_always_run() {
+        assert_eq!(
+            native_post_condition(NativeActionAdapter::Sccache),
+            Some("always()")
+        );
+        assert_eq!(
+            native_post_condition(NativeActionAdapter::Kache),
+            Some("always()")
+        );
+    }
+
+    #[test]
+    fn prepared_jackin_tools_require_the_complete_bundle() {
+        let root = temp_dir();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("cargo-fuzz"), b"tool").unwrap();
+        assert!(!prepared_jackin_tools_complete(&root));
+        for tool in [
+            "sccache",
+            "cargo-nextest",
+            "cargo-deny",
+            "cargo-shear",
+            "cargo-audit",
+            "cargo-dylint",
+            "cargo-hack",
+            "cargo-hakari",
+            "cargo-llvm-cov",
+            "cargo-mutants",
+            "cargo-zigbuild",
+            "dylint-link",
+            "weaver",
+        ] {
+            fs::write(root.join(tool), b"tool").unwrap();
+        }
+        assert!(prepared_jackin_tools_complete(&root));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prepared_jackin_tool_exports_use_container_paths() {
+        let root = temp_dir();
+        let temp = root.join("temp");
+        let tools = root.join(".ci-prebuilt-tools");
+        let xtask = root.join(".ci-prebuilt-xtask");
+        fs::create_dir_all(&temp).unwrap();
+        fs::create_dir_all(&tools).unwrap();
+        fs::create_dir_all(&xtask).unwrap();
+        for tool in [
+            "sccache",
+            "cargo-nextest",
+            "cargo-deny",
+            "cargo-shear",
+            "cargo-audit",
+            "cargo-dylint",
+            "cargo-fuzz",
+            "cargo-hack",
+            "cargo-hakari",
+            "cargo-llvm-cov",
+            "cargo-mutants",
+            "cargo-zigbuild",
+            "dylint-link",
+            "weaver",
+        ] {
+            fs::write(tools.join(tool), b"tool").unwrap();
+        }
+        fs::write(xtask.join("jackin-xtask"), b"xtask").unwrap();
+        fs::write(xtask.join("workspace-metadata.json"), b"{}").unwrap();
+        let env = [
+            ("JACKIN_WORKSPACE".into(), "/__w".into()),
+            ("JACKIN_INCLUDE_TOOLS".into(), "true".into()),
+            ("JACKIN_INCLUDE_XTASK".into(), "true".into()),
+            ("JACKIN_TOOLS_CACHE_HIT".into(), "true".into()),
+            ("JACKIN_XTASK_CACHE_HIT".into(), "true".into()),
+        ];
+        let state = JobExecutionState::new_with_workspace(&[], &[], &root, &temp);
+        let action_state = JobExecutionState::new(&env);
+        let result = native_restore_prepared_jackin_tools(&action_state, &state).unwrap();
+        assert_eq!(result.state.env["CI_TOOLS_PATH"], "/__w/.ci-prebuilt-tools");
+        assert_eq!(
+            result.state.env["CI_CARGO_FUZZ"],
+            "/__w/.ci-prebuilt-tools/cargo-fuzz"
+        );
+        assert_eq!(
+            result.state.env["CI_XTASK"],
+            "/__w/.ci-prebuilt-xtask/jackin-xtask"
+        );
+        assert_eq!(
+            result.state.env["CI_METADATA"],
+            "/__w/.ci-prebuilt-xtask/workspace-metadata.json"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
     use crate::container::{ServiceContainerSpec, Shell};
     use std::{
         fs,
@@ -6567,18 +8031,62 @@ mod tests {
         }
     }
 
+    struct ServiceContextRunner;
+
+    impl CommandRunner for ServiceContextRunner {
+        fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+            let stdout = match args.first().map(String::as_str) {
+                Some("inspect") => "container-id\n",
+                Some("port") => "5432/tcp -> 0.0.0.0:32768\n5432/tcp -> [::]:32768\n",
+                _ => "",
+            };
+            Ok(CommandResult {
+                code: 0,
+                stdout: stdout.into(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn service_context_exposes_mapped_ports() {
+        let temp = temp_dir();
+        let mut job = container(&temp);
+        job.services.push(ServiceContainerSpec {
+            name: "velnor-service-postgres".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "velnor-net".into(),
+            env: vec![("POSTGRES_PASSWORD".into(), "postgres".into())],
+            ports: vec!["5432".into()],
+            options: vec!["--health-cmd".into(), "pg_isready -U postgres".into()],
+        });
+        let mut executor = DockerScriptExecutor::new(ServiceContextRunner);
+        let context = executor.service_context(&job).unwrap().unwrap();
+
+        assert_eq!(context["postgres"]["id"], "container-id");
+        assert_eq!(context["postgres"]["network"], "velnor-net");
+        assert_eq!(context["postgres"]["ports"]["5432"], "32768");
+        fs::remove_dir_all(temp).ok();
+    }
+
     #[derive(Default)]
     struct GitDiffRunner {
         calls: Vec<(String, Vec<String>)>,
         stdout: String,
+        missing_refs: bool,
     }
 
     impl CommandRunner for GitDiffRunner {
         fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
             self.calls.push((program.to_string(), args.to_vec()));
             Ok(CommandResult {
-                code: 0,
-                stdout: if program == "git" {
+                code: if self.missing_refs && args.iter().any(|arg| arg == "cat-file") {
+                    1
+                } else {
+                    0
+                },
+                stdout: if program == "git" && args.iter().any(|arg| arg == "diff") {
                     self.stdout.clone()
                 } else {
                     String::new()
@@ -6917,9 +8425,17 @@ mod tests {
 
     #[test]
     fn mise_setup_exports_cargo_backend_tool_bins() {
-        let script = setup_mise_script(true, "", "");
+        let script = setup_mise_script(true, "2026.7.7", "", "", "mise-v2", false);
 
         assert!(script.contains("mise bin-paths"));
+        assert!(script.contains(r#"flock -x 9"#));
+        assert_eq!(script.matches(r#"flock -x 9"#).count(), 1);
+        assert!(!script.contains(r#"flock -x 8"#));
+        assert!(script.contains(r#".velnor-install.lock"#));
+        assert!(script.contains(r#"mise self-update "$requested_version" -y"#));
+        assert!(script.contains("requested_version='2026.7.7'"));
+        assert!(script.contains("cache_key_prefix='mise-v2'"));
+        assert!(script.contains("cache_save_requested=\"\""));
         assert!(script.contains("-type d -empty -exec rm -rf"));
         assert!(script.contains(r#"find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d"#));
         assert!(script.contains(r#"find "$mise_home/installs" -mindepth 3 -maxdepth 3"#));
@@ -6927,6 +8443,24 @@ mod tests {
         assert!(script.contains("cargo-audit"));
         assert!(script.contains("cargo-deny"));
         assert!(script.contains("cargo-shear"));
+        assert!(!script.contains("export CARGO_HOME="));
+        assert!(!script.contains("export RUSTUP_HOME="));
+        assert!(script.contains("mise env --redacted --json"));
+        assert!(script.contains("mise env --json"));
+    }
+
+    #[test]
+    fn mise_environment_exports_strings_except_path_and_masks_redacted_values() {
+        let (env, masks) = parse_mise_environment(
+            r#"{"RUSTUP_TOOLCHAIN":"1.97.1","PATH":"ignored","COUNT":2}"#,
+            r#"{"TOKEN":"secret","EMPTY":""}"#,
+        )
+        .unwrap();
+
+        assert_eq!(env.get("RUSTUP_TOOLCHAIN"), Some(&"1.97.1".to_string()));
+        assert!(!env.contains_key("PATH"));
+        assert!(!env.contains_key("COUNT"));
+        assert_eq!(masks, vec!["secret"]);
     }
 
     fn host_temp_script_path(container_path: &str, temp: &Path) -> PathBuf {
@@ -6975,6 +8509,7 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("unknown-repository".into()),
             cargo_target_host: None,
+            compiler_cache_backend: crate::compiler_cache::CompilerCacheBackend::Sccache,
         }
     }
 
@@ -6995,6 +8530,59 @@ mod tests {
             .1
             .contains(&format!("test -f /__t/{DOCKER_MOUNT_CHECK_FILE}")));
         assert!(!temp.join(DOCKER_MOUNT_CHECK_FILE).exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn deferred_teardown_keeps_resources_until_completion_boundary() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps_without_cleanup(&spec, &[], &[], &[], None, None, &temp)
+            .unwrap();
+        assert!(!executor
+            .runner()
+            .calls
+            .iter()
+            .any(|(_, args)| args.first().is_some_and(|arg| arg == "rm")));
+
+        executor.cleanup(&spec).unwrap();
+        let calls = &executor.runner().calls;
+        assert!(calls
+            .iter()
+            .any(|(_, args)| { args.starts_with(&["rm".into(), "--force".into(), "job".into()]) }));
+        assert!(calls.iter().any(|(_, args)| args.starts_with(&[
+            "network".into(),
+            "rm".into(),
+            "net".into()
+        ])));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn precreated_environment_skips_lazy_container_start() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default())
+            .with_job_environment_started(true);
+
+        executor
+            .execute_ordered_steps_without_cleanup(&spec, &[], &[], &[], None, None, &temp)
+            .unwrap();
+
+        assert!(
+            !executor
+                .runner()
+                .calls
+                .iter()
+                .any(|(_, args)| args == &["network", "create", "net"]),
+            "lazy startup unexpectedly recreated the network: {:?}",
+            executor.runner().calls
+        );
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -7177,6 +8765,7 @@ mod tests {
             step_id: "github-runtime".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::GitHubRuntimeExport,
                 inputs: [("github-token".into(), "ghs_token".into())].into(),
                 env: vec![("ACTIONS_CUSTOM".into(), "${{ env.CUSTOM_RUNTIME }}".into())],
@@ -7234,6 +8823,51 @@ mod tests {
     }
 
     #[test]
+    fn native_github_script_copies_exact_contract_output() {
+        let action = NativeActionInvocation {
+            git_ref: "373c709c69115d41ff229c7e5df9f8788daa9553".into(),
+            adapter: NativeActionAdapter::GitHubScript,
+            inputs: [(
+                "script".into(),
+                "core.setOutput('docs-xtask', process.env.CONTRACT)".into(),
+            )]
+            .into(),
+            env: vec![("CONTRACT".into(), "contract-sha".into())],
+        };
+        let state = JobExecutionState::new(&[]);
+        let result = native_github_script(&action, &state).unwrap();
+        assert_eq!(result.state.outputs["docs-xtask"], "contract-sha");
+    }
+
+    #[test]
+    fn repository_artifact_request_retries_server_failure() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for (status, body) in [("500 Internal Server Error", "retry"), ("200 OK", "ready")] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let client = reqwest::blocking::Client::new();
+
+        let body = repository_artifact_response(|| client.get(&url), "test artifact").unwrap();
+
+        server.join().unwrap();
+        assert_eq!(body, b"ready");
+    }
+
+    #[test]
     fn native_paths_filter_outputs_target_shapes() {
         let temp = temp_dir();
         fs::create_dir_all(temp.join("work")).unwrap();
@@ -7241,6 +8875,7 @@ mod tests {
             step_id: "filter".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::PathsFilter,
                 inputs: [(
                     "filters".into(),
@@ -7256,6 +8891,7 @@ mod tests {
         let mut executor = DockerScriptExecutor::new(GitDiffRunner {
             calls: Vec::new(),
             stdout: "docker/construct/Dockerfile\ndocs/index.md\nREADME.md\n".into(),
+            missing_refs: true,
         });
 
         let results = executor
@@ -7292,7 +8928,14 @@ mod tests {
         );
         assert!(results[0].stdout.contains("changed: README.md"));
         assert!(executor.runner().calls.iter().any(|(program, args)| {
-            program == "git" && args.contains(&"base-sha..head-sha".into())
+            program == "git" && args.contains(&"base-sha...head-sha".into())
+        }));
+        assert!(executor.runner().calls.iter().any(|(program, args)| {
+            program == "git"
+                && args.contains(&"fetch".into())
+                && args.contains(&"--depth=10".into())
+                && args.contains(&"base-sha".into())
+                && args.contains(&"head-sha".into())
         }));
         assert_eq!(
             executor
@@ -7309,6 +8952,25 @@ mod tests {
     }
 
     #[test]
+    fn paths_filter_dispatch_defaults_to_remote_default_branch() {
+        let state = JobExecutionState::new_with_context(
+            &[("GITHUB_SHA".into(), "head-sha".into())],
+            &[(
+                "github".into(),
+                serde_json::json!({
+                    "event": {"repository": {"default_branch": "main"}}
+                }),
+            )],
+        );
+
+        assert_eq!(
+            paths_filter_base_ref(&state).as_deref(),
+            Some("origin/main")
+        );
+        assert_eq!(paths_filter_head_ref(&state).as_deref(), Some("head-sha"));
+    }
+
+    #[test]
     fn native_cache_reports_miss_without_node_sidecar() {
         let temp = temp_dir();
         let workspace = temp.join("work");
@@ -7322,6 +8984,7 @@ mod tests {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -7418,9 +9081,23 @@ mod tests {
     }
 
     #[test]
+    fn cache_store_refuses_missing_repository_identity() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        fs::create_dir_all(&temp).unwrap();
+        let state = JobExecutionState::new_internal(&[], &[], None, Some(temp.clone()));
+        assert_eq!(
+            cache_store_dir(&state).unwrap(),
+            temp.join("_velnor/ephemeral/caches")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn cache_hit_output_matches_actions_cache() {
         let root = temp_dir();
-        let store = root.join("_velnor_caches/trusted/unknown-repository");
+        let store = root.join("_velnor_caches/trusted/Test_Repo");
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
         let exact_cache = store.join("linux-rust-exact");
         let partial_cache = store.join("linux-rust-prefix-new");
         fs::create_dir_all(exact_cache.join("0")).unwrap();
@@ -7437,6 +9114,7 @@ mod tests {
                 step_id: "cache".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::Cache,
                     inputs: [
                         ("path".into(), "~/.cache/rust-script".into()),
@@ -7463,7 +9141,7 @@ mod tests {
             .execute_ordered_steps(
                 &container(&exact_temp),
                 &cache_step("linux-rust-exact", ""),
-                &[],
+                &env,
                 &exact_temp,
             )
             .unwrap();
@@ -7471,7 +9149,7 @@ mod tests {
             .execute_ordered_steps(
                 &container(&partial_temp),
                 &cache_step("linux-rust-prefix-miss", "linux-rust-prefix-\n"),
-                &[],
+                &env,
                 &partial_temp,
             )
             .unwrap();
@@ -7479,7 +9157,7 @@ mod tests {
             .execute_ordered_steps(
                 &container(&miss_temp),
                 &cache_step("linux-rust-total-miss", "linux-rust-missing-\n"),
-                &[],
+                &env,
                 &miss_temp,
             )
             .unwrap();
@@ -7498,6 +9176,7 @@ mod tests {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     (
@@ -7526,7 +9205,15 @@ mod tests {
             .stdout
             .contains("Cache paths live on Velnor host-persistent storage (always warm)"));
         assert!(!results[0].stdout.contains("Cache not found"));
+        assert!(results[0]
+            .state
+            .summary
+            .contains("host-persistent store — restore/save skipped"));
         assert!(results[1].stdout.contains("nothing to save"));
+        assert!(results[1]
+            .state
+            .summary
+            .contains("host-persistent store — restore/save skipped"));
         assert!(results[1].stderr.is_empty());
         fs::remove_dir_all(temp).unwrap();
     }
@@ -7541,10 +9228,13 @@ mod tests {
     fn native_rust_cache_treats_persistent_cargo_target_as_warm() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        spec.cargo_target_host = Some(temp.join("target-store"));
         let steps = vec![ExecutableStep::Native {
             step_id: "rust-cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::RustCache,
                 inputs: [("shared-key".into(), "ci-default-dev-workspace-v2".into())].into(),
                 env: Vec::new(),
@@ -7555,12 +9245,7 @@ mod tests {
         }];
 
         let results = DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(
-                &container(&temp),
-                &steps,
-                &[("CARGO_TARGET_DIR".into(), "/__cargo_target".into())],
-                &temp,
-            )
+            .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
         assert_eq!(results.len(), 2);
@@ -7570,6 +9255,10 @@ mod tests {
             .stdout
             .contains("Rust cache paths live on Velnor host-persistent storage"));
         assert!(!results[0].stdout.contains("Rust cache miss"));
+        assert!(results[0]
+            .state
+            .summary
+            .contains("Backend: rust-cache (native)"));
         assert!(results[1].stdout.contains("Cache hit occurred"));
         fs::remove_dir_all(temp).unwrap();
     }
@@ -7584,6 +9273,7 @@ mod tests {
             step_id: "rust-cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::RustCache,
                 inputs: [("shared-key".into(), "ci-default-dev-workspace-v2".into())].into(),
                 env: Vec::new(),
@@ -7613,12 +9303,13 @@ mod tests {
             step_id: "rust-cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::RustCache,
                 inputs: [
                     ("shared-key".into(), "ci-custom-dir".into()),
                     (
                         "cache-directories".into(),
-                        "/__cargo_target\n/var/cache/sccache\n".into(),
+                        "/__w/target\n/var/cache/sccache\n".into(),
                     ),
                 ]
                 .into(),
@@ -7637,7 +9328,7 @@ mod tests {
         assert!(results[0]
             .stdout
             .contains("Rust cache paths live on Velnor host-persistent storage"));
-        assert!(velnor_persistent_cache_path("/__cargo_target/debug"));
+        assert!(velnor_persistent_cache_path("/__w/target/debug"));
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -7649,6 +9340,7 @@ mod tests {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "target".into()),
@@ -7687,10 +9379,12 @@ mod tests {
             "cached\n",
         )
         .unwrap();
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
         let save = vec![ExecutableStep::Native {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -7704,13 +9398,14 @@ mod tests {
             timeout_minutes: None,
         }];
         DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(&container(&save_temp), &save, &[], &save_temp)
+            .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
         let restore = vec![ExecutableStep::Native {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -7725,7 +9420,7 @@ mod tests {
             timeout_minutes: None,
         }];
         let restore_results = DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(&container(&restore_temp), &restore, &[], &restore_temp)
+            .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
         assert_eq!(restore_results[0].exit_code, 0);
@@ -7747,10 +9442,12 @@ mod tests {
         )
         .unwrap();
         let folded_key = "rust-script-Linux-deadbeef\n";
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
         let save = vec![ExecutableStep::Native {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -7765,7 +9462,7 @@ mod tests {
         }];
 
         let save_results = DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(&container(&save_temp), &save, &[], &save_temp)
+            .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
         assert_eq!(
@@ -7773,15 +9470,14 @@ mod tests {
             "rust-script-Linux-deadbeef"
         );
         assert!(root
-            .join(
-                "_velnor_caches/trusted/unknown-repository/rust-script-Linux-deadbeef/0/state.bin"
-            )
+            .join("_velnor_caches/trusted/Test_Repo/rust-script-Linux-deadbeef/0/state.bin")
             .exists());
 
         let restore = vec![ExecutableStep::Native {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -7795,7 +9491,7 @@ mod tests {
             timeout_minutes: None,
         }];
         let restore_results = DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(&container(&restore_temp), &restore, &[], &restore_temp)
+            .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
         assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
@@ -7828,11 +9524,15 @@ mod tests {
             "cached\n",
         )
         .unwrap();
-        let env = vec![("GITHUB_RUN_ID".into(), "123456".into())];
+        let env = vec![
+            ("GITHUB_RUN_ID".into(), "123456".into()),
+            ("GITHUB_REPOSITORY".into(), "Test/Repo".into()),
+        ];
         let save = vec![ExecutableStep::Native {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -7855,13 +9555,14 @@ mod tests {
             .stdout
             .contains("Saved cache 'linux-rust-script-abc'"));
         assert!(root
-            .join("_velnor_caches/trusted/unknown-repository/linux-rust-script-abc/0/state.bin")
+            .join("_velnor_caches/trusted/Test_Repo/linux-rust-script-abc/0/state.bin")
             .exists());
 
         let restore = vec![ExecutableStep::Native {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -7905,10 +9606,12 @@ mod tests {
             "cached\n",
         )
         .unwrap();
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
         let save = vec![ExecutableStep::Native {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -7923,13 +9626,14 @@ mod tests {
         }];
 
         DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(&container(&save_temp), &save, &[], &save_temp)
+            .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
         let lookup = vec![ExecutableStep::Native {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -7944,7 +9648,7 @@ mod tests {
             timeout_minutes: None,
         }];
         let lookup_results = DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(&container(&lookup_temp), &lookup, &[], &lookup_temp)
+            .execute_ordered_steps(&container(&lookup_temp), &lookup, &env, &lookup_temp)
             .unwrap();
 
         assert_eq!(lookup_results[0].exit_code, 0);
@@ -7960,7 +9664,8 @@ mod tests {
     fn native_cache_restore_key_uses_newest_prefix_match() {
         let root = temp_dir();
         let restore_temp = root.join("restore-job/temp");
-        let store = root.join("_velnor_caches/trusted/unknown-repository");
+        let store = root.join("_velnor_caches/trusted/Test_Repo");
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
         let old_cache = store.join("rust-linux-a-old");
         let new_cache = store.join("rust-linux-z-new");
         fs::create_dir_all(old_cache.join("0")).unwrap();
@@ -7977,6 +9682,7 @@ mod tests {
             step_id: "cache".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
@@ -7992,7 +9698,7 @@ mod tests {
         }];
 
         let restore_results = DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(&container(&restore_temp), &restore, &[], &restore_temp)
+            .execute_ordered_steps(&container(&restore_temp), &restore, &env, &restore_temp)
             .unwrap();
 
         assert_eq!(restore_results[0].state.outputs["cache-hit"], "false");
@@ -8026,11 +9732,16 @@ mod tests {
                 step_id: "buildx".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerSetupBuildx,
                     inputs: [
                         ("name".into(), "velnor-builder".into()),
                         ("driver".into(), "docker-container".into()),
                         ("install".into(), "true".into()),
+                        (
+                            "buildkitd-config-inline".into(),
+                            "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]\n".into(),
+                        ),
                     ]
                     .into(),
                     env: Vec::new(),
@@ -8043,6 +9754,7 @@ mod tests {
                 step_id: "login".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerLogin,
                     inputs: [
                         ("username".into(), "docker-user".into()),
@@ -8059,6 +9771,7 @@ mod tests {
                 step_id: "meta".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerMetadata,
                     inputs: [
                         ("images".into(), "chainargos/rust-bitcoin-processor".into()),
@@ -8080,6 +9793,7 @@ type=sha,format=long,prefix=,enable=true"
                 step_id: "build-push".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerBuildPush,
                     inputs: [
                         ("context".into(), ".".into()),
@@ -8111,6 +9825,7 @@ type=sha,format=long,prefix=,enable=true"
                 step_id: "bake".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerBake,
                     inputs: [
                         ("files".into(), "backend-rust/docker-bake.hcl".into()),
@@ -8189,9 +9904,14 @@ type=sha,format=long,prefix=,enable=true"
         ));
         let runner = executor.runner();
         let calls = docker_call_strings(&runner.calls);
-        assert!(calls
-            .iter()
-            .any(|c| c.contains("'buildx' 'create' '--name' 'velnor-builder'")));
+        assert!(calls.iter().any(
+            |c| c.contains("'buildx' 'create' '--name' 'velnor-builder'")
+                && c.contains("'--config' '/__t/buildkitd-config-velnor-builder.toml'")
+        ));
+        assert_eq!(
+            fs::read_to_string(temp.join("buildkitd-config-velnor-builder.toml")).unwrap(),
+            "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]\n"
+        );
         let login_call = runner.calls.iter().position(|(program, args)| {
             program == "docker"
                 && args.join(" ").contains(
@@ -8211,9 +9931,11 @@ type=sha,format=long,prefix=,enable=true"
         // local builder cache); the step output records the substitution.
         assert!(!calls[build_call.unwrap()].contains("type=gha"));
         assert!(results[3].stdout.contains("[velnor] dropped"));
-        // Runtime env reaches the container via docker exec -e flags.
+        // Non-secret runtime env remains inline, while credentials use a
+        // mode-0600 env file and never occur in the process argument vector.
         let build_invocation = &calls[build_call.unwrap()];
-        assert!(build_invocation.contains("ACTIONS_RUNTIME_TOKEN=runtime-token"));
+        assert!(!build_invocation.contains("ACTIONS_RUNTIME_TOKEN=runtime-token"));
+        assert!(build_invocation.contains("--env-file"));
         assert!(build_invocation.contains("ACTIONS_CACHE_URL=https://cache.actions"));
         let bake_call = calls
             .iter()
@@ -8238,6 +9960,198 @@ type=sha,format=long,prefix=,enable=true"
     }
 
     #[test]
+    fn docker_login_refused_outside_trusted_scope() {
+        let temp = temp_dir();
+        let mut executor =
+            DockerScriptExecutor::new(RecordingRunner::default()).with_trust_scope("public-forks");
+        let error = executor
+            .native_docker_login(
+                &container(&temp),
+                &NativeActionInvocation {
+                    git_ref: String::new(),
+                    adapter: NativeActionAdapter::DockerLogin,
+                    inputs: [
+                        ("username".into(), "docker-user".into()),
+                        ("password".into(), "registry-secret".into()),
+                    ]
+                    .into(),
+                    env: Vec::new(),
+                },
+                &JobExecutionState::default(),
+                DEFAULT_STEP_TIMEOUT,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("public-forks"));
+        assert!(error.to_string().contains("accepted trust scope: trusted"));
+        assert!(executor.runner().calls.is_empty());
+    }
+
+    #[test]
+    fn configure_pages_outputs_match_upstream_url_surface() {
+        let outputs = pages_site_outputs("https://octocat.github.io/example/").unwrap();
+        assert_eq!(outputs["base_url"], "https://octocat.github.io/example");
+        assert_eq!(outputs["origin"], "https://octocat.github.io");
+        assert_eq!(outputs["host"], "octocat.github.io");
+        assert_eq!(outputs["base_path"], "/example");
+    }
+
+    #[test]
+    fn configure_pages_fetches_site_and_exports_environment() {
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let read = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("GET /repos/octocat/example/pages HTTP/1.1"));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("authorization: bearer test-token"));
+            let body = r#"{"html_url":"https://octocat.github.io/example/"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let state = JobExecutionState::new(&[
+            ("GITHUB_REPOSITORY".into(), "octocat/example".into()),
+            ("GITHUB_API_URL".into(), format!("http://{address}")),
+            ("GITHUB_TOKEN".into(), "test-token".into()),
+        ]);
+        let result = native_configure_pages(
+            &NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::ConfigurePages,
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+            },
+            &state,
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.state.outputs["base_path"], "/example");
+        assert_eq!(result.state.env["GITHUB_PAGES"], "true");
+    }
+
+    #[test]
+    fn configure_pages_adapter_is_registered() {
+        assert_eq!(
+            crate::action::native_action_adapter("actions/configure-pages"),
+            Some(NativeActionAdapter::ConfigurePages)
+        );
+    }
+
+    #[test]
+    fn deploy_pages_runs_artifact_oidc_create_and_status_loop() {
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&requests);
+        let responses = [
+            r#"{"artifacts":[{"name":"github-pages","database_id":42,"size":123}]}"#,
+            r#"{"value":"oidc-token"}"#,
+            r#"{"id":7,"status_url":"status/7","page_url":"https://initial.example/"}"#,
+            r#"{"status":"queued"}"#,
+            r#"{"status":"succeed","page_url":"https://deployed.example/"}"#,
+        ];
+        let server = std::thread::spawn(move || {
+            for body in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let read = stream.read(&mut buffer).unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    let text = String::from_utf8_lossy(&request);
+                    let header_end = text.find("\r\n\r\n");
+                    let content_length = text
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if header_end.is_some_and(|end| request.len() >= end + 4 + content_length) {
+                        break;
+                    }
+                }
+                captured
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&request).to_string());
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+        let base = format!("http://{address}");
+        let runtime_token = runtime_token_with_results_scope("plan-1", "job-1");
+        let state = JobExecutionState::new(&[
+            ("GITHUB_REPOSITORY".into(), "octocat/example".into()),
+            ("GITHUB_SHA".into(), "abc123".into()),
+            ("GITHUB_TOKEN".into(), "github-token".into()),
+            ("GITHUB_API_URL".into(), base.clone()),
+            ("ACTIONS_RESULTS_URL".into(), base.clone()),
+            ("ACTIONS_RUNTIME_TOKEN".into(), runtime_token),
+            (
+                "ACTIONS_ID_TOKEN_REQUEST_URL".into(),
+                format!("{base}/oidc"),
+            ),
+            (
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN".into(),
+                "oidc-request-token".into(),
+            ),
+        ]);
+        let result = native_deploy_pages(
+            &NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::DeployPages,
+                inputs: [("reporting_interval".into(), "0".into())].into(),
+                env: Vec::new(),
+            },
+            &state,
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(
+            result.state.outputs["page_url"],
+            "https://deployed.example/"
+        );
+        let requests = requests.lock().unwrap();
+        assert!(requests[0].starts_with(
+            "POST /twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts HTTP/1.1"
+        ));
+        assert!(requests[0].contains("\"workflow_run_backend_id\":\"plan-1\""));
+        assert!(requests[1].starts_with("GET /oidc HTTP/1.1"));
+        assert!(requests[2].starts_with("POST /repos/octocat/example/pages/deployments HTTP/1.1"));
+        assert!(requests[2].contains("\"artifact_id\":42"));
+        assert!(requests[2].contains("\"oidc_token\":\"oidc-token\""));
+        assert!(requests[3].starts_with("GET /repos/octocat/example/pages/deployments/7 HTTP/1.1"));
+        assert!(requests[4].starts_with("GET /repos/octocat/example/pages/deployments/7 HTTP/1.1"));
+    }
+
+    #[test]
     fn native_docker_build_push_honors_load_input_separately() {
         let temp = temp_dir();
         fs::create_dir_all(temp.join("work")).unwrap();
@@ -8245,6 +10159,7 @@ type=sha,format=long,prefix=,enable=true"
             step_id: "build-push".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::DockerBuildPush,
                 inputs: [
                     ("context".into(), ".".into()),
@@ -8283,6 +10198,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             step_id: "pr-meta".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::DockerMetadata,
                 inputs: [
                     ("images".into(), "${{ inputs.image }}".into()),
@@ -8349,6 +10265,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             )],
         );
         let publish_action = NativeActionInvocation {
+            git_ref: String::new(),
             adapter: NativeActionAdapter::DockerMetadata,
             inputs: [
                 ("images".into(), "${{ inputs.image }}".into()),
@@ -8376,6 +10293,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             &[],
         );
         let action = NativeActionInvocation {
+            git_ref: String::new(),
             adapter: NativeActionAdapter::DockerMetadata,
             inputs: [
                 ("images".into(), "ghcr.io/org/repo/fixture".into()),
@@ -8405,6 +10323,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             &[],
         );
         let action = NativeActionInvocation {
+            git_ref: String::new(),
             adapter: NativeActionAdapter::DockerMetadata,
             inputs: [
                 ("images".into(), "ghcr.io/org/repo/fixture".into()),
@@ -8422,11 +10341,19 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     fn native_tool_adapters_use_job_container_without_node_sidecars() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
+        fs::create_dir_all(temp.join("_velnor")).unwrap();
+        fs::write(
+            temp.join("_velnor/mise-env.json"),
+            r#"{"RUSTUP_TOOLCHAIN":"1.97.1"}"#,
+        )
+        .unwrap();
+        fs::write(temp.join("_velnor/mise-env-redacted.json"), "{}").unwrap();
         let steps = vec![
             ExecutableStep::Native {
                 step_id: "mise".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::Mise,
                     inputs: [("install".into(), "false".into())].into(),
                     env: Vec::new(),
@@ -8439,6 +10366,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 step_id: "setup-mold".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::SetupMold,
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
@@ -8451,6 +10379,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 step_id: "sccache".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::Sccache,
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
@@ -8463,6 +10392,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 step_id: "setup-just".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::SetupJust,
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
@@ -8475,6 +10405,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 step_id: "rust-cache".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::RustCache,
                     inputs: [
                         ("shared-key".into(), "kestra-rust-build-cache".into()),
@@ -8508,6 +10439,20 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
 
         assert_eq!(results.len(), 7); // 5 main + sccache-post + rust-cache-post
         assert!(results[0].state.path.contains(&"/opt/mise/shims".into()));
+        let mise_shims = results[0]
+            .state
+            .path
+            .iter()
+            .position(|path| path == "/opt/mise/shims")
+            .unwrap();
+        let baked_rustup = results[0]
+            .state
+            .path
+            .iter()
+            .position(|path| path == "/root/.cargo/bin")
+            .unwrap();
+        assert!(mise_shims < baked_rustup);
+        assert_eq!(results[0].state.env["RUSTUP_TOOLCHAIN"], "1.97.1");
         assert!(results[3].state.path.contains(&"/root/.cargo/bin".into()));
         assert_eq!(results[4].state.outputs["cache-hit"], "false");
         assert_eq!(results[4].state.env["CACHE_ON_FAILURE"], "true");
@@ -8549,6 +10494,34 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
     }
 
     #[test]
+    fn native_kache_exports_compile_environment_to_later_steps() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "kache".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::Kache,
+                inputs: BTreeMap::new(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+        let results = executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results[0].state.env["RUSTC_WRAPPER"], "kache");
+        assert_eq!(results[0].state.env["KACHE_CACHE_DIR"], "/var/cache/kache");
+        assert_eq!(results[0].state.env["KACHE_MAX_SIZE"], "20GiB");
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn starts_and_waits_for_service_before_job_container() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -8584,6 +10557,27 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert_eq!(calls[2].1[0], "inspect");
         assert_eq!(calls[3].1[0], "run");
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn service_cleanup_is_separate_from_deferred_job_teardown() {
+        let temp = temp_dir();
+        let mut spec = container(&temp);
+        spec.services.push(ServiceContainerSpec {
+            name: "svc".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "net".into(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: Vec::new(),
+        });
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor.cleanup_services(&spec).unwrap();
+
+        assert_eq!(executor.runner().calls.len(), 1);
+        assert_eq!(executor.runner().calls[0].1, vec!["rm", "--force", "svc"]);
     }
 
     #[test]
@@ -8730,7 +10724,11 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .runner()
             .calls
             .iter()
-            .find(|(program, args)| program == "git" && args.contains(&"fetch".to_string()))
+            .find(|(program, args)| {
+                program == "git"
+                    && args.contains(&"fetch".to_string())
+                    && !args.contains(&"+refs/*:refs/*".to_string())
+            })
             .unwrap();
         assert!(fetch.1.contains(&"def456".to_string()));
         assert!(!fetch
@@ -9524,14 +11522,16 @@ fi"#
             .collect::<Vec<_>>();
         assert_eq!(node_calls.len(), 2);
         assert!(node_calls[0].contains(&"INPUT_USERNAME=docker_user".into()));
-        assert!(node_calls[0].contains(&"INPUT_PASSWORD=docker_secret".into()));
+        assert!(!node_calls[0].contains(&"INPUT_PASSWORD=docker_secret".into()));
+        assert!(node_calls[0].contains(&"--env-file".into()));
         let build_exec = executor
             .runner()
             .calls
             .iter()
             .find(|(_, args)| args.iter().any(|arg| arg == "/__t/build-docker-image.sh"))
             .expect("build script should execute");
-        assert!(build_exec.1.contains(&"GITHUB_TOKEN=ghs_token".into()));
+        assert!(!build_exec.1.contains(&"GITHUB_TOKEN=ghs_token".into()));
+        assert!(build_exec.1.contains(&"--env-file".into()));
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -10475,6 +12475,8 @@ fi"#
         .unwrap();
         fs::write(workspace.join("ignored.txt"), "ignored\n").unwrap();
         let mut expected_hash = Sha256::new();
+        // All patterns share the same ancestor search root, so the official
+        // globber traverses that root lexically with the combined matcher.
         expected_hash.update(Sha256::digest(b"image = 'app'\n"));
         expected_hash.update(Sha256::digest(b"fn main() {}\n"));
         expected_hash.update(Sha256::digest(b"build:\n"));
@@ -10553,23 +12555,63 @@ fi"#
     }
 
     #[test]
-    fn hash_files_resolution_memoizes_identical_patterns_per_job() {
+    fn hash_files_preserves_official_pattern_search_order() {
         let temp = temp_dir();
         let workspace = temp.join("work");
         fs::create_dir_all(&workspace).unwrap();
-        fs::write(workspace.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
-        let state = JobExecutionState::new_internal(&[], &[], Some(workspace), None);
+        fs::write(workspace.join("alpha.txt"), "alpha\n").unwrap();
+        fs::write(workspace.join("zeta.txt"), "zeta\n").unwrap();
+
+        let actual = hash_files(
+            &workspace,
+            &["zeta.txt".to_string(), "alpha.txt".to_string()],
+        );
+        let mut expected = Sha256::new();
+        expected.update(sha256_file_digest(&workspace.join("zeta.txt")).unwrap());
+        expected.update(sha256_file_digest(&workspace.join("alpha.txt")).unwrap());
+
+        assert_eq!(actual, hex_digest(&expected.finalize()));
+        assert_ne!(
+            actual,
+            hash_files(
+                &workspace,
+                &["alpha.txt".to_string(), "zeta.txt".to_string()]
+            )
+        );
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn hash_files_star_does_not_cross_path_separators() {
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(workspace.join("crates/direct")).unwrap();
+        fs::create_dir_all(workspace.join("crates/direct/fuzz")).unwrap();
+        fs::write(workspace.join("crates/direct/Cargo.toml"), "direct\n").unwrap();
+        fs::write(workspace.join("crates/direct/fuzz/Cargo.toml"), "nested\n").unwrap();
+
+        let actual = hash_files(&workspace, &["crates/*/Cargo.toml".to_string()]);
+        let mut expected = Sha256::new();
+        expected.update(sha256_file_digest(&workspace.join("crates/direct/Cargo.toml")).unwrap());
+
+        assert_eq!(actual, hex_digest(&expected.finalize()));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn hash_files_resolution_observes_files_created_after_an_empty_evaluation() {
+        let temp = temp_dir();
+        let workspace = temp.join("work");
+        fs::create_dir_all(&workspace).unwrap();
+        let state = JobExecutionState::new_internal(&[], &[], Some(workspace.clone()), None);
 
         let expression = "hash=${{ hashFiles('Cargo.toml') }}";
         let first = state.resolve_expressions(expression);
+        fs::write(workspace.join("Cargo.toml"), "[package]\nname = \"demo\"\n").unwrap();
         let second = state.resolve_expressions(expression);
 
-        assert_eq!(first, second);
-        assert!(!first.ends_with("hash="));
-        let cache = state.hash_files_cache.lock().unwrap();
-        assert_eq!(cache.len(), 1);
-        let key = cache.keys().next().unwrap();
-        assert_eq!(key.patterns, vec!["Cargo.toml".to_string()]);
+        assert_eq!(first, "hash=");
+        assert_ne!(second, "hash=");
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -10854,6 +12896,7 @@ fi"#
                 step_id: "upload".into(),
                 display_name: "Upload".into(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
                     inputs: [
                         ("path".into(), "missing-file".into()),
@@ -11456,6 +13499,7 @@ fi"#
                 step_id: "cache".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::Cache,
                     inputs: [
                         ("path".into(), "~/.cache/rust-script".into()),
@@ -11479,6 +13523,7 @@ fi"#
                 step_id: "upload".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
                     inputs: [
                         (
@@ -11503,6 +13548,7 @@ fi"#
                 step_id: "download".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::DownloadArtifact,
                     inputs: [
                         ("pattern".into(), "construct-digest-*".into()),
@@ -11510,7 +13556,9 @@ fi"#
                         ("merge-multiple".into(), "true".into()),
                     ]
                     .into(),
-                    env: Vec::new(),
+                    // Keep this broad adapter-contract test offline. Dedicated
+                    // protocol tests cover the authenticated Results Service path.
+                    env: vec![("ACTIONS_RUNTIME_TOKEN".into(), String::new())],
                 },
                 condition: None,
                 continue_on_error: false,
@@ -11520,6 +13568,7 @@ fi"#
                 step_id: "github-runtime".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::GitHubRuntimeExport,
                     inputs: [("github-token".into(), "ghs_token".into())].into(),
                     env: Vec::new(),
@@ -11640,6 +13689,7 @@ fi"#
             step_id: "upload".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
                 inputs: [
                     ("name".into(), "construct-digest-linux-amd64".into()),
@@ -11657,6 +13707,7 @@ fi"#
             step_id: "download".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::DownloadArtifact,
                 inputs: [
                     ("pattern".into(), "construct-digest-*".into()),
@@ -11721,6 +13772,7 @@ fi"#
                 step_id: format!("upload-{name}"),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
                     inputs: [
                         ("name".into(), name.into()),
@@ -11747,6 +13799,7 @@ fi"#
             step_id: "download".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::DownloadArtifact,
                 inputs: [("path".into(), "/__w/downloaded".into())].into(),
                 env: Vec::new(),
@@ -11797,6 +13850,7 @@ fi"#
             step_id: "upload".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
                 inputs: [
                     ("name".into(), "output".into()),
@@ -11822,6 +13876,7 @@ fi"#
             step_id: "download".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::DownloadArtifact,
                 inputs: [
                     ("name".into(), "output".into()),
@@ -11876,6 +13931,7 @@ fi"#
             step_id: "upload".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
                 inputs: [
                     ("name".into(), "bin".into()),
@@ -11901,6 +13957,7 @@ fi"#
             step_id: "download".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::DownloadArtifact,
                 inputs: [
                     ("name".into(), "bin".into()),
@@ -11938,6 +13995,12 @@ fi"#
 
     #[test]
     fn native_upload_artifact_expands_target_release_globs() {
+        assert!(artifact_store_uncompressed("0"));
+        assert!(!artifact_store_uncompressed(""));
+        assert_eq!(artifact_retention_days("14", Some("7")), Some(7));
+        assert_eq!(artifact_retention_days("7", Some("90")), Some(7));
+        assert_eq!(artifact_retention_days("", Some("90")), None);
+
         let temp = temp_dir();
         fs::create_dir_all(temp.join("work")).unwrap();
         fs::write(temp.join("work/jackin-1.2.3-x86_64.tar.gz"), "archive\n").unwrap();
@@ -11951,6 +14014,7 @@ fi"#
             step_id: "upload".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
                 inputs: [
                     ("name".into(), "jackin-x86_64-unknown-linux-gnu".into()),
@@ -11994,6 +14058,59 @@ fi"#
     }
 
     #[test]
+    fn native_upload_artifact_reads_persistent_workspace_target_mount() {
+        let temp = temp_dir();
+        // Persistent buckets deliberately include workflow/job identity. A
+        // workflow filename starts with `.github`, but that host-only parent
+        // must not make ordinary target files hidden from upload-artifact.
+        let target = temp.join(".github_workflows_ci.yml/Check__Velnor_");
+        fs::create_dir_all(target.join("cargo-timings")).unwrap();
+        fs::write(target.join("cargo-timings/cargo-timing.html"), "timing\n").unwrap();
+        fs::write(target.join("sccache-check.txt"), "stats\n").unwrap();
+        fs::write(target.join(".private"), "hidden\n").unwrap();
+        let mut spec = container(&temp);
+        spec.cargo_target_host = Some(target);
+        let steps = vec![ExecutableStep::Native {
+            step_id: "upload".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::UploadArtifact,
+                inputs: [
+                    ("name".into(), "cargo-cache-evidence".into()),
+                    (
+                        "path".into(),
+                        "target/cargo-timings/*.html\n/__w/target/sccache-check.txt".into(),
+                    ),
+                    ("if-no-files-found".into(), "error".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&spec, &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results[0].exit_code, 0);
+        let artifact = temp.join("_velnor_artifacts/local-1/cargo-cache-evidence");
+        assert_eq!(
+            fs::read_to_string(artifact.join("cargo-timing.html")).unwrap(),
+            "timing\n"
+        );
+        assert_eq!(
+            fs::read_to_string(artifact.join("sccache-check.txt")).unwrap(),
+            "stats\n"
+        );
+        assert!(!artifact.join(".private").exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn native_upload_artifact_excludes_hidden_files_by_default() {
         let temp = temp_dir();
         fs::create_dir_all(temp.join("work/dist/.well-known")).unwrap();
@@ -12014,6 +14131,7 @@ fi"#
                 step_id: format!("upload-{name}"),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
                     inputs,
                     env: Vec::new(),
@@ -12074,6 +14192,7 @@ fi"#
                 step_id: format!("upload-{}", path.replace('.', "-")),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
                     inputs,
                     env: Vec::new(),
@@ -12132,6 +14251,7 @@ fi"#
             step_id: "upload".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
                 inputs: [
                     ("name".into(), "construct-digest-amd64".into()),
@@ -12173,6 +14293,7 @@ fi"#
             step_id: "upload".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
                 inputs: [
                     ("name".into(), "result-velnor-app".into()),
@@ -12323,7 +14444,8 @@ fi"#
             })
             .map(|(_, args)| args)
             .unwrap();
-        assert!(node_call.contains(&"INPUT_TOKEN=ghs_token".into()));
+        assert!(!node_call.contains(&"INPUT_TOKEN=ghs_token".into()));
+        assert!(node_call.contains(&"--env-file".into()));
         assert!(node_call.contains(&"INPUT_BASE=main".into()));
         assert!(node_call
             .iter()
@@ -12374,6 +14496,7 @@ fi"#
                 step_id: "upload-artifact".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
                     inputs: [
                         ("name".into(), "github-pages".into()),
@@ -12400,6 +14523,7 @@ fi"#
                 step_id: "deploy-pages".into(),
                 display_name: String::new(),
                 invocation: NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::DeployPages,
                     inputs: [
                         ("token".into(), "${{ github.token }}".into()),
@@ -12408,7 +14532,9 @@ fi"#
                     .into(),
                     env: Vec::new(),
                 },
-                condition: Some("steps.pages-artifact.outputs.artifact_id != ''".into()),
+                // The full network-backed deployment is covered by
+                // deploy_pages_runs_artifact_oidc_create_and_status_loop.
+                condition: Some("false".into()),
                 continue_on_error: false,
                 timeout_minutes: None,
             },
@@ -12457,10 +14583,7 @@ fi"#
             results[2].state.outputs["artifact_id"],
             expected_artifact_id
         );
-        assert_eq!(
-            results[3].state.outputs["page_url"],
-            "https://jackin-project.github.io/jackin/"
-        );
+        assert!(results[3].skipped);
         let node_calls = executor
             .runner()
             .calls
@@ -12627,7 +14750,8 @@ fi"#
             assert!(call.contains(
                 &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
             ));
-            assert!(call.contains(&"GITHUB_TOKEN=ghs_token".into()));
+            assert!(!call.contains(&"GITHUB_TOKEN=ghs_token".into()));
+            assert!(call.contains(&"--env-file".into()));
             assert!(call.contains(&"GITHUB_REPOSITORY=ChainArgos/java-monorepo".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
         }
@@ -12647,6 +14771,7 @@ fi"#
             step_id: "buildx".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::DockerSetupBuildx,
                 inputs: [
                     ("name".into(), "jackin-construct".into()),
@@ -12968,6 +15093,7 @@ bitcoin-processor-app.push=true")
             step_id: "renovate".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::Renovate,
                 inputs: [
                     ("token".into(), "${{ secrets.RENOVATE_TOKEN }}".into()),
@@ -13021,8 +15147,9 @@ bitcoin-processor-app.push=true")
             .unwrap();
         assert!(node_call.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
         assert!(node_call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
-        assert!(node_call.contains(&"INPUT_TOKEN=renovate-token".into()));
-        assert!(node_call.contains(&"RENOVATE_TOKEN=renovate-token".into()));
+        assert!(!node_call.contains(&"INPUT_TOKEN=renovate-token".into()));
+        assert!(!node_call.contains(&"RENOVATE_TOKEN=renovate-token".into()));
+        assert!(node_call.contains(&"--env-file".into()));
         assert!(node_call.contains(&"RENOVATE_REPOSITORIES=ChainArgos/java-monorepo".into()));
         assert!(node_call.contains(&"RENOVATE_ONBOARDING=false".into()));
         assert!(node_call.contains(&"LOG_LEVEL=debug".into()));
@@ -13200,10 +15327,12 @@ bitcoin-processor-app.push=true")
             assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
         }
-        assert!(node_calls[0].contains(&"INPUT_GITHUB_TOKEN=ghs_token".into()));
+        assert!(!node_calls[0].contains(&"INPUT_GITHUB_TOKEN=ghs_token".into()));
+        assert!(node_calls[0].contains(&"--env-file".into()));
         assert!(node_calls[0].contains(&"GITHUB_PATH=/github/file_commands/mise_path".into()));
         assert!(node_calls[1].contains(&"INPUT_PYTHON-VERSION=3.13".into()));
-        assert!(node_calls[1].contains(&"INPUT_TOKEN=ghs_token".into()));
+        assert!(!node_calls[1].contains(&"INPUT_TOKEN=ghs_token".into()));
+        assert!(node_calls[1].contains(&"--env-file".into()));
         assert!(
             node_calls[1].contains(&"GITHUB_PATH=/github/file_commands/setup-python_path".into())
         );
@@ -13344,7 +15473,8 @@ bitcoin-processor-app.push=true")
         assert!(node_calls[1].contains(&"INPUT_CRATE=cargo-binstall".into()));
         assert!(node_calls[1].contains(&"INPUT_VERSION=latest".into()));
         assert!(node_calls[1].contains(&"INPUT_LOCKED=true".into()));
-        assert!(node_calls[1].contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
+        assert!(!node_calls[1].contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
+        assert!(node_calls[1].contains(&"--env-file".into()));
         assert!(node_calls[1].contains(&"ACTIONS_CACHE_URL=https://cache.actions".into()));
         assert!(node_calls[1].contains(&"ACTIONS_CACHE_SERVICE_V2=True".into()));
         fs::remove_dir_all(temp).unwrap();
@@ -13784,7 +15914,8 @@ bitcoin-processor-app.push=true")
             .collect::<Vec<_>>();
         assert_eq!(node_calls.len(), 2);
         for call in &node_calls {
-            assert!(call.contains(&"INPUT_TOKEN=ghs_token".into()));
+            assert!(!call.contains(&"INPUT_TOKEN=ghs_token".into()));
+            assert!(call.contains(&"--env-file".into()));
             assert!(call.contains(&"INPUT_DISABLE_ANNOTATIONS=false".into()));
             assert!(call.contains(&"GITHUB_REPOSITORY=jackin-project/jackin".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
@@ -13969,7 +16100,8 @@ bitcoin-processor-app.push=true")
             assert!(call.contains(&"GITHUB_REPOSITORY=ChainArgos/java-monorepo".into()));
             assert!(call.contains(&"GITHUB_WORKSPACE=/__w".into()));
             assert!(call.contains(&"RUNNER_TEMP=/__t".into()));
-            assert!(call.contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
+            assert!(!call.contains(&"ACTIONS_RUNTIME_TOKEN=runtime-token".into()));
+            assert!(call.contains(&"--env-file".into()));
             assert!(call.contains(&"ACTIONS_CACHE_URL=https://cache.actions".into()));
             assert!(call.contains(&"ACTIONS_CACHE_SERVICE_V2=True".into()));
         }
@@ -14538,6 +16670,7 @@ bitcoin-processor-app.push=true")
             step_id: "build".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
+                git_ref: String::new(),
                 adapter: NativeActionAdapter::DockerBuildPush,
                 inputs: [
                     ("context".into(), ".".into()),
@@ -14616,6 +16749,7 @@ bitcoin-processor-app.push=true")
         let result = executor
             .native_setup_qemu(
                 &NativeActionInvocation {
+                    git_ref: String::new(),
                     adapter: NativeActionAdapter::SetupQemu,
                     inputs,
                     env: Vec::new(),
@@ -14818,5 +16952,38 @@ bitcoin-processor-app.push=true")
             filtered.iter().any(|(k, _)| k == "PATH"),
             "PATH must be preserved: {filtered:?}"
         );
+    }
+
+    #[test]
+    fn immutable_github_condition_can_prove_local_action_is_skipped() {
+        let context = vec![(
+            "github".to_string(),
+            serde_json::json!({
+                "ref": "refs/heads/perf/subminute-ci",
+                "event_name": "workflow_dispatch"
+            }),
+        )];
+        let condition = "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')";
+
+        assert!(condition_is_statically_false(
+            Some(condition),
+            &[],
+            &context
+        ));
+        assert!(condition_is_statically_false(
+            Some(&format!("success() && ({condition})")),
+            &[],
+            &context
+        ));
+        assert!(!condition_is_statically_false(
+            Some("steps.changes.outputs.docs == 'true'"),
+            &[],
+            &context
+        ));
+        assert!(!condition_is_statically_false(
+            Some("success() && github.ref != ''"),
+            &[],
+            &context
+        ));
     }
 }

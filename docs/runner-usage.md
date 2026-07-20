@@ -12,7 +12,24 @@ The runner installs and upgrades via apt (repo: `velnor-apt.tailrocks.com`):
 sudo apt-get update && sudo apt-get install velnor-runner   # or upgrade
 ```
 
+For first-install repository/keyring setup and the maintainer's complete
+tag-to-signed-repository publication procedure, follow
+[Debian package + apt-native repository](debian-apt-repo.md). Production
+servers never install a local release asset.
+
 Configuration (one daemon per target scope):
+
+Production upgrades on Sentry come only from that signed repository. Commit and
+push the source, tag the new version, wait for `release-deb.yml` and
+`tailrocks/velnor-apt`'s `publish.yml` to pass, verify the signed repository
+offers the new version, then run the apt command above. Do not deploy with
+`dpkg -i` or install a local `.deb` path with apt.
+
+The package ships the canonical job-image Dockerfile. During configuration,
+`postinst` compares the image's OCI version label with the Debian package
+version and rebuilds `velnor/job-ubuntu:26.04` before restarting any daemon when
+they differ. An apt upgrade therefore cannot leave native adapters paired with
+a stale tool image; image-build failure fails the package transaction.
 
 - Default instance: `/etc/velnor/velnor.env` (URL, name, labels, slots,
   work dir) + `/etc/velnor/secrets.env` (0600, `GITHUB_TOKEN=...` — never
@@ -25,11 +42,33 @@ Configuration (one daemon per target scope):
   `container.options` so daemon policy wins on shared warm-runner hosts.
   Set either value empty in the daemon env to disable that cap for a trusted
   scope, or tune per instance.
+- Rust compile-cache defaults: every job starts with
+  `CARGO_INCREMENTAL=0`, `SCCACHE_CACHE_SIZE=20G`, and
+  `SCCACHE_BASEDIRS=/__w:/github/home`. Workflow environment may explicitly
+  override the incremental setting and cache size. The path-normalization
+  roots are runner-owned and cannot be overridden. Set
+  `VELNOR_SCCACHE_CACHE_SIZE` on the daemon to change the default store bound.
+- Capacity admission reserves 30 GiB per advertised slot and preserves a 10
+  GiB emergency floor. Tune them per host with `VELNOR_JOB_PEAK_BYTES` and
+  `VELNOR_EMERGENCY_RESERVE_BYTES`; doctor reports free/reserved bytes, active
+  leases, and cache accounting.
+- Regenerable class ceilings default to targets 200 GiB, actions cache 50 GiB,
+  and artifacts/Cargo/mise 20 GiB each. Override with the corresponding
+  `VELNOR_BUDGET_{TARGETS,CACHES,ARTIFACTS,CARGO,MISE}_BYTES` variables.
+  The mise class includes repo-scoped `/opt/mise/installs` and the matching
+  `/root/.rustup` payload; they are one executable-tool lifetime and budget.
 - Optional Rust target persistence: set `VELNOR_CARGO_TARGET_PERSIST=true` in
   the daemon env only for trusted target scopes. Velnor stores targets under
-  `_velnor_targets/<trust-scope>/<repo>/<workflow>/<job-bucket>` so warm state
+  `_velnor_targets/<trust-scope>/<generation>/<repo>/<workflow>/<job-bucket>`
+  so warm state
   is shared only across matching trust scope, repository, workflow, and job
-  classes. Set `VELNOR_TRUST_SCOPE` per daemon/pool (`trusted` by default;
+  classes, then mounts that bucket at the normal `/__w/target` workspace path.
+  It does not set `CARGO_TARGET_DIR`, so workflow-visible Cargo paths remain
+  identical to GitHub-hosted execution. Native checkout preserves only this
+  runner-owned `target/` mount while applying `git clean -ffdx` to every other
+  ignored or untracked workspace path; otherwise checkout would empty the
+  durable bucket before every job. Set `VELNOR_TRUST_SCOPE` per
+  daemon/pool (`trusted` by default;
   use a distinct value such as `public-forks` for untrusted lanes) before
   enabling target persistence.
 - Trust scopes are enforced at runtime. The `trusted` scope keeps the current
@@ -39,6 +78,10 @@ Configuration (one daemon per target scope):
   receive the host Docker socket. Use separate runner labels and runner groups
   for trusted and untrusted daemons so fork PRs cannot land on a trusted warm
   pool by accident.
+- Organization fleets: use `--url https://github.com/<org>` with
+  `--pool-name <runner-group>` to resolve the current group id through GitHub.
+  Follow the drain, trust-lane, label-continuity, and rollback procedure in
+  [org-fleet-migration.md](org-fleet-migration.md).
 
 Units (all shipped by the package):
 
@@ -55,6 +98,23 @@ Units (all shipped by the package):
   `systemctl list-units --type=service --all` is the normal completed state
   after a timer run. Inspect `systemctl list-timers 'velnor-doctor*'` and
   failed units instead of treating inactive one-shot services as stale daemons.
+
+Persistent stores use `/var/cache/velnor/v1/<trust-scope>/...`; durable state,
+runtime leases, and logs use `/var/lib/velnor`, `/run/velnor`, and
+`/var/log/velnor`. Package units set `VELNOR_STORAGE_ROOT=/var`. Before an
+upgrade that adopts the canonical tree, drain every daemon and move each
+legacy `/var/lib/velnor*/work/_velnor_*` class into its matching canonical
+trust/class path. Velnor reads an existing legacy class only while its
+canonical destination is absent, so migration is explicit and reversible.
+Use `velnor-runner storage paths` and `storage status` to inspect resolution.
+Primary-repository bare mirrors live in the regenerable `git-mirrors` cache
+class (`/var/cache/velnor/v1/<trust-scope>/git-mirrors`). Each mirror is keyed
+by owner/repository, locked across slots during delta fetch, and never stores a
+remote URL or credential. Checkout fetches locally from the refreshed mirror
+while preserving the normal checkout trace and falls back to its direct origin
+when refresh fails. Cache and artifact tree copies try the filesystem's native
+reflink operation first (XFS `FICLONE` on production Linux, `clonefile` on
+macOS) and transparently fall back to a byte copy when unsupported.
 
 ## Current runner state
 
@@ -217,6 +277,12 @@ docker run --rm \
     --docker-host-work-dir "$PWD/.velnor-work" \
     --require-docker-socket
 ```
+
+The canonical job image includes the current architecture-pinned Node.js
+runtime (v26.5.0) as a base-runner tool. This matches GitHub-hosted semantics
+for ordinary run steps and lets tools such as Oxlint's type-aware plugin invoke
+`node` without a workflow-only installation. Runner preflight rejects an image
+that lacks Node or any required estate Rust target.
 
 The same path mapping is required for `daemon` and `run`:
 

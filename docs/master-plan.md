@@ -445,7 +445,8 @@ Fixed by truthful exec base env (HOME=/github/home) + mount-based caching:
 daemon-shared host stores for cargo registry/git and mise installs/cache
 mounted into every job container, actions/cache adapter no-ops for
 always-warm paths, type=gha buildx cache options dropped on the Velnor
-lane, opt-in persistent CARGO_TARGET_DIR buckets, and the host-path leak
+lane, opt-in persistent workspace `target` buckets mounted at `/__w/target`
+without exporting `CARGO_TARGET_DIR`, and the host-path leak
 (unknown absolute paths resolving to the daemon host FS) closed.
 
 1. **Native HTTP client, kill the curl subprocesses.** Today every GitHub

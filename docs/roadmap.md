@@ -44,6 +44,16 @@ expanded job against
 effect. Unsupported refs, inputs, values, and combinations fail clearly. New
 surface requires explicit operator approval.
 
+**Estate uniformity is concern-based.** Repositories do not gain meaningless
+jobs merely to look alike. First inventory which CI concerns each repository
+actually has and which baseline concerns its class requires. Every shared or
+required concern then uses the same canonical workflow name, job id, lane
+matrix, step order, pinned actions, inputs, environment, cache keys, timeouts,
+concurrency, writer gate, and required aggregator. Repository-specific work may
+differ only where its product surface differs. Missing required concerns are
+added from the canonical template; non-applicable concerns are documented and
+omitted, never represented by fake no-op jobs.
+
 ## Implementation Goal
 
 Velnor is a GitHub Actions-compatible runner daemon with a Rust runtime.
@@ -690,9 +700,9 @@ All questions below were resolved during Phase 0/P1; answers inline.
    dispatch a fresh fixture workflow after JIT lands?
 6. Cleanup: should Velnor keep failed JIT runner configs for debugging behind a
    flag, or always delete them by default?
-7. Artifact/cache: **Phase 0 decision: one-host shared-workdir transport is
-   sufficient.** The `_velnor_artifacts/{run_id}-{attempt}/` and
-   `_velnor_caches/` directories on the daemon host serve all jobs in the same
-   run because Phase 0 proof runs on a single host. GitHub service-backed
-   artifact/cache transport (Results Service file APIs) is deferred post-Phase 0
-   for multi-host support.
+7. Artifact/cache: the earlier Phase-0 one-host artifact decision is
+   superseded. Upload and download use Results Service v4
+   (Create/Finalize/List/GetSignedArtifactURL) so job placement never changes
+   correctness; `_velnor_artifacts/{run_id}-{attempt}/` is diagnostic/offline
+   fallback only. `_velnor_caches/` remains an explicitly owned runner-local
+   acceleration store under the storage contract.

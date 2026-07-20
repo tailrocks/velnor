@@ -19,7 +19,7 @@
 //!   lane's `job-log` artifact(s) for the Velnor side.
 
 use anyhow::{bail, Context, Result};
-use clap::{ArgAction, Args};
+use clap::{ArgAction, Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -60,6 +60,44 @@ pub struct LaneCompareArgs {
     /// Exit nonzero when any paired step is less informative than GitHub.
     #[arg(long, default_value_t = true, action = ArgAction::Set)]
     pub strict: bool,
+    /// §2.11 workload class used for the Velnor wall-time budget.
+    #[arg(long, value_enum)]
+    pub class: Option<RunClass>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum RunClass {
+    A,
+    B,
+    C,
+    D,
+}
+
+impl RunClass {
+    // VELNOR_PROJECTS_SETUP.md §2.11 initial warm/no-change budgets.
+    fn wall_budget_seconds(self) -> i64 {
+        match self {
+            Self::A => 150,
+            Self::B | Self::C => 90,
+            Self::D => 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BudgetVerdict {
+    seconds: i64,
+    budget: i64,
+    pass: bool,
+}
+
+fn wall_budget_verdict(class: RunClass, seconds: i64) -> BudgetVerdict {
+    let budget = class.wall_budget_seconds();
+    BudgetVerdict {
+        seconds,
+        budget,
+        pass: seconds <= budget,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -178,6 +216,7 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
 
     let mut report = String::new();
     let mut worse_total = 0usize;
+    let mut budget_failures = 0usize;
     writeln!(report, "# Lane compare — run {run_id} ({})", args.repo)?;
     writeln!(report)?;
     writeln!(
@@ -185,6 +224,31 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
         "Gate: equal-or-better — zero rows where the GitHub lane shows \
          information the Velnor lane lacks."
     )?;
+    if let Some(class) = args.class {
+        writeln!(report)?;
+        writeln!(report, "## §2.11 Velnor budget ({class:?})")?;
+        writeln!(report)?;
+        writeln!(report, "| Job | Wall | Budget | Verdict |")?;
+        writeln!(report, "|---|---:|---:|---|")?;
+        for (_, velnor) in &pairs {
+            let seconds = job_duration_seconds(velnor).unwrap_or(i64::MAX);
+            let verdict = wall_budget_verdict(class, seconds);
+            budget_failures += usize::from(!verdict.pass);
+            writeln!(
+                report,
+                "| {} | {}s | {}s | {} |",
+                velnor.name,
+                verdict.seconds,
+                verdict.budget,
+                if verdict.pass { "PASS" } else { "FAIL" }
+            )?;
+        }
+        writeln!(report)?;
+        writeln!(
+            report,
+            "Pickup SLO is reported from Velnor's versioned `job-timing` forensic records; the GitHub jobs API does not expose an authoritative broker-message timestamp."
+        )?;
+    }
 
     for (github, velnor) in &pairs {
         let github_html = fetch_job_html_steps(github).unwrap_or_else(|error| {
@@ -224,7 +288,7 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
 
     writeln!(report, "\n## Result")?;
     writeln!(report)?;
-    if worse_total == 0 {
+    if worse_total == 0 && budget_failures == 0 {
         writeln!(
             report,
             "**PASS** — no paired step is less informative than the GitHub lane."
@@ -232,8 +296,7 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
     } else {
         writeln!(
             report,
-            "**FAIL** — {worse_total} row(s) where the Velnor lane is less \
-             informative than the GitHub lane."
+            "**FAIL** — {worse_total} parity row(s) and {budget_failures} §2.11 budget failure(s)."
         )?;
     }
     writeln!(report)?;
@@ -249,8 +312,8 @@ pub fn lane_compare(root: &Path, args: LaneCompareArgs) -> Result<()> {
     println!("{report}");
     println!("report: {}", report_path.display());
 
-    if args.strict && worse_total > 0 {
-        bail!("lane-compare gate failed: {worse_total} worse row(s); see report above");
+    if args.strict && (worse_total > 0 || budget_failures > 0) {
+        bail!("lane-compare gate failed: {worse_total} worse row(s), {budget_failures} budget failure(s); see report above");
     }
     Ok(())
 }
@@ -1371,6 +1434,23 @@ mod tests {
         let mut open_ended = step.clone();
         open_ended.completed_at = None;
         assert_eq!(step_duration_seconds(&open_ended), None);
+    }
+
+    #[test]
+    fn class_d_wall_budget_accepts_sixty_seconds() {
+        assert_eq!(
+            wall_budget_verdict(RunClass::D, 60),
+            BudgetVerdict {
+                seconds: 60,
+                budget: 60,
+                pass: true,
+            }
+        );
+    }
+
+    #[test]
+    fn class_a_wall_budget_rejects_over_150_seconds() {
+        assert!(!wall_budget_verdict(RunClass::A, 151).pass);
     }
 
     fn lane_stats(gh: f64, vl: f64, worse_rows: usize) -> LaneStats {

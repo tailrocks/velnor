@@ -100,12 +100,13 @@ until a new target workflow needs more.
 | --- | --- | --- |
 | `actions/checkout` | `Checkout` | self checkout, external repo checkout, `path`, `ref`, `token`, `fetch-depth` |
 | `actions/cache` | `Cache` | restore/save paths, key, restore keys with newest prefix match, `hashFiles(...)` keys, latest `cache-hit` output semantics (`true` exact hit, `false` prefix hit, empty miss), `fail-on-cache-miss`, `lookup-only` without restoring paths, shared workdir cache storage |
-| `actions/upload-artifact` | `UploadArtifact` | `name`, `path` including target glob patterns, `if-no-files-found`, `include-hidden-files` defaulting to false like the latest action, `overwrite` defaulting to false with duplicate-name failure, `retention-days`, target outputs, deterministic per-run/per-name artifact id, run-scoped workdir storage, Results Service upload required for cross-host handoff |
-| `actions/download-artifact` | `DownloadArtifact` | `name`, `pattern`, all-artifacts mode, `path`, container-visible `download-path` output, `merge-multiple`, latest directory layout semantics, downloaded directory/file permissions normalized to `755`/`644`, same-run cross-job handoff on one Velnor host |
+| `actions/upload-artifact` | `UploadArtifact` | `name`, `path` including target glob patterns, `if-no-files-found`, `include-hidden-files` defaulting to false like the latest action, `overwrite` defaulting to false with duplicate-name failure, exact estate-approved `compression-level: 0` (ZIP Stored), estate-observed `retention-days` literals `1`, `7`, `14`, `30`, and `90` with repository-maximum clamping and Results Service expiration, target outputs, deterministic per-run/per-name artifact id, run-scoped workdir storage, Results Service upload required for cross-host handoff |
+| `actions/github-script` | `GitHubScript` | Exact v9 Jackin patterns only: copy `CONTRACT` to the `docs-xtask` output, or restore prepared tool/xtask artifacts through the repository artifacts REST API with the declared 55-second publication wait, safe ZIP extraction, executable modes, path/env exports, and hit outputs. All adjacent scripts, refs, and inputs fail strict validation. |
+| `actions/download-artifact` | `DownloadArtifact` | `name`, `pattern`, all-artifacts mode, `path`, container-visible `download-path` output, `merge-multiple`, latest directory layout semantics, safe zip extraction, and Results Service v4 ListArtifacts/GetSignedArtifactURL transport across jobs, slots, and hosts |
 | `actions/upload-pages-artifact` | `UploadPagesArtifact` | package pages directory and expose artifact handoff |
 | `actions/deploy-pages` | `DeployPages` | pages artifact name and deployment output `page_url` |
-| `dorny/paths-filter` | `PathsFilter` | evaluate target multiline filters for push, PR, workflow dispatch |
-| `jdx/mise-action` | `Mise` | install mise when missing, install requested tools, use shared home, update `GITHUB_PATH` |
+| `dorny/paths-filter` | `PathsFilter` | evaluate target multiline filters for push and PR; for workflow dispatch and other non-PR events, match current upstream by diffing the checked-out ref from the repository default branch's merge base |
+| `jdx/mise-action` | `Mise` | install the approved exact mise version when requested, install requested tools, persist executable installs and rustup state in the same trust/repository scope, consume the approved cache generation and archive-save policy through that persistent local store (upstream `cache_save` controls archive publication, not tool installation; Velnor never enables a remote backend), update `GITHUB_PATH`, export every non-`PATH` string from `mise env --json`, and register the redacted environment values as log masks without streaming either environment document |
 | `mozilla-actions/sccache-action` | `Sccache` | configure env/path/cache, fail honestly when `sccache` is unavailable so target `continue-on-error` gates work |
 | `rui314/setup-mold` | `SetupMold` | install/link mold for later Rust builds |
 | `extractions/setup-just` | `SetupJust` | install just or reuse image-provided just, update cargo bin path |
@@ -125,6 +126,10 @@ matrix jobs, including the Velnor lane, then download them from Ubuntu-hosted
 fan-in/compare jobs. A failed remote upload would make Velnor report success
 while the downstream GitHub-hosted job cannot find the artifact, so the upload
 step must fail after preserving the local `_velnor_artifacts` copy.
+`actions/download-artifact` likewise treats the Results Service as
+authoritative whenever the job carries runtime credentials; a daemon-local
+copy is only an offline/test fallback and must never determine product
+correctness or constrain fan-in jobs to one slot or host.
 
 Local composite actions remain first-class workflow code. Velnor should parse
 their metadata and expand their nested `run` and `uses` steps, but nested

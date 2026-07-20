@@ -6,7 +6,7 @@ their history lives in git (the 2026-07-03 deep-audit generation, plans
 pre-cleanup tree at tag/commit `17136f9` for the archived files).
 
 The single active execution prompt for the whole program is
-[`estate-program-goal-prompt.md`](estate-program-goal-prompt.md) — pass its
+[`docs/prompt.md`](../docs/prompt.md) — pass its
 body to `/goal`. There are no other active prompts; the old `prompts/`
 goal-prompt system is retired (all its sequences completed 2026-06-11).
 
@@ -26,8 +26,8 @@ Verification gates used by every velnor code plan (from `mise.toml`):
 
 | Plan | Title | Priority | Effort | Status |
 |------|-------|----------|--------|--------|
-| 014 | Harden the systemd unit (sandboxing) without breaking Docker/bind mounts | P2 | S | BLOCKED: needs a live systemd smoke + `systemd-analyze security` score on the host — fold into the program's host window (do alongside 059) |
-| 015 | Purge committed run-log HTML captures with channel tokens + commit policy | P2 | S | BLOCKED: git-history purge is destructive — operator-confirmed window; the non-destructive part (delete files at HEAD, add the never-commit policy + guard) is executable now |
+| 014 | Harden the systemd unit (sandboxing) without breaking Docker/bind mounts | P2 | S | DONE: v0.1.49 apt deployment; hardened unit ran green fixture jobs; live score 7.9 |
+| 015 | Purge committed run-log HTML captures with channel tokens + commit policy | P2 | S | BLOCKED: HEAD is clean and guard/policy exist; history purge of commit `55ed22f` requires an operator-confirmed coordinated rewrite window |
 
 ---
 
@@ -50,29 +50,33 @@ jackin-project/jackin PR #810; the whole jackin delivery stacks there and
 merges with that PR (operator decision 2026-07-18, setup-doc §12.5). Every
 V-B three-lane dispatch and V-C timing run executes **from the repo's
 program branch before merge** — both runners must prove the exact same
-configuration. Uniform shape is law: same workflow filenames, job ids, input
-names, cache keys, concurrency groups, and `.github/AGENTS.md` template in
-every repo (§2.12; `audit-ci` rule 11 enforces it).
+configuration. Uniform shape is concern-based law: every concern common to
+multiple repositories or required by a repository's class/product surface uses
+the same canonical workflow filename, job ids, input names, step order, pins,
+environment, cache keys, timeout/concurrency, writer gate, aggregator, and
+`.github/AGENTS.md` shared block. Missing required concerns are added;
+genuinely non-applicable concerns are classified and omitted, never replaced
+with no-op jobs (§2.12; `audit-ci` must enforce both coverage and equivalence).
 
 ## Execution order & status — runner (velnor)
 
 | Plan | Title | Priority | Effort | Depends on | Maps to | Status |
 |------|-------|----------|--------|------------|---------|--------|
-| 033 | Strict capability manifest; no unknown-action fallback | P0 | L | — | V0.14; contract gates 1–3,6,7 | TODO |
-| 034 | Compiler-cache backend seam (sccache v0.16.0 baked, kache, off) | P0 | L | 033 | contract gates 4–5; V2.2/V2.3 | TODO |
-| 035 | Canonical storage contract + fail-closed identity | P0 | L | — | V0.11; P0 unknown-repo bug | TODO |
-| 036 | Capacity controller — leases, reservations, reclaim-before-accept | P0 | L | 035 (037 couples) | V0.12/V0.13 | TODO |
-| 037 | Destructive cache GC + physical accounting | P0 | M/L | 035 | V0.7/V0.8 | TODO |
-| 038 | Job-env defaults (SCCACHE_CACHE_SIZE/BASEDIRS, CARGO_INCREMENTAL=0) | P0 | S | — | V0.9 | TODO |
-| 039 | Org-level JIT + multi-repo fleet ops | P0 | M | — | V0.1 | TODO |
-| 040 | `services:` parity (host/port env, alias) | P0 | M | — | V0.5 | TODO |
-| 041 | Fixture: inline matrix, backend jobs, services job, registry sync | P0 | M | (033/034/040 soft) | V0.10; gate V-A | TODO |
-| 042 | Estate adapter completion (Pages, attest, composites, login gate) | P0/P1 | L | 033 | V0.4/V0.6/V1.1/V1.2/V1.5 | TODO |
-| 043 | Job lifecycle latency (async finalize, pre-create, JIT overlap) | P1 | L | — | V1.9/V1.10/V1.12 | TODO |
-| 044 | Git-mirror store + reflink copies | P1 | M | 035 | V1.11/V1.13 | TODO |
-| 045 | Timing observability (job summary reports, doctor SLOs) | P1 | M | 043 soft | V1.14/V1.15/V1.7 | TODO |
-| 046 | velnor-tools audit-ci + compare (incl. §2.12 uniform-shape rules) | P1 | M/L | — | V1.16; §2.8/§2.12 | TODO |
-| 059 | Velnor host baseline cleanup (operator-supervised; inventory now, destructive pass ideally post-035/037, always before the first verification campaign) | P0 | M | 035/037 preferred | §0 gate 7; §8 Phase 0.5 | TODO |
+| 033 | Strict capability manifest; no unknown-action fallback | P0 | L | — | V0.14; contract gates 1–3,6,7 | DONE: versioned ref/input manifest, pre-side-effect validation, diagnostic-only Node fallback, export/check CLI, eight focused tests, and all gates green |
+| 034 | Compiler-cache backend seam (sccache v0.16.0 baked, kache, off) | P0 | L | 033 | contract gates 4–5; V2.2/V2.3 | DONE |
+| 035 | Canonical storage contract + fail-closed identity | P0 | L | — | V0.11; P0 unknown-repo bug | DONE: canonical resolver/catalog/CLI, legacy readability, fail-closed identity, packaging, and all gates green |
+| 036 | Capacity controller — leases, reservations, reclaim-before-accept | P0 | L | 035 (037 couples) | V0.12/V0.13 | DONE: serialized reservations, emergency floor/hysteresis, lease-safe shortfall reclaim, explicit backpressure, doctor output, live host proof, and all gates green |
+| 037 | Destructive cache GC + physical accounting | P0 | M/L | 035 | V0.7/V0.8 | DONE: guarded destructive GC, leader lock, physical budgets/history, owned-builder boundary, live cleanup, and all gates green |
+| 038 | Job-env defaults (SCCACHE_CACHE_SIZE/BASEDIRS, CARGO_INCREMENTAL=0) | P0 | S | — | V0.9 | DONE: defaults, precedence tests, docs, and all runner gates green |
+| 039 | Org-level JIT + multi-repo fleet ops | P0 | M | — | V0.1 | BLOCKED: code/runbook and gates complete; all local and daemon credentials return HTTP 403 for org runner-group administration |
+| 040 | `services:` parity (host/port env, alias) | P0 | M | — | V0.5 | DONE: V2 service tokens, shared-network aliases, runtime port context, Postgres-shape tests, and all gates green |
+| 041 | Fixture: inline matrix, backend jobs, services job, registry sync | P0 | M | (033/034/040 soft) | V0.10; gate V-A | DONE: fixture audits and tools tests green; GitHub `29634753256`, Velnor `29634781889`, both/parity `29634836133` green; Kache canary skipped per documented fallback |
+| 042 | Estate adapter completion (Pages, attest, composites, login gate) | P0/P1 | L | 033 | V0.4/V0.6/V1.1/V1.2/V1.5 | DONE: full Pages V2/OIDC loop, explicit attest rejection, composites, denylist, and trust gate verified (577 tests) |
+| 043 | Job lifecycle latency (async finalize, pre-create, JIT overlap) | P1 | L | — | V1.9/V1.10/V1.12 | DONE: completion-before-teardown and next-JIT overlap proved live on Sentry |
+| 044 | Git-mirror store + reflink copies | P1 | M | 035 | V1.11/V1.13 | DONE: trust mirror live; checkout spans 407–454 ms; no credential persisted |
+| 045 | Timing observability (job summary reports, doctor SLOs) | P1 | M | 043 soft | V1.14/V1.15/V1.7 | DONE: six live spans, versioned records/cache summaries, 611-test gate, and v0.1.55 doctor p50/p95 table verified |
+| 046 | velnor-tools audit-ci + compare (incl. §2.12 uniform-shape rules) | P1 | M/L | — | V1.16; §2.8/§2.12 | DONE: 49 tool tests, full 611-test gate, real estate audits, and fixture parity/budget run `29636145660` pass |
+| 059 | Velnor host baseline cleanup (operator-supervised; inventory now, destructive pass ideally post-035/037, always before the first verification campaign) | P0 | M | 035/037 preferred | §0 gate 7; §8 Phase 0.5 | DONE: committed before/after baseline, root 36%, zero unknown identities/stale Velnor objects, doctor green, both-lane smoke `29636145660` green |
 
 ## Execution order & status — estate (one PR per repo)
 
@@ -81,18 +85,18 @@ V-A). Do not open estate PRs before 041's operator verification.
 
 | Plan | Repo | Phase | Effort | Extra deps | Status |
 |------|------|-------|--------|-----------|--------|
-| 047 | ChainArgos/java-monorepo | 1 | M | — | TODO |
-| 048 | ChainArgos/blockchain-nodes | 1 | S/M | — | TODO |
-| 049 | jackin-project/jackin (stacks on PR #810) | 1 | L | 047 (pattern) | TODO |
-| 050 | tailrocks/velnor (dogfood) | 2 | M | 039 (fleet label) | TODO |
-| 051 | tailrocks/holla | 2 | S | — | TODO |
-| 052 | tailrocks/ruxel | 2 | S | — | TODO |
-| 053 | tailrocks/parallax | 2 | L | 051 (pattern), 042 (attest) | TODO |
-| 054 | tailrocks/termrock | 3 | M | 042 (Pages) | TODO |
-| 055 | schemalane + pg-bigdecimal + tracing-request-level (Class D trio) | 3 | M | 040 (schemalane services) | TODO |
-| 056 | tailrocks/parallax-telemetry-playground | 3 | S | — | TODO |
-| 057 | tailrocks/tablerock | 3 | S | — | TODO |
-| 058 | Phase 4: estate enforcement + docs reconcile + required checks | 4 | M | 046, 047–057 | TODO |
+| 047 | ChainArgos/java-monorepo | 1 | M | — | BLOCKED — all gates green; branch policy requires human approval/merge |
+| 048 | ChainArgos/blockchain-nodes | 1 | S/M | — | IN PROGRESS — source defects fixed on PR #651 (`6a46c93`); local amd64 image proof green for all three former failures; fresh V-B/V-C evidence remains |
+| 049 | jackin-project/jackin (stacks on PR #810) | 1 | L | 047 (pattern) | BLOCKED — Docs and CI three-lane gates are green, but Preview Velnor requires explicitly unapproved attest-build-provenance v4 capability (run `29677351289`) |
+| 050 | tailrocks/velnor (dogfood) | 2 | M | 039 (fleet label) | DONE implementation — three lanes green, 33 s zero-install rerun passes Class B budget, and GitHub release recovery drill green; whole-program PR #100 remains open and clean at `c233c92` |
+| 051 | tailrocks/holla | 2 | S | — | DONE: PR #36 merged; Velnor/GitHub/both green; 57 s no-change budget passed |
+| 052 | tailrocks/ruxel | 2 | S | — | DONE — PR #2 merged; final three-lane and 52 s zero-install rerun green |
+| 053 | tailrocks/parallax | 2 | L | 051 (pattern), 042 (attest) | BLOCKED — prior visual-parity defect remains; additionally PR #21 head has 19 Phase-4 errors, while repository law permits direct-main work only and forbids branch/PR mutation; operator must reconcile delivery path before fixes |
+| 054 | tailrocks/termrock | 3 | M | 042 (Pages) | BLOCKED — source/workflow fixes are on trunk (`1d38a7a`..`b799612`); fresh `both` run `29780236893` proved GitHub jobs start while all Velnor jobs remain unassigned past two minutes; org runner-group access remains HTTP 403 |
+| 055 | schemalane + pg-bigdecimal + tracing-request-level (Class D trio) | 3 | M | 040 (schemalane services) | DONE original delivery; Phase-4 convergence follow-ups are open as PRs #3/#2/#2 under plan 058, with GitHub proofs green and current `both` runs awaiting runner-group access |
+| 056 | tailrocks/parallax-telemetry-playground | 3 | S | — | DONE |
+| 057 | tailrocks/tablerock | 3 | S | — | BLOCKED — trunk-only delivery is clear and coverage must be preserved, but mandatory current-code gate fails strict clippy with 191 errors across user-modified source; workflow rewrite would land red CI |
+| 058 | Phase 4: concern-based estate convergence, enforcement, docs reconcile, required checks | 4 | L | 046, 047–057 | IN PROGRESS — inventory every concern; add missing required concerns; converge common implementations; extend audit-ci for missing-required/canonical-drift; then finish audit and reconciliation |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) |
 REJECTED (one-line rationale).
@@ -124,6 +128,12 @@ REJECTED (one-line rationale).
   tailrocks org migration or an interim repo-level daemon).
 - 053/054 writer-gate attest/Pages steps until 042 completes those adapters.
 - 058 runs last; it re-baselines the §2.11 budgets from measured data.
+- 058 also owns the 2026-07-21 concern-based uniformity clarification: build a
+  machine-readable per-repo concern inventory, converge every common/applicable
+  concern to one canonical implementation, add missing class/product-required
+  concerns, classify genuine non-applicability, and extend `audit-ci` to fail
+  both missing-required coverage and canonical drift. It must not add fake jobs
+  for concerns a repository does not have.
 - 014's systemd hardening smoke and 059's host window share the same live
   host access — schedule together.
 

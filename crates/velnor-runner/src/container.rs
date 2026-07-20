@@ -7,6 +7,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use crate::compiler_cache::CompilerCacheBackend;
+
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
@@ -38,13 +40,35 @@ pub struct JobContainerSpec {
     pub verify_bind_mounts: bool,
     pub daemon_id: String,
     pub repository: Option<String>,
-    /// Host-persistent incremental-build store mounted as CARGO_TARGET_DIR
-    /// (opt-in via VELNOR_CARGO_TARGET_PERSIST; GitHub-hosted runners do not
-    /// set CARGO_TARGET_DIR, so this stays off unless the operator enables it).
+    /// Host-persistent incremental-build store mounted at the workspace's
+    /// ordinary `target` path. This preserves GitHub-hosted observable path
+    /// semantics while enabling opt-in warm builds.
     pub cargo_target_host: Option<PathBuf>,
+    /// Exactly one compiler-cache store is exposed to a job.
+    pub compiler_cache_backend: CompilerCacheBackend,
 }
 
 impl JobContainerSpec {
+    fn append_compiler_cache_mount(&self, args: &mut Vec<String>) {
+        let (host, container, env) = match self.compiler_cache_backend {
+            CompilerCacheBackend::Sccache => (
+                sccache_host(&self.temp_host),
+                "/var/cache/sccache",
+                vec!["SCCACHE_DIR=/var/cache/sccache"],
+            ),
+            CompilerCacheBackend::Kache => (
+                kache_host(&self.temp_host),
+                "/var/cache/kache",
+                vec!["KACHE_CACHE_DIR=/var/cache/kache", "KACHE_MAX_SIZE=20GiB"],
+            ),
+            CompilerCacheBackend::Off => return,
+        };
+        args.extend(["-v".into(), self.mount_arg(&host, container)]);
+        for value in env {
+            args.extend(["-e".into(), value.into()]);
+        }
+    }
+
     pub fn create_network_args(&self) -> Vec<String> {
         vec!["network".into(), "create".into(), self.network.clone()]
     }
@@ -55,8 +79,6 @@ impl JobContainerSpec {
             "--detach".into(),
             "--name".into(),
             self.name.clone(),
-            "--network".into(),
-            self.network.clone(),
             "--workdir".into(),
             "/__w".into(),
             "-v".into(),
@@ -79,22 +101,34 @@ impl JobContainerSpec {
                     .to_string(),
             ),
             "-v".into(),
-            self.mount_arg(&sccache_host(&self.temp_host), "/var/cache/sccache"),
-            "-v".into(),
             self.mount_arg(&self.home_host, "/github/home"),
-            // Host-persistent cargo registry/git stores (daemon-shared, like
-            // sccache): downloads land on the host once and every later job —
-            // on any slot — starts with a warm registry. Cargo's own file
-            // locking makes concurrent jobs on the shared store safe.
+            // Playwright's browser payload is a versioned download cache, not
+            // workspace output. Persist it per trust/repository so unchanged
+            // jobs do not download Chromium and FFmpeg on every fresh container.
             "-v".into(),
             self.mount_arg(
-                &cargo_store_host(&self.temp_host).join("registry"),
-                "/github/home/.cargo/registry",
+                &self.playwright_browser_store_host(),
+                "/github/home/.cache/ms-playwright",
+            ),
+            // Share immutable Cargo downloads and indexes across the daemon,
+            // but keep extracted registry sources and git checkouts in the
+            // job home. Separate containers can otherwise race while creating
+            // `.cargo-ok` in the same extracted crate (Cargo's package-cache
+            // lock does not serialize that mutation across container jobs).
+            "-v".into(),
+            self.mount_arg(
+                &cargo_store_host(&self.temp_host).join("registry/cache"),
+                "/github/home/.cargo/registry/cache",
             ),
             "-v".into(),
             self.mount_arg(
-                &cargo_store_host(&self.temp_host).join("git"),
-                "/github/home/.cargo/git",
+                &cargo_store_host(&self.temp_host).join("registry/index"),
+                "/github/home/.cargo/registry/index",
+            ),
+            "-v".into(),
+            self.mount_arg(
+                &cargo_store_host(&self.temp_host).join("git/db"),
+                "/github/home/.cargo/git/db",
             ),
             // $CARGO_HOME/bin holds executable proxies on PATH, so it is
             // shared only inside one trust/repository scope. Registry/git data
@@ -102,7 +136,7 @@ impl JobContainerSpec {
             // execute files directly from those caches.
             "-v".into(),
             self.mount_arg(
-                &cargo_executable_store_host(&self.temp_host, &self.repository_store_key()),
+                &self.cargo_executable_store_host(),
                 "/github/home/.cargo/bin",
             ),
             // Host-persistent mise tool store: installed tools are executable,
@@ -111,10 +145,12 @@ impl JobContainerSpec {
             // download data and remains daemon-shared for warmth; mise uses
             // its own file locks.
             "-v".into(),
-            self.mount_arg(
-                &mise_executable_store_host(&self.temp_host, &self.repository_store_key()),
-                "/opt/mise/installs",
-            ),
+            self.mount_arg(&self.mise_executable_store_host(), "/opt/mise/installs"),
+            // mise's Rust backend stores compiler payloads and selection state
+            // in rustup, not in /opt/mise. Keep it in the same trust/repository
+            // scope or an ephemeral container loses the selected toolchain.
+            "-v".into(),
+            self.mount_arg(&self.rustup_executable_store_host(), "/root/.rustup"),
             "-v".into(),
             self.mount_arg(
                 &mise_store_host(&self.temp_host).join("cache"),
@@ -133,8 +169,6 @@ impl JobContainerSpec {
             "-e".into(),
             "CARGO_HOME=/github/home/.cargo".into(),
             "-e".into(),
-            "SCCACHE_DIR=/var/cache/sccache".into(),
-            "-e".into(),
             "RUNNER_TEMP=/__t".into(),
             "-e".into(),
             "RUNNER_TOOL_CACHE=/__tool".into(),
@@ -151,13 +185,9 @@ impl JobContainerSpec {
                 self.docker_host_path(&self.workspace_host).display()
             ),
         ];
+        self.append_compiler_cache_mount(&mut args);
         if let Some(target_host) = &self.cargo_target_host {
-            args.extend([
-                "-v".into(),
-                self.mount_arg(target_host, "/__cargo_target"),
-                "-e".into(),
-                "CARGO_TARGET_DIR=/__cargo_target".into(),
-            ]);
+            args.extend(["-v".into(), self.mount_arg(target_host, "/__w/target")]);
         }
         for (name, value) in &self.env {
             args.extend(["-e".into(), format!("{name}={value}")]);
@@ -169,6 +199,12 @@ impl JobContainerSpec {
         args.extend(self.options.iter().cloned());
         args.extend(self.resource_options.iter().cloned());
 
+        // GitHub-hosted Ubuntu jobs expose localhost over IPv4. Docker also
+        // assigns localhost to ::1, which can split same-process servers and
+        // clients across address families (for example Vite binds ::1 while
+        // Bun fetches 127.0.0.1). Keep loopback behavior lane-identical.
+        args.extend(["--sysctl".into(), "net.ipv6.conf.all.disable_ipv6=1".into()]);
+
         if self.mount_docker_socket {
             args.extend([
                 "-v".into(),
@@ -176,6 +212,11 @@ impl JobContainerSpec {
             ]);
         }
         self.append_docker_cli_mounts(&mut args);
+
+        // The per-job network is runner policy. Keep it after expanded job
+        // and daemon resource options so the job cannot be displaced from the
+        // network shared with its workflow services.
+        args.extend(["--network".into(), self.network.clone()]);
 
         // PID 1 tails a live console file instead of /dev/null, so
         // `docker logs <job-container>` mirrors the GitHub UI step output.
@@ -205,20 +246,26 @@ impl JobContainerSpec {
             "sh".into(),
             "-v".into(),
             self.mount_arg(
-                &mise_executable_store_host(&self.temp_host, &self.repository_store_key()),
+                &self.mise_executable_store_host(),
                 "/__velnor_seed/installs",
             ),
             "-v".into(),
             self.mount_arg(&store.join("cache"), "/__velnor_seed/cache"),
+            "-v".into(),
+            self.mount_arg(
+                &self.rustup_executable_store_host(),
+                "/__velnor_seed/rustup",
+            ),
             self.image.clone(),
             "-c".into(),
             "cp -an /opt/mise/installs/. /__velnor_seed/installs/ 2>/dev/null || true; \
-             cp -an /opt/mise/cache/. /__velnor_seed/cache/ 2>/dev/null || true"
+             cp -an /opt/mise/cache/. /__velnor_seed/cache/ 2>/dev/null || true; \
+             cp -an /root/.rustup/. /__velnor_seed/rustup/ 2>/dev/null || true"
                 .into(),
         ]
     }
 
-    pub fn exec_script_args(
+    fn exec_script_args(
         &self,
         script_path_in_container: &str,
         shell: Shell,
@@ -248,7 +295,7 @@ impl JobContainerSpec {
         )
     }
 
-    pub fn exec_process_args(
+    fn exec_process_args(
         &self,
         working_directory: &str,
         env: &[(String, String)],
@@ -283,29 +330,8 @@ impl JobContainerSpec {
         Ok(prepared)
     }
 
-    /// Like exec_process_args, but with stdin kept open (`docker exec -i`) so
-    /// the caller can stream data (e.g. a registry password) to the process.
-    pub fn exec_process_stdin_args(
-        &self,
-        working_directory: &str,
-        env: &[(String, String)],
-        command: &[String],
-    ) -> Vec<String> {
-        let mut args = vec![
-            "exec".into(),
-            "-i".into(),
-            "--workdir".into(),
-            working_directory.into(),
-        ];
-        self.append_base_exec_env(&mut args);
-        for (name, value) in env {
-            args.extend(["-e".into(), format!("{name}={value}")]);
-        }
-        args.push(self.name.clone());
-        args.extend(command.iter().cloned());
-        args
-    }
-
+    /// Like prepare_exec_process_args, but with stdin kept open (`docker exec
+    /// -i`) so the caller can stream data (for example a registry password).
     pub fn prepare_exec_process_stdin_args(
         &self,
         working_directory: &str,
@@ -333,15 +359,20 @@ impl JobContainerSpec {
         secret_masks: &[String],
     ) -> io::Result<()> {
         for (name, value) in env {
-            if env_value_is_secret(value, secret_masks) && !value.contains('\n') {
+            let is_secret = env_name_is_secret(name) || env_value_is_secret(value, secret_masks);
+            if is_secret && value.contains('\n') {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("secret environment variable {name} contains a newline"),
+                ));
+            }
+            if is_secret {
                 let env_file = write_exec_env_file(&self.temp_host, name, value)?;
                 prepared
                     .args
                     .extend(["--env-file".into(), env_file.path().display().to_string()]);
                 prepared.env_files.push(env_file);
             } else {
-                // Docker --env-file cannot represent multi-line values; those
-                // stay inline to preserve exact env semantics.
                 prepared
                     .args
                     .extend(["-e".into(), format!("{name}={value}")]);
@@ -377,7 +408,7 @@ impl JobContainerSpec {
         }
     }
 
-    pub fn run_node_action_args(
+    fn run_node_action_args(
         &self,
         working_directory: &str,
         env: &[(String, String)],
@@ -403,8 +434,6 @@ impl JobContainerSpec {
             "-v".into(),
             self.mount_arg(&self.temp_host, "/tmp"),
             "-v".into(),
-            self.mount_arg(&sccache_host(&self.temp_host), "/var/cache/sccache"),
-            "-v".into(),
             self.mount_arg(&self.temp_host, "/github/runner_temp"),
             "-v".into(),
             self.mount_arg(&self.temp_host, "/github/file_commands"),
@@ -427,6 +456,7 @@ impl JobContainerSpec {
             "--entrypoint".into(),
             "node".into(),
         ];
+        self.append_compiler_cache_mount(&mut args);
         if self.mount_docker_socket {
             args.extend([
                 "-v".into(),
@@ -451,6 +481,29 @@ impl JobContainerSpec {
         args
     }
 
+    pub fn prepare_run_node_action_args(
+        &self,
+        working_directory: &str,
+        env: &[(String, String)],
+        secret_masks: &[String],
+        path_prepend: &[String],
+        node_image: &str,
+        entrypoint_container_path: &str,
+    ) -> io::Result<PreparedDockerArgs> {
+        let mut prepared = PreparedDockerArgs::new(self.run_node_action_args(
+            working_directory,
+            &[],
+            path_prepend,
+            node_image,
+            entrypoint_container_path,
+        ));
+        let image_position = prepared.args.len() - 2;
+        let trailing = prepared.args.split_off(image_position);
+        self.append_step_env(&mut prepared, env, secret_masks)?;
+        prepared.args.extend(trailing);
+        Ok(prepared)
+    }
+
     pub fn build_docker_action_args(
         &self,
         image: &str,
@@ -467,7 +520,7 @@ impl JobContainerSpec {
         ]
     }
 
-    pub fn run_docker_action_args(
+    fn run_docker_action_args(
         &self,
         working_directory: &str,
         env: &[(String, String)],
@@ -493,8 +546,6 @@ impl JobContainerSpec {
             "-v".into(),
             self.mount_arg(&self.temp_host, "/tmp"),
             "-v".into(),
-            self.mount_arg(&sccache_host(&self.temp_host), "/var/cache/sccache"),
-            "-v".into(),
             self.mount_arg(&self.temp_host, "/github/runner_temp"),
             "-v".into(),
             self.mount_arg(&self.temp_host, "/github/file_commands"),
@@ -513,6 +564,7 @@ impl JobContainerSpec {
             "-e".into(),
             "AGENT_TOOLSDIRECTORY=/__tool".into(),
         ];
+        self.append_compiler_cache_mount(&mut args);
         if self.mount_docker_socket {
             args.extend([
                 "-v".into(),
@@ -531,12 +583,77 @@ impl JobContainerSpec {
         args
     }
 
+    pub fn prepare_run_docker_action_args(
+        &self,
+        working_directory: &str,
+        env: &[(String, String)],
+        secret_masks: &[String],
+        image: &str,
+        entrypoint: Option<&str>,
+        command_args: &[String],
+    ) -> io::Result<PreparedDockerArgs> {
+        let mut prepared = PreparedDockerArgs::new(self.run_docker_action_args(
+            working_directory,
+            &[],
+            image,
+            entrypoint,
+            command_args,
+        ));
+        let image_position = prepared.args.len() - command_args.len() - 1;
+        let trailing = prepared.args.split_off(image_position);
+        self.append_step_env(&mut prepared, env, secret_masks)?;
+        prepared.args.extend(trailing);
+        Ok(prepared)
+    }
+
     pub fn remove_container_args(&self) -> Vec<String> {
         vec!["rm".into(), "--force".into(), self.name.clone()]
     }
 
     pub fn remove_network_args(&self) -> Vec<String> {
         vec!["network".into(), "rm".into(), self.network.clone()]
+    }
+
+    pub fn disconnect_network_args(&self) -> Vec<String> {
+        vec![
+            "network".into(),
+            "disconnect".into(),
+            "--force".into(),
+            self.network.clone(),
+            self.name.clone(),
+        ]
+    }
+
+    pub fn connect_network_args(&self) -> Vec<String> {
+        vec![
+            "network".into(),
+            "connect".into(),
+            self.network.clone(),
+            self.name.clone(),
+        ]
+    }
+
+    pub fn inspect_network_args(&self) -> Vec<String> {
+        vec!["network".into(), "inspect".into(), self.network.clone()]
+    }
+
+    pub fn service_dns_args(&self, alias: &str) -> Vec<String> {
+        vec![
+            "exec".into(),
+            self.name.clone(),
+            "getent".into(),
+            "hosts".into(),
+            alias.into(),
+        ]
+    }
+
+    pub fn resolver_state_args(&self) -> Vec<String> {
+        vec![
+            "exec".into(),
+            self.name.clone(),
+            "cat".into(),
+            "/etc/resolv.conf".into(),
+        ]
     }
 
     fn append_docker_cli_mounts(&self, args: &mut Vec<String>) {
@@ -561,7 +678,7 @@ impl JobContainerSpec {
         mount(&self.docker_host_path(host_path), container_path)
     }
 
-    fn repository_store_key(&self) -> String {
+    fn repository_store_key(&self) -> Option<String> {
         self.repository
             .as_deref()
             .or_else(|| {
@@ -570,8 +687,51 @@ impl JobContainerSpec {
                     .find(|(name, _)| name == "GITHUB_REPOSITORY")
                     .map(|(_, value)| value.as_str())
             })
+            .filter(|value| !value.is_empty())
             .map(sanitize_store_key)
-            .unwrap_or_else(|| "unknown-repository".to_string())
+    }
+
+    fn cargo_executable_store_host(&self) -> PathBuf {
+        self.repository_store_key().map_or_else(
+            || {
+                eprintln!(
+                    "forensics.lifecycle: persistent cargo bin store refused: missing github.repository"
+                );
+                self.temp_host.join("_velnor/ephemeral/cargo-bin")
+            },
+            |repository| cargo_executable_store_host(&self.temp_host, &repository),
+        )
+    }
+
+    pub(crate) fn mise_executable_store_host(&self) -> PathBuf {
+        self.repository_store_key().map_or_else(
+            || {
+                eprintln!(
+                    "forensics.lifecycle: persistent mise install store refused: missing github.repository"
+                );
+                self.temp_host.join("_velnor/ephemeral/mise-installs")
+            },
+            |repository| mise_executable_store_host(&self.temp_host, &repository),
+        )
+    }
+
+    fn rustup_executable_store_host(&self) -> PathBuf {
+        self.repository_store_key().map_or_else(
+            || {
+                eprintln!(
+                    "forensics.lifecycle: persistent rustup store refused: missing github.repository"
+                );
+                self.temp_host.join("_velnor/ephemeral/rustup")
+            },
+            |repository| rustup_executable_store_host(&self.temp_host, &repository),
+        )
+    }
+
+    fn playwright_browser_store_host(&self) -> PathBuf {
+        self.repository_store_key().map_or_else(
+            || self.home_host.join(".cache/ms-playwright"),
+            |repository| playwright_browser_store_host(&self.temp_host, &repository),
+        )
     }
 
     fn docker_host_path(&self, host_path: &Path) -> PathBuf {
@@ -641,6 +801,17 @@ fn env_value_is_secret(value: &str, secret_masks: &[String]) -> bool {
             .any(|mask| value.contains(mask))
 }
 
+fn env_name_is_secret(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    matches!(
+        name.as_str(),
+        "ACTIONS_RUNTIME_TOKEN" | "ACTIONS_ID_TOKEN_REQUEST_TOKEN" | "GITHUB_TOKEN"
+    ) || name.ends_with("_TOKEN")
+        || name.ends_with("_PASSWORD")
+        || name.ends_with("_SECRET")
+        || name.ends_with("_PRIVATE_KEY")
+}
+
 fn write_exec_env_file(temp_host: &Path, name: &str, value: &str) -> io::Result<ExecEnvFile> {
     let dir = temp_host.join("_velnor").join("exec-env");
     fs::create_dir_all(&dir)?;
@@ -673,10 +844,6 @@ impl ServiceContainerSpec {
             "--detach".into(),
             "--name".into(),
             self.name.clone(),
-            "--network".into(),
-            self.network.clone(),
-            "--network-alias".into(),
-            self.network_alias.clone(),
         ];
         for (name, value) in &self.env {
             args.extend(["-e".into(), format!("{name}={value}")]);
@@ -685,12 +852,43 @@ impl ServiceContainerSpec {
             args.extend(["-p".into(), port.clone()]);
         }
         args.extend(self.options.iter().cloned());
+        // Runner-owned network policy must win over any network-shaped token
+        // present in the expanded service options. Docker uses the final
+        // occurrence, so append the per-job network and workflow service key
+        // as its DNS alias after user options.
+        args.extend([
+            "--network".into(),
+            self.network.clone(),
+            "--network-alias".into(),
+            self.network_alias.clone(),
+        ]);
         args.extend([self.image.clone()]);
         args
     }
 
     pub fn remove_args(&self) -> Vec<String> {
         vec!["rm".into(), "--force".into(), self.name.clone()]
+    }
+
+    pub fn disconnect_network_args(&self) -> Vec<String> {
+        vec![
+            "network".into(),
+            "disconnect".into(),
+            "--force".into(),
+            self.network.clone(),
+            self.name.clone(),
+        ]
+    }
+
+    pub fn connect_network_args(&self) -> Vec<String> {
+        vec![
+            "network".into(),
+            "connect".into(),
+            "--alias".into(),
+            self.network_alias.clone(),
+            self.network.clone(),
+            self.name.clone(),
+        ]
     }
 
     pub fn health_status_args(&self) -> Vec<String> {
@@ -700,6 +898,18 @@ impl ServiceContainerSpec {
                 .into(),
             self.name.clone(),
         ]
+    }
+
+    pub fn id_args(&self) -> Vec<String> {
+        vec![
+            "inspect".into(),
+            "--format={{.Id}}".into(),
+            self.name.clone(),
+        ]
+    }
+
+    pub fn mapped_ports_args(&self) -> Vec<String> {
+        vec!["port".into(), self.name.clone()]
     }
 }
 
@@ -760,13 +970,61 @@ pub(crate) fn daemon_shared_root(root: PathBuf) -> PathBuf {
 }
 
 pub(crate) fn sccache_host(temp_host: &Path) -> PathBuf {
-    daemon_store_root(temp_host).join("_velnor_sccache")
+    crate::storage::cache_class_path(
+        &daemon_store_root(temp_host),
+        "compiler/sccache",
+        "_velnor_sccache",
+    )
 }
 
-/// Host-persistent cargo registry + git store, daemon-shared like sccache.
-/// Mounted at /github/home/.cargo/{registry,git} in every job container.
+pub(crate) fn kache_host(temp_host: &Path) -> PathBuf {
+    crate::storage::cache_class_path(
+        &daemon_store_root(temp_host),
+        "compiler/kache",
+        "_velnor_kache",
+    )
+}
+
+/// Host-persistent Cargo download/index store, daemon-shared like sccache.
+/// Extracted registry sources and git checkouts remain job-local because they
+/// are mutable during materialization and are unsafe to share across slots.
 pub(crate) fn cargo_store_host(temp_host: &Path) -> PathBuf {
-    daemon_store_root(temp_host).join("_velnor_cargo")
+    crate::storage::cache_class_path(&daemon_store_root(temp_host), "cargo", "_velnor_cargo")
+}
+
+/// Remove Cargo git checkouts whose same-named bare repository is absent.
+/// Cargo cannot heal this state itself: it treats the checkout as reusable,
+/// then fails metadata with `Repository .../git/db/<name> not found`.
+pub(crate) fn repair_cargo_git_store(cargo_store: &Path) -> io::Result<usize> {
+    let git = cargo_store.join("git");
+    let lock = git.join(".velnor-repair-lock");
+    match fs::create_dir(&lock) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(0),
+        Err(error) => return Err(error),
+    }
+
+    let result = (|| {
+        let checkouts = git.join("checkouts");
+        let db = git.join("db");
+        let entries = match fs::read_dir(&checkouts) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error),
+        };
+        let mut repaired = 0;
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() || db.join(entry.file_name()).is_dir() {
+                continue;
+            }
+            fs::remove_dir_all(entry.path())?;
+            repaired += 1;
+        }
+        Ok(repaired)
+    })();
+    let _ = fs::remove_dir(&lock);
+    result
 }
 
 /// Host-persistent cargo executable store, scoped by trust + repository.
@@ -783,15 +1041,17 @@ fn cargo_executable_store_host_for_scope(
     trust_scope: &str,
     repository: &str,
 ) -> PathBuf {
-    cargo_store_host(temp_host)
-        .join("bin")
-        .join(sanitize_store_key(trust_scope))
+    crate::storage::child_with_legacy_trust(cargo_store_host(temp_host), "bin", trust_scope)
         .join(sanitize_store_key(repository))
 }
 
 /// Host-persistent mise tool store (installs + cache subdirs are mounted).
 pub(crate) fn mise_store_host(temp_host: &Path) -> PathBuf {
-    daemon_store_root(temp_host).join("_velnor_mise")
+    crate::storage::cache_class_path(&daemon_store_root(temp_host), "mise", "_velnor_mise")
+}
+
+pub(crate) fn git_mirror_store_host(temp_host: &Path, trust_scope: &str) -> PathBuf {
+    crate::git_mirror::store_root(&daemon_store_root(temp_host), trust_scope)
 }
 
 /// Host-persistent mise executable store, scoped by trust + repository.
@@ -808,15 +1068,41 @@ fn mise_executable_store_host_for_scope(
     trust_scope: &str,
     repository: &str,
 ) -> PathBuf {
-    mise_store_host(temp_host)
-        .join("installs")
-        .join(sanitize_store_key(trust_scope))
+    crate::storage::child_with_legacy_trust(mise_store_host(temp_host), "installs", trust_scope)
         .join(sanitize_store_key(repository))
 }
 
-/// Root for opt-in persistent CARGO_TARGET_DIR buckets (one per job class).
+/// Host-persistent rustup state used by mise's Rust backend, scoped by the
+/// same trust/repository boundary as executable mise installs.
+pub(crate) fn rustup_executable_store_host(temp_host: &Path, repository: &str) -> PathBuf {
+    rustup_executable_store_host_for_scope(
+        temp_host,
+        &crate::github_adapter::cargo_target_trust_scope(),
+        repository,
+    )
+}
+
+fn rustup_executable_store_host_for_scope(
+    temp_host: &Path,
+    trust_scope: &str,
+    repository: &str,
+) -> PathBuf {
+    crate::storage::child_with_legacy_trust(mise_store_host(temp_host), "rustup", trust_scope)
+        .join(sanitize_store_key(repository))
+}
+
+/// Root for opt-in persistent workspace target buckets (one per job class).
 pub(crate) fn cargo_target_store_host(temp_host: &Path) -> PathBuf {
-    daemon_store_root(temp_host).join("_velnor_targets")
+    crate::storage::cache_class_path(&daemon_store_root(temp_host), "targets", "_velnor_targets")
+}
+
+/// Host-persistent Playwright browser downloads, scoped by trust + repository.
+pub(crate) fn playwright_browser_store_host(temp_host: &Path, repository: &str) -> PathBuf {
+    let root =
+        crate::storage::cache_class_path(&daemon_store_root(temp_host), "caches", "_velnor_caches");
+    crate::storage::append_legacy_trust(root, &crate::github_adapter::cargo_target_trust_scope())
+        .join(sanitize_store_key(repository))
+        .join("playwright")
 }
 
 /// Resolve the daemon-shared store root from a job temp dir
@@ -929,6 +1215,7 @@ mod tests {
             daemon_id: "test-daemon".into(),
             repository: Some("acme/repo".into()),
             cargo_target_host: None,
+            compiler_cache_backend: CompilerCacheBackend::Sccache,
         }
     }
 
@@ -941,6 +1228,53 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn repairs_orphaned_cargo_git_checkouts_as_one_coherent_store() {
+        let root = container_test_temp("cargo-git-repair");
+        let cargo = root.join("cargo");
+        fs::create_dir_all(cargo.join("git/checkouts/orphan-123/rev")).unwrap();
+        fs::create_dir_all(cargo.join("git/checkouts/healthy-456/rev")).unwrap();
+        fs::create_dir_all(cargo.join("git/db/healthy-456")).unwrap();
+
+        assert_eq!(repair_cargo_git_store(&cargo).unwrap(), 1);
+        assert!(!cargo.join("git/checkouts/orphan-123").exists());
+        assert!(cargo.join("git/checkouts/healthy-456").is_dir());
+        assert_eq!(repair_cargo_git_store(&cargo).unwrap(), 0);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn compiler_cache_mounts_are_mutually_exclusive() {
+        let mut job = spec();
+        let sccache = job.start_args().join(" ");
+        assert!(sccache.contains("/var/cache/sccache"));
+        assert!(!sccache.contains("/var/cache/kache"));
+
+        job.compiler_cache_backend = CompilerCacheBackend::Kache;
+        let kache = job.start_args().join(" ");
+        assert!(kache.contains("/var/cache/kache"));
+        assert!(!kache.contains("/var/cache/sccache"));
+
+        job.compiler_cache_backend = CompilerCacheBackend::Off;
+        let off = job.start_args().join(" ");
+        assert!(!off.contains("/var/cache/sccache"));
+        assert!(!off.contains("/var/cache/kache"));
+    }
+
+    #[test]
+    fn compiler_cache_stores_have_distinct_canonical_classes() {
+        let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
+        assert_eq!(
+            sccache_host(temp),
+            PathBuf::from("/var/lib/velnor/work/_velnor_sccache")
+        );
+        assert_eq!(
+            kache_host(temp),
+            PathBuf::from("/var/lib/velnor/work/_velnor_kache")
+        );
     }
 
     #[test]
@@ -992,6 +1326,12 @@ mod tests {
                 "/var/lib/velnor/work/_velnor_mise/installs/trusted/ChainArgos_java-monorepo"
             )
         );
+        assert_eq!(
+            rustup_executable_store_host_for_scope(temp, "trusted", "ChainArgos/java-monorepo"),
+            PathBuf::from(
+                "/var/lib/velnor/work/_velnor_mise/rustup/trusted/ChainArgos_java-monorepo"
+            )
+        );
     }
 
     #[test]
@@ -1006,6 +1346,10 @@ mod tests {
             mise_executable_store_host_for_scope(temp, "trusted", "org/one"),
             mise_executable_store_host_for_scope(temp, "trusted", "org/two")
         );
+        assert_ne!(
+            rustup_executable_store_host_for_scope(temp, "trusted", "org/one"),
+            rustup_executable_store_host_for_scope(temp, "trusted", "org/two")
+        );
     }
 
     #[test]
@@ -1013,12 +1357,12 @@ mod tests {
         let temp = Path::new("/var/lib/velnor/work/slot-3/job-9/temp");
 
         assert_eq!(
-            cargo_store_host(temp).join("registry"),
-            PathBuf::from("/var/lib/velnor/work/_velnor_cargo/registry")
+            cargo_store_host(temp).join("registry/cache"),
+            PathBuf::from("/var/lib/velnor/work/_velnor_cargo/registry/cache")
         );
         assert_eq!(
-            cargo_store_host(temp).join("git"),
-            PathBuf::from("/var/lib/velnor/work/_velnor_cargo/git")
+            cargo_store_host(temp).join("git/db"),
+            PathBuf::from("/var/lib/velnor/work/_velnor_cargo/git/db")
         );
         assert_eq!(
             mise_store_host(temp).join("cache"),
@@ -1050,12 +1394,28 @@ mod tests {
         assert!(args.contains(&"/tmp/temp:/tmp".into()));
         assert!(args.contains(&"/tmp/_velnor_sccache:/var/cache/sccache".into()));
         assert!(args.contains(&"/tmp/home:/github/home".into()));
+        assert!(args.contains(
+            &"/tmp/_velnor_caches/trusted/acme_repo/playwright:/github/home/.cache/ms-playwright"
+                .into()
+        ));
         assert!(args
             .contains(&"/tmp/_velnor_cargo/bin/trusted/acme_repo:/github/home/.cargo/bin".into()));
         assert!(args
             .contains(&"/tmp/_velnor_mise/installs/trusted/acme_repo:/opt/mise/installs".into()));
-        assert!(args.contains(&"/tmp/_velnor_cargo/registry:/github/home/.cargo/registry".into()));
-        assert!(args.contains(&"/tmp/_velnor_cargo/git:/github/home/.cargo/git".into()));
+        assert!(args.contains(&"/tmp/_velnor_mise/rustup/trusted/acme_repo:/root/.rustup".into()));
+        assert!(args.contains(
+            &"/tmp/_velnor_cargo/registry/cache:/github/home/.cargo/registry/cache".into()
+        ));
+        assert!(args.contains(
+            &"/tmp/_velnor_cargo/registry/index:/github/home/.cargo/registry/index".into()
+        ));
+        assert!(args.contains(&"/tmp/_velnor_cargo/git/db:/github/home/.cargo/git/db".into()));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.ends_with(":/github/home/.cargo/registry/src")));
+        assert!(!args
+            .iter()
+            .any(|arg| arg.ends_with(":/github/home/.cargo/git/checkouts")));
         assert!(args.contains(&"/tmp/_velnor_mise/cache:/opt/mise/cache".into()));
         assert!(args.contains(&"/tmp/temp/_github_workflow:/github/workflow".into()));
         assert!(args.contains(&"HOME=/github/home".into()));
@@ -1064,6 +1424,9 @@ mod tests {
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"NODE_OPTIONS=--max-old-space-size=4096".into()));
         assert!(args.windows(2).any(|pair| pair == ["--cpus", "2"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair == ["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"] }));
         assert!(args.windows(2).any(|pair| pair == ["--memory", "8g"]));
         let cpus_pos = args.iter().position(|arg| arg == "--cpus").unwrap();
         let memory_pos = args.iter().position(|arg| arg == "--memory").unwrap();
@@ -1073,6 +1436,19 @@ mod tests {
         assert_eq!(
             args.last().map(String::as_str),
             Some("mkdir -p /__t/_velnor && touch /__t/_velnor/console.log && exec tail -n +1 -F /__t/_velnor/console.log")
+        );
+    }
+
+    #[test]
+    fn mise_seed_copies_repo_scoped_rustup_state() {
+        let args = spec().seed_mise_store_args();
+
+        assert!(args
+            .contains(&"/tmp/_velnor_mise/rustup/trusted/acme_repo:/__velnor_seed/rustup".into()));
+        assert!(
+            args.last().is_some_and(
+                |script| script.contains("cp -an /root/.rustup/. /__velnor_seed/rustup/")
+            )
         );
     }
 
@@ -1193,6 +1569,64 @@ mod tests {
         assert!(prepared.args().contains(&"--env-file".into()));
         assert!(!joined.contains("PLACEHOLDER_SECRET"));
         assert!(joined.contains("PLAIN=visible"));
+    }
+
+    #[test]
+    fn runtime_tokens_are_not_on_exec_argv_without_masks() {
+        let mut spec = spec();
+        spec.temp_host = container_test_temp("runtime-token-env");
+        for name in [
+            "ACTIONS_RUNTIME_TOKEN",
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+            "GITHUB_TOKEN",
+        ] {
+            let prepared = spec
+                .prepare_exec_process_args(
+                    "/__w",
+                    &[(name.into(), "PLACEHOLDER_CREDENTIAL".into())],
+                    &[],
+                    &["printenv".into()],
+                )
+                .unwrap();
+            let joined = prepared.args().join("\0");
+            assert!(prepared.args().contains(&"--env-file".into()));
+            assert!(!joined.contains("PLACEHOLDER_CREDENTIAL"));
+        }
+    }
+
+    #[test]
+    fn multiline_secret_is_rejected_instead_of_exposed() {
+        let error = spec()
+            .prepare_exec_process_args(
+                "/__w",
+                &[("ACTIONS_RUNTIME_TOKEN".into(), "line-one\nline-two".into())],
+                &[],
+                &["printenv".into()],
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(!error.to_string().contains("line-one"));
+    }
+
+    #[test]
+    fn action_sidecars_keep_runtime_tokens_off_argv() {
+        let mut spec = spec();
+        spec.temp_host = container_test_temp("sidecar-token-env");
+        let env = &[(
+            "ACTIONS_RUNTIME_TOKEN".into(),
+            "PLACEHOLDER_CREDENTIAL".into(),
+        )];
+        let node = spec
+            .prepare_run_node_action_args("/__w", env, &[], &[], "node:24", "/__a/action/index.js")
+            .unwrap();
+        let docker = spec
+            .prepare_run_docker_action_args("/__w", env, &[], "alpine:3.22", None, &["true".into()])
+            .unwrap();
+        for prepared in [node, docker] {
+            let joined = prepared.args().join("\0");
+            assert!(prepared.args().contains(&"--env-file".into()));
+            assert!(!joined.contains("PLACEHOLDER_CREDENTIAL"));
+        }
     }
 
     #[test]
@@ -1463,16 +1897,16 @@ mod tests {
                 "--detach",
                 "--name",
                 "velnor-service-postgres",
-                "--network",
-                "velnor-net-1",
-                "--network-alias",
-                "postgres",
                 "-e",
                 "POSTGRES_PASSWORD=postgres",
                 "-p",
                 "5432:5432",
                 "--health-cmd",
                 "pg_isready",
+                "--network",
+                "velnor-net-1",
+                "--network-alias",
+                "postgres",
                 "postgres:16"
             ]
         );
@@ -1488,6 +1922,67 @@ mod tests {
                 "velnor-service-postgres"
             ]
         );
+    }
+
+    #[test]
+    fn service_runner_network_overrides_expanded_options() {
+        let service = ServiceContainerSpec {
+            name: "velnor-service-postgres".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: "velnor-net-owned".into(),
+            env: Vec::new(),
+            ports: Vec::new(),
+            options: vec!["--network".into(), "unexpected".into()],
+        };
+        let args = service.start_args();
+        assert_eq!(
+            &args[args.len() - 5..],
+            [
+                "--network",
+                "velnor-net-owned",
+                "--network-alias",
+                "postgres",
+                "postgres:16"
+            ]
+        );
+    }
+
+    #[test]
+    fn job_runner_network_overrides_expanded_options() {
+        let mut job = spec();
+        job.options = vec!["--network".into(), "unexpected".into()];
+        let args = job.start_args();
+        let network_pairs = args
+            .windows(2)
+            .filter(|pair| pair[0] == "--network")
+            .collect::<Vec<_>>();
+        assert_eq!(network_pairs.last().unwrap()[1], "velnor-net-1");
+    }
+
+    #[test]
+    fn container_job_reaches_service_by_shared_network_alias() {
+        let job = spec();
+        let service = ServiceContainerSpec {
+            name: "velnor-service-postgres".into(),
+            image: "postgres:16".into(),
+            network_alias: "postgres".into(),
+            network: job.network.clone(),
+            env: Vec::new(),
+            ports: vec!["5432".into()],
+            options: Vec::new(),
+        };
+        let job_args = job.start_args();
+        let service_args = service.start_args();
+        assert!(job_args
+            .windows(2)
+            .any(|pair| pair == ["--network", "velnor-net-1"]));
+        assert!(service_args
+            .windows(2)
+            .any(|pair| pair == ["--network", "velnor-net-1"]));
+        assert!(service_args
+            .windows(2)
+            .any(|pair| pair == ["--network-alias", "postgres"]));
     }
 
     #[test]

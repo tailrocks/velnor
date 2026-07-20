@@ -1,5 +1,9 @@
 # Cache GC Design
 
+Implementation status: destructive confirmation, filesystem leader lock,
+active-scope exclusion, physical accounting, class budgets, and append-only GC
+history are implemented by plans 036–037.
+
 > **Superseded as the implementation contract:** this file documents the
 > original read-only spike. The production design, canonical paths, live Sentry
 > evidence, leases, filesystem-wide admission control, and delivery gates are

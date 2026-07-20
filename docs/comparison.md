@@ -1,7 +1,7 @@
 # Velnor vs GitHub-hosted Runner — UI Output Comparison
 
-Evidence and analysis for the **GitHub UI Experience Parity** goal
-(`../prompts/github-ui-parity.md`). Mission context: `mission.md` — the
+Evidence and analysis for the completed **GitHub UI Experience Parity** goal.
+Mission context: `mission.md` — the
 output must be **equal-or-better, never less informative**, and Velnor controls
 its own log stream so it can be nicer than GitHub.
 

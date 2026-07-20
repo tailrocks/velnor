@@ -1,7 +1,7 @@
 use aho_corasick::{AhoCorasick, MatchKind};
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -20,6 +20,7 @@ use tokio::{
     sync::mpsc::UnboundedReceiver,
     task::{JoinHandle, JoinSet},
 };
+use tracing::Instrument as _;
 
 use crate::{
     action::{
@@ -37,13 +38,14 @@ use crate::{
     cli::{ConfigureArgs, DaemonArgs, DoctorArgs, PreflightArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     executor::{
-        DockerScriptExecutor, ExecutableStep, ProcessCommandRunner, StepLog, StepStartEvent,
+        condition_is_statically_false, DockerScriptExecutor, ExecutableStep, ProcessCommandRunner,
+        StepLog, StepStartEvent,
     },
     github_adapter::{
         github_job_container_spec, github_normalized_job_plan, job_container_name,
         system_connection_access_token, GitHubJobContainerPaths,
     },
-    job_message::{ActionReferenceType, AgentJobRequestMessage},
+    job_message::{ActionReferenceType, AgentJobRequestMessage, VariableValue},
     platform,
     protocol::{
         decode_jit_config, AcquireJobOutcome, BrokerClient, DistributedTaskClient, GitHubApiError,
@@ -55,7 +57,7 @@ use crate::{
     },
     runtime_env::job_runtime_env,
     script_step::{StepAnnotation, StepAnnotationLevel},
-    slot_log::{self, SlotForensics},
+    slot_log::{self, SlotForensics, LIFECYCLE_LOG},
 };
 
 const JOB_CANCELLATION_MESSAGE: &str = "JobCancellation";
@@ -102,6 +104,31 @@ struct RunServiceJobContext {
 struct AcquiredJobIdentity {
     plan_id: String,
     job_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct JobTimingRecord {
+    v: u8,
+    job_id: String,
+    pickup_ms: u64,
+    first_step_ms: u64,
+    checkout_ms: u64,
+    container_boot_ms: u64,
+    steps_ms: u64,
+    finalize_ms: u64,
+    teardown_ms: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ExecutionTimings {
+    first_step_ms: u64,
+    checkout_ms: u64,
+    container_boot_ms: u64,
+    steps_ms: u64,
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 impl AcquiredJobIdentity {
@@ -273,18 +300,6 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
     validate_linux_only_labels(&labels)?;
     platform::validate_arm_label_matches_host(&labels, std::env::consts::ARCH)?;
 
-    if args.pool_name.is_some() && args.pool_id.is_none() {
-        bail!("JIT runner config requires numeric --pool-id for non-default runner groups");
-    }
-
-    let runner_group_id = args.pool_id.unwrap_or(1);
-    let jit_request = GitHubJitConfigRequest {
-        name: agent_name.clone(),
-        runner_group_id,
-        labels: labels.clone(),
-        work_folder: None,
-    };
-
     let pat = if args.dry_run {
         None
     } else {
@@ -293,6 +308,27 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("GitHub PAT required for JIT config: pass --pat"))?,
         )
+    };
+    let runner_group_id = match args.pool_name.as_deref() {
+        Some(_) if args.dry_run && args.pool_id.is_some() => args.pool_id.expect("checked above"),
+        Some(pool_name) => {
+            let pat = pat.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--pool-name requires live GitHub lookup; for --dry-run also pass --pool-id"
+                )
+            })?;
+            let groups = RegistrationClient::new()?
+                .list_runner_groups(&scope, pat)
+                .await?;
+            resolve_runner_group_id(&groups, pool_name, args.pool_id)?
+        }
+        None => args.pool_id.unwrap_or(1),
+    };
+    let jit_request = GitHubJitConfigRequest {
+        name: agent_name.clone(),
+        runner_group_id,
+        labels: labels.clone(),
+        work_folder: None,
     };
 
     if args.replace {
@@ -399,6 +435,37 @@ pub async fn configure(args: ConfigureArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn resolve_runner_group_id(
+    groups: &[crate::protocol::RunnerGroup],
+    requested_name: &str,
+    requested_id: Option<i64>,
+) -> Result<i64> {
+    let group = groups
+        .iter()
+        .find(|group| group.name.eq_ignore_ascii_case(requested_name))
+        .ok_or_else(|| {
+            let accepted = groups
+                .iter()
+                .map(|group| group.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            anyhow::anyhow!(
+                "runner group '{requested_name}' not found; accepted groups: {accepted}"
+            )
+        })?;
+    if let Some(requested_id) = requested_id {
+        if requested_id != group.id {
+            bail!(
+                "runner group '{}' resolves to id {}, not supplied --pool-id {}",
+                group.name,
+                group.id,
+                requested_id
+            );
+        }
+    }
+    Ok(group.id)
 }
 
 async fn remove_existing_jit_config_for_replace(dir: &Path, pat: Option<&str>) -> Result<()> {
@@ -508,6 +575,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     }
 
     let dir = config::config_dir(args.config_dir.clone())?;
+    wait_for_prior_slot_teardown(&dir).await?;
     preflight_before_executable_run(&args, &dir).map_err(local_failure)?;
     let stored = config::load(&dir).map_err(local_failure)?;
     let agent_id = stored.settings.agent_id.ok_or_else(|| {
@@ -639,6 +707,10 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
 
     let mut attempt: u32 = 0;
     loop {
+        if draining() {
+            println!("drain complete during registration retry: exiting");
+            return Ok(());
+        }
         match daemon_pass(&args, slots).await {
             Ok(()) => return Ok(()),
             Err(error) => {
@@ -661,7 +733,13 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
                     "registration failing (attempt {attempt}); retrying in {}s",
                     delay.as_secs()
                 ));
-                tokio::time::sleep(delay).await;
+                for _ in 0..delay.as_secs().max(1) {
+                    if draining() {
+                        println!("drain complete during registration backoff: exiting");
+                        return Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
             }
         }
     }
@@ -672,6 +750,9 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
 /// reaching the end of this function only happens in one-shot modes or when
 /// every slot task has stopped (e.g. all panicked repeatedly).
 async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
+    if draining() {
+        return Ok(());
+    }
     let config_base = daemon_config_dir(args)?;
     preflight_before_daemon_jit_config(args, &config_base, slots)?;
     if args.url.is_some() && !args.dry_run_registration {
@@ -681,8 +762,14 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "default".to_string());
         prune_stale_velnor_docker_resources(&daemon_id);
+        if let Some(work_root) = args.work_dir.as_deref() {
+            prune_stale_job_workspaces(work_root);
+        }
     }
     configure_daemon_slots(args, &config_base, slots).await?;
+    if draining() {
+        return Ok(());
+    }
     if !daemon_should_poll_after_jit_config(args) {
         println!("Daemon JIT config dry run complete; skipped polling GitHub for jobs.");
         return Ok(());
@@ -829,6 +916,22 @@ fn slot_retry_delay(attempt: u32, slot_index: usize) -> Duration {
     Duration::from_secs(capped + jitter)
 }
 
+/// Wait for a slot retry without making SIGTERM drain wait behind a long
+/// capacity/JIT backoff. Returns true as soon as drain is requested.
+async fn sleep_slot_retry_or_drain(delay: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + delay;
+    loop {
+        if draining() {
+            return true;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        tokio::time::sleep((deadline - now).min(Duration::from_secs(1))).await;
+    }
+}
+
 /// Minimum free disk space below which a slot parks instead of registering
 /// runners whose jobs are doomed.
 const DISK_MIN_FREE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -940,7 +1043,9 @@ async fn run_daemon_slot(
             eprintln!("{message}");
             crate::sd_notify::status(&message);
             daemon_forensic_log(&config_base, &message);
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            if sleep_slot_retry_or_drain(Duration::from_secs(60)).await {
+                continue;
+            }
             continue;
         }
         let mut slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
@@ -968,7 +1073,9 @@ async fn run_daemon_slot(
                         "slot-{slot_index} cycle {cycle} local failure attempt {local_failure_streak} (registration kept): {error:#}"
                     ),
                 );
-                tokio::time::sleep(delay).await;
+                if sleep_slot_retry_or_drain(delay).await {
+                    continue;
+                }
                 continue;
             }
             local_failure_streak = 0;
@@ -982,7 +1089,9 @@ async fn run_daemon_slot(
             );
             reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle).await;
             cycle += 1;
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            if sleep_slot_retry_or_drain(Duration::from_secs(5)).await {
+                continue;
+            }
             continue;
         }
         local_failure_streak = 0;
@@ -1041,7 +1150,9 @@ async fn reconfigure_daemon_slot_forever(
                     "daemon slot-{slot_index} JIT reconfigure attempt {attempt} failed: {error:#}.{diagnosis} Retrying in {}s.",
                     delay.as_secs()
                 );
-                tokio::time::sleep(delay).await;
+                if sleep_slot_retry_or_drain(delay).await {
+                    return;
+                }
             }
         }
     }
@@ -1073,6 +1184,10 @@ async fn recycle_daemon_slot(
     configure(configure_args)
         .await
         .with_context(|| format!("recycle JIT config for daemon slot-{slot_index}"))?;
+    println!(
+        "forensics.lifecycle event=next-jit-ready timestamp={}",
+        unix_now_iso8601()
+    );
     Ok(())
 }
 
@@ -1115,6 +1230,10 @@ async fn configure_daemon_slots(args: &DaemonArgs, config_base: &Path, slots: us
     let mut usable_slots = 0usize;
     let mut skipped_slots = Vec::new();
     for slot_index in 1..=slots {
+        if draining() {
+            cleanup_configured_daemon_slots(args, config_base, slots, &configured_slots).await;
+            return Ok(());
+        }
         let slot_config_dir = daemon_slot_config_dir(config_base, slot_index, slots);
         if !daemon_slot_should_configure_jit(
             &slot_config_dir,
@@ -1365,6 +1484,48 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
     }
 }
 
+/// A fresh daemon pass has no surviving jobs from the previous process, so
+/// UUID-named job workspaces below its own slot roots are stale by definition.
+/// Restrict deletion to this exact shape; shared stores and operator files at
+/// the work-root or slot level are never candidates.
+fn prune_stale_job_workspaces(work_root: &Path) {
+    let Ok(slots) = std::fs::read_dir(work_root) else {
+        return;
+    };
+    let mut removed = 0usize;
+    for slot in slots.flatten() {
+        let Ok(file_type) = slot.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() || !slot.file_name().to_string_lossy().starts_with("slot-") {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(slot.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if !file_type.is_dir()
+                || uuid::Uuid::parse_str(&entry.file_name().to_string_lossy()).is_err()
+            {
+                continue;
+            }
+            match std::fs::remove_dir_all(entry.path()) {
+                Ok(()) => removed += 1,
+                Err(error) => eprintln!(
+                    "Failed to prune stale Velnor job workspace {}: {error}",
+                    entry.path().display()
+                ),
+            }
+        }
+    }
+    if removed > 0 {
+        eprintln!("Pruned {removed} stale Velnor job workspace(s) at startup.");
+    }
+}
+
 fn daemon_slot_configure_args(
     args: &DaemonArgs,
     config_base: &Path,
@@ -1418,7 +1579,11 @@ fn daemon_slot_run_args(
         job_cpus: args.job_cpus.clone(),
         job_memory: args.job_memory.clone(),
         trust_scope: args.trust_scope.clone(),
+        emergency_reserve_bytes: args.emergency_reserve_bytes,
+        job_peak_bytes: args.job_peak_bytes,
         node_action_image: args.node_action_image.clone(),
+        diagnostic_node_sidecar: args.diagnostic_node_sidecar,
+        skip_capability_validation: args.skip_capability_validation,
         work_dir: daemon_slot_child_path(args.work_dir.as_deref(), slot_index, slot_count),
         docker_host_work_dir: daemon_slot_child_path(
             args.docker_host_work_dir.as_deref(),
@@ -1531,6 +1696,65 @@ async fn run_v2(
     agent_id: i64,
     token: OAuthAccessToken,
 ) -> Result<()> {
+    let work_root = crate::container::daemon_shared_root(
+        args.work_dir
+            .clone()
+            .unwrap_or_else(|| config_dir.join("_work")),
+    );
+    let run_root = crate::storage::StorageLayout::resolve()
+        .map(|layout| layout.run_root)
+        .unwrap_or_else(|| daemon_capacity_run_root(&config_dir));
+    let controller = crate::capacity::CapacityController {
+        run_root: run_root.clone(),
+        emergency_reserve_bytes: args.emergency_reserve_bytes,
+        job_peak_bytes: args.job_peak_bytes,
+    };
+    let free = free_space_bytes(&work_root)
+        .ok_or_else(|| anyhow::anyhow!("capacity backpressure: cannot measure free bytes"))
+        .map_err(local_failure)?;
+    let reservation = match controller.reserve_with_free_bytes(free) {
+        Ok(reservation) => reservation,
+        Err(first_error) => {
+            let active = crate::capacity::active_scopes(&run_root, Duration::from_secs(24 * 3600))
+                .map_err(local_failure)?;
+            let (_, active_reserved) =
+                crate::capacity::reservation_summary(&run_root).map_err(local_failure)?;
+            let hysteresis = if run_root.join("capacity-backpressure").exists() {
+                args.job_peak_bytes / 5
+            } else {
+                0
+            };
+            let required = args
+                .emergency_reserve_bytes
+                .saturating_add(active_reserved)
+                .saturating_add(args.job_peak_bytes)
+                .saturating_add(hysteresis);
+            let needed = required.saturating_sub(free);
+            let log_root = crate::storage::StorageLayout::resolve()
+                .map(|layout| layout.log_root)
+                .unwrap_or_else(|| config_dir.join("logs"));
+            let reclaim_layout = crate::storage::StorageLayout {
+                cache_root: work_root.clone(),
+                lib_root: config_dir.clone(),
+                run_root: run_root.clone(),
+                log_root,
+                mode: "resolved",
+            };
+            if needed > 0 {
+                let _ = crate::cache::reclaim(&reclaim_layout, needed, &active)
+                    .map_err(local_failure)?;
+            }
+            let free_after = free_space_bytes(&work_root).unwrap_or(free);
+            controller
+                .reserve_with_free_bytes(free_after)
+                .with_context(|| {
+                    format!("{first_error:#}; reclaim completed but reservation still unavailable")
+                })
+                .map_err(local_failure)?
+        }
+    };
+    let _reserved_bytes = reservation.bytes;
+    let _reservation = reservation;
     let server_url_v2 = stored.settings.server_url_v2.as_deref().ok_or_else(|| {
         anyhow::anyhow!("runner config enables V2 flow but missing server_url_v2")
     })?;
@@ -1704,6 +1928,7 @@ async fn run_v2(
                     &args,
                     stored.settings.disable_update,
                     &stored.settings.agent_name,
+                    &forensics,
                     message,
                 )
                 .instrument(message_span)
@@ -1770,6 +1995,15 @@ async fn run_v2(
     }
 
     run_result
+}
+
+fn daemon_capacity_run_root(config_dir: &Path) -> PathBuf {
+    let base = config_dir
+        .parent()
+        .filter(|parent| parent.file_name().is_some_and(|name| name == "slots"))
+        .and_then(Path::parent)
+        .unwrap_or(config_dir);
+    base.join("run")
 }
 
 /// Proactively refresh OAuth credentials for an idle slot. Best-effort: a
@@ -2111,6 +2345,7 @@ async fn handle_v2_message(
     args: &RunArgs,
     disable_update: bool,
     runner_name: &str,
+    forensics: &SlotForensics,
     message: crate::protocol::TaskAgentMessage,
 ) -> Result<V2MessageAction> {
     println!(
@@ -2200,6 +2435,8 @@ async fn handle_v2_message(
         .run_service_url
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("V2 runner job request missing run_service_url"))?;
+    let pickup_started = Instant::now();
+    let pickup_span = tracing::info_span!("job-pickup");
     let job_value = run_service
         .acquire_job(
             run_service_url,
@@ -2207,6 +2444,7 @@ async fn handle_v2_message(
             std::env::consts::OS,
             reference.billing_owner_id.as_deref(),
         )
+        .instrument(pickup_span)
         .await?;
     let job_value = match job_value {
         AcquireJobOutcome::Acquired(value) => value,
@@ -2280,11 +2518,14 @@ async fn handle_v2_message(
         broker_cancellation,
         runner_name,
         job,
+        forensics,
+        duration_ms(pickup_started.elapsed()),
     )
     .await?;
     Ok(V2MessageAction::JobHandled)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_job_request(
     config_dir: &std::path::Path,
     args: &RunArgs,
@@ -2292,6 +2533,8 @@ async fn handle_job_request(
     broker_cancellation: BrokerCancellationContext,
     runner_name: &str,
     job: AgentJobRequestMessage,
+    forensics: &SlotForensics,
+    pickup_ms: u64,
 ) -> Result<()> {
     println!(
         "Parsed job request {} for job '{}' ({} step(s), {} endpoint(s)).",
@@ -2310,7 +2553,94 @@ async fn handle_job_request(
     }
     let early_context = job_context_data(&job);
     let mut job = job;
+    hydrate_github_variables_from_context(&mut job, &early_context);
     apply_workflow_script_step_names(&mut job, &early_context).await;
+    let capacity_run_root = crate::storage::StorageLayout::resolve()
+        .map(|layout| layout.run_root)
+        .unwrap_or_else(|| daemon_capacity_run_root(config_dir));
+    let acquire_storage_leases = || {
+        crate::github_adapter::job_variable(&job, "github.repository")
+            .filter(|repository| !repository.is_empty())
+            .map(|repository| -> Result<Vec<crate::capacity::ScopeLease>> {
+                let work_root = crate::container::daemon_shared_root(
+                    args.work_dir
+                        .clone()
+                        .unwrap_or_else(|| config_dir.join("_work")),
+                );
+                let repository_key = crate::container::sanitize_store_key(repository);
+                let trust_key = crate::container::sanitize_store_key(&args.trust_scope);
+                let cargo_root = crate::container::cargo_store_host(&work_root);
+                let mise_root = crate::container::mise_store_host(&work_root);
+                let target_root = crate::storage::append_legacy_trust(
+                    crate::container::cargo_target_store_host(&work_root),
+                    &trust_key,
+                );
+                let target_job = crate::github_adapter::github_cargo_target_store_host(
+                    &job, &work_root, &trust_key,
+                );
+                let target_scope = target_job
+                    .parent()
+                    .and_then(|path| path.strip_prefix(&target_root).ok())
+                    .context("derive persistent target GC scope")?
+                    .to_string_lossy()
+                    .to_string();
+                let cargo_bin_scope =
+                    crate::container::cargo_executable_store_host(&work_root, &repository_key)
+                        .strip_prefix(&cargo_root)
+                        .context("derive Cargo executable GC scope")?
+                        .to_string_lossy()
+                        .to_string();
+                let mise_install_scope =
+                    crate::container::mise_executable_store_host(&work_root, &repository_key)
+                        .strip_prefix(&mise_root)
+                        .context("derive mise install GC scope")?
+                        .to_string_lossy()
+                        .to_string();
+                let rustup_scope =
+                    crate::container::rustup_executable_store_host(&work_root, &repository_key)
+                        .strip_prefix(&mise_root)
+                        .context("derive rustup GC scope")?
+                        .to_string_lossy()
+                        .to_string();
+                let actions_cache =
+                    crate::storage::cache_class_path(&work_root, "caches", "_velnor_caches");
+                let actions_cache_scope = if actions_cache
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("_velnor_"))
+                {
+                    format!("{trust_key}/{repository_key}")
+                } else {
+                    repository_key
+                };
+                let stale_after = Duration::from_secs(24 * 3600);
+                let lease_holder = crate::container::sanitize_store_key(&job.job_id);
+                [
+                    ("targets", target_scope),
+                    ("actions-cache", actions_cache_scope),
+                    ("cargo", "registry".into()),
+                    ("cargo", "git".into()),
+                    ("cargo", cargo_bin_scope),
+                    ("mise", "cache".into()),
+                    ("mise", mise_install_scope),
+                    ("mise", rustup_scope),
+                ]
+                .into_iter()
+                .map(|(class, scope)| {
+                    // ScopeLease is intentionally exclusive. Give every active job its own
+                    // child lease while the GC's ancestor-overlap check protects the shared
+                    // candidate scope for all concurrent holders.
+                    let holder_scope = format!("{scope}/{lease_holder}");
+                    crate::capacity::ScopeLease::acquire(
+                        &capacity_run_root,
+                        class,
+                        &holder_scope,
+                        stale_after,
+                    )
+                })
+                .collect()
+            })
+            .transpose()
+    };
     let script_steps = match crate::script_step::github_script_steps_with_context(
         &job.steps,
         "/__w",
@@ -2334,8 +2664,47 @@ async fn handle_job_request(
     }
     if should_execute_job(args) {
         let Some(script_steps) = script_steps else {
+            complete_acquired_job_failure(
+                &run_service_job,
+                &AcquiredJobIdentity::from_job(&job),
+                Some("step_mapping".to_string()),
+            )
+            .await?;
             bail!("cannot execute scripts because step mapping failed");
         };
+        if let Err(error) = validate_job_trust_policy(&job, &args.trust_scope) {
+            complete_acquired_job_failure(
+                &run_service_job,
+                &AcquiredJobIdentity::from_job(&job),
+                Some("trust_policy".to_string()),
+            )
+            .await?;
+            return Err(error);
+        }
+        if !args.skip_capability_validation {
+            if let Err(error) = crate::manifest::validate_job_with_context(&job, &early_context) {
+                complete_acquired_job_failure(
+                    &run_service_job,
+                    &AcquiredJobIdentity::from_job(&job),
+                    Some("capability_validation".to_string()),
+                )
+                .await?;
+                return Err(error);
+            }
+            if let Err(error) = preflight_local_action_closure(&job, &early_context) {
+                complete_acquired_job_failure(
+                    &run_service_job,
+                    &AcquiredJobIdentity::from_job(&job),
+                    Some("nested_capability_validation".to_string()),
+                )
+                .await?;
+                return Err(error);
+            }
+        }
+        // Lease publication mutates the runtime store, so it must follow all
+        // trust and strict-capability checks. Keep the guards through result
+        // upload by binding them in the execution scope.
+        let _storage_leases = acquire_storage_leases()?;
         if let Err(error) = publish_timeline_job_started(&job, runner_name).await {
             eprintln!("Best-effort timeline job start update failed: {error:#}");
         }
@@ -2369,12 +2738,14 @@ async fn handle_job_request(
         let step_logs_publisher =
             start_step_log_publisher(job.clone(), step_log_receiver, console_log_path);
         let config_dir = config_dir.to_path_buf();
+        let teardown_config_dir = config_dir.clone();
         let work_dir = args.work_dir.clone();
         let docker_host_work_dir = args.docker_host_work_dir.clone();
         let docker_image = args.docker_image.clone();
         let resource_options = job_resource_options(&args.job_cpus, &args.job_memory);
         let node_action_image = args.node_action_image.clone();
-        validate_job_trust_policy(&job, &args.trust_scope)?;
+        let allow_unknown_action_diagnostics =
+            args.skip_capability_validation && args.diagnostic_node_sidecar;
         let trust_scope = args.trust_scope.clone();
         let run_service_url = run_service_job.run_service_url.clone();
         let billing_owner_id = run_service_job.billing_owner_id.clone();
@@ -2393,6 +2764,7 @@ async fn handle_job_request(
                 &docker_image,
                 resource_options,
                 &node_action_image,
+                allow_unknown_action_diagnostics,
                 &trust_scope,
                 &run_service_url,
                 billing_owner_id,
@@ -2451,6 +2823,8 @@ async fn handle_job_request(
                         outputs: BTreeMap::new(),
                         environment_url: None,
                         step_logs: Vec::new(),
+                        teardown: None,
+                        timings: ExecutionTimings::default(),
                     }
                 } else {
                     let infrastructure_failure_category =
@@ -2477,6 +2851,10 @@ async fn handle_job_request(
         };
         let outputs = job_result.outputs;
         let step_logs = job_result.step_logs;
+        let teardown = job_result.teardown;
+        let execution_timings = job_result.timings;
+        let finalize_started = Instant::now();
+        let finalize_span = tracing::info_span!("job-finalize");
         let completion = complete_run_service_job_refreshing(
             &run_service_job.client,
             &stored_for_refresh,
@@ -2490,9 +2868,36 @@ async fn handle_job_request(
             None,
             false,
         )
+        .instrument(finalize_span)
         .await;
+        let finalize_ms = duration_ms(finalize_started.elapsed());
         renewal.abort();
         completion?;
+        println!(
+            "forensics.lifecycle event=completion-posted timestamp={}",
+            unix_now_iso8601()
+        );
+        let timing_record = JobTimingRecord {
+            v: 1,
+            job_id: job.job_id.clone(),
+            pickup_ms,
+            first_step_ms: pickup_ms.saturating_add(execution_timings.first_step_ms),
+            checkout_ms: execution_timings.checkout_ms,
+            container_boot_ms: execution_timings.container_boot_ms,
+            steps_ms: execution_timings.steps_ms,
+            finalize_ms,
+            teardown_ms: 0,
+        };
+        if let Some(teardown) = teardown {
+            spawn_post_completion_teardown(
+                teardown_config_dir,
+                teardown,
+                forensics.clone(),
+                timing_record,
+            );
+        } else if let Ok(json) = serde_json::to_string(&timing_record) {
+            forensics.lifecycle(&format!("job-timing {json}"));
+        }
         println!(
             "Job completed with result {:?} and message acknowledged.",
             job_result.result
@@ -2818,6 +3223,10 @@ fn github_api_error_status(error: &anyhow::Error) -> Option<u16> {
     })
 }
 
+fn active_job_broker_registration_is_gone(error: &anyhow::Error) -> bool {
+    github_api_error_status(error) == Some(404)
+}
+
 fn start_broker_cancellation_poll(
     broker: BrokerClient,
     session_id: String,
@@ -2846,6 +3255,14 @@ fn start_broker_cancellation_poll(
                         eprintln!(
                             "Broker cancellation poll failed ({error_streak} consecutive): {error:#}"
                         );
+                    }
+                    if active_job_broker_registration_is_gone(&error) {
+                        eprintln!(
+                            "Active job runner registration disappeared; cancelling the job because broker control messages can no longer be received: {error:#}"
+                        );
+                        canceled.store(true, Ordering::SeqCst);
+                        kill_job_container(&job_container_name);
+                        break;
                     }
                     if is_credential_poll_error(&error) {
                         match oauth_access_token(&stored).await {
@@ -3440,21 +3857,26 @@ fn is_job_cancellation_for(message: &crate::protocol::TaskAgentMessage, job_id: 
 }
 
 fn kill_job_container(container_name: &str) {
-    match Command::new("docker")
-        .args(["kill", container_name])
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            println!("Killed Docker job container {container_name} after GitHub cancellation.");
-        }
-        Ok(output) => {
-            eprintln!(
-                "Failed to kill Docker job container {container_name}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        Err(error) => {
-            eprintln!("Failed to run docker kill for {container_name}: {error:#}");
+    // Docker actions run in a sibling sidecar, so killing only the long-lived
+    // job container leaves `docker run` blocked until the action exits. Stop
+    // the exact job-owned sidecar first, then the job container.
+    for name in [
+        format!("velnor-docker-action-{container_name}"),
+        container_name.to_string(),
+    ] {
+        match Command::new("docker").args(["kill", &name]).output() {
+            Ok(output) if output.status.success() => {
+                println!("Killed Docker container {name} after GitHub cancellation.");
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stderr.contains("No such container") {
+                    eprintln!("Failed to kill Docker container {name}: {stderr}");
+                }
+            }
+            Err(error) => {
+                eprintln!("Failed to run docker kill for {name}: {error:#}");
+            }
         }
     }
 }
@@ -3467,6 +3889,7 @@ fn execute_script_job(
     docker_image: &str,
     resource_options: Vec<String>,
     node_action_image: &str,
+    allow_unknown_action_diagnostics: bool,
     trust_scope: &str,
     run_service_url: &str,
     billing_owner_id: Option<String>,
@@ -3483,6 +3906,7 @@ fn execute_script_job(
         docker_image,
         resource_options,
         node_action_image,
+        allow_unknown_action_diagnostics,
         trust_scope,
         run_service_url,
         billing_owner_id,
@@ -3492,11 +3916,13 @@ fn execute_script_job(
         step_log_sender,
         daemon_id,
     );
-    if let Err(e) = fs::remove_dir_all(&job_dir) {
-        eprintln!(
-            "Warning: failed to clean up job workspace at {}: {e:#}",
-            job_dir.display()
-        );
+    if result.is_err() {
+        if let Err(e) = fs::remove_dir_all(&job_dir) {
+            eprintln!(
+                "Warning: failed to clean up job workspace at {}: {e:#}",
+                job_dir.display()
+            );
+        }
     }
     result
 }
@@ -3508,6 +3934,7 @@ fn execute_script_job_inner(
     docker_image: &str,
     resource_options: Vec<String>,
     node_action_image: &str,
+    allow_unknown_action_diagnostics: bool,
     trust_scope: &str,
     run_service_url: &str,
     billing_owner_id: Option<String>,
@@ -3517,6 +3944,7 @@ fn execute_script_job_inner(
     step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
     daemon_id: String,
 ) -> Result<ScriptJobResult> {
+    let execution_started = Instant::now();
     let workspace = job_dir.join("workspace");
     let temp = job_dir.join("temp");
     let home = job_dir.join("home");
@@ -3541,7 +3969,28 @@ fn execute_script_job_inner(
         fs::create_dir_all(&path)
             .with_context(|| format!("create persistent store {}", path.display()))?;
     }
+    let repaired = crate::container::repair_cargo_git_store(&cargo_store)
+        .context("repair persistent Cargo git store")?;
+    if repaired > 0 {
+        eprintln!("forensics.lifecycle: removed {repaired} orphaned Cargo git checkout(s)");
+    }
     seed_mise_store_from_image(docker_image, &mise_store);
+    let container = github_job_container_spec(
+        job,
+        GitHubJobContainerPaths {
+            workspace_host: workspace.clone(),
+            temp_host: temp.clone(),
+            home_host: home.clone(),
+            actions_host: actions.clone(),
+            tools_host: tools.clone(),
+            docker_host_work_dir,
+        },
+        docker_image,
+        resource_options,
+        node_action_image,
+        daemon_id,
+        trust_scope,
+    );
     let context_data = job_context_data(job);
     // Synthetic "Set up job" step matching GitHub-hosted runner output.
     let setup_step_id = uuid::Uuid::new_v4().to_string();
@@ -3584,7 +4033,30 @@ fn execute_script_job_inner(
         .into_iter()
         .map(|plan| resolve_checkout_plan_context(plan, &base_env, &context_data))
         .collect::<Vec<_>>();
-    let mut checkout_order: i32 = 1;
+    let git_mirror_store = crate::container::git_mirror_store_host(&temp, trust_scope);
+    // Capability validation has already accepted the complete job. Start the
+    // Docker environment while checkout performs host-side network and disk
+    // work. The guard removes a successfully pre-created environment if any
+    // later planning step returns early; a failed pre-create is retried by the
+    // executor's normal lazy startup path.
+    let initialize_containers_step = (!container.services.is_empty()).then(|| {
+        let step_id = uuid::Uuid::new_v4().to_string();
+        if let Some(sender) = &step_start_sender {
+            let _ = sender.send(StepStartEvent {
+                step_id: step_id.clone(),
+                display_name: "Initialize containers".to_string(),
+                order: 2,
+            });
+        }
+        (step_id, unix_now_iso8601())
+    });
+    let precreated_environment = PrecreatedJobEnvironment::spawn(container.clone());
+    let mut checkout_order: i32 = if initialize_containers_step.is_some() {
+        2
+    } else {
+        1
+    };
+    let mut checkout_duration = Duration::ZERO;
     // Eager checkout logs also belong in the downloadable job-log artifact —
     // they only travelled the live channel before, so the artifact was the one
     // place the checkout step was missing.
@@ -3604,8 +4076,17 @@ fn execute_script_job_inner(
             });
         }
         let mut checkout_trace = Vec::new();
-        let checkout_result =
-            crate::checkout::execute_checkout(&mut command_runner, plan, &mut checkout_trace);
+        let checkout_started = Instant::now();
+        let checkout_result = {
+            let _span = tracing::info_span!("job-checkout").entered();
+            crate::checkout::execute_checkout_with_mirror(
+                &mut command_runner,
+                plan,
+                &mut checkout_trace,
+                Some(&git_mirror_store),
+            )
+        };
+        checkout_duration = checkout_duration.saturating_add(checkout_started.elapsed());
         let exit_code = if checkout_result.is_ok() { 0 } else { 1 };
         if let Err(ref e) = checkout_result {
             eprintln!("Checkout failed: {e:#}");
@@ -3640,12 +4121,36 @@ fn execute_script_job_inner(
     }
     let local_action_plans =
         local_action_plans_with_context(&job.steps, &workspace, &context_data)?;
+    let statically_skipped_local_actions = job
+        .steps
+        .iter()
+        .filter(|step| is_local_action_step(step))
+        .zip(local_action_plans.iter())
+        .filter(|(step, _)| {
+            condition_is_statically_false(step.condition.as_deref(), &base_env, &context_data)
+        })
+        .map(|(_, plan)| plan.step_id.clone())
+        .collect::<BTreeSet<_>>();
     let local_actions = local_action_plans
         .iter()
-        .map(|plan| Ok((plan.clone(), resolve_local_action(plan)?)))
+        .map(|plan| {
+            let metadata = if statically_skipped_local_actions.contains(&plan.step_id) {
+                None
+            } else {
+                Some(resolve_local_action(plan)?)
+            };
+            Ok((plan.clone(), metadata))
+        })
         .collect::<Result<Vec<_>>>()?;
+    let resolved_local_actions = local_actions
+        .iter()
+        .filter_map(|(plan, metadata)| metadata.clone().map(|metadata| (plan.clone(), metadata)))
+        .collect::<Vec<_>>();
     let mut repository_action_plans = repository_action_plans(&job.steps, &actions)?;
-    repository_action_plans.extend(composite_repository_action_plans(&local_actions, &actions)?);
+    repository_action_plans.extend(composite_repository_action_plans(
+        &resolved_local_actions,
+        &actions,
+    )?);
     let resolved_actions = if repository_action_plans.is_empty() {
         Vec::new()
     } else {
@@ -3668,24 +4173,9 @@ fn execute_script_job_inner(
         &local_actions,
         &actions,
         &runtime_checkout_plans,
+        allow_unknown_action_diagnostics,
     )?;
 
-    let container = github_job_container_spec(
-        job,
-        GitHubJobContainerPaths {
-            workspace_host: workspace,
-            temp_host: temp.clone(),
-            home_host: home,
-            actions_host: actions,
-            tools_host: tools,
-            docker_host_work_dir,
-        },
-        docker_image,
-        resource_options,
-        node_action_image,
-        daemon_id,
-        trust_scope,
-    );
     let plan = github_normalized_job_plan(
         job,
         run_service_url,
@@ -3708,10 +4198,41 @@ fn execute_script_job_inner(
     // Keep clones for synthetic steps after executor (senders are moved into executor below).
     let post_step_start_sender = step_start_sender.clone();
     let post_step_log_sender = step_log_sender.clone();
+    let (environment_started, container_boot_duration) = precreated_environment.claim();
+    let container_boot_ms = duration_ms(container_boot_duration);
+    let initialize_containers_log = initialize_containers_step.map(|(step_id, started_at)| {
+        let log = StepLog {
+            step_id,
+            display_name: "Initialize containers".to_string(),
+            order: 2,
+            started_at,
+            completed_at: unix_now_iso8601(),
+            lines: vec![format!(
+                "Initialized {} service container(s) on the runner-owned job network.",
+                container.services.len()
+            )],
+            masks: Vec::new(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        };
+        if let Some(sender) = &step_log_sender {
+            let _ = sender.send(log.clone());
+        }
+        log
+    });
     let mut executor = DockerScriptExecutor::new(command_runner)
+        .with_job_environment_started(environment_started)
         .with_initial_order(checkout_order)
         .with_trailing_post_action_count(cleanup_checkout_plans.len())
         .with_workflow_env(crate::runtime_env::job_environment_variables(job))
+        .with_trust_scope(trust_scope)
         .with_secret_masks(job_secret_mask_values(job));
     if let Some(sender) = step_start_sender {
         executor = executor.with_step_start_sender(sender);
@@ -3719,15 +4240,30 @@ fn execute_script_job_inner(
     if let Some(sender) = step_log_sender {
         executor = executor.with_step_log_sender(sender);
     }
-    let summary_result = executor.execute_ordered_steps_with_completion(
-        &plan.execution.job_container,
-        &plan.steps,
-        &plan.execution.env,
-        &plan.execution.context_data,
-        job.job_outputs.as_ref(),
-        actions_environment_url(job),
-        &plan.execution.temp_host,
+    let steps_started = Instant::now();
+    let first_step_ms = duration_ms(execution_started.elapsed());
+    let summary_result = {
+        let _span = tracing::info_span!("job-steps").entered();
+        executor.execute_ordered_steps_without_cleanup(
+            &plan.execution.job_container,
+            &plan.steps,
+            &plan.execution.env,
+            &plan.execution.context_data,
+            job.job_outputs.as_ref(),
+            actions_environment_url(job),
+            &plan.execution.temp_host,
+        )
+    };
+    let steps_ms = duration_ms(steps_started.elapsed());
+    println!(
+        "forensics.lifecycle event=last-step-end timestamp={}",
+        unix_now_iso8601()
     );
+    if summary_result.is_err() {
+        if let Err(error) = executor.cleanup(&plan.execution.job_container) {
+            eprintln!("Warning: cleanup failed after executor error: {error:#}");
+        }
+    }
     let mut command_runner = executor.into_runner();
     let cleanup_result = cleanup_checkout_credentials(&mut command_runner, &cleanup_checkout_plans);
     let (summary, cleanup_traces) = match (summary_result, cleanup_result) {
@@ -3829,6 +4365,47 @@ fn execute_script_job_inner(
         extra_step_logs.push(post_log);
     }
 
+    let services_removed = !plan.execution.job_container.services.is_empty();
+    if services_removed {
+        post_order += 1;
+        let stop_step_id = uuid::Uuid::new_v4().to_string();
+        let stop_started_at = unix_now_iso8601();
+        if let Some(sender) = &post_step_start_sender {
+            let _ = sender.send(StepStartEvent {
+                step_id: stop_step_id.clone(),
+                display_name: "Stop containers".to_string(),
+                order: post_order,
+            });
+        }
+        let mut service_executor = DockerScriptExecutor::new(command_runner);
+        service_executor.cleanup_services(&plan.execution.job_container)?;
+        let stop_log = StepLog {
+            step_id: stop_step_id,
+            display_name: "Stop containers".to_string(),
+            order: post_order,
+            started_at: stop_started_at,
+            completed_at: unix_now_iso8601(),
+            lines: vec![format!(
+                "Stopped {} service container(s).",
+                plan.execution.job_container.services.len()
+            )],
+            masks: Vec::new(),
+            annotations: Vec::new(),
+            telemetry: Vec::new(),
+            exit_code: 0,
+            skipped: false,
+            failure_ignored: false,
+            error_count: 0,
+            warning_count: 0,
+            notice_count: 0,
+            summary: String::new(),
+        };
+        if let Some(sender) = &post_step_log_sender {
+            let _ = sender.send(stop_log.clone());
+        }
+        extra_step_logs.push(stop_log);
+    }
+
     // Synthetic "Complete job" step matching GitHub-hosted runner output.
     let complete_step_id = uuid::Uuid::new_v4().to_string();
     let complete_order = post_order + 1;
@@ -3864,6 +4441,7 @@ fn execute_script_job_inner(
     extra_step_logs.push(complete_log);
 
     let mut all_step_logs = vec![setup_log];
+    all_step_logs.extend(initialize_containers_log);
     all_step_logs.extend(eager_checkout_step_logs);
     all_step_logs.extend(summary.step_logs);
     all_step_logs.extend(extra_step_logs);
@@ -3872,6 +4450,17 @@ fn execute_script_job_inner(
         outputs: summary.job_outputs,
         environment_url,
         step_logs: all_step_logs,
+        teardown: Some(TeardownHandle {
+            container: plan.execution.job_container,
+            job_dir: job_dir.to_path_buf(),
+            services_removed,
+        }),
+        timings: ExecutionTimings {
+            first_step_ms,
+            checkout_ms: duration_ms(checkout_duration),
+            container_boot_ms,
+            steps_ms,
+        },
     })
 }
 
@@ -3958,6 +4547,158 @@ struct ScriptJobResult {
     outputs: BTreeMap<String, String>,
     environment_url: Option<String>,
     step_logs: Vec<StepLog>,
+    teardown: Option<TeardownHandle>,
+    timings: ExecutionTimings,
+}
+
+#[derive(Debug, Clone)]
+struct TeardownHandle {
+    container: crate::container::JobContainerSpec,
+    job_dir: PathBuf,
+    services_removed: bool,
+}
+
+impl TeardownHandle {
+    fn run(self) {
+        let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+        let cleanup = if self.services_removed {
+            executor.cleanup_job_and_network(&self.container)
+        } else {
+            executor.cleanup(&self.container)
+        };
+        if let Err(error) = cleanup {
+            eprintln!("Warning: post-completion Docker teardown failed: {error:#}");
+        }
+        if let Err(error) = fs::remove_dir_all(&self.job_dir) {
+            eprintln!(
+                "Warning: post-completion workspace teardown failed for {}: {error}",
+                self.job_dir.display()
+            );
+        }
+    }
+}
+
+type SlotTeardownTasks = std::collections::HashMap<PathBuf, std::thread::JoinHandle<()>>;
+
+static SLOT_TEARDOWN_TASKS: std::sync::OnceLock<std::sync::Mutex<SlotTeardownTasks>> =
+    std::sync::OnceLock::new();
+
+fn slot_teardown_tasks() -> &'static std::sync::Mutex<SlotTeardownTasks> {
+    SLOT_TEARDOWN_TASKS.get_or_init(|| std::sync::Mutex::new(SlotTeardownTasks::new()))
+}
+
+fn spawn_post_completion_teardown(
+    config_dir: PathBuf,
+    teardown: TeardownHandle,
+    forensics: SlotForensics,
+    mut timing_record: JobTimingRecord,
+) {
+    let task = std::thread::spawn(move || {
+        let _span = tracing::info_span!("job-teardown").entered();
+        let teardown_started = Instant::now();
+        teardown.run();
+        timing_record.teardown_ms = duration_ms(teardown_started.elapsed());
+        if let Ok(json) = serde_json::to_string(&timing_record) {
+            forensics.lifecycle(&format!("job-timing {json}"));
+        }
+        println!(
+            "forensics.lifecycle event=teardown-done timestamp={}",
+            unix_now_iso8601()
+        );
+    });
+    register_slot_teardown_task(config_dir, task);
+}
+
+fn register_slot_teardown_task(config_dir: PathBuf, task: std::thread::JoinHandle<()>) {
+    let displaced = slot_teardown_tasks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(config_dir, task);
+    // A slot starts at most one job per JIT cycle. Joining here is a defensive
+    // fail-closed guard if a caller ever violates that ownership invariant.
+    if let Some(displaced) = displaced {
+        let _ = displaced.join();
+    }
+}
+
+async fn wait_for_prior_slot_teardown(config_dir: &Path) -> Result<()> {
+    let task = slot_teardown_tasks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(config_dir);
+    let Some(task) = task else {
+        return Ok(());
+    };
+    tokio::task::spawn_blocking(move || task.join())
+        .await
+        .context("join prior slot teardown task")?
+        .map_err(|_| anyhow::anyhow!("prior slot teardown task panicked"))?;
+    Ok(())
+}
+
+struct PrecreatedJobEnvironment {
+    container: crate::container::JobContainerSpec,
+    task: Option<std::thread::JoinHandle<(Result<()>, Duration)>>,
+    claimed: bool,
+    boot_duration: Duration,
+}
+
+impl PrecreatedJobEnvironment {
+    fn spawn(container: crate::container::JobContainerSpec) -> Self {
+        let task_container = container.clone();
+        let task = std::thread::spawn(move || {
+            let started = Instant::now();
+            let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+            let result = executor.start_job_environment(&task_container);
+            (result, started.elapsed())
+        });
+        Self {
+            container,
+            task: Some(task),
+            claimed: false,
+            boot_duration: Duration::ZERO,
+        }
+    }
+
+    fn join(&mut self) -> bool {
+        let Some(task) = self.task.take() else {
+            return self.claimed;
+        };
+        match task.join() {
+            Ok((Ok(()), duration)) => {
+                self.boot_duration = duration;
+                true
+            }
+            Ok((Err(error), duration)) => {
+                self.boot_duration = duration;
+                eprintln!(
+                    "Warning: Docker environment pre-create failed; retrying lazily: {error:#}"
+                );
+                false
+            }
+            Err(_) => {
+                eprintln!("Warning: Docker environment pre-create panicked; retrying lazily");
+                false
+            }
+        }
+    }
+
+    fn claim(mut self) -> (bool, Duration) {
+        self.claimed = self.join();
+        (self.claimed, self.boot_duration)
+    }
+}
+
+impl Drop for PrecreatedJobEnvironment {
+    fn drop(&mut self) {
+        if self.claimed || !self.join() {
+            return;
+        }
+        let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+        if let Err(error) = executor.cleanup(&self.container) {
+            eprintln!("Warning: abandoned pre-created environment cleanup failed: {error:#}");
+        }
+    }
 }
 
 fn job_context_data(job: &AgentJobRequestMessage) -> Vec<(String, Value)> {
@@ -4017,6 +4758,55 @@ fn job_context_data(job: &AgentJobRequestMessage) -> Vec<(String, Value)> {
         }
     }
     expanded.into_iter().collect()
+}
+
+/// Current V2 messages carry the official GitHub environment context in
+/// `ContextData.github`; older messages duplicated those values into
+/// `Variables` as `github.*`. Normalize the current representation into the
+/// internal variable view used by runtime env, storage, and checkout without
+/// overriding any explicit variable.
+fn hydrate_github_variables_from_context(
+    job: &mut AgentJobRequestMessage,
+    context_data: &[(String, Value)],
+) {
+    for name in [
+        "github.actor",
+        "github.actor_id",
+        "github.api_url",
+        "github.base_ref",
+        "github.event_name",
+        "github.graphql_url",
+        "github.head_ref",
+        "github.ref",
+        "github.ref_name",
+        "github.ref_protected",
+        "github.ref_type",
+        "github.repository",
+        "github.repository_id",
+        "github.repository_owner",
+        "github.repository_owner_id",
+        "github.retention_days",
+        "github.run_attempt",
+        "github.run_id",
+        "github.run_number",
+        "github.server_url",
+        "github.sha",
+        "github.triggering_actor",
+        "github.workflow",
+        "github.workflow_ref",
+        "github.workflow_sha",
+    ] {
+        let Some(value) = context_string(context_data, name).filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        job.variables
+            .entry(name.to_string())
+            .or_insert(VariableValue {
+                value: Some(value),
+                is_secret: false,
+            });
+    }
 }
 
 fn expand_broker_context_value(value: Value) -> Value {
@@ -4157,6 +4947,198 @@ fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowS
         path,
         sha,
     })
+}
+
+fn preflight_local_action_closure(
+    job: &AgentJobRequestMessage,
+    context_data: &[(String, Value)],
+) -> Result<()> {
+    let local_paths: Vec<String> = job
+        .steps
+        .iter()
+        .filter(|step| step.enabled)
+        .filter_map(|step| step.reference.as_ref())
+        .filter_map(|reference| {
+            reference
+                .path
+                .as_deref()
+                .or(reference.name.as_deref())
+                .filter(|value| value.starts_with("./"))
+                .map(ToOwned::to_owned)
+        })
+        .collect();
+    if local_paths.is_empty() {
+        return Ok(());
+    }
+    let source = workflow_source_context(context_data)
+        .context("local action preflight requires exact workflow repository and SHA")?;
+    // Local action metadata lives in the workflow repository. The
+    // SystemVssConnection token authenticates Actions service endpoints and
+    // does not carry repository Contents API scope; use the same repository
+    // token preference as checkout.
+    let token = job_repository_access_token(job)
+        .context("local action preflight requires the job repository access token")?;
+    let api_url = context_string(context_data, "github.api_url")
+        .unwrap_or_else(|| "https://api.github.com".to_string());
+    preflight_local_paths(
+        &source.repository,
+        &source.sha,
+        &local_paths,
+        &token,
+        &api_url,
+    )
+}
+
+fn job_repository_access_token(job: &AgentJobRequestMessage) -> Option<String> {
+    job.variables
+        .get("system.github.token")
+        .and_then(|variable| variable.value.clone())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            job.system_connection()
+                .and_then(system_connection_access_token)
+        })
+}
+
+fn preflight_local_paths(
+    repository: &str,
+    sha: &str,
+    paths: &[String],
+    token: &str,
+    api_url: &str,
+) -> Result<()> {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("velnor-runner")
+        .build()?;
+    let mut visited = std::collections::BTreeSet::new();
+    for path in paths {
+        preflight_action_metadata(
+            &client,
+            api_url,
+            token,
+            repository,
+            sha,
+            path.trim_start_matches("./"),
+            &mut visited,
+            0,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn preflight_action_metadata(
+    client: &reqwest::blocking::Client,
+    api_url: &str,
+    token: &str,
+    repository: &str,
+    action_ref: &str,
+    action_path: &str,
+    visited: &mut std::collections::BTreeSet<String>,
+    depth: usize,
+) -> Result<()> {
+    const MAX_COMPOSITE_DEPTH: usize = 10;
+    if depth > MAX_COMPOSITE_DEPTH {
+        bail!("composite action depth exceeded {MAX_COMPOSITE_DEPTH}");
+    }
+    let key = format!("{repository}@{action_ref}:{action_path}");
+    if !visited.insert(key) {
+        return Ok(());
+    }
+    let metadata =
+        fetch_action_metadata(client, api_url, token, repository, action_ref, action_path)?;
+    if !metadata.runs.using.eq_ignore_ascii_case("composite") {
+        return Ok(());
+    }
+    for step in &metadata.runs.steps {
+        let Some(uses) = step.uses.as_deref() else {
+            continue;
+        };
+        if uses.starts_with("docker://") {
+            bail!("unsupported nested container action '{uses}' in {repository}@{action_ref}");
+        }
+        if uses.starts_with("./") {
+            preflight_action_metadata(
+                client,
+                api_url,
+                token,
+                repository,
+                action_ref,
+                uses.trim_start_matches("./"),
+                visited,
+                depth + 1,
+            )?;
+            continue;
+        }
+        let (target, target_ref) = uses
+            .rsplit_once('@')
+            .with_context(|| format!("nested action uses is missing @ref: {uses}"))?;
+        let mut segments = target.split('/');
+        let owner = segments.next().context("nested action owner is missing")?;
+        let repo = segments
+            .next()
+            .context("nested action repository is missing")?;
+        let target_repository = format!("{owner}/{repo}");
+        let target_path = segments.collect::<Vec<_>>().join("/");
+        crate::manifest::validate_resolved_action(
+            step.name.as_deref().unwrap_or("nested-action"),
+            &target_repository,
+            target_ref,
+            &step.with,
+        )?;
+        preflight_action_metadata(
+            client,
+            api_url,
+            token,
+            &target_repository,
+            target_ref,
+            &target_path,
+            visited,
+            depth + 1,
+        )?;
+    }
+    Ok(())
+}
+
+fn fetch_action_metadata(
+    client: &reqwest::blocking::Client,
+    api_url: &str,
+    token: &str,
+    repository: &str,
+    action_ref: &str,
+    action_path: &str,
+) -> Result<crate::action::ActionMetadata> {
+    let base = api_url.trim_end_matches('/');
+    let directory = action_path.trim_matches('/');
+    let candidates = ["action.yml", "action.yaml"];
+    let mut last_status = None;
+    for file in candidates {
+        let metadata_path = if directory.is_empty() {
+            file.to_string()
+        } else {
+            format!("{directory}/{file}")
+        };
+        let response = client
+            .get(format!(
+                "{base}/repos/{repository}/contents/{metadata_path}?ref={action_ref}"
+            ))
+            .bearer_auth(token)
+            .header("Accept", "application/vnd.github.raw+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()?;
+        last_status = Some(response.status());
+        if response.status().is_success() {
+            return crate::action::parse_action_metadata(&response.text()?)
+                .with_context(|| format!("parse {repository}@{action_ref}:{metadata_path}"));
+        }
+        if response.status() != reqwest::StatusCode::NOT_FOUND {
+            response.error_for_status()?;
+        }
+    }
+    bail!(
+        "action metadata not found for {repository}@{action_ref}:{directory} (last status {})",
+        last_status.map_or_else(|| "none".to_string(), |status| status.to_string())
+    )
 }
 
 fn context_string(context_data: &[(String, Value)], path: &str) -> Option<String> {
@@ -4401,14 +5383,16 @@ fn same_action(left: &RepositoryActionPlan, right: &RepositoryActionPlan) -> boo
         && left.source_path == right.source_path
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ordered_executable_steps(
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
     repository_action_plans: &[RepositoryActionPlan],
     resolved_actions: &[ResolvedAction],
-    local_actions: &[(LocalActionPlan, ActionMetadata)],
+    local_actions: &[(LocalActionPlan, Option<ActionMetadata>)],
     actions_host: &std::path::Path,
     runtime_checkout_plans: &[CheckoutPlan],
+    allow_unknown_action_diagnostics: bool,
 ) -> Result<Vec<ExecutableStep>> {
     let mut ordered = Vec::new();
     let mut script_iter = script_steps.iter();
@@ -4441,6 +5425,12 @@ fn ordered_executable_steps(
                         env: crate::script_step::step_environment(step)?,
                         condition: parent_condition.map(ToOwned::to_owned),
                     });
+                    let Some(metadata) = metadata else {
+                        ordered.push(ExecutableStep::CompositeEnd {
+                            step_id: plan.step_id.clone(),
+                        });
+                        continue;
+                    };
                     for invocation in
                         composite_action_invocations(plan, metadata, "/__w", actions_host)?
                     {
@@ -4480,6 +5470,7 @@ fn ordered_executable_steps(
                                     parent_condition,
                                     parent_continue_on_error,
                                     "",
+                                    allow_unknown_action_diagnostics,
                                 )?;
                             }
                             CompositeActionInvocation::Outputs(outputs) => {
@@ -4542,6 +5533,7 @@ fn ordered_executable_steps(
                     None,
                     false,
                     &step_display_name,
+                    allow_unknown_action_diagnostics,
                 )?;
             }
             _ => bail!("unsupported enabled step in job"),
@@ -4550,6 +5542,7 @@ fn ordered_executable_steps(
     Ok(ordered)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_resolved_action_steps(
     ordered: &mut Vec<ExecutableStep>,
     action: &ResolvedAction,
@@ -4558,8 +5551,17 @@ fn append_resolved_action_steps(
     parent_condition: Option<&str>,
     parent_continue_on_error: bool,
     display_name: &str,
+    allow_unknown_action_diagnostics: bool,
 ) -> Result<()> {
     let continue_on_error = parent_continue_on_error || action.plan.continue_on_error;
+    if !allow_unknown_action_diagnostics && !action.plan.repository.starts_with("./") {
+        crate::manifest::validate_resolved_action(
+            &action.plan.step_id,
+            &action.plan.repository,
+            &action.plan.git_ref,
+            &action.plan.inputs,
+        )?;
+    }
     if let Some(invocation) = action.native_invocation() {
         ordered.push(ExecutableStep::Native {
             step_id: action.plan.step_id.clone(),
@@ -4575,14 +5577,21 @@ fn append_resolved_action_steps(
         bail!("{message}");
     }
     match &action.runtime {
-        ActionRuntime::JavaScript { .. } => ordered.push(ExecutableStep::JavaScript {
-            step_id: action.plan.step_id.clone(),
-            display_name: display_name.to_string(),
-            invocation: action.javascript_invocation(actions_host)?,
-            condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
-            continue_on_error,
-            timeout_minutes: action.plan.timeout_minutes,
-        }),
+        ActionRuntime::JavaScript { .. } if allow_unknown_action_diagnostics => {
+            ordered.push(ExecutableStep::JavaScript {
+                step_id: action.plan.step_id.clone(),
+                display_name: display_name.to_string(),
+                invocation: action.javascript_invocation(actions_host)?,
+                condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
+                continue_on_error,
+                timeout_minutes: action.plan.timeout_minutes,
+            })
+        }
+        ActionRuntime::JavaScript { .. } => bail!(
+            "unknown action '{}@{}' reached execution — capability validation must reject this earlier",
+            action.plan.repository,
+            action.plan.git_ref
+        ),
         ActionRuntime::Docker { .. } => ordered.push(ExecutableStep::Docker {
             step_id: action.plan.step_id.clone(),
             display_name: display_name.to_string(),
@@ -4643,6 +5652,7 @@ fn append_resolved_action_steps(
                             action_condition.as_deref(),
                             continue_on_error,
                             "",
+                            allow_unknown_action_diagnostics,
                         )?;
                     }
                     CompositeActionInvocation::Outputs(outputs) => {
@@ -5145,11 +6155,12 @@ async fn upload_job_log_artifact(job: &AgentJobRequestMessage, step_logs: &[Step
             &job_id,
             "job-log",
             &[("job-log.txt".to_string(), content)],
+            crate::protocol::ArtifactUploadOptions::default(),
         )
     })
     .await;
     match outcome {
-        Ok(Ok(())) => println!("Uploaded job-log.txt artifact."),
+        Ok(Ok(_)) => println!("Uploaded job-log.txt artifact."),
         Ok(Err(e)) => eprintln!("Best-effort job-log artifact upload failed: {e:#}"),
         Err(e) => eprintln!("Best-effort job-log artifact task join failed: {e:#}"),
     }
@@ -5756,6 +6767,136 @@ async fn remove_one(args: &RemoveArgs, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+const DEFAULT_SLO_PICKUP_MS: u64 = 3_000;
+const DEFAULT_SLO_FIRST_STEP_MS: u64 = 5_000;
+const DEFAULT_SLO_FINALIZE_MS: u64 = 2_000;
+const DEFAULT_SLO_TEARDOWN_MS: u64 = 2_000;
+const DEFAULT_SLO_SAMPLE_SIZE: usize = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TimingPercentiles {
+    pickup_p50: u64,
+    pickup_p95: u64,
+    first_step_p50: u64,
+    first_step_p95: u64,
+    finalize_p50: u64,
+    finalize_p95: u64,
+    teardown_p50: u64,
+    teardown_p95: u64,
+}
+
+fn parse_job_timing_line(line: &str) -> Option<JobTimingRecord> {
+    let (_, json) = line.split_once("job-timing ")?;
+    serde_json::from_str(json.trim()).ok()
+}
+
+fn percentile(values: &mut [u64], percentile: usize) -> u64 {
+    if values.is_empty() {
+        return 0;
+    }
+    values.sort_unstable();
+    let rank = (values.len() * percentile).div_ceil(100).saturating_sub(1);
+    values[rank.min(values.len() - 1)]
+}
+
+fn timing_percentiles(records: &[JobTimingRecord]) -> Option<TimingPercentiles> {
+    if records.is_empty() {
+        return None;
+    }
+    let mut pickup: Vec<_> = records.iter().map(|record| record.pickup_ms).collect();
+    let mut first_step: Vec<_> = records.iter().map(|record| record.first_step_ms).collect();
+    let mut finalize: Vec<_> = records.iter().map(|record| record.finalize_ms).collect();
+    let mut teardown: Vec<_> = records.iter().map(|record| record.teardown_ms).collect();
+    Some(TimingPercentiles {
+        pickup_p50: percentile(&mut pickup.clone(), 50),
+        pickup_p95: percentile(&mut pickup, 95),
+        first_step_p50: percentile(&mut first_step.clone(), 50),
+        first_step_p95: percentile(&mut first_step, 95),
+        finalize_p50: percentile(&mut finalize.clone(), 50),
+        finalize_p95: percentile(&mut finalize, 95),
+        teardown_p50: percentile(&mut teardown.clone(), 50),
+        teardown_p95: percentile(&mut teardown, 95),
+    })
+}
+
+fn env_u64(name: &str, default: u64) -> u64 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn recent_job_timings(config_base: &Path, slots: usize, limit: usize) -> Vec<JobTimingRecord> {
+    let Ok(slot_dirs) = daemon_slot_config_dirs(config_base, slots) else {
+        return Vec::new();
+    };
+    let mut records = Vec::new();
+    for slot_dir in slot_dirs {
+        for file_name in [format!("{LIFECYCLE_LOG}.1"), LIFECYCLE_LOG.to_string()] {
+            let path = slot_dir.join("logs").join(file_name);
+            let Ok(contents) = fs::read_to_string(path) else {
+                continue;
+            };
+            records.extend(contents.lines().filter_map(parse_job_timing_line));
+        }
+    }
+    let keep_from = records.len().saturating_sub(limit);
+    records.drain(..keep_from);
+    records
+}
+
+fn print_doctor_slos(records: &[JobTimingRecord]) {
+    let Some(summary) = timing_percentiles(records) else {
+        println!("timing SLOs: no completed job-timing records yet");
+        return;
+    };
+    let pickup_budget = env_u64("VELNOR_SLO_PICKUP_MS", DEFAULT_SLO_PICKUP_MS);
+    let first_step_budget = env_u64("VELNOR_SLO_FIRST_STEP_MS", DEFAULT_SLO_FIRST_STEP_MS);
+    let finalize_budget = env_u64("VELNOR_SLO_FINALIZE_MS", DEFAULT_SLO_FINALIZE_MS);
+    let teardown_budget = env_u64("VELNOR_SLO_TEARDOWN_MS", DEFAULT_SLO_TEARDOWN_MS);
+    println!("timing SLOs: samples={}", records.len());
+    for (name, p50, p95, budget) in [
+        (
+            "pickup",
+            summary.pickup_p50,
+            summary.pickup_p95,
+            pickup_budget,
+        ),
+        (
+            "pickup-to-first-step",
+            summary.first_step_p50,
+            summary.first_step_p95,
+            first_step_budget,
+        ),
+        (
+            "finalize",
+            summary.finalize_p50,
+            summary.finalize_p95,
+            finalize_budget,
+        ),
+        (
+            "teardown",
+            summary.teardown_p50,
+            summary.teardown_p95,
+            teardown_budget,
+        ),
+    ] {
+        let state = timing_slo_state(p95, budget);
+        println!("  {name}: p50={p50}ms p95={p95}ms budget={budget}ms {state}");
+        if p95 > budget {
+            eprintln!("WARNING: timing SLO breach: {name} p95={p95}ms exceeds {budget}ms");
+        }
+    }
+}
+
+fn timing_slo_state(p95: u64, budget: u64) -> &'static str {
+    if p95 > budget {
+        "WARN"
+    } else {
+        "PASS"
+    }
+}
+
 /// Fleet health probe: list this daemon's registered runners on GitHub and
 /// fail (non-zero exit) when none are online, so a systemd timer surfaces a
 /// dead fleet loudly instead of jobs queueing in silence (master-plan P1.4).
@@ -5771,6 +6912,23 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
     }
 
     let scope = GitHubScope::parse(&args.url)?;
+    let layout = crate::storage::StorageLayout::resolve();
+    let run_root = layout
+        .as_ref()
+        .map(|layout| layout.run_root.clone())
+        .unwrap_or_else(|| PathBuf::from("/tmp/velnor-doctor"));
+    let cache_root = layout
+        .as_ref()
+        .map(|layout| layout.cache_root.clone())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let free = free_space_bytes(&cache_root).unwrap_or(0);
+    let (reservation_count, reserved_bytes) =
+        crate::capacity::reservation_summary(&run_root).unwrap_or((0, 0));
+    let active_leases = crate::capacity::active_scopes(&run_root, Duration::from_secs(24 * 3600))
+        .map(|scopes| scopes.len())
+        .unwrap_or(0);
+    let (cache_logical, cache_physical) =
+        crate::cache::accounting_summary(&cache_root).unwrap_or((0, 0));
     let runners = RegistrationClient::new()?
         .list_runners(&scope, pat)
         .await
@@ -5799,6 +6957,21 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         "doctor: {} — {online}/{} expected runner(s) online ({} registered, {busy} busy) for prefix '{}'",
         args.url, args.slots, mine.len(), args.name
     );
+    println!(
+        "capacity: free={} reserved={} reservations={} active_leases={}; cache logical={} physical={}",
+        free, reserved_bytes, reservation_count, active_leases, cache_logical, cache_physical
+    );
+    let config_base = config::config_dir(None)?
+        .join("daemons")
+        .join(sanitize_daemon_config_component(&args.name));
+    let sample_size = usize::try_from(env_u64(
+        "VELNOR_SLO_SAMPLE_SIZE",
+        DEFAULT_SLO_SAMPLE_SIZE as u64,
+    ))
+    .unwrap_or(DEFAULT_SLO_SAMPLE_SIZE)
+    .max(1);
+    let timing_records = recent_job_timings(&config_base, args.slots, sample_size);
+    print_doctor_slos(&timing_records);
     for runner in &mine {
         println!(
             "  {} [{}{}]",
@@ -5998,6 +7171,47 @@ fn default_agent_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_workspace_pruner_only_removes_uuid_dirs_below_slots() {
+        let root = std::env::temp_dir().join(format!("velnor-work-prune-{}", uuid::Uuid::new_v4()));
+        let stale = root
+            .join("slot-1")
+            .join("4675b50d-5bf9-529b-8082-648f9c52c3b2");
+        let keep_slot = root.join("slot-1/preflight");
+        let keep_shared = root.join("_velnor_cargo/registry");
+        let keep_other = root
+            .join("other")
+            .join("6e0ed314-4298-5b5b-be02-b2914d9427e3");
+        for path in [&stale, &keep_slot, &keep_shared, &keep_other] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+
+        prune_stale_job_workspaces(&root);
+
+        assert!(!stale.exists());
+        assert!(keep_slot.exists());
+        assert!(keep_shared.exists());
+        assert!(keep_other.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn runner_group_name_resolves_case_insensitively() {
+        let groups = vec![crate::protocol::RunnerGroup {
+            id: 42,
+            name: "Velnor Trusted".into(),
+        }];
+        assert_eq!(
+            resolve_runner_group_id(&groups, "velnor trusted", None).unwrap(),
+            42
+        );
+        assert!(resolve_runner_group_id(&groups, "missing", None)
+            .unwrap_err()
+            .to_string()
+            .contains("accepted groups: Velnor Trusted"));
+        assert!(resolve_runner_group_id(&groups, "Velnor Trusted", Some(7)).is_err());
+    }
     use crate::action::{
         parse_action_metadata, resolve_action, ActionRuntime, LocalActionPlan, RepositoryActionPlan,
     };
@@ -6080,7 +7294,11 @@ mod tests {
             job_cpus: String::new(),
             job_memory: String::new(),
             trust_scope: "trusted".into(),
+            emergency_reserve_bytes: 10 * 1024 * 1024 * 1024,
+            job_peak_bytes: 30 * 1024 * 1024 * 1024,
             node_action_image: String::new(),
+            diagnostic_node_sidecar: false,
+            skip_capability_validation: false,
             work_dir: None,
             docker_host_work_dir: None,
             skip_preflight: false,
@@ -6122,6 +7340,37 @@ mod tests {
         }));
 
         validate_job_trust_policy(&job, "public-forks").unwrap();
+    }
+
+    #[test]
+    fn local_action_preflight_prefers_repository_token() {
+        let job: crate::job_message::AgentJobRequestMessage =
+            serde_json::from_value(serde_json::json!({
+                "messageType": "PipelineAgentJobRequest",
+                "plan": { "planId": "plan" },
+                "timeline": { "id": "timeline" },
+                "jobId": "job",
+                "jobDisplayName": "Local action",
+                "requestId": 1,
+                "variables": {
+                    "system.github.token": { "value": "repository-token", "isSecret": true }
+                },
+                "resources": {
+                    "endpoints": [{
+                        "name": "SystemVssConnection",
+                        "authorization": {
+                            "scheme": "OAuth",
+                            "parameters": { "AccessToken": "actions-service-token" }
+                        }
+                    }]
+                }
+            }))
+            .unwrap();
+
+        assert_eq!(
+            job_repository_access_token(&job).as_deref(),
+            Some("repository-token")
+        );
     }
 
     #[test]
@@ -6276,12 +7525,19 @@ mod tests {
             action: "get broker message".into(),
             body: "oops".into(),
         });
+        let missing_runner = anyhow::Error::from(GitHubApiError {
+            status: 404,
+            action: "get broker message".into(),
+            body: r#"{"errorKind":"RunnerNotFound"}"#.into(),
+        });
         let string_error = anyhow::anyhow!("get broker message failed: status=401, body=");
 
         assert!(is_credential_poll_error(&auth_error));
         assert!(is_credential_poll_error(&forbidden_error));
         assert!(!is_credential_poll_error(&server_error));
         assert!(!is_credential_poll_error(&string_error));
+        assert!(active_job_broker_registration_is_gone(&missing_runner));
+        assert!(!active_job_broker_registration_is_gone(&server_error));
     }
 
     #[test]
@@ -6434,6 +7690,43 @@ jobs:
     }
 
     #[test]
+    fn current_v2_context_hydrates_official_github_environment() {
+        let mut job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanId": "plan" },
+            "Timeline": { "Id": "timeline" },
+            "JobId": "job",
+            "JobDisplayName": "job",
+            "RequestId": 1,
+            "ContextData": {
+                "github": { "d": [
+                    { "k": "repository", "v": "tailrocks/fixture" },
+                    { "k": "workflow", "v": "compat" },
+                    { "k": "workflow_ref", "v": "tailrocks/fixture/.github/workflows/compat.yml@refs/heads/main" },
+                    { "k": "run_attempt", "v": "3" },
+                    { "k": "run_number", "v": "42" }
+                ], "t": 2 }
+            }
+        }))
+        .unwrap();
+        let context = job_context_data(&job);
+
+        hydrate_github_variables_from_context(&mut job, &context);
+
+        assert_eq!(
+            crate::github_adapter::job_variable(&job, "github.repository"),
+            Some("tailrocks/fixture")
+        );
+        assert_eq!(
+            crate::github_adapter::job_variable(&job, "github.workflow"),
+            Some("compat")
+        );
+        let env = crate::runtime_env::job_runtime_env(&job);
+        assert!(env.contains(&("GITHUB_RUN_ATTEMPT".into(), "3".into())));
+        assert!(env.contains(&("GITHUB_RUN_NUMBER".into(), "42".into())));
+    }
+
+    #[test]
     fn run_preflight_args_preserve_target_docker_requirements() {
         let mut args = run_args(false, false, false);
         args.work_dir = Some(Path::new("/runner/work").to_path_buf());
@@ -6504,7 +7797,11 @@ jobs:
             job_cpus: String::new(),
             job_memory: String::new(),
             trust_scope: "trusted".into(),
+            emergency_reserve_bytes: 10 * 1024 * 1024 * 1024,
+            job_peak_bytes: 30 * 1024 * 1024 * 1024,
             node_action_image: String::new(),
+            diagnostic_node_sidecar: false,
+            skip_capability_validation: false,
             work_dir: None,
             docker_host_work_dir: None,
             skip_preflight: false,
@@ -7646,6 +8943,7 @@ jobs:
             &run_args(false, false, false),
             true,
             "velnor",
+            &SlotForensics::new(PathBuf::from("/tmp"), "test".to_string()),
             message,
         )
         .await
@@ -7858,9 +9156,10 @@ runs:
             &script_steps,
             &[],
             &[],
-            &[(local_plan, metadata)],
+            &[(local_plan, Some(metadata))],
             Path::new("/tmp/actions"),
             &[],
+            false,
         )
         .unwrap();
 
@@ -7934,6 +9233,7 @@ runs:
             &[],
             Path::new("/tmp/actions"),
             &runtime_checkout_plans,
+            false,
         )
         .unwrap();
 
@@ -8105,9 +9405,10 @@ runs:
             &[],
             &[],
             &[resolved],
-            &[(local_plan, local_metadata)],
+            &[(local_plan, Some(local_metadata))],
             Path::new("/tmp/actions"),
             &[],
+            true,
         )
         .unwrap();
 
@@ -8138,7 +9439,7 @@ runs:
     }
 
     #[test]
-    fn ordered_steps_match_repository_action_source_path() {
+    fn unknown_javascript_action_requires_diagnostic_flags() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
             "plan": { "planId": "plan" },
@@ -8204,8 +9505,13 @@ runs:
         ];
 
         let plans = vec![resolved[1].plan.clone()];
+        let error =
+            ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[], false)
+                .unwrap_err();
+        assert!(error.to_string().contains("unsupported capability"));
         let ordered =
-            ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[]).unwrap();
+            ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[], true)
+                .unwrap();
 
         let ExecutableStep::JavaScript { invocation, .. } = &ordered[0] else {
             panic!("repository action should expand to JavaScript step")
@@ -8257,14 +9563,62 @@ runs:
                 runtime: metadata.runtime().unwrap(),
                 metadata: metadata.clone(),
             }];
-            let error =
-                ordered_executable_steps(&job, &[], &[plan], &resolved, &[], actions_host, &[])
-                    .unwrap_err();
+            let error = ordered_executable_steps(
+                &job,
+                &[],
+                &[plan],
+                &resolved,
+                &[],
+                actions_host,
+                &[],
+                false,
+            )
+            .unwrap_err();
             assert!(
                 error.to_string().contains("jdx/mise-action"),
                 "expected error for {repository} to mention jdx/mise-action, got: {error}"
             );
         }
+    }
+
+    #[test]
+    fn local_composite_unknown_nested_action_fails_read_only_preflight() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let api = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let size = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.contains(
+                "GET /repos/acme/repo/contents/.github/actions/local/action.yml?ref=deadbeef"
+            ));
+            let body =
+                "name: local\nruns:\n  using: composite\n  steps:\n    - uses: acme/unknown@v1\n";
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let error = preflight_local_paths(
+            "acme/repo",
+            "deadbeef",
+            &["./.github/actions/local".into()],
+            "token",
+            &api,
+        )
+        .unwrap_err();
+        server.join().unwrap();
+        assert!(error.to_string().contains("unsupported capability"));
+        // This preflight owns no executor, cache, service, or container handle;
+        // rejection therefore happens before any of those mutable phases exist.
     }
 
     #[test]
@@ -8320,7 +9674,7 @@ runs:
         let resolved = resolve_actions_from_cache(&plans, actions_host);
 
         let ordered =
-            ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[])
+            ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[], false)
                 .unwrap_or_else(|error| panic!("plan target action inventory: {error:#}"));
 
         assert!(
@@ -8399,9 +9753,17 @@ runs:
             metadata,
         };
 
-        let ordered =
-            ordered_executable_steps(&job, &[], &plans, &[resolved], &[], actions_host, &[])
-                .unwrap();
+        let ordered = ordered_executable_steps(
+            &job,
+            &[],
+            &plans,
+            &[resolved],
+            &[],
+            actions_host,
+            &[],
+            false,
+        )
+        .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native {
@@ -8424,7 +9786,7 @@ runs:
     }
 
     #[test]
-    fn native_repository_actions_ignore_pinned_ref_metadata() {
+    fn native_repository_actions_preserve_pinned_ref_metadata() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
             "plan": { "planId": "plan" },
@@ -8437,7 +9799,7 @@ runs:
                 "reference": {
                     "type": "Repository",
                     "name": "actions/cache",
-                    "ref": "pinned-sha-ignored-by-native-adapter"
+                    "ref": "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
                 },
                 "inputs": {
                     "key": "linux-cache",
@@ -8450,7 +9812,8 @@ runs:
         let plans = repository_action_plans(&job.steps, actions_host).unwrap();
 
         let ordered =
-            ordered_executable_steps(&job, &[], &plans, &[], &[], actions_host, &[]).unwrap();
+            ordered_executable_steps(&job, &[], &plans, &[], &[], actions_host, &[], false)
+                .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native { invocation, .. } = &ordered[0] else {
@@ -8462,10 +9825,14 @@ runs:
         );
         assert_eq!(invocation.inputs["key"], "linux-cache");
         assert_eq!(invocation.inputs["path"], "~/.cargo");
+        assert_eq!(
+            invocation.git_ref,
+            "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
+        );
     }
 
     #[test]
-    fn native_repository_actions_do_not_require_ref_metadata() {
+    fn native_repository_actions_require_ref_metadata() {
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
             "plan": { "planId": "plan" },
@@ -8487,21 +9854,11 @@ runs:
         }))
         .unwrap();
         let actions_host = Path::new("/tmp/actions");
-        let plans = repository_action_plans(&job.steps, actions_host).unwrap();
-
-        let ordered =
-            ordered_executable_steps(&job, &[], &plans, &[], &[], actions_host, &[]).unwrap();
-
-        assert_eq!(ordered.len(), 1);
-        let ExecutableStep::Native { invocation, .. } = &ordered[0] else {
-            panic!("known native action should not require downloaded action metadata")
-        };
+        let error = repository_action_plans(&job.steps, actions_host).unwrap_err();
         assert_eq!(
-            invocation.adapter,
-            crate::action::NativeActionAdapter::Cache
+            error.to_string(),
+            "repository action 'actions/cache' missing ref"
         );
-        assert_eq!(invocation.inputs["key"], "linux-cache");
-        assert_eq!(invocation.inputs["path"], "~/.cargo");
     }
 
     #[test]
@@ -8561,9 +9918,17 @@ runs:
             metadata,
         };
 
-        let ordered =
-            ordered_executable_steps(&job, &[], &plans, &[resolved], &[], actions_host, &[])
-                .unwrap();
+        let ordered = ordered_executable_steps(
+            &job,
+            &[],
+            &plans,
+            &[resolved],
+            &[],
+            actions_host,
+            &[],
+            false,
+        )
+        .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native {
@@ -8658,9 +10023,17 @@ runs:
             metadata: upload_metadata,
         };
 
-        let ordered =
-            ordered_executable_steps(&job, &[], &plans, &[pages, upload], &[], actions_host, &[])
-                .unwrap();
+        let ordered = ordered_executable_steps(
+            &job,
+            &[],
+            &plans,
+            &[pages, upload],
+            &[],
+            actions_host,
+            &[],
+            false,
+        )
+        .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native {
@@ -9247,5 +10620,177 @@ runs:
             log.started_at, log.completed_at,
             "synthetic step: started == completed so duration shows 0s"
         );
+    }
+
+    #[tokio::test]
+    async fn next_slot_run_waits_for_detached_teardown() {
+        let key = std::env::temp_dir().join(format!("velnor-tail-{}", uuid::Uuid::new_v4()));
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        register_slot_teardown_task(
+            key.clone(),
+            std::thread::spawn(move || release_receiver.recv().unwrap()),
+        );
+
+        let mut waiter = tokio::spawn(async move { wait_for_prior_slot_teardown(&key).await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut waiter)
+                .await
+                .is_err(),
+            "the next run crossed the teardown ownership boundary"
+        );
+        release_sender.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn slot_without_prior_teardown_proceeds_immediately() {
+        let key = std::env::temp_dir().join(format!("velnor-tail-{}", uuid::Uuid::new_v4()));
+        tokio::time::timeout(
+            Duration::from_millis(25),
+            wait_for_prior_slot_teardown(&key),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn completed_teardown_is_consumed_once() {
+        let key = std::env::temp_dir().join(format!("velnor-tail-{}", uuid::Uuid::new_v4()));
+        register_slot_teardown_task(key.clone(), std::thread::spawn(|| {}));
+
+        wait_for_prior_slot_teardown(&key).await.unwrap();
+        tokio::time::timeout(
+            Duration::from_millis(25),
+            wait_for_prior_slot_teardown(&key),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    fn timing_record(job_id: &str, pickup_ms: u64) -> JobTimingRecord {
+        JobTimingRecord {
+            v: 1,
+            job_id: job_id.to_string(),
+            pickup_ms,
+            first_step_ms: 30,
+            checkout_ms: 20,
+            container_boot_ms: 30,
+            steps_ms: 40,
+            finalize_ms: 50,
+            teardown_ms: 60,
+        }
+    }
+
+    #[test]
+    fn timing_record_round_trips_as_versioned_json() {
+        let record = timing_record("job-1", 10);
+        let json = serde_json::to_string(&record).unwrap();
+        assert_eq!(
+            serde_json::from_str::<JobTimingRecord>(&json).unwrap(),
+            record
+        );
+        assert!(json.contains("\"v\":1"));
+    }
+
+    #[test]
+    fn timing_parser_ignores_unrelated_and_malformed_lines() {
+        assert!(parse_job_timing_line("broker session created").is_none());
+        assert!(parse_job_timing_line("job-timing not-json").is_none());
+        let record = timing_record("job-2", 11);
+        let line = format!(
+            "2026-07-18T00:00:00Z runner=slot-1 job-timing {}",
+            serde_json::to_string(&record).unwrap()
+        );
+        assert_eq!(parse_job_timing_line(&line), Some(record));
+    }
+
+    #[test]
+    fn timing_percentiles_report_pickup_to_first_step() {
+        let mut slow = timing_record("slow", 9_000);
+        slow.first_step_ms = 4_000;
+        let summary = timing_percentiles(&[timing_record("fast", 100), slow]).unwrap();
+        assert_eq!(summary.pickup_p50, 100);
+        assert_eq!(summary.pickup_p95, 9_000);
+        assert_eq!(summary.first_step_p95, 4_000);
+    }
+
+    #[test]
+    fn doctor_timing_slo_marks_pass_and_breach() {
+        assert_eq!(timing_slo_state(3_000, 3_000), "PASS");
+        assert_eq!(timing_slo_state(3_001, 3_000), "WARN");
+    }
+
+    #[test]
+    fn recent_job_timings_reads_rotated_logs_and_honors_limit() {
+        let root = std::env::temp_dir().join(format!("velnor-timing-{}", uuid::Uuid::new_v4()));
+        let logs = root.join("logs");
+        fs::create_dir_all(&logs).unwrap();
+        let old = timing_record("old", 1);
+        let current = timing_record("current", 2);
+        fs::write(
+            logs.join(format!("{LIFECYCLE_LOG}.1")),
+            format!("job-timing {}\n", serde_json::to_string(&old).unwrap()),
+        )
+        .unwrap();
+        fs::write(
+            logs.join(LIFECYCLE_LOG),
+            format!("job-timing {}\n", serde_json::to_string(&current).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(recent_job_timings(&root, 1, 1), vec![current]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordered_steps_do_not_read_statically_skipped_local_composite() {
+        let condition = "github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')";
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Docs changes",
+            "requestId": 1,
+            "steps": [{
+                "id": "download-ci-xtask",
+                "reference": {
+                    "type": "Repository",
+                    "name": "./.github/actions/download-ci-xtask"
+                },
+                "condition": condition
+            }]
+        }))
+        .unwrap();
+        let plan = LocalActionPlan {
+            step_id: "download-ci-xtask".into(),
+            action_dir: Path::new("/path/that/does/not/exist").into(),
+            inputs: BTreeMap::new(),
+        };
+
+        let ordered = ordered_executable_steps(
+            &job,
+            &[],
+            &[],
+            &[],
+            &[(plan, None)],
+            Path::new("/tmp/actions"),
+            &[],
+            false,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &ordered[..],
+            [
+                ExecutableStep::CompositeStart { step_id, condition: Some(actual), .. },
+                ExecutableStep::CompositeEnd { .. }
+            ] if step_id == "download-ci-xtask" && actual == condition
+        ));
     }
 }

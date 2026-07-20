@@ -25,7 +25,9 @@ The implementation checklist is tracked in [roadmap.md](roadmap.md).
 - GitHub PAT in `GITHUB_TOKEN` with permission to create and delete JIT self-hosted runner configs for the target repo.
 - Set `VELNOR_TARGET_MVP_ARM_LABEL=true` only on hosts where Docker can provide ARM64 Linux job containers; the live proof
   scripts reject that label on incompatible hosts before JIT config.
-- A persistent Velnor `--work-dir` shared by all jobs in the same validation run; native cache restore/save and artifact upload/download use this shared work directory for single-host handoff until GitHub cache/artifact service transport is implemented.
+- A persistent Velnor `--work-dir` for bounded native caches and offline
+  diagnostics. Artifact upload/download uses GitHub's Results Service v4 so
+  fan-in jobs remain correct across slots and hosts.
 - Current target verifier passes locally:
 
 ```sh
@@ -345,7 +347,9 @@ For each run, record:
 - first and last step logs for each job assigned to Velnor
 - timeline/annotation readability for `::error::`, `::notice::`, and grouped logs where present
 - cache restore/save behavior for target cache actions through the shared Velnor work directory
-- artifact upload/download behavior for target artifact actions, including cross-job handoff through the shared Velnor work directory
+- artifact upload/download behavior for target artifact actions, including
+  cross-job Results Service handoff when producer and consumer use different
+  slots or hosts
 - job outputs used by downstream jobs
 - required aggregator job status and final workflow status
 

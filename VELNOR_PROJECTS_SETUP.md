@@ -444,24 +444,43 @@ latency classes found in the 2026-07-18 estate scan (§3.0):
 5. Regression gate: `audit-ci` perf mode (§2.8) fails warm runs showing
    dependency download/compile or tool-install markers.
 
-### 2.12 Uniform shape — identical names everywhere
+### 2.12 Uniform shape — identical implementation for common and required concerns
 
-"One approach" is literal: for every concern a repo has, every repo uses the
-**same file names, job ids, input names, key shapes, and branch name**. A
-maintainer moving between repos must find zero naming drift.
+"One approach" is literal **at the concern boundary**, not a demand that every
+repository contain every possible job. Inventory each repository by concern
+(Rust CI, integration/services, Docker build, release, docs/Pages, preview,
+Renovate). The intersection is canonical: whenever two repositories implement
+the same concern, they use the same file name, job ids, lane plumbing, step
+order, pinned actions, inputs, environment, cache-key shapes, timeouts,
+concurrency, writer gate, and required aggregator. A concern required by the
+repository's class or actual product surface but currently missing is added
+from the same canonical template. A genuinely non-applicable concern is
+documented and omitted—never added as a meaningless no-op job.
+
+This yields similar repositories without flattening real product differences:
+common mechanics are byte-for-byte identical where YAML permits; only
+repository-specific commands, paths, package names, secrets, deploy targets,
+and justified resource limits vary. Every variation must be the smallest
+data-level parameter needed by the product, not a second implementation of the
+same CI behavior.
 
 | Surface | Canonical form |
 |---------|----------------|
 | Program branch | `velnor-estate-standard` — **one branch per repo carries that repo's entire program work**, velnor itself included (runner features + dogfood CI on the same branch) and the fixture too. Per-feature commits, never per-feature branches. **Sole exception: jackin** — its one branch is the existing head branch of [PR #810](https://github.com/jackin-project/jackin/pull/810) (operator decision, §12.5). |
-| Workflow files | `ci.yml` (always); `release.yml` (publish/tag); `docs.yml` (docs + Pages); `preview.yml`; `renovate.yml`. One concern = one filename, identical in every repo. Extra repo-specific workflows allowed; they follow every other rule. |
+| Workflow files | `ci.yml` for every code repository; `release.yml` when it publishes/tags; `docs.yml` when it builds or deploys docs; `preview.yml` when it produces previews; `renovate.yml` when repository-local Renovate execution is required. One applicable concern = one canonical filename. Extra product-specific workflows are allowed and follow every applicable common rule. |
 | Dispatch input | `lanes` exactly as §2.1 — same description text, default, options order |
-| Job ids | `rust`, `integration`, `audit`, `build-image`, `docs`, `release`, `ci-required`; display names `<Purpose> (${{ matrix.config.lane }})` |
+| Job ids | Use the canonical id only when that concern exists: `rust`, `integration`, `audit`, `build-image`, `docs`, `release`, `ci-required`; display names `<Purpose> (${{ matrix.config.lane }})`. Do not add empty jobs solely to occupy an id. |
 | Concurrency groups | `<workflow-name>-${{ github.ref }}` |
 | Cache keys | §2.4/§9 shapes verbatim (`cargo-registry-<lane>-<os>-<lockhash>`, …) |
 | `.github/AGENTS.md` | Identical shared template text (three lanes, ubuntu-26.04, standard stack); repo-specific lines appended **below** the shared block |
 | Env block, step order, timeout tiers | §2.10/§9 verbatim |
 
-Enforcement: `audit-ci` (§2.8) checks names and shapes, not just behavior.
+Enforcement: `audit-ci` (§2.8) checks (1) the concern inventory/classification,
+(2) missing required concerns, and (3) canonical names and shapes for every
+applicable concern—not just behavior. Its report distinguishes
+`missing-required`, `non-applicable`, `canonical`, and `repo-specific` so an
+omission cannot masquerade as intentional and a product-specific job cannot be
+mistaken for shared machinery.
 
 ---
 
@@ -790,7 +809,7 @@ verification (V-B three-lane dispatch, V-C timing) runs **from the repo's
 program branch before merge** — the same configuration must be proven on
 GitHub and on Velnor for everything the branch changes.
 
-### Phase 0 — Contract + runner readiness
+### Phase 0 — Contract + runner readiness — terminal 2026-07-18
 
 1. Land / keep this document as law.  
 2. Snippet pack: inline matrix + `setup-rust-ci` (fixture first).  
@@ -804,7 +823,7 @@ GitHub and on Velnor for everything the branch changes.
    host are not trustworthy. The durable fix remains V0.7–V0.13; this is the
    one-time test-bed reset.
 
-### Phase 1 — Reference alignment
+### Phase 1 — Reference alignment — terminal 2026-07-19
 
 | # | Repo | Focus |
 |---|------|--------|
@@ -812,7 +831,7 @@ GitHub and on Velnor for everything the branch changes.
 | 2 | blockchain-nodes | `lanes`; pin; selected-lane sweep; QEMU action |
 | 3 | jackin | Default **velnor**; 26.04; no macOS; AGENTS; #810 L1 |
 
-### Phase 2 — Dogfood + mid-tier
+### Phase 2 — Dogfood + mid-tier — terminal 2026-07-19
 
 | # | Repo | Focus |
 |---|------|--------|
@@ -821,7 +840,7 @@ GitHub and on Velnor for everything the branch changes.
 | 6 | ruxel | Lanes + pin + ansible/uv |
 | 7 | parallax | Full lanes; no macOS |
 
-### Phase 3 — Libraries + cleanup
+### Phase 3 — Libraries + cleanup — terminal 2026-07-19
 
 | # | Repo | Focus |
 |---|------|--------|
@@ -832,12 +851,15 @@ GitHub and on Velnor for everything the branch changes.
 | 12 | parallax-telemetry-playground | Class E |
 | 13 | tablerock | Replace with Class D |
 
-### Phase 4 — Enforcement
+### Phase 4 — Enforcement — terminal 2026-07-19
 
-1. `velnor-tools audit-ci` against all 13.  
-2. Fixture snippets for standard patterns.  
-3. Reconcile `docs/master-plan.md`, `docs/mission.md`, `AGENTS.md` with **Velnor default everywhere**.  
-4. Required-check strategy (operator: final state = Velnor required).
+1. `velnor-tools audit-ci` against all 13 — executed; errors map to the
+   evidence-backed blocked delivery rows in `plans/README.md`.
+2. Fixture snippets for standard patterns — complete.
+3. Reconcile `docs/master-plan.md`, `docs/mission.md`, `AGENTS.md` with
+   **Velnor default everywhere** — complete.
+4. Required-check strategy — human-only repository administration remains
+   recorded in `plans/OPERATOR-REPORT.md`; no policy was guessed.
 
 ### Dual-runner verification protocol (every repo, every migration PR)
 
