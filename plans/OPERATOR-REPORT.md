@@ -1458,3 +1458,15 @@ same-version local-artifact sentence is superseded and must not be used.
   repaired, continue on the existing `perf/subminute-ci` PR branch, eliminate
   all 18 errors structurally, run the exact estate audit again, and only then
   perform the attestation-dependent preview proof after approval.
+
+### 2026-07-21 TableRock STOP revalidation
+
+- TableRock is no longer a dirty worktree: current trunk is clean and two
+  unpublished local commits (`5c37304`, `9e32138`) sit above `origin/main`.
+- The binding preflight still fails exactly as before: formatting passes, then
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` reports 191
+  errors. Plan 057 explicitly stops before workflow delivery on current-code
+  clippy failure. No source or workflow was changed.
+- Required operator choice: authorize repairing the existing TableRock source
+  lint baseline first, or defer plan 057. The obsolete plan branch/template
+  remains forbidden by TableRock's trunk-only rules.
