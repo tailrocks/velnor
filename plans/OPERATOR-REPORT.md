@@ -1643,3 +1643,18 @@ same-version local-artifact sentence is superseded and must not be used.
   Python-version-dependent last-digit drift. Its required gate now passes
   format, strict clippy, all 215 nextest tests, dependency audit, 54 Python
   verifier tests, and all oracle, benchmark, and chaos evidence checks.
+
+### 2026-07-21 TableRock native checkpoint closure
+
+- TableRock trunk `9763873` fixes the cancellation proof structurally. The
+  scripted backend supports direct connection; the fixture starts a real
+  `runQuery()` lifecycle; nested query-state changes invalidate presentation;
+  the view observes the active tab directly; and the selectable status exposes
+  its semantic terminal value to accessibility.
+- Native run `29827520875` is fully green: project and binding drift, Rust
+  bridge, Swift feature tests, universal XCFramework, the canonical Xcode
+  checkpoint including UI cancellation, Release archive, and development app
+  verification all pass. Earlier runs are retained as root-cause evidence.
+- TableRock remains incomplete only for fresh org-fleet V-B/V-C. The
+  repository has no applicable Ubuntu execution surface; its Apple-only
+  classification remains enforced by Velnor's shape-aware estate audit.
