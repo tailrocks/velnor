@@ -101,6 +101,11 @@ Velnor must support the common Rust GitHub Actions shape used by both projects:
 - checkout current repository and selected external repositories
 - install Rust toolchains and cargo tools
 - run `cargo fmt`, `cargo clippy`, `cargo check`, and `cargo nextest`
+- use `cargo nextest run` as the sole Rust test runner in local verification,
+  CI, scripts, and instructions; never invoke `cargo test`
+- preserve documentation-example coverage by moving executable examples into
+  nextest-discoverable regression tests, because stable nextest does not run
+  rustdoc doctests
 - support `rustup component add` and target installation
 - support `mise` as the main tool installer for all target projects
 - support `Swatinem/rust-cache` for ChainArgos shapes

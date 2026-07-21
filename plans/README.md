@@ -31,7 +31,7 @@ Verification gates used by every velnor code plan (from `mise.toml`):
 
 ---
 
-# Program 033–059 — Estate CI standardization (2026-07-18, velnor `48b04ad`)
+# Program 033–060 — Estate CI standardization (2026-07-18, velnor `48b04ad`)
 
 Source of law: `VELNOR_PROJECTS_SETUP.md` (rev 2) + `docs/strict-capability-contract.md`
 + `docs/storage-and-disk-pressure-2026-07-18.md`. Code facts verified against
@@ -97,6 +97,7 @@ V-A). Do not open estate PRs before 041's operator verification.
 | 056 | tailrocks/parallax-telemetry-playground | 3 | S | — | BLOCKED — original delivery passed; canonical aggregate `8fba93b` is committed locally but workflow-capable push credentials are unavailable |
 | 057 | tailrocks/tablerock | 3 | S | — | IN PROGRESS — trunk `89e7d16` repairs the strict-lint baseline and Redis fixture-readiness class, consolidates CI with current nextest-only coverage, and reports zero local audit errors; 768/768 nextest and strict clippy pass. V-B/V-C waits the org-fleet migration. |
 | 058 | Phase 4: concern-based estate convergence, enforcement, docs reconcile, required checks | 4 | L | 046, 047–057 | IN PROGRESS — concern inventory and enforcement now include stable required aggregators; exact policy handoff exists. Delivery/proof, operator decisions, and final zero-error audits remain |
+| 060 | Estate-wide nextest-only Rust testing | 4 | M | 041, 046 | IN PROGRESS — Velnor local verification and fixture PR #4 are migrated; remaining estate commands and doctest-equivalent regressions require convergence and delivery |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) |
 REJECTED (one-line rationale).

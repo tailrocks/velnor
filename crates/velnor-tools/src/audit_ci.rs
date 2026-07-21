@@ -631,6 +631,17 @@ fn audit_steps(
             .iter()
             .any(|command| line.starts_with(command) || line.contains(&format!(" {command}")))
         });
+        if run.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("cargo test") || line.contains(" cargo test")
+        }) {
+            findings.push(Finding::error(
+                "test-runner",
+                file,
+                format!("{path}.run"),
+                "use cargo nextest run; cargo test is forbidden by the estate test-runner contract",
+            ));
+        }
         for marker in ["::set-output", "::save-state", "node12", "node16"] {
             if run.contains(marker) {
                 findings.push(Finding::error(
@@ -1024,7 +1035,7 @@ jobs:
       - uses: actions/checkout@0123456789012345678901234567890123456789
       - uses: mozilla-actions/sccache-action@0123456789012345678901234567890123456789
         env: {SCCACHE_GHA_ENABLED: "false"}
-      - run: cargo test
+      - run: cargo nextest run --workspace --locked
 "#;
 
     #[test]
@@ -1045,7 +1056,7 @@ jobs:
         let yaml = BASE
             .replace("${{ matrix.config.runner }}", "macos-26")
             .replace(
-                "      - run: cargo test",
+                "      - run: cargo nextest run --workspace --locked",
                 "      - run: ./scripts/build-native-app.sh",
             );
         assert!(!has_rule(&audit(&yaml), "runner-os"));
@@ -1097,14 +1108,23 @@ jobs:
 
     #[test]
     fn rejects_double_cache() {
-        let yaml = BASE.replace("      - run: cargo test", "      - uses: Swatinem/rust-cache@0123456789012345678901234567890123456789\n      - run: cargo test");
+        let yaml = BASE.replace("      - run: cargo nextest run --workspace --locked", "      - uses: Swatinem/rust-cache@0123456789012345678901234567890123456789\n      - run: cargo nextest run --workspace --locked");
         assert!(has_rule(&audit(&yaml), "double-cache"));
+    }
+
+    #[test]
+    fn rejects_cargo_test_runner() {
+        let yaml = BASE.replace(
+            "cargo nextest run --workspace --locked",
+            "cargo test --workspace --locked",
+        );
+        assert!(has_rule(&audit(&yaml), "test-runner"));
     }
 
     #[test]
     fn rejects_lane_condition_and_deprecated_command() {
         let yaml = BASE.replace(
-            "      - run: cargo test",
+            "      - run: cargo nextest run --workspace --locked",
             "      - if: matrix.config.lane == 'Velnor'\n        run: echo ::set-output name=x::y",
         );
         let findings = audit(&yaml);
@@ -1115,8 +1135,8 @@ jobs:
     #[test]
     fn rejects_ad_hoc_compiler_cache_reporting() {
         let yaml = BASE.replace(
-            "      - run: cargo test",
-            "      - run: cargo test\n      - run: sccache --show-stats",
+            "      - run: cargo nextest run --workspace --locked",
+            "      - run: cargo nextest run --workspace --locked\n      - run: sccache --show-stats",
         );
         assert!(has_rule(&audit(&yaml), "cache-reporting"));
     }
@@ -1198,7 +1218,7 @@ jobs:
                     implementations: vec![ConcernImplementation {
                         workflow: "ci.yml".to_string(),
                         job_ids: vec!["rust".to_string()],
-                        canonical_markers: vec!["cargo test".to_string()],
+                        canonical_markers: vec!["cargo nextest".to_string()],
                     }],
                 },
             )]),
@@ -1222,7 +1242,7 @@ jobs:
                     workflow: "ci.yml".to_string(),
                     job_ids: vec!["rust".to_string()],
                     canonical_markers: vec![
-                        "cargo test".to_string(),
+                        "cargo nextest".to_string(),
                         "actions/checkout@".to_string(),
                     ],
                 }],

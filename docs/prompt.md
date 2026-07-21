@@ -78,6 +78,7 @@ only the gate needed to resolve uncertainty or changed behavior.
 | 057 | IN PROGRESS | TableRock trunk `89e7d16` now passes strict clippy, actionlint, the estate audit, and 768/768 nextest tests. The root fixture defect was trusting container stdout before the forwarded Redis port accepted adapter connections; shared readiness probing and serialized real-server nextest groups remove that class. V-B/V-C waits the org fleet. |
 | 058 | IN PROGRESS at baseline | Phase-4 audit, performance report, and direction-doc reconciliation were executed; finish status/bookkeeping and any currently authorized delivery work. Human-only policy decisions remain excluded. |
 | 059 | DONE | Recorded host baseline cleanup and post-cleanup smoke. |
+| 060 | IN PROGRESS | Operator direction requires nextest as the sole Rust test runner. Velnor local verification is migrated and fixture PR #4 removes its duplicate `cargo test`; migrate every estate command and preserve doctest coverage as nextest-discoverable regressions. |
 
 ## Unblocking mandate
 
@@ -207,6 +208,11 @@ operator interaction:
    operationally relevant, `plans/OPERATOR-REPORT.md`.
 5. Finish with docs, prompt, plan index, current PR state, and actual delivery
    state mutually consistent. Do not describe blocked work as merged or done.
+6. Complete plan 060: no executable or instructional `cargo test` remains in
+   Velnor, the fixture, or any estate repository. Ordinary tests use
+   `cargo nextest run`; former doctest coverage is preserved through
+   nextest-discoverable regression tests because stable nextest does not run
+   rustdoc doctests.
 
 ## Authorization boundaries
 

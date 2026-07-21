@@ -138,6 +138,13 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-07-21: **Rust testing is nextest-only** ([docs/roadmap.md](docs/roadmap.md)
+  Shared Rust CI Requirements): local verification, CI, scripts, and agent
+  instructions use `cargo nextest run`, never `cargo test`. Stable nextest
+  cannot execute rustdoc doctests, so repositories preserve those examples as
+  nextest-discoverable regression tests rather than dropping coverage or
+  retaining a second test runner. Plan 060 owns estate convergence.
+
 - 2026-07-21: **Uniformity is concern-based; active prompt moved to docs**
   ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) §2.12): repositories
   are not padded with irrelevant no-op jobs. Every concern shared by multiple
