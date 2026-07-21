@@ -4401,11 +4401,40 @@ fn native_upload_pages_artifact(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let source_input = native_input_or(&action_state, action, "path", "_site/");
+    let source = resolve_host_path(state, &source_input)
+        .context("actions/upload-pages-artifact requires a workspace path")?;
+    if !source.is_dir() {
+        bail!(
+            "actions/upload-pages-artifact path '{}' is not a directory",
+            source_input
+        );
+    }
+    let runner_temp = action_state
+        .env
+        .get("RUNNER_TEMP")
+        .filter(|value| !value.is_empty())
+        .map(String::as_str)
+        .unwrap_or("/__t");
+    let temp_host = state
+        .temp_host
+        .as_deref()
+        .context("actions/upload-pages-artifact requires RUNNER_TEMP")?;
+    let archive = temp_host.join("artifact.tar");
+    create_pages_archive(&source, &archive)?;
+
     let mut page_action = action.clone();
+    page_action.inputs.insert(
+        "name".to_string(),
+        native_input_or(&action_state, action, "name", "github-pages"),
+    );
     page_action
         .inputs
-        .entry("name".to_string())
-        .or_insert_with(|| "github-pages".to_string());
+        .insert("path".to_string(), format!("{runner_temp}/artifact.tar"));
+    page_action
+        .inputs
+        .insert("if-no-files-found".to_string(), "error".to_string());
     let result = native_upload_artifact(&page_action, state)?;
     let mut outputs = result.state.outputs.clone();
     if let Some(artifact_id) = outputs.get("artifact-id").cloned() {
@@ -4418,6 +4447,75 @@ fn native_upload_pages_artifact(
         },
         ..result
     })
+}
+
+fn create_pages_archive(source: &Path, archive: &Path) -> Result<()> {
+    if let Some(parent) = archive.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create Pages archive directory {}", parent.display()))?;
+    }
+    let file = fs::File::create(archive)
+        .with_context(|| format!("create Pages archive {}", archive.display()))?;
+    let mut builder = tar::Builder::new(file);
+    // Latest actions/upload-pages-artifact uses GNU tar --dereference and
+    // --hard-dereference because Pages rejects links in deployment content.
+    builder.follow_symlinks(true);
+    builder
+        .append_dir(".", source)
+        .with_context(|| format!("archive Pages root {}", source.display()))?;
+    append_pages_archive_dir(&mut builder, source, Path::new(""), &mut BTreeSet::new())?;
+    builder
+        .finish()
+        .with_context(|| format!("finish Pages archive {}", archive.display()))?;
+    Ok(())
+}
+
+fn append_pages_archive_dir<W: Write>(
+    builder: &mut tar::Builder<W>,
+    source: &Path,
+    relative: &Path,
+    active_directories: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    let directory = source.join(relative);
+    let canonical = fs::canonicalize(&directory)
+        .with_context(|| format!("resolve Pages artifact directory {}", directory.display()))?;
+    if !active_directories.insert(canonical.clone()) {
+        bail!(
+            "Pages artifact directory contains a symlink cycle at {}",
+            directory.display()
+        );
+    }
+
+    let mut entries = fs::read_dir(&directory)
+        .with_context(|| format!("read Pages artifact directory {}", directory.display()))?
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let name = entry.file_name();
+        let name_text = name.to_string_lossy();
+        if name_text.starts_with('.') {
+            continue;
+        }
+        let child_relative = relative.join(&name);
+        let child = entry.path();
+        let metadata = fs::metadata(&child)
+            .with_context(|| format!("read Pages artifact path {}", child.display()))?;
+        let archive_path = Path::new(".").join(&child_relative);
+        if metadata.is_dir() {
+            builder
+                .append_dir(&archive_path, &child)
+                .with_context(|| format!("archive Pages directory {}", child.display()))?;
+            append_pages_archive_dir(builder, source, &child_relative, active_directories)?;
+        } else if metadata.is_file() {
+            builder
+                .append_path_with_name(&child, &archive_path)
+                .with_context(|| format!("archive Pages file {}", child.display()))?;
+        } else {
+            bail!("unsupported Pages artifact path {}", child.display());
+        }
+    }
+    active_directories.remove(&canonical);
+    Ok(())
 }
 
 fn native_attest_build_provenance(
@@ -14275,6 +14373,72 @@ fi"#
         assert!(temp
             .join("_velnor_artifacts/local-1/explicit/.well-known/assetlinks.json")
             .exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_upload_pages_artifact_uploads_single_dereferenced_tar() {
+        let temp = temp_dir();
+        let site = temp.join("work/site");
+        fs::create_dir_all(site.join("assets")).unwrap();
+        fs::create_dir_all(site.join(".github")).unwrap();
+        fs::create_dir_all(site.join(".well-known")).unwrap();
+        fs::write(site.join("index.html"), "pages\n").unwrap();
+        fs::write(site.join("assets/app.js"), "app\n").unwrap();
+        fs::write(site.join(".github/workflow.yml"), "excluded\n").unwrap();
+        fs::write(site.join(".well-known/security.txt"), "hidden\n").unwrap();
+        fs::hard_link(site.join("index.html"), site.join("hard-linked.html")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("index.html", site.join("linked.html")).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "pages".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::UploadPagesArtifact,
+                inputs: [("path".into(), "site".into())].into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results[0].exit_code, 0);
+        assert_eq!(
+            results[0].state.outputs["artifact_id"],
+            results[0].state.outputs["artifact-id"]
+        );
+        let artifact_dir = temp.join("_velnor_artifacts/local-1/github-pages");
+        let files = fs::read_dir(&artifact_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(files, vec![std::ffi::OsString::from("artifact.tar")]);
+
+        let file = fs::File::open(artifact_dir.join("artifact.tar")).unwrap();
+        let mut archive = tar::Archive::new(file);
+        let mut archived = BTreeMap::new();
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.header().entry_type().is_file() {
+                let mut content = String::new();
+                entry.read_to_string(&mut content).unwrap();
+                archived.insert(entry.path().unwrap().into_owned(), content);
+            }
+        }
+        assert_eq!(archived[Path::new("index.html")], "pages\n");
+        assert_eq!(archived[Path::new("assets/app.js")], "app\n");
+        assert_eq!(archived[Path::new("hard-linked.html")], "pages\n");
+        #[cfg(unix)]
+        assert_eq!(archived[Path::new("linked.html")], "pages\n");
+        assert!(!archived.contains_key(Path::new(".github/workflow.yml")));
+        assert!(!archived.contains_key(Path::new(".well-known/security.txt")));
+
         fs::remove_dir_all(temp).unwrap();
     }
 
