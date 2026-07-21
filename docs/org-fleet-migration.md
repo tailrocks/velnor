@@ -37,12 +37,14 @@ mount trusted stores or the host Docker socket.
 
 ## Tailrocks access repair checklist
 
-Current evidence: the org fleet accepts `tailrocks/velnor`, while jobs from the
-other estate repositories remain unassigned. This means the runner-group
-repository allowlist is incomplete. The operator needs either a classic token
-with `admin:org`, or a fine-grained token with organization **Self-hosted
-runners: write** plus repository **Metadata: read**. GitHub's current endpoint
-adds one selected repository without replacing the existing allowlist.
+Current evidence (2026-07-21): the `tailrocks` organization has zero registered
+runners. Its `Default` runner group has `visibility=all`, so repository access is
+not the blocker. Five healthy `velnor-dogfood-slot-*` registrations instead live
+under the `tailrocks/velnor` repository. The daemon must be drained and migrated
+from repository scope to organization scope before estate smoke dispatches.
+
+The authenticated operator token now carries `admin:org`, `repo`, and
+`workflow`; no further GitHub scope expansion is required for this migration.
 
 1. Find the trusted group id and confirm its visibility is `selected`:
 
