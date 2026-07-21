@@ -11,7 +11,7 @@ use crate::cli::{CapabilitiesArgs, CapabilitiesCommand};
 use crate::compiler_cache::CompilerCacheBackend;
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 
-pub const MANIFEST_VERSION: u32 = 3;
+pub const MANIFEST_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CapabilityManifest {
@@ -38,13 +38,17 @@ pub struct AllowedRef {
 pub enum InputRule {
     Any(&'static str),
     Literal(&'static str, &'static [&'static str]),
+    RequiredLiteral(&'static str, &'static [&'static str]),
     Forbidden(&'static str),
 }
 
 impl InputRule {
     fn name(self) -> &'static str {
         match self {
-            Self::Any(name) | Self::Literal(name, _) | Self::Forbidden(name) => name,
+            Self::Any(name)
+            | Self::Literal(name, _)
+            | Self::RequiredLiteral(name, _)
+            | Self::Forbidden(name) => name,
         }
     }
 }
@@ -278,6 +282,18 @@ pub static ACTIONS: &[ActionCapability] = &[
         ]
     ),
     capability!("actions/cache", Cache, CACHE_REFS, CACHE_INPUTS),
+    capability!(
+        "actions/attest-build-provenance",
+        AttestBuildProvenance,
+        &[allowed(
+            "0f67c3f4856b2e3261c31976d6725780e5e4c373",
+            "v4.1.1"
+        )],
+        &[InputRule::RequiredLiteral(
+            "subject-path",
+            &["dist/*.tar.gz"]
+        )]
+    ),
     capability!(
         "actions/upload-artifact",
         UploadArtifact,
@@ -795,11 +811,11 @@ fn validate_inputs(
             .find(|rule| rule.name().eq_ignore_ascii_case(name))
         {
             Some(InputRule::Any(_)) => {}
-            Some(InputRule::Literal(_, allowed))
+            Some(InputRule::Literal(_, allowed) | InputRule::RequiredLiteral(_, allowed))
                 if allowed
                     .iter()
                     .any(|candidate| candidate.eq_ignore_ascii_case(value.trim())) => {}
-            Some(InputRule::Literal(_, allowed)) => violations.push(violation(
+            Some(InputRule::Literal(_, allowed) | InputRule::RequiredLiteral(_, allowed)) => violations.push(violation(
                 step,
                 repository,
                 action_ref,
@@ -827,6 +843,20 @@ fn validate_inputs(
                     .map(|rule| rule.name().to_string())
                     .collect(),
             )),
+        }
+    }
+    for rule in capability.inputs {
+        if let InputRule::RequiredLiteral(name, allowed) = rule {
+            if !inputs.keys().any(|input| input.eq_ignore_ascii_case(name)) {
+                violations.push(violation(
+                    step,
+                    repository,
+                    action_ref,
+                    &format!("with.{name}"),
+                    "absent",
+                    allowed.iter().map(|value| (*value).to_string()).collect(),
+                ));
+            }
         }
     }
 }
@@ -967,6 +997,7 @@ mod tests {
             NativeActionAdapter::UploadPagesArtifact,
             NativeActionAdapter::ConfigurePages,
             NativeActionAdapter::DeployPages,
+            NativeActionAdapter::AttestBuildProvenance,
             NativeActionAdapter::PathsFilter,
             NativeActionAdapter::Mise,
             NativeActionAdapter::Sccache,
@@ -1008,17 +1039,29 @@ mod tests {
     }
 
     #[test]
-    fn validate_job_rejects_attestation_with_writer_lane_guidance() {
+    fn validate_job_accepts_exact_attestation_surface() {
+        let errors = violations(&job(
+            "actions/attest-build-provenance",
+            Some("0f67c3f4856b2e3261c31976d6725780e5e4c373"),
+            serde_json::json!({"subject-path": "dist/*.tar.gz"}),
+        ));
+        assert!(errors.is_empty(), "{errors:#?}");
+    }
+
+    #[test]
+    fn validate_job_rejects_unapproved_attestation_surface() {
         let errors = violations(&job(
             "actions/attest-build-provenance",
             Some("0f67c3f4856b2e3261c31976d6725780e5e4c373"),
             serde_json::json!({"subject-path": "release.tar.gz"}),
         ));
-        assert_eq!(errors[0].field, "uses");
-        assert!(errors[0]
-            .accepted
-            .iter()
-            .any(|message| message.contains("GitHub writer lane")));
+        assert_eq!(errors[0].field, "with.subject-path");
+        let missing = violations(&job(
+            "actions/attest-build-provenance",
+            Some("0f67c3f4856b2e3261c31976d6725780e5e4c373"),
+            serde_json::json!({}),
+        ));
+        assert_eq!(missing[0].received, "absent");
     }
 
     #[test]

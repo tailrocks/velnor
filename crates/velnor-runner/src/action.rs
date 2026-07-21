@@ -117,6 +117,7 @@ pub enum NativeActionAdapter {
     UploadPagesArtifact,
     ConfigurePages,
     DeployPages,
+    AttestBuildProvenance,
     PathsFilter,
     Mise,
     Sccache,
@@ -146,6 +147,9 @@ pub fn native_action_adapter(repository: &str) -> Option<NativeActionAdapter> {
         "actions/upload-pages-artifact" => Some(NativeActionAdapter::UploadPagesArtifact),
         "actions/configure-pages" => Some(NativeActionAdapter::ConfigurePages),
         "actions/deploy-pages" => Some(NativeActionAdapter::DeployPages),
+        "actions/attest-build-provenance" => {
+            Some(NativeActionAdapter::AttestBuildProvenance)
+        }
         "dorny/paths-filter" => Some(NativeActionAdapter::PathsFilter),
         "jdx/mise-action" => Some(NativeActionAdapter::Mise),
         "mozilla-actions/sccache-action" => Some(NativeActionAdapter::Sccache),
@@ -189,12 +193,6 @@ pub fn unsupported_action_error(repository: &str) -> Option<&'static str> {
         "embarkstudios/cargo-deny-action" => Some(
             "EmbarkStudios/cargo-deny-action is not supported on Velnor: use jdx/mise-action \
              with a pinned 'cargo:cargo-deny' tool and invoke cargo deny from a run step instead.",
-        ),
-        "actions/attest-build-provenance" => Some(
-            "actions/attest-build-provenance is not available on the Velnor product lane: its \
-             actions/attest v4 flow requires Sigstore bundle generation plus the GitHub \
-             attestation API. Keep this step gated to the GitHub writer lane until a native \
-             Rust attestation client is fixture-proven; JavaScript sidecar fallback is forbidden.",
         ),
         _ => None,
     }
@@ -3003,6 +3001,10 @@ runs:
                 NativeActionAdapter::UploadPagesArtifact,
             ),
             ("actions/deploy-pages", NativeActionAdapter::DeployPages),
+            (
+                "actions/attest-build-provenance",
+                NativeActionAdapter::AttestBuildProvenance,
+            ),
             ("dorny/paths-filter", NativeActionAdapter::PathsFilter),
             ("jdx/mise-action", NativeActionAdapter::Mise),
             (
@@ -3052,7 +3054,7 @@ runs:
         assert!(unsupported_action_error("baptiste0928/cargo-install").is_some());
         assert!(unsupported_action_error("Baptiste0928/Cargo-Install").is_some());
         assert!(unsupported_action_error("EmbarkStudios/cargo-deny-action").is_some());
-        assert!(unsupported_action_error("actions/attest-build-provenance").is_some());
+        assert!(unsupported_action_error("actions/attest-build-provenance").is_none());
         assert!(unsupported_action_error("jdx/mise-action").is_none());
         assert!(unsupported_action_error("owner/unknown-action").is_none());
         assert!(unsupported_action_error("dtolnay/rust-toolchain")
@@ -3064,9 +3066,6 @@ runs:
         assert!(unsupported_action_error("EmbarkStudios/cargo-deny-action")
             .unwrap()
             .contains("cargo:cargo-deny"));
-        assert!(unsupported_action_error("actions/attest-build-provenance")
-            .unwrap()
-            .contains("GitHub writer lane"));
     }
 
     fn action_metadata_files(root: &Path) -> Vec<PathBuf> {
