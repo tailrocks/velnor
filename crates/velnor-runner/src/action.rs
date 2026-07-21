@@ -147,9 +147,7 @@ pub fn native_action_adapter(repository: &str) -> Option<NativeActionAdapter> {
         "actions/upload-pages-artifact" => Some(NativeActionAdapter::UploadPagesArtifact),
         "actions/configure-pages" => Some(NativeActionAdapter::ConfigurePages),
         "actions/deploy-pages" => Some(NativeActionAdapter::DeployPages),
-        "actions/attest-build-provenance" => {
-            Some(NativeActionAdapter::AttestBuildProvenance)
-        }
+        "actions/attest-build-provenance" => Some(NativeActionAdapter::AttestBuildProvenance),
         "dorny/paths-filter" => Some(NativeActionAdapter::PathsFilter),
         "jdx/mise-action" => Some(NativeActionAdapter::Mise),
         "mozilla-actions/sccache-action" => Some(NativeActionAdapter::Sccache),

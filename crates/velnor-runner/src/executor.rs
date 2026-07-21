@@ -1886,6 +1886,9 @@ where
             NativeActionAdapter::UploadPagesArtifact => native_upload_pages_artifact(action, state),
             NativeActionAdapter::ConfigurePages => native_configure_pages(action, state),
             NativeActionAdapter::DeployPages => native_deploy_pages(action, state),
+            NativeActionAdapter::AttestBuildProvenance => {
+                native_attest_build_provenance(action, state)
+            }
             NativeActionAdapter::Mise => self.native_mise(_container, action, state, timeout),
             NativeActionAdapter::Sccache => self.native_sccache(_container, action, state, timeout),
             NativeActionAdapter::Kache => self.native_kache(_container, action, state, timeout),
@@ -4414,6 +4417,106 @@ fn native_upload_pages_artifact(
             ..result.state
         },
         ..result
+    })
+}
+
+fn native_attest_build_provenance(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let workspace = action_state
+        .workspace_host
+        .as_deref()
+        .context("actions/attest-build-provenance requires a host workspace mapping")?;
+    let runner_temp = action_state
+        .temp_host
+        .as_deref()
+        .context("actions/attest-build-provenance requires RUNNER_TEMP")?;
+    let oidc_url = action_state
+        .env
+        .get("ACTIONS_ID_TOKEN_REQUEST_URL")
+        .filter(|value| !value.is_empty())
+        .context("missing id-token permission: ACTIONS_ID_TOKEN_REQUEST_URL is absent")?;
+    let oidc_request_token = action_state
+        .env
+        .get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+        .filter(|value| !value.is_empty())
+        .context("missing id-token permission: ACTIONS_ID_TOKEN_REQUEST_TOKEN is absent")?;
+    let github_token = action_state
+        .env
+        .get("GITHUB_TOKEN")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .or_else(|| action_state.resolve_context_data_expression("github.token"))
+        .unwrap_or_else(|| oidc_request_token.clone());
+    let repository = action_state
+        .env
+        .get("GITHUB_REPOSITORY")
+        .filter(|value| !value.is_empty())
+        .context("actions/attest-build-provenance requires GITHUB_REPOSITORY")?;
+    let api_url = action_state
+        .env
+        .get("GITHUB_API_URL")
+        .map(String::as_str)
+        .unwrap_or("https://api.github.com");
+    let server_url = action_state
+        .env
+        .get("GITHUB_SERVER_URL")
+        .map(String::as_str)
+        .unwrap_or("https://github.com");
+    let visibility = action_state
+        .resolve_context_data_expression("github.event.repository.visibility")
+        .or_else(|| {
+            action_state
+                .env
+                .get("GITHUB_REPOSITORY_VISIBILITY")
+                .cloned()
+        });
+
+    let result =
+        crate::attestation::attest_build_provenance(crate::attestation::AttestationRequest {
+            workspace,
+            runner_temp,
+            runner_temp_container: "/__t",
+            oidc_url,
+            oidc_request_token,
+            github_token: &github_token,
+            api_url,
+            server_url,
+            repository,
+            repository_visibility: visibility.as_deref(),
+        })?;
+    let mut outputs = BTreeMap::new();
+    outputs.insert("bundle-path".to_string(), result.bundle_path.clone());
+    outputs.insert("attestation-id".to_string(), result.attestation_id.clone());
+    outputs.insert(
+        "attestation-url".to_string(),
+        result.attestation_url.clone(),
+    );
+    let summary = format!(
+        "### Attestation Created\n\n- <a href=\"{}\">{}</a>\n",
+        result.attestation_url, result.attestation_url
+    );
+    let instance = if result.public_good {
+        "Public Good"
+    } else {
+        "GitHub"
+    };
+    Ok(StepExecutionResult {
+        exit_code: 0,
+        state: StepCommandState {
+            outputs,
+            summary,
+            ..StepCommandState::default()
+        },
+        skipped: false,
+        failure_ignored: false,
+        stdout: format!(
+            "Attestation created for {} subject(s)\nAttestation signed using {instance} Sigstore instance\nAttestation uploaded to repository\n{}\n",
+            result.subjects.len(), result.attestation_url
+        ),
+        stderr: String::new(),
     })
 }
 

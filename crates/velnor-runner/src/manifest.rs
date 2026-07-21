@@ -657,7 +657,63 @@ pub fn violations_with_context(
         );
     }
     validate_compiler_cache_topology(job, &mut violations);
+    validate_attestation_permissions(job, &mut violations);
     violations
+}
+
+fn validate_attestation_permissions(
+    job: &AgentJobRequestMessage,
+    violations: &mut Vec<CapabilityViolation>,
+) {
+    let uses_attestation = job.steps.iter().filter(|step| step.enabled).any(|step| {
+        step.reference
+            .as_ref()
+            .and_then(|reference| reference.name.as_deref())
+            .is_some_and(|repository| {
+                repository.eq_ignore_ascii_case("actions/attest-build-provenance")
+            })
+    });
+    if !uses_attestation {
+        return;
+    }
+    let parsed = job
+        .variables
+        .get("system.github.token.permissions")
+        .and_then(|variable| variable.value.as_deref())
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .and_then(|value| value.as_object().cloned());
+    let Some(permissions) = parsed else {
+        violations.push(violation(
+            "job preflight",
+            "actions/attest-build-provenance",
+            "permissions",
+            "permissions",
+            "absent or malformed",
+            vec!["contents: read, id-token: write, attestations: write".into()],
+        ));
+        return;
+    };
+    for (scope, accepted) in [
+        ("contents", "read"),
+        ("idtoken", "write"),
+        ("attestations", "write"),
+    ] {
+        let received = permissions
+            .iter()
+            .find(|(name, _)| name.to_ascii_lowercase().replace(['-', '_'], "") == scope)
+            .and_then(|(_, value)| value.as_str())
+            .unwrap_or("absent");
+        if !received.eq_ignore_ascii_case(accepted) {
+            violations.push(violation(
+                "job preflight",
+                "actions/attest-build-provenance",
+                "permissions",
+                &format!("permissions.{scope}"),
+                received,
+                vec![accepted.into()],
+            ));
+        }
+    }
 }
 
 pub fn compiler_cache_backend(job: &AgentJobRequestMessage) -> CompilerCacheBackend {
@@ -815,14 +871,16 @@ fn validate_inputs(
                 if allowed
                     .iter()
                     .any(|candidate| candidate.eq_ignore_ascii_case(value.trim())) => {}
-            Some(InputRule::Literal(_, allowed) | InputRule::RequiredLiteral(_, allowed)) => violations.push(violation(
-                step,
-                repository,
-                action_ref,
-                &format!("with.{name}"),
-                value,
-                allowed.iter().map(|value| (*value).to_string()).collect(),
-            )),
+            Some(InputRule::Literal(_, allowed) | InputRule::RequiredLiteral(_, allowed)) => {
+                violations.push(violation(
+                    step,
+                    repository,
+                    action_ref,
+                    &format!("with.{name}"),
+                    value,
+                    allowed.iter().map(|value| (*value).to_string()).collect(),
+                ))
+            }
             Some(InputRule::Forbidden(_)) => violations.push(violation(
                 step,
                 repository,
@@ -973,6 +1031,11 @@ mod tests {
             "jobDisplayName": "manifest test",
             "jobName": "test",
             "requestId": 1,
+            "variables": {
+                "system.github.token.permissions": {
+                    "value": "{\"Contents\":\"read\",\"IdToken\":\"write\",\"Attestations\":\"write\"}"
+                }
+            },
             "steps": [{
                 "type": "Action",
                 "displayName": "target action",
@@ -1062,6 +1125,20 @@ mod tests {
             serde_json::json!({}),
         ));
         assert_eq!(missing[0].received, "absent");
+    }
+
+    #[test]
+    fn validate_job_rejects_missing_attestation_permissions() {
+        let mut target = job(
+            "actions/attest-build-provenance",
+            Some("0f67c3f4856b2e3261c31976d6725780e5e4c373"),
+            serde_json::json!({"subject-path": "dist/*.tar.gz"}),
+        );
+        target.variables.clear();
+        let errors = violations(&target);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, "permissions");
+        assert_eq!(errors[0].received, "absent or malformed");
     }
 
     #[test]

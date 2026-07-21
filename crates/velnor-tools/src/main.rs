@@ -820,6 +820,13 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
                 ("Postgres services job", "services-postgres:"),
                 ("services declaration", "services:"),
                 ("Postgres health check", "pg_isready"),
+                ("provenance attestation job", "attestation:"),
+                (
+                    "pinned provenance attestation",
+                    "actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373",
+                ),
+                ("attestation permission", "attestations: write"),
+                ("attestation verification", "gh attestation verify"),
                 ("artifact upload", "actions/upload-artifact@v7"),
                 ("artifact download", "actions/download-artifact@v8"),
                 ("command env file", "GITHUB_ENV"),
@@ -838,6 +845,15 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
                     "./.github/actions/check-fixture-output",
                 ),
                 ("aggregate composite", "./.github/actions/aggregate-needs"),
+            ],
+        ),
+        (
+            ".github/workflows/attestation-negative.yml",
+            vec![
+                ("missing permission case", "missing-permission:"),
+                ("no subject match case", "no-match:"),
+                ("unapproved input case", "unapproved-input:"),
+                ("unapproved registry input", "push-to-registry: false"),
             ],
         ),
         (
@@ -4116,6 +4132,7 @@ fn fixture_parity_workflows() -> Vec<(&'static str, &'static str)> {
         (".github/workflows/compat.yml", "cache-sccache"),
         (".github/workflows/compat.yml", "cache-kache"),
         (".github/workflows/compat.yml", "services-postgres"),
+        (".github/workflows/compat.yml", "attestation"),
         (".github/workflows/docker.yml", "docker"),
         (".github/workflows/pages.yml", "build"),
         (".github/workflows/renovate.yml", "renovate"),
