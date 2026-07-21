@@ -148,6 +148,27 @@ follow-up plan, not inline.
 **Verify**: checklist delivered; decision recorded; any standard change
 spawned as a new plan file, not hacked in.
 
+### Current offline audit checkpoint (2026-07-21)
+
+The current 13-repository estate sweep reports zero errors and six advisory
+`uniform-concurrency` warnings. All six are deliberate cross-ref serialization,
+not canonical drift:
+
+- Jackin `jackin-dev.yml` isolates pull-request branches while main pushes and
+  dispatches share one latest-publish stream; Jackin `release.yml` serializes
+  releases without cancelling an in-flight publication.
+- Parallax `preview.yml` serializes Homebrew publication across triggering
+  refs; Parallax `release.yml` serializes releases without cancellation.
+- TableRock `native-release.yml` serializes Developer ID publication without
+  cancellation.
+- Termrock `release.yml` serializes releases without cancellation.
+
+Adding `github.ref` would split those publication locks and defeat their safety
+contract. These warnings remain explained advisories; `missing-required` and
+`canonical-drift` findings remain zero. Command evidence is the offline
+`audit-ci --estate config/estate-repositories.json --json` sweep with Jackin's
+open PR #810 worktree substituted for its checkout path.
+
 ## Test plan
 
 The estate sweep IS the test. Campaign report completeness per step 2.
