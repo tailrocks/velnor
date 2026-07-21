@@ -5,7 +5,8 @@
 - **Priority**: P0
 - **Risk**: MED — removing `cargo test --doc` without replacement loses coverage
 - **Depends on**: 041 fixture contract; 046 estate audit
-- **Current**: IN PROGRESS
+- **Current**: IN PROGRESS — Velnor delivered; fixture PR #4 and playground
+  PR #8 open; Termrock delivered; Class-D trio program branches pushed.
 
 ## Requirement
 
@@ -60,9 +61,8 @@ execute or instruct the command.
 
 ## Done criteria
 
-- [ ] Velnor and fixture delivered
+- [ ] Velnor and fixture delivered (Velnor complete; fixture PR #4 open)
 - [ ] All 13 repositories delivered
 - [ ] Doctest coverage preserved as nextest-discoverable regressions
 - [ ] Mechanical audit prevention green
 - [ ] V-A/V-B/V-C evidence recorded
-

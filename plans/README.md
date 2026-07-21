@@ -97,7 +97,7 @@ V-A). Do not open estate PRs before 041's operator verification.
 | 056 | tailrocks/parallax-telemetry-playground | 3 | S | — | BLOCKED — original delivery passed; canonical aggregate `8fba93b` is committed locally but workflow-capable push credentials are unavailable |
 | 057 | tailrocks/tablerock | 3 | S | — | IN PROGRESS — trunk `89e7d16` repairs the strict-lint baseline and Redis fixture-readiness class, consolidates CI with current nextest-only coverage, and reports zero local audit errors; 768/768 nextest and strict clippy pass. V-B/V-C waits the org-fleet migration. |
 | 058 | Phase 4: concern-based estate convergence, enforcement, docs reconcile, required checks | 4 | L | 046, 047–057 | IN PROGRESS — concern inventory and enforcement now include stable required aggregators; exact policy handoff exists. Delivery/proof, operator decisions, and final zero-error audits remain |
-| 060 | Estate-wide nextest-only Rust testing | 4 | M | 041, 046 | IN PROGRESS — Velnor local verification and fixture PR #4 are migrated; remaining estate commands and doctest-equivalent regressions require convergence and delivery |
+| 060 | Estate-wide nextest-only Rust testing | 4 | M | 041, 046 | IN PROGRESS — Velnor is delivered; fixture PR #4 and playground PR #8 are open; Termrock main `e655d29` is delivered; Schemalane `ebeeda1`, pg-bigdecimal `9a1c2e1`, and tracing-request-level `66ef136` are pushed to their program PRs. Remaining estate commands and compile-fail/doctest-equivalent regressions require convergence and delivery |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) |
 REJECTED (one-line rationale).
