@@ -4685,8 +4685,7 @@ fn native_deploy_pages(
             .bearer_auth(runtime_token)
             .json(&serde_json::json!({
                 "workflow_run_backend_id": plan_id,
-                "workflow_job_run_backend_id": job_id,
-                "name_filter": {"value": artifact_name}
+                "workflow_job_run_backend_id": job_id
             }))
             .send()
             .context("list Pages artifacts")?,
@@ -10246,6 +10245,7 @@ type=sha,format=long,prefix=,enable=true"
             "POST /twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts HTTP/1.1"
         ));
         assert!(requests[0].contains("\"workflow_run_backend_id\":\"plan-1\""));
+        assert!(!requests[0].contains("name_filter"));
         assert!(requests[1].starts_with("GET /oidc HTTP/1.1"));
         assert!(requests[2].starts_with("POST /repos/octocat/example/pages/deployments HTTP/1.1"));
         assert!(requests[2].contains("\"artifact_id\":42"));
