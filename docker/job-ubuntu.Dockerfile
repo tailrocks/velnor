@@ -64,6 +64,7 @@ RUN apt-get update \
         pkg-config \
         protobuf-compiler \
         python3 \
+        sudo \
         tar \
         tk-dev \
         uuid-dev \

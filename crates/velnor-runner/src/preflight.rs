@@ -199,7 +199,7 @@ fn verify_job_image_tools(runner: &mut dyn CommandRunner, docker_image: &str) ->
         docker_image.to_string(),
         "sh".to_string(),
         "-c".to_string(),
-        "command -v sh >/dev/null && command -v bash >/dev/null && command -v git >/dev/null && command -v file >/dev/null && command -v node >/dev/null && node --version && command -v rustup >/dev/null && installed=$(rustup target list --installed) && for target in aarch64-apple-darwin aarch64-unknown-linux-gnu x86_64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-linux-musl; do printf '%s\\n' \"$installed\" | grep -qxF \"$target\" || exit 1; done"
+        "command -v sh >/dev/null && command -v bash >/dev/null && command -v git >/dev/null && command -v file >/dev/null && command -v sudo >/dev/null && command -v node >/dev/null && node --version && command -v rustup >/dev/null && installed=$(rustup target list --installed) && for target in aarch64-apple-darwin aarch64-unknown-linux-gnu x86_64-apple-darwin x86_64-unknown-linux-gnu x86_64-unknown-linux-musl; do printf '%s\\n' \"$installed\" | grep -qxF \"$target\" || exit 1; done"
             .to_string(),
     ];
     let result = runner.run("docker", &args)?;
@@ -555,6 +555,7 @@ mod tests {
         verify_job_image_tools(&mut runner, "velnor/job-ubuntu:26.04").unwrap();
 
         let command = runner.calls[0].1.last().unwrap();
+        assert!(command.contains("command -v sudo >/dev/null"));
         assert!(command.contains("command -v node >/dev/null && node --version"));
         for target in [
             "aarch64-apple-darwin",

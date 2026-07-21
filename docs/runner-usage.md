@@ -414,6 +414,9 @@ For target jobs, Velnor runs the job in a Docker container and mounts
 default `velnor/job-ubuntu:26.04` image is built from official `ubuntu:26.04` and
 contains the Docker CLI and Buildx plugin, so workflow steps inside the job
 container can run `docker`/`docker buildx` without relying on host binary mounts.
+It also contains `sudo`, matching GitHub-hosted Ubuntu workflow semantics even
+though Velnor currently executes the job container as root. Preflight rejects
+an image missing this contract tool before the runner advertises capacity.
 Service containers share the per-job Docker network with GitHub-style aliases.
 
 To force reuse of an existing run, set `VELNOR_FIXTURE_DISPATCH=false` together
