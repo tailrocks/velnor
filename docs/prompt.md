@@ -58,7 +58,7 @@ only the gate needed to resolve uncertainty or changed behavior.
 | 036 | DONE | Capacity leases, reservations, admission, and reclaim. |
 | 037 | DONE | Guarded cache GC and physical accounting. |
 | 038 | DONE | Job environment defaults and precedence. |
-| 039 | IN PROGRESS | Exact selected groups are live for all three organizations and Tailrocks runs eight org-scoped slots on signed-apt 0.1.102. Sequential ChainArgos and jackin-project migration/smoke remains. |
+| 039 | IN PROGRESS | Exact selected groups are live for all three organizations and Tailrocks runs eight org-scoped slots on signed-apt 0.1.105. Sequential ChainArgos and jackin-project migration/smoke remains. |
 | 040 | DONE | Current-V2 `services:` parity. |
 | 041 | DONE | Fixture V-A proof, including inline matrix, cache backends, services, and registry sync. |
 | 042 | DONE | Approved estate adapters, Pages V2/OIDC, composites, attest rejection, and trust gates. |
@@ -72,8 +72,8 @@ only the gate needed to resolve uncertainty or changed behavior.
 | 050 | DONE | Velnor dogfood three-lane proof, 33-second clean rerun, and release recovery drill. PR #100 was open and green at baseline; its current delivery state must be reconciled. |
 | 051 | IN PROGRESS | Holla PR #37 head `94fc643a` is Velnor-green and includes canonical weekly `both`; manual V-B/V-C and operator review remain. |
 | 052 | IN PROGRESS | Ruxel PR #3 head `3d7684fa` is Velnor-green and includes canonical weekly `both`; manual V-B/V-C and operator review remain. |
-| 053 | IN PROGRESS | Parallax direct-main delivery through `c8cd46d0` includes canonical weekly `both`; current Velnor run and manual V-B/V-C remain, plus the Darwin-release decision. |
-| 054 | IN PROGRESS | TermRock direct-main delivery through `5a485d39` includes canonical weekly `both` and a root-fixed public-API freshness gate; 337 nextest tests and the full local gate pass. Remote proof remains. |
+| 053 | IN PROGRESS | Parallax direct-main delivery through `7fe3f136` includes canonical weekly `both`; exact-head Velnor run `29854619258` is fully green after structural browser save/readiness fixes. Manual V-B/V-C and the Darwin-release decision remain. |
+| 054 | IN PROGRESS | TermRock direct-main delivery through `deeefef8` includes canonical weekly `both` and a root-fixed public-API freshness gate. Exact-head Docs/Pages run `29849259484` attempt 4 is green after Velnor 0.1.105 fixed the required single-tar Pages artifact contract; manual V-B/V-C remains. |
 | 055 | IN PROGRESS | Schemalane/pg-bigdecimal/tracing PR heads `fa090cc2`/`c1ac5c8c`/`84e6caeb` include canonical weekly `both` and are Velnor-green; manual V-B/V-C and operator review remain. |
 | 056 | IN PROGRESS | Parallax telemetry playground is delivered directly through `b6ec71e9`; automatic Velnor run `29847627753` is green and manual V-B/V-C remains. |
 | 057 | IN PROGRESS | TableRock trunk `31bb6b76` includes canonical weekly `both`; existing native and local proofs remain green, with manual applicable V-B/V-C pending. |

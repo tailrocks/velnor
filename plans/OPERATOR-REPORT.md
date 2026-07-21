@@ -1719,3 +1719,27 @@ same-version local-artifact sentence is superseded and must not be used.
   `29846369353` proves GitHub rejects the mandated public Rekor V2 bundle for
   zero verifier-counted integrated timestamps. The proposed Sigstore RFC3161
   TSA expansion remains unimplemented pending exact operator approval.
+
+### 2026-07-21 Parallax and TermRock exact-head closure
+
+- Parallax trunk `7fe3f136` removes two browser races structurally. Shell
+  visual proof waits for loaded overview content, while investigation save
+  exposes a server-confirmed saving/saved lifecycle before tests read the
+  control snapshot. The persistence hook reduces the page function ratchet
+  from 191 to 177. Local formatting, typecheck, 539 UI tests, and the focused
+  browser contract pass; exact-head Velnor run `29854619258` is fully green,
+  including browser contracts, breadth, full stack, policy, audit, and
+  nextest.
+- TermRock exact-head run `29849259484` attempt 3 proved Velnor uploaded Pages
+  site files directly. GitHub rejected that artifact with
+  `deployment_content_failed`; the official `actions/upload-pages-artifact`
+  v5 contract requires one dereferenced `artifact.tar`.
+- Velnor `29a96ff3` implements that contract in native Rust, including hidden
+  entry exclusion, symlink/hardlink dereference, cycle failure, single-file
+  Results Service upload, and regression coverage. CI run `29855770848`,
+  general release `29855968974`, Debian release `29855968916`, and signed apt
+  publication `tailrocks/velnor-apt#29856322505` are green. Sentry apt package,
+  canonical image, active daemon, and all eight online slots verify 0.1.105.
+- TermRock full rerun `29849259484` attempt 4 regenerated the artifact under
+  0.1.105. Both Docs and Deploy Pages pass at `deeefef8`; the uploaded Pages
+  artifact is 713,886 bytes. No pull request was merged.
