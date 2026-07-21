@@ -138,6 +138,15 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-07-21: **Final estate state is operator-reviewable, not auto-merged**:
+  every applicable repository must finish with a final PR (or binding
+  trunk-only delivery record) using the canonical concern-based format,
+  local-only sccache, scheduled `both` parity, and the approved required-check
+  handoff. Automation verifies and prepares every delivery but never merges
+  these final PRs without a later explicit operator decision. The exact
+  `actions/attest-build-provenance@v4.1.1` proposal is approved for native Rust
+  implementation and fixture/Jackin proof; no adjacent surface is authorized.
+
 - 2026-07-21: **Rust testing is nextest-only** ([docs/roadmap.md](docs/roadmap.md)
   Shared Rust CI Requirements): local verification, CI, scripts, and agent
   instructions use `cargo nextest run`, never `cargo test`. Stable nextest

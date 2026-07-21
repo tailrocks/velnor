@@ -80,6 +80,7 @@ only the gate needed to resolve uncertainty or changed behavior.
 | 058 | IN PROGRESS at baseline | Phase-4 audit, performance report, and direction-doc reconciliation were executed; finish status/bookkeeping and any currently authorized delivery work. Human-only policy decisions remain excluded. |
 | 059 | DONE | Recorded host baseline cleanup and post-cleanup smoke. |
 | 060 | IN PROGRESS | Active program heads are migrated for nextest-only testing; former doctest coverage has nextest-discoverable integration/trybuild replacements. Velnor `1bd00cf` extends mechanical enforcement to live scripts, configuration, instructions, and Rust documentation; the current 13-repository audit has zero errors and zero test-runner findings. Fixture PR #4, estate delivery, and V-A/V-B/V-C remain. |
+| 061 | IN PROGRESS | Produce one final reviewable delivery per estate repository, with local-only sccache, canonical weekly `both` parity, approved required checks, and exact PR/evidence ledger. Never merge the final PRs; stop only for operator review decisions. |
 
 ## Unblocking mandate
 

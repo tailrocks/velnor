@@ -54,6 +54,13 @@ differ only where its product surface differs. Missing required concerns are
 added from the canonical template; non-applicable concerns are documented and
 omitted, never represented by fake no-op jobs.
 
+**Final estate delivery is review-gated.** Every applicable repository ends
+with one final, reviewable program PR (or its binding trunk-only delivery
+record), canonical concern shapes, local-only sccache, and scheduled `both`
+parity. Required-check policy is applied from the canonical handoff only after
+the named checks exist. Automation must prepare and verify these deliveries,
+but the operator alone decides whether to merge them.
+
 ## Implementation Goal
 
 Velnor is a GitHub Actions-compatible runner daemon with a Rust runtime.
