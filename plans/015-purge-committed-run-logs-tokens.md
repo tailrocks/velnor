@@ -128,6 +128,16 @@ force-push without confirmation.
   refs including `origin/HEAD`, and 97 release tags (`v0.1.2` through
   `v0.1.98`, with the repository's existing tag sequence). Rewriting only
   `main` is insufficient.
+- Exact current head/ref inventory after fetch+prune:
+  `refs/heads/main`, `refs/heads/velnor-estate-standard`,
+  `refs/remotes/origin/HEAD`, `refs/remotes/origin/main`,
+  `refs/remotes/origin/velnor-estate-standard`, and origin Renovate refs
+  `anyhow-1.x-lockfile`, `casey-just-1.x`, `lock-file-maintenance`,
+  `renovatebot-github-action-46.x`, `rust-futures-monorepo`,
+  `serde-monorepo`, `serde_json-1.x-lockfile`, `thiserror-2.x-lockfile`, and
+  `time-0.x-lockfile`. The 97 tag names are the repository's `v0.1.2` through
+  `v0.1.98` sequence. Re-run this inventory after the write freeze; it is a
+  recorded baseline, never a hard-coded push target.
 - Rewriting the release tags changes their commit targets. The coordinated
   notice must therefore include release/apt maintainers and consumers that
   verify tag or commit identities; old signed provenance cannot be represented

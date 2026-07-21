@@ -1588,3 +1588,13 @@ same-version local-artifact sentence is superseded and must not be used.
 - Read-only host-key discovery reports Sentry ED25519 fingerprint
   `SHA256:n42CpA98ASrRoKhbt5xhFTKnqIV/AbRNHHlMktbFtok`. No trust was added;
   operator out-of-band verification and acceptance remain mandatory.
+
+### 2026-07-21 plan 015 ref-inventory refresh
+
+- A fresh fetch/prune and presence-only scan still finds the capture's add
+  commit `55ed22f`, no tracked HTML in the current tree, and the ignore guard
+  active. Reachability is exactly two local heads, twelve origin refs including
+  `origin/HEAD`, and 97 tags. The full named head/ref list is now in plan 015;
+  tag names remain the `v0.1.2` through `v0.1.98` sequence.
+- No blob contents or embedded values were read or printed. The coordinated
+  rewrite remains unexecuted pending explicit operator confirmation.
