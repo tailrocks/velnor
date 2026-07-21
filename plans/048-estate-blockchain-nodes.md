@@ -17,9 +17,10 @@
 - **Depends on**: plans/041-fixture-inline-matrix-and-snippets.md
 - **Category**: dx / perf
 - **Planned at**: velnor repo commit `48b04ad`, target repo commit `d156fe4`, 2026-07-18
-- **Current**: IN PROGRESS — PR #651 head `367817f`; all three former package
-  failures pass local amd64 BuildKit proof. Fresh V-B/V-C waits the org fleet;
-  merge remains explicit per-PR operator authority.
+- **Current**: IN PROGRESS — PR #651 head `492b96a`; all three former package
+  failures pass local amd64 BuildKit proof and 4/4 nextest tests pass. Fresh
+  V-B/V-C waits the org fleet; merge remains explicit per-PR operator
+  authority.
 
 ## Why this matters
 
