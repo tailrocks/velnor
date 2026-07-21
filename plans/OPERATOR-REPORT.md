@@ -1537,3 +1537,24 @@ same-version local-artifact sentence is superseded and must not be used.
   path-context regressions 2/2, affected strict clippy clean, and the combined
   Jackin/console/xtask suite 2,182/2,182 nextest tests passed with the pinned
   mise toolset.
+
+### 2026-07-21 current-head estate and approval audits
+
+- The machine-readable estate audit was rerun with Jackin's actual PR #810
+  worktree substituted for the intentionally dirty default checkout. It exited
+  successfully with zero errors across all 13 program heads. Remaining warning
+  output is legacy vocabulary and intentional cross-ref single-writer
+  serialization, not a hidden `missing-required` or `canonical-drift` error.
+- Full-history consumers now carry same-line rationale required by the audit;
+  stale checkout v7.0.0 annotations were corrected to v7.0.1, and Parallax's
+  scheduled evidence uploads now use the current upload-artifact v7.0.1 pin.
+- The attestation approval proposal was revalidated: latest upstream remains
+  `actions/attest-build-provenance` v4.1.1, its exact commit and delegated
+  action are unchanged, and official actions/runner remains v2.336.0. The two
+  Jackin call sites remain exact at PR #810 head
+  `a27fcdaff7ac4c9562eb01c468f2d45aac0dac6c`; approval is still not inferred.
+- Plan 015's safe ref audit still finds exactly one historical HTML path. It
+  entered at `55ed22f`, was removed at `d7e75af`, remains reachable from the
+  current branches plus nine remote-only branches and 97 release tags, and is
+  absent from the tracked tree. Therefore the prepared coordinated rewrite
+  remains necessary and correctly operator-gated.

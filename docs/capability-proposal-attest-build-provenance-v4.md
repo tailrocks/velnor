@@ -15,7 +15,8 @@ on a cache miss both attestation steps execute. Velnor currently rejects the
 action before job execution, so Preview cannot satisfy V-B parity. Removing or
 writer-gating the step would weaken the shared workflow and is forbidden.
 
-Exact call sites at Jackin head `185359306977eba6f12d935c30cef7d387490063`:
+Exact call sites revalidated at Jackin PR #810 head
+`a27fcdaff7ac4c9562eb01c468f2d45aac0dac6c`:
 
 - `.github/workflows/preview.yml`, `build-preview`: attest the complete Jackin
   archive set.

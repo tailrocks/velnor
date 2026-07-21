@@ -66,16 +66,16 @@ only the gate needed to resolve uncertainty or changed behavior.
 | 044 | DONE | Trust-scoped git mirror and reflink checkout. |
 | 045 | DONE | Timing records, summaries, and doctor SLO output. |
 | 046 | DONE | `velnor-tools audit-ci` and lane comparison. |
-| 047 | IN PROGRESS | java-monorepo PR #1753 head `f510ee0` is pushed with nextest-only probes and current pins. Fresh V-B/V-C waits the org fleet; explicit human merge approval remains mandatory. |
-| 048 | IN PROGRESS | PR #651 head `63a2a7c` contains the shared package fixes, current pins, and nextest-only instructions; local amd64 BuildKit proof passes for arbitrum, fraxtal-op-node, and op-node. Fresh V-B/V-C waits the org fleet, then explicit operator confirmation is required before merge. |
-| 049 | IN PROGRESS | PR #810 head `a27fcda` is pushed; standalone audit is error-free, host-attach test isolation is structurally fixed, and 2,182/2,182 affected tests pass. Preview still requires explicit approval of the proposed native `actions/attest-build-provenance@v4` surface and fleet proof remains. |
+| 047 | IN PROGRESS | java-monorepo PR #1753 head `1c136c4` is pushed with nextest-only probes, current pins, and canonical concurrency. Fresh V-B/V-C waits the org fleet; explicit human merge approval remains mandatory. |
+| 048 | IN PROGRESS | PR #651 head `492b96a` contains the shared package fixes, current metadata/concurrency, and nextest-only instructions; local amd64 BuildKit proof passes for arbitrum, fraxtal-op-node, and op-node. Fresh V-B/V-C waits the org fleet, then explicit operator confirmation is required before merge. |
+| 049 | IN PROGRESS | PR #810 head `0e4e5c7` is pushed; standalone audit is error-free, host-attach test isolation is structurally fixed, and 2,182/2,182 affected tests pass. Preview still requires explicit approval of the proposed native `actions/attest-build-provenance@v4` surface and fleet proof remains. |
 | 050 | DONE | Velnor dogfood three-lane proof, 33-second clean rerun, and release recovery drill. PR #100 was open and green at baseline; its current delivery state must be reconciled. |
-| 051 | IN PROGRESS | Original Holla delivery passed; follow-up PR #37 head `e4bef1e` is clean and awaits fresh org-fleet V-B/V-C plus merge. |
-| 052 | IN PROGRESS | Original Ruxel delivery passed; follow-up PR #3 head `6e9c02a` is clean and awaits fresh org-fleet V-B/V-C plus merge. |
-| 053 | IN PROGRESS | Parallax direct-main delivery through `a5ebba6` includes deterministic race coverage, nextest/trybuild example coverage, and current pins; local gates pass. Fresh Ubuntu V-B/V-C and the Darwin-release decision remain. |
-| 054 | IN PROGRESS | Termrock direct-main delivery through `92c7afb` fixes the rustfmt drift, uses nextest exclusively, and passes the full local gate. Fresh V-B/V-C remains. |
-| 055 | IN PROGRESS | Schemalane, pg-bigdecimal, and tracing-request-level follow-up PRs #3/#2/#2 are pushed at `5c839db`/`2cd6c1b`/`8782114`; local nextest/actionlint gates pass. Fresh V-B/V-C and merge remain. |
-| 056 | IN PROGRESS | Parallax telemetry playground is delivered directly through `c64cf19`; superseded PR #8 is closed. Fresh V-B/V-C remains for its new nextest/pin surface. |
+| 051 | IN PROGRESS | Original Holla delivery passed; follow-up PR #37 head `69b4dfc` is clean and awaits fresh org-fleet V-B/V-C plus merge. |
+| 052 | IN PROGRESS | Original Ruxel delivery passed; follow-up PR #3 head `fd12173` is clean and awaits fresh org-fleet V-B/V-C plus merge. |
+| 053 | IN PROGRESS | Parallax direct-main delivery through `d949f5a` includes deterministic race coverage, nextest/trybuild examples, current metadata, and canonical scheduled concurrency; local gates pass. Fresh Ubuntu V-B/V-C and the Darwin-release decision remain. |
+| 054 | IN PROGRESS | Termrock direct-main delivery through `d14c626` fixes the rustfmt drift, uses nextest exclusively, and passes the full local gate. Fresh V-B/V-C remains. |
+| 055 | IN PROGRESS | Schemalane, pg-bigdecimal, and tracing-request-level follow-up PRs #3/#2/#2 are pushed at `6005432`/`b9272fa`/`5abc3ad`; local nextest/actionlint gates pass. Fresh V-B/V-C and merge remain. |
+| 056 | IN PROGRESS | Parallax telemetry playground is delivered directly through `973d9cb`; superseded PR #8 is closed. Fresh V-B/V-C remains for its nextest/metadata surface. |
 | 057 | IN PROGRESS | TableRock trunk `89e7d16` now passes strict clippy, actionlint, the estate audit, and 768/768 nextest tests. The root fixture defect was trusting container stdout before the forwarded Redis port accepted adapter connections; shared readiness probing and serialized real-server nextest groups remove that class. V-B/V-C waits the org fleet. |
 | 058 | IN PROGRESS at baseline | Phase-4 audit, performance report, and direction-doc reconciliation were executed; finish status/bookkeeping and any currently authorized delivery work. Human-only policy decisions remain excluded. |
 | 059 | DONE | Recorded host baseline cleanup and post-cleanup smoke. |
