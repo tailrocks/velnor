@@ -66,7 +66,7 @@ only the gate needed to resolve uncertainty or changed behavior.
 | 045 | DONE | Timing records, summaries, and doctor SLO output. |
 | 046 | DONE | `velnor-tools audit-ci` and lane comparison. |
 | 047 | BLOCKED | java-monorepo PR #1753 and all technical gates were green; branch policy required an authorized human merge. Re-check current PR state before acting. |
-| 048 | BLOCKED | blockchain-nodes fails the same three pre-existing package builds on GitHub and Velnor; Dockerfile/package-source fixes were outside the approved plan. |
+| 048 | IN PROGRESS | PR #651 head `367817f` fixes all three shared package failures; local amd64 BuildKit proof passes for arbitrum, fraxtal-op-node, and op-node. Fresh V-B/V-C waits the org fleet, then the repository requires explicit operator confirmation before merge. |
 | 049 | BLOCKED | Exact estate audit of PR #810 SHA `1853593` finds 18 remaining workflow-contract errors. Repair requires workflow-capable push credentials; Preview separately requires explicit approval of the proposed native `actions/attest-build-provenance@v4` surface. |
 | 050 | DONE | Velnor dogfood three-lane proof, 33-second clean rerun, and release recovery drill. PR #100 was open and green at baseline; its current delivery state must be reconciled. |
 | 051 | DONE | Holla PR #36 merged; parity and 57-second clean rerun passed. |
