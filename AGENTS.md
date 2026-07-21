@@ -138,6 +138,11 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-07-21: **Every Sentry install and upgrade is apt-only** (operator): the
+  signed `velnor-apt` repository is mandatory for first installation and every
+  upgrade. Local `.deb`, direct `dpkg -i`, copied binaries, and local-path apt
+  sources are prohibited.
+
 - 2026-07-21: **Final estate state is operator-reviewable, not auto-merged**:
   every applicable repository must finish with a final PR (or binding
   trunk-only delivery record) using the canonical concern-based format,

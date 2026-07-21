@@ -30,7 +30,8 @@ conclusions in the GitHub UI — is **achieved and in production**:
   unapproved security/storage/network surface fails explicitly under the
   strict capability contract rather than silently falling back.
 - The runner ships as a Debian package from a fully automatic
-  tag → CI → deb → apt chain, operates unattended under systemd
+  tag → CI → deb → apt chain; every live installation and upgrade uses that
+  signed apt source, never a local package or copied binary; it operates under systemd
   (never-exit supervision, credential diagnosis, watchdog, doctor timers),
   and streams logs live per line to the GitHub UI.
 

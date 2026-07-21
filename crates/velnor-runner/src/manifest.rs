@@ -676,6 +676,24 @@ fn validate_attestation_permissions(
     if !uses_attestation {
         return;
     }
+    let has_id_token_endpoint = job.system_connection().is_some_and(|endpoint| {
+        endpoint.data.iter().any(|(name, value)| {
+            matches!(
+                name.to_ascii_lowercase().replace(['-', '_'], "").as_str(),
+                "generateidtokenurl" | "actionsidtokenrequesturl"
+            ) && !value.trim().is_empty()
+        })
+    });
+    if !has_id_token_endpoint {
+        violations.push(violation(
+            "job preflight",
+            "actions/attest-build-provenance",
+            "permissions",
+            "permissions.id-token",
+            "absent",
+            vec!["write".into()],
+        ));
+    }
     let parsed = job
         .variables
         .get("system.github.token.permissions")
@@ -689,15 +707,11 @@ fn validate_attestation_permissions(
             "permissions",
             "permissions",
             "absent or malformed",
-            vec!["contents: read, id-token: write, attestations: write".into()],
+            vec!["contents: read, attestations: write".into()],
         ));
         return;
     };
-    for (scope, accepted) in [
-        ("contents", "read"),
-        ("idtoken", "write"),
-        ("attestations", "write"),
-    ] {
+    for (scope, accepted) in [("contents", "read"), ("attestations", "write")] {
         let received = permissions
             .iter()
             .find(|(name, _)| name.to_ascii_lowercase().replace(['-', '_'], "") == scope)
@@ -1033,8 +1047,14 @@ mod tests {
             "requestId": 1,
             "variables": {
                 "system.github.token.permissions": {
-                    "value": "{\"Contents\":\"read\",\"IdToken\":\"write\",\"Attestations\":\"write\"}"
+                    "value": "{\"Contents\":\"read\",\"Attestations\":\"write\"}"
                 }
+            },
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "data": { "GenerateIdTokenUrl": "https://oidc.actions.example/token" }
+                }]
             },
             "steps": [{
                 "type": "Action",
@@ -1139,6 +1159,20 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].field, "permissions");
         assert_eq!(errors[0].received, "absent or malformed");
+    }
+
+    #[test]
+    fn validate_job_rejects_missing_attestation_id_token_endpoint() {
+        let mut target = job(
+            "actions/attest-build-provenance",
+            Some("0f67c3f4856b2e3261c31976d6725780e5e4c373"),
+            serde_json::json!({"subject-path": "dist/*.tar.gz"}),
+        );
+        target.resources.endpoints.clear();
+        let errors = violations(&target);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, "permissions.id-token");
+        assert_eq!(errors[0].received, "absent");
     }
 
     #[test]
