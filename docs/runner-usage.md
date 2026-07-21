@@ -60,14 +60,14 @@ a stale tool image; image-build failure fails the package transaction.
 - Optional Rust target persistence: set `VELNOR_CARGO_TARGET_PERSIST=true` in
   the daemon env only for trusted target scopes. Velnor stores targets under
   `_velnor_targets/<trust-scope>/<generation>/<repo>/<workflow>/<job-bucket>`
-  so warm state
-  is shared only across matching trust scope, repository, workflow, and job
-  classes, then mounts that bucket at the normal `/__w/target` workspace path.
-  It does not set `CARGO_TARGET_DIR`, so workflow-visible Cargo paths remain
-  identical to GitHub-hosted execution. Native checkout preserves only this
-  runner-owned `target/` mount while applying `git clean -ffdx` to every other
-  ignored or untracked workspace path; otherwise checkout would empty the
-  durable bucket before every job. Set `VELNOR_TRUST_SCOPE` per
+  so warm state is shared only across matching trust scope, repository,
+  workflow, and job classes. After checkout, Velnor reflink/copies a complete
+  generation into the job-local workspace `target/`; after the job it publishes
+  the completed tree atomically. It never adds a nested `/__w/target` bind
+  mount: nested mounts make an ordinary rename between `target/` and another
+  workspace directory fail with `EXDEV`. Velnor does not set
+  `CARGO_TARGET_DIR`, so paths and same-filesystem semantics remain identical
+  to GitHub-hosted execution. Set `VELNOR_TRUST_SCOPE` per
   daemon/pool (`trusted` by default;
   use a distinct value such as `public-forks` for untrusted lanes) before
   enabling target persistence.

@@ -138,6 +138,16 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-07-22: **Persistent Cargo targets are job-local materializations**:
+  a Jackin dual-lane run proved that bind-mounting the durable bucket directly
+  at `/__w/target` changes observable filesystem behavior: atomic promotion
+  from `target/.ci-restore` to `.ci-target-cache` fails with `EXDEV`, while the
+  identical GitHub-hosted workspace succeeds. Velnor now reflink/copies a
+  complete scoped generation into the ordinary job-local `target/` after
+  checkout and publishes the completed tree atomically after the job. It still
+  exports no synthetic `CARGO_TARGET_DIR`; generation `workspace-v3-job-local`
+  invalidates the incompatible mount-era trees.
+
 - 2026-07-21: **Every Sentry install and upgrade is apt-only** (operator): the
   signed `velnor-apt` repository is mandatory for first installation and every
   upgrade. Local `.deb`, direct `dpkg -i`, copied binaries, and local-path apt
@@ -191,13 +201,13 @@ Never let a prompt, README, or doc describe a direction that the current vision/
   in the job home. This preserves zero-download warm runs without exposing
   mutable materialization trees across slots.
 
-- 2026-07-18: **Persistent Cargo targets preserve workspace semantics**:
-  `VELNOR_CARGO_TARGET_PERSIST` mounts the scoped host bucket at the ordinary
-  `/__w/target` workspace path. Target generations invalidate artifacts when
-  compiler-visible path semantics change. It never exports a synthetic
-  `CARGO_TARGET_DIR` or exposes the retired `/__cargo_target` path. This keeps
-  unchanged workflow references such as `target/release/...` identical on
-  GitHub and Velnor while retaining host persistence.
+- 2026-07-18: **Persistent Cargo targets preserve workspace semantics**
+  (storage mechanism superseded 2026-07-22): target generations invalidate
+  artifacts when compiler-visible path semantics change. Velnor never exports
+  a synthetic `CARGO_TARGET_DIR` or exposes the retired `/__cargo_target` path;
+  unchanged workflow references such as `target/release/...` stay identical.
+  Direct `/__w/target` mounting was later proven to violate rename semantics
+  and replaced by job-local materialization plus atomic publication.
 
 - 2026-07-18: **Artifact fan-in is Results Service authoritative**: the
   superseded Phase-0 single-host artifact assumption is removed. Native
