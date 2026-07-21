@@ -6,9 +6,10 @@ Pass everything below this line to `/goal`, verbatim.
 
 Unblock and finish every item in the Velnor estate-standardization program;
 do not merely inventory or restate blockers. Work from
-`/Users/donbeave/Projects/tailrocks/velnor-project/velnor` on the existing
-`velnor-estate-standard` branch. The reconciliation baseline is commit
-`a0a4ee5` (2026-07-19). First verify the worktree, branch, HEAD, open pull
+`/Users/donbeave/Projects/tailrocks/velnor-project/velnor` on the current
+policy-permitted delivery branches (`main` for Velnor after PR #100 merged).
+The reconciliation baseline is commit `a0a4ee5` (2026-07-19). First verify the
+worktree, branch, HEAD, open pull
 requests, current checks, and repository policies; external state may have
 changed since the baseline. Preserve unrelated user changes.
 
@@ -57,7 +58,7 @@ only the gate needed to resolve uncertainty or changed behavior.
 | 036 | DONE | Capacity leases, reservations, admission, and reclaim. |
 | 037 | DONE | Guarded cache GC and physical accounting. |
 | 038 | DONE | Job environment defaults and precedence. |
-| 039 | BLOCKED | Code, runbook, and local gates are done; live org registration returned HTTP 403 without org runner-group administration permission. |
+| 039 | BLOCKED | Code, runbook, and local gates are done. Org administration now succeeds, but only the unrestricted Default group exists; restricted-group creation/configuration and Sentry SSH trust still require explicit operator action before migration. |
 | 040 | DONE | Current-V2 `services:` parity. |
 | 041 | DONE | Fixture V-A proof, including inline matrix, cache backends, services, and registry sync. |
 | 042 | DONE | Approved estate adapters, Pages V2/OIDC, composites, attest rejection, and trust gates. |
@@ -65,20 +66,20 @@ only the gate needed to resolve uncertainty or changed behavior.
 | 044 | DONE | Trust-scoped git mirror and reflink checkout. |
 | 045 | DONE | Timing records, summaries, and doctor SLO output. |
 | 046 | DONE | `velnor-tools audit-ci` and lane comparison. |
-| 047 | BLOCKED | java-monorepo PR #1753 and all technical gates were green; branch policy required an authorized human merge. Re-check current PR state before acting. |
-| 048 | IN PROGRESS | PR #651 head `367817f` fixes all three shared package failures; local amd64 BuildKit proof passes for arbitrum, fraxtal-op-node, and op-node. Fresh V-B/V-C waits the org fleet, then the repository requires explicit operator confirmation before merge. |
-| 049 | BLOCKED | Exact estate audit of PR #810 SHA `1853593` finds 18 remaining workflow-contract errors. Repair requires workflow-capable push credentials; Preview separately requires explicit approval of the proposed native `actions/attest-build-provenance@v4` surface. |
+| 047 | IN PROGRESS | java-monorepo PR #1753 head `f510ee0` is pushed with nextest-only probes and current pins. Fresh V-B/V-C waits the org fleet; explicit human merge approval remains mandatory. |
+| 048 | IN PROGRESS | PR #651 head `63a2a7c` contains the shared package fixes, current pins, and nextest-only instructions; local amd64 BuildKit proof passes for arbitrum, fraxtal-op-node, and op-node. Fresh V-B/V-C waits the org fleet, then explicit operator confirmation is required before merge. |
+| 049 | IN PROGRESS | PR #810 head `eff7c33` is pushed; standalone audit is error-free and nextest-focused gates pass. Preview still requires explicit approval of the proposed native `actions/attest-build-provenance@v4` surface, fleet proof remains, and one pre-existing Docker-fake integration defect requires root-cause repair. |
 | 050 | DONE | Velnor dogfood three-lane proof, 33-second clean rerun, and release recovery drill. PR #100 was open and green at baseline; its current delivery state must be reconciled. |
-| 051 | DONE | Holla PR #36 merged; parity and 57-second clean rerun passed. |
-| 052 | DONE | Ruxel PR #2 merged; parity and 52-second clean rerun passed. |
-| 053 | BLOCKED | Direct-main convergence is locally committed as `8190a6d`; 539 UI tests, type/format checks, actionlint, workflow-policy fixtures, and 163 focused Rust tests pass, and estate audit reports zero Parallax errors. Push is rejected because OAuth lacks `workflow` and SSH signing is unavailable; Ubuntu visual proof and the Darwin-release decision therefore remain. |
-| 054 | BLOCKED | Termrock PR #4 lanes fail identical pre-existing rustfmt drift outside the estate plan. |
-| 055 | DONE | Schemalane, pg-bigdecimal, and tracing-request-level merged with clean V-B/V-C proof. |
-| 056 | DONE | Parallax telemetry playground merged and passed. |
+| 051 | IN PROGRESS | Original Holla delivery passed; follow-up PR #37 head `e4bef1e` is clean and awaits fresh org-fleet V-B/V-C plus merge. |
+| 052 | IN PROGRESS | Original Ruxel delivery passed; follow-up PR #3 head `6e9c02a` is clean and awaits fresh org-fleet V-B/V-C plus merge. |
+| 053 | IN PROGRESS | Parallax direct-main delivery through `a5ebba6` includes deterministic race coverage, nextest/trybuild example coverage, and current pins; local gates pass. Fresh Ubuntu V-B/V-C and the Darwin-release decision remain. |
+| 054 | IN PROGRESS | Termrock direct-main delivery through `92c7afb` fixes the rustfmt drift, uses nextest exclusively, and passes the full local gate. Fresh V-B/V-C remains. |
+| 055 | IN PROGRESS | Schemalane, pg-bigdecimal, and tracing-request-level follow-up PRs #3/#2/#2 are pushed at `5c839db`/`2cd6c1b`/`8782114`; local nextest/actionlint gates pass. Fresh V-B/V-C and merge remain. |
+| 056 | IN PROGRESS | Parallax telemetry playground is delivered directly through `c64cf19`; superseded PR #8 is closed. Fresh V-B/V-C remains for its new nextest/pin surface. |
 | 057 | IN PROGRESS | TableRock trunk `89e7d16` now passes strict clippy, actionlint, the estate audit, and 768/768 nextest tests. The root fixture defect was trusting container stdout before the forwarded Redis port accepted adapter connections; shared readiness probing and serialized real-server nextest groups remove that class. V-B/V-C waits the org fleet. |
 | 058 | IN PROGRESS at baseline | Phase-4 audit, performance report, and direction-doc reconciliation were executed; finish status/bookkeeping and any currently authorized delivery work. Human-only policy decisions remain excluded. |
 | 059 | DONE | Recorded host baseline cleanup and post-cleanup smoke. |
-| 060 | IN PROGRESS | Operator direction requires nextest as the sole Rust test runner. Velnor and Termrock are delivered; fixture PR #4 and playground PR #8 are open; Schemalane, pg-bigdecimal, and tracing-request-level program branches are pushed. Migrate every remaining estate command and preserve doctest/compile-fail coverage as nextest-discoverable regressions. |
+| 060 | IN PROGRESS | Active program heads are migrated and scanned for nextest-only testing; former doctest coverage has nextest-discoverable integration/trybuild replacements. Fixture PR #4, estate delivery, and V-A/V-B/V-C remain. |
 
 ## Unblocking mandate
 

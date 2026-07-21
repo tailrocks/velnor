@@ -1486,3 +1486,39 @@ same-version local-artifact sentence is superseded and must not be used.
 - Proof: `cargo clippy --workspace --all-targets --locked -- -D warnings`,
   actionlint, and standalone `audit-ci` pass; full nextest reports 768 passed,
   12 skipped. V-B/V-C remains pending organization-scope runner migration.
+
+### 2026-07-21 workflow credential and organization-admin reconciliation
+
+- The refreshed GitHub authentication now accepts workflow-file pushes and
+  organization runner administration. All prepared estate heads were pushed;
+  Velnor PR #100 is merged, Parallax and Termrock are delivered directly on
+  their policy-mandated trunks, and the remaining program PR heads are listed
+  in `plans/README.md`.
+- Read-only organization inspection reports zero `tailrocks` org runners and
+  only runner group `Default` (`visibility=all`). Five healthy
+  `velnor-dogfood-slot-*` runners remain registered to `tailrocks/velnor`.
+  Therefore the former HTTP 403 is resolved, but plan 039 is not complete:
+  creating/configuring a restricted trusted group is an explicit approval
+  boundary, and the Sentry host key still needs operator acceptance before the
+  daemon can be drained and migrated.
+- Every stale queued/in-progress estate verification run found on 2026-07-21
+  received a cancellation request. No replacement smoke was dispatched while
+  the org fleet was absent.
+
+### 2026-07-21 nextest-only and latest-pin convergence
+
+- Velnor, the fixture PR, Jackin PR #810, all current estate program branches,
+  and direct-main repositories now use nextest for executable/instructional
+  Rust testing. Parser fixtures and historical incident prose remain only as
+  classified non-executable evidence.
+- Checkout now resolves to the v7.0.1 commit
+  `3d3c42e5aac5ba805825da76410c181273ba90b1`. The sccache v0.0.10 annotated
+  tag object was replaced with its executable commit
+  `9e7fa8a12102821edf02ca5dbea1acd0f89a2696` across the strict manifest,
+  canonical inventory, workflows, and estate heads.
+- Jackin verification passed 979 dhat-enabled tests, 18 focused ratchet tests,
+  and 150 view tests. A broader run passed 983 tests before reproducing a
+  pre-existing integration defect: `NoOpDocker` claims container creation
+  succeeded while the attach path invokes the real Docker CLI, so the expected
+  fake container does not exist. This remains technical work; it is not hidden
+  or attributed to the workflow-only migration.
