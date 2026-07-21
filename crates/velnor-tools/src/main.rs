@@ -801,6 +801,10 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
             ".github/workflows/compat.yml",
             vec![
                 ("matrix config lanes", "matrix.config"),
+                (
+                    "weekly schedule both arm",
+                    "github.event_name == 'schedule'",
+                ),
                 ("inline lane ternary", "inputs.lanes == 'both'"),
                 ("github lane entry", r#""lane":"GitHub""#),
                 ("velnor lane entry", r#""lane":"Velnor""#),
