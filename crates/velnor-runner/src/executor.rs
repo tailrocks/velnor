@@ -4708,9 +4708,12 @@ fn native_deploy_pages(
         .get("database_id")
         .or_else(|| matching[0].get("databaseId"))
         .or_else(|| matching[0].get("id"))
-        .filter(|value| value.is_string() || value.is_number())
-        .cloned()
-        .context("Pages artifact is missing database_id")?;
+        .and_then(|value| match value {
+            Value::Number(value) => value.as_u64(),
+            Value::String(value) => value.parse().ok(),
+            _ => None,
+        })
+        .context("Pages artifact is missing numeric database_id")?;
 
     let oidc: Value = pages_json_response(
         client
@@ -10162,7 +10165,7 @@ type=sha,format=long,prefix=,enable=true"
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&requests);
         let responses = [
-            r#"{"artifacts":[{"name":"github-pages","database_id":42,"size":123}]}"#,
+            r#"{"artifacts":[{"name":"github-pages","database_id":"42","size":123}]}"#,
             r#"{"value":"oidc-token"}"#,
             r#"{"id":7,"status_url":"status/7","page_url":"https://initial.example/"}"#,
             r#"{"status":"queued"}"#,
