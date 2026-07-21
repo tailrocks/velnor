@@ -5,8 +5,12 @@
 - **Priority**: P0
 - **Risk**: MED — removing `cargo test --doc` without replacement loses coverage
 - **Depends on**: 041 fixture contract; 046 estate audit
-- **Current**: IN PROGRESS — Velnor delivered; fixture PR #4 and playground
-  PR #8 open; Termrock delivered; Class-D trio program branches pushed.
+- **Current**: IN PROGRESS — Velnor, Termrock, Parallax, TableRock, and the
+  telemetry playground are delivered; fixture PR #4, Jackin PR #810, and the
+  remaining repository program branches are pushed. Playground PR #8 was
+  superseded by policy-compliant direct-main delivery. Local nextest and
+  actionlint evidence is green except for one pre-existing Jackin Docker-fake
+  integration failure; V-A/V-B/V-C remain fleet-blocked.
 
 ## Requirement
 
