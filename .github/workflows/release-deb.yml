@@ -203,8 +203,10 @@ jobs:
             exit 1
           fi
           # Create the release if it does not exist yet, then upload the deb assets.
-          gh release view "$TAG" >/dev/null 2>&1 \
-            || gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release view "$TAG" >/dev/null 2>&1 || {
+            gh release create "$TAG" --title "$TAG" --generate-notes \
+              || gh release view "$TAG" >/dev/null
+          }
           gh release upload "$TAG" artifacts/velnor-runner-*-unknown-linux-gnu.deb artifacts/velnor-runner-*-unknown-linux-gnu.deb.sha256 --clobber
 
       - name: Push .deb(s) to velnor-apt + trigger publish (optional)
@@ -226,8 +228,10 @@ jobs:
             exit 0
           fi
           export GH_TOKEN="$APT_TOKEN"
-          gh release view "$TAG" --repo tailrocks/velnor-apt >/dev/null 2>&1 \
-            || gh release create "$TAG" --repo tailrocks/velnor-apt --title "velnor-runner $TAG (debs)" --notes "velnor-runner .debs for apt repository (amd64 + arm64)."
+          gh release view "$TAG" --repo tailrocks/velnor-apt >/dev/null 2>&1 || {
+            gh release create "$TAG" --repo tailrocks/velnor-apt --title "velnor-runner $TAG (debs)" --notes "velnor-runner .debs for apt repository (amd64 + arm64)." \
+              || gh release view "$TAG" --repo tailrocks/velnor-apt >/dev/null
+          }
           gh release upload "$TAG" artifacts/velnor-runner-*-unknown-linux-gnu.deb artifacts/velnor-runner-*-unknown-linux-gnu.deb.sha256 --repo tailrocks/velnor-apt --clobber
           gh workflow run publish.yml --repo tailrocks/velnor-apt -f version="$TAG"
           echo "Uploaded velnor-runner debs to velnor-apt $TAG and triggered publish."

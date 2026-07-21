@@ -159,8 +159,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="v${VERSION}"
-          gh release view "$tag" >/dev/null 2>&1 \
-            || gh release create "$tag" --title "$tag" --generate-notes
+          gh release view "$tag" >/dev/null 2>&1 || {
+            gh release create "$tag" --title "$tag" --generate-notes \
+              || gh release view "$tag" >/dev/null
+          }
           gh release upload "$tag" \
             artifacts/velnor-runner-*.tar.gz \
             artifacts/velnor-runner-*.tar.gz.sha256 \
