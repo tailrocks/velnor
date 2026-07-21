@@ -1552,9 +1552,24 @@ same-version local-artifact sentence is superseded and must not be used.
   `actions/attest-build-provenance` v4.1.1, its exact commit and delegated
   action are unchanged, and official actions/runner remains v2.336.0. The two
   Jackin call sites remain exact at PR #810 head
-  `a27fcdaff7ac4c9562eb01c468f2d45aac0dac6c`; approval is still not inferred.
+  `0e4e5c7`; approval is still not inferred.
 - Plan 015's safe ref audit still finds exactly one historical HTML path. It
   entered at `55ed22f`, was removed at `d7e75af`, remains reachable from the
   current branches plus nine remote-only branches and 97 release tags, and is
   absent from the tracked tree. Therefore the prepared coordinated rewrite
   remains necessary and correctly operator-gated.
+
+### 2026-07-21 TableRock native-workflow reconciliation
+
+- TableRock advanced independently to trunk `36b83dd` with an all-macOS native
+  checkpoint. Its workload is intrinsically Apple-only, so requiring Velnor
+  and Ubuntu lane matrices would create forbidden fake jobs rather than parity.
+- Velnor `4d6af61` makes the estate auditor recognize only the proven shape:
+  every job uses macOS and invokes `./scripts/build-native-app.sh`. A regression
+  test guards the exception, while mixed or generic workflows retain the lane
+  requirement. The full Velnor gate passes 653 nextest tests.
+- TableRock local verification passes strict clippy and all 768 nextest tests
+  in 544.482 seconds. Native run `29803656124` failed on older trunk
+  `d3539b9` because fileprivate protocol witnesses were too narrow; current
+  trunk already repairs that root cause, and replacement run `29804459618` is
+  active. No duplicate patch was applied over the independent trunk repair.
