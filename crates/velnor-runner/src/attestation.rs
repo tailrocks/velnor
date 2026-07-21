@@ -156,10 +156,12 @@ fn upload_attestation(client: &Client, url: &str, token: &str, bundle: &Value) -
                 if response.status().is_client_error()
                     && response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS =>
             {
-                bail!(
-                    "upload repository attestation returned terminal HTTP {}",
-                    response.status()
-                );
+                let status = response.status();
+                let detail = response
+                    .text()
+                    .map(|body| bounded_response_detail(&body))
+                    .unwrap_or_else(|_| "response body unavailable".into());
+                bail!("upload repository attestation returned terminal HTTP {status}: {detail}");
             }
             Ok(response) if attempt == MAX_RETRIES => {
                 bail!(
@@ -176,6 +178,23 @@ fn upload_attestation(client: &Client, url: &str, token: &str, bundle: &Value) -
         }
     }
     unreachable!("bounded upload loop always returns")
+}
+
+fn bounded_response_detail(body: &str) -> String {
+    const LIMIT: usize = 4096;
+    let mut detail = body
+        .chars()
+        .filter(|character| !character.is_control() || *character == ' ')
+        .take(LIMIT)
+        .collect::<String>();
+    if body.chars().count() > LIMIT {
+        detail.push('…');
+    }
+    if detail.is_empty() {
+        "empty response body".into()
+    } else {
+        detail
+    }
 }
 
 fn collect_subjects(workspace: &Path) -> Result<Vec<Subject>> {
@@ -535,5 +554,13 @@ mod tests {
             statement["predicate"]["runDetails"]["metadata"]["invocationId"],
             "https://github.com/o/r/actions/runs/3/attempts/1"
         );
+    }
+
+    #[test]
+    fn repository_error_detail_is_bounded_and_single_line() {
+        let detail = bounded_response_detail(&format!("bad\n{}", "x".repeat(5000)));
+        assert!(!detail.contains('\n'));
+        assert!(detail.ends_with('…'));
+        assert_eq!(detail.chars().count(), 4097);
     }
 }
