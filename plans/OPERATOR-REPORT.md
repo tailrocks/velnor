@@ -1598,3 +1598,25 @@ same-version local-artifact sentence is superseded and must not be used.
   tag names remain the `v0.1.2` through `v0.1.98` sequence.
 - No blob contents or embedded values were read or printed. The coordinated
   rewrite remains unexecuted pending explicit operator confirmation.
+
+### 2026-07-21 v0.1.99 strict-manifest bootstrap release
+
+- Main run `29805908947` assigned all five jobs to the repository-scoped
+  v0.1.98 fleet and failed before any step or uploaded log. That shape is
+  consistent with pre-side-effect strict validation rejecting the newly
+  approved checkout and sccache commits before the installed manifest itself
+  could be upgraded; no broader runtime failure is inferred from absent logs.
+- Tag `v0.1.99` points at signed-off source commit `31306be`. Its automatic
+  Velnor release attempt `29806032075` reproduced the expected pre-step
+  bootstrap failure. The documented recovery path then ran exactly once on
+  GitHub-hosted runners: `29806067427` built and validated amd64 and arm64
+  packages and delivered both source and apt release assets successfully.
+- Apt publisher `29806314708` built and deployed successfully. The live amd64
+  and arm64 package indexes both advertise `velnor-runner` 0.1.99. This local
+  macOS environment lacks `gpgv`, so cryptographic candidate verification is
+  deliberately deferred to Sentry's `apt-get update`; no unsigned or local
+  package path was used.
+- Installation remains blocked solely by unverified Sentry SSH host trust.
+  After operator fingerprint confirmation, drain first, use only
+  `apt-get update && apt-get install velnor-runner`, confirm package/image
+  0.1.99, restore the daemon, and rerun the failed main CI plus fixture smoke.

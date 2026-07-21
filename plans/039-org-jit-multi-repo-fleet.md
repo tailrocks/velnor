@@ -36,6 +36,10 @@ build-out.
 - Sentry resolves to `5.9.55.237`; the presented ED25519 fingerprint is
   `SHA256:n42CpA98ASrRoKhbt5xhFTKnqIV/AbRNHHlMktbFtok`. It is not trusted yet;
   the operator must verify it out of band before accepting it.
+- v0.1.99 is published through the required dual-architecture source release
+  and signed apt-repository workflow. The live index advertises 0.1.99 for
+  amd64 and arm64; Sentry installation remains forbidden until SSH trust is
+  verified and accepted.
 
 - `crates/velnor-runner/src/protocol.rs:126-134` (verified excerpt):
   ```rust
