@@ -1703,7 +1703,7 @@ same-version local-artifact sentence is superseded and must not be used.
   migration; the single host is never registered to mixed organizations.
 - Canonical Sunday `0 4 * * 0` parity and schedule-selected `both` are delivered
   to every estate CI head plus fixture. Current heads are Velnor `0b40e401`,
-  fixture `5ffc9f92`, java-monorepo `3e2d21b5`, blockchain-nodes `8296582f`,
+  fixture `5ffc9f92`, java-monorepo `78697247`, blockchain-nodes `cc22d7cc`,
   jackin PR #810 `d72e3a77`, Holla `94fc643a`, Ruxel `3d7684fa`, Schemalane
   `fa090cc2`, pg-bigdecimal `c1ac5c8c`, tracing-request-level `84e6caeb`,
   Parallax trunk `c8cd46d0`, playground trunk `b6ec71e9`, TableRock trunk

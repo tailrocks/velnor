@@ -66,8 +66,8 @@ only the gate needed to resolve uncertainty or changed behavior.
 | 044 | DONE | Trust-scoped git mirror and reflink checkout. |
 | 045 | DONE | Timing records, summaries, and doctor SLO output. |
 | 046 | DONE | `velnor-tools audit-ci` and lane comparison. |
-| 047 | IN PROGRESS | java-monorepo PR #1753 head `3e2d21b5` includes canonical weekly `both`; fresh ChainArgos V-B/V-C and operator review remain. |
-| 048 | IN PROGRESS | blockchain-nodes PR #651 head `8296582f` includes canonical weekly `both`; fresh ChainArgos V-B/V-C and operator review remain. |
+| 047 | IN PROGRESS | java-monorepo PR #1753 head `78697247` includes canonical weekly `both`, nextest-only execution, and audited full-history justification; fresh ChainArgos V-B/V-C and operator review remain. |
+| 048 | IN PROGRESS | blockchain-nodes PR #651 head `cc22d7cc` includes canonical weekly `both`, pull-request execution, and rustfmt-clean control-plane tests; exact-head GitHub proof is running and fresh ChainArgos V-B/V-C plus operator review remain. |
 | 049 | IN PROGRESS | Native v4 attestation is apt-deployed as 0.1.102 and reaches repository upload. GitHub rejects the mandated public Rekor V2 bundle because it has zero verifier-counted integrated timestamps; exact Sigstore RFC3161 TSA expansion approval, fixture proof, and Jackin Preview V-B/V-C remain. |
 | 050 | DONE | Velnor dogfood three-lane proof, 33-second clean rerun, and release recovery drill. PR #100 was open and green at baseline; its current delivery state must be reconciled. |
 | 051 | IN PROGRESS | Holla PR #37 head `94fc643a` is Velnor-green and includes canonical weekly `both`; manual V-B/V-C and operator review remain. |

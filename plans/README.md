@@ -88,8 +88,8 @@ V-A). Do not open estate PRs before 041's operator verification.
 
 | Plan | Repo | Phase | Effort | Extra deps | Status |
 |------|------|-------|--------|-----------|--------|
-| 047 | ChainArgos/java-monorepo | 1 | M | — | IN PROGRESS — PR #1753 head `3e2d21b5` adds canonical Sunday `both` parity to the nextest-only/current-pin delivery. Fresh V-B/V-C and explicit human review remain; never merge automatically |
-| 048 | ChainArgos/blockchain-nodes | 1 | S/M | — | IN PROGRESS — PR #651 head `8296582f` adds canonical Sunday `both` parity to the shared package/root-cause fixes. Fresh V-B/V-C and explicit human review remain; never merge automatically |
+| 047 | ChainArgos/java-monorepo | 1 | M | — | IN PROGRESS — PR #1753 head `78697247` adds canonical Sunday `both` parity to the nextest-only/current-pin delivery and passes the program-head audit with its full-history consumers justified. Fresh V-B/V-C and explicit human review remain; never merge automatically |
+| 048 | ChainArgos/blockchain-nodes | 1 | S/M | — | IN PROGRESS — PR #651 head `cc22d7cc` adds canonical Sunday `both`, pull-request execution, and rustfmt-clean control-plane tests to the shared package/root-cause fixes. Exact-head GitHub proof is running; fresh V-B/V-C and explicit human review remain; never merge automatically |
 | 049 | jackin-project/jackin (stacks on PR #810) | 1 | L | 047 (pattern) | IN PROGRESS — PR #810 head `d72e3a77` has canonical Sunday `both` parity. Native attestation shipped through signed apt as 0.1.102 and reaches GitHub upload; GitHub rejects public Rekor V2 bundles for zero verified integrated timestamps. Adding Sigstore RFC3161 TSA trust needs exact operator approval before implementation; fixture and Preview V-B/V-C remain |
 | 050 | tailrocks/velnor (dogfood) | 2 | M | 039 (fleet label) | DONE and delivered — three lanes green, 33 s zero-install rerun passes Class B budget, GitHub recovery drill green, and whole-program PR #100 merged as `c493a2f` |
 | 051 | tailrocks/holla | 2 | S | — | IN PROGRESS — PR #37 head `94fc643a` is green on its automatic Velnor lane and includes canonical Sunday `both`; fresh manual V-B/V-C and human review remain |
