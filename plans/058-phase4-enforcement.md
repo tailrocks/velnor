@@ -30,6 +30,9 @@ the standardized surface — the baseline every regression is measured against.
 
 ## Current state
 
+- `docs/program-requirement-evidence.tsv` is the machine-checkable live item,
+  evidence, delivery, and status ledger; `config/estate-repositories.json` is
+  its per-repository concern-classification companion.
 - `VELNOR_PROJECTS_SETUP.md` §8 Phase 4 + §11 metrics + §12 open decisions
   (1: required checks; 7: GitHub-lane GHA sccache; 8: parity cadence) —
   decisions 1/7/8 need operator answers recorded.

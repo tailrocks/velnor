@@ -9,6 +9,9 @@ The single active execution prompt for the whole program is
 [`docs/prompt.md`](../docs/prompt.md) — pass its
 body to `/goal`. There are no other active prompts; the old `prompts/`
 goal-prompt system is retired (all its sequences completed 2026-06-11).
+The live machine-checkable completion ledger is
+[`docs/program-requirement-evidence.tsv`](../docs/program-requirement-evidence.tsv);
+the concern inventory it references is `config/estate-repositories.json`.
 
 Each executor: **read the plan fully before starting**, honor its STOP
 conditions, run every verification command, and update your row below when

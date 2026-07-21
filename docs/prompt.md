@@ -177,6 +177,10 @@ only `proven-complete` may satisfy done. Missing mappings, stale paths,
 duplicate concern ownership, or evidence that proves only a narrower claim are
 work, not documentation footnotes.
 
+The live matrix is `docs/program-requirement-evidence.tsv`; its concern-level
+companion is `config/estate-repositories.json`. Update both with current
+evidence as implementation, delivery, and external state change.
+
 If implementation or an audit discovers an approved in-scope requirement with
 no owning plan, create the next monotonic numbered plan, link its dependencies,
 add it to `plans/README.md`, give it exact verification/evidence gates, and
