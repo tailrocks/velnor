@@ -68,7 +68,7 @@ only the gate needed to resolve uncertainty or changed behavior.
 | 046 | DONE | `velnor-tools audit-ci` and lane comparison. |
 | 047 | IN PROGRESS | java-monorepo PR #1753 head `f510ee0` is pushed with nextest-only probes and current pins. Fresh V-B/V-C waits the org fleet; explicit human merge approval remains mandatory. |
 | 048 | IN PROGRESS | PR #651 head `63a2a7c` contains the shared package fixes, current pins, and nextest-only instructions; local amd64 BuildKit proof passes for arbitrum, fraxtal-op-node, and op-node. Fresh V-B/V-C waits the org fleet, then explicit operator confirmation is required before merge. |
-| 049 | IN PROGRESS | PR #810 head `eff7c33` is pushed; standalone audit is error-free and nextest-focused gates pass. Preview still requires explicit approval of the proposed native `actions/attest-build-provenance@v4` surface, fleet proof remains, and one pre-existing Docker-fake integration defect requires root-cause repair. |
+| 049 | IN PROGRESS | PR #810 head `a27fcda` is pushed; standalone audit is error-free, host-attach test isolation is structurally fixed, and 2,182/2,182 affected tests pass. Preview still requires explicit approval of the proposed native `actions/attest-build-provenance@v4` surface and fleet proof remains. |
 | 050 | DONE | Velnor dogfood three-lane proof, 33-second clean rerun, and release recovery drill. PR #100 was open and green at baseline; its current delivery state must be reconciled. |
 | 051 | IN PROGRESS | Original Holla delivery passed; follow-up PR #37 head `e4bef1e` is clean and awaits fresh org-fleet V-B/V-C plus merge. |
 | 052 | IN PROGRESS | Original Ruxel delivery passed; follow-up PR #3 head `6e9c02a` is clean and awaits fresh org-fleet V-B/V-C plus merge. |

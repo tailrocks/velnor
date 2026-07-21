@@ -1522,3 +1522,18 @@ same-version local-artifact sentence is superseded and must not be used.
   succeeded while the attach path invokes the real Docker CLI, so the expected
   fake container does not exist. This remains technical work; it is not hidden
   or attributed to the workflow-only migration.
+
+### 2026-07-21 Jackin host-attach test isolation correction
+
+- The broader failure above was traced to the operator shell's intentional
+  `JACKIN_HOST_ATTACH=1`. Integration-test binaries link runtime libraries
+  without `cfg(test)`, so the environment selected the real host transport
+  despite injected `FakeRunner` and `NoOpDocker` dependencies.
+- PR #810 commit `a27fcda` adds explicit test-layout identity to
+  `JackinPaths`; transport selection now honors injected test context before
+  reading operator environment. This removes the whole environment-leak class
+  without weakening production host attach.
+- Proof under the still-exported host-attach variable: exact regression 1/1,
+  path-context regressions 2/2, affected strict clippy clean, and the combined
+  Jackin/console/xtask suite 2,182/2,182 nextest tests passed with the pinned
+  mise toolset.
