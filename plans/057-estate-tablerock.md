@@ -15,7 +15,7 @@
 - **Depends on**: plans/041-fixture-inline-matrix-and-snippets.md
 - **Category**: dx
 - **Planned at**: velnor repo commit `48b04ad`, target `03c6dd9`, 2026-07-18
-- **Current**: IN PROGRESS — delivered through trunk-only `main` at `57d407d`;
+- **Current**: IN PROGRESS — delivered through trunk-only `main` at `89e7d16`;
   local strict clippy, actionlint, audit-ci, and 768/768 nextest pass. V-B/V-C
   remains pending the organization-fleet migration.
 

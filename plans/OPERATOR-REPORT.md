@@ -1472,7 +1472,7 @@ same-version local-artifact sentence is superseded and must not be used.
   remains forbidden by TableRock's trunk-only rules.
 ### 2026-07-21 TableRock technical gate repaired
 
-- TableRock trunk `57d407d` replaces the obsolete macOS-only checks and
+- TableRock trunk `89e7d16` replaces the obsolete macOS-only checks and
   dependency workflows with current lane-aware CI while preserving native
   Apple preview work as an explicit product exception.
 - Strict clippy exposed 191 current-toolchain findings. Compiler-authored
