@@ -9,8 +9,9 @@
   telemetry playground are delivered; fixture PR #4, Jackin PR #810, and the
   remaining repository program branches are pushed. Playground PR #8 was
   superseded by policy-compliant direct-main delivery. Local nextest and
-  actionlint evidence is green except for one pre-existing Jackin Docker-fake
-  integration failure; V-A/V-B/V-C remain fleet-blocked.
+  actionlint evidence is green. Jackin's host-attach environment leak into
+  injected-fake tests was structurally repaired and its affected 2,182-test
+  nextest suite passes; V-A/V-B/V-C remain fleet-blocked.
 
 ## Requirement
 

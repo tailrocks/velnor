@@ -2,7 +2,7 @@
 
 This directory holds only **open work**. Completed plan files are removed —
 their history lives in git (the 2026-07-03 deep-audit generation, plans
-001–032, is fully DONE except the two outstanding rows below; see the
+001–032, is fully DONE except the approval-gated plan 015 row below; see the
 pre-cleanup tree at tag/commit `17136f9` for the archived files).
 
 The single active execution prompt for the whole program is

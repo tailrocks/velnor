@@ -153,8 +153,8 @@ fleet, warm-store hit confirmed on second run. Then the other two orgs.
 
 ## Maintenance notes
 
-- Org fleets make host stores multi-repo by default — plans 035/036/037's
-  scoping/budgets become load-bearing; do not migrate ChainArgos (production)
-  before 036+037 are live.
+- Org fleets make host stores multi-repo by default — the delivered storage,
+  capacity, and GC contracts formerly tracked by plans 035–037 become
+  load-bearing; do not migrate ChainArgos unless those live gates remain green.
 - Slot counts in §6 are starting points; doctor + queue-wait SLOs (plan 045)
   drive resizing.
