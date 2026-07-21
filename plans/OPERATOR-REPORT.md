@@ -1552,7 +1552,7 @@ same-version local-artifact sentence is superseded and must not be used.
   `actions/attest-build-provenance` v4.1.1, its exact commit and delegated
   action are unchanged, and official actions/runner remains v2.336.0. The two
   Jackin call sites remain exact at PR #810 head
-  `0e4e5c7`; approval is still not inferred.
+  `67b60bea`; approval is still not inferred.
 - Plan 015's safe ref audit still finds exactly one historical HTML path. It
   entered at `55ed22f`, was removed at `d7e75af`, remains reachable from the
   current branches plus nine remote-only branches and 97 release tags, and is
@@ -1620,3 +1620,26 @@ same-version local-artifact sentence is superseded and must not be used.
   After operator fingerprint confirmation, drain first, use only
   `apt-get update && apt-get install velnor-runner`, confirm package/image
   0.1.99, restore the daemon, and rerun the failed main CI plus fixture smoke.
+
+### 2026-07-21 nextest live-surface enforcement
+
+- Velnor `1bd00cf` closes the audit gap that previously inspected only workflow
+  `run:` blocks. `audit-ci` now checks live scripts, configuration,
+  instructions, and Rust documentation while excluding generated artifacts and
+  explicitly historical plans, migrations, research, evidence, and benchmark
+  records. Its parser test distinguishes executable commands from prohibition
+  and incident prose.
+- The resulting 13-repository audit reports zero errors and zero test-runner
+  findings; the same run retains six already-classified concurrency advisories.
+  Velnor's full format, strict clippy, actionlint, and 655-test nextest gate is
+  green.
+- The wider scan found and repaired live surfaces missed by the older audit:
+  Java PR #1753 head `6f7ee98b`, Ruxel PR #3 head `27fa811`, and Jackin PR
+  #810 head `67b60bea`. Jackin now rejects runnable rustdoc fences unless their
+  examples are mirrored into nextest-discoverable tests; all 27 library
+  packages and 263 xtask tests pass.
+- Ruxel `e96ad0c` fixes the exposed evidence defect structurally: derived
+  floating statistics are rounded before serialization, eliminating
+  Python-version-dependent last-digit drift. Its required gate now passes
+  format, strict clippy, all 215 nextest tests, dependency audit, 54 Python
+  verifier tests, and all oracle, benchmark, and chaos evidence checks.

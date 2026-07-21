@@ -9,9 +9,16 @@
   telemetry playground are delivered; fixture PR #4, Jackin PR #810, and the
   remaining repository program branches are pushed. Playground PR #8 was
   superseded by policy-compliant direct-main delivery. Local nextest and
-  actionlint evidence is green. Jackin's host-attach environment leak into
+  actionlint evidence is green. Velnor `1bd00cf` extends the mechanical rule
+  beyond workflow `run:` blocks to live scripts, configuration, instructions,
+  and Rust documentation; the current 13-repository audit has zero errors and
+  zero test-runner findings. Jackin's host-attach environment leak into
   injected-fake tests was structurally repaired and its affected 2,182-test
-  nextest suite passes; V-A/V-B/V-C remain fleet-blocked.
+  nextest suite passes. Jackin `67b60bea` replaces its indirect rustdoc runner
+  with a parser-backed gate requiring nextest mirrors for runnable examples;
+  all 27 library packages and 263 xtask tests pass. Java `6f7ee98b` and Ruxel
+  `e96ad0c` remove the last live source/script instructions found by the wider
+  audit. V-A/V-B/V-C remain fleet-blocked.
 
 ## Requirement
 
