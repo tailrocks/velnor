@@ -409,6 +409,7 @@ fn audit_repo_profile(
     legacy_uniform_warnings: bool,
 ) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
+    findings.extend(audit_test_runner_surfaces(root)?);
     if !root.join(".github/AGENTS.md").is_file() {
         findings.push(Finding::error(
             "uniform-agents",
@@ -459,6 +460,123 @@ fn audit_repo_profile(
         (&left.file, &left.path, left.rule).cmp(&(&right.file, &right.path, right.rule))
     });
     Ok(findings)
+}
+
+fn audit_test_runner_surfaces(root: &Path) -> Result<Vec<Finding>> {
+    let mut files = Vec::new();
+    collect_test_runner_files(root, root, &mut files)?;
+    files.sort();
+    let mut findings = Vec::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let text = fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        for (index, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if path.extension().is_some_and(|extension| extension == "rs")
+                && !trimmed.starts_with("///")
+                && !trimmed.starts_with("//!")
+            {
+                continue;
+            }
+            if is_cargo_test_instruction(line) {
+                findings.push(Finding::error(
+                    "test-runner",
+                    &relative,
+                    format!("line {}", index + 1),
+                    "use cargo nextest run; cargo test is forbidden by the estate test-runner contract",
+                ));
+            }
+        }
+    }
+    Ok(findings)
+}
+
+fn collect_test_runner_files(
+    root: &Path,
+    directory: &Path,
+    files: &mut Vec<PathBuf>,
+) -> Result<()> {
+    for entry in fs::read_dir(directory).with_context(|| format!("read {}", directory.display()))? {
+        let entry = entry.with_context(|| format!("read entry under {}", directory.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("read file type for {}", path.display()))?;
+        if file_type.is_dir() {
+            let relative = path.strip_prefix(root).unwrap_or(&path);
+            if !is_historical_or_generated_directory(relative) {
+                collect_test_runner_files(root, &path, files)?;
+            }
+        } else if file_type.is_file() && is_test_runner_surface(&path) {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn is_historical_or_generated_directory(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component.as_os_str().to_str(),
+            Some(
+                ".git"
+                    | ".velnor-compare"
+                    | "target"
+                    | "node_modules"
+                    | "plans"
+                    | "migrations"
+                    | "research"
+                    | "validation"
+                    | "evidence"
+                    | "history"
+                    | "benchmarks"
+            )
+        )
+    })
+}
+
+fn is_test_runner_surface(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if matches!(name, "compatibility.toml" | "Cargo.lock") {
+        return false;
+    }
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension,
+                "sh" | "bash" | "zsh" | "md" | "mdx" | "rs" | "toml" | "yml" | "yaml"
+            )
+        })
+        || matches!(name, "Justfile" | "Makefile")
+}
+
+fn is_cargo_test_instruction(line: &str) -> bool {
+    let line = line
+        .trim_start()
+        .strip_prefix("///")
+        .or_else(|| line.trim_start().strip_prefix("//!"))
+        .or_else(|| line.trim_start().strip_prefix('#'))
+        .unwrap_or_else(|| line.trim_start())
+        .trim_start_matches([' ', '\t', '`', '>', '-', '*']);
+    let Some(index) = line.find("cargo test") else {
+        return false;
+    };
+    let prefix = line[..index].trim();
+    prefix.is_empty()
+        || matches!(prefix, "rtk" | "rtk proxy" | "mise x --" | "mise exec --")
+        || prefix.ends_with("&&")
+        || prefix.ends_with('"')
+        || prefix
+            .split_whitespace()
+            .all(|token| token.contains('=') && !token.starts_with('='))
 }
 
 fn audit_workflow(
@@ -1190,6 +1308,26 @@ jobs:
             "cargo test --workspace --locked",
         );
         assert!(has_rule(&audit(&yaml), "test-runner"));
+    }
+
+    #[test]
+    fn recognizes_live_cargo_test_instructions_without_flagging_prose() {
+        for line in [
+            "cargo test --workspace --locked",
+            "rtk cargo test -p crate",
+            "//! rtk cargo test -p crate",
+            "FOO=bar cargo test --lib",
+            "command = \"cargo test --workspace\"",
+            "fmt && cargo test --workspace",
+        ] {
+            assert!(is_cargo_test_instruction(line), "missed {line:?}");
+        }
+        for line in [
+            "Never use `cargo test`; use nextest.",
+            "Historical cargo test failure caused the incident.",
+        ] {
+            assert!(!is_cargo_test_instruction(line), "false positive {line:?}");
+        }
     }
 
     #[test]
