@@ -48,7 +48,7 @@
     },
     {
       "name":"jackin-project/jackin",
-      "path":"/Users/donbeave/Projects/tailrocks/jackin-project/jackin",
+      "path":"/Users/donbeave/Projects/tailrocks/jackin-project/jackin-velnor-estate",
       "concerns": {
         "checkout":{"classification":"required","evidence":"Jackin's canonical telemetry conformance compile job consumes repository source through pinned checkout.","implementations":[{"workflow":"ci.yml","job_ids":["telemetry-conformance"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]}]},
         "tool-setup":{"classification":"required","evidence":"Jackin's canonical telemetry conformance compile job installs its locked Rust toolchain through mise.","implementations":[{"workflow":"ci.yml","job_ids":["telemetry-conformance"],"canonical_markers":["jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d"]}]},
