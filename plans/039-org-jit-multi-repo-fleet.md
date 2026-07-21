@@ -28,6 +28,15 @@ build-out.
 
 ## Current state (verified against `48b04ad`)
 
+- Revalidated 2026-07-21: `tailrocks` has only runner group id 1 (`Default`,
+  `visibility=all`) and zero organization runners; five healthy slots remain
+  registered to `tailrocks/velnor`. The authenticated token has `admin:org`,
+  `repo`, and `workflow`, but creating/configuring the proposed
+  `velnor-trusted` group remains an explicit operator-authority boundary.
+- Sentry resolves to `5.9.55.237`; the presented ED25519 fingerprint is
+  `SHA256:n42CpA98ASrRoKhbt5xhFTKnqIV/AbRNHHlMktbFtok`. It is not trusted yet;
+  the operator must verify it out of band before accepting it.
+
 - `crates/velnor-runner/src/protocol.rs:126-134` (verified excerpt):
   ```rust
   fn token_scope_path(segments: &[&str]) -> Result<String> {

@@ -46,7 +46,38 @@ from repository scope to organization scope before estate smoke dispatches.
 The authenticated operator token now carries `admin:org`, `repo`, and
 `workflow`; no further GitHub scope expansion is required for this migration.
 
-1. Find the trusted group id and confirm its visibility is `selected`:
+1. With explicit operator approval, create the currently missing restricted
+   group and its complete allowlist in one request. The proposed exact name is
+   `velnor-trusted`; all listed repositories are public, so GitHub requires
+   `allows_public_repositories=true`. Selection remains repository-scoped and
+   fork execution remains governed by the separate untrusted-pool rule above.
+
+   ```sh
+   gh api --method POST -H 'X-GitHub-Api-Version: 2026-03-10' \
+     orgs/tailrocks/actions/runner-groups \
+     -f name='velnor-trusted' \
+     -f visibility='selected' \
+     -F allows_public_repositories=true \
+     -F 'selected_repository_ids[]=1255367013' \
+     -F 'selected_repository_ids[]=1235761953' \
+     -F 'selected_repository_ids[]=1277301638' \
+     -F 'selected_repository_ids[]=1301508644' \
+     -F 'selected_repository_ids[]=1262209244' \
+     -F 'selected_repository_ids[]=1265722009' \
+     -F 'selected_repository_ids[]=1302045151' \
+     -F 'selected_repository_ids[]=1168023899' \
+     -F 'selected_repository_ids[]=1247026498' \
+     -F 'selected_repository_ids[]=1247026496' \
+     -F 'selected_repository_ids[]=1256201624' \
+     --jq '[.id, .name, .visibility, .allows_public_repositories] | @tsv'
+   ```
+
+   [GitHub documents](https://docs.github.com/en/rest/actions/self-hosted-runner-groups?apiVersion=2026-03-10#create-a-self-hosted-runner-group-for-an-organization)
+   `POST /orgs/{org}/actions/runner-groups` for this operation; classic
+   OAuth/PAT authentication requires `admin:org`, which the current
+   authenticated identity now has. Do not run this command before approval.
+
+2. Find the trusted group id and confirm its visibility is `selected`:
 
    ```sh
    gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
@@ -54,7 +85,7 @@ The authenticated operator token now carries `admin:org`, `repo`, and
      --jq '.runner_groups[] | [.id, .name, .visibility] | @tsv'
    ```
 
-2. Set `trusted_group_id` to that numeric id, then add every tailrocks estate
+3. Set `trusted_group_id` to that numeric id, then add every tailrocks estate
    repository. These repository ids are stable GitHub ids:
 
    ```sh
@@ -75,7 +106,7 @@ The authenticated operator token now carries `admin:org`, `repo`, and
    `schemalane`, `pg-bigdecimal`, `tracing-request-level`, and
    `velnor-actions-fixture`.
 
-3. Verify the allowlist before dispatching anything:
+4. Verify the allowlist before dispatching anything:
 
    ```sh
    gh api --paginate -H 'X-GitHub-Api-Version: 2026-03-10' \
@@ -83,7 +114,7 @@ The authenticated operator token now carries `admin:org`, `repo`, and
      --jq '.repositories[].full_name'
    ```
 
-4. Cancel every older active verification run. Dispatch one `lanes=both` run
+5. Cancel every older active verification run. Dispatch one `lanes=both` run
    per repository, monitor only its returned id, and require a non-empty runner
    and group assignment within two minutes. Then run `velnor-runner doctor`
    and the warm rerun proof before declaring migration complete.

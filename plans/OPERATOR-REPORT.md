@@ -1573,3 +1573,18 @@ same-version local-artifact sentence is superseded and must not be used.
   `d3539b9` because fileprivate protocol witnesses were too narrow; current
   trunk already repairs that root cause, and replacement run `29804459618` is
   active. No duplicate patch was applied over the independent trunk repair.
+
+### 2026-07-21 org-fleet authority revalidation
+
+- Current GitHub state still has only the unrestricted `tailrocks` Default
+  runner group, zero organization runners, and five idle online runners scoped
+  to `tailrocks/velnor`. The authenticated identity now has the necessary
+  `admin:org`, `repo`, and `workflow` scopes; lack of scope is no longer the
+  blocker.
+- `docs/org-fleet-migration.md` now contains the exact operator-gated creation
+  request for proposed selected group `velnor-trusted`, including all eleven
+  public-repository ids and `allows_public_repositories=true`, followed by
+  allowlist verification. This follows GitHub's current 2026-03-10 REST shape.
+- Read-only host-key discovery reports Sentry ED25519 fingerprint
+  `SHA256:n42CpA98ASrRoKhbt5xhFTKnqIV/AbRNHHlMktbFtok`. No trust was added;
+  operator out-of-band verification and acceptance remain mandatory.
