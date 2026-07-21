@@ -975,7 +975,18 @@ fn is_native_apple_job(job: &serde_yaml::Mapping) -> bool {
                 steps.iter().any(|step| {
                     object_get(step, "run")
                         .and_then(Value::as_str)
-                        .is_some_and(|run| run.contains("./scripts/build-native-app.sh"))
+                        .is_some_and(|run| {
+                            [
+                                "./scripts/build-native-app.sh",
+                                "./scripts/build-xcframework.sh",
+                                "xcodebuild ",
+                                "codesign ",
+                                "xcrun notarytool ",
+                                "swift test ",
+                            ]
+                            .iter()
+                            .any(|marker| run.contains(marker))
+                        })
                 })
             })
 }
@@ -1097,6 +1108,28 @@ jobs:
 "#;
         let findings = audit(yaml);
         assert!(!has_rule(&findings, "lanes"), "{findings:?}");
+        assert!(!has_rule(&findings, "runner-os"), "{findings:?}");
+    }
+
+    #[test]
+    fn native_apple_release_does_not_require_a_linux_runner() {
+        let yaml = r#"
+on:
+  workflow_dispatch:
+concurrency:
+  group: native-release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - run: |
+          xcodebuild archive -project native/App.xcodeproj
+          codesign --verify --deep --strict TableRock.app
+          xcrun notarytool submit TableRock.zip --wait
+"#;
+        let findings = audit(yaml);
         assert!(!has_rule(&findings, "runner-os"), "{findings:?}");
     }
 
