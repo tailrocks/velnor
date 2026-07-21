@@ -30,7 +30,7 @@ Verification gates used by every velnor code plan (from `mise.toml`):
 | Plan | Title | Priority | Effort | Status |
 |------|-------|----------|--------|--------|
 | 014 | Harden the systemd unit (sandboxing) without breaking Docker/bind mounts | P2 | S | DONE: v0.1.49 apt deployment; hardened unit ran green fixture jobs; live score 7.9 |
-| 015 | Purge committed run-log HTML captures with channel tokens + commit policy | P2 | S | BLOCKED: HEAD/guard are clean; capture commit `55ed22f` remains reachable from current heads and 97 release tags; exact freeze, backup, rewrite, rollback, reclone, and verification procedure is prepared but requires explicit coordinated-window confirmation |
+| 015 | Purge committed run-log HTML captures with channel tokens + commit policy | P2 | S | BLOCKED: HEAD/guard are clean; capture commit `55ed22f` remains reachable from current heads and 98 release tags through `v0.1.99`; exact freeze, backup, rewrite, rollback, reclone, and verification procedure is prepared but requires explicit coordinated-window confirmation |
 
 ---
 

@@ -125,8 +125,8 @@ force-push without confirmation.
   `55ed22fe3162228876c1c5829d3c4d966b28e0d2` and was removed at
   `d7e75af8867bfd43ed48c84af2087350c6fdca8e`.
 - It is reachable from `main`, `velnor-estate-standard`, 12 fetched origin
-  refs including `origin/HEAD`, and 97 release tags (`v0.1.2` through
-  `v0.1.98`, with the repository's existing tag sequence). Rewriting only
+  refs including `origin/HEAD`, and 98 release tags (`v0.1.2` through
+  `v0.1.99`, with the repository's existing tag sequence). Rewriting only
   `main` is insufficient.
 - Exact current head/ref inventory after fetch+prune:
   `refs/heads/main`, `refs/heads/velnor-estate-standard`,
@@ -135,8 +135,8 @@ force-push without confirmation.
   `anyhow-1.x-lockfile`, `casey-just-1.x`, `lock-file-maintenance`,
   `renovatebot-github-action-46.x`, `rust-futures-monorepo`,
   `serde-monorepo`, `serde_json-1.x-lockfile`, `thiserror-2.x-lockfile`, and
-  `time-0.x-lockfile`. The 97 tag names are the repository's `v0.1.2` through
-  `v0.1.98` sequence. Re-run this inventory after the write freeze; it is a
+  `time-0.x-lockfile`. The 98 tag names are the repository's `v0.1.2` through
+  `v0.1.99` sequence. Re-run this inventory after the write freeze; it is a
   recorded baseline, never a hard-coded push target.
 - Rewriting the release tags changes their commit targets. The coordinated
   notice must therefore include release/apt maintainers and consumers that

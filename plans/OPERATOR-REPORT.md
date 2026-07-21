@@ -1658,3 +1658,28 @@ same-version local-artifact sentence is superseded and must not be used.
 - TableRock remains incomplete only for fresh org-fleet V-B/V-C. The
   repository has no applicable Ubuntu execution surface; its Apple-only
   classification remains enforced by Velnor's shape-aware estate audit.
+
+### 2026-07-21 plan 015 post-release ref refresh
+
+- A fresh fetch/prune and presence-only scan finds the historical capture
+  absent from the tracked tree and still guarded by `.gitignore`. No removed
+  blob contents or embedded values were read.
+- Commit `55ed22f` remains reachable from the same two local heads, twelve
+  origin refs including `origin/HEAD`, and now 98 release tags: the existing
+  sequence through `v0.1.99`. The coordinated rewrite inventory and index were
+  updated; execution still requires explicit approval of the freeze window.
+
+### 2026-07-21 delivered-estate audit and fleet revalidation
+
+- The current 13-repository audit was rerun after TableRock's native proof,
+  with the detached Jackin PR #810 worktree at `67b60bea` substituted for the
+  user's unrelated checkout branch. It reports zero errors and zero
+  test-runner findings. The same six documented cross-ref publication-lock
+  advisories remain; no new applicability or canonical-drift gap appeared.
+- Running the same audit against the user's ordinary Jackin checkout produced
+  94 Jackin-only errors, confirming why exact program-head substitution is
+  required. No user checkout was modified.
+- Live `tailrocks` organization state remains one unrestricted `Default`
+  runner group and zero organization runners. The open estate PRs therefore
+  have DCO/local evidence but no fresh V-B/V-C proof; no merge or runner-group
+  policy change was inferred.
