@@ -88,7 +88,7 @@ const fn allowed(value: &'static str, release: &'static str) -> AllowedRef {
 
 const CHECKOUT_REFS: &[AllowedRef] = &[
     allowed(NATIVE_ACTION_REF, "broker-managed checkout"),
-    allowed("9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0", "v7"),
+    allowed("3d3c42e5aac5ba805825da76410c181273ba90b1", "v7"),
     allowed("df4cb1c069e1874edd31b4311f1884172cec0e10", "v6"),
     allowed("34e114876b0b11c390a56381ad16ebd13914f8d5", "v4"),
     allowed("v4", "fixture transition until plan 041"),
@@ -116,7 +116,6 @@ const MISE_REFS: &[AllowedRef] = &[
 ];
 const SCCACHE_REFS: &[AllowedRef] = &[
     allowed("9e7fa8a12102821edf02ca5dbea1acd0f89a2696", "v0.0.10"),
-    allowed("1583d6b38d7be47f593cb472781bbb21cab4321e", "v0.0.10"),
     allowed("v0.0.10", "fixture transition until plan 041"),
 ];
 const MOLD_REFS: &[AllowedRef] = &[
@@ -1175,7 +1174,7 @@ mod tests {
     fn validate_job_expands_matrix_literals_before_capability_checks() {
         let job = job(
             "actions/checkout",
-            Some("9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"),
+            Some("3d3c42e5aac5ba805825da76410c181273ba90b1"),
             serde_json::json!({"lfs": "${{ matrix.package == 'heimdall' }}"}),
         );
         let context = vec![(

@@ -810,7 +810,7 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
                 ("path filtering", "dorny/paths-filter@v4"),
                 ("mise tool installer", "jdx/mise-action@v4"),
                 ("mold linker", "rui314/setup-mold@v1"),
-                ("sccache action", "mozilla-actions/sccache-action@1583d6b"),
+                ("sccache action", "mozilla-actions/sccache-action@9e7fa8a"),
                 ("sccache local env", "SCCACHE_GHA_ENABLED: \"false\""),
                 ("cargo cache", "actions/cache@55cc834"),
                 ("cargo cache restore-keys", "restore-keys:"),

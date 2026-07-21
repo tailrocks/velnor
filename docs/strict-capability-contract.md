@@ -128,7 +128,7 @@ env:
 
 steps:
   - name: Set up local sccache
-    uses: mozilla-actions/sccache-action@1583d6b38d7be47f593cb472781bbb21cab4321e # v0.0.10
+    uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
     with:
       version: v0.16.0
       disable_annotations: "false"

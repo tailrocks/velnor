@@ -35,7 +35,7 @@ Repo: `/Users/donbeave/Projects/tailrocks/ruxel`. Single workflow
 concurrency present (1/1); zero `timeout-minutes`; pins:
 `actions/cache@27d5ce7f...# v5`, `actions/checkout@df4cb1c0...# v6`,
 `jdx/mise-action@dba19683...# v4.1.0`,
-`mozilla-actions/sccache-action@1583d6b3...# v0.0.10`. No mold. Root has
+`mozilla-actions/sccache-action@9e7fa8a1...# v0.0.10`. No mold. Root has
 `mise.toml`, `renovate.json`, `rust-toolchain.toml`.
 
 Canonical blocks (inline; exact texts):
