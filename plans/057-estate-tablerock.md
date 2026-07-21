@@ -15,6 +15,9 @@
 - **Depends on**: plans/041-fixture-inline-matrix-and-snippets.md
 - **Category**: dx
 - **Planned at**: velnor repo commit `48b04ad`, target `03c6dd9`, 2026-07-18
+- **Current**: IN PROGRESS — delivered through trunk-only `main` at `57d407d`;
+  local strict clippy, actionlint, audit-ci, and 768/768 nextest pass. V-B/V-C
+  remains pending the organization-fleet migration.
 
 ## Why this matters
 
@@ -87,8 +90,9 @@ budget (no-change rerun ≤ 60 s Velnor).
 
 ## Done criteria
 
-- [ ] Class D ci.yml + 4 root files landed; macOS CI gone
-- [ ] Local gate green; actionlint green
+- [x] Class D ci.yml + root tool files landed; native Apple preview remains an
+  explicit product-specific macOS exception
+- [x] Local gate green; actionlint green
 - [ ] Operator dispatches green or deferred; no out-of-scope changes
 
 ## STOP conditions

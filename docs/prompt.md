@@ -75,7 +75,7 @@ only the gate needed to resolve uncertainty or changed behavior.
 | 054 | BLOCKED | Termrock PR #4 lanes fail identical pre-existing rustfmt drift outside the estate plan. |
 | 055 | DONE | Schemalane, pg-bigdecimal, and tracing-request-level merged with clean V-B/V-C proof. |
 | 056 | DONE | Parallax telemetry playground merged and passed. |
-| 057 | BLOCKED | Current clean TableRock `main` (including local commits `5c37304` and `9e32138`) reproduces 191 strict-clippy errors. Its binding plan forbids landing CI red; trunk-only delivery and newer coverage must still be preserved after an operator decision on repairing source first. |
+| 057 | IN PROGRESS | TableRock trunk `57d407d` now passes strict clippy, actionlint, the estate audit, and 768/768 nextest tests. The root fixture defect was trusting container stdout before the forwarded Redis port accepted adapter connections; shared readiness probing and serialized real-server nextest groups remove that class. V-B/V-C waits the org fleet. |
 | 058 | IN PROGRESS at baseline | Phase-4 audit, performance report, and direction-doc reconciliation were executed; finish status/bookkeeping and any currently authorized delivery work. Human-only policy decisions remain excluded. |
 | 059 | DONE | Recorded host baseline cleanup and post-cleanup smoke. |
 

@@ -1470,3 +1470,19 @@ same-version local-artifact sentence is superseded and must not be used.
 - Required operator choice: authorize repairing the existing TableRock source
   lint baseline first, or defer plan 057. The obsolete plan branch/template
   remains forbidden by TableRock's trunk-only rules.
+### 2026-07-21 TableRock technical gate repaired
+
+- TableRock trunk `57d407d` replaces the obsolete macOS-only checks and
+  dependency workflows with current lane-aware CI while preserving native
+  Apple preview work as an explicit product exception.
+- Strict clippy exposed 191 current-toolchain findings. Compiler-authored
+  mechanical fixes plus narrowly justified typed-boundary lint expectations
+  reduced the baseline to zero without weakening `-D warnings`.
+- Full nextest initially exposed two architectural test defects: real-server
+  binaries launched too many containers concurrently, and several Redis tests
+  trusted container stdout before the host-forwarded port accepted adapter
+  connections. A committed nextest test group serializes real-server binaries;
+  shared adapter-level readiness probing replaces one-shot connects.
+- Proof: `cargo clippy --workspace --all-targets --locked -- -D warnings`,
+  actionlint, and standalone `audit-ci` pass; full nextest reports 768 passed,
+  12 skipped. V-B/V-C remains pending organization-scope runner migration.
