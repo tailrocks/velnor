@@ -520,7 +520,10 @@ fn audit_workflow(
             ));
         }
     }
-    if workload && (!has_lanes_input(yaml) || !text.contains(INLINE_MATRIX_MARKER)) {
+    if workload
+        && !is_native_apple_workflow(yaml)
+        && (!has_lanes_input(yaml) || !text.contains(INLINE_MATRIX_MARKER))
+    {
         findings.push(Finding::error(
             "lanes",
             file,
@@ -565,16 +568,7 @@ fn audit_workflow(
         }
         if let Some(runs_on) = mapping_get(job, "runs-on") {
             let value = compact(runs_on);
-            let native_apple_build = value.starts_with("macos-")
-                && mapping_get(job, "steps")
-                    .and_then(Value::as_sequence)
-                    .is_some_and(|steps| {
-                        steps.iter().any(|step| {
-                            object_get(step, "run")
-                                .and_then(Value::as_str)
-                                .is_some_and(|run| run.contains("./scripts/build-native-app.sh"))
-                        })
-                    });
+            let native_apple_build = is_native_apple_job(job);
             if !native_apple_build
                 && ["ubuntu-latest", "ubuntu-24.04", "macos-", "windows-"]
                     .iter()
@@ -963,6 +957,29 @@ fn has_lanes_input(yaml: &Value) -> bool {
         .is_some()
 }
 
+fn is_native_apple_workflow(yaml: &Value) -> bool {
+    let Some(jobs) = object_get(yaml, "jobs").and_then(Value::as_mapping) else {
+        return false;
+    };
+    !jobs.is_empty()
+        && jobs
+            .values()
+            .all(|job| job.as_mapping().is_some_and(is_native_apple_job))
+}
+
+fn is_native_apple_job(job: &serde_yaml::Mapping) -> bool {
+    mapping_get(job, "runs-on").is_some_and(|runs_on| compact(runs_on).starts_with("macos-"))
+        && mapping_get(job, "steps")
+            .and_then(Value::as_sequence)
+            .is_some_and(|steps| {
+                steps.iter().any(|step| {
+                    object_get(step, "run")
+                        .and_then(Value::as_str)
+                        .is_some_and(|run| run.contains("./scripts/build-native-app.sh"))
+                })
+            })
+}
+
 fn object_get<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
     value
         .as_mapping()
@@ -1060,6 +1077,27 @@ jobs:
                 "      - run: ./scripts/build-native-app.sh",
             );
         assert!(!has_rule(&audit(&yaml), "runner-os"));
+    }
+
+    #[test]
+    fn native_apple_workflow_does_not_require_fake_linux_lanes() {
+        let yaml = r#"
+on:
+  push:
+  workflow_dispatch:
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - run: ./scripts/build-native-app.sh
+"#;
+        let findings = audit(yaml);
+        assert!(!has_rule(&findings, "lanes"), "{findings:?}");
+        assert!(!has_rule(&findings, "runner-os"), "{findings:?}");
     }
 
     #[test]

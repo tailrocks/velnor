@@ -89,7 +89,7 @@
       "name":"tailrocks/tablerock",
       "path":"/Users/donbeave/Projects/tailrocks/tablerock",
       "concerns": {
-        "integration-services":{"classification":"repo-specific","evidence":"Native Swift/FFI parity is a TableRock product concern, currently represented by checks.yml.","implementations":[]},
+        "integration-services":{"classification":"repo-specific","evidence":"Native Swift/FFI parity is a TableRock product concern represented by native.yml; it is an all-macOS application gate and therefore cannot use the Linux Velnor lane matrix.","implementations":[]},
         "artifacts":{"classification":"repo-specific","evidence":"Generated Swift bindings and native evidence are repository-specific outputs.","implementations":[]}
       }
     },
