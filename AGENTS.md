@@ -118,6 +118,12 @@ Always use Rust for scripting as much as possible. Prefer Rust for verification 
 
 Rarely use Python or shell. Use them only when the task cannot reasonably be done properly in Rust, or when the existing interface is necessarily a shell entrypoint that delegates substantive work to Rust.
 
+## HARD RULE: Rust tests use nextest
+
+Always run Rust tests with `cargo nextest run`, never `cargo test`. This applies
+to local verification, CI workflows, maintenance scripts, documentation, and
+agent instructions.
+
 ## HARD RULE: Keep direction docs and the execution prompt consistent
 
 `docs/` is the single source of truth for direction: [docs/mission.md](docs/mission.md), [docs/vision.md](docs/vision.md), [docs/roadmap.md](docs/roadmap.md) (the plan), and [docs/comparison.md](docs/comparison.md). The single active execution prompt ([docs/prompt.md](docs/prompt.md)), the plan library (`plans/`), and the rest of the repository defer to it. The old `prompts/` goal-prompt system is retired — its sequences completed 2026-06-11 and the files were removed 2026-07-18; there is exactly ONE active prompt at a time.
