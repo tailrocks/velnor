@@ -19,7 +19,7 @@
   "repositories": [
     {
       "name":"ChainArgos/java-monorepo",
-      "path":"/Users/donbeave/Projects/ChainArgos/java-monorepo",
+      "path":"/Users/donbeave/Projects/ChainArgos/java-monorepo-velnor-estate",
       "concerns": {
         "rust-ci":{"classification":"repo-specific","evidence":"The production monorepo uses path-classified per-package Rust jobs and an aggregate required check; package identities are explicit repository parameters under the approved Class-A L2/L3 model.","implementations":[]},
         "checkout":{"classification":"required","evidence":"Every source-consuming Class-A workload job must use the canonical checkout pin and credential boundary.","implementations":[{"workflow":"ci.yml","job_ids":["changes","check","test-bitcoin-processor","test-eth-processor","test-coingecko-pricing","test-processor-monitor","test-tron-processor","test-blockchain-explorer","test-eth-grpc-server","test-tron-grpc-server","test-legacy-grpc-server"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]}]},
