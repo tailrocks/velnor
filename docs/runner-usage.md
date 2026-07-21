@@ -80,6 +80,9 @@ a stale tool image; image-build failure fails the package transaction.
   pool by accident.
 - Organization fleets: use `--url https://github.com/<org>` with
   `--pool-name <runner-group>` to resolve the current group id through GitHub.
+  The daemon validates that name/id pair once per daemon pass; all slots and
+  later JIT recycles reuse the resolved id so fleet width and retry storms do
+  not multiply GitHub REST quota consumption.
   Follow the drain, trust-lane, label-continuity, and rollback procedure in
   [org-fleet-migration.md](org-fleet-migration.md).
 

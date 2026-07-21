@@ -766,11 +766,12 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
             prune_stale_job_workspaces(work_root);
         }
     }
-    configure_daemon_slots(args, &config_base, slots).await?;
+    let resolved_args = resolve_daemon_runner_group_once(args).await?;
+    configure_daemon_slots(&resolved_args, &config_base, slots).await?;
     if draining() {
         return Ok(());
     }
-    if !daemon_should_poll_after_jit_config(args) {
+    if !daemon_should_poll_after_jit_config(&resolved_args) {
         println!("Daemon JIT config dry run complete; skipped polling GitHub for jobs.");
         return Ok(());
     }
@@ -796,7 +797,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     );
 
     let spawn_slot = |slot_tasks: &mut JoinSet<(usize, Result<()>)>, slot_index: usize| {
-        let daemon_args = args.clone();
+        let daemon_args = resolved_args.clone();
         let config_base = config_base.clone();
         slot_tasks.spawn(async move {
             // catch_unwind keeps the slot index attached to a panic, so the
@@ -1218,6 +1219,48 @@ async fn retry_daemon_slot_jit_config(
     configure(configure_args).await.with_context(|| {
         format!("retry JIT config for daemon slot-{slot_index} after cycle {cycle}")
     })
+}
+
+/// Resolve and validate the operator-selected runner group once per daemon
+/// pass. Every slot and every later JIT recycle then reuses the immutable id
+/// instead of spending one REST request per slot per attempt.
+async fn resolve_daemon_runner_group_once(args: &DaemonArgs) -> Result<DaemonArgs> {
+    if args.url.is_none() {
+        return Ok(args.clone());
+    }
+    let Some(pool_name) = args.pool_name.as_deref() else {
+        return Ok(args.clone());
+    };
+    if args.dry_run_registration {
+        if args.pool_id.is_none() {
+            bail!("--pool-name requires --pool-id with --dry-run-jit-config");
+        }
+        let mut resolved = args.clone();
+        resolved.pool_name = None;
+        return Ok(resolved);
+    }
+
+    let url = args
+        .url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("runner group resolution requires --url"))?;
+    let pat = args
+        .pat
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("runner group resolution requires a GitHub PAT"))?;
+    let scope = GitHubScope::parse(url)?;
+    let groups = RegistrationClient::new()?
+        .list_runner_groups(&scope, pat)
+        .await?;
+    let pool_id = resolve_runner_group_id(&groups, pool_name, args.pool_id)?;
+
+    let mut resolved = args.clone();
+    resolved.pool_id = Some(pool_id);
+    resolved.pool_name = None;
+    println!(
+        "Resolved runner group '{pool_name}' to id {pool_id}; all daemon slots reuse this id."
+    );
+    Ok(resolved)
 }
 
 async fn configure_daemon_slots(args: &DaemonArgs, config_base: &Path, slots: usize) -> Result<()> {
@@ -7913,6 +7956,52 @@ jobs:
         );
         assert!(configure_args.replace);
         assert_eq!(configure_args.pool_name.as_deref(), Some("Default"));
+    }
+
+    #[tokio::test]
+    async fn daemon_dry_run_resolves_group_once_for_all_slots() {
+        let mut args = daemon_args(8);
+        args.url = Some("https://github.com/tailrocks".into());
+        args.pool_name = Some("Velnor".into());
+        args.pool_id = Some(3);
+        args.dry_run_registration = true;
+
+        let resolved = resolve_daemon_runner_group_once(&args).await.unwrap();
+
+        assert_eq!(resolved.pool_id, Some(3));
+        assert_eq!(resolved.pool_name, None);
+        for slot in 1..=8 {
+            let configured =
+                daemon_slot_configure_args(&resolved, Path::new("/config"), slot, 8).unwrap();
+            assert_eq!(configured.pool_id, Some(3));
+            assert_eq!(configured.pool_name, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn daemon_dry_run_group_name_requires_resolved_id() {
+        let mut args = daemon_args(2);
+        args.url = Some("https://github.com/tailrocks".into());
+        args.pool_name = Some("Velnor".into());
+        args.dry_run_registration = true;
+
+        let error = resolve_daemon_runner_group_once(&args)
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("--pool-name requires --pool-id"));
+    }
+
+    #[tokio::test]
+    async fn config_only_daemon_does_not_resolve_runner_group() {
+        let mut args = daemon_args(2);
+        args.pool_name = Some("Velnor".into());
+
+        let resolved = resolve_daemon_runner_group_once(&args).await.unwrap();
+
+        assert_eq!(resolved.pool_name.as_deref(), Some("Velnor"));
+        assert_eq!(resolved.pool_id, None);
     }
 
     #[test]
