@@ -35,7 +35,7 @@ Paths and per-repo facts (verified 2026-07-18):
 
 | Repo | Path | Facts |
 |------|------|-------|
-| schemalane | `/Users/donbeave/Projects/tailrocks/schemalane` | `ci.yml` (3 jobs: rust, integration (Postgres via `cargo test --test postgres_integration -- --include-ignored`), audit with `cargo install cargo-audit`), `release.yml`; SHA-pinned but old majors (checkout **v4**); `runs-on: ubuntu-latest`; scripts/check-agent-instructions.sh step; NO mise/rust-toolchain/renovate files |
+| schemalane | `/Users/donbeave/Projects/tailrocks/schemalane` | `ci.yml` (3 jobs: rust, integration (Postgres via `cargo nextest run --test postgres_integration --run-ignored all`), audit with `cargo install cargo-audit`), `release.yml`; SHA-pinned but old majors (checkout **v4**); `runs-on: ubuntu-latest`; scripts/check-agent-instructions.sh step; NO mise/rust-toolchain/renovate files |
 | pg-bigdecimal | `/Users/donbeave/Projects/tailrocks/pg-bigdecimal` | `ci.yml`, `release.yml`; floating `actions/checkout@v4`, `Swatinem/rust-cache@v2`, `dtolnay/rust-toolchain@stable`; no root config files |
 | tracing-request-level | `/Users/donbeave/Projects/tailrocks/tracing-request-level` | same shape as pg-bigdecimal |
 
@@ -53,7 +53,7 @@ jobs:
       - uses: Swatinem/rust-cache@42dc69e1... # v2
       ...
       - name: Test
-        run: cargo test --workspace --locked --all-targets --all-features
+        run: cargo nextest run --workspace --locked --all-features
 ```
 
 ## The Class D template (write this; pin SHAs at PR time via plan 052 step-1 recipe)
@@ -156,7 +156,7 @@ Per-repo deltas:
   - `integration` — same matrix/timeout(30)/setup, plus a `services:` Postgres
     (`services: { postgres: { image: postgres:<latest-major>, env: POSTGRES_PASSWORD/DB, ports: [5432:5432], options: health-cmd pg_isready ... } }`),
     then the existing command
-    `cargo test -p schemalane-core --locked --test postgres_integration -- --include-ignored`
+    `cargo nextest run -p schemalane-core --locked --test postgres_integration --run-ignored all`
     with `DATABASE_URL` env pointing at the service. Inspect
     `crates/*/tests/postgres_integration*` first to learn the URL env var it
     reads; if it spawns its own container (testcontainers) instead of reading
@@ -174,7 +174,7 @@ Per-repo deltas:
 | Purpose | Command | Expected |
 |---------|---------|----------|
 | Lint workflows | `actionlint` | exit 0 |
-| Local gate | `cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo nextest run --workspace --locked` (or `cargo test` pre-migration) | exit 0 |
+| Local gate | `cargo fmt --all --check && cargo clippy --workspace --all-targets --locked -- -D warnings && cargo nextest run --workspace --locked` | exit 0 |
 
 ## Scope
 
@@ -217,8 +217,8 @@ tables; Class D budget: no-change rerun ≤ 60 s on Velnor.
   Docker) AND the operator wants `services:` instead → STOP; that's a test
   refactor outside CI scope.
 - Velnor lane fails `services:` startup → STOP; runner plan 040 owns it.
-- `cargo nextest` reveals tests relying on `cargo test` semantics (doc-tests!)
-  → keep a `cargo test --doc` step alongside nextest, note it, continue.
+- `cargo nextest` reveals examples that existed only as rustdoc tests
+  → migrate them into nextest-discoverable integration/unit tests or compile-UI tests; never drop coverage.
 
 ## Maintenance notes
 
