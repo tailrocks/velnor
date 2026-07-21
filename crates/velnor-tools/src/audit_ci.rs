@@ -565,9 +565,20 @@ fn audit_workflow(
         }
         if let Some(runs_on) = mapping_get(job, "runs-on") {
             let value = compact(runs_on);
-            if ["ubuntu-latest", "ubuntu-24.04", "macos-", "windows-"]
-                .iter()
-                .any(|forbidden| value.contains(forbidden))
+            let native_apple_build = value.starts_with("macos-")
+                && mapping_get(job, "steps")
+                    .and_then(Value::as_sequence)
+                    .is_some_and(|steps| {
+                        steps.iter().any(|step| {
+                            object_get(step, "run")
+                                .and_then(Value::as_str)
+                                .is_some_and(|run| run.contains("./scripts/build-native-app.sh"))
+                        })
+                    });
+            if !native_apple_build
+                && ["ubuntu-latest", "ubuntu-24.04", "macos-", "windows-"]
+                    .iter()
+                    .any(|forbidden| value.contains(forbidden))
             {
                 findings.push(Finding::error(
                     "runner-os",
@@ -1027,6 +1038,17 @@ jobs:
             &audit(&BASE.replace("${{ matrix.config.runner }}", "ubuntu-latest")),
             "runner-os"
         ));
+    }
+
+    #[test]
+    fn allows_native_apple_application_build_on_macos() {
+        let yaml = BASE
+            .replace("${{ matrix.config.runner }}", "macos-26")
+            .replace(
+                "      - run: cargo test",
+                "      - run: ./scripts/build-native-app.sh",
+            );
+        assert!(!has_rule(&audit(&yaml), "runner-os"));
     }
 
     #[test]
