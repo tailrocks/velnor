@@ -831,7 +831,6 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
                 ("lane in step summary", "matrix.config.lane }}"),
                 ("fmt check", "just fmt-check"),
                 ("clippy", "just clippy"),
-                ("cargo test", "just test"),
                 ("nextest", "just nextest"),
                 ("compare needs", "needs: [compat]"),
                 (
@@ -1034,7 +1033,7 @@ fn fixture_readiness(args: FixtureReadinessArgs) -> Result<()> {
         run_readiness_section("scripts/target_verify.sh")?;
 
         println!("==> Running Rust test suite");
-        run_readiness_section("cargo test -q")?;
+        run_readiness_section("cargo nextest run --workspace --locked")?;
     }
 
     println!("==> Checking live host readiness");
@@ -2744,23 +2743,19 @@ async fn target_verify(root: &Path, mut args: TargetVerifyArgs) -> Result<()> {
     for script in target_verify_helper_scripts() {
         run_passthrough(root, script, Command::new(script))?;
     }
-    println!("==> cargo test -p velnor-tools live_sequence");
-    let tools_output = run_cargo_tools_test_filter(root, "live_sequence")?;
+    println!("==> cargo nextest run -p velnor-tools live_sequence");
+    let tools_output = run_nextest_filter(root, "velnor-tools", "live_sequence")?;
     print!("{tools_output}");
-    assert_cargo_filter_matched("live_sequence", &tools_output)?;
-    println!("==> cargo test -p velnor-tools smoke_plan");
-    let tools_output = run_cargo_tools_test_filter(root, "smoke_plan")?;
+    println!("==> cargo nextest run -p velnor-tools smoke_plan");
+    let tools_output = run_nextest_filter(root, "velnor-tools", "smoke_plan")?;
     print!("{tools_output}");
-    assert_cargo_filter_matched("smoke_plan", &tools_output)?;
-    println!("==> cargo test -p velnor-tools host_doctor_plan");
-    let tools_output = run_cargo_tools_test_filter(root, "host_doctor_plan")?;
+    println!("==> cargo nextest run -p velnor-tools host_doctor_plan");
+    let tools_output = run_nextest_filter(root, "velnor-tools", "host_doctor_plan")?;
     print!("{tools_output}");
-    assert_cargo_filter_matched("host_doctor_plan", &tools_output)?;
     for test_name in target_verify_focused_tests() {
-        println!("==> cargo test {test_name}");
-        let output = run_cargo_test_filter(root, test_name)?;
+        println!("==> cargo nextest run -p velnor-runner {test_name}");
+        let output = run_nextest_filter(root, "velnor-runner", test_name)?;
         print!("{output}");
-        assert_cargo_filter_matched(test_name, &output)?;
     }
 
     println!("target audit written to /tmp/velnor-target-audit.txt");
@@ -2865,43 +2860,28 @@ fn run_passthrough(root: &Path, label: &str, mut command: Command) -> Result<()>
     Ok(())
 }
 
-fn run_cargo_test_filter(root: &Path, test_name: &str) -> Result<String> {
+fn run_nextest_filter(root: &Path, package: &str, test_name: &str) -> Result<String> {
     let output = Command::new("cargo")
         .current_dir(root)
-        .args(["test", "-q", "-p", "velnor-runner", test_name])
+        .args([
+            "nextest",
+            "run",
+            "--locked",
+            "-p",
+            package,
+            "--no-tests",
+            "fail",
+            test_name,
+        ])
         .output()
-        .with_context(|| format!("run cargo test {test_name}"))?;
+        .with_context(|| format!("run cargo nextest for {package} filter {test_name}"))?;
     let mut combined = String::new();
     combined.push_str(&String::from_utf8_lossy(&output.stdout));
     combined.push_str(&String::from_utf8_lossy(&output.stderr));
     if !output.status.success() {
-        bail!("cargo test {test_name} failed:\n{combined}");
+        bail!("cargo nextest for {package} filter {test_name} failed:\n{combined}");
     }
     Ok(combined)
-}
-
-fn run_cargo_tools_test_filter(root: &Path, test_name: &str) -> Result<String> {
-    let output = Command::new("cargo")
-        .current_dir(root)
-        .args(["test", "-q", "-p", "velnor-tools", test_name])
-        .output()
-        .with_context(|| format!("run cargo test -p velnor-tools {test_name}"))?;
-    let mut combined = String::new();
-    combined.push_str(&String::from_utf8_lossy(&output.stdout));
-    combined.push_str(&String::from_utf8_lossy(&output.stderr));
-    if !output.status.success() {
-        bail!("cargo test -p velnor-tools {test_name} failed:\n{combined}");
-    }
-    Ok(combined)
-}
-
-fn assert_cargo_filter_matched(test_name: &str, output: &str) -> Result<()> {
-    let regex = Regex::new(r"running [1-9][0-9]* tests?")?;
-    if regex.is_match(output) {
-        Ok(())
-    } else {
-        bail!("test filter matched zero tests: {test_name}")
-    }
 }
 
 fn target_verify_shell_files() -> Vec<&'static str> {

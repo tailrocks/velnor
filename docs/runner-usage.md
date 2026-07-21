@@ -204,7 +204,7 @@ handled job, while normal daemon mode keeps polling.
 
 ```sh
 scripts/target_verify.sh
-cargo test -q
+cargo nextest run --workspace --locked
 cargo run -q -p velnor-tools -- target-audit --check-target-mvp /tmp/velnor-jackin /tmp/velnor-chainargos
 cargo run -q -p velnor-tools -- target-verify
 ```

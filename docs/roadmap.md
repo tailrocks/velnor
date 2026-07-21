@@ -100,8 +100,7 @@ Velnor must support the common Rust GitHub Actions shape used by both projects:
 
 - checkout current repository and selected external repositories
 - install Rust toolchains and cargo tools
-- run `cargo fmt`, `cargo clippy`, `cargo check`, `cargo test`, and
-  `cargo nextest`
+- run `cargo fmt`, `cargo clippy`, `cargo check`, and `cargo nextest`
 - support `rustup component add` and target installation
 - support `mise` as the main tool installer for all target projects
 - support `Swatinem/rust-cache` for ChainArgos shapes
@@ -364,7 +363,7 @@ Local non-mutating gates:
 
 ```sh
 cargo fmt --check
-cargo test -q
+cargo nextest run --workspace --locked
 scripts/target_verify.sh
 scripts/fixture_readiness.sh
 ```
@@ -410,7 +409,7 @@ Required checks:
 
 ```sh
 cargo fmt --check
-cargo test -q
+cargo nextest run --workspace --locked
 cargo run -q -p velnor-tools -- check-runner-reference
 docker build -f docker/job-ubuntu.Dockerfile -t velnor/job-ubuntu:26.04 .
 docker build -t velnor-runner:local .

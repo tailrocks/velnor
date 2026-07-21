@@ -32,7 +32,7 @@ The implementation checklist is tracked in [roadmap.md](roadmap.md).
 
 ```sh
 scripts/target_verify.sh
-cargo test -q
+cargo nextest run --workspace --locked
 ```
 
 The target verifier checks that the local `jackin` and ChainArgos checkouts have
@@ -113,7 +113,7 @@ scripts/fixture_smoke.sh
 
 The readiness script checks fixture status, fixture feature-surface drift, and
 host Docker readiness without JIT runner config creation or workflow dispatch. The
-smoke script runs `cargo test -q`, Docker preflight through the host doctor,
+smoke script runs `cargo nextest run --workspace --locked`, Docker preflight through the host doctor,
 fixture JIT runner slot setup, one bounded Velnor daemon with `--once` and
 one internal slot per requested fixture job, and a GitHub run status summary.
 Set `VELNOR_RUN_TARGET_VERIFY=true` when you also want the host doctor to run
