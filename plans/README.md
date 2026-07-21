@@ -2,7 +2,7 @@
 
 This directory holds only **open work**. Completed plan files are removed —
 their history lives in git (the 2026-07-03 deep-audit generation, plans
-001–032, is fully DONE except the approval-gated plan 015 row below; see the
+001–032, is fully DONE; see the
 pre-cleanup tree at tag/commit `17136f9` for the archived files).
 
 The single active execution prompt for the whole program is
@@ -30,7 +30,7 @@ Verification gates used by every velnor code plan (from `mise.toml`):
 | Plan | Title | Priority | Effort | Status |
 |------|-------|----------|--------|--------|
 | 014 | Harden the systemd unit (sandboxing) without breaking Docker/bind mounts | P2 | S | DONE: v0.1.49 apt deployment; hardened unit ran green fixture jobs; live score 7.9 |
-| 015 | Purge committed run-log HTML captures with channel tokens + commit policy | P2 | S | BLOCKED: HEAD/guard are clean; capture commit `55ed22f` remains reachable from current heads and 98 release tags through `v0.1.99`; exact freeze, backup, rewrite, rollback, reclone, and verification procedure is prepared but requires explicit coordinated-window confirmation |
+| 015 | Purge committed run-log HTML captures with channel tokens + commit policy | P2 | S | DONE: coordinated rewrite completed; backup SHA-256 `ead88e40cf7b0cd2bd6019dd063f597d00e2a5f332cd87a666bca739a92fbb8b`; remote and local reachable-ref scans contain neither `55ed22f` nor `.velnor-compare/*.html`; obsolete local pre-rewrite branch removed |
 
 ---
 
@@ -71,7 +71,7 @@ with no-op jobs (§2.12; `audit-ci` must enforce both coverage and equivalence).
 | 036 | Capacity controller — leases, reservations, reclaim-before-accept | P0 | L | 035 (037 couples) | V0.12/V0.13 | DONE: serialized reservations, emergency floor/hysteresis, lease-safe shortfall reclaim, explicit backpressure, doctor output, live host proof, and all gates green |
 | 037 | Destructive cache GC + physical accounting | P0 | M/L | 035 | V0.7/V0.8 | DONE: guarded destructive GC, leader lock, physical budgets/history, owned-builder boundary, live cleanup, and all gates green |
 | 038 | Job-env defaults (SCCACHE_CACHE_SIZE/BASEDIRS, CARGO_INCREMENTAL=0) | P0 | S | — | V0.9 | DONE: defaults, precedence tests, docs, and all runner gates green |
-| 039 | Org-level JIT + multi-repo fleet ops | P0 | M | — | V0.1 | BLOCKED: org administration now succeeds, but only the unrestricted Default group exists and the five-slot fleet remains repository-scoped to `tailrocks/velnor`; creating/configuring the restricted group requires explicit operator authority, and Sentry SSH host trust still requires operator acceptance |
+| 039 | Org-level JIT + multi-repo fleet ops | P0 | M | — | V0.1 | IN PROGRESS: exact selected `velnor-trusted` groups are live for Tailrocks (11 repos), ChainArgos (2), and jackin-project (1); Tailrocks has eight org-scoped slots on signed-apt 0.1.102. Sequential ChainArgos and jackin-project migration/smoke remains |
 | 040 | `services:` parity (host/port env, alias) | P0 | M | — | V0.5 | DONE: V2 service tokens, shared-network aliases, runtime port context, Postgres-shape tests, and all gates green |
 | 041 | Fixture: inline matrix, backend jobs, services job, registry sync | P0 | M | (033/034/040 soft) | V0.10; gate V-A | DONE: fixture audits and tools tests green; GitHub `29634753256`, Velnor `29634781889`, both/parity `29634836133` green; Kache canary skipped per documented fallback |
 | 042 | Estate adapter completion (Pages, attest, composites, login gate) | P0/P1 | L | 033 | V0.4/V0.6/V1.1/V1.2/V1.5 | DONE: full Pages V2/OIDC loop, explicit attest rejection, composites, denylist, and trust gate verified (577 tests) |
@@ -88,17 +88,17 @@ V-A). Do not open estate PRs before 041's operator verification.
 
 | Plan | Repo | Phase | Effort | Extra deps | Status |
 |------|------|-------|--------|-----------|--------|
-| 047 | ChainArgos/java-monorepo | 1 | M | — | IN PROGRESS — PR #1753 head `6f7ee98b` is pushed with nextest-only probes and trace-spike instructions, current action pins, and canonical concurrency; stale runs were cancelled. Fresh V-B/V-C and explicit human merge approval remain |
-| 048 | ChainArgos/blockchain-nodes | 1 | S/M | — | IN PROGRESS — PR #651 head `492b96a` includes the shared package fixes, current metadata/concurrency, and nextest-only instructions; local amd64 proof and 4/4 nextest pass. Fresh V-B/V-C and explicit human merge approval remain |
-| 049 | jackin-project/jackin (stacks on PR #810) | 1 | L | 047 (pattern) | IN PROGRESS — exact attestation proposal approved; manifest v4 and native Rust DSSE/SLSA/OIDC/Sigstore/repository-upload implementation are on Velnor final-review branch with focused nextest/lint green. Fixture proof, signed release deployment, Jackin Preview V-B/V-C, and final PR review remain |
+| 047 | ChainArgos/java-monorepo | 1 | M | — | IN PROGRESS — PR #1753 head `3e2d21b5` adds canonical Sunday `both` parity to the nextest-only/current-pin delivery. Fresh V-B/V-C and explicit human review remain; never merge automatically |
+| 048 | ChainArgos/blockchain-nodes | 1 | S/M | — | IN PROGRESS — PR #651 head `8296582f` adds canonical Sunday `both` parity to the shared package/root-cause fixes. Fresh V-B/V-C and explicit human review remain; never merge automatically |
+| 049 | jackin-project/jackin (stacks on PR #810) | 1 | L | 047 (pattern) | IN PROGRESS — PR #810 head `d72e3a77` has canonical Sunday `both` parity. Native attestation shipped through signed apt as 0.1.102 and reaches GitHub upload; GitHub rejects public Rekor V2 bundles for zero verified integrated timestamps. Adding Sigstore RFC3161 TSA trust needs exact operator approval before implementation; fixture and Preview V-B/V-C remain |
 | 050 | tailrocks/velnor (dogfood) | 2 | M | 039 (fleet label) | DONE and delivered — three lanes green, 33 s zero-install rerun passes Class B budget, GitHub recovery drill green, and whole-program PR #100 merged as `c493a2f` |
-| 051 | tailrocks/holla | 2 | S | — | IN PROGRESS — PR #37 head `69b4dfc` is pushed and clean; fresh org-fleet V-B/V-C and merge remain |
-| 052 | tailrocks/ruxel | 2 | S | — | IN PROGRESS — PR #3 head `e96ad0c` is pushed and clean; executable ignored gates and oracle instructions use nextest. Float summaries are canonical across Python versions; the full format, strict clippy, 215 nextest, dependency, 54 Python verifier, oracle, benchmark, and chaos gate passes. Fresh org-fleet V-B/V-C and merge remain |
-| 053 | tailrocks/parallax | 2 | L | 051 (pattern), 042 (attest) | IN PROGRESS — direct-main delivery through `d949f5a` includes deterministic race coverage, nextest/trybuild examples, current action metadata, and canonical scheduled concurrency; local gates pass. Fresh Ubuntu V-B/V-C and the Darwin-release decision remain |
-| 054 | tailrocks/termrock | 3 | M | 042 (Pages) | IN PROGRESS — direct-main delivery through `d14c626` passes the full local gate with 337 nextest tests and current action metadata. Fresh V-B/V-C remains |
-| 055 | schemalane + pg-bigdecimal + tracing-request-level (Class D trio) | 3 | M | 040 (schemalane services) | IN PROGRESS — PRs #3/#2/#2 are pushed at `6005432`/`b9272fa`/`5abc3ad`; nextest and actionlint evidence is green. Fresh V-B/V-C and merge remain |
-| 056 | tailrocks/parallax-telemetry-playground | 3 | S | — | IN PROGRESS — policy-compliant direct-main delivery through `973d9cb` replaces superseded PR #8 and carries nextest-only testing plus current action metadata; fresh V-B/V-C remains |
-| 057 | tailrocks/tablerock | 3 | S | — | IN PROGRESS — trunk `9763873` retains the repaired strict-lint/Redis fixture baseline and adds its native macOS checkpoint, transitive XCFramework link metadata, and observable cancellation proof; 768/768 nextest, strict clippy, actionlint, and the shape-aware estate audit pass. Native run `29827520875` is fully green; V-B/V-C waits the org-fleet migration. |
+| 051 | tailrocks/holla | 2 | S | — | IN PROGRESS — PR #37 head `94fc643a` is green on its automatic Velnor lane and includes canonical Sunday `both`; fresh manual V-B/V-C and human review remain |
+| 052 | tailrocks/ruxel | 2 | S | — | IN PROGRESS — PR #3 head `3d7684fa` is green on its automatic Velnor lane and includes canonical Sunday `both`; its full local 215-nextest/oracle/benchmark/chaos proof remains valid. Fresh manual V-B/V-C and human review remain |
+| 053 | tailrocks/parallax | 2 | L | 051 (pattern), 042 (attest) | IN PROGRESS — direct-main delivery through `c8cd46d0` includes canonical Sunday `both`; current automatic run `29847591648` supplies fresh Velnor evidence when complete. Manual V-B/V-C and Darwin-release decision remain |
+| 054 | tailrocks/termrock | 3 | M | 042 (Pages) | IN PROGRESS — direct-main delivery through `5a485d39` includes canonical Sunday `both` and structurally gates API-inventory freshness locally; full gate passes 337 nextest tests. Fresh remote proof remains |
+| 055 | schemalane + pg-bigdecimal + tracing-request-level (Class D trio) | 3 | M | 040 (schemalane services) | IN PROGRESS — PRs #3/#2/#2 at `fa090cc2`/`c1ac5c8c`/`84e6caeb` include canonical Sunday `both`; automatic Velnor runs `29847474262`/`29847510306`/`29847552773` are green. Manual V-B/V-C and human review remain |
+| 056 | tailrocks/parallax-telemetry-playground | 3 | S | — | IN PROGRESS — policy-compliant direct-main delivery through `b6ec71e9` includes canonical Sunday `both`; automatic Velnor run `29847627753` is green. Manual V-B/V-C remains |
+| 057 | tailrocks/tablerock | 3 | S | — | IN PROGRESS — trunk `31bb6b76` adds canonical Sunday `both` atop the native checkpoint; 768/768 nextest, strict clippy, actionlint, shape-aware audit, and native run `29827520875` are green. Manual applicable V-B/V-C remains |
 | 058 | Phase 4: concern-based estate convergence, enforcement, docs reconcile, required checks | 4 | L | 046, 047–057 | IN PROGRESS — concern inventory and enforcement now include stable required aggregators; exact policy handoff exists. Delivery/proof, operator decisions, and final zero-error audits remain |
 | 060 | Estate-wide nextest-only Rust testing | 4 | M | 041, 046 | IN PROGRESS — active program heads are migrated; former executable doctests have nextest-discoverable integration/trybuild coverage, and ignored gates preserve selection/output semantics. Velnor `1bd00cf` audits live scripts/config/instructions/Rust docs as well as workflows; current 13-repository result is zero errors and zero test-runner findings. Fixture PR #4 and estate PR delivery plus V-A/V-B/V-C remain |
 | 061 | Final estate operator-review set | 4 | L | 039, 047–060 | IN PROGRESS — operator approved restricted groups, local-only sccache, weekly `both`, required checks, exact attestation proposal, and history rewrite; automation must finish all PRs/evidence but must not merge |
@@ -149,7 +149,7 @@ REJECTED (one-line rationale).
    allow (fixture YAML work can start immediately; registry sync + kache job
    follow). 059 inventory (read-only) starts immediately; its destructive
    pass runs after 035/037 (or immediately before Wave B's first campaign
-   window — see 059 STOP #4). 015's non-destructive half and 014's unit
+   window — see 059 STOP #4). 014's unit
    changes are Wave A fillers; their host/history steps join the 059 window.
 2. **Wave B (estate Phase 1)**: 047 → 048 → 049 after 041 verified AND 059's
    baseline recorded.

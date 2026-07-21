@@ -50,7 +50,7 @@ only the gate needed to resolve uncertainty or changed behavior.
 |---|---|---|
 | 001–013 | DONE / archived | The original 2026-07-03 audit plans are complete and removed; history at `17136f9` is reference only. |
 | 014 | DONE | Systemd hardening deployed and live-smoked; score 7.9. Do not repeat. |
-| 015 | BLOCKED | HEAD cleanup and guard are done. Only the coordinated history rewrite for commit `55ed22f` remains, and it requires explicit operator confirmation. |
+| 015 | DONE | Coordinated rewrite completed. Backup checksum and collaborator notice are recorded; all local/remote reachable refs and object paths rescan clean. |
 | 016–032 | DONE / archived | The remaining 2026-07-03 audit plans are complete and removed; do not recreate or replay them. |
 | 033 | DONE | Strict capability manifest and pre-side-effect validation. |
 | 034 | DONE | Compiler-cache backend seam: sccache, Kache canary, and off. |
@@ -58,7 +58,7 @@ only the gate needed to resolve uncertainty or changed behavior.
 | 036 | DONE | Capacity leases, reservations, admission, and reclaim. |
 | 037 | DONE | Guarded cache GC and physical accounting. |
 | 038 | DONE | Job environment defaults and precedence. |
-| 039 | BLOCKED | Code, runbook, and local gates are done. Org administration now succeeds, but only the unrestricted Default group exists; restricted-group creation/configuration and Sentry SSH trust still require explicit operator action before migration. |
+| 039 | IN PROGRESS | Exact selected groups are live for all three organizations and Tailrocks runs eight org-scoped slots on signed-apt 0.1.102. Sequential ChainArgos and jackin-project migration/smoke remains. |
 | 040 | DONE | Current-V2 `services:` parity. |
 | 041 | DONE | Fixture V-A proof, including inline matrix, cache backends, services, and registry sync. |
 | 042 | DONE | Approved estate adapters, Pages V2/OIDC, composites, attest rejection, and trust gates. |
@@ -66,17 +66,17 @@ only the gate needed to resolve uncertainty or changed behavior.
 | 044 | DONE | Trust-scoped git mirror and reflink checkout. |
 | 045 | DONE | Timing records, summaries, and doctor SLO output. |
 | 046 | DONE | `velnor-tools audit-ci` and lane comparison. |
-| 047 | IN PROGRESS | java-monorepo PR #1753 head `6f7ee98b` is pushed with nextest-only probes and trace-spike instructions, current pins, and canonical concurrency. Fresh V-B/V-C waits the org fleet; explicit human merge approval remains mandatory. |
-| 048 | IN PROGRESS | PR #651 head `492b96a` contains the shared package fixes, current metadata/concurrency, and nextest-only instructions; local amd64 BuildKit proof passes for arbitrum, fraxtal-op-node, and op-node. Fresh V-B/V-C waits the org fleet, then explicit operator confirmation is required before merge. |
-| 049 | IN PROGRESS | Exact `actions/attest-build-provenance@v4.1.1` surface approved 2026-07-21. Manifest v4 and native Rust DSSE/SLSA/OIDC/Sigstore/repository-upload implementation are in progress on Velnor final-review branch. Fixture proof, signed release deployment, and Jackin Preview V-B/V-C remain. |
+| 047 | IN PROGRESS | java-monorepo PR #1753 head `3e2d21b5` includes canonical weekly `both`; fresh ChainArgos V-B/V-C and operator review remain. |
+| 048 | IN PROGRESS | blockchain-nodes PR #651 head `8296582f` includes canonical weekly `both`; fresh ChainArgos V-B/V-C and operator review remain. |
+| 049 | IN PROGRESS | Native v4 attestation is apt-deployed as 0.1.102 and reaches repository upload. GitHub rejects the mandated public Rekor V2 bundle because it has zero verifier-counted integrated timestamps; exact Sigstore RFC3161 TSA expansion approval, fixture proof, and Jackin Preview V-B/V-C remain. |
 | 050 | DONE | Velnor dogfood three-lane proof, 33-second clean rerun, and release recovery drill. PR #100 was open and green at baseline; its current delivery state must be reconciled. |
-| 051 | IN PROGRESS | Original Holla delivery passed; follow-up PR #37 head `69b4dfc` is clean and awaits fresh org-fleet V-B/V-C plus merge. |
-| 052 | IN PROGRESS | Original Ruxel delivery passed; follow-up PR #3 head `e96ad0c` uses nextest in executable ignored gates and oracle instructions. Float summaries are canonical across Python versions; the full format, strict clippy, 215 nextest, dependency, 54 Python verifier, oracle, benchmark, and chaos gate passes. Fresh org-fleet V-B/V-C plus merge remain. |
-| 053 | IN PROGRESS | Parallax direct-main delivery through `d949f5a` includes deterministic race coverage, nextest/trybuild examples, current metadata, and canonical scheduled concurrency; local gates pass. Fresh Ubuntu V-B/V-C and the Darwin-release decision remain. |
-| 054 | IN PROGRESS | Termrock direct-main delivery through `d14c626` fixes the rustfmt drift, uses nextest exclusively, and passes the full local gate. Fresh V-B/V-C remains. |
-| 055 | IN PROGRESS | Schemalane, pg-bigdecimal, and tracing-request-level follow-up PRs #3/#2/#2 are pushed at `6005432`/`b9272fa`/`5abc3ad`; local nextest/actionlint gates pass. Fresh V-B/V-C and merge remain. |
-| 056 | IN PROGRESS | Parallax telemetry playground is delivered directly through `973d9cb`; superseded PR #8 is closed. Fresh V-B/V-C remains for its nextest/metadata surface. |
-| 057 | IN PROGRESS | TableRock trunk `9763873` retains the repaired strict-lint and Redis fixture baseline while adding a native macOS checkpoint, transitive XCFramework link metadata, and observable cancellation proof. Strict clippy, actionlint, 768/768 nextest tests, and the shape-aware estate audit pass. Native run `29827520875` is fully green; V-B/V-C waits the org fleet. |
+| 051 | IN PROGRESS | Holla PR #37 head `94fc643a` is Velnor-green and includes canonical weekly `both`; manual V-B/V-C and operator review remain. |
+| 052 | IN PROGRESS | Ruxel PR #3 head `3d7684fa` is Velnor-green and includes canonical weekly `both`; manual V-B/V-C and operator review remain. |
+| 053 | IN PROGRESS | Parallax direct-main delivery through `c8cd46d0` includes canonical weekly `both`; current Velnor run and manual V-B/V-C remain, plus the Darwin-release decision. |
+| 054 | IN PROGRESS | TermRock direct-main delivery through `5a485d39` includes canonical weekly `both` and a root-fixed public-API freshness gate; 337 nextest tests and the full local gate pass. Remote proof remains. |
+| 055 | IN PROGRESS | Schemalane/pg-bigdecimal/tracing PR heads `fa090cc2`/`c1ac5c8c`/`84e6caeb` include canonical weekly `both` and are Velnor-green; manual V-B/V-C and operator review remain. |
+| 056 | IN PROGRESS | Parallax telemetry playground is delivered directly through `b6ec71e9`; automatic Velnor run `29847627753` is green and manual V-B/V-C remains. |
+| 057 | IN PROGRESS | TableRock trunk `31bb6b76` includes canonical weekly `both`; existing native and local proofs remain green, with manual applicable V-B/V-C pending. |
 | 058 | IN PROGRESS at baseline | Phase-4 audit, performance report, and direction-doc reconciliation were executed; finish status/bookkeeping and any currently authorized delivery work. Human-only policy decisions remain excluded. |
 | 059 | DONE | Recorded host baseline cleanup and post-cleanup smoke. |
 | 060 | IN PROGRESS | Active program heads are migrated for nextest-only testing; former doctest coverage has nextest-discoverable integration/trybuild replacements. Velnor `1bd00cf` extends mechanical enforcement to live scripts, configuration, instructions, and Rust documentation; the current 13-repository audit has zero errors and zero test-runner findings. Fixture PR #4, estate delivery, and V-A/V-B/V-C remain. |
@@ -97,9 +97,8 @@ Use these resolution tracks:
 
 | Item | Required autonomous resolution track |
 |---|---|
-| 015 | Re-verify every reachable ref for the captured HTML. Prepare a complete coordinated rewrite runbook, exact ref inventory, collaborator/reclone notice, backup/rollback procedure, and post-rewrite verification. Execute the rewrite only after explicit confirmation of the coordinated window; destructive shared-history consent cannot be inferred. Continue all other work meanwhile. |
 | 039 | Re-check current credentials and org runner-group state. If still unauthorized, finish every non-admin migration prerequisite, validate the runbook against current GitHub behavior, determine the minimum exact permission and group/repository settings, and produce one executable operator command/checklist. Apply the migration immediately if ordinary authenticated access now permits it; never retry unchanged 403s. |
-| 047 | Refresh java-monorepo PR #1753 and its checks, resolve safe drift, and perform an ordinary policy-compliant merge. If the identity cannot merge, leave a merge-ready PR with exact required-check and reviewer state plus the single smallest human action. |
+| 047 | Refresh java-monorepo PR #1753 and its checks, resolve safe drift, and leave the final merge-ready PR with exact required-check and reviewer state. Do not merge; operator review is the terminal boundary. |
 | 048 | Diagnose the three package-build failures from current GitHub and Velnor logs. Fix their shared project-side root causes in blockchain-nodes—Dockerfiles and package sources are now in scope—add regression checks, then repeat V-B/V-C from the existing program branch. A lane-neutral failure must receive one shared fix, never lane-specific YAML. |
 | 049 | First write the mandatory capability proposal for `actions/attest-build-provenance@v4`: why Jackin needs it; exact accepted ref, inputs, values, combinations, outputs, failure modes, Sigstore/OIDC/GitHub API behavior, trust/network/storage implications, upstream `actions/runner` and action-source evidence, and fixture proof. Do not implement this new security/network capability until the operator explicitly approves that described surface. After approval, implement the latest native Rust path, manifest validation, fixture coverage, and Jackin Preview V-B/V-C. Advance every non-dependent Jackin task while approval is pending. |
 | 053 | Reproduce Parallax against current exact heads, compare official-runner and Velnor timing/state evidence, and perform a root-cause investigation of the loading-skeleton and CRUD race. Fix the approved browser/job-runtime behavior in Velnor if it diverges; otherwise fix the shared deterministic application/test race in Parallax, now in scope. Add a regression that fails on the old race, then repeat V-B/V-C without weakening assertions or goldens. |
@@ -233,8 +232,6 @@ operator interaction:
   formatting, test, and workflow corrections named in the resolution tracks.
   Keep each correction minimal, root-cause based, tested, and isolated from
   unrelated product changes.
-- Do not rewrite git history or force-push for plan 015 without explicit
-  confirmation of a coordinated rewrite window.
 - Do not change branch protection, required checks, org runner groups, remote
   compiler-cache trust, or scheduled parity policy without explicit authority.
 - Do not bypass a target repository's `AGENTS.md`. If current instructions
@@ -255,7 +252,7 @@ operator interaction:
   `git rev-parse --short HEAD`, and inspect commits since `a0a4ee5`.
 - Query current states for Velnor PR #100, java-monorepo PR #1753, Jackin PR
   #810, Parallax PR #21, Termrock PR #4, and any PR named by remaining plans.
-- Check whether the org permission, plan-015 approval, strict-capability
+- Check whether the org permission, strict-capability
   approval, required-check decisions, or target-repository instructions have
   changed. Absence of evidence is not approval.
 - Build a private working checklist mapping every item 014–059 to
@@ -265,15 +262,14 @@ operator interaction:
 
 ### 2. Eliminate technical and delivery blockers
 
-- If PR #100 remains open and all required current gates are green, merge it
-  only if the authenticated identity and repository policy permit an ordinary,
-  non-bypassing merge. Otherwise record the exact administrative blocker.
+- Reconcile historical PR #100 against its already-delivered state; do not
+  replay or alter that completed delivery.
 - Execute the item-specific resolution tracks above in dependency order.
   Technical blockers 048, 053, 054, and the policy-compatible work for 057 are
   active implementation tasks, not handoff notes.
-- Re-check other open estate PRs. Resolve safe merge drift and perform ordinary
-  merges whose technical gates are green and whose policies permit them; never
-  bypass protection.
+- Re-check other open estate PRs and resolve safe merge drift. Never merge the
+  final review set; leave exact required-check and reviewer state for the
+  operator.
 - After each fix, rerun focused local regression gates first, then only the
   stale V-A/V-B/V-C evidence required for that changed surface. Do not replay
   the full campaign without a concrete stale-evidence reason.
@@ -313,7 +309,8 @@ exiting zero proves only the behavior it actually exercises.
 - Run the current estate audit only if all configured local clones exist and
   the run is needed to validate changed bookkeeping. A nonzero result is
   acceptable only when every error maps to an explicitly blocked delivery;
-  never claim a zero-error estate when main branches remain unmerged.
+  never claim a delivered-default audit for repositories whose final PRs remain
+  open; audit their exact delivery heads and label that evidence accurately.
 - Mark plan 058 terminal only when its audit, campaign report, concern
   convergence, docs reconciliation, and human-policy decisions are implemented
   and accurately recorded. A prepared handoff is progress, not completion;
@@ -329,9 +326,9 @@ exiting zero proves only the behavior it actually exercises.
   completed implementation, blocked delivery, and human-only follow-up.
 - Retain individual files only for genuinely open executable or
   approval-gated work. Remove stale completed plan files after their evidence
-  is safely summarized. Do not delete plan 015 while its history rewrite
-  remains approval-gated unless the index itself fully preserves the complete
-  safe procedure and STOP boundary.
+  is safely summarized. Plan 015 is complete and its individual plan file is
+  retired; its backup checksum and post-rewrite evidence remain in the index
+  and operator report.
 - Keep `plans/OPERATOR-REPORT.md` append-only. Add only new decisions,
   deviations, and fresh evidence; do not rewrite its incident history.
 - Verify all edited Markdown references and ensure no prompt references removed
@@ -393,9 +390,9 @@ fully verified definition of done below.
 - Plan 039's organization runner groups and repository access are live with the
   documented permission model, followed by a successful registration and
   smoke proof; a prepared runbook alone is insufficient.
-- Plans 047–057 are merged or otherwise delivered through each repository's
-  current permitted mechanism, with required V-B/V-C evidence green. An open
-  merge-ready PR is not completion.
+- Plans 047–057 have one final reviewable PR or binding trunk-only delivery
+  record per repository, with required V-B/V-C evidence green. Final PRs remain
+  open for operator review and are never merged by automation.
 - Every repository has a reviewed concern classification; every required
   concern exists; every common/applicable concern matches its canonical
   behavioral signature; every non-applicable or repo-specific classification
@@ -416,8 +413,8 @@ fully verified definition of done below.
   `plans/OPERATOR-REPORT.md`, direction docs, and current PR states agree.
 - Completed plan files are retired; only genuinely open work remains.
 - The worktree passes the checks appropriate to the changed surface.
-- The final report lists: files changed, verification run, PRs merged or still
-  open, items completed, and confirmation that no approval boundary was
+- The final report lists: files changed, verification run, final PRs and
+  trunk-only records, items completed, and confirmation that no approval boundary was
   crossed. If any program PR is still open or any operator action is still
   required, this definition is not met and the goal remains active.
 - Before declaring completion, perform two consecutive independent full audits

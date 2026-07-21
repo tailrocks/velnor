@@ -1683,3 +1683,39 @@ same-version local-artifact sentence is superseded and must not be used.
   runner group and zero organization runners. The open estate PRs therefore
   have DCO/local evidence but no fresh V-B/V-C proof; no merge or runner-group
   policy change was inferred.
+
+### 2026-07-21 coordinated history rewrite and final-estate convergence
+
+- The operator-approved coordinated rewrite completed. Recoverable backup
+  `/tmp/velnor-history-rewrite-20260721T1443Z/backup.git.tar.gz` has SHA-256
+  `ead88e40cf7b0cd2bd6019dd063f597d00e2a5f332cd87a666bca739a92fbb8b`.
+  Fresh fetch/prune plus local/remote reachable-ref and object-path scans find
+  neither commit `55ed22f` nor `.velnor-compare/*.html`; the last obsolete
+  local pre-rewrite branch was removed. Collaborators must discard pre-rewrite
+  clones/branches and reclone or reset to rewritten remote refs.
+- GitHub runner groups now use exact selected access: Tailrocks group id 3
+  contains the eleven Tailrocks estate repositories; ChainArgos group id 4
+  contains only java-monorepo and blockchain-nodes; jackin-project group id 3
+  contains only jackin-project/jackin. Public-repository access is enabled only
+  because each selected group contains at least one public repository.
+- The Sentry Tailrocks pool runs eight org-scoped slots from signed-apt package
+  0.1.102. ChainArgos and jackin-project groups are prepared for sequential
+  migration; the single host is never registered to mixed organizations.
+- Canonical Sunday `0 4 * * 0` parity and schedule-selected `both` are delivered
+  to every estate CI head plus fixture. Current heads are Velnor `0b40e401`,
+  fixture `5ffc9f92`, java-monorepo `3e2d21b5`, blockchain-nodes `8296582f`,
+  jackin PR #810 `d72e3a77`, Holla `94fc643a`, Ruxel `3d7684fa`, Schemalane
+  `fa090cc2`, pg-bigdecimal `c1ac5c8c`, tracing-request-level `84e6caeb`,
+  Parallax trunk `c8cd46d0`, playground trunk `b6ec71e9`, TableRock trunk
+  `31bb6b76`, and TermRock trunk `5a485d39`.
+- The program-head estate audit exits zero. It retains six already-classified
+  cross-ref publication-lock advisories and reports no missing-required or
+  canonical-drift errors. No pull request was merged.
+- TermRock run `29847714724` exposed a contaminated public API inventory that
+  the local gate did not verify. Trunk `5a485d39` removes the two build-status
+  lines and adds nightly-backed API regeneration/diff to `mise run gate`; the
+  complete gate passes with 337 nextest tests.
+- Velnor 0.1.102 reaches GitHub's attestation upload API, where fixture run
+  `29846369353` proves GitHub rejects the mandated public Rekor V2 bundle for
+  zero verifier-counted integrated timestamps. The proposed Sigstore RFC3161
+  TSA expansion remains unimplemented pending exact operator approval.
