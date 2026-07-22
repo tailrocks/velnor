@@ -110,6 +110,8 @@ pub enum ActionRuntime {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeActionAdapter {
+    /// Strictly approved remote composite expanded from its pinned metadata.
+    ApprovedComposite,
     Checkout,
     Cache,
     UploadArtifact,
