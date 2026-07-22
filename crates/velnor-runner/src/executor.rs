@@ -2097,32 +2097,7 @@ where
         let (mut env, masks) = parse_mise_environment(&exported_env, &redacted_env)?;
         let _ = fs::remove_file(&env_path);
         let _ = fs::remove_file(&redacted_path);
-        let mut path = vec![
-            // Mise binary dir so subsequent steps can call `mise run ...` directly.
-            "/opt/mise/bin".to_string(),
-            // Match mise-action: the repository-selected toolchain must win over
-            // anything baked into the job image. setup_mise_script keeps the
-            // rustup proxy ahead only while mise installs cargo-backed tools.
-            "/opt/mise/shims".to_string(),
-        ];
-        // Add the active mise tool install bin dirs (emitted by setup_mise_script)
-        // so executables installed into a mise-managed tool (e.g. ansible-galaxy
-        // from `pip install ansible-core` into mise's python, cargo-deny from
-        // mise's GitHub backend, or cargo-audit from mise's cargo backend) are on
-        // PATH for subsequent steps. Strip the marker lines from the logged output
-        // so the step log stays clean (UI parity with the GitHub-hosted lane).
-        for line in result.stdout.lines() {
-            if let Some(dir) = line.strip_prefix("__VELNOR_MISE_BIN__") {
-                let dir = dir.trim();
-                if !dir.is_empty() && !path.iter().any(|p| p == dir) {
-                    path.push(dir.to_string());
-                }
-            }
-        }
-        // Keep the image-baked rustup proxies as a final fallback for projects
-        // that do not select Rust through mise. They must never shadow an exact
-        // rust-toolchain.toml version resolved above.
-        path.push("/root/.cargo/bin".to_string());
+        let path = mise_step_path(&result.stdout);
         if result.stdout.contains("__VELNOR_MISE_BIN__") {
             let filtered: Vec<&str> = result
                 .stdout
@@ -3373,14 +3348,13 @@ else
   command -v mise >/dev/null 2>&1
 fi
 # Emit active mise tool bin dirs as markers. native_mise parses these and adds
-# them to PATH for subsequent steps. Velnor only puts the shims dir on the step
-# PATH, but executables installed INTO a mise-managed tool (python/cargo
-# and GitHub backends, etc.) live in the tool's install root or bin, not always
-# in shims. This makes ansible-galaxy, cargo-audit, cargo-shear, cargo-deny, and
-# similar tools findable in later steps, matching jdx/mise-action.
+# them to PATH for subsequent steps. Do not enumerate every version root:
+# pipx version roots contain a same-named virtualenv directory (for example
+# `<version>/reuse`) which shadows the real `<version>/bin/reuse` executable
+# and produces EACCES. `mise bin-paths` is authoritative for active tools;
+# nested `bin` directories cover executables installed into managed runtimes.
 {{
   mise bin-paths 2>/dev/null || true
-  find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d 2>/dev/null || true
   find "$mise_home/installs" -mindepth 3 -maxdepth 3 -type d -name bin 2>/dev/null || true
 }} | awk 'NF && !seen[$0]++ {{ print "__VELNOR_MISE_BIN__" $0 }}'
 # Match mise-action's environment export. Write through the job temp mount so
@@ -3395,6 +3369,28 @@ echo "mise install completed, cargo: $(command -v cargo 2>/dev/null || echo 'not
 mise --version
 "#,
     )
+}
+
+fn mise_step_path(output: &str) -> Vec<String> {
+    let mut path = vec!["/opt/mise/bin".to_string()];
+    // Add the active mise tool install bin dirs before shims. A pipx install
+    // has both `<version>/reuse/` (the virtualenv directory) and
+    // `<version>/bin/reuse` (the executable); a stale/shared shim can resolve
+    // the former and fail with EACCES. `mise bin-paths` is authoritative for
+    // the repository-selected versions.
+    for line in output.lines() {
+        if let Some(dir) = line.strip_prefix("__VELNOR_MISE_BIN__") {
+            let dir = dir.trim();
+            if !dir.is_empty() && !path.iter().any(|path| path == dir) {
+                path.push(dir.to_string());
+            }
+        }
+    }
+    path.push("/opt/mise/shims".to_string());
+    // Keep the image-baked rustup proxies as a final fallback for projects
+    // that do not select Rust through mise.
+    path.push("/root/.cargo/bin".to_string());
+    path
 }
 
 fn parse_mise_environment(
@@ -8888,16 +8884,34 @@ mod tests {
         assert!(script.contains("cache_key_prefix='mise-v2'"));
         assert!(script.contains("cache_save_requested=\"\""));
         assert!(script.contains("-type d -empty -exec rm -rf"));
-        assert!(script.contains(r#"find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d"#));
+        assert_eq!(
+            script
+                .matches(r#"find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d"#)
+                .count(),
+            1,
+            "only the poisoned-empty-entry cleanup may scan version roots"
+        );
         assert!(script.contains(r#"find "$mise_home/installs" -mindepth 3 -maxdepth 3"#));
         assert!(script.contains("__VELNOR_MISE_BIN__"));
-        assert!(script.contains("cargo-audit"));
-        assert!(script.contains("cargo-deny"));
-        assert!(script.contains("cargo-shear"));
+        assert!(script.contains("pipx version roots contain a same-named virtualenv"));
         assert!(!script.contains("export CARGO_HOME="));
         assert!(!script.contains("export RUSTUP_HOME="));
         assert!(script.contains("mise env --redacted --json"));
         assert!(script.contains("mise env --json"));
+    }
+
+    #[test]
+    fn mise_direct_bin_paths_precede_shims_and_ignore_duplicates() {
+        let pipx_bin = "/opt/mise/installs/pipx-reuse/6.2.0/bin";
+        let path = mise_step_path(&format!(
+            "__VELNOR_MISE_BIN__{pipx_bin}\n__VELNOR_MISE_BIN__{pipx_bin}\n"
+        ));
+
+        assert_eq!(path.iter().filter(|entry| *entry == pipx_bin).count(), 1);
+        assert!(
+            path.iter().position(|entry| entry == pipx_bin)
+                < path.iter().position(|entry| entry == "/opt/mise/shims")
+        );
     }
 
     #[test]
