@@ -781,6 +781,8 @@ fn audit_steps(
     let mut target_dir_override = false;
     let mut unstable_target_dir = false;
     let mut literal_target_cache = false;
+    let mut cargo_fuzz = false;
+    let mut fuzz_target_cache = false;
     let mut first_compile_step = None;
     let mut first_target_cache_step = None;
     for (index, step) in steps.iter().enumerate() {
@@ -788,25 +790,32 @@ fn audit_steps(
         let run = object_get(step, "run")
             .and_then(Value::as_str)
             .unwrap_or("");
+        let step_fuzz = run.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("cargo ") && line.contains(" fuzz ")
+                || line.starts_with("cargo +") && line.contains(" fuzz ")
+        });
+        cargo_fuzz |= step_fuzz;
         target_dir_override |= run.contains("CARGO_TARGET_DIR=");
         unstable_target_dir |= run.contains("CARGO_TARGET_DIR=")
             && (run.contains("GITHUB_RUN_ID") || run.contains("GITHUB_RUN_ATTEMPT"));
-        let step_compiles = run.lines().any(|line| {
-            let line = line.trim_start();
-            [
-                "cargo build",
-                "cargo check",
-                "cargo clippy",
-                "cargo test",
-                "cargo nextest",
-                "cargo run",
-                "cargo zigbuild",
-                "cargo xtask",
-                "rustc ",
-            ]
-            .iter()
-            .any(|command| line.starts_with(command) || line.contains(&format!(" {command}")))
-        });
+        let step_compiles = step_fuzz
+            || run.lines().any(|line| {
+                let line = line.trim_start();
+                [
+                    "cargo build",
+                    "cargo check",
+                    "cargo clippy",
+                    "cargo test",
+                    "cargo nextest",
+                    "cargo run",
+                    "cargo zigbuild",
+                    "cargo xtask",
+                    "rustc ",
+                ]
+                .iter()
+                .any(|command| line.starts_with(command) || line.contains(&format!(" {command}")))
+            });
         compile |= step_compiles;
         if step_compiles {
             first_compile_step.get_or_insert(index);
@@ -904,6 +913,11 @@ fn audit_steps(
             if let Some(with) = object_get(step, "with") {
                 let caches_target = object_get(with, "path").is_some_and(|value| {
                     compact(value).lines().any(|line| line.contains("target"))
+                });
+                fuzz_target_cache |= object_get(with, "path").is_some_and(|value| {
+                    compact(value)
+                        .lines()
+                        .any(|line| line.trim() == "fuzz/target")
                 });
                 target_cache |= caches_target;
                 if caches_target {
@@ -1017,6 +1031,14 @@ fn audit_steps(
             file,
             job_path,
             "use a stable job-scoped CARGO_TARGET_DIR; run-specific paths invalidate restored Cargo fingerprints",
+        ));
+    }
+    if cargo_fuzz && !fuzz_target_cache {
+        findings.push(Finding::error(
+            "target-cache-path",
+            file,
+            job_path,
+            "cargo fuzz writes to fuzz/target; persist that effective target path",
         ));
     }
 }
@@ -1361,6 +1383,21 @@ jobs:
                 "cargo xtask policy --output github",
             );
         assert!(has_rule(&audit(&yaml), "target-cache"));
+    }
+
+    #[test]
+    fn cargo_fuzz_requires_its_effective_target_cache() {
+        let yaml = BASE.replace(
+            "cargo nextest run --workspace --locked",
+            "cargo +nightly fuzz build --target x86_64-unknown-linux-gnu",
+        );
+        assert!(has_rule(&audit(&yaml), "target-cache-path"));
+
+        let yaml = yaml.replace(
+            "          path: target",
+            "          path: |\n            target\n            fuzz/target",
+        );
+        assert!(!has_rule(&audit(&yaml), "target-cache-path"));
     }
 
     #[test]
