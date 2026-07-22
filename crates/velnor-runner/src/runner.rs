@@ -2815,46 +2815,9 @@ async fn handle_job_request(
         // trust and strict-capability checks. Keep the guards through result
         // upload by binding them in the execution scope.
         //
-        // Disk peak reservation is taken only for an active job (not while the
-        // JIT slot is idle-polling). Hold until this scope ends so concurrent
-        // daemons share a truthful host admission budget. Fail closed on the
-        // acquired job if the host cannot admit peak — do not leave GitHub
-        // holding an in-progress job with no runner work.
-        let _job_peak_reservation = match reserve_job_peak_capacity(config_dir, args) {
-            Ok(reservation) => {
-                println!(
-                    "Reserved host disk peak {} bytes for active job {}.",
-                    reservation.bytes, job.job_id
-                );
-                reservation
-            }
-            Err(error) => {
-                complete_acquired_job_failure(
-                    &run_service_job,
-                    &AcquiredJobIdentity::from_job(&job),
-                    Some("capacity_backpressure".to_string()),
-                    &format!("{error:#}"),
-                )
-                .await?;
-                return Err(error).context("reserve host disk peak for active job");
-            }
-        };
-        let _storage_leases = match acquire_storage_leases() {
-            Ok(leases) => leases,
-            Err(error) => {
-                complete_acquired_job_failure(
-                    &run_service_job,
-                    &AcquiredJobIdentity::from_job(&job),
-                    Some("storage_lease".to_string()),
-                    &format!("{error:#}"),
-                )
-                .await?;
-                return Err(error).context("acquire storage leases for active job");
-            }
-        };
-        if let Err(error) = publish_timeline_job_started(&job, runner_name).await {
-            eprintln!("Best-effort timeline job start update failed: {error:#}");
-        }
+        // Start lease renewal before admission. A full host is infrastructure
+        // backpressure, not a repository failure: keep the acquired job alive
+        // until capacity becomes available instead of completing it red.
         let stored_for_refresh = broker_cancellation.stored.clone();
         let renewal = start_run_service_lock_renewal(
             run_service_job.client.clone(),
@@ -2874,6 +2837,47 @@ async fn handle_job_request(
             canceled.clone(),
             broker_cancellation.stored,
         );
+
+        // Disk peak reservation is taken only for an acquired job (not while
+        // the JIT slot is idle-polling). Hold until this scope ends so
+        // concurrent daemons share a truthful host admission budget. Retry
+        // backpressure while the run-service renewal keeps the job lease live.
+        let _job_peak_reservation = loop {
+            match reserve_job_peak_capacity(config_dir, args) {
+                Ok(reservation) => {
+                    println!(
+                        "Reserved host disk peak {} bytes for active job {}.",
+                        reservation.bytes, job.job_id
+                    );
+                    break reservation;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "Job {} waiting for host capacity: {error:#}. Retrying in 15s.",
+                        job.job_id
+                    );
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+                }
+            }
+        };
+        let _storage_leases = match acquire_storage_leases() {
+            Ok(leases) => leases,
+            Err(error) => {
+                cancellation.abort();
+                renewal.abort();
+                complete_acquired_job_failure(
+                    &run_service_job,
+                    &AcquiredJobIdentity::from_job(&job),
+                    Some("storage_lease".to_string()),
+                    &format!("{error:#}"),
+                )
+                .await?;
+                return Err(error).context("acquire storage leases for active job");
+            }
+        };
+        if let Err(error) = publish_timeline_job_started(&job, runner_name).await {
+            eprintln!("Best-effort timeline job start update failed: {error:#}");
+        }
         let (step_start_sender, step_start_receiver) = tokio::sync::mpsc::unbounded_channel();
         let step_timeline = start_step_timeline_publisher(job.clone(), step_start_receiver);
         let (step_log_sender, step_log_receiver) = tokio::sync::mpsc::unbounded_channel();
