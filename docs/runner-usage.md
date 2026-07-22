@@ -48,10 +48,14 @@ a stale tool image; image-build failure fails the package transaction.
   override the incremental setting and cache size. The path-normalization
   roots are runner-owned and cannot be overridden. Set
   `VELNOR_SCCACHE_CACHE_SIZE` on the daemon to change the default store bound.
-- Capacity admission reserves 30 GiB per advertised slot and preserves a 10
-  GiB emergency floor. Tune them per host with `VELNOR_JOB_PEAK_BYTES` and
-  `VELNOR_EMERGENCY_RESERVE_BYTES`; doctor reports free/reserved bytes, active
-  leases, and cache accounting.
+- Capacity admission reserves 30 GiB **per active job** (not per idle JIT
+  slot) and preserves a 10 GiB emergency floor. Idle slots poll without
+  pinning peak budget so multi-daemon hosts do not over-reserve disk.
+  Tune peak/floor with `VELNOR_JOB_PEAK_BYTES` and
+  `VELNOR_EMERGENCY_RESERVE_BYTES`. Leaked reservation files older than
+  `VELNOR_RESERVATION_TTL_SECS` (default 6h) are reaped even while the
+  daemon PID is still alive (multi-slot daemons share one PID). Doctor
+  reports free/reserved bytes, active leases, and cache accounting.
 - Regenerable class ceilings default to targets 200 GiB, actions cache 50 GiB,
   and artifacts/Cargo/mise 20 GiB each. Override with the corresponding
   `VELNOR_BUDGET_{TARGETS,CACHES,ARTIFACTS,CARGO,MISE}_BYTES` variables.
