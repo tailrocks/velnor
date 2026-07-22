@@ -15,6 +15,7 @@ use std::os::unix::fs::OpenOptionsExt;
 static EXEC_ENV_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const NODE_ACTION_BASE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const JOB_NOFILE_LIMIT: &str = "65536:65536";
 
 #[derive(Debug, Clone)]
 pub struct JobContainerSpec {
@@ -197,6 +198,12 @@ impl JobContainerSpec {
         ]);
         args.extend(self.options.iter().cloned());
         args.extend(self.resource_options.iter().cloned());
+
+        // Docker Engine 29 inherits systemd's 1024-file descriptor default
+        // when no container limit is explicit. Large Rust/Zig links open one
+        // descriptor per object and fail with ProcessFdQuotaExceeded. Make the
+        // job contract deterministic and large enough for GitHub-scale builds.
+        args.extend(["--ulimit".into(), format!("nofile={JOB_NOFILE_LIMIT}")]);
 
         // GitHub-hosted Ubuntu jobs expose localhost over IPv4. Docker also
         // assigns localhost to ::1, which can split same-process servers and
@@ -1423,6 +1430,9 @@ mod tests {
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"NODE_OPTIONS=--max-old-space-size=4096".into()));
         assert!(args.windows(2).any(|pair| pair == ["--cpus", "2"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--ulimit", "nofile=65536:65536"]));
         assert!(args
             .windows(2)
             .any(|pair| { pair == ["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"] }));
