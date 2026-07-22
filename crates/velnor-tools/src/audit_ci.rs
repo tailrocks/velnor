@@ -779,6 +779,7 @@ fn audit_steps(
     let mut target_cache = false;
     let mut target_cache_generation = false;
     let mut target_dir_override = false;
+    let mut unstable_target_dir = false;
     let mut literal_target_cache = false;
     for (index, step) in steps.iter().enumerate() {
         let path = format!("{job_path}.steps[{index}]");
@@ -786,6 +787,8 @@ fn audit_steps(
             .and_then(Value::as_str)
             .unwrap_or("");
         target_dir_override |= run.contains("CARGO_TARGET_DIR=");
+        unstable_target_dir |= run.contains("CARGO_TARGET_DIR=")
+            && (run.contains("GITHUB_RUN_ID") || run.contains("GITHUB_RUN_ATTEMPT"));
         compile |= run.lines().any(|line| {
             let line = line.trim_start();
             [
@@ -986,6 +989,14 @@ fn audit_steps(
             file,
             job_path,
             "cache the effective CARGO_TARGET_DIR, not literal target",
+        ));
+    }
+    if unstable_target_dir {
+        findings.push(Finding::error(
+            "target-cache-path",
+            file,
+            job_path,
+            "use a stable job-scoped CARGO_TARGET_DIR; run-specific paths invalidate restored Cargo fingerprints",
         ));
     }
 }
@@ -1337,6 +1348,15 @@ jobs:
         let yaml = BASE.replace(
             "      - run: cargo nextest run --workspace --locked",
             "      - run: echo 'CARGO_TARGET_DIR=/tmp/job-target' >> \"$GITHUB_ENV\"\n      - run: cargo nextest run --workspace --locked",
+        );
+        assert!(has_rule(&audit(&yaml), "target-cache-path"));
+    }
+
+    #[test]
+    fn target_override_rejects_run_specific_path() {
+        let yaml = BASE.replace(
+            "      - run: cargo nextest run --workspace --locked",
+            "      - run: echo 'CARGO_TARGET_DIR=/tmp/target-${GITHUB_RUN_ID}' >> \"$GITHUB_ENV\"\n      - run: cargo nextest run --workspace --locked",
         );
         assert!(has_rule(&audit(&yaml), "target-cache-path"));
     }
