@@ -796,6 +796,7 @@ fn audit_steps(
                 "cargo nextest",
                 "cargo run",
                 "cargo zigbuild",
+                "cargo xtask",
                 "rustc ",
             ]
             .iter()
