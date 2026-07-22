@@ -704,12 +704,24 @@ fn audit_workflow(
         let Some(job) = job_value.as_mapping() else {
             continue;
         };
+        let job_text = compact(job_value);
         if mapping_get(job, "timeout-minutes").is_none() && mapping_get(job, "uses").is_none() {
             findings.push(Finding::error(
                 "timeout",
                 file,
                 format!("{job_path}.timeout-minutes"),
                 "set a measured timeout-minutes budget",
+            ));
+        }
+        if job_text.contains("playwright")
+            && job_text.contains(" install")
+            && !job_text.contains(".cache/ms-playwright")
+        {
+            findings.push(Finding::error(
+                "playwright-cache",
+                file,
+                &job_path,
+                "cache ~/.cache/ms-playwright with a lockfile-derived key before installing browsers",
             ));
         }
         if let Some(runs_on) = mapping_get(job, "runs-on") {
@@ -1395,6 +1407,21 @@ jobs:
 
         let ref_scoped = BASE.replace("${{ github.sha }}", "${{ github.ref }}");
         assert!(has_rule(&audit(&ref_scoped), "target-cache-key"));
+    }
+
+    #[test]
+    fn playwright_install_requires_browser_cache() {
+        let yaml = BASE.replace(
+            "      - run: cargo nextest run --workspace --locked",
+            "      - run: bunx playwright install --with-deps chromium",
+        );
+        assert!(has_rule(&audit(&yaml), "playwright-cache"));
+
+        let cached = yaml.replace(
+            "          path: target",
+            "          path: |\n            target\n            ~/.cache/ms-playwright",
+        );
+        assert!(!has_rule(&audit(&cached), "playwright-cache"));
     }
 
     #[test]
