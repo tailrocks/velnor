@@ -8664,9 +8664,7 @@ jobs:
         assert_eq!(completion.step_results[0].conclusion, TaskResult::Failed);
         assert_eq!(completion.step_results[0].number, Some(1));
         assert!(
-            completion.step_results[0]
-                .name
-                .contains("executor_panic"),
+            completion.step_results[0].name.contains("executor_panic"),
             "step name should carry category: {}",
             completion.step_results[0].name
         );
