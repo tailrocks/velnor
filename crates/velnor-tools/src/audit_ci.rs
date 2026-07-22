@@ -778,11 +778,14 @@ fn audit_steps(
     let mut swatinem = false;
     let mut target_cache = false;
     let mut target_cache_generation = false;
+    let mut target_dir_override = false;
+    let mut literal_target_cache = false;
     for (index, step) in steps.iter().enumerate() {
         let path = format!("{job_path}.steps[{index}]");
         let run = object_get(step, "run")
             .and_then(Value::as_str)
             .unwrap_or("");
+        target_dir_override |= run.contains("CARGO_TARGET_DIR=");
         compile |= run.lines().any(|line| {
             let line = line.trim_start();
             [
@@ -890,11 +893,12 @@ fn audit_steps(
         if family == "actions/cache" {
             if let Some(with) = object_get(step, "with") {
                 let caches_target = object_get(with, "path").is_some_and(|value| {
-                    compact(value)
-                        .lines()
-                        .any(|line| line.trim() == "target" || line.contains("/target"))
+                    compact(value).lines().any(|line| line.contains("target"))
                 });
                 target_cache |= caches_target;
+                literal_target_cache |= object_get(with, "path").is_some_and(|value| {
+                    compact(value).lines().any(|line| line.trim() == "target")
+                });
                 if caches_target {
                     let key = object_get(with, "key").map(compact).unwrap_or_default();
                     let restore = object_get(with, "restore-keys")
@@ -973,6 +977,14 @@ fn audit_steps(
             file,
             job_path,
             "target cache key must include github.sha while its restore prefix omits ref/SHA so main seeds PRs and each successful commit saves an updated generation",
+        ));
+    }
+    if target_dir_override && literal_target_cache {
+        findings.push(Finding::error(
+            "target-cache-path",
+            file,
+            job_path,
+            "cache the effective CARGO_TARGET_DIR, not literal target",
         ));
     }
 }
@@ -1303,6 +1315,15 @@ jobs:
                 "cargo zigbuild --target x86_64-unknown-linux-musl",
             );
         assert!(has_rule(&audit(&yaml), "target-cache"));
+    }
+
+    #[test]
+    fn target_override_rejects_literal_target_cache() {
+        let yaml = BASE.replace(
+            "      - run: cargo nextest run --workspace --locked",
+            "      - run: echo 'CARGO_TARGET_DIR=/tmp/job-target' >> \"$GITHUB_ENV\"\n      - run: cargo nextest run --workspace --locked",
+        );
+        assert!(has_rule(&audit(&yaml), "target-cache-path"));
     }
 
     #[test]
