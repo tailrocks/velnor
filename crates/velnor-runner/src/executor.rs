@@ -1098,7 +1098,10 @@ where
                     } if invocation.adapter == NativeActionAdapter::Checkout
                 )
             {
-                materialize_persistent_target(container)?;
+                materialize_persistent_target(
+                    container,
+                    state.env.get("GITHUB_SHA").map(String::as_str),
+                )?;
                 target_materialized = true;
             }
             match step {
@@ -1678,7 +1681,10 @@ where
             }
         }
         if target_materialized {
-            if let Err(error) = publish_persistent_target(container) {
+            if let Err(error) = publish_persistent_target(
+                container,
+                state.env.get("GITHUB_SHA").map(String::as_str),
+            ) {
                 eprintln!(
                     "forensics.lifecycle: persistent target publish skipped for '{}': {error:#}",
                     container.name
@@ -4219,7 +4225,12 @@ fn verify_cache_copy(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn materialize_persistent_target(container: &JobContainerSpec) -> Result<()> {
+const TARGET_SOURCE_REVISION_MARKER: &str = ".velnor-source-revision-v1";
+
+fn materialize_persistent_target(
+    container: &JobContainerSpec,
+    source_revision: Option<&str>,
+) -> Result<()> {
     let Some(store) = container.cargo_target_host.as_deref() else {
         return Ok(());
     };
@@ -4237,10 +4248,69 @@ fn materialize_persistent_target(container: &JobContainerSpec) -> Result<()> {
         .with_context(|| format!("create job-local target {}", target.display()))?;
     copy_dir_contents(&payload, &target)?;
     verify_cache_copy(&payload, &target)
-        .with_context(|| format!("verify persistent target restore from {}", store.display()))
+        .with_context(|| format!("verify persistent target restore from {}", store.display()))?;
+
+    let stored_revision = fs::read_to_string(store.join(TARGET_SOURCE_REVISION_MARKER))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let source_revision = workspace_source_revision(&container.workspace_host, source_revision);
+    if source_revision
+        .as_deref()
+        .is_some_and(|revision| stored_revision.as_deref() != Some(revision))
+    {
+        refresh_workspace_source_mtimes(&container.workspace_host)?;
+    }
+    Ok(())
 }
 
-fn publish_persistent_target(container: &JobContainerSpec) -> Result<()> {
+fn workspace_source_revision(workspace: &Path, fallback: Option<&str>) -> Option<String> {
+    std::process::Command::new("git")
+        .args(["-C"])
+        .arg(workspace)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|revision| revision.trim().to_owned())
+        .filter(|revision| !revision.is_empty())
+        .or_else(|| fallback.map(str::to_owned))
+}
+
+fn refresh_workspace_source_mtimes(workspace: &Path) -> Result<()> {
+    let modified = std::time::SystemTime::now();
+    let mut pending = vec![workspace.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory)
+            .with_context(|| format!("read workspace directory {}", directory.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if directory == workspace
+                && matches!(entry.file_name().to_str(), Some(".git" | "target"))
+            {
+                continue;
+            }
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if file_type.is_file() {
+                fs::File::options()
+                    .append(true)
+                    .open(&path)?
+                    .set_modified(modified)?;
+            }
+        }
+        fs::File::open(&directory)?.set_modified(modified)?;
+    }
+    Ok(())
+}
+
+fn publish_persistent_target(
+    container: &JobContainerSpec,
+    source_revision: Option<&str>,
+) -> Result<()> {
     let Some(store) = container.cargo_target_host.as_deref() else {
         return Ok(());
     };
@@ -4265,6 +4335,13 @@ fn publish_persistent_target(container: &JobContainerSpec) -> Result<()> {
     }
     fs::write(staging.join(".velnor-target-complete-v1"), b"complete\n")
         .with_context(|| format!("write target completion marker {}", staging.display()))?;
+    if let Some(revision) = workspace_source_revision(&container.workspace_host, source_revision) {
+        fs::write(
+            staging.join(TARGET_SOURCE_REVISION_MARKER),
+            format!("{revision}\n"),
+        )
+        .with_context(|| format!("write target source revision {}", staging.display()))?;
+    }
 
     let _lock = CacheEntryLock::exclusive(store)?;
     fs::remove_dir_all(store).ok();
@@ -9946,18 +10023,35 @@ mod tests {
         let store = root.join("target-store");
         fs::create_dir_all(store.join("data/debug")).unwrap();
         fs::write(store.join(".velnor-target-complete-v1"), "complete\n").unwrap();
+        fs::write(store.join(TARGET_SOURCE_REVISION_MARKER), "old-revision\n").unwrap();
         fs::write(store.join("data/debug/seed"), "warm\n").unwrap();
+        fs::create_dir_all(&spec.workspace_host).unwrap();
+        fs::write(spec.workspace_host.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let stale_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        fs::File::options()
+            .append(true)
+            .open(spec.workspace_host.join("Cargo.toml"))
+            .unwrap()
+            .set_modified(stale_time)
+            .unwrap();
         spec.cargo_target_host = Some(store.clone());
         assert!(!spec
             .start_args()
             .iter()
             .any(|arg| arg.contains(":/__w/target")));
 
-        materialize_persistent_target(&spec).unwrap();
+        materialize_persistent_target(&spec, Some("new-revision")).unwrap();
         let target = spec.workspace_host.join("target");
         assert_eq!(
             fs::read_to_string(target.join("debug/seed")).unwrap(),
             "warm\n"
+        );
+        assert!(
+            fs::metadata(spec.workspace_host.join("Cargo.toml"))
+                .unwrap()
+                .modified()
+                .unwrap()
+                > stale_time
         );
 
         // Both paths remain inside the workspace mount, so the workflow's
@@ -9969,12 +10063,30 @@ mod tests {
         )
         .unwrap();
         fs::write(target.join("new-output"), "compiled\n").unwrap();
-        publish_persistent_target(&spec).unwrap();
+        publish_persistent_target(&spec, Some("new-revision")).unwrap();
 
         assert!(store.join(".velnor-target-complete-v1").is_file());
         assert_eq!(
+            fs::read_to_string(store.join(TARGET_SOURCE_REVISION_MARKER)).unwrap(),
+            "new-revision\n"
+        );
+        assert_eq!(
             fs::read_to_string(store.join("data/new-output")).unwrap(),
             "compiled\n"
+        );
+        fs::File::options()
+            .append(true)
+            .open(spec.workspace_host.join("Cargo.toml"))
+            .unwrap()
+            .set_modified(stale_time)
+            .unwrap();
+        materialize_persistent_target(&spec, Some("new-revision")).unwrap();
+        assert_eq!(
+            fs::metadata(spec.workspace_host.join("Cargo.toml"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            stale_time
         );
         fs::remove_dir_all(root).unwrap();
     }
