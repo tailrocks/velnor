@@ -1796,8 +1796,9 @@ same-version local-artifact sentence is superseded and must not be used.
 - Release-deb `29883315448` and signed apt publisher `29884053413` are green
   for `v0.1.109`; both amd64 and arm64 package indexes advertise `0.1.109`.
   Sentry remains unmodified because `/Users/donbeave/.ssh/donbeave-ssh` is
-  absent and the SSH agent has no identities. No direct package path or host
-  bypass was used.
+  absent. The configured 1Password agent advertises the registered
+  `donbeave SSH` key but has repeatedly refused the signing operation; no
+  private-key export, direct package path, or host bypass was used.
 - TableRock removed both lane-specific freshness steps at `3a9cdce`; the next
   estate audit checkpoint reports zero errors and the same six explained
   publication-lock advisories. TableRock trunk continues moving under its
@@ -1807,3 +1808,23 @@ same-version local-artifact sentence is superseded and must not be used.
   Greptime and Browser Full Stack on both Velnor and GitHub. This directly
   proves the managed-engine restart fix; no retry, assertion, fixture, or
   expected outcome was weakened.
+
+### 2026-07-22 live-fleet version precondition
+
+- Parallax direct-main `24aade0` corrects the required aggregator display name
+  to the canonical `CI required`, preserving its logic. The automatic exact-head
+  run `29884970397` was cancelled before acceptance because its setup evidence
+  showed the live fleet had not received the published runner correction.
+- TableRock advanced to `03bc78e8`. CI `29884740470` compiled cleanly but its
+  PTY test spawned a child that exceeded 30 seconds. The job's authoritative
+  setup log identifies `Velnor Runner/0.1.58`; that release predates the
+  source-revision target-generation fix by 51 releases. A persistent target may
+  therefore combine a fresh test executable with a stale spawned `tablerock`
+  binary. This is the exact runner defect fixed by `v0.1.109`, not evidence for
+  widening the product timeout or changing TableRock semantics. The invalid
+  Velnor run was cancelled; Native run `29884740464` was left running because
+  it uses GitHub-hosted macOS and remains valid evidence.
+- No replacement Velnor proof will be dispatched until Sentry installs
+  `v0.1.109` from the signed apt repository and reports the matching package,
+  image, daemon, and doctor state. Existing stale registrations must be removed
+  before that dispatch.
