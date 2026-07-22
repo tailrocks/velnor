@@ -408,10 +408,11 @@ pub struct OAuthClient {
 #[error("GitHub runner registration no longer exists: {0}")]
 pub(crate) struct OAuthRegistrationNotFound(pub(crate) String);
 
-fn oauth_registration_not_found(error: &str, description: &str) -> bool {
-    error == "invalid_client"
-        && description.starts_with("Registration ")
-        && description.ends_with(" was not found.")
+fn oauth_registration_not_found(error: &str) -> bool {
+    // Match actions/runner's MessageListener and BrokerMessageListener: the
+    // service's invalid_client code means the runner registration was deleted.
+    // Do not couple recovery to mutable, localized description prose.
+    error.eq_ignore_ascii_case("invalid_client")
 }
 
 impl OAuthClient {
@@ -496,7 +497,7 @@ impl OAuthClient {
 
         if let Some(error) = token_response.error {
             let description = token_response.error_description.unwrap_or_default();
-            if oauth_registration_not_found(&error, &description) {
+            if oauth_registration_not_found(&error) {
                 return Err(OAuthRegistrationNotFound(description).into());
             }
             bail!(
@@ -4110,18 +4111,9 @@ mod tests {
 
     #[test]
     fn classifies_only_missing_registration_oauth_errors() {
-        assert!(oauth_registration_not_found(
-            "invalid_client",
-            "Registration 42c88e02-5da5-423b-82b9-eebe082b81fb was not found."
-        ));
-        assert!(!oauth_registration_not_found(
-            "invalid_client",
-            "client assertion expired"
-        ));
-        assert!(!oauth_registration_not_found(
-            "temporarily_unavailable",
-            "Registration deadbeef was not found."
-        ));
+        assert!(oauth_registration_not_found("invalid_client"));
+        assert!(oauth_registration_not_found("INVALID_CLIENT"));
+        assert!(!oauth_registration_not_found("temporarily_unavailable"));
     }
 
     #[test]
