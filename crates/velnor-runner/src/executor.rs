@@ -4259,6 +4259,11 @@ fn materialize_persistent_target(
         .as_deref()
         .is_some_and(|revision| stored_revision.as_deref() != Some(revision))
     {
+        eprintln!(
+            "forensics.lifecycle: persistent target source revision changed (stored={}, current={}); refreshing workspace mtimes",
+            stored_revision.as_deref().unwrap_or("unknown"),
+            source_revision.as_deref().unwrap_or("unknown")
+        );
         refresh_workspace_source_mtimes(&container.workspace_host)?;
     }
     Ok(())
