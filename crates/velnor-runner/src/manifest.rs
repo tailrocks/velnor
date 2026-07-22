@@ -11,7 +11,7 @@ use crate::cli::{CapabilitiesArgs, CapabilitiesCommand};
 use crate::compiler_cache::CompilerCacheBackend;
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 
-pub const MANIFEST_VERSION: u32 = 4;
+pub const MANIFEST_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CapabilityManifest {
@@ -272,10 +272,16 @@ pub static ACTIONS: &[ActionCapability] = &[
     ActionCapability {
         repository: "jackin-project/jackin-role-action",
         adapter: NativeActionAdapter::ApprovedComposite,
-        allowed_refs: &[allowed(
-            "80a1acd07257a23b441c546e6fcad12239ef7626",
-            "estate-pinned composite",
-        )],
+        allowed_refs: &[
+            allowed(
+                "80a1acd07257a23b441c546e6fcad12239ef7626",
+                "estate-pinned composite",
+            ),
+            allowed(
+                "889e01e1fec152cc68271385f8976319244d9251",
+                "latest-build artifact API lookup (#80)",
+            ),
+        ],
         inputs: &[
             InputRule::Any("path"),
             InputRule::Any("jackin-version"),
@@ -1139,7 +1145,7 @@ mod tests {
     fn pinned_role_composite_is_admitted_but_not_executed_as_native() {
         let job = job(
             "jackin-project/jackin-role-action",
-            Some("80a1acd07257a23b441c546e6fcad12239ef7626"),
+            Some("889e01e1fec152cc68271385f8976319244d9251"),
             serde_json::json!({
                 "path": ".",
                 "skip-build": "false",
