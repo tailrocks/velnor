@@ -781,6 +781,8 @@ fn audit_steps(
     let mut target_dir_override = false;
     let mut unstable_target_dir = false;
     let mut literal_target_cache = false;
+    let mut first_compile_step = None;
+    let mut first_target_cache_step = None;
     for (index, step) in steps.iter().enumerate() {
         let path = format!("{job_path}.steps[{index}]");
         let run = object_get(step, "run")
@@ -789,7 +791,7 @@ fn audit_steps(
         target_dir_override |= run.contains("CARGO_TARGET_DIR=");
         unstable_target_dir |= run.contains("CARGO_TARGET_DIR=")
             && (run.contains("GITHUB_RUN_ID") || run.contains("GITHUB_RUN_ATTEMPT"));
-        compile |= run.lines().any(|line| {
+        let step_compiles = run.lines().any(|line| {
             let line = line.trim_start();
             [
                 "cargo build",
@@ -805,6 +807,10 @@ fn audit_steps(
             .iter()
             .any(|command| line.starts_with(command) || line.contains(&format!(" {command}")))
         });
+        compile |= step_compiles;
+        if step_compiles {
+            first_compile_step.get_or_insert(index);
+        }
         if run.lines().any(|line| {
             let line = line.trim_start();
             line.starts_with("cargo test") || line.contains(" cargo test")
@@ -900,6 +906,9 @@ fn audit_steps(
                     compact(value).lines().any(|line| line.contains("target"))
                 });
                 target_cache |= caches_target;
+                if caches_target {
+                    first_target_cache_step.get_or_insert(index);
+                }
                 literal_target_cache |= object_get(with, "path").is_some_and(|value| {
                     compact(value).lines().any(|line| line.trim() == "target")
                 });
@@ -981,6 +990,17 @@ fn audit_steps(
             file,
             job_path,
             "target cache key must include github.sha while its restore prefix omits ref/SHA so main seeds PRs and each successful commit saves an updated generation",
+        ));
+    }
+    if first_compile_step
+        .zip(first_target_cache_step)
+        .is_some_and(|(compile_step, cache_step)| cache_step > compile_step)
+    {
+        findings.push(Finding::error(
+            "target-cache-order",
+            file,
+            job_path,
+            "restore the Cargo target cache before the first compiling step",
         ));
     }
     if target_dir_override && literal_target_cache {
@@ -1359,6 +1379,16 @@ jobs:
             "      - run: echo 'CARGO_TARGET_DIR=/tmp/target-${GITHUB_RUN_ID}' >> \"$GITHUB_ENV\"\n      - run: cargo nextest run --workspace --locked",
         );
         assert!(has_rule(&audit(&yaml), "target-cache-path"));
+    }
+
+    #[test]
+    fn target_cache_must_precede_compilation() {
+        let cache = "      - uses: actions/cache@0123456789012345678901234567890123456789\n        with:\n          path: target\n          key: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}\n          restore-keys: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-\n";
+        let yaml = BASE.replace(cache, "").replace(
+            "      - run: cargo nextest run --workspace --locked",
+            &format!("      - run: cargo nextest run --workspace --locked\n{cache}"),
+        );
+        assert!(has_rule(&audit(&yaml), "target-cache-order"));
     }
 
     #[test]
