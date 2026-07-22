@@ -569,6 +569,12 @@ fn local_failure(error: anyhow::Error) -> anyhow::Error {
     anyhow::Error::new(LocalRunnerFailure(error))
 }
 
+fn registration_was_deleted(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<crate::protocol::OAuthRegistrationNotFound>())
+}
+
 pub async fn run(args: RunArgs) -> Result<()> {
     if args.complete_noop && args.execute_scripts {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
@@ -1057,6 +1063,26 @@ async fn run_daemon_slot(
             if args.once {
                 cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
                 return Err(error);
+            }
+            if registration_was_deleted(&error) {
+                local_failure_streak = 0;
+                cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
+                eprintln!(
+                    "daemon slot-{slot_index} cycle {cycle} registration disappeared; creating a fresh JIT config: {error:#}"
+                );
+                daemon_forensic_log(
+                    &config_base,
+                    &format!(
+                        "slot-{slot_index} cycle {cycle} registration disappeared; fresh JIT config: {error:#}"
+                    ),
+                );
+                reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle)
+                    .await;
+                cycle += 1;
+                if sleep_slot_retry_or_drain(Duration::from_secs(5)).await {
+                    continue;
+                }
+                continue;
             }
             if error.downcast_ref::<LocalRunnerFailure>().is_some() {
                 // Local fault (docker/preflight/OAuth/config): the GitHub
@@ -7605,8 +7631,19 @@ mod tests {
     fn local_failures_are_classified() {
         let error = local_failure(anyhow::anyhow!("docker is down"));
         assert!(error.downcast_ref::<LocalRunnerFailure>().is_some());
+        assert!(!registration_was_deleted(&error));
+
+        let stale = local_failure(anyhow::Error::new(
+            crate::protocol::OAuthRegistrationNotFound(
+                "Registration deadbeef was not found.".to_string(),
+            ),
+        ));
+        assert!(stale.downcast_ref::<LocalRunnerFailure>().is_some());
+        assert!(registration_was_deleted(&stale));
+
         let remote = anyhow::anyhow!("broker polling failed 10 consecutive times");
         assert!(remote.downcast_ref::<LocalRunnerFailure>().is_none());
+        assert!(!registration_was_deleted(&remote));
     }
 
     #[test]
