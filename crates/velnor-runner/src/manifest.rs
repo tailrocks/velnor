@@ -68,12 +68,11 @@ impl fmt::Display for CapabilityViolation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "unsupported capability in step '{}': action {}@{}, field '{}' received '{}'; accepted: {}; manifest version {}",
+            "unsupported capability in step '{}': action {}@{}, field '{}' received [redacted]; accepted: {}; manifest version {}",
             self.step,
             self.repository,
             self.action_ref,
             self.field,
-            self.received,
             if self.accepted.is_empty() {
                 "none".to_string()
             } else {
@@ -1236,6 +1235,24 @@ mod tests {
             serde_json::json!({"token": "secret"}),
         ));
         assert_eq!(errors[0].field, "with.token");
+    }
+
+    #[test]
+    fn capability_violation_display_never_exposes_received_value() {
+        let secret = "ghs_runtime_secret";
+        let violation = violation(
+            "build",
+            "docker/build-push-action",
+            "sha",
+            "with.secrets",
+            secret,
+            vec!["context".to_string()],
+        );
+
+        let rendered = violation.to_string();
+        assert!(!rendered.contains(secret));
+        assert!(rendered.contains("received [redacted]"));
+        assert_eq!(violation.received, secret);
     }
 
     #[test]
