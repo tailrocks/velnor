@@ -797,7 +797,12 @@ fn audit_steps(
                 "remove sudo; only a proven OS-package boundary may retain it with an immediately preceding # velnor-sudo-exception: reason",
             ));
         }
-        let lane_identity_run = run.replace("--deny-self-hosted-runners", "");
+        let lane_identity_run = run
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("Description:"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace("--deny-self-hosted-runners", "");
         if lane_identity_run.contains("self-hosted")
             || lane_identity_run.contains("velnor-target-mvp")
             || lane_identity_run.contains("ubuntu-26.04")
@@ -1372,6 +1377,15 @@ jobs:
         let yaml = BASE.replace(
             "cargo nextest run --workspace --locked",
             "gh attestation verify artifact --deny-self-hosted-runners",
+        );
+        assert!(!has_rule(&audit(&yaml), "lane-conditional"));
+    }
+
+    #[test]
+    fn permits_self_hosted_words_in_package_description() {
+        let yaml = BASE.replace(
+            "      - run: cargo nextest run --workspace --locked",
+            "      - run: |\n          cat <<'EOF'\n          Description: apt repository for a self-hosted runner\n          EOF",
         );
         assert!(!has_rule(&audit(&yaml), "lane-conditional"));
     }
