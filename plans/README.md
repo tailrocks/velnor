@@ -60,6 +60,8 @@ environment, cache keys, timeout/concurrency, writer gate, aggregator, and
 `.github/AGENTS.md` shared block. Missing required concerns are added;
 genuinely non-applicable concerns are classified and omitted, never replaced
 with no-op jobs (§2.12; `audit-ci` must enforce both coverage and equivalence).
+Workflow execution is unprivileged by default: no cache/ownership/setup
+`sudo`; only documented audited OS-package bootstrap exceptions remain.
 
 ## Execution order & status — runner (velnor)
 

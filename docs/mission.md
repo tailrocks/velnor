@@ -104,6 +104,11 @@ treatment.
   latest crate majors).
 - **Rust-first automation** — prefer `velnor-tools` subcommands over new
   shell/Python.
+- **Least privilege in workflows** — do not use `sudo` for cache ownership,
+  permissions repair, tool setup, or convenience. Prefer mise-managed
+  user-space tools and workspace-owned state. A required OS package may use
+  privileged installation only when no viable user-space path exists; record
+  that audited exception beside the command and keep its package scope exact.
 - **Operations are bulletproof by design** (master-plan P1, shipped in
   0.1.5–0.1.6): the daemon never exits on failures, diagnoses bad credentials
   precisely, reports via sd_notify, and the doctor timer makes a dead fleet

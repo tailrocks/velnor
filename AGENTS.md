@@ -124,6 +124,14 @@ Always run Rust tests with `cargo nextest run`, never `cargo test`. This applies
 to local verification, CI workflows, maintenance scripts, documentation, and
 agent instructions.
 
+## HARD RULE: Unprivileged workflows by default
+
+Never use `sudo` for cache ownership, permission repair, tool setup, or
+convenience. Use mise-managed user-space tools and workspace/home-owned state.
+Privilege is allowed only for an exact required OS package with no viable
+user-space distribution; install it through mise bootstrap, document the
+exception beside the workflow step, and enforce it in `audit-ci`.
+
 ## HARD RULE: Keep direction docs and the execution prompt consistent
 
 `docs/` is the single source of truth for direction: [docs/mission.md](docs/mission.md), [docs/vision.md](docs/vision.md), [docs/roadmap.md](docs/roadmap.md) (the plan), and [docs/comparison.md](docs/comparison.md). The single active execution prompt ([docs/prompt.md](docs/prompt.md)), the plan library (`plans/`), and the rest of the repository defer to it. The old `prompts/` goal-prompt system is retired — its sequences completed 2026-06-11 and the files were removed 2026-07-18; there is exactly ONE active prompt at a time.
@@ -137,6 +145,13 @@ Whenever a discussion or change affects the **vision, plan, or roadmap**:
 Never let a prompt, README, or doc describe a direction that the current vision/plan/roadmap no longer holds. If the prompt and `docs/` disagree, `docs/` wins — fix the prompt.
 
 ### Direction change log
+
+- 2026-07-22: **Unprivileged workflows by default** (operator): estate
+  workflows do not use `sudo` for cache ownership, permission repair, tool
+  setup, or convenience. Tools install in user space through mise and caches
+  live in workspace/home-owned paths. Only an exact required OS package with
+  no viable user-space distribution may elevate through documented mise
+  bootstrap; `audit-ci` enforces the exception.
 
 - 2026-07-22: **Expanded twenty-repository estate; Actions-only delivery may
   merge** (operator): the canonical Velnor-default program also covers

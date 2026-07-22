@@ -140,7 +140,7 @@ an absent workflow is not evidence that the concern is non-applicable.
 | Preview | Repositories producing previews | Canonical build/attest/publish flow, read-only secondary lane, retention, and required aggregator; target/package data may vary. |
 | Release | Repositories publishing tags/packages/images | Canonical trigger, immutable pins, build reuse, attestation where approved, single-writer publish, recovery path, and required aggregator; package targets and credentials are parameters. |
 | Renovate | Repositories running repository-local Renovate | Canonical filename, schedule/dispatch, pin, permissions, concurrency, timeout, and writer behavior; config path is a parameter. |
-| Workflow safety | Every workflow | Canonical concurrency/cancel policy, timeout tier, least permissions, Ubuntu pin, no ad-hoc installers, no deprecated commands, and no lane conditionals except writer gate/name suffix. |
+| Workflow safety | Every workflow | Canonical concurrency/cancel policy, timeout tier, least permissions, Ubuntu pin, no ad-hoc installers, no unexplained `sudo`, no deprecated commands, and no lane conditionals except writer gate/name suffix. User-space mise tools and workspace-owned caches are mandatory; only a documented audited OS-package bootstrap with no viable user-space path may elevate. |
 
 For each canonical concern:
 

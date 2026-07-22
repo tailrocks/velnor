@@ -96,7 +96,7 @@ Law: `docs/mission.md`, `docs/master-plan.md` §3a, `docs/runner-usage.md`, `doc
 
 Repos differ only in **which jobs exist**, not in **how lanes, tools, and caches are declared**.
 
-### 2.0 Two overriding laws
+### 2.0 Three overriding laws
 
 These govern every rule below and every future change to the standard.
 
@@ -150,6 +150,20 @@ estate surface:
 - **Freshness never bypasses verification:** every upgrade lands through the
   same gates (V-A fixture where behavior changes, V-B parity) as any other
   change.
+
+#### Law 3 — Unprivileged workflows by default
+
+- **No permission-repair sudo.** Cache preparation, ownership fixes, build
+  directories, and generated state use workspace/home-owned paths and ordinary
+  user permissions.
+- **Tools remain user-space.** mise installs project tools; a workflow must not
+  use `sudo` as a substitute for a mise tool definition.
+- **Narrow OS-package exception only.** A required operating-system package may
+  be installed through mise's declarative package bootstrap when no viable
+  user-space distribution exists. The workflow comments the proven reason and
+  exact package scope; no broad upgrade or unrelated install is permitted.
+- `audit-ci` fails unexplained workflow `sudo` and permits only documented
+  package-bootstrap exceptions.
 
 ### 2.1 Lane plumbing
 

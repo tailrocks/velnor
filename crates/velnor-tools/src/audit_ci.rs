@@ -579,6 +579,23 @@ fn is_cargo_test_instruction(line: &str) -> bool {
             .all(|token| token.contains('=') && !token.starts_with('='))
 }
 
+fn has_unexplained_sudo(run: &str) -> bool {
+    let lines = run.lines().collect::<Vec<_>>();
+    lines.iter().enumerate().any(|(index, line)| {
+        let line = line.trim();
+        let invokes_sudo = line.starts_with("sudo ")
+            || line.contains("&& sudo ")
+            || line.contains("; sudo ")
+            || line.contains("| sudo ");
+        invokes_sudo
+            && !index.checked_sub(1).is_some_and(|previous| {
+                lines[previous]
+                    .trim()
+                    .starts_with("# velnor-sudo-exception:")
+            })
+    })
+}
+
 fn audit_workflow(
     file: &str,
     text: &str,
@@ -770,6 +787,14 @@ fn audit_steps(
                 file,
                 format!("{path}.run"),
                 "remove ad-hoc cache CLI reporting; the setup action/native adapter post step owns the report",
+            ));
+        }
+        if has_unexplained_sudo(run) {
+            findings.push(Finding::error(
+                "privilege",
+                file,
+                format!("{path}.run"),
+                "remove sudo; only a proven OS-package boundary may retain it with an immediately preceding # velnor-sudo-exception: reason",
             ));
         }
         let lane_identity_run = run.replace("--deny-self-hosted-runners", "");
@@ -1349,6 +1374,16 @@ jobs:
             "gh attestation verify artifact --deny-self-hosted-runners",
         );
         assert!(!has_rule(&audit(&yaml), "lane-conditional"));
+    }
+
+    #[test]
+    fn rejects_unexplained_sudo_and_accepts_documented_exception() {
+        assert!(has_unexplained_sudo("sudo chown -R user cache"));
+        assert!(has_unexplained_sudo("mkdir cache && sudo chmod 777 cache"));
+        assert!(!has_unexplained_sudo(
+            "# velnor-sudo-exception: apt package has no user-space distribution\nsudo apt-get install reprepro"
+        ));
+        assert!(!has_unexplained_sudo("echo 'never use sudo here'"));
     }
 
     #[test]
