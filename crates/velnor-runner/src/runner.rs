@@ -1522,15 +1522,26 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
             .unwrap_or_default()
     };
 
-    let label_filter = format!("label=velnor.daemon-id={daemon_id}");
-    let containers = ids_from(&[
-        "ps",
-        "-aq",
-        "--filter",
-        "name=velnor-job",
-        "--filter",
-        &label_filter,
-    ]);
+    // Job containers are labelled with the slot work directory, while daemon
+    // startup receives the shared work root. Docker's label filter is exact,
+    // so filtering for the shared root silently missed every multi-slot
+    // container after a crash or package restart. Inspect the bounded
+    // `velnor-job` set and accept the shared root plus its direct slot roots.
+    let containers = ids_from(&["ps", "-aq", "--filter", "name=velnor-job"])
+        .into_iter()
+        .filter(|id| {
+            docker(&[
+                "inspect",
+                "--format",
+                "{{ index .Config.Labels \"velnor.daemon-id\" }}",
+                id,
+            ])
+            .filter(|output| output.status.success())
+            .is_some_and(|output| {
+                daemon_owns_resource(String::from_utf8_lossy(&output.stdout).trim(), daemon_id)
+            })
+        })
+        .collect::<Vec<_>>();
     if !containers.is_empty() {
         let mut args = vec!["rm".to_string(), "-f".to_string()];
         args.extend(containers.iter().cloned());
@@ -1551,6 +1562,21 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
             networks.len()
         );
     }
+}
+
+fn daemon_owns_resource(owner: &str, daemon_id: &str) -> bool {
+    if owner == daemon_id {
+        return true;
+    }
+    Path::new(owner).parent() == Some(Path::new(daemon_id))
+        && Path::new(owner)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.strip_prefix("slot-").is_some_and(|slot| {
+                    !slot.is_empty() && slot.chars().all(|c| c.is_ascii_digit())
+                })
+            })
 }
 
 /// A fresh daemon pass has no surviving jobs from the previous process, so
@@ -1765,65 +1791,11 @@ async fn run_v2(
     agent_id: i64,
     token: OAuthAccessToken,
 ) -> Result<()> {
-    let work_root = crate::container::daemon_shared_root(
-        args.work_dir
-            .clone()
-            .unwrap_or_else(|| config_dir.join("_work")),
-    );
-    let run_root = crate::storage::StorageLayout::resolve()
-        .map(|layout| layout.run_root)
-        .unwrap_or_else(|| daemon_capacity_run_root(&config_dir));
-    let controller = crate::capacity::CapacityController {
-        run_root: run_root.clone(),
-        emergency_reserve_bytes: args.emergency_reserve_bytes,
-        job_peak_bytes: args.job_peak_bytes,
-    };
-    let free = free_space_bytes(&work_root)
-        .ok_or_else(|| anyhow::anyhow!("capacity backpressure: cannot measure free bytes"))
-        .map_err(local_failure)?;
-    let reservation = match controller.reserve_with_free_bytes(free) {
-        Ok(reservation) => reservation,
-        Err(first_error) => {
-            let active = crate::capacity::active_scopes(&run_root, Duration::from_secs(24 * 3600))
-                .map_err(local_failure)?;
-            let (_, active_reserved) =
-                crate::capacity::reservation_summary(&run_root).map_err(local_failure)?;
-            let hysteresis = if run_root.join("capacity-backpressure").exists() {
-                args.job_peak_bytes / 5
-            } else {
-                0
-            };
-            let required = args
-                .emergency_reserve_bytes
-                .saturating_add(active_reserved)
-                .saturating_add(args.job_peak_bytes)
-                .saturating_add(hysteresis);
-            let needed = required.saturating_sub(free);
-            let log_root = crate::storage::StorageLayout::resolve()
-                .map(|layout| layout.log_root)
-                .unwrap_or_else(|| config_dir.join("logs"));
-            let reclaim_layout = crate::storage::StorageLayout {
-                cache_root: work_root.clone(),
-                lib_root: config_dir.clone(),
-                run_root: run_root.clone(),
-                log_root,
-                mode: "resolved",
-            };
-            if needed > 0 {
-                let _ = crate::cache::reclaim(&reclaim_layout, needed, &active)
-                    .map_err(local_failure)?;
-            }
-            let free_after = free_space_bytes(&work_root).unwrap_or(free);
-            controller
-                .reserve_with_free_bytes(free_after)
-                .with_context(|| {
-                    format!("{first_error:#}; reclaim completed but reservation still unavailable")
-                })
-                .map_err(local_failure)?
-        }
-    };
-    let _reserved_bytes = reservation.bytes;
-    let _reservation = reservation;
+    // Disk peak is reserved only while a job is executing (see
+    // `reserve_job_peak_capacity` in `handle_job_request`). Idle JIT slots
+    // must not pin `VELNOR_JOB_PEAK_BYTES` for their whole poll lifetime —
+    // on multi-daemon hosts that over-reserved the host and permanently
+    // blocked admission (capacity backpressure with free ≫ real job use).
     let server_url_v2 = stored.settings.server_url_v2.as_deref().ok_or_else(|| {
         anyhow::anyhow!("runner config enables V2 flow but missing server_url_v2")
     })?;
@@ -2073,6 +2045,69 @@ fn daemon_capacity_run_root(config_dir: &Path) -> PathBuf {
         .and_then(Path::parent)
         .unwrap_or(config_dir);
     base.join("run")
+}
+
+/// Reserve host disk peak for one **active** job.
+///
+/// Call only after a job has been acquired and is about to execute. Drop the
+/// returned [`crate::capacity::Reservation`] when the job finishes so idle
+/// slots free the admission budget for other daemons.
+fn reserve_job_peak_capacity(
+    config_dir: &Path,
+    args: &RunArgs,
+) -> Result<crate::capacity::Reservation> {
+    let work_root = crate::container::daemon_shared_root(
+        args.work_dir
+            .clone()
+            .unwrap_or_else(|| config_dir.join("_work")),
+    );
+    let run_root = crate::storage::StorageLayout::resolve()
+        .map(|layout| layout.run_root)
+        .unwrap_or_else(|| daemon_capacity_run_root(config_dir));
+    let controller = crate::capacity::CapacityController {
+        run_root: run_root.clone(),
+        emergency_reserve_bytes: args.emergency_reserve_bytes,
+        job_peak_bytes: args.job_peak_bytes,
+    };
+    let free = free_space_bytes(&work_root)
+        .ok_or_else(|| anyhow::anyhow!("capacity backpressure: cannot measure free bytes"))?;
+    match controller.reserve_with_free_bytes(free) {
+        Ok(reservation) => Ok(reservation),
+        Err(first_error) => {
+            let active = crate::capacity::active_scopes(&run_root, Duration::from_secs(24 * 3600))?;
+            let (_, active_reserved) = crate::capacity::reservation_summary(&run_root)?;
+            let hysteresis = if run_root.join("capacity-backpressure").exists() {
+                args.job_peak_bytes / 5
+            } else {
+                0
+            };
+            let required = args
+                .emergency_reserve_bytes
+                .saturating_add(active_reserved)
+                .saturating_add(args.job_peak_bytes)
+                .saturating_add(hysteresis);
+            let needed = required.saturating_sub(free);
+            let log_root = crate::storage::StorageLayout::resolve()
+                .map(|layout| layout.log_root)
+                .unwrap_or_else(|| config_dir.join("logs"));
+            let reclaim_layout = crate::storage::StorageLayout {
+                cache_root: work_root.clone(),
+                lib_root: config_dir.to_path_buf(),
+                run_root: run_root.clone(),
+                log_root,
+                mode: "resolved",
+            };
+            if needed > 0 {
+                let _ = crate::cache::reclaim(&reclaim_layout, needed, &active)?;
+            }
+            let free_after = free_space_bytes(&work_root).unwrap_or(free);
+            controller
+                .reserve_with_free_bytes(free_after)
+                .with_context(|| {
+                    format!("{first_error:#}; reclaim completed but reservation still unavailable")
+                })
+        }
+    }
 }
 
 /// Proactively refresh OAuth credentials for an idle slot. Best-effort: a
@@ -2779,7 +2814,44 @@ async fn handle_job_request(
         // Lease publication mutates the runtime store, so it must follow all
         // trust and strict-capability checks. Keep the guards through result
         // upload by binding them in the execution scope.
-        let _storage_leases = acquire_storage_leases()?;
+        //
+        // Disk peak reservation is taken only for an active job (not while the
+        // JIT slot is idle-polling). Hold until this scope ends so concurrent
+        // daemons share a truthful host admission budget. Fail closed on the
+        // acquired job if the host cannot admit peak — do not leave GitHub
+        // holding an in-progress job with no runner work.
+        let _job_peak_reservation = match reserve_job_peak_capacity(config_dir, args) {
+            Ok(reservation) => {
+                println!(
+                    "Reserved host disk peak {} bytes for active job {}.",
+                    reservation.bytes, job.job_id
+                );
+                reservation
+            }
+            Err(error) => {
+                complete_acquired_job_failure(
+                    &run_service_job,
+                    &AcquiredJobIdentity::from_job(&job),
+                    Some("capacity_backpressure".to_string()),
+                    &format!("{error:#}"),
+                )
+                .await?;
+                return Err(error).context("reserve host disk peak for active job");
+            }
+        };
+        let _storage_leases = match acquire_storage_leases() {
+            Ok(leases) => leases,
+            Err(error) => {
+                complete_acquired_job_failure(
+                    &run_service_job,
+                    &AcquiredJobIdentity::from_job(&job),
+                    Some("storage_lease".to_string()),
+                    &format!("{error:#}"),
+                )
+                .await?;
+                return Err(error).context("acquire storage leases for active job");
+            }
+        };
         if let Err(error) = publish_timeline_job_started(&job, runner_name).await {
             eprintln!("Best-effort timeline job start update failed: {error:#}");
         }
@@ -10917,6 +10989,28 @@ runs:
     fn doctor_timing_slo_marks_pass_and_breach() {
         assert_eq!(timing_slo_state(3_000, 3_000), "PASS");
         assert_eq!(timing_slo_state(3_001, 3_000), "WARN");
+    }
+
+    #[test]
+    fn daemon_resource_ownership_accepts_only_direct_numeric_slots() {
+        let daemon = "/var/lib/velnor-tailrocks/work";
+        assert!(daemon_owns_resource(daemon, daemon));
+        assert!(daemon_owns_resource(
+            "/var/lib/velnor-tailrocks/work/slot-8",
+            daemon
+        ));
+        assert!(!daemon_owns_resource(
+            "/var/lib/velnor-chainargos/work/slot-8",
+            daemon
+        ));
+        assert!(!daemon_owns_resource(
+            "/var/lib/velnor-tailrocks/work/slot-bad",
+            daemon
+        ));
+        assert!(!daemon_owns_resource(
+            "/var/lib/velnor-tailrocks/work/slot-8/nested",
+            daemon
+        ));
     }
 
     #[test]

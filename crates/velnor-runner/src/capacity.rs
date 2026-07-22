@@ -23,6 +23,20 @@ struct ReservationRecord {
     created_unix: u64,
 }
 
+/// Maximum age for a job capacity reservation before it is treated as leaked.
+///
+/// Reservations must only live for the duration of an active job. Multi-slot
+/// daemons share one PID across slots, so PID liveness alone cannot reap a
+/// leaked file left behind after a job-path panic or incomplete Drop. Age is
+/// the host-wide safety net. Override with `VELNOR_RESERVATION_TTL_SECS`.
+pub fn reservation_ttl() -> Duration {
+    let secs = std::env::var("VELNOR_RESERVATION_TTL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(6 * 3600);
+    Duration::from_secs(secs.max(60))
+}
+
 #[derive(Debug)]
 pub struct ScopeLease {
     path: PathBuf,
@@ -218,16 +232,23 @@ impl CapacityController {
     }
 }
 
+fn reservation_is_stale(record: &ReservationRecord, ttl: Duration) -> bool {
+    let age_stale = unix_now().saturating_sub(record.created_unix) > ttl.as_secs();
+    let proc_root = Path::new("/proc");
+    let pid_gone = proc_root.exists() && !proc_root.join(record.pid.to_string()).exists();
+    age_stale || pid_gone
+}
+
 fn reservation_bytes(dir: &Path) -> Result<u64> {
     let mut total = 0u64;
+    let ttl = reservation_ttl();
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
         if path.extension().is_none_or(|extension| extension != "json") {
             continue;
         }
         let record: ReservationRecord = serde_json::from_slice(&fs::read(&path)?)?;
-        if Path::new("/proc").exists() && !Path::new("/proc").join(record.pid.to_string()).exists()
-        {
+        if reservation_is_stale(&record, ttl) {
             fs::remove_file(path)?;
             continue;
         }
@@ -333,6 +354,52 @@ mod tests {
         drop(first);
         assert!(controller.reserve_with_free_bytes(45).is_err());
         assert!(controller.reserve_with_free_bytes(46).is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reservation_drop_releases_active_bytes() {
+        let root = root("capacity-drop");
+        let controller = CapacityController {
+            run_root: root.clone(),
+            emergency_reserve_bytes: 0,
+            job_peak_bytes: 100,
+        };
+        let held = controller.reserve_with_free_bytes(100).unwrap();
+        assert_eq!(reservation_summary(&root).unwrap(), (1, 100));
+        drop(held);
+        assert_eq!(reservation_summary(&root).unwrap(), (0, 0));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn aged_out_reservation_is_reaped_even_when_pid_alive() {
+        let root = root("capacity-age");
+        let dir = root.join("reservations");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("stale.json");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        serde_json::to_writer(
+            &mut file,
+            &ReservationRecord {
+                bytes: 100,
+                pid: std::process::id(),
+                // Far in the past so any positive TTL reaps it.
+                created_unix: 1,
+            },
+        )
+        .unwrap();
+        file.flush().unwrap();
+        // TTL default is hours; force a short one for the test.
+        // SAFETY: single-threaded test, restored below.
+        std::env::set_var("VELNOR_RESERVATION_TTL_SECS", "60");
+        assert_eq!(reservation_bytes(&dir).unwrap(), 0);
+        assert!(!path.exists());
+        std::env::remove_var("VELNOR_RESERVATION_TTL_SECS");
         fs::remove_dir_all(root).unwrap();
     }
 }
