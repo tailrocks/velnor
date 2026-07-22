@@ -17,10 +17,10 @@ use rayon::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fs::{self, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
@@ -2633,6 +2633,34 @@ where
         }
         for build_arg in input_values(&native_input(action, &action_state, "build-args")) {
             push_arg(&mut args, "--build-arg", &build_arg);
+        }
+        let secret_input = native_input(action, &action_state, "secrets");
+        if !secret_input.trim().is_empty() && self.trust_scope != "trusted" {
+            bail!(
+                "docker/build-push-action refuses BuildKit secrets in trust scope '{}'; accepted trust scope: trusted",
+                self.trust_scope
+            );
+        }
+        let mut secret_files = Vec::new();
+        for secret in secret_input.lines().filter(|line| !line.trim().is_empty()) {
+            let (id, value) = secret
+                .split_once('=')
+                .filter(|(id, value)| !id.is_empty() && !value.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("docker/build-push-action received an invalid secret entry")
+                })?;
+            let secret_file = BuildSecretFile::create(
+                action_state.temp_host.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("docker/build-push-action requires a runner temp directory")
+                })?,
+                value,
+            )?;
+            push_arg(
+                &mut args,
+                "--secret",
+                &format!("id={id},src={}", secret_file.container_path()),
+            );
+            secret_files.push(secret_file);
         }
         let mut dropped_gha_cache = 0usize;
         for cache in input_values(&native_input(action, &action_state, "cache-from")) {
@@ -6294,6 +6322,46 @@ fn push_arg(args: &mut Vec<String>, name: &str, value: &str) {
     if !value.trim().is_empty() {
         args.push(name.to_string());
         args.push(value.to_string());
+    }
+}
+
+#[derive(Debug)]
+struct BuildSecretFile {
+    host_path: PathBuf,
+    container_path: String,
+}
+
+impl BuildSecretFile {
+    fn create(temp_host: &Path, value: &str) -> Result<Self> {
+        let relative = PathBuf::from("_velnor")
+            .join("build-secrets")
+            .join(uuid::Uuid::new_v4().to_string());
+        let host_path = temp_host.join(&relative);
+        fs::create_dir_all(host_path.parent().expect("secret file has parent"))
+            .context("create BuildKit secret directory")?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(&host_path)
+            .context("create BuildKit secret file")?;
+        file.write_all(value.as_bytes())
+            .context("write BuildKit secret file")?;
+        Ok(Self {
+            host_path,
+            container_path: format!("/__t/{}", relative.to_string_lossy()),
+        })
+    }
+
+    fn container_path(&self) -> &str {
+        &self.container_path
+    }
+}
+
+impl Drop for BuildSecretFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.host_path);
     }
 }
 
@@ -10387,6 +10455,10 @@ type=sha,format=long,prefix=,enable=true"
                         ("tags".into(), "${{ steps.meta.outputs.tags }}".into()),
                         ("labels".into(), "${{ steps.meta.outputs.labels }}".into()),
                         (
+                            "secrets".into(),
+                            "github_token=${{ secrets.DOCKER_TOKEN }}".into(),
+                        ),
+                        (
                             "cache-from".into(),
                             "type=gha,scope=bitcoin-processor-app-pr".into(),
                         ),
@@ -10516,8 +10588,17 @@ type=sha,format=long,prefix=,enable=true"
         // mode-0600 env file and never occur in the process argument vector.
         let build_invocation = &calls[build_call.unwrap()];
         assert!(!build_invocation.contains("ACTIONS_RUNTIME_TOKEN=runtime-token"));
+        assert!(!build_invocation.contains("docker-token"));
+        assert!(build_invocation
+            .contains("'--secret' 'id=github_token,src=/__t/_velnor/build-secrets/"));
         assert!(build_invocation.contains("--env-file"));
         assert!(build_invocation.contains("ACTIONS_CACHE_URL=https://cache.actions"));
+        assert_eq!(
+            fs::read_dir(temp.join("_velnor/build-secrets"))
+                .unwrap()
+                .count(),
+            0
+        );
         let bake_call = calls
             .iter()
             .position(|c| c.contains("'buildx' 'bake'") && c.contains("'bitcoin-processor-app'"));
@@ -10766,6 +10847,28 @@ type=sha,format=long,prefix=,enable=true"
         assert!(calls.iter().any(|c| {
             c.contains("'buildx' 'build'") && c.contains("'--load'") && !c.contains("'--push'")
         }));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn build_secret_file_is_private_and_ephemeral() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+
+        let secret = BuildSecretFile::create(&temp, "runtime-token").unwrap();
+        let host_path = secret.host_path.clone();
+        assert_eq!(fs::read_to_string(&host_path).unwrap(), "runtime-token");
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&host_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(secret
+            .container_path()
+            .starts_with("/__t/_velnor/build-secrets/"));
+
+        drop(secret);
+        assert!(!host_path.exists());
         fs::remove_dir_all(temp).unwrap();
     }
 

@@ -249,6 +249,7 @@ const BUILD_PUSH_INPUTS: &[InputRule] = &[
     InputRule::Any("tags"),
     InputRule::Any("labels"),
     InputRule::Any("build-args"),
+    InputRule::Any("secrets"),
     InputRule::Any("cache-from"),
     InputRule::Any("cache-to"),
     InputRule::Any("outputs"),
