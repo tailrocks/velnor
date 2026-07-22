@@ -14,7 +14,7 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 /// Bump whenever target mounting or compiler-visible path semantics change.
 /// Old generations remain inactive, owned cache data and are reclaimed by GC.
-const CARGO_TARGET_GENERATION: &str = "workspace-v2";
+const CARGO_TARGET_GENERATION: &str = "workspace-v3-job-local";
 
 pub struct GitHubJobContainerPaths {
     pub workspace_host: PathBuf,
@@ -978,7 +978,7 @@ mod tests {
         assert_eq!(
             host,
             std::path::PathBuf::from(
-                "/velnor/work/_velnor_targets/trusted/workspace-v2/ChainArgos_java-monorepo/CI___Preview/Rust___test__ubuntu_"
+                "/velnor/work/_velnor_targets/trusted/workspace-v3-job-local/ChainArgos_java-monorepo/CI___Preview/Rust___test__ubuntu_"
             )
         );
     }

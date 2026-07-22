@@ -37,19 +37,19 @@ status checks.
 
 | Repository | Delivery prerequisite | Required check context(s) |
 |---|---|---|
-| `jackin-project/jackin` | Merge PR #810 after its approved attestation capability and fresh proof | `ci-required`; `construct-required`; `docs required (Velnor)`; `DCO` |
-| `ChainArgos/java-monorepo` | Merge PR #1753 including `4ef12b2` | `CI required (Velnor)`; `Docker required (Velnor)` |
-| `ChainArgos/blockchain-nodes` | Merge PR #651 including `367817f` | `CI required (Velnor)` |
-| `tailrocks/parallax` | Push direct-main commit `8190a6d` and complete Ubuntu/Velnor proof | `CI required (Velnor)` |
-| `tailrocks/parallax-telemetry-playground` | Push direct-main commit `8fba93b` | `CI required (Velnor)` |
-| `tailrocks/tablerock` | Resolve plan 057's current-code clippy STOP and deliver a compliant CI workflow | **Not selectable yet** |
-| `tailrocks/holla` | Update PR #37 with `bb1a338`, prove, merge | `CI required (Velnor)` |
-| `tailrocks/velnor` | Already merged | `CI required (Velnor)` |
-| `tailrocks/ruxel` | Update PR #3 with `d8380df`, prove, merge | `CI required (Velnor)` |
-| `tailrocks/termrock` | Push direct-main commit `f20f271` | `CI required (Velnor)` |
-| `tailrocks/schemalane` | Update PR #3 with `8058791`, prove, merge | `CI required (Velnor)` |
-| `tailrocks/pg-bigdecimal` | Update PR #2 with `dcdb6fa`, prove, merge | `CI required (Velnor)` |
-| `tailrocks/tracing-request-level` | Update PR #2 with `106641a`, prove, merge | `CI required (Velnor)` |
+| `jackin-project/jackin` | Merge PR #810 head `28187d25` after explicit attestation-expansion approval, implementation, and fresh Velnor proof | `ci-required`; `construct-required`; `docs required (Velnor)`; `DCO` |
+| `ChainArgos/java-monorepo` | Merge PR #1753 head `78697247` after fresh Velnor proof | `CI required (Velnor)`; `Docker required (Velnor)` |
+| `ChainArgos/blockchain-nodes` | Merge PR #651 head `bb2548cc` after fresh Velnor proof | `CI required (Velnor)` |
+| `tailrocks/parallax` | Complete exact-head proof for direct-main `705af2ca` | `CI required (Velnor)` |
+| `tailrocks/parallax-telemetry-playground` | Direct-main `b6ec71e9` delivered; final proof reconciliation remains | `CI required (Velnor)` |
+| `tailrocks/tablerock` | Complete exact-head CI and Native proof for trunk `f6591b04` | `CI required (Velnor)` |
+| `tailrocks/holla` | Merge PR #37 head `94fc643a` after final combined proof | `CI required (Velnor)` |
+| `tailrocks/velnor` | Merge PR #110 head `720ec17c` after signed release and fleet proof | `CI required (Velnor)` |
+| `tailrocks/ruxel` | Merge PR #3 head `3d7684fa` after final combined proof | `CI required (Velnor)` |
+| `tailrocks/termrock` | Direct-main `13b05d4c` delivered; final proof reconciliation remains | `CI required (Velnor)` |
+| `tailrocks/schemalane` | Merge PR #3 head `fa090cc2` after final combined proof | `CI required (Velnor)` |
+| `tailrocks/pg-bigdecimal` | Merge PR #2 head `c1ac5c8c` after final combined proof | `CI required (Velnor)` |
+| `tailrocks/tracing-request-level` | Merge PR #2 head `84e6caeb` after final combined proof | `CI required (Velnor)` |
 
 ## Per-repository UI procedure
 

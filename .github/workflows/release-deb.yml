@@ -92,6 +92,13 @@ jobs:
           restore-keys: |
             cargo-registry-${{ runner.os }}-
 
+      - name: Cache Cargo target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: target
+          key: cargo-target-${{ matrix.config.lane }}-${{ runner.os }}-${{ github.job }}-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', '**/Cargo.toml', '**/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: cargo-target-${{ matrix.config.lane }}-${{ runner.os }}-${{ github.job }}-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', '**/Cargo.toml', '**/Cargo.lock') }}-
+
       # OpenSSL is vendored (native-tls-vendored), so no system libssl or
       # cross :arm64 packages are needed — zigbuild supplies the toolchain.
 
@@ -203,8 +210,10 @@ jobs:
             exit 1
           fi
           # Create the release if it does not exist yet, then upload the deb assets.
-          gh release view "$TAG" >/dev/null 2>&1 \
-            || gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release view "$TAG" >/dev/null 2>&1 || {
+            gh release create "$TAG" --title "$TAG" --generate-notes \
+              || gh release view "$TAG" >/dev/null
+          }
           gh release upload "$TAG" artifacts/velnor-runner-*-unknown-linux-gnu.deb artifacts/velnor-runner-*-unknown-linux-gnu.deb.sha256 --clobber
 
       - name: Push .deb(s) to velnor-apt + trigger publish (optional)
@@ -226,8 +235,10 @@ jobs:
             exit 0
           fi
           export GH_TOKEN="$APT_TOKEN"
-          gh release view "$TAG" --repo tailrocks/velnor-apt >/dev/null 2>&1 \
-            || gh release create "$TAG" --repo tailrocks/velnor-apt --title "velnor-runner $TAG (debs)" --notes "velnor-runner .debs for apt repository (amd64 + arm64)."
+          gh release view "$TAG" --repo tailrocks/velnor-apt >/dev/null 2>&1 || {
+            gh release create "$TAG" --repo tailrocks/velnor-apt --title "velnor-runner $TAG (debs)" --notes "velnor-runner .debs for apt repository (amd64 + arm64)." \
+              || gh release view "$TAG" --repo tailrocks/velnor-apt >/dev/null
+          }
           gh release upload "$TAG" artifacts/velnor-runner-*-unknown-linux-gnu.deb artifacts/velnor-runner-*-unknown-linux-gnu.deb.sha256 --repo tailrocks/velnor-apt --clobber
           gh workflow run publish.yml --repo tailrocks/velnor-apt -f version="$TAG"
           echo "Uploaded velnor-runner debs to velnor-apt $TAG and triggered publish."

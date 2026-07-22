@@ -124,6 +124,14 @@ Always run Rust tests with `cargo nextest run`, never `cargo test`. This applies
 to local verification, CI workflows, maintenance scripts, documentation, and
 agent instructions.
 
+## HARD RULE: Unprivileged workflows by default
+
+Never use `sudo` for cache ownership, permission repair, tool setup, or
+convenience. Use mise-managed user-space tools and workspace/home-owned state.
+Privilege is allowed only for an exact required OS package with no viable
+user-space distribution; install it through mise bootstrap, document the
+exception beside the workflow step, and enforce it in `audit-ci`.
+
 ## HARD RULE: Keep direction docs and the execution prompt consistent
 
 `docs/` is the single source of truth for direction: [docs/mission.md](docs/mission.md), [docs/vision.md](docs/vision.md), [docs/roadmap.md](docs/roadmap.md) (the plan), and [docs/comparison.md](docs/comparison.md). The single active execution prompt ([docs/prompt.md](docs/prompt.md)), the plan library (`plans/`), and the rest of the repository defer to it. The old `prompts/` goal-prompt system is retired — its sequences completed 2026-06-11 and the files were removed 2026-07-18; there is exactly ONE active prompt at a time.
@@ -137,6 +145,69 @@ Whenever a discussion or change affects the **vision, plan, or roadmap**:
 Never let a prompt, README, or doc describe a direction that the current vision/plan/roadmap no longer holds. If the prompt and `docs/` disagree, `docs/` wins — fix the prompt.
 
 ### Direction change log
+
+- 2026-07-22: **Sequential runs must be fully warm** (operator): each
+  successful cold run seeds dependency, compiler-output, tool, and layer
+  caches; unchanged sequential PR and main-equivalent runs on GitHub and
+  Velnor download and compile no dependency and reinstall no tool. Canonical
+  keys exclude refs and include compatibility inputs. GitHub's native cache
+  scope lets trusted main seed PR restores; PR caches remain merge-ref scoped
+  and never feed main. Every workflow-only PR may merge after exact-head
+  dual-lane plus cold→warm→unchanged log proof.
+
+- 2026-07-22: **Unprivileged workflows by default** (operator): estate
+  workflows do not use `sudo` for cache ownership, permission repair, tool
+  setup, or convenience. Tools install in user space through mise and caches
+  live in workspace/home-owned paths. Only an exact required OS package with
+  no viable user-space distribution may elevate through documented mise
+  bootstrap; `audit-ci` enforces the exception.
+
+- 2026-07-22: **Expanded twenty-repository estate; Actions-only delivery may
+  merge** (operator): the canonical Velnor-default program also covers
+  `jackin-agent-brown`, `velnor-actions-fixture`, `velnor-apt`, `holla-apt`,
+  `homebrew-tablerock`, `homebrew-parallax`, and `homebrew-holla`. Every
+  applicable Linux workflow defaults to Velnor; GitHub-hosted execution
+  requires explicit `lanes: github`, and `lanes: both` proves parity. Shared
+  concerns use one canonical mechanism, tools install only through mise, Rust
+  tests use nextest, and current stable pins/features plus aggressive bounded
+  caches are mandatory. Automation may merge a GitHub Actions-only PR after
+  exact-head canonical and dual-runner gates pass. Mixed product/CI PRs remain
+  review-gated unless separately authorized.
+
+- 2026-07-22: **Parallax native Apple packaging is the sole measured OS
+  exception** ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) §12.4):
+  the operator's approval of all pending program decisions except PR merging
+  accepts the proven `aarch64-apple-darwin` and `x86_64-apple-darwin`
+  preview/stable producers. Linux zigbuild cannot embed the required line
+  tables into Parallax's single-file Mach-O archive; native `dsymutil`, Apple
+  linker header padding, DWARF insertion, and `codesign` are required. These
+  GitHub-hosted package jobs are not CI lanes and do not authorize any other
+  macOS surface. Velnor still rejects Darwin labels.
+
+- 2026-07-22: **Persistent Cargo targets are job-local materializations**:
+  a Jackin dual-lane run proved that bind-mounting the durable bucket directly
+  at `/__w/target` changes observable filesystem behavior: atomic promotion
+  from `target/.ci-restore` to `.ci-target-cache` fails with `EXDEV`, while the
+  identical GitHub-hosted workspace succeeds. Velnor now reflink/copies a
+  complete scoped generation into the ordinary job-local `target/` after
+  checkout and publishes the completed tree atomically after the job. It still
+  exports no synthetic `CARGO_TARGET_DIR`; generation `workspace-v3-job-local`
+  invalidates the incompatible mount-era trees.
+
+- 2026-07-21: **Every Sentry install and upgrade is apt-only** (operator): the
+  signed `velnor-apt` repository is mandatory for first installation and every
+  upgrade. Local `.deb`, direct `dpkg -i`, copied binaries, and local-path apt
+  sources are prohibited.
+
+- 2026-07-21: **Final estate state was operator-reviewable, not auto-merged**
+  (merge restriction superseded for Actions-only PRs on 2026-07-22):
+  every applicable repository must finish with a final PR (or binding
+  trunk-only delivery record) using the canonical concern-based format,
+  local-only sccache, scheduled `both` parity, and the approved required-check
+  handoff. Mixed product/CI PRs still require an explicit operator merge
+  decision; the later Actions-only authorization is narrow. The exact
+  `actions/attest-build-provenance@v4.1.1` proposal is approved for native Rust
+  implementation and fixture/Jackin proof; no adjacent surface is authorized.
 
 - 2026-07-21: **Rust testing is nextest-only** ([docs/roadmap.md](docs/roadmap.md)
   Shared Rust CI Requirements): local verification, CI, scripts, and agent
@@ -177,13 +248,13 @@ Never let a prompt, README, or doc describe a direction that the current vision/
   in the job home. This preserves zero-download warm runs without exposing
   mutable materialization trees across slots.
 
-- 2026-07-18: **Persistent Cargo targets preserve workspace semantics**:
-  `VELNOR_CARGO_TARGET_PERSIST` mounts the scoped host bucket at the ordinary
-  `/__w/target` workspace path. Target generations invalidate artifacts when
-  compiler-visible path semantics change. It never exports a synthetic
-  `CARGO_TARGET_DIR` or exposes the retired `/__cargo_target` path. This keeps
-  unchanged workflow references such as `target/release/...` identical on
-  GitHub and Velnor while retaining host persistence.
+- 2026-07-18: **Persistent Cargo targets preserve workspace semantics**
+  (storage mechanism superseded 2026-07-22): target generations invalidate
+  artifacts when compiler-visible path semantics change. Velnor never exports
+  a synthetic `CARGO_TARGET_DIR` or exposes the retired `/__cargo_target` path;
+  unchanged workflow references such as `target/release/...` stay identical.
+  Direct `/__w/target` mounting was later proven to violate rename semantics
+  and replaced by job-local materialization plus atomic publication.
 
 - 2026-07-18: **Artifact fan-in is Results Service authoritative**: the
   superseded Phase-0 single-host artifact assumption is removed. Native

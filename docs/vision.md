@@ -20,17 +20,34 @@ conclusions in the GitHub UI — is **achieved and in production**:
   replaces only the runner side, over GitHub's current V2 JIT/broker/
   run-service/Results Service protocol, executing every assigned Linux job
   in an isolated Docker container.
-- The 2026-07-18 estate program standardized the thirteen repositories in
+- The estate program standardizes the twenty repositories in
   `VELNOR_PROJECTS_SETUP.md` on one YAML surface: Velnor by default, pinned
   Ubuntu 26.04 selectable with `lanes=github`, and paired parity with
   `lanes=both`. Repositories whose delivery is blocked retain their pushed
   program branch and exact evidence; their current `main` is not represented
   as migrated until its PR can merge.
+- GitHub Actions-only delivery PRs may merge after exact-head canonical,
+  GitHub-hosted, and Velnor proof. Mixed product/CI PRs remain operator-review
+  deliveries unless separately authorized.
+- Standardized CI, test, docs, and Linux release work remains Ubuntu-only.
+  Workflow steps run unprivileged by default: user-space tools come from mise
+  and caches live in workspace/home-owned paths. `sudo` is limited to a
+  documented, audited OS-package boundary with no viable user-space install.
+  Successful cold runs seed dependency, compiler-output, tool, and layer
+  caches. Sequential unchanged runs on both GitHub and Velnor must restore
+  them with zero dependency download, compilation, or tool installation.
+  Parallax's two Apple package producers are the documented product-blocker
+  exception: the shipped single-file Mach-O contract requires native
+  `dsymutil`, Apple linker header padding, DWARF embedding, and `codesign`.
+  Linux `cargo-zigbuild` was measured and cannot produce that valid artifact.
+  These GitHub-hosted packaging legs are not Velnor lanes; Velnor continues to
+  reject every macOS label.
 - Velnor must support every approved feature these repositories use. An
   unapproved security/storage/network surface fails explicitly under the
   strict capability contract rather than silently falling back.
 - The runner ships as a Debian package from a fully automatic
-  tag → CI → deb → apt chain, operates unattended under systemd
+  tag → CI → deb → apt chain; every live installation and upgrade uses that
+  signed apt source, never a local package or copied binary; it operates under systemd
   (never-exit supervision, credential diagnosis, watchdog, doctor timers),
   and streams logs live per line to the GitHub UI.
 

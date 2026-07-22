@@ -1,6 +1,6 @@
 # Capability proposal: `actions/attest-build-provenance@v4.1.1`
 
-Status: **approval required; not implemented**.
+Status: **approved by the operator 2026-07-21; implementation and proof in progress**.
 
 This proposal is intentionally narrower than the upstream action. Approval of
 this document would authorize only the exact Jackin Preview surface below. It
@@ -145,9 +145,9 @@ ref; this document does not silently authorize it.
    the unchanged workflow specifies, then run the required warm/no-change
    performance proof.
 
-## Approval question
+## Approval record
 
-Approve exactly the capability surface in this document: yes or no. A yes
+The operator approved exactly this capability surface on 2026-07-21. Approval
 authorizes native Rust implementation and the stated fixture/Jackin proof; it
 does not authorize any adjacent attestation input, registry/storage behavior,
 ref, or action.

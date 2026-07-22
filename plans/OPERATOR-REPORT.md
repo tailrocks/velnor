@@ -1683,3 +1683,187 @@ same-version local-artifact sentence is superseded and must not be used.
   runner group and zero organization runners. The open estate PRs therefore
   have DCO/local evidence but no fresh V-B/V-C proof; no merge or runner-group
   policy change was inferred.
+
+### 2026-07-21 coordinated history rewrite and final-estate convergence
+
+- The operator-approved coordinated rewrite completed. Recoverable backup
+  `/tmp/velnor-history-rewrite-20260721T1443Z/backup.git.tar.gz` has SHA-256
+  `ead88e40cf7b0cd2bd6019dd063f597d00e2a5f332cd87a666bca739a92fbb8b`.
+  Fresh fetch/prune plus local/remote reachable-ref and object-path scans find
+  neither commit `55ed22f` nor `.velnor-compare/*.html`; the last obsolete
+  local pre-rewrite branch was removed. Collaborators must discard pre-rewrite
+  clones/branches and reclone or reset to rewritten remote refs.
+- GitHub runner groups now use exact selected access: Tailrocks group id 3
+  contains the eleven Tailrocks estate repositories; ChainArgos group id 4
+  contains only java-monorepo and blockchain-nodes; jackin-project group id 3
+  contains only jackin-project/jackin. Public-repository access is enabled only
+  because each selected group contains at least one public repository.
+- The Sentry Tailrocks pool runs eight org-scoped slots from signed-apt package
+  0.1.102. ChainArgos and jackin-project groups are prepared for sequential
+  migration; the single host is never registered to mixed organizations.
+- Canonical Sunday `0 4 * * 0` parity and schedule-selected `both` are delivered
+  to every estate CI head plus fixture. Current heads are Velnor `0b40e401`,
+  fixture `5ffc9f92`, java-monorepo `78697247`, blockchain-nodes `cc22d7cc`,
+  jackin PR #810 `d72e3a77`, Holla `94fc643a`, Ruxel `3d7684fa`, Schemalane
+  `fa090cc2`, pg-bigdecimal `c1ac5c8c`, tracing-request-level `84e6caeb`,
+  Parallax trunk `c8cd46d0`, playground trunk `b6ec71e9`, TableRock trunk
+  `31bb6b76`, and TermRock trunk `5a485d39`.
+- The program-head estate audit exits zero. It retains six already-classified
+  cross-ref publication-lock advisories and reports no missing-required or
+  canonical-drift errors. No pull request was merged.
+- TermRock run `29847714724` exposed a contaminated public API inventory that
+  the local gate did not verify. Trunk `5a485d39` removes the two build-status
+  lines and adds nightly-backed API regeneration/diff to `mise run gate`; the
+  complete gate passes with 337 nextest tests.
+- Velnor 0.1.102 reaches GitHub's attestation upload API, where fixture run
+  `29846369353` proves GitHub rejects the mandated public Rekor V2 bundle for
+  zero verifier-counted integrated timestamps. The proposed Sigstore RFC3161
+  TSA expansion remains unimplemented pending exact operator approval.
+
+### 2026-07-21 Parallax and TermRock exact-head closure
+
+- Parallax trunk `7fe3f136` removes two browser races structurally. Shell
+  visual proof waits for loaded overview content, while investigation save
+  exposes a server-confirmed saving/saved lifecycle before tests read the
+  control snapshot. The persistence hook reduces the page function ratchet
+  from 191 to 177. Local formatting, typecheck, 539 UI tests, and the focused
+  browser contract pass; exact-head Velnor run `29854619258` is fully green,
+  including browser contracts, breadth, full stack, policy, audit, and
+  nextest.
+- TermRock exact-head run `29849259484` attempt 3 proved Velnor uploaded Pages
+  site files directly. GitHub rejected that artifact with
+  `deployment_content_failed`; the official `actions/upload-pages-artifact`
+  v5 contract requires one dereferenced `artifact.tar`.
+- Velnor `29a96ff3` implements that contract in native Rust, including hidden
+  entry exclusion, symlink/hardlink dereference, cycle failure, single-file
+  Results Service upload, and regression coverage. CI run `29855770848`,
+  general release `29855968974`, Debian release `29855968916`, and signed apt
+  publication `tailrocks/velnor-apt#29856322505` are green. Sentry apt package,
+  canonical image, active daemon, and all eight online slots verify 0.1.105.
+- TermRock full rerun `29849259484` attempt 4 regenerated the artifact under
+  0.1.105. Both Docs and Deploy Pages pass at `deeefef8`; the uploaded Pages
+  artifact is 713,886 bytes. No pull request was merged.
+
+### 2026-07-22 final-head reconciliation and defect proof
+
+- Velnor 0.1.108 is committed, tagged, built, and published through the signed
+  Debian repository. Sentry remains on the prior package because the configured
+  `~/.ssh/donbeave-ssh` identity is absent and the local SSH agent has no keys.
+  No direct package, binary, local-path apt, or host-filesystem bypass was used.
+- Exact selected `velnor-trusted` group allowlists were revalidated through the
+  GitHub API: Tailrocks id 3 has 11 repositories, ChainArgos id 4 has 2, and
+  jackin-project id 3 has 1. All named final PRs remain open; their heads and
+  bodies were reconciled to exact evidence. No pull request was merged.
+- Parallax GitHub run `29877446570` exposed compiler-driven trybuild contention;
+  `93b3e340` reserves the complete nextest pool for those binaries. Exact Velnor
+  `29878865107` and GitHub `29879539863` then passed. Combined Storage run
+  `29880330009` exposed a second architectural race: graceful shutdown aborted
+  the managed Greptime supervisor but returned before the child released fixed
+  ports, so immediate restart rejected its own terminating child as foreign.
+- Parallax `705af2ca` makes graceful shutdown own task cancellation and await
+  release of all four engine ports through typed engine-I/O composition. It
+  keeps exact anyhow and file-size ratchets unchanged. Local format, policy,
+  strict all-target server clippy, and 102 server nextest tests pass; 9 real
+  engine tests remain explicitly ignored in the ordinary profile. The focused
+  local real-engine run compiled but its one-time 144 MiB engine download ended
+  early at 83 percent, so it is not claimed as passing evidence.
+- The first pushed Parallax form of that checkpoint was amended after policy
+  exposed intermediate generic-error/file-size drift. A SHA-pinned
+  `--force-with-lease` replaced only that just-pushed commit. Automatic run
+  `29881560389` passed every product gate but correctly rejected the now
+  non-linear push event range; local `HEAD^..HEAD` source hygiene passes and
+  exact dispatch `29882121621` is the replacement proof.
+- TableRock exact trunk CI `29880422990` passed at `e2ccfceb`. Native
+  `29880423048` then exposed five related reachability failures: the connected
+  workbench retained the full direct-connect form and clipped result controls
+  below the fixed test window, while styled import/export buttons did not own
+  their final accessibility identifiers. `d5761ef` structurally contains the
+  connected workbench and restores final-view identifier ownership;
+  `f6591b04` expands the machine-checked screen manifest. Exact CI
+  `29881771351` and Native `29881771295` are active. No assertion, golden,
+  retry, sleep, or fixture contract was weakened.
+
+### 2026-07-22 source-revision and Parallax closure
+
+- The estate audit exposed two forbidden TableRock lane-conditional `touch`
+  steps. Hosted run `29875329220` proved why they had been added: commit-time
+  mtime normalization could repeat or move backward across a persistent Cargo
+  target, allowing stale workspace fingerprints. Velnor `0146732` removes the
+  enabling condition by recording the source revision with each target
+  generation, refreshing workspace mtimes only when that revision changes,
+  and retaining same-revision warmth. The complete local Velnor gate passed
+  with 669 nextest tests; exact-head CI `29883003438` is green.
+- Release-deb `29883315448` and signed apt publisher `29884053413` are green
+  for `v0.1.109`; both amd64 and arm64 package indexes advertise `0.1.109`.
+  Sentry remains unmodified because `/Users/donbeave/.ssh/donbeave-ssh` is
+  absent. The configured 1Password agent advertises the registered
+  `donbeave SSH` key but has repeatedly refused the signing operation; no
+  private-key export, direct package path, or host bypass was used.
+- TableRock removed both lane-specific freshness steps at `3a9cdce`; the next
+  estate audit checkpoint reports zero errors and the same six explained
+  publication-lock advisories. TableRock trunk continues moving under its
+  independent roadmap, so no terminal head claim is made yet.
+- Parallax exact-head CI `29882121621` is green at `705af2ca`. After cleaning
+  old runs and stale registrations, combined Storage `29883285817` passed
+  Greptime and Browser Full Stack on both Velnor and GitHub. This directly
+  proves the managed-engine restart fix; no retry, assertion, fixture, or
+  expected outcome was weakened.
+- Operator approval of all pending program decisions except PR merging resolves
+  §12.4 from Parallax's committed measurement: Linux zigbuild cannot embed the
+  required line tables in its single-file Mach-O contract, while native Apple
+  tooling produced and verified both Darwin targets in four-target preview run
+  `29575421066`. Only those preview/stable package producers remain; they are
+  not Velnor/GitHub CI lanes and authorize no broader macOS surface.
+
+### 2026-07-22 live-fleet version precondition
+
+- Parallax direct-main `24aade0` corrects the required aggregator display name
+  to the canonical `CI required`, preserving its logic. The automatic exact-head
+  run `29884970397` was cancelled before acceptance because its setup evidence
+  showed the live fleet had not received the published runner correction.
+- TableRock advanced to `03bc78e8`. CI `29884740470` compiled cleanly but its
+  PTY test spawned a child that exceeded 30 seconds. The job's authoritative
+  setup log identifies `Velnor Runner/0.1.58`; that release predates the
+  source-revision target-generation fix by 51 releases. A persistent target may
+  therefore combine a fresh test executable with a stale spawned `tablerock`
+  binary. This is the exact runner defect fixed by `v0.1.109`, not evidence for
+  widening the product timeout or changing TableRock semantics. The invalid
+  Velnor run was cancelled; Native run `29884740464` was left running because
+  it uses GitHub-hosted macOS and remains valid evidence.
+- No replacement Velnor proof will be dispatched until Sentry installs
+  `v0.1.109` from the signed apt repository and reports the matching package,
+  image, daemon, and doctor state. Existing stale registrations must be removed
+  before that dispatch.
+
+### 2026-07-22 compiler topology and moving-trunk closure
+
+- Parallax exact GitHub run `29885434328` proved the server public-API trybuild
+  case launched a nested cold Cargo graph; its first attempt exceeded five
+  minutes and its warm retry passed, which the evidence gate correctly rejected.
+  Run `29887096900` then proved the API privacy trybuild case had the same
+  architecture: both 60-second attempts timed out. Commits through `f298c850`
+  replace both nested graphs with ordinary integration-test compilation,
+  source visibility invariants, and syntax-derived facade checks. Commit
+  `13b0acb6` removes the now-orphan workspace dependency after run
+  `29887823678` exposed it through cargo-shear. Focused nextest, facade,
+  structural policy, strict clippy, formatting, locked metadata, and shear are
+  green; exact GitHub run `29888329917` is fully green, including Test without
+  retry evidence and dependency Audit.
+- TableRock `061efb1` restores direct accessibility actions for result cells,
+  external URLs, Quick Switcher, and Explain. Its attempted `needs: rust`
+  serialization treated fleet load as the PTY cause, but the authoritative
+  setup evidence identifies Velnor 0.1.58, whose persistent target predates the
+  source-revision fix. Commit `7d57eaa` removes that workaround and records the
+  20/20 nextest proof; exact GitHub CI `29887254539` is green with Rust and
+  real-server jobs parallel. Moving trunk `c511761` then exposed only rustfmt
+  drift in its new shared PostgreSQL tool seam. Commit `b3e7886` formats that
+  file after focused tablerock-tools nextest and strict clippy passed. Exact
+  GitHub CI `29888578314` is fully green, including parallel real-server,
+  UniFFI, CSV, dependency, and required lanes. Native `29888579521` passed
+  bridge, Swift, and universal-XCFramework stages, then exposed four UI-control
+  failures in its canonical checkpoint. Concurrent trunk-only product work
+  modifies the same native sources/tests; those user changes remain untouched
+  and their delivered head must be tested before isolating any residual fix.
+- No pull request was merged. Sentry was not changed: 1Password remains signed
+  out, so no signed SSH operation or apt-only upgrade is yet possible. No key
+  export, direct package, local apt path, or host bypass was used.

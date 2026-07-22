@@ -378,11 +378,11 @@ pub struct DaemonArgs {
     pub replace: bool,
 
     /// Runner group id for JIT configuration. Defaults to GitHub's default group id 1.
-    #[arg(long)]
+    #[arg(long, env = "VELNOR_POOL_ID")]
     pub pool_id: Option<i64>,
 
-    /// Runner group name is not supported by JIT setup; pass --pool-id for non-default groups.
-    #[arg(long)]
+    /// Resolve this organization or enterprise runner group name through GitHub.
+    #[arg(long, env = "VELNOR_POOL_NAME")]
     pub pool_name: Option<String>,
 
     /// Validate daemon slot JIT payloads without calling GitHub.

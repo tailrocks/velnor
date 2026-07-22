@@ -54,6 +54,26 @@ differ only where its product surface differs. Missing required concerns are
 added from the canonical template; non-applicable concerns are documented and
 omitted, never represented by fake no-op jobs.
 
+**Final estate delivery is classified by change surface.** Every applicable repository ends
+with one final, reviewable program PR (or its binding trunk-only delivery
+record), canonical concern shapes, local-only sccache, and scheduled `both`
+parity. Required-check policy is applied from the canonical handoff only after
+the named checks exist. Automation may merge GitHub Actions-only PRs after
+exact-head canonical and dual-runner proof. Mixed product/CI PRs remain for
+operator merge review unless separately authorized.
+
+**Estate workflows are unprivileged by default.** User-space tools install
+through mise and cache/generated state stays workspace- or home-owned. Never
+use `sudo` for ownership repair, permission repair, or convenience. Only an
+exact required OS package with no viable user-space distribution may elevate
+through a documented mise bootstrap exception enforced by `audit-ci`.
+
+**Warm sequential execution is an acceptance contract.** Cache keys exclude
+branch/ref identity, include every compatibility input, and use native GitHub
+scope rules so trusted main caches seed pull requests while PR caches remain
+merge-ref isolated. Cold → warm → unchanged reruns must prove zero dependency
+download, dependency compilation, and tool installation on both runner types.
+
 ## Implementation Goal
 
 Velnor is a GitHub Actions-compatible runner daemon with a Rust runtime.

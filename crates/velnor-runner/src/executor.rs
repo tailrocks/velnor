@@ -20,6 +20,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    fs::OpenOptions,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
@@ -1071,7 +1072,10 @@ where
             temp_host,
         );
         state.persistent_workspace_target = container.cargo_target_host.is_some();
-        state.cargo_target_host = container.cargo_target_host.clone();
+        state.cargo_target_host = container
+            .cargo_target_host
+            .as_ref()
+            .map(|_| container.workspace_host.join("target"));
         state.workflow_env = self
             .workflow_env
             .iter()
@@ -1082,7 +1086,24 @@ where
         let mut native_post_actions = Vec::new();
         let mut timeline_order = self.initial_order;
         let mut composite_frame: Option<CompositeFrame> = None;
+        let mut target_materialized = false;
         for step in steps {
+            if !target_materialized
+                && container.cargo_target_host.is_some()
+                && !matches!(
+                    step,
+                    ExecutableStep::Native {
+                        invocation,
+                        ..
+                    } if invocation.adapter == NativeActionAdapter::Checkout
+                )
+            {
+                materialize_persistent_target(
+                    container,
+                    state.env.get("GITHUB_SHA").map(String::as_str),
+                )?;
+                target_materialized = true;
+            }
             match step {
                 ExecutableStep::CompositeStart {
                     step_id,
@@ -1659,6 +1680,17 @@ where
                 }
             }
         }
+        if target_materialized {
+            if let Err(error) = publish_persistent_target(
+                container,
+                state.env.get("GITHUB_SHA").map(String::as_str),
+            ) {
+                eprintln!(
+                    "forensics.lifecycle: persistent target publish skipped for '{}': {error:#}",
+                    container.name
+                );
+            }
+        }
         if let Some(error) = step_error {
             return Err(error);
         }
@@ -1886,6 +1918,9 @@ where
             NativeActionAdapter::UploadPagesArtifact => native_upload_pages_artifact(action, state),
             NativeActionAdapter::ConfigurePages => native_configure_pages(action, state),
             NativeActionAdapter::DeployPages => native_deploy_pages(action, state),
+            NativeActionAdapter::AttestBuildProvenance => {
+                native_attest_build_provenance(action, state)
+            }
             NativeActionAdapter::Mise => self.native_mise(_container, action, state, timeout),
             NativeActionAdapter::Sccache => self.native_sccache(_container, action, state, timeout),
             NativeActionAdapter::Kache => self.native_kache(_container, action, state, timeout),
@@ -3844,7 +3879,7 @@ fn find_cache_match(
         return Ok(None);
     }
     let exact = store.join(sanitize_artifact_name(key));
-    if exact.exists() {
+    if cache_entry_complete(&exact) {
         return Ok(Some(key.to_string()));
     }
     for restore_key in restore_keys
@@ -3877,7 +3912,7 @@ fn cache_entries_with_prefix(store: &Path, prefix: &str) -> Result<Vec<CacheEntr
     let mut matches = Vec::new();
     for entry in fs::read_dir(store).with_context(|| format!("read {}", store.display()))? {
         let entry = entry?;
-        if !entry.file_type()?.is_dir() {
+        if !entry.file_type()?.is_dir() || !cache_entry_complete(&entry.path()) {
             continue;
         }
         let sanitized_key = entry.file_name().to_string_lossy().to_string();
@@ -3919,6 +3954,10 @@ fn system_time_nanos(time: SystemTime) -> Option<u128> {
 
 fn restore_cache_paths(state: &JobExecutionState, key: &str, paths: &str) -> Result<()> {
     let cache_dir = cache_store_dir(state)?.join(sanitize_artifact_name(key));
+    let _lock = CacheEntryLock::shared(&cache_dir)?;
+    if !cache_entry_complete(&cache_dir) {
+        bail!("cache entry '{key}' is incomplete");
+    }
     for (index, path) in cache_paths(paths).into_iter().enumerate() {
         // Paths that live on Velnor's host-persistent mounts (cargo
         // registry/git, mise installs, sccache) are always warm — copying
@@ -3936,6 +3975,7 @@ fn restore_cache_paths(state: &JobExecutionState, key: &str, paths: &str) -> Res
         fs::create_dir_all(&destination)
             .with_context(|| format!("create cache restore path {}", destination.display()))?;
         copy_dir_contents(&source, &destination)?;
+        verify_cache_copy(&source, &destination)?;
     }
     Ok(())
 }
@@ -4007,6 +4047,14 @@ fn save_cache_result(
     }
     let t0 = Instant::now();
     let cache_dir = cache_store_dir(state)?.join(sanitize_artifact_name(key));
+    let _lock = CacheEntryLock::exclusive(&cache_dir)?;
+    if cache_entry_complete(&cache_dir) {
+        return Ok(cache_save_step_result(
+            0,
+            &format!("Cache entry already exists for primary key '{key}', not saving cache\n"),
+            "",
+        ));
+    }
     // The store is shared across daemon slots: stage the whole entry next to
     // its final location and swap with a rename, so a sibling slot restoring
     // this key never reads a half-written tree.
@@ -4069,6 +4117,12 @@ fn save_cache_result(
             &format!("Cache not saved because no paths exist for key '{key}'\n"),
         ));
     }
+    // Completion marker is written only after every source was copied and
+    // verified. Legacy or interrupted entries have no marker and are misses.
+    // This prevents rustup and similar mutable trees from being restored from
+    // a structurally incomplete cache generation.
+    fs::write(staging_dir.join(".velnor-complete-v1"), b"complete\n")
+        .with_context(|| format!("write cache completion marker {}", staging_dir.display()))?;
     fs::remove_dir_all(&cache_dir).ok();
     if let Err(error) = fs::rename(&staging_dir, &cache_dir)
         .with_context(|| format!("publish cache entry {}", cache_dir.display()))
@@ -4087,6 +4141,222 @@ fn save_cache_result(
         ),
         "",
     ))
+}
+
+fn cache_entry_complete(path: &Path) -> bool {
+    path.is_dir() && path.join(".velnor-complete-v1").is_file()
+}
+
+struct CacheEntryLock {
+    _file: fs::File,
+}
+
+impl CacheEntryLock {
+    fn shared(cache_dir: &Path) -> Result<Self> {
+        Self::acquire(cache_dir, rustix::fs::FlockOperation::LockShared)
+    }
+
+    fn exclusive(cache_dir: &Path) -> Result<Self> {
+        Self::acquire(cache_dir, rustix::fs::FlockOperation::LockExclusive)
+    }
+
+    fn acquire(cache_dir: &Path, operation: rustix::fs::FlockOperation) -> Result<Self> {
+        let store = cache_dir
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("cache entry has no store parent"))?;
+        let locks = store.join(".velnor-locks");
+        fs::create_dir_all(&locks)
+            .with_context(|| format!("create cache lock directory {}", locks.display()))?;
+        let name = cache_dir
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("cache entry has no name"))?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(locks.join(name))
+            .with_context(|| format!("open cache entry lock for {}", cache_dir.display()))?;
+        rustix::fs::flock(&file, operation)
+            .with_context(|| format!("lock cache entry {}", cache_dir.display()))?;
+        Ok(Self { _file: file })
+    }
+}
+
+fn verify_cache_copy(source: &Path, destination: &Path) -> Result<()> {
+    for entry in fs::read_dir(source).with_context(|| format!("verify {}", source.display()))? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let source_type = entry.file_type()?;
+        let destination_metadata = fs::symlink_metadata(&destination_path).with_context(|| {
+            format!(
+                "cache restore omitted {} while materializing {}",
+                source_path.display(),
+                destination.display()
+            )
+        })?;
+        if source_type.is_dir() {
+            if !destination_metadata.is_dir() {
+                bail!(
+                    "cache restore changed directory {} into another file type",
+                    source_path.display()
+                );
+            }
+            verify_cache_copy(&source_path, &destination_path)?;
+        } else if source_type.is_file() {
+            let source_metadata = entry.metadata()?;
+            if !destination_metadata.is_file()
+                || source_metadata.len() != destination_metadata.len()
+                || source_metadata.permissions().mode() != destination_metadata.permissions().mode()
+            {
+                bail!(
+                    "cache restore did not preserve file metadata for {}",
+                    source_path.display()
+                );
+            }
+        } else {
+            bail!(
+                "cache entry contains unsupported file type at {}",
+                source_path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+const TARGET_SOURCE_REVISION_MARKER: &str = ".velnor-source-revision-v1";
+
+fn materialize_persistent_target(
+    container: &JobContainerSpec,
+    source_revision: Option<&str>,
+) -> Result<()> {
+    let Some(store) = container.cargo_target_host.as_deref() else {
+        return Ok(());
+    };
+    let _lock = CacheEntryLock::shared(store)?;
+    let payload = store.join("data");
+    if !store.join(".velnor-target-complete-v1").is_file() || !payload.is_dir() {
+        return Ok(());
+    }
+    let target = container.workspace_host.join("target");
+    if target.exists() {
+        fs::remove_dir_all(&target)
+            .with_context(|| format!("clear job-local target {}", target.display()))?;
+    }
+    fs::create_dir_all(&target)
+        .with_context(|| format!("create job-local target {}", target.display()))?;
+    copy_dir_contents(&payload, &target)?;
+    verify_cache_copy(&payload, &target)
+        .with_context(|| format!("verify persistent target restore from {}", store.display()))?;
+
+    let stored_revision = fs::read_to_string(store.join(TARGET_SOURCE_REVISION_MARKER))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let source_revision = workspace_source_revision(&container.workspace_host, source_revision);
+    if source_revision
+        .as_deref()
+        .is_some_and(|revision| stored_revision.as_deref() != Some(revision))
+    {
+        eprintln!(
+            "forensics.lifecycle: persistent target source revision changed (stored={}, current={}); refreshing workspace mtimes",
+            stored_revision.as_deref().unwrap_or("unknown"),
+            source_revision.as_deref().unwrap_or("unknown")
+        );
+        refresh_workspace_source_mtimes(&container.workspace_host)?;
+    }
+    Ok(())
+}
+
+fn workspace_source_revision(workspace: &Path, fallback: Option<&str>) -> Option<String> {
+    std::process::Command::new("git")
+        .args(["-C"])
+        .arg(workspace)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|revision| revision.trim().to_owned())
+        .filter(|revision| !revision.is_empty())
+        .or_else(|| fallback.map(str::to_owned))
+}
+
+fn refresh_workspace_source_mtimes(workspace: &Path) -> Result<()> {
+    let modified = std::time::SystemTime::now();
+    let mut pending = vec![workspace.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory)
+            .with_context(|| format!("read workspace directory {}", directory.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if directory == workspace
+                && matches!(entry.file_name().to_str(), Some(".git" | "target"))
+            {
+                continue;
+            }
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if file_type.is_file() {
+                fs::File::options()
+                    .append(true)
+                    .open(&path)?
+                    .set_modified(modified)?;
+            }
+        }
+        fs::File::open(&directory)?.set_modified(modified)?;
+    }
+    Ok(())
+}
+
+fn publish_persistent_target(
+    container: &JobContainerSpec,
+    source_revision: Option<&str>,
+) -> Result<()> {
+    let Some(store) = container.cargo_target_host.as_deref() else {
+        return Ok(());
+    };
+    let target = container.workspace_host.join("target");
+    if !target.is_dir() {
+        return Ok(());
+    }
+    let name = store
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("target");
+    let staging = store.with_file_name(cache_staging_name(name));
+    fs::remove_dir_all(&staging).ok();
+    let payload = staging.join("data");
+    fs::create_dir_all(&payload)
+        .with_context(|| format!("create target staging directory {}", payload.display()))?;
+    if let Err(error) =
+        copy_dir_contents(&target, &payload).and_then(|()| verify_cache_copy(&target, &payload))
+    {
+        fs::remove_dir_all(&staging).ok();
+        return Err(error).context("stage persistent target generation");
+    }
+    fs::write(staging.join(".velnor-target-complete-v1"), b"complete\n")
+        .with_context(|| format!("write target completion marker {}", staging.display()))?;
+    if let Some(revision) = workspace_source_revision(&container.workspace_host, source_revision) {
+        fs::write(
+            staging.join(TARGET_SOURCE_REVISION_MARKER),
+            format!("{revision}\n"),
+        )
+        .with_context(|| format!("write target source revision {}", staging.display()))?;
+    }
+
+    let _lock = CacheEntryLock::exclusive(store)?;
+    fs::remove_dir_all(store).ok();
+    if let Err(error) = fs::rename(&staging, store)
+        .with_context(|| format!("publish persistent target {}", store.display()))
+    {
+        fs::remove_dir_all(&staging).ok();
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn cache_staging_name(cache_file_name: &str) -> String {
@@ -4398,11 +4668,40 @@ fn native_upload_pages_artifact(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let source_input = native_input_or(&action_state, action, "path", "_site/");
+    let source = resolve_host_path(state, &source_input)
+        .context("actions/upload-pages-artifact requires a workspace path")?;
+    if !source.is_dir() {
+        bail!(
+            "actions/upload-pages-artifact path '{}' is not a directory",
+            source_input
+        );
+    }
+    let runner_temp = action_state
+        .env
+        .get("RUNNER_TEMP")
+        .filter(|value| !value.is_empty())
+        .map(String::as_str)
+        .unwrap_or("/__t");
+    let temp_host = state
+        .temp_host
+        .as_deref()
+        .context("actions/upload-pages-artifact requires RUNNER_TEMP")?;
+    let archive = temp_host.join("artifact.tar");
+    create_pages_archive(&source, &archive)?;
+
     let mut page_action = action.clone();
+    page_action.inputs.insert(
+        "name".to_string(),
+        native_input_or(&action_state, action, "name", "github-pages"),
+    );
     page_action
         .inputs
-        .entry("name".to_string())
-        .or_insert_with(|| "github-pages".to_string());
+        .insert("path".to_string(), format!("{runner_temp}/artifact.tar"));
+    page_action
+        .inputs
+        .insert("if-no-files-found".to_string(), "error".to_string());
     let result = native_upload_artifact(&page_action, state)?;
     let mut outputs = result.state.outputs.clone();
     if let Some(artifact_id) = outputs.get("artifact-id").cloned() {
@@ -4414,6 +4713,175 @@ fn native_upload_pages_artifact(
             ..result.state
         },
         ..result
+    })
+}
+
+fn create_pages_archive(source: &Path, archive: &Path) -> Result<()> {
+    if let Some(parent) = archive.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create Pages archive directory {}", parent.display()))?;
+    }
+    let file = fs::File::create(archive)
+        .with_context(|| format!("create Pages archive {}", archive.display()))?;
+    let mut builder = tar::Builder::new(file);
+    // Latest actions/upload-pages-artifact uses GNU tar --dereference and
+    // --hard-dereference because Pages rejects links in deployment content.
+    builder.follow_symlinks(true);
+    builder
+        .append_dir(".", source)
+        .with_context(|| format!("archive Pages root {}", source.display()))?;
+    append_pages_archive_dir(&mut builder, source, Path::new(""), &mut BTreeSet::new())?;
+    builder
+        .finish()
+        .with_context(|| format!("finish Pages archive {}", archive.display()))?;
+    Ok(())
+}
+
+fn append_pages_archive_dir<W: Write>(
+    builder: &mut tar::Builder<W>,
+    source: &Path,
+    relative: &Path,
+    active_directories: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    let directory = source.join(relative);
+    let canonical = fs::canonicalize(&directory)
+        .with_context(|| format!("resolve Pages artifact directory {}", directory.display()))?;
+    if !active_directories.insert(canonical.clone()) {
+        bail!(
+            "Pages artifact directory contains a symlink cycle at {}",
+            directory.display()
+        );
+    }
+
+    let mut entries = fs::read_dir(&directory)
+        .with_context(|| format!("read Pages artifact directory {}", directory.display()))?
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let name = entry.file_name();
+        let name_text = name.to_string_lossy();
+        if name_text.starts_with('.') {
+            continue;
+        }
+        let child_relative = relative.join(&name);
+        let child = entry.path();
+        let metadata = fs::metadata(&child)
+            .with_context(|| format!("read Pages artifact path {}", child.display()))?;
+        let archive_path = Path::new(".").join(&child_relative);
+        if metadata.is_dir() {
+            builder
+                .append_dir(&archive_path, &child)
+                .with_context(|| format!("archive Pages directory {}", child.display()))?;
+            append_pages_archive_dir(builder, source, &child_relative, active_directories)?;
+        } else if metadata.is_file() {
+            builder
+                .append_path_with_name(&child, &archive_path)
+                .with_context(|| format!("archive Pages file {}", child.display()))?;
+        } else {
+            bail!("unsupported Pages artifact path {}", child.display());
+        }
+    }
+    active_directories.remove(&canonical);
+    Ok(())
+}
+
+fn native_attest_build_provenance(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let workspace = action_state
+        .workspace_host
+        .as_deref()
+        .context("actions/attest-build-provenance requires a host workspace mapping")?;
+    let runner_temp = action_state
+        .temp_host
+        .as_deref()
+        .context("actions/attest-build-provenance requires RUNNER_TEMP")?;
+    let oidc_url = action_state
+        .env
+        .get("ACTIONS_ID_TOKEN_REQUEST_URL")
+        .filter(|value| !value.is_empty())
+        .context("missing id-token permission: ACTIONS_ID_TOKEN_REQUEST_URL is absent")?;
+    let oidc_request_token = action_state
+        .env
+        .get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+        .filter(|value| !value.is_empty())
+        .context("missing id-token permission: ACTIONS_ID_TOKEN_REQUEST_TOKEN is absent")?;
+    let github_token = action_state
+        .env
+        .get("GITHUB_TOKEN")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .or_else(|| action_state.resolve_context_data_expression("github.token"))
+        .unwrap_or_else(|| oidc_request_token.clone());
+    let repository = action_state
+        .env
+        .get("GITHUB_REPOSITORY")
+        .filter(|value| !value.is_empty())
+        .context("actions/attest-build-provenance requires GITHUB_REPOSITORY")?;
+    let api_url = action_state
+        .env
+        .get("GITHUB_API_URL")
+        .map(String::as_str)
+        .unwrap_or("https://api.github.com");
+    let server_url = action_state
+        .env
+        .get("GITHUB_SERVER_URL")
+        .map(String::as_str)
+        .unwrap_or("https://github.com");
+    let visibility = action_state
+        .resolve_context_data_expression("github.event.repository.visibility")
+        .or_else(|| {
+            action_state
+                .env
+                .get("GITHUB_REPOSITORY_VISIBILITY")
+                .cloned()
+        });
+
+    let result =
+        crate::attestation::attest_build_provenance(crate::attestation::AttestationRequest {
+            workspace,
+            runner_temp,
+            runner_temp_container: "/__t",
+            oidc_url,
+            oidc_request_token,
+            github_token: &github_token,
+            api_url,
+            server_url,
+            repository,
+            repository_visibility: visibility.as_deref(),
+        })?;
+    let mut outputs = BTreeMap::new();
+    outputs.insert("bundle-path".to_string(), result.bundle_path.clone());
+    outputs.insert("attestation-id".to_string(), result.attestation_id.clone());
+    outputs.insert(
+        "attestation-url".to_string(),
+        result.attestation_url.clone(),
+    );
+    let summary = format!(
+        "### Attestation Created\n\n- <a href=\"{}\">{}</a>\n",
+        result.attestation_url, result.attestation_url
+    );
+    let instance = if result.public_good {
+        "Public Good"
+    } else {
+        "GitHub"
+    };
+    Ok(StepExecutionResult {
+        exit_code: 0,
+        state: StepCommandState {
+            outputs,
+            summary,
+            ..StepCommandState::default()
+        },
+        skipped: false,
+        failure_ignored: false,
+        stdout: format!(
+            "Attestation created for {} subject(s)\nAttestation signed using {instance} Sigstore instance\nAttestation uploaded to repository\n{}\n",
+            result.subjects.len(), result.attestation_url
+        ),
+        stderr: String::new(),
     })
 }
 
@@ -4582,8 +5050,7 @@ fn native_deploy_pages(
             .bearer_auth(runtime_token)
             .json(&serde_json::json!({
                 "workflow_run_backend_id": plan_id,
-                "workflow_job_run_backend_id": job_id,
-                "name_filter": {"value": artifact_name}
+                "workflow_job_run_backend_id": job_id
             }))
             .send()
             .context("list Pages artifacts")?,
@@ -4606,9 +5073,12 @@ fn native_deploy_pages(
         .get("database_id")
         .or_else(|| matching[0].get("databaseId"))
         .or_else(|| matching[0].get("id"))
-        .filter(|value| value.is_string() || value.is_number())
-        .cloned()
-        .context("Pages artifact is missing database_id")?;
+        .and_then(|value| match value {
+            Value::Number(value) => value.as_u64(),
+            Value::String(value) => value.parse().ok(),
+            _ => None,
+        })
+        .context("Pages artifact is missing numeric database_id")?;
 
     let oidc: Value = pages_json_response(
         client
@@ -6081,7 +6551,7 @@ struct JobExecutionState {
     temp_host: Option<PathBuf>,
     /// Runner-internal storage fact; deliberately not exported to step env.
     persistent_workspace_target: bool,
-    /// Host side of the dedicated `/__w/target` bind mount, when enabled.
+    /// Job-local workspace target materialized from a persistent generation.
     cargo_target_host: Option<PathBuf>,
     outputs: BTreeMap<String, BTreeMap<String, String>>,
     action_states: BTreeMap<String, BTreeMap<String, String>>,
@@ -9104,9 +9574,11 @@ mod tests {
         fs::create_dir_all(partial_cache.join("0")).unwrap();
         fs::write(exact_cache.join(".velnor-key"), "linux-rust-exact").unwrap();
         fs::write(exact_cache.join(".velnor-created"), "1").unwrap();
+        fs::write(exact_cache.join(".velnor-complete-v1"), "complete\n").unwrap();
         fs::write(exact_cache.join("0/state.bin"), "exact\n").unwrap();
         fs::write(partial_cache.join(".velnor-key"), "linux-rust-prefix-new").unwrap();
         fs::write(partial_cache.join(".velnor-created"), "2").unwrap();
+        fs::write(partial_cache.join(".velnor-complete-v1"), "complete\n").unwrap();
         fs::write(partial_cache.join("0/state.bin"), "partial\n").unwrap();
 
         let cache_step = |key: &str, restore_keys: &str| {
@@ -9513,6 +9985,118 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_cache_generation_is_never_a_hit() {
+        let root = temp_dir();
+        let restore_temp = root.join("restore-job/temp");
+        let entry = root.join("_velnor_caches/trusted/Test_Repo/rustup-v2-linux-key");
+        fs::create_dir_all(entry.join("0/toolchains/1.97.0/bin")).unwrap();
+        fs::create_dir_all(root.join("restore-job/home")).unwrap();
+        fs::write(entry.join(".velnor-key"), "rustup-v2-linux-key").unwrap();
+        fs::write(entry.join("0/toolchains/1.97.0/bin/cargo"), "partial").unwrap();
+        let state = JobExecutionState::default()
+            .with_env(vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())]);
+        let mut state = state;
+        state.temp_host = Some(restore_temp);
+
+        assert_eq!(
+            find_cache_match(&state, "rustup-v2-linux-key", "rustup-v2-linux-").unwrap(),
+            None
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cache_copy_verification_rejects_omitted_files() {
+        let root = temp_dir();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(source.join("manifest-rustc"), "required").unwrap();
+
+        let error = verify_cache_copy(&source, &destination).unwrap_err();
+        assert!(error.to_string().contains("cache restore omitted"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn persistent_target_is_job_local_and_published_as_complete_generation() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        let store = root.join("target-store");
+        fs::create_dir_all(store.join("data/debug")).unwrap();
+        fs::write(store.join(".velnor-target-complete-v1"), "complete\n").unwrap();
+        fs::write(store.join(TARGET_SOURCE_REVISION_MARKER), "old-revision\n").unwrap();
+        fs::write(store.join("data/debug/seed"), "warm\n").unwrap();
+        fs::create_dir_all(&spec.workspace_host).unwrap();
+        fs::write(spec.workspace_host.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let stale_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        fs::File::options()
+            .append(true)
+            .open(spec.workspace_host.join("Cargo.toml"))
+            .unwrap()
+            .set_modified(stale_time)
+            .unwrap();
+        spec.cargo_target_host = Some(store.clone());
+        assert!(!spec
+            .start_args()
+            .iter()
+            .any(|arg| arg.contains(":/__w/target")));
+
+        materialize_persistent_target(&spec, Some("new-revision")).unwrap();
+        let target = spec.workspace_host.join("target");
+        assert_eq!(
+            fs::read_to_string(target.join("debug/seed")).unwrap(),
+            "warm\n"
+        );
+        assert!(
+            fs::metadata(spec.workspace_host.join("Cargo.toml"))
+                .unwrap()
+                .modified()
+                .unwrap()
+                > stale_time
+        );
+
+        // Both paths remain inside the workspace mount, so the workflow's
+        // ordinary atomic promotion cannot fail with EXDEV.
+        fs::create_dir_all(spec.workspace_host.join(".ci-target-cache")).unwrap();
+        fs::rename(
+            target.join("debug/seed"),
+            spec.workspace_host.join(".ci-target-cache/target.tar.zst"),
+        )
+        .unwrap();
+        fs::write(target.join("new-output"), "compiled\n").unwrap();
+        publish_persistent_target(&spec, Some("new-revision")).unwrap();
+
+        assert!(store.join(".velnor-target-complete-v1").is_file());
+        assert_eq!(
+            fs::read_to_string(store.join(TARGET_SOURCE_REVISION_MARKER)).unwrap(),
+            "new-revision\n"
+        );
+        assert_eq!(
+            fs::read_to_string(store.join("data/new-output")).unwrap(),
+            "compiled\n"
+        );
+        fs::File::options()
+            .append(true)
+            .open(spec.workspace_host.join("Cargo.toml"))
+            .unwrap()
+            .set_modified(stale_time)
+            .unwrap();
+        materialize_persistent_target(&spec, Some("new-revision")).unwrap();
+        assert_eq!(
+            fs::metadata(spec.workspace_host.join("Cargo.toml"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            stale_time
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn native_cache_saves_and_restores_from_shared_workdir() {
         let root = temp_dir();
         let save_temp = root.join("save-job/temp");
@@ -9673,9 +10257,11 @@ mod tests {
         fs::create_dir_all(root.join("restore-job/home")).unwrap();
         fs::write(old_cache.join(".velnor-key"), "rust-linux-a-old").unwrap();
         fs::write(old_cache.join(".velnor-created"), "1").unwrap();
+        fs::write(old_cache.join(".velnor-complete-v1"), "complete\n").unwrap();
         fs::write(old_cache.join("0/state.bin"), "old\n").unwrap();
         fs::write(new_cache.join(".velnor-key"), "rust-linux-z-new").unwrap();
         fs::write(new_cache.join(".velnor-created"), "2").unwrap();
+        fs::write(new_cache.join(".velnor-complete-v1"), "complete\n").unwrap();
         fs::write(new_cache.join("0/state.bin"), "new\n").unwrap();
 
         let restore = vec![ExecutableStep::Native {
@@ -10060,7 +10646,7 @@ type=sha,format=long,prefix=,enable=true"
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&requests);
         let responses = [
-            r#"{"artifacts":[{"name":"github-pages","database_id":42,"size":123}]}"#,
+            r#"{"artifacts":[{"name":"github-pages","database_id":"42","size":123}]}"#,
             r#"{"value":"oidc-token"}"#,
             r#"{"id":7,"status_url":"status/7","page_url":"https://initial.example/"}"#,
             r#"{"status":"queued"}"#,
@@ -10143,6 +10729,7 @@ type=sha,format=long,prefix=,enable=true"
             "POST /twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts HTTP/1.1"
         ));
         assert!(requests[0].contains("\"workflow_run_backend_id\":\"plan-1\""));
+        assert!(!requests[0].contains("name_filter"));
         assert!(requests[1].starts_with("GET /oidc HTTP/1.1"));
         assert!(requests[2].starts_with("POST /repos/octocat/example/pages/deployments HTTP/1.1"));
         assert!(requests[2].contains("\"artifact_id\":42"));
@@ -14058,18 +14645,15 @@ fi"#
     }
 
     #[test]
-    fn native_upload_artifact_reads_persistent_workspace_target_mount() {
+    fn native_upload_artifact_reads_job_local_persistent_workspace_target() {
         let temp = temp_dir();
-        // Persistent buckets deliberately include workflow/job identity. A
-        // workflow filename starts with `.github`, but that host-only parent
-        // must not make ordinary target files hidden from upload-artifact.
-        let target = temp.join(".github_workflows_ci.yml/Check__Velnor_");
+        let mut spec = container(&temp);
+        let target = spec.workspace_host.join("target");
         fs::create_dir_all(target.join("cargo-timings")).unwrap();
         fs::write(target.join("cargo-timings/cargo-timing.html"), "timing\n").unwrap();
         fs::write(target.join("sccache-check.txt"), "stats\n").unwrap();
         fs::write(target.join(".private"), "hidden\n").unwrap();
-        let mut spec = container(&temp);
-        spec.cargo_target_host = Some(target);
+        spec.cargo_target_host = Some(temp.join("persistent-target-generation"));
         let steps = vec![ExecutableStep::Native {
             step_id: "upload".into(),
             display_name: String::new(),
@@ -14169,6 +14753,72 @@ fi"#
         assert!(temp
             .join("_velnor_artifacts/local-1/explicit/.well-known/assetlinks.json")
             .exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_upload_pages_artifact_uploads_single_dereferenced_tar() {
+        let temp = temp_dir();
+        let site = temp.join("work/site");
+        fs::create_dir_all(site.join("assets")).unwrap();
+        fs::create_dir_all(site.join(".github")).unwrap();
+        fs::create_dir_all(site.join(".well-known")).unwrap();
+        fs::write(site.join("index.html"), "pages\n").unwrap();
+        fs::write(site.join("assets/app.js"), "app\n").unwrap();
+        fs::write(site.join(".github/workflow.yml"), "excluded\n").unwrap();
+        fs::write(site.join(".well-known/security.txt"), "hidden\n").unwrap();
+        fs::hard_link(site.join("index.html"), site.join("hard-linked.html")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("index.html", site.join("linked.html")).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "pages".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::UploadPagesArtifact,
+                inputs: [("path".into(), "site".into())].into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results[0].exit_code, 0);
+        assert_eq!(
+            results[0].state.outputs["artifact_id"],
+            results[0].state.outputs["artifact-id"]
+        );
+        let artifact_dir = temp.join("_velnor_artifacts/local-1/github-pages");
+        let files = fs::read_dir(&artifact_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(files, vec![std::ffi::OsString::from("artifact.tar")]);
+
+        let file = fs::File::open(artifact_dir.join("artifact.tar")).unwrap();
+        let mut archive = tar::Archive::new(file);
+        let mut archived = BTreeMap::new();
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.header().entry_type().is_file() {
+                let mut content = String::new();
+                entry.read_to_string(&mut content).unwrap();
+                archived.insert(entry.path().unwrap().into_owned(), content);
+            }
+        }
+        assert_eq!(archived[Path::new("index.html")], "pages\n");
+        assert_eq!(archived[Path::new("assets/app.js")], "app\n");
+        assert_eq!(archived[Path::new("hard-linked.html")], "pages\n");
+        #[cfg(unix)]
+        assert_eq!(archived[Path::new("linked.html")], "pages\n");
+        assert!(!archived.contains_key(Path::new(".github/workflow.yml")));
+        assert!(!archived.contains_key(Path::new(".well-known/security.txt")));
+
         fs::remove_dir_all(temp).unwrap();
     }
 

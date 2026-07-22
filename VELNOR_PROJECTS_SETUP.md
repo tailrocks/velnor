@@ -1,6 +1,6 @@
 # VELNOR_PROJECTS_SETUP — Estate CI Standardization Plan
 
-**Status:** definitive research + implementation plan (2026-07-18, rev 2 — speed doctrine, budgets, dual-lane verification protocol)  
+**Status:** definitive research + implementation plan (2026-07-22, rev 3 — twenty-repository estate, speed doctrine, budgets, dual-lane verification protocol)  
 **Audience:** operators and agents preparing one PR per repo so **Velnor is the default runner**, with GitHub and dual-lane modes always available.  
 **Related:** [`docs/strict-capability-contract.md`](docs/strict-capability-contract.md), [`docs/storage-and-disk-pressure-2026-07-18.md`](docs/storage-and-disk-pressure-2026-07-18.md), [`docs/rust-build-cache-hygiene-velnor.md`](docs/rust-build-cache-hygiene-velnor.md), [`docs/cache-gc-design.md`](docs/cache-gc-design.md), [`docs/perf-instant-cache-plan-2026-06-11.md`](docs/perf-instant-cache-plan-2026-06-11.md), [`docs/master-plan.md`](docs/master-plan.md)
 
@@ -19,7 +19,7 @@ One CI/CD shape for every listed repository:
 | 1 | **Velnor by default** on `push`, `pull_request`, `schedule`, and default `workflow_dispatch` |
 | 2 | **GitHub selectable** via the same workflow (`lanes: github`) |
 | 3 | **Both** in one run for parity (`lanes: both`) |
-| 4 | **Ubuntu only** — GitHub lane is exactly `ubuntu-26.04`; Velnor runs the Ubuntu job image; **no macOS/Windows CI** in the standardized surface |
+| 4 | **Ubuntu CI lanes** — GitHub lane is exactly `ubuntu-26.04`; Velnor runs the Ubuntu job image; **no macOS/Windows CI lane**. A native package producer may remain only as a measured product-blocker exception that is not a Velnor/GitHub comparison lane |
 | 5 | **mise + `rust-toolchain.toml`** for tools and Rust; no `dtolnay/rust-toolchain` product path |
 | 6 | **One caching model** — cargo registry/git, sccache, Docker layers, mise — identical YAML on both lanes |
 | 7 | **Clarity** — job/step names explain purpose; no shards/batches; complex CI decisions in Rust |
@@ -29,6 +29,19 @@ One CI/CD shape for every listed repository:
 | 11 | **Latest and greatest** — newest stable major of every action, tool, toolchain, and workflow feature; Renovate keeps pins current; no deprecated surfaces (§2.0 Law 2) |
 
 **Policy override.** Older docs sometimes defaulted jackin-family repos to GitHub. **This plan defaults every listed repo to Velnor.** GitHub remains a permanent comparison lane.
+
+The twenty-repository estate is `jackin`, `java-monorepo`,
+`blockchain-nodes`, `jackin-agent-brown`, `tablerock`, `parallax`, `velnor`,
+`velnor-apt`, `homebrew-tablerock`, `termrock`, `homebrew-parallax`,
+`parallax-telemetry-playground`, `tracing-request-level`, `pg-bigdecimal`,
+`schemalane`, `ruxel`, `holla`, `velnor-actions-fixture`, `holla-apt`, and
+`homebrew-holla`. Packaging and fixture repositories receive only applicable
+concerns; absence of Rust or product releases never justifies a second
+implementation of a shared concern.
+
+GitHub Actions-only PRs may merge after exact-head audit and GitHub/Velnor
+proof. PRs mixing product changes with CI remain operator-review deliveries
+unless separately authorized.
 
 ### Estate snapshot (local trees, 2026-07-18)
 
@@ -73,7 +86,7 @@ Velnor is a GitHub Actions–compatible self-hosted runner (Rust/tokio):
 - `actions/cache` / rust-cache / sccache-GHA become **no-ops** when paths are already host-persistent — **same workflow YAML on both lanes**.
 - Trust scopes: `trusted` keeps Docker socket + secrets; other scopes refuse secrets and omit host Docker.
 
-**Hard OS rule:** Velnor does not run Darwin. Combined with the Ubuntu-everywhere operator rule, **every `macos-*` job is removed, replaced by Ubuntu cross-build (`cargo-zigbuild` where valid), or documented as a proven product blocker** before migration is complete. There is no “GitHub-only macOS fourth lane” in the standard.
+**Hard OS rule:** Velnor does not run Darwin. Combined with the Ubuntu-everywhere operator rule, **every `macos-*` job is removed, replaced by Ubuntu cross-build (`cargo-zigbuild` where valid), or documented as a proven product blocker** before migration is complete. There is no “GitHub-only macOS fourth lane” in the standard. Parallax's Apple package matrix is the sole approved blocker exception: it produces native Darwin release assets outside lane comparison because Linux zigbuild cannot satisfy the single-file Mach-O DWARF/codesign contract.
 
 Law: `docs/mission.md`, `docs/master-plan.md` §3a, `docs/runner-usage.md`, `docs/perf-instant-cache-plan-2026-06-11.md`, `docs/reference/target-action-registry.md`.
 
@@ -83,7 +96,7 @@ Law: `docs/mission.md`, `docs/master-plan.md` §3a, `docs/runner-usage.md`, `doc
 
 Repos differ only in **which jobs exist**, not in **how lanes, tools, and caches are declared**.
 
-### 2.0 Two overriding laws
+### 2.0 Three overriding laws
 
 These govern every rule below and every future change to the standard.
 
@@ -137,6 +150,20 @@ estate surface:
 - **Freshness never bypasses verification:** every upgrade lands through the
   same gates (V-A fixture where behavior changes, V-B parity) as any other
   change.
+
+#### Law 3 — Unprivileged workflows by default
+
+- **No permission-repair sudo.** Cache preparation, ownership fixes, build
+  directories, and generated state use workspace/home-owned paths and ordinary
+  user permissions.
+- **Tools remain user-space.** mise installs project tools; a workflow must not
+  use `sudo` as a substitute for a mise tool definition.
+- **Narrow OS-package exception only.** A required operating-system package may
+  be installed through mise's declarative package bootstrap when no viable
+  user-space distribution exists. The workflow comments the proven reason and
+  exact package scope; no broad upgrade or unrelated install is permitted.
+- `audit-ci` fails unexplained workflow `sudo` and permits only documented
+  package-bootstrap exceptions.
 
 ### 2.1 Lane plumbing
 
@@ -223,9 +250,9 @@ Rerun of the same commit on a warm fleet must not re-download crates, recompile 
 
 | Layer | GitHub lane | Velnor lane |
 |-------|-------------|-------------|
-| **1. Compiler cache** | `mozilla-actions/sccache-action` pinned `version: v0.16.0` + `RUSTC_WRAPPER=sccache` + **`SCCACHE_GHA_ENABLED=false`** (local disk; store lives only for the job = cold compiler baseline) | Selected backend store (`sccache \| kache \| off` per [strict contract](docs/strict-capability-contract.md)); Velnor owns `SCCACHE_DIR`; adapter owns setup/post reporting |
+| **1. Compiler cache** | `mozilla-actions/sccache-action` pinned `version: v0.16.0` + `RUSTC_WRAPPER=sccache` + `SCCACHE_GHA_ENABLED=false`; persisted target artifacts in layer 3 carry compilation reuse between ephemeral jobs | Selected backend store (`sccache \| kache \| off` per [strict contract](docs/strict-capability-contract.md)); Velnor owns `SCCACHE_DIR`; adapter owns setup/post reporting |
 | **2. Cargo registry/git** | `actions/cache` on registry + git/db; key = lockfile + lane + os | Host `_velnor_cargo`; cache action no-ops |
-| **3. Target dir** | Optional measured cache; prefer sccache+registry over blind Swatinem+target double-cache | Optional `VELNOR_CARGO_TARGET_PERSIST` buckets (hygiene §3) |
+| **3. Target dir** | Required `actions/cache` entry for compiling jobs. Primary key = compatibility hash + `github.sha`; restore prefix omits SHA so the newest compatible main cache seeds PRs and each successful commit saves an updated immutable generation | Required persistent target bucket for compiling job classes; the same cache step is a native no-op over Velnor's scoped host generation (hygiene §3) |
 | **4. Result reuse** | jackin #810 exact-result proofs (advanced monorepos only) | Same YAML |
 
 ```yaml
@@ -242,10 +269,13 @@ env:
 local-only stores; exactly one of `sccache | kache | off` per job; only the
 pinned action inputs at their approved values; no remote-backend environment;
 cache reporting is owned by the action / native-adapter **post step** — build
-steps never call cache CLIs. Consequences the estate must accept until §12.7 is
-decided: the GitHub lane recompiles dependencies every run (its local store is
-job-lifetime), while `actions/cache` on the **cargo registry** remains approved
-on both lanes, so downloads stay warm. This supersedes any older
+steps never call cache CLIs. Cross-run GitHub compilation reuse comes from the
+existing approved `actions/cache` surface over the Cargo target, not a remote
+sccache backend. The target key includes toolchain, manifests/config, lane, OS,
+and commit SHA; its restore prefix omits only SHA. GitHub therefore restores the
+newest compatible default-branch generation into PRs, saves updated immutable
+generations after successful commits, and keeps PR-produced caches merge-ref
+isolated. This supersedes any older
 `SCCACHE_GHA_ENABLED=true` guidance in repo workflows and in earlier revisions
 of this document.
 
@@ -838,7 +868,7 @@ GitHub and on Velnor for everything the branch changes.
 | 4 | velnor | Lanes + dogfood |
 | 5 | holla | Lanes only |
 | 6 | ruxel | Lanes + pin + ansible/uv |
-| 7 | parallax | Full lanes; no macOS |
+| 7 | parallax | Full Ubuntu CI lanes; native Apple package blocker only |
 
 ### Phase 3 — Libraries + cleanup — terminal 2026-07-19
 
@@ -1022,7 +1052,14 @@ jobs:
 1. **Required checks:** GitHub lane required, optional, or dispatch-only once Velnor is default?  
 2. **Org JIT timeline:** block mass onboarding until shipped, or temporary N repo-level daemons?  
 3. **Shared `velnor-ci-actions`?**  
-4. **Which macOS artifacts need a zigbuild proof before migration?**  
+4. **ANSWERED (operator, 2026-07-22):** Parallax's
+   `aarch64-apple-darwin` and `x86_64-apple-darwin` preview/stable package
+   artifacts require native macOS. Linux zigbuild was directly proven unable
+   to embed the required Mach-O line tables; native `dsymutil`, Apple linker
+   header padding, DWARF insertion, and `codesign` produced and verified all
+   four target artifacts in run `29575421066`. Preserve those two package
+   producers as the documented product-blocker exception, never as a fourth
+   CI lane. No other macOS workflow surface is approved by this answer.
 5. **jackin PR #810:** ANSWERED (operator, 2026-07-18) — the entire jackin
    program delivery lands **on top of PR #810's head branch**; that PR stays
    jackin's single program PR (the §2.12 one-branch rule maps to that

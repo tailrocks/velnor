@@ -1,7 +1,7 @@
 {
   "version": 1,
   "defaults": {
-    "lane-selection": {"classification":"required","evidence":"Every estate code repository must default automatic events to Velnor and expose github/both through the canonical ci.yml matrix.","implementations":[{"workflow":"ci.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]}]},
+    "lane-selection": {"classification":"required","evidence":"Every estate code repository must default automatic events to Velnor, run weekly schedules on both lanes, and expose github/both through the canonical ci.yml matrix.","implementations":[{"workflow":"ci.yml","canonical_markers":["github.event_name == 'schedule'","inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]}]},
     "checkout": {"classification":"required","evidence":"Every estate code repository consumes checked-out source in CI.","implementations":[{"workflow":"ci.yml","job_ids":["rust"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]}]},
     "tool-setup": {"classification":"required","evidence":"Estate law requires committed mise configuration and the pinned mise action for CI tools.","implementations":[{"workflow":"ci.yml","job_ids":["rust"],"canonical_markers":["jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea"]}]},
     "rust-ci": {"classification":"required","evidence":"All 13 repositories contain Rust source or a Rust CI/build helper requiring canonical validation.","implementations":[{"workflow":"ci.yml","job_ids":["rust"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444","mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696","jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"]}]},
@@ -19,7 +19,7 @@
   "repositories": [
     {
       "name":"ChainArgos/java-monorepo",
-      "path":"/Users/donbeave/Projects/ChainArgos/java-monorepo",
+      "path":"/Users/donbeave/Projects/ChainArgos/java-monorepo-velnor-estate",
       "concerns": {
         "rust-ci":{"classification":"repo-specific","evidence":"The production monorepo uses path-classified per-package Rust jobs and an aggregate required check; package identities are explicit repository parameters under the approved Class-A L2/L3 model.","implementations":[]},
         "checkout":{"classification":"required","evidence":"Every source-consuming Class-A workload job must use the canonical checkout pin and credential boundary.","implementations":[{"workflow":"ci.yml","job_ids":["changes","check","test-bitcoin-processor","test-eth-processor","test-coingecko-pricing","test-processor-monitor","test-tron-processor","test-blockchain-explorer","test-eth-grpc-server","test-tron-grpc-server","test-legacy-grpc-server"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]}]},
@@ -48,7 +48,7 @@
     },
     {
       "name":"jackin-project/jackin",
-      "path":"/Users/donbeave/Projects/tailrocks/jackin-project/jackin",
+      "path":"/Users/donbeave/Projects/tailrocks/jackin-project/jackin-velnor-estate",
       "concerns": {
         "checkout":{"classification":"required","evidence":"Jackin's canonical telemetry conformance compile job consumes repository source through pinned checkout.","implementations":[{"workflow":"ci.yml","job_ids":["telemetry-conformance"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]}]},
         "tool-setup":{"classification":"required","evidence":"Jackin's canonical telemetry conformance compile job installs its locked Rust toolchain through mise.","implementations":[{"workflow":"ci.yml","job_ids":["telemetry-conformance"],"canonical_markers":["jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d"]}]},
@@ -87,7 +87,7 @@
     },
     {
       "name":"tailrocks/tablerock",
-      "path":"/Users/donbeave/Projects/tailrocks/tablerock",
+      "path":"/Users/donbeave/Projects/tailrocks/tablerock-estate",
       "concerns": {
         "integration-services":{"classification":"repo-specific","evidence":"Native Swift/FFI parity is a TableRock product concern represented by native.yml; it is an all-macOS application gate and therefore cannot use the Linux Velnor lane matrix.","implementations":[]},
         "artifacts":{"classification":"repo-specific","evidence":"Generated Swift bindings and native evidence are repository-specific outputs.","implementations":[]},
@@ -163,6 +163,136 @@
       "path":"/Users/donbeave/Projects/tailrocks/tracing-request-level",
       "concerns": {
         "release":{"classification":"applicable","evidence":"release.yml publishes the library crate.","implementations":[{"workflow":"release.yml","job_ids":["release"]}]}
+      }
+    },
+    {
+      "name":"ChainArgos/jackin-agent-brown",
+      "path":"/Users/donbeave/Projects/ChainArgos/jackin-agent-brown",
+      "concerns": {
+        "lane-selection":{"classification":"required","evidence":"Validation, history scanning, image publication, pre-commit, and Renovate are executable Linux workflows and must use the canonical Velnor-default lane contract.","implementations":[{"workflow":"ci.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]},{"workflow":"gitleaks-history.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]},{"workflow":"precommit.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]},{"workflow":"publish-image.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.writer"]},{"workflow":"renovate.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]}]},
+        "checkout":{"classification":"required","evidence":"All local validation and publication jobs consume repository source.","implementations":[{"workflow":"ci.yml","job_ids":["validate"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]},{"workflow":"gitleaks-history.yml","job_ids":["scan"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]},{"workflow":"precommit.yml","job_ids":["prek"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]},{"workflow":"renovate.yml","job_ids":["renovate"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]}]},
+        "tool-setup":{"classification":"required","evidence":"Gitleaks and pre-commit tooling must be declared through mise instead of curl or a second setup action.","implementations":[{"workflow":"gitleaks-history.yml","job_ids":["scan"],"canonical_markers":["jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea"]},{"workflow":"precommit.yml","job_ids":["prek"],"canonical_markers":["jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea"]}]},
+        "rust-ci":{"classification":"non-applicable","evidence":"This role repository builds a container through the shared role action and contains no Rust workspace.","implementations":[]},
+        "cargo-cache":{"classification":"non-applicable","evidence":"No Rust compilation occurs in this repository.","implementations":[]},
+        "docker-build":{"classification":"required","evidence":"The repository validates and publishes the jackin-agent-brown image through jackin-role-action.","implementations":[{"workflow":"ci.yml","job_ids":["validate"],"canonical_markers":["jackin-project/jackin-role-action@","registry-cache-image"]},{"workflow":"publish-image.yml","job_ids":["publish"],"canonical_markers":["jackin-project/jackin-role-action/.github/workflows/publish.yml@"]}]},
+        "artifacts":{"classification":"non-applicable","evidence":"The role workflow publishes OCI images directly and has no Results Service producer/consumer pair.","implementations":[]},
+        "preview":{"classification":"non-applicable","evidence":"No distinct preview artifact surface exists.","implementations":[]},
+        "release":{"classification":"applicable","evidence":"publish-image.yml publishes the role image.","implementations":[{"workflow":"publish-image.yml","job_ids":["publish"]}]},
+        "renovate":{"classification":"applicable","evidence":"renovate.yml runs repository-local Renovate.","implementations":[{"workflow":"renovate.yml","job_ids":["renovate"]}]},
+        "required-aggregator":{"classification":"required","evidence":"Every executable role workflow exposes a stable selected-lane aggregate context.","implementations":[{"workflow":"ci.yml","job_ids":["ci-required"],"canonical_markers":["toJSON(needs)"]},{"workflow":"gitleaks-history.yml","job_ids":["gitleaks-required"],"canonical_markers":["toJSON(needs)"]},{"workflow":"precommit.yml","job_ids":["precommit-required"],"canonical_markers":["toJSON(needs)"]},{"workflow":"publish-image.yml","job_ids":["publish-required"],"canonical_markers":["toJSON(needs)"]},{"workflow":"renovate.yml","job_ids":["renovate-required"],"canonical_markers":["toJSON(needs)"]}]},
+        "workflow-safety":{"classification":"required","evidence":"Every executable role workflow requires canonical concurrency, timeout, permissions, and immutable pins.","implementations":[{"workflow":"ci.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"gitleaks-history.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"precommit.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"publish-image.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"renovate.yml","canonical_markers":["concurrency:","timeout-minutes:"]}]}
+      }
+    },
+    {
+      "name":"tailrocks/velnor-actions-fixture",
+      "path":"/Users/donbeave/Projects/tailrocks/velnor-project/velnor-actions-fixture",
+      "concerns": {
+        "lane-selection":{"classification":"repo-specific","evidence":"Fixture workflows intentionally exercise canonical inline matrices plus isolated negative and reusable-workflow protocol shapes; their exact content is the Velnor compatibility contract.","implementations":[]},
+        "checkout":{"classification":"applicable","evidence":"Fixture workload jobs consume source using the approved checkout adapter.","implementations":[{"workflow":"compat.yml","job_ids":["changes","compat"],"canonical_markers":["actions/checkout@"]}]},
+        "tool-setup":{"classification":"applicable","evidence":"Rust and action fixtures exercise native mise setup.","implementations":[{"workflow":"compat.yml","canonical_markers":["jdx/mise-action@"]}]},
+        "rust-ci":{"classification":"repo-specific","evidence":"fixture-rust-check.yml is a reusable protocol fixture rather than a product Rust workspace pipeline.","implementations":[]},
+        "integration-services":{"classification":"required","evidence":"compat.yml proves current V2 PostgreSQL service behavior.","implementations":[{"workflow":"compat.yml","job_ids":["services-postgres"]}]},
+        "cargo-cache":{"classification":"required","evidence":"compat.yml proves off, sccache, and Kache strict backend behavior without stacking.","implementations":[{"workflow":"compat.yml","job_ids":["cache-off","cache-sccache","cache-kache"]}]},
+        "docker-build":{"classification":"required","evidence":"docker.yml and multi-arch.yml prove native Docker and manifest behavior.","implementations":[{"workflow":"docker.yml","job_ids":["docker"]},{"workflow":"multi-arch.yml","job_ids":["build","merge-manifests"]}]},
+        "artifacts":{"classification":"required","evidence":"Fixture fan-in proves current Results Service producer/consumer behavior.","implementations":[{"workflow":"compat.yml","canonical_markers":["actions/upload-artifact@","actions/download-artifact@"]}]},
+        "docs-pages":{"classification":"required","evidence":"pages.yml proves configure, single-tar upload, OIDC deploy, and writer behavior.","implementations":[{"workflow":"pages.yml","job_ids":["build","deploy"]}]},
+        "preview":{"classification":"non-applicable","evidence":"Fixture validates primitives directly rather than publishing a product preview.","implementations":[]},
+        "release":{"classification":"non-applicable","evidence":"Fixture has no product release.","implementations":[]},
+        "renovate":{"classification":"applicable","evidence":"renovate.yml is a protocol fixture for the approved Renovate adapter.","implementations":[{"workflow":"renovate.yml","job_ids":["renovate"]}]},
+        "required-aggregator":{"classification":"repo-specific","evidence":"Each independent fixture surface exposes its own required aggregator so failures remain attributable.","implementations":[]},
+        "workflow-safety":{"classification":"required","evidence":"Positive and negative fixture workflows use bounded execution and intentional concurrency without changing the protocol behavior under test.","implementations":[{"workflow":"attestation-negative.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"compat.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"docker.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"fixture-rust-check.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"multi-arch.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"pages.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"renovate.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"reuse-caller.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"schedule.yml","canonical_markers":["concurrency:","timeout-minutes:"]}]}
+      }
+    },
+    {
+      "name":"tailrocks/velnor-apt",
+      "path":"/Users/donbeave/Projects/tailrocks/velnor-project/velnor-apt",
+      "concerns": {
+        "lane-selection":{"classification":"required","evidence":"Signed repository publication and Renovate are executable Linux workflows; automatic publication must use Velnor and dispatch must expose github/both.","implementations":[{"workflow":"publish.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]},{"workflow":"renovate.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]}]},
+        "checkout":{"classification":"required","evidence":"Repository assembly and Renovate consume checked-out configuration.","implementations":[{"workflow":"publish.yml","job_ids":["build"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]},{"workflow":"renovate.yml","job_ids":["renovate"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]}]},
+        "tool-setup":{"classification":"required","evidence":"reprepro and GnuPG bootstrap must be declarative through mise bootstrap packages.","implementations":[{"workflow":"publish.yml","job_ids":["build"],"canonical_markers":["jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea","mise bootstrap packages apply --yes"]}]},
+        "rust-ci":{"classification":"non-applicable","evidence":"The signed Debian repository contains no Rust workspace.","implementations":[]},
+        "cargo-cache":{"classification":"non-applicable","evidence":"No Rust compilation occurs.","implementations":[]},
+        "docker-build":{"classification":"non-applicable","evidence":"Publication assembles a Debian repository and Pages payload, not an OCI image.","implementations":[]},
+        "artifacts":{"classification":"applicable","evidence":"publish.yml downloads release Debian assets through gh and uploads one Pages artifact.","implementations":[{"workflow":"publish.yml","job_ids":["build"],"canonical_markers":["gh release download","actions/upload-pages-artifact@"]}]},
+        "docs-pages":{"classification":"required","evidence":"The signed apt repository is served through GitHub Pages.","implementations":[{"workflow":"publish.yml","job_ids":["build"],"canonical_markers":["actions/configure-pages@","actions/upload-pages-artifact@"]},{"workflow":"publish.yml","job_ids":["deploy"],"canonical_markers":["actions/deploy-pages@"]}]},
+        "preview":{"classification":"non-applicable","evidence":"Only the authoritative signed repository is published.","implementations":[]},
+        "release":{"classification":"required","evidence":"publish.yml is the production signed apt publication path.","implementations":[{"workflow":"publish.yml","job_ids":["build","deploy"]}]},
+        "renovate":{"classification":"applicable","evidence":"renovate.yml runs repository-local Renovate.","implementations":[{"workflow":"renovate.yml","job_ids":["renovate"]}]},
+        "required-aggregator":{"classification":"required","evidence":"Publication needs stable selected-lane terminal contexts.","implementations":[{"workflow":"publish.yml","job_ids":["publish-required"],"canonical_markers":["toJSON(needs)"]},{"workflow":"renovate.yml","job_ids":["renovate-required"],"canonical_markers":["toJSON(needs)"]}]},
+        "workflow-safety":{"classification":"required","evidence":"Signing and Pages publication require global writer serialization, bounded jobs, least privilege, and immutable pins.","implementations":[{"workflow":"publish.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"renovate.yml","canonical_markers":["concurrency:","timeout-minutes:"]}]}
+      }
+    },
+    {
+      "name":"tailrocks/holla-apt",
+      "path":"/Users/donbeave/Projects/tailrocks/holla-project/holla-apt",
+      "concerns": {
+        "lane-selection":{"classification":"required","evidence":"Signed repository publication and Renovate are executable Linux workflows.","implementations":[{"workflow":"publish.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]},{"workflow":"renovate.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]}]},
+        "checkout":{"classification":"required","evidence":"Repository assembly and Renovate consume checked-out configuration.","implementations":[{"workflow":"publish.yml","job_ids":["build"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]},{"workflow":"renovate.yml","job_ids":["renovate"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]}]},
+        "tool-setup":{"classification":"required","evidence":"reprepro and GnuPG bootstrap must be declarative through mise bootstrap packages.","implementations":[{"workflow":"publish.yml","job_ids":["build"],"canonical_markers":["jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea","mise bootstrap packages apply --yes"]}]},
+        "rust-ci":{"classification":"non-applicable","evidence":"The signed Debian repository contains no Rust workspace.","implementations":[]},
+        "cargo-cache":{"classification":"non-applicable","evidence":"No Rust compilation occurs.","implementations":[]},
+        "docker-build":{"classification":"non-applicable","evidence":"Publication assembles a Debian repository and Pages payload, not an OCI image.","implementations":[]},
+        "artifacts":{"classification":"applicable","evidence":"publish.yml downloads release Debian assets through gh and uploads one Pages artifact.","implementations":[{"workflow":"publish.yml","job_ids":["build"],"canonical_markers":["gh release download","actions/upload-pages-artifact@"]}]},
+        "docs-pages":{"classification":"required","evidence":"The signed apt repository is served through GitHub Pages.","implementations":[{"workflow":"publish.yml","job_ids":["build"],"canonical_markers":["actions/configure-pages@","actions/upload-pages-artifact@"]},{"workflow":"publish.yml","job_ids":["deploy"],"canonical_markers":["actions/deploy-pages@"]}]},
+        "preview":{"classification":"non-applicable","evidence":"Only the authoritative signed repository is published.","implementations":[]},
+        "release":{"classification":"required","evidence":"publish.yml is the production signed apt publication path.","implementations":[{"workflow":"publish.yml","job_ids":["build","deploy"]}]},
+        "renovate":{"classification":"applicable","evidence":"renovate.yml runs repository-local Renovate.","implementations":[{"workflow":"renovate.yml","job_ids":["renovate"]}]},
+        "required-aggregator":{"classification":"required","evidence":"Publication needs stable selected-lane terminal contexts.","implementations":[{"workflow":"publish.yml","job_ids":["publish-required"],"canonical_markers":["toJSON(needs)"]},{"workflow":"renovate.yml","job_ids":["renovate-required"],"canonical_markers":["toJSON(needs)"]}]},
+        "workflow-safety":{"classification":"required","evidence":"Signing and Pages publication require global writer serialization, bounded jobs, least privilege, and immutable pins.","implementations":[{"workflow":"publish.yml","canonical_markers":["concurrency:","timeout-minutes:"]},{"workflow":"renovate.yml","canonical_markers":["concurrency:","timeout-minutes:"]}]}
+      }
+    },
+    {
+      "name":"tailrocks/homebrew-tablerock",
+      "path":"/Users/donbeave/Projects/tailrocks/homebrew-tablerock",
+      "concerns": {
+        "lane-selection":{"classification":"required","evidence":"Scheduled preview metadata update is executable Linux automation and must use Velnor by default with explicit github/both dispatch.","implementations":[{"workflow":"update-preview.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]}]},
+        "checkout":{"classification":"required","evidence":"The update job modifies checked-out cask metadata.","implementations":[{"workflow":"update-preview.yml","job_ids":["update"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]}]},
+        "tool-setup":{"classification":"required","evidence":"Verification and update tools must be declared through mise.","implementations":[{"workflow":"update-preview.yml","job_ids":["update"],"canonical_markers":["jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea"]}]},
+        "rust-ci":{"classification":"non-applicable","evidence":"The tap contains Homebrew metadata, not a Rust workspace.","implementations":[]},
+        "cargo-cache":{"classification":"non-applicable","evidence":"No Rust compilation occurs.","implementations":[]},
+        "docker-build":{"classification":"non-applicable","evidence":"The tap consumes signed native archives and builds no image.","implementations":[]},
+        "artifacts":{"classification":"non-applicable","evidence":"The updater consumes upstream release assets directly and has no workflow artifact fan-in.","implementations":[]},
+        "preview":{"classification":"required","evidence":"update-preview.yml verifies and writes preview cask metadata.","implementations":[{"workflow":"update-preview.yml","job_ids":["update"]}]},
+        "release":{"classification":"repo-specific","evidence":"Release state is a committed cask update driven by the upstream product repository.","implementations":[]},
+        "renovate":{"classification":"non-applicable","evidence":"No repository-local Renovate workflow currently exists; action freshness must be added or explicitly owned externally.","implementations":[]},
+        "required-aggregator":{"classification":"required","evidence":"Preview update needs a stable selected-lane terminal context.","implementations":[{"workflow":"update-preview.yml","job_ids":["update-required"],"canonical_markers":["toJSON(needs)"]}]},
+        "workflow-safety":{"classification":"required","evidence":"Tap mutation requires single-writer gating, bounded execution, least privilege, and immutable pins.","implementations":[{"workflow":"update-preview.yml","canonical_markers":["concurrency:","timeout-minutes:"]}]}
+      }
+    },
+    {
+      "name":"tailrocks/homebrew-parallax",
+      "path":"/Users/donbeave/Projects/tailrocks/parallax-project/homebrew-parallax",
+      "concerns": {
+        "lane-selection":{"classification":"required","evidence":"Scheduled preview metadata update is executable Linux automation and must use Velnor by default with explicit github/both dispatch.","implementations":[{"workflow":"update-preview.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]}]},
+        "checkout":{"classification":"required","evidence":"The update job modifies checked-out formula metadata.","implementations":[{"workflow":"update-preview.yml","job_ids":["update"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]}]},
+        "tool-setup":{"classification":"required","evidence":"Cosign and update tools must be declared through mise where they are tools rather than approved native actions.","implementations":[{"workflow":"update-preview.yml","job_ids":["update"],"canonical_markers":["jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea"]}]},
+        "rust-ci":{"classification":"non-applicable","evidence":"The tap contains Homebrew metadata, not a Rust workspace.","implementations":[]},
+        "cargo-cache":{"classification":"non-applicable","evidence":"No Rust compilation occurs.","implementations":[]},
+        "docker-build":{"classification":"non-applicable","evidence":"The tap consumes signed native archives and builds no image.","implementations":[]},
+        "artifacts":{"classification":"non-applicable","evidence":"The updater consumes upstream release assets directly and has no workflow artifact fan-in.","implementations":[]},
+        "preview":{"classification":"required","evidence":"update-preview.yml verifies and writes preview formula metadata.","implementations":[{"workflow":"update-preview.yml","job_ids":["update"]}]},
+        "release":{"classification":"repo-specific","evidence":"Release state is a committed formula update driven by the upstream product repository.","implementations":[]},
+        "renovate":{"classification":"non-applicable","evidence":"No repository-local Renovate workflow currently exists; action freshness must be added or explicitly owned externally.","implementations":[]},
+        "required-aggregator":{"classification":"required","evidence":"Preview update needs a stable selected-lane terminal context.","implementations":[{"workflow":"update-preview.yml","job_ids":["update-required"],"canonical_markers":["toJSON(needs)"]}]},
+        "workflow-safety":{"classification":"required","evidence":"Tap mutation requires single-writer gating, bounded execution, least privilege, and immutable pins.","implementations":[{"workflow":"update-preview.yml","canonical_markers":["concurrency:","timeout-minutes:"]}]}
+      }
+    },
+    {
+      "name":"tailrocks/homebrew-holla",
+      "path":"/Users/donbeave/Projects/tailrocks/holla-project/homebrew-holla",
+      "concerns": {
+        "lane-selection":{"classification":"required","evidence":"Repository-local Renovate is executable Linux automation and must use Velnor by default with explicit github/both dispatch.","implementations":[{"workflow":"renovate.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]}]},
+        "checkout":{"classification":"required","evidence":"Renovate consumes repository configuration and tap metadata.","implementations":[{"workflow":"renovate.yml","job_ids":["renovate"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]}]},
+        "tool-setup":{"classification":"non-applicable","evidence":"The approved Renovate action is a native adapter/container surface; no separate project tool is installed.","implementations":[]},
+        "rust-ci":{"classification":"non-applicable","evidence":"The tap contains Homebrew metadata, not a Rust workspace.","implementations":[]},
+        "cargo-cache":{"classification":"non-applicable","evidence":"No Rust compilation occurs.","implementations":[]},
+        "docker-build":{"classification":"non-applicable","evidence":"The tap builds no OCI image.","implementations":[]},
+        "artifacts":{"classification":"non-applicable","evidence":"No workflow artifact producer/consumer pair exists.","implementations":[]},
+        "preview":{"classification":"non-applicable","evidence":"No separate preview workflow exists.","implementations":[]},
+        "release":{"classification":"repo-specific","evidence":"Published tap state is maintained through committed metadata changes.","implementations":[]},
+        "renovate":{"classification":"required","evidence":"renovate.yml runs repository-local Renovate.","implementations":[{"workflow":"renovate.yml","job_ids":["renovate"]}]},
+        "required-aggregator":{"classification":"required","evidence":"Renovate dispatch parity needs a stable selected-lane terminal context.","implementations":[{"workflow":"renovate.yml","job_ids":["renovate-required"],"canonical_markers":["toJSON(needs)"]}]},
+        "workflow-safety":{"classification":"required","evidence":"Repository mutation requires writer gating, bounded execution, least privilege, and immutable pins.","implementations":[{"workflow":"renovate.yml","canonical_markers":["concurrency:","timeout-minutes:"]}]}
       }
     }
   ]

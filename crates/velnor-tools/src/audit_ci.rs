@@ -410,6 +410,12 @@ fn audit_repo_profile(
 ) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
     findings.extend(audit_test_runner_surfaces(root)?);
+    let mise_path = root.join("mise.toml");
+    if mise_path.is_file() {
+        let text = fs::read_to_string(&mise_path)
+            .with_context(|| format!("read {}", mise_path.display()))?;
+        audit_prebuilt_tool_surface("mise.toml", &text, &mut findings);
+    }
     if !root.join(".github/AGENTS.md").is_file() {
         findings.push(Finding::error(
             "uniform-agents",
@@ -579,6 +585,23 @@ fn is_cargo_test_instruction(line: &str) -> bool {
             .all(|token| token.contains('=') && !token.starts_with('='))
 }
 
+fn has_unexplained_sudo(run: &str) -> bool {
+    let lines = run.lines().collect::<Vec<_>>();
+    lines.iter().enumerate().any(|(index, line)| {
+        let line = line.trim();
+        let invokes_sudo = line.starts_with("sudo ")
+            || line.contains("&& sudo ")
+            || line.contains("; sudo ")
+            || line.contains("| sudo ");
+        invokes_sudo
+            && !index.checked_sub(1).is_some_and(|previous| {
+                lines[previous]
+                    .trim()
+                    .starts_with("# velnor-sudo-exception:")
+            })
+    })
+}
+
 fn audit_workflow(
     file: &str,
     text: &str,
@@ -588,6 +611,7 @@ fn audit_workflow(
     latest: &mut BTreeMap<String, Option<String>>,
     findings: &mut Vec<Finding>,
 ) {
+    audit_prebuilt_tool_surface(file, text, findings);
     let workload = profile
         .workload_override
         .unwrap_or_else(|| has_trigger(yaml, "push") || has_trigger(yaml, "pull_request"));
@@ -629,12 +653,16 @@ fn audit_workflow(
         .and_then(|value| object_get(value, "group"))
         .and_then(Value::as_str)
     {
-        if !group.contains("github.ref") {
+        let globally_serialized = object_get(yaml, "concurrency")
+            .and_then(|value| object_get(value, "cancel-in-progress"))
+            .and_then(Value::as_bool)
+            == Some(false);
+        if !group.contains("github.ref") && !globally_serialized {
             findings.push(Finding::warn(
                 "uniform-concurrency",
                 file,
                 "$.concurrency.group",
-                "include the workflow identity and github.ref",
+                "include the workflow identity and github.ref, or set cancel-in-progress false for intentional global writer serialization",
             ));
         }
     }
@@ -676,12 +704,24 @@ fn audit_workflow(
         let Some(job) = job_value.as_mapping() else {
             continue;
         };
+        let job_text = compact(job_value);
         if mapping_get(job, "timeout-minutes").is_none() && mapping_get(job, "uses").is_none() {
             findings.push(Finding::error(
                 "timeout",
                 file,
                 format!("{job_path}.timeout-minutes"),
                 "set a measured timeout-minutes budget",
+            ));
+        }
+        if job_text.contains("playwright")
+            && job_text.contains(" install")
+            && !job_text.contains(".cache/ms-playwright")
+        {
+            findings.push(Finding::error(
+                "playwright-cache",
+                file,
+                &job_path,
+                "cache ~/.cache/ms-playwright with a lockfile-derived key before installing browsers",
             ));
         }
         if let Some(runs_on) = mapping_get(job, "runs-on") {
@@ -709,6 +749,19 @@ fn audit_workflow(
     }
 }
 
+fn audit_prebuilt_tool_surface(file: &str, text: &str, findings: &mut Vec<Finding>) {
+    for (index, line) in text.lines().enumerate() {
+        if line.contains("cargo:cargo-nextest") {
+            findings.push(Finding::error(
+                "prebuilt-tool",
+                file,
+                format!("line {}", index + 1),
+                "install nextest from aqua:nextest-rs/nextest/cargo-nextest; CI tooling must not compile from source",
+            ));
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn audit_steps(
     file: &str,
@@ -724,25 +777,49 @@ fn audit_steps(
     let mut sccache = false;
     let mut swatinem = false;
     let mut target_cache = false;
+    let mut target_cache_generation = false;
+    let mut target_dir_override = false;
+    let mut unstable_target_dir = false;
+    let mut literal_target_cache = false;
+    let mut cargo_fuzz = false;
+    let mut fuzz_target_cache = false;
+    let mut first_compile_step = None;
+    let mut first_target_cache_step = None;
     for (index, step) in steps.iter().enumerate() {
         let path = format!("{job_path}.steps[{index}]");
         let run = object_get(step, "run")
             .and_then(Value::as_str)
             .unwrap_or("");
-        compile |= run.lines().any(|line| {
+        let step_fuzz = run.lines().any(|line| {
             let line = line.trim_start();
-            [
-                "cargo build",
-                "cargo check",
-                "cargo clippy",
-                "cargo test",
-                "cargo nextest",
-                "cargo run",
-                "rustc ",
-            ]
-            .iter()
-            .any(|command| line.starts_with(command) || line.contains(&format!(" {command}")))
+            line.starts_with("cargo ") && line.contains(" fuzz ")
+                || line.starts_with("cargo +") && line.contains(" fuzz ")
         });
+        cargo_fuzz |= step_fuzz;
+        target_dir_override |= run.contains("CARGO_TARGET_DIR=");
+        unstable_target_dir |= run.contains("CARGO_TARGET_DIR=")
+            && (run.contains("GITHUB_RUN_ID") || run.contains("GITHUB_RUN_ATTEMPT"));
+        let step_compiles = step_fuzz
+            || run.lines().any(|line| {
+                let line = line.trim_start();
+                [
+                    "cargo build",
+                    "cargo check",
+                    "cargo clippy",
+                    "cargo test",
+                    "cargo nextest",
+                    "cargo run",
+                    "cargo zigbuild",
+                    "cargo xtask",
+                    "rustc ",
+                ]
+                .iter()
+                .any(|command| line.starts_with(command) || line.contains(&format!(" {command}")))
+            });
+        compile |= step_compiles;
+        if step_compiles {
+            first_compile_step.get_or_insert(index);
+        }
         if run.lines().any(|line| {
             let line = line.trim_start();
             line.starts_with("cargo test") || line.contains(" cargo test")
@@ -772,9 +849,23 @@ fn audit_steps(
                 "remove ad-hoc cache CLI reporting; the setup action/native adapter post step owns the report",
             ));
         }
-        if run.contains("self-hosted")
-            || run.contains("velnor-target-mvp")
-            || run.contains("ubuntu-26.04")
+        if has_unexplained_sudo(run) {
+            findings.push(Finding::error(
+                "privilege",
+                file,
+                format!("{path}.run"),
+                "remove sudo; only a proven OS-package boundary may retain it with an immediately preceding # velnor-sudo-exception: reason",
+            ));
+        }
+        let lane_identity_run = run
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("Description:"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace("--deny-self-hosted-runners", "");
+        if lane_identity_run.contains("self-hosted")
+            || lane_identity_run.contains("velnor-target-mvp")
+            || lane_identity_run.contains("ubuntu-26.04")
         {
             findings.push(Finding::error(
                 "lane-conditional",
@@ -819,13 +910,33 @@ fn audit_steps(
         sccache |= family == "mozilla-actions/sccache-action";
         swatinem |= family == "Swatinem/rust-cache";
         if family == "actions/cache" {
-            target_cache |= object_get(step, "with")
-                .and_then(|with| object_get(with, "path"))
-                .is_some_and(|value| {
+            if let Some(with) = object_get(step, "with") {
+                let caches_target = object_get(with, "path").is_some_and(|value| {
+                    compact(value).lines().any(|line| line.contains("target"))
+                });
+                fuzz_target_cache |= object_get(with, "path").is_some_and(|value| {
                     compact(value)
                         .lines()
-                        .any(|line| line.trim() == "target" || line.contains("/target"))
+                        .any(|line| line.trim() == "fuzz/target")
                 });
+                target_cache |= caches_target;
+                if caches_target {
+                    first_target_cache_step.get_or_insert(index);
+                }
+                literal_target_cache |= object_get(with, "path").is_some_and(|value| {
+                    compact(value).lines().any(|line| line.trim() == "target")
+                });
+                if caches_target {
+                    let key = object_get(with, "key").map(compact).unwrap_or_default();
+                    let restore = object_get(with, "restore-keys")
+                        .map(compact)
+                        .unwrap_or_default();
+                    target_cache_generation |= key.contains("github.sha")
+                        && !key.contains("github.ref")
+                        && !restore.contains("github.sha")
+                        && !restore.contains("github.ref");
+                }
+            }
         }
         audit_ref(file, &path, uses, raw, offline, latest, findings);
         if family == "mozilla-actions/sccache-action" {
@@ -879,12 +990,55 @@ fn audit_steps(
             "remove Swatinem/rust-cache from the sccache job",
         ));
     }
-    if target_cache && sccache {
+    if compile && !target_cache && !matches!(job_id, "cache-off" | "cache-kache") {
         findings.push(Finding::error(
-            "double-cache",
+            "target-cache",
             file,
             job_path,
-            "remove actions/cache target caching from the sccache job",
+            "compile job must persist the Cargo target through actions/cache",
+        ));
+    }
+    if target_cache && !target_cache_generation {
+        findings.push(Finding::error(
+            "target-cache-key",
+            file,
+            job_path,
+            "target cache key must include github.sha while its restore prefix omits ref/SHA so main seeds PRs and each successful commit saves an updated generation",
+        ));
+    }
+    if first_compile_step
+        .zip(first_target_cache_step)
+        .is_some_and(|(compile_step, cache_step)| cache_step > compile_step)
+    {
+        findings.push(Finding::error(
+            "target-cache-order",
+            file,
+            job_path,
+            "restore the Cargo target cache before the first compiling step",
+        ));
+    }
+    if target_dir_override && literal_target_cache {
+        findings.push(Finding::error(
+            "target-cache-path",
+            file,
+            job_path,
+            "cache the effective CARGO_TARGET_DIR, not literal target",
+        ));
+    }
+    if unstable_target_dir {
+        findings.push(Finding::error(
+            "target-cache-path",
+            file,
+            job_path,
+            "use a stable job-scoped CARGO_TARGET_DIR; run-specific paths invalidate restored Cargo fingerprints",
+        ));
+    }
+    if cargo_fuzz && !fuzz_target_cache {
+        findings.push(Finding::error(
+            "target-cache-path",
+            file,
+            job_path,
+            "cargo fuzz writes to fuzz/target; persist that effective target path",
         ));
     }
 }
@@ -1181,12 +1335,108 @@ jobs:
       - uses: actions/checkout@0123456789012345678901234567890123456789
       - uses: mozilla-actions/sccache-action@0123456789012345678901234567890123456789
         env: {SCCACHE_GHA_ENABLED: "false"}
+      - uses: actions/cache@0123456789012345678901234567890123456789
+        with:
+          path: target
+          key: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
       - run: cargo nextest run --workspace --locked
 "#;
 
     #[test]
     fn canonical_workflow_passes_static_rules() {
         assert!(audit(BASE).is_empty());
+    }
+
+    #[test]
+    fn rejects_source_installed_nextest() {
+        let yaml = BASE.replace(
+            "      - run: cargo nextest run --workspace --locked",
+            "      - uses: jdx/mise-action@0123456789012345678901234567890123456789\n        with:\n          install_args: rust cargo:cargo-nextest\n      - run: cargo nextest run --workspace --locked",
+        );
+        assert!(has_rule(&audit(&yaml), "prebuilt-tool"));
+    }
+
+    #[test]
+    fn cross_compile_job_requires_target_cache() {
+        let yaml = BASE
+            .replace(
+                "      - uses: actions/cache@0123456789012345678901234567890123456789\n        with:\n          path: target\n          key: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}\n          restore-keys: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-\n",
+                "",
+            )
+            .replace(
+                "cargo nextest run --workspace --locked",
+                "cargo zigbuild --target x86_64-unknown-linux-musl",
+            );
+        assert!(has_rule(&audit(&yaml), "target-cache"));
+    }
+
+    #[test]
+    fn xtask_job_requires_target_cache() {
+        let yaml = BASE
+            .replace(
+                "      - uses: actions/cache@0123456789012345678901234567890123456789\n        with:\n          path: target\n          key: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}\n          restore-keys: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-\n",
+                "",
+            )
+            .replace(
+                "cargo nextest run --workspace --locked",
+                "cargo xtask policy --output github",
+            );
+        assert!(has_rule(&audit(&yaml), "target-cache"));
+    }
+
+    #[test]
+    fn cargo_fuzz_requires_its_effective_target_cache() {
+        let yaml = BASE.replace(
+            "cargo nextest run --workspace --locked",
+            "cargo +nightly fuzz build --target x86_64-unknown-linux-gnu",
+        );
+        assert!(has_rule(&audit(&yaml), "target-cache-path"));
+
+        let yaml = yaml.replace(
+            "          path: target",
+            "          path: |\n            target\n            fuzz/target",
+        );
+        assert!(!has_rule(&audit(&yaml), "target-cache-path"));
+    }
+
+    #[test]
+    fn target_override_rejects_literal_target_cache() {
+        let yaml = BASE.replace(
+            "      - run: cargo nextest run --workspace --locked",
+            "      - run: echo 'CARGO_TARGET_DIR=/tmp/job-target' >> \"$GITHUB_ENV\"\n      - run: cargo nextest run --workspace --locked",
+        );
+        assert!(has_rule(&audit(&yaml), "target-cache-path"));
+    }
+
+    #[test]
+    fn target_override_rejects_run_specific_path() {
+        let yaml = BASE.replace(
+            "      - run: cargo nextest run --workspace --locked",
+            "      - run: echo 'CARGO_TARGET_DIR=/tmp/target-${GITHUB_RUN_ID}' >> \"$GITHUB_ENV\"\n      - run: cargo nextest run --workspace --locked",
+        );
+        assert!(has_rule(&audit(&yaml), "target-cache-path"));
+    }
+
+    #[test]
+    fn target_cache_must_precede_compilation() {
+        let cache = "      - uses: actions/cache@0123456789012345678901234567890123456789\n        with:\n          path: target\n          key: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}\n          restore-keys: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-\n";
+        let yaml = BASE.replace(cache, "").replace(
+            "      - run: cargo nextest run --workspace --locked",
+            &format!("      - run: cargo nextest run --workspace --locked\n{cache}"),
+        );
+        assert!(has_rule(&audit(&yaml), "target-cache-order"));
+    }
+
+    #[test]
+    fn rejects_source_installed_nextest_in_mise_config() {
+        let mut findings = Vec::new();
+        audit_prebuilt_tool_surface(
+            "mise.toml",
+            "[tools]\n\"cargo:cargo-nextest\" = \"0.9.140\"\n",
+            &mut findings,
+        );
+        assert!(has_rule(&findings, "prebuilt-tool"));
     }
 
     #[test]
@@ -1280,6 +1530,39 @@ jobs:
     }
 
     #[test]
+    fn compile_job_requires_updatable_ref_independent_target_cache() {
+        let missing = BASE
+            .lines()
+            .filter(|line| {
+                !line.contains("actions/cache@")
+                    && !line.trim_start().starts_with("path: target")
+                    && !line.trim_start().starts_with("key: rust-build-")
+                    && !line.trim_start().starts_with("restore-keys: rust-build-")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(has_rule(&audit(&missing), "target-cache"));
+
+        let ref_scoped = BASE.replace("${{ github.sha }}", "${{ github.ref }}");
+        assert!(has_rule(&audit(&ref_scoped), "target-cache-key"));
+    }
+
+    #[test]
+    fn playwright_install_requires_browser_cache() {
+        let yaml = BASE.replace(
+            "      - run: cargo nextest run --workspace --locked",
+            "      - run: bunx playwright install --with-deps chromium",
+        );
+        assert!(has_rule(&audit(&yaml), "playwright-cache"));
+
+        let cached = yaml.replace(
+            "          path: target",
+            "          path: |\n            target\n            ~/.cache/ms-playwright",
+        );
+        assert!(!has_rule(&audit(&cached), "playwright-cache"));
+    }
+
+    #[test]
     fn requires_concurrency_and_timeout() {
         let yaml = BASE
             .replace("concurrency:\n  group: ci-${{ github.ref }}\n", "")
@@ -1287,6 +1570,24 @@ jobs:
         let findings = audit(&yaml);
         assert!(has_rule(&findings, "concurrency"));
         assert!(has_rule(&findings, "timeout"));
+    }
+
+    #[test]
+    fn allows_non_cancellable_global_writer_serialization() {
+        let yaml = BASE.replace(
+            "  group: ci-${{ github.ref }}",
+            "  group: release\n  cancel-in-progress: false",
+        );
+        assert!(!has_rule(&audit(&yaml), "uniform-concurrency"));
+    }
+
+    #[test]
+    fn warns_for_cancellable_global_concurrency() {
+        let yaml = BASE.replace(
+            "  group: ci-${{ github.ref }}",
+            "  group: release\n  cancel-in-progress: true",
+        );
+        assert!(has_rule(&audit(&yaml), "uniform-concurrency"));
     }
 
     #[test]
@@ -1339,6 +1640,34 @@ jobs:
         let findings = audit(&yaml);
         assert!(has_rule(&findings, "lane-conditional"));
         assert!(has_rule(&findings, "deprecated"));
+    }
+
+    #[test]
+    fn permits_attestation_self_hosted_denial_policy() {
+        let yaml = BASE.replace(
+            "cargo nextest run --workspace --locked",
+            "gh attestation verify artifact --deny-self-hosted-runners",
+        );
+        assert!(!has_rule(&audit(&yaml), "lane-conditional"));
+    }
+
+    #[test]
+    fn permits_self_hosted_words_in_package_description() {
+        let yaml = BASE.replace(
+            "      - run: cargo nextest run --workspace --locked",
+            "      - run: |\n          cat <<'EOF'\n          Description: apt repository for a self-hosted runner\n          EOF",
+        );
+        assert!(!has_rule(&audit(&yaml), "lane-conditional"));
+    }
+
+    #[test]
+    fn rejects_unexplained_sudo_and_accepts_documented_exception() {
+        assert!(has_unexplained_sudo("sudo chown -R user cache"));
+        assert!(has_unexplained_sudo("mkdir cache && sudo chmod 777 cache"));
+        assert!(!has_unexplained_sudo(
+            "# velnor-sudo-exception: apt package has no user-space distribution\nsudo apt-get install reprepro"
+        ));
+        assert!(!has_unexplained_sudo("echo 'never use sudo here'"));
     }
 
     #[test]

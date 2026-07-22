@@ -97,6 +97,13 @@ jobs:
           restore-keys: |
             cargo-registry-${{ runner.os }}-
 
+      - name: Cache Cargo target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: target
+          key: cargo-target-${{ matrix.config.lane }}-${{ runner.os }}-${{ github.job }}-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', '**/Cargo.toml', '**/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: cargo-target-${{ matrix.config.lane }}-${{ runner.os }}-${{ github.job }}-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', '**/Cargo.toml', '**/Cargo.lock') }}-
+
       - name: Build
         run: cargo zigbuild -p velnor-runner --release --locked --target ${{ matrix.target }}.2.17
 
@@ -159,8 +166,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="v${VERSION}"
-          gh release view "$tag" >/dev/null 2>&1 \
-            || gh release create "$tag" --title "$tag" --generate-notes
+          gh release view "$tag" >/dev/null 2>&1 || {
+            gh release create "$tag" --title "$tag" --generate-notes \
+              || gh release view "$tag" >/dev/null
+          }
           gh release upload "$tag" \
             artifacts/velnor-runner-*.tar.gz \
             artifacts/velnor-runner-*.tar.gz.sha256 \

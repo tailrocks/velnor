@@ -40,9 +40,11 @@ pub struct JobContainerSpec {
     pub verify_bind_mounts: bool,
     pub daemon_id: String,
     pub repository: Option<String>,
-    /// Host-persistent incremental-build store mounted at the workspace's
-    /// ordinary `target` path. This preserves GitHub-hosted observable path
-    /// semantics while enabling opt-in warm builds.
+    /// Host-persistent incremental-build generation. The runner reflink/copies
+    /// it into the job-local workspace target after checkout and publishes the
+    /// completed job tree back atomically. It is never a nested bind mount:
+    /// one would make rename(2) across `target` return EXDEV even though the
+    /// same workflow succeeds on GitHub-hosted runners.
     pub cargo_target_host: Option<PathBuf>,
     /// Exactly one compiler-cache store is exposed to a job.
     pub compiler_cache_backend: CompilerCacheBackend,
@@ -186,9 +188,6 @@ impl JobContainerSpec {
             ),
         ];
         self.append_compiler_cache_mount(&mut args);
-        if let Some(target_host) = &self.cargo_target_host {
-            args.extend(["-v".into(), self.mount_arg(target_host, "/__w/target")]);
-        }
         for (name, value) in &self.env {
             args.extend(["-e".into(), format!("{name}={value}")]);
         }

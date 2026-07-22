@@ -60,14 +60,14 @@ a stale tool image; image-build failure fails the package transaction.
 - Optional Rust target persistence: set `VELNOR_CARGO_TARGET_PERSIST=true` in
   the daemon env only for trusted target scopes. Velnor stores targets under
   `_velnor_targets/<trust-scope>/<generation>/<repo>/<workflow>/<job-bucket>`
-  so warm state
-  is shared only across matching trust scope, repository, workflow, and job
-  classes, then mounts that bucket at the normal `/__w/target` workspace path.
-  It does not set `CARGO_TARGET_DIR`, so workflow-visible Cargo paths remain
-  identical to GitHub-hosted execution. Native checkout preserves only this
-  runner-owned `target/` mount while applying `git clean -ffdx` to every other
-  ignored or untracked workspace path; otherwise checkout would empty the
-  durable bucket before every job. Set `VELNOR_TRUST_SCOPE` per
+  so warm state is shared only across matching trust scope, repository,
+  workflow, and job classes. After checkout, Velnor reflink/copies a complete
+  generation into the job-local workspace `target/`; after the job it publishes
+  the completed tree atomically. It never adds a nested `/__w/target` bind
+  mount: nested mounts make an ordinary rename between `target/` and another
+  workspace directory fail with `EXDEV`. Velnor does not set
+  `CARGO_TARGET_DIR`, so paths and same-filesystem semantics remain identical
+  to GitHub-hosted execution. Set `VELNOR_TRUST_SCOPE` per
   daemon/pool (`trusted` by default;
   use a distinct value such as `public-forks` for untrusted lanes) before
   enabling target persistence.
@@ -80,6 +80,9 @@ a stale tool image; image-build failure fails the package transaction.
   pool by accident.
 - Organization fleets: use `--url https://github.com/<org>` with
   `--pool-name <runner-group>` to resolve the current group id through GitHub.
+  The daemon validates that name/id pair once per daemon pass; all slots and
+  later JIT recycles reuse the resolved id so fleet width and retry storms do
+  not multiply GitHub REST quota consumption.
   Follow the drain, trust-lane, label-continuity, and rollback procedure in
   [org-fleet-migration.md](org-fleet-migration.md).
 
@@ -414,6 +417,9 @@ For target jobs, Velnor runs the job in a Docker container and mounts
 default `velnor/job-ubuntu:26.04` image is built from official `ubuntu:26.04` and
 contains the Docker CLI and Buildx plugin, so workflow steps inside the job
 container can run `docker`/`docker buildx` without relying on host binary mounts.
+It also contains `sudo`, matching GitHub-hosted Ubuntu workflow semantics even
+though Velnor currently executes the job container as root. Preflight rejects
+an image missing this contract tool before the runner advertises capacity.
 Service containers share the per-job Docker network with GitHub-style aliases.
 
 To force reuse of an existing run, set `VELNOR_FIXTURE_DISPATCH=false` together

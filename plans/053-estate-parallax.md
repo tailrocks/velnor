@@ -77,16 +77,18 @@ Velnor); their mutating steps (issue/PR creation) writer-gated.
 
 **Verify**: actionlint exit 0; `grep -rn "ubuntu-latest" .github/workflows/` → none.
 
-### Step 3: Kill macOS
+### Step 3: Remove macOS except the proven Apple package blocker
 
-Delete the `macos-15` job and `${{ matrix.os }}` matrices that exist only to
-include macOS; delete `setup-macos-sdk` composite. If the macOS job produced
-a release artifact (check `release.yml` asset list), replace with
-`cargo-zigbuild` for the same triple on Ubuntu; if the artifact is
-Darwin-only and zigbuild cannot produce it validly, STOP (operator decision
-§12.4).
+Delete the `macos-15` CI job and matrices that exist only for generic macOS
+coverage; delete the retired SDK composite from active package paths. The
+Parallax Apple release artifacts reached the documented STOP: Linux zigbuild
+cannot embed their required Mach-O line tables, while native `dsymutil`, Apple
+linker header padding, DWARF insertion, and `codesign` pass the single-file
+archive verifier. Operator decision §12.4 therefore preserves only the two
+Apple preview/stable package producers, outside the CI lane matrix.
 
-**Verify**: `grep -rn "macos\|setup-macos-sdk" .github/workflows/ .github/actions/` → none (or STOP filed).
+**Verify**: generic CI contains no macOS; remaining macOS references are only
+the approved Apple package matrices and their documented native tool contract.
 
 ### Step 4: Collapse the 58-cache sprawl
 
@@ -123,13 +125,14 @@ lane save/restore time — record before/after totals.
 ## Done criteria
 
 - [ ] actionlint exit 0; pins all latest-major SHA
-- [ ] Lanes everywhere; zero macOS; zero ubuntu-latest; cache steps ≤ 15, all owned
+- [ ] Lanes everywhere; no macOS CI lane; only the approved Apple package
+  producers remain; zero ubuntu-latest; cache steps ≤ 15, all owned
 - [ ] mold + contract env on compile jobs; timeouts everywhere
 - [ ] Operator dispatches green or deferred; no out-of-scope changes
 
 ## STOP conditions
 
-- macOS artifact with no valid zigbuild equivalent (step 3).
+- Any new macOS surface beyond the approved Apple package producers (step 3).
 - Velnor lane capability failure (cosign-installer, attest steps are the
   likely candidates — runner plan 042 owns those adapters) → STOP + report.
 - A deleted cache step turns out to feed a script that reads the cached path
