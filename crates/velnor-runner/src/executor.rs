@@ -2001,7 +2001,9 @@ where
             }
             NativeActionAdapter::DockerSetupBuildx => {
                 let action_state = state.with_env(state.resolve_env(&action.env));
-                let name = native_input_or(&action_state, action, "name", "velnor-builder");
+                let requested_name =
+                    native_input_or(&action_state, action, "name", "velnor-builder");
+                let name = job_scoped_buildx_builder_name(&requested_name, state);
                 if !input_truthy(&native_input_or(&action_state, action, "cleanup", "true")) {
                     return Ok(StepExecutionResult {
                         exit_code: 0,
@@ -2496,7 +2498,8 @@ where
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
-        let name = native_input_or(&action_state, action, "name", "velnor-builder");
+        let requested_name = native_input_or(&action_state, action, "name", "velnor-builder");
+        let name = job_scoped_buildx_builder_name(&requested_name, state);
         let driver = native_input_or(&action_state, action, "driver", "docker-container");
         let buildkitd_config_inline =
             native_input(action, &action_state, "buildkitd-config-inline");
@@ -6287,6 +6290,23 @@ fn sanitize_artifact_name(name: &str) -> String {
         "" | "." | ".." => "_".to_string(),
         _ => mapped,
     }
+}
+
+fn job_scoped_buildx_builder_name(requested: &str, state: &JobExecutionState) -> String {
+    let temp = state.temp_host.as_deref();
+    let scope_path = temp
+        .filter(|path| path.file_name().is_some_and(|name| name == "temp"))
+        .and_then(Path::parent)
+        .or(temp);
+    let scope = scope_path
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .unwrap_or("job");
+    format!(
+        "{}-{}",
+        sanitize_artifact_name(requested),
+        sanitize_artifact_name(scope)
+    )
 }
 
 fn pages_url_for_repository(repository: &str) -> String {
@@ -10557,12 +10577,17 @@ type=sha,format=long,prefix=,enable=true"
         ));
         let runner = executor.runner();
         let calls = docker_call_strings(&runner.calls);
-        assert!(calls.iter().any(
-            |c| c.contains("'buildx' 'create' '--name' 'velnor-builder'")
-                && c.contains("'--config' '/__t/buildkitd-config-velnor-builder.toml'")
-        ));
+        let builder = format!(
+            "velnor-builder-{}",
+            sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap())
+        );
+        assert!(calls.iter().any(|c| c
+            .contains(&format!("'buildx' 'create' '--name' '{builder}'"))
+            && c.contains(&format!(
+                "'--config' '/__t/buildkitd-config-{builder}.toml'"
+            ))));
         assert_eq!(
-            fs::read_to_string(temp.join("buildkitd-config-velnor-builder.toml")).unwrap(),
+            fs::read_to_string(temp.join(format!("buildkitd-config-{builder}.toml"))).unwrap(),
             "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]\n"
         );
         let login_call = runner.calls.iter().position(|(program, args)| {
@@ -15538,17 +15563,21 @@ fi"#
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
+        let builder = format!(
+            "jackin-construct-{}",
+            sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap())
+        );
         assert_eq!(results[0].exit_code, 0);
-        assert_eq!(results[0].state.outputs["name"], "jackin-construct");
-        assert_eq!(results[0].state.env["BUILDX_BUILDER"], "jackin-construct");
+        assert_eq!(results[0].state.outputs["name"], builder);
+        assert_eq!(results[0].state.env["BUILDX_BUILDER"], builder);
         let calls = docker_call_strings(&executor.runner().calls);
         let inspect_call = calls
             .iter()
-            .position(|c| c.contains("'buildx' 'inspect' 'jackin-construct'"))
+            .position(|c| c.contains(&format!("'buildx' 'inspect' '{builder}'")))
             .unwrap();
         let use_call = calls
             .iter()
-            .position(|c| c.contains("'buildx' 'use' 'jackin-construct'"))
+            .position(|c| c.contains(&format!("'buildx' 'use' '{builder}'")))
             .unwrap();
         assert!(inspect_call < use_call);
         assert!(
