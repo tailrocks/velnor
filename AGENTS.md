@@ -146,6 +146,15 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-07-22: **Sequential runs must be fully warm** (operator): each
+  successful cold run seeds dependency, compiler-output, tool, and layer
+  caches; unchanged sequential PR and main-equivalent runs on GitHub and
+  Velnor download and compile no dependency and reinstall no tool. Canonical
+  keys exclude refs and include compatibility inputs. GitHub's native cache
+  scope lets trusted main seed PR restores; PR caches remain merge-ref scoped
+  and never feed main. Every workflow-only PR may merge after exact-head
+  dual-lane plus cold→warm→unchanged log proof.
+
 - 2026-07-22: **Unprivileged workflows by default** (operator): estate
   workflows do not use `sudo` for cache ownership, permission repair, tool
   setup, or convenience. Tools install in user space through mise and caches

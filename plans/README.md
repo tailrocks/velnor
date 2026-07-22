@@ -62,6 +62,9 @@ genuinely non-applicable concerns are classified and omitted, never replaced
 with no-op jobs (§2.12; `audit-ci` must enforce both coverage and equivalence).
 Workflow execution is unprivileged by default: no cache/ownership/setup
 `sudo`; only documented audited OS-package bootstrap exceptions remain.
+Cache acceptance is cold → warm → unchanged on both lanes: main seeds trusted
+shared restores, PR caches remain merge-ref scoped, and sequential unchanged
+runs show zero dependency download, compilation, or tool installation.
 
 ## Execution order & status — runner (velnor)
 

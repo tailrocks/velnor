@@ -741,6 +741,7 @@ fn audit_steps(
     let mut sccache = false;
     let mut swatinem = false;
     let mut target_cache = false;
+    let mut target_cache_generation = false;
     for (index, step) in steps.iter().enumerate() {
         let path = format!("{job_path}.steps[{index}]");
         let run = object_get(step, "run")
@@ -850,13 +851,24 @@ fn audit_steps(
         sccache |= family == "mozilla-actions/sccache-action";
         swatinem |= family == "Swatinem/rust-cache";
         if family == "actions/cache" {
-            target_cache |= object_get(step, "with")
-                .and_then(|with| object_get(with, "path"))
-                .is_some_and(|value| {
+            if let Some(with) = object_get(step, "with") {
+                let caches_target = object_get(with, "path").is_some_and(|value| {
                     compact(value)
                         .lines()
                         .any(|line| line.trim() == "target" || line.contains("/target"))
                 });
+                target_cache |= caches_target;
+                if caches_target {
+                    let key = object_get(with, "key").map(compact).unwrap_or_default();
+                    let restore = object_get(with, "restore-keys")
+                        .map(compact)
+                        .unwrap_or_default();
+                    target_cache_generation |= key.contains("github.sha")
+                        && !key.contains("github.ref")
+                        && !restore.contains("github.sha")
+                        && !restore.contains("github.ref");
+                }
+            }
         }
         audit_ref(file, &path, uses, raw, offline, latest, findings);
         if family == "mozilla-actions/sccache-action" {
@@ -910,12 +922,20 @@ fn audit_steps(
             "remove Swatinem/rust-cache from the sccache job",
         ));
     }
-    if target_cache && sccache {
+    if compile && !target_cache && !matches!(job_id, "cache-off" | "cache-kache") {
         findings.push(Finding::error(
-            "double-cache",
+            "target-cache",
             file,
             job_path,
-            "remove actions/cache target caching from the sccache job",
+            "compile job must persist the Cargo target through actions/cache",
+        ));
+    }
+    if target_cache && !target_cache_generation {
+        findings.push(Finding::error(
+            "target-cache-key",
+            file,
+            job_path,
+            "target cache key must include github.sha while its restore prefix omits ref/SHA so main seeds PRs and each successful commit saves an updated generation",
         ));
     }
 }
@@ -1212,6 +1232,11 @@ jobs:
       - uses: actions/checkout@0123456789012345678901234567890123456789
       - uses: mozilla-actions/sccache-action@0123456789012345678901234567890123456789
         env: {SCCACHE_GHA_ENABLED: "false"}
+      - uses: actions/cache@0123456789012345678901234567890123456789
+        with:
+          path: target
+          key: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-
       - run: cargo nextest run --workspace --locked
 "#;
 
@@ -1308,6 +1333,24 @@ jobs:
             .collect::<Vec<_>>()
             .join("\n");
         assert!(has_rule(&audit(&yaml), "compile-cache"));
+    }
+
+    #[test]
+    fn compile_job_requires_updatable_ref_independent_target_cache() {
+        let missing = BASE
+            .lines()
+            .filter(|line| {
+                !line.contains("actions/cache@")
+                    && !line.trim_start().starts_with("path: target")
+                    && !line.trim_start().starts_with("key: rust-build-")
+                    && !line.trim_start().starts_with("restore-keys: rust-build-")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(has_rule(&audit(&missing), "target-cache"));
+
+        let ref_scoped = BASE.replace("${{ github.sha }}", "${{ github.ref }}");
+        assert!(has_rule(&audit(&ref_scoped), "target-cache-key"));
     }
 
     #[test]

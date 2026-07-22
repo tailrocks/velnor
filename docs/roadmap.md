@@ -68,6 +68,12 @@ use `sudo` for ownership repair, permission repair, or convenience. Only an
 exact required OS package with no viable user-space distribution may elevate
 through a documented mise bootstrap exception enforced by `audit-ci`.
 
+**Warm sequential execution is an acceptance contract.** Cache keys exclude
+branch/ref identity, include every compatibility input, and use native GitHub
+scope rules so trusted main caches seed pull requests while PR caches remain
+merge-ref isolated. Cold → warm → unchanged reruns must prove zero dependency
+download, dependency compilation, and tool installation on both runner types.
+
 ## Implementation Goal
 
 Velnor is a GitHub Actions-compatible runner daemon with a Rust runtime.

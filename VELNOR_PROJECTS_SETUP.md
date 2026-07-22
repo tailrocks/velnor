@@ -250,9 +250,9 @@ Rerun of the same commit on a warm fleet must not re-download crates, recompile 
 
 | Layer | GitHub lane | Velnor lane |
 |-------|-------------|-------------|
-| **1. Compiler cache** | `mozilla-actions/sccache-action` pinned `version: v0.16.0` + `RUSTC_WRAPPER=sccache` + **`SCCACHE_GHA_ENABLED=false`** (local disk; store lives only for the job = cold compiler baseline) | Selected backend store (`sccache \| kache \| off` per [strict contract](docs/strict-capability-contract.md)); Velnor owns `SCCACHE_DIR`; adapter owns setup/post reporting |
+| **1. Compiler cache** | `mozilla-actions/sccache-action` pinned `version: v0.16.0` + `RUSTC_WRAPPER=sccache` + `SCCACHE_GHA_ENABLED=false`; persisted target artifacts in layer 3 carry compilation reuse between ephemeral jobs | Selected backend store (`sccache \| kache \| off` per [strict contract](docs/strict-capability-contract.md)); Velnor owns `SCCACHE_DIR`; adapter owns setup/post reporting |
 | **2. Cargo registry/git** | `actions/cache` on registry + git/db; key = lockfile + lane + os | Host `_velnor_cargo`; cache action no-ops |
-| **3. Target dir** | Optional measured cache; prefer sccache+registry over blind Swatinem+target double-cache | Optional `VELNOR_CARGO_TARGET_PERSIST` buckets (hygiene §3) |
+| **3. Target dir** | Required `actions/cache` entry for compiling jobs. Primary key = compatibility hash + `github.sha`; restore prefix omits SHA so the newest compatible main cache seeds PRs and each successful commit saves an updated immutable generation | Required persistent target bucket for compiling job classes; the same cache step is a native no-op over Velnor's scoped host generation (hygiene §3) |
 | **4. Result reuse** | jackin #810 exact-result proofs (advanced monorepos only) | Same YAML |
 
 ```yaml
@@ -269,10 +269,13 @@ env:
 local-only stores; exactly one of `sccache | kache | off` per job; only the
 pinned action inputs at their approved values; no remote-backend environment;
 cache reporting is owned by the action / native-adapter **post step** — build
-steps never call cache CLIs. Consequences the estate must accept until §12.7 is
-decided: the GitHub lane recompiles dependencies every run (its local store is
-job-lifetime), while `actions/cache` on the **cargo registry** remains approved
-on both lanes, so downloads stay warm. This supersedes any older
+steps never call cache CLIs. Cross-run GitHub compilation reuse comes from the
+existing approved `actions/cache` surface over the Cargo target, not a remote
+sccache backend. The target key includes toolchain, manifests/config, lane, OS,
+and commit SHA; its restore prefix omits only SHA. GitHub therefore restores the
+newest compatible default-branch generation into PRs, saves updated immutable
+generations after successful commits, and keeps PR-produced caches merge-ref
+isolated. This supersedes any older
 `SCCACHE_GHA_ENABLED=true` guidance in repo workflows and in earlier revisions
 of this document.
 

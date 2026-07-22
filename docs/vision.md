@@ -33,6 +33,9 @@ conclusions in the GitHub UI — is **achieved and in production**:
   Workflow steps run unprivileged by default: user-space tools come from mise
   and caches live in workspace/home-owned paths. `sudo` is limited to a
   documented, audited OS-package boundary with no viable user-space install.
+  Successful cold runs seed dependency, compiler-output, tool, and layer
+  caches. Sequential unchanged runs on both GitHub and Velnor must restore
+  them with zero dependency download, compilation, or tool installation.
   Parallax's two Apple package producers are the documented product-blocker
   exception: the shipped single-file Mach-O contract requires native
   `dsymutil`, Apple linker header padding, DWARF embedding, and `codesign`.
