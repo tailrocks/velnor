@@ -230,6 +230,8 @@ const BUILDX_INPUTS: &[InputRule] = &[
     InputRule::Any("name"),
     InputRule::Literal("driver", &["docker-container"]),
     InputRule::Literal("install", &["true", "false"]),
+    InputRule::Literal("cleanup", &["true", "false"]),
+    InputRule::Literal("keep-state", &["true", "false"]),
     InputRule::Literal(
         "buildkitd-config-inline",
         &["[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]"],
@@ -1350,6 +1352,19 @@ mod tests {
         ));
         assert_eq!(errors[0].field, "with.buildkitd-config-inline");
         assert_eq!(errors[0].accepted, [approved]);
+    }
+
+    #[test]
+    fn validate_job_accepts_buildx_cleanup_controls() {
+        validate_job_with_context(
+            &job(
+                "docker/setup-buildx-action",
+                Some("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"),
+                serde_json::json!({"cleanup": false, "keep-state": true}),
+            ),
+            &[],
+        )
+        .unwrap();
     }
 
     #[test]
