@@ -138,6 +138,16 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-07-22: **Parallax native Apple packaging is the sole measured OS
+  exception** ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) §12.4):
+  the operator's approval of all pending program decisions except PR merging
+  accepts the proven `aarch64-apple-darwin` and `x86_64-apple-darwin`
+  preview/stable producers. Linux zigbuild cannot embed the required line
+  tables into Parallax's single-file Mach-O archive; native `dsymutil`, Apple
+  linker header padding, DWARF insertion, and `codesign` are required. These
+  GitHub-hosted package jobs are not CI lanes and do not authorize any other
+  macOS surface. Velnor still rejects Darwin labels.
+
 - 2026-07-22: **Persistent Cargo targets are job-local materializations**:
   a Jackin dual-lane run proved that bind-mounting the durable bucket directly
   at `/__w/target` changes observable filesystem behavior: atomic promotion

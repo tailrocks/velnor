@@ -19,7 +19,7 @@ One CI/CD shape for every listed repository:
 | 1 | **Velnor by default** on `push`, `pull_request`, `schedule`, and default `workflow_dispatch` |
 | 2 | **GitHub selectable** via the same workflow (`lanes: github`) |
 | 3 | **Both** in one run for parity (`lanes: both`) |
-| 4 | **Ubuntu only** — GitHub lane is exactly `ubuntu-26.04`; Velnor runs the Ubuntu job image; **no macOS/Windows CI** in the standardized surface |
+| 4 | **Ubuntu CI lanes** — GitHub lane is exactly `ubuntu-26.04`; Velnor runs the Ubuntu job image; **no macOS/Windows CI lane**. A native package producer may remain only as a measured product-blocker exception that is not a Velnor/GitHub comparison lane |
 | 5 | **mise + `rust-toolchain.toml`** for tools and Rust; no `dtolnay/rust-toolchain` product path |
 | 6 | **One caching model** — cargo registry/git, sccache, Docker layers, mise — identical YAML on both lanes |
 | 7 | **Clarity** — job/step names explain purpose; no shards/batches; complex CI decisions in Rust |
@@ -73,7 +73,7 @@ Velnor is a GitHub Actions–compatible self-hosted runner (Rust/tokio):
 - `actions/cache` / rust-cache / sccache-GHA become **no-ops** when paths are already host-persistent — **same workflow YAML on both lanes**.
 - Trust scopes: `trusted` keeps Docker socket + secrets; other scopes refuse secrets and omit host Docker.
 
-**Hard OS rule:** Velnor does not run Darwin. Combined with the Ubuntu-everywhere operator rule, **every `macos-*` job is removed, replaced by Ubuntu cross-build (`cargo-zigbuild` where valid), or documented as a proven product blocker** before migration is complete. There is no “GitHub-only macOS fourth lane” in the standard.
+**Hard OS rule:** Velnor does not run Darwin. Combined with the Ubuntu-everywhere operator rule, **every `macos-*` job is removed, replaced by Ubuntu cross-build (`cargo-zigbuild` where valid), or documented as a proven product blocker** before migration is complete. There is no “GitHub-only macOS fourth lane” in the standard. Parallax's Apple package matrix is the sole approved blocker exception: it produces native Darwin release assets outside lane comparison because Linux zigbuild cannot satisfy the single-file Mach-O DWARF/codesign contract.
 
 Law: `docs/mission.md`, `docs/master-plan.md` §3a, `docs/runner-usage.md`, `docs/perf-instant-cache-plan-2026-06-11.md`, `docs/reference/target-action-registry.md`.
 
@@ -838,7 +838,7 @@ GitHub and on Velnor for everything the branch changes.
 | 4 | velnor | Lanes + dogfood |
 | 5 | holla | Lanes only |
 | 6 | ruxel | Lanes + pin + ansible/uv |
-| 7 | parallax | Full lanes; no macOS |
+| 7 | parallax | Full Ubuntu CI lanes; native Apple package blocker only |
 
 ### Phase 3 — Libraries + cleanup — terminal 2026-07-19
 
@@ -1022,7 +1022,14 @@ jobs:
 1. **Required checks:** GitHub lane required, optional, or dispatch-only once Velnor is default?  
 2. **Org JIT timeline:** block mass onboarding until shipped, or temporary N repo-level daemons?  
 3. **Shared `velnor-ci-actions`?**  
-4. **Which macOS artifacts need a zigbuild proof before migration?**  
+4. **ANSWERED (operator, 2026-07-22):** Parallax's
+   `aarch64-apple-darwin` and `x86_64-apple-darwin` preview/stable package
+   artifacts require native macOS. Linux zigbuild was directly proven unable
+   to embed the required Mach-O line tables; native `dsymutil`, Apple linker
+   header padding, DWARF insertion, and `codesign` produced and verified all
+   four target artifacts in run `29575421066`. Preserve those two package
+   producers as the documented product-blocker exception, never as a fourth
+   CI lane. No other macOS workflow surface is approved by this answer.
 5. **jackin PR #810:** ANSWERED (operator, 2026-07-18) — the entire jackin
    program delivery lands **on top of PR #810's head branch**; that PR stays
    jackin's single program PR (the §2.12 one-branch rule maps to that

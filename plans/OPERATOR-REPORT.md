@@ -1808,6 +1808,12 @@ same-version local-artifact sentence is superseded and must not be used.
   Greptime and Browser Full Stack on both Velnor and GitHub. This directly
   proves the managed-engine restart fix; no retry, assertion, fixture, or
   expected outcome was weakened.
+- Operator approval of all pending program decisions except PR merging resolves
+  §12.4 from Parallax's committed measurement: Linux zigbuild cannot embed the
+  required line tables in its single-file Mach-O contract, while native Apple
+  tooling produced and verified both Darwin targets in four-target preview run
+  `29575421066`. Only those preview/stable package producers remain; they are
+  not Velnor/GitHub CI lanes and authorize no broader macOS surface.
 
 ### 2026-07-22 live-fleet version precondition
 

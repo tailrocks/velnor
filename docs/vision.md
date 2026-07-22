@@ -26,6 +26,13 @@ conclusions in the GitHub UI — is **achieved and in production**:
   `lanes=both`. Repositories whose delivery is blocked retain their pushed
   program branch and exact evidence; their current `main` is not represented
   as migrated until its PR can merge.
+- Standardized CI, test, docs, and Linux release work remains Ubuntu-only.
+  Parallax's two Apple package producers are the documented product-blocker
+  exception: the shipped single-file Mach-O contract requires native
+  `dsymutil`, Apple linker header padding, DWARF embedding, and `codesign`.
+  Linux `cargo-zigbuild` was measured and cannot produce that valid artifact.
+  These GitHub-hosted packaging legs are not Velnor lanes; Velnor continues to
+  reject every macOS label.
 - Velnor must support every approved feature these repositories use. An
   unapproved security/storage/network surface fails explicitly under the
   strict capability contract rather than silently falling back.
