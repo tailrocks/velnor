@@ -1782,3 +1782,28 @@ same-version local-artifact sentence is superseded and must not be used.
   `f6591b04` expands the machine-checked screen manifest. Exact CI
   `29881771351` and Native `29881771295` are active. No assertion, golden,
   retry, sleep, or fixture contract was weakened.
+
+### 2026-07-22 source-revision and Parallax closure
+
+- The estate audit exposed two forbidden TableRock lane-conditional `touch`
+  steps. Hosted run `29875329220` proved why they had been added: commit-time
+  mtime normalization could repeat or move backward across a persistent Cargo
+  target, allowing stale workspace fingerprints. Velnor `0146732` removes the
+  enabling condition by recording the source revision with each target
+  generation, refreshing workspace mtimes only when that revision changes,
+  and retaining same-revision warmth. The complete local Velnor gate passed
+  with 669 nextest tests; exact-head CI `29883003438` is green.
+- Release-deb `29883315448` and signed apt publisher `29884053413` are green
+  for `v0.1.109`; both amd64 and arm64 package indexes advertise `0.1.109`.
+  Sentry remains unmodified because `/Users/donbeave/.ssh/donbeave-ssh` is
+  absent and the SSH agent has no identities. No direct package path or host
+  bypass was used.
+- TableRock removed both lane-specific freshness steps at `3a9cdce`; the next
+  estate audit checkpoint reports zero errors and the same six explained
+  publication-lock advisories. TableRock trunk continues moving under its
+  independent roadmap, so no terminal head claim is made yet.
+- Parallax exact-head CI `29882121621` is green at `705af2ca`. After cleaning
+  old runs and stale registrations, combined Storage `29883285817` passed
+  Greptime and Browser Full Stack on both Velnor and GitHub. This directly
+  proves the managed-engine restart fix; no retry, assertion, fixture, or
+  expected outcome was weakened.
