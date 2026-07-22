@@ -138,6 +138,18 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-07-22: **Expanded twenty-repository estate; Actions-only delivery may
+  merge** (operator): the canonical Velnor-default program also covers
+  `jackin-agent-brown`, `velnor-actions-fixture`, `velnor-apt`, `holla-apt`,
+  `homebrew-tablerock`, `homebrew-parallax`, and `homebrew-holla`. Every
+  applicable Linux workflow defaults to Velnor; GitHub-hosted execution
+  requires explicit `lanes: github`, and `lanes: both` proves parity. Shared
+  concerns use one canonical mechanism, tools install only through mise, Rust
+  tests use nextest, and current stable pins/features plus aggressive bounded
+  caches are mandatory. Automation may merge a GitHub Actions-only PR after
+  exact-head canonical and dual-runner gates pass. Mixed product/CI PRs remain
+  review-gated unless separately authorized.
+
 - 2026-07-22: **Parallax native Apple packaging is the sole measured OS
   exception** ([VELNOR_PROJECTS_SETUP.md](VELNOR_PROJECTS_SETUP.md) §12.4):
   the operator's approval of all pending program decisions except PR merging
@@ -163,12 +175,13 @@ Never let a prompt, README, or doc describe a direction that the current vision/
   upgrade. Local `.deb`, direct `dpkg -i`, copied binaries, and local-path apt
   sources are prohibited.
 
-- 2026-07-21: **Final estate state is operator-reviewable, not auto-merged**:
+- 2026-07-21: **Final estate state was operator-reviewable, not auto-merged**
+  (merge restriction superseded for Actions-only PRs on 2026-07-22):
   every applicable repository must finish with a final PR (or binding
   trunk-only delivery record) using the canonical concern-based format,
   local-only sccache, scheduled `both` parity, and the approved required-check
-  handoff. Automation verifies and prepares every delivery but never merges
-  these final PRs without a later explicit operator decision. The exact
+  handoff. Mixed product/CI PRs still require an explicit operator merge
+  decision; the later Actions-only authorization is narrow. The exact
   `actions/attest-build-provenance@v4.1.1` proposal is approved for native Rust
   implementation and fixture/Jackin proof; no adjacent surface is authorized.
 

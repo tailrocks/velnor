@@ -1,6 +1,6 @@
 # VELNOR_PROJECTS_SETUP — Estate CI Standardization Plan
 
-**Status:** definitive research + implementation plan (2026-07-18, rev 2 — speed doctrine, budgets, dual-lane verification protocol)  
+**Status:** definitive research + implementation plan (2026-07-22, rev 3 — twenty-repository estate, speed doctrine, budgets, dual-lane verification protocol)  
 **Audience:** operators and agents preparing one PR per repo so **Velnor is the default runner**, with GitHub and dual-lane modes always available.  
 **Related:** [`docs/strict-capability-contract.md`](docs/strict-capability-contract.md), [`docs/storage-and-disk-pressure-2026-07-18.md`](docs/storage-and-disk-pressure-2026-07-18.md), [`docs/rust-build-cache-hygiene-velnor.md`](docs/rust-build-cache-hygiene-velnor.md), [`docs/cache-gc-design.md`](docs/cache-gc-design.md), [`docs/perf-instant-cache-plan-2026-06-11.md`](docs/perf-instant-cache-plan-2026-06-11.md), [`docs/master-plan.md`](docs/master-plan.md)
 
@@ -29,6 +29,19 @@ One CI/CD shape for every listed repository:
 | 11 | **Latest and greatest** — newest stable major of every action, tool, toolchain, and workflow feature; Renovate keeps pins current; no deprecated surfaces (§2.0 Law 2) |
 
 **Policy override.** Older docs sometimes defaulted jackin-family repos to GitHub. **This plan defaults every listed repo to Velnor.** GitHub remains a permanent comparison lane.
+
+The twenty-repository estate is `jackin`, `java-monorepo`,
+`blockchain-nodes`, `jackin-agent-brown`, `tablerock`, `parallax`, `velnor`,
+`velnor-apt`, `homebrew-tablerock`, `termrock`, `homebrew-parallax`,
+`parallax-telemetry-playground`, `tracing-request-level`, `pg-bigdecimal`,
+`schemalane`, `ruxel`, `holla`, `velnor-actions-fixture`, `holla-apt`, and
+`homebrew-holla`. Packaging and fixture repositories receive only applicable
+concerns; absence of Rust or product releases never justifies a second
+implementation of a shared concern.
+
+GitHub Actions-only PRs may merge after exact-head audit and GitHub/Velnor
+proof. PRs mixing product changes with CI remain operator-review deliveries
+unless separately authorized.
 
 ### Estate snapshot (local trees, 2026-07-18)
 

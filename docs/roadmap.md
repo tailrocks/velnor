@@ -54,12 +54,13 @@ differ only where its product surface differs. Missing required concerns are
 added from the canonical template; non-applicable concerns are documented and
 omitted, never represented by fake no-op jobs.
 
-**Final estate delivery is review-gated.** Every applicable repository ends
+**Final estate delivery is classified by change surface.** Every applicable repository ends
 with one final, reviewable program PR (or its binding trunk-only delivery
 record), canonical concern shapes, local-only sccache, and scheduled `both`
 parity. Required-check policy is applied from the canonical handoff only after
-the named checks exist. Automation must prepare and verify these deliveries,
-but the operator alone decides whether to merge them.
+the named checks exist. Automation may merge GitHub Actions-only PRs after
+exact-head canonical and dual-runner proof. Mixed product/CI PRs remain for
+operator merge review unless separately authorized.
 
 ## Implementation Goal
 

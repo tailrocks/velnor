@@ -20,12 +20,15 @@ conclusions in the GitHub UI — is **achieved and in production**:
   replaces only the runner side, over GitHub's current V2 JIT/broker/
   run-service/Results Service protocol, executing every assigned Linux job
   in an isolated Docker container.
-- The 2026-07-18 estate program standardized the thirteen repositories in
+- The estate program standardizes the twenty repositories in
   `VELNOR_PROJECTS_SETUP.md` on one YAML surface: Velnor by default, pinned
   Ubuntu 26.04 selectable with `lanes=github`, and paired parity with
   `lanes=both`. Repositories whose delivery is blocked retain their pushed
   program branch and exact evidence; their current `main` is not represented
   as migrated until its PR can merge.
+- GitHub Actions-only delivery PRs may merge after exact-head canonical,
+  GitHub-hosted, and Velnor proof. Mixed product/CI PRs remain operator-review
+  deliveries unless separately authorized.
 - Standardized CI, test, docs, and Linux release work remains Ubuntu-only.
   Parallax's two Apple package producers are the documented product-blocker
   exception: the shipped single-file Mach-O contract requires native

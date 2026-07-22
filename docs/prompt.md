@@ -67,20 +67,21 @@ only the gate needed to resolve uncertainty or changed behavior.
 | 045 | DONE | Timing records, summaries, and doctor SLO output. |
 | 046 | DONE | `velnor-tools audit-ci` and lane comparison. |
 | 047 | IN PROGRESS | java-monorepo PR #1753 head `78697247` includes canonical weekly `both`, nextest-only execution, and audited full-history justification; fresh ChainArgos V-B/V-C and operator review remain. |
-| 048 | IN PROGRESS | blockchain-nodes PR #651 head `cc22d7cc` includes canonical weekly `both`, pull-request execution, and rustfmt-clean control-plane tests; exact-head GitHub proof is running and fresh ChainArgos V-B/V-C plus operator review remain. |
+| 048 | IN PROGRESS | blockchain-nodes PR #651 head `bb2548cc` includes canonical weekly `both`, pull-request execution, and authenticated BuildKit-secret mise installation; exact-head GitHub build `29870692493` is green and fresh ChainArgos V-B/V-C plus operator review remain. |
 | 049 | IN PROGRESS | Native v4 attestation is apt-deployed as 0.1.102 and reaches repository upload. GitHub rejects the mandated public Rekor V2 bundle because it has zero verifier-counted integrated timestamps; exact Sigstore RFC3161 TSA expansion approval, fixture proof, and Jackin Preview V-B/V-C remain. |
 | 050 | DONE | Velnor dogfood three-lane proof, 33-second clean rerun, and release recovery drill. PR #100 was open and green at baseline; its current delivery state must be reconciled. |
 | 051 | IN PROGRESS | Holla PR #37 head `94fc643a` is Velnor-green and includes canonical weekly `both`; manual V-B/V-C and operator review remain. |
 | 052 | IN PROGRESS | Ruxel PR #3 head `3d7684fa` is Velnor-green and includes canonical weekly `both`; manual V-B/V-C and operator review remain. |
-| 053 | IN PROGRESS | Parallax direct-main runtime through `705af2ca` has exact CI `29882121621` and combined Storage `29883285817` green on both lanes; `24aade0` canonically names the required aggregator. §12.4 is answered: only the two proven native Apple package producers remain outside lane comparison. Exact 0.1.109 Velnor proof and final reconciliation remain. |
+| 053 | IN PROGRESS | Parallax direct-main through `13b0acb6` removes both nested public-API compiler graphs and their orphan workspace dependency after exact GitHub evidence exposed cold-host timeout/retry and dependency-audit failures. Exact GitHub `29888329917` is fully green; prior runtime CI `29882121621` and combined Storage `29883285817` remain green on both lanes. `24aade0` canonically names the required aggregator. §12.4 is answered: only the two proven native Apple package producers remain outside lane comparison. Exact 0.1.109 Velnor proof and final reconciliation remain. |
 | 054 | IN PROGRESS | TermRock direct-main delivery through `deeefef8` includes canonical weekly `both` and a root-fixed public-API freshness gate. Exact-head Docs/Pages run `29849259484` attempt 4 is green after Velnor 0.1.105 fixed the required single-tar Pages artifact contract; manual V-B/V-C remains. |
 | 055 | IN PROGRESS | Schemalane/pg-bigdecimal/tracing PR heads `fa090cc2`/`c1ac5c8c`/`84e6caeb` include canonical weekly `both` and are Velnor-green; manual V-B/V-C and operator review remain. |
 | 056 | IN PROGRESS | Parallax telemetry playground is delivered directly through `b6ec71e9`; automatic Velnor run `29847627753` is green and manual V-B/V-C remains. |
-| 057 | IN PROGRESS | TableRock trunk `31bb6b76` includes canonical weekly `both`; existing native and local proofs remain green, with manual applicable V-B/V-C pending. |
+| 057 | IN PROGRESS | TableRock trunk `b3e7886` contains the `7d57eaa` four-control and parallel-CI correction plus subsequent trunk-only roadmap work and the required rustfmt repair; exact current-head GitHub CI `29888578314` is fully green. Native `29888579521` passed bridge, Swift, and XCFramework stages but exposed four deterministic UI-control failures in the checkpoint; concurrent trunk-only product work owns overlapping native files, so preserve it and retest its delivered head before any isolated correction. Exact 0.1.109 Velnor proof also remains. |
 | 058 | IN PROGRESS at baseline | Phase-4 audit, performance report, and direction-doc reconciliation were executed; finish status/bookkeeping and any currently authorized delivery work. Human-only policy decisions remain excluded. |
 | 059 | DONE | Recorded host baseline cleanup and post-cleanup smoke. |
 | 060 | IN PROGRESS | Active program heads are migrated for nextest-only testing; former doctest coverage has nextest-discoverable integration/trybuild replacements. Velnor `1bd00cf` extends mechanical enforcement to live scripts, configuration, instructions, and Rust documentation; the current 13-repository audit has zero errors and zero test-runner findings. Fixture PR #4, estate delivery, and V-A/V-B/V-C remain. |
-| 061 | IN PROGRESS | Produce one final reviewable delivery per estate repository, with local-only sccache, canonical weekly `both` parity, approved required checks, and exact PR/evidence ledger. Never merge the final PRs; stop only for operator review decisions. |
+| 061 | IN PROGRESS | Produce one final reviewable delivery per estate repository, with local-only sccache where Rust compiles, canonical weekly `both` parity, approved required checks, and exact PR/evidence ledger. Actions-only PRs may merge after exact-head canonical and dual-runner proof; mixed product/CI PRs stop for operator review unless separately authorized. |
+| 062 | IN PROGRESS | Expand convergence to all twenty operator-listed repositories; refresh official research, concern inventory, canonical enforcement, current pins, mise/nextest/cache policy, exact dual-runner evidence, and delivery state. |
 
 ## Unblocking mandate
 
@@ -98,7 +99,7 @@ Use these resolution tracks:
 | Item | Required autonomous resolution track |
 |---|---|
 | 039 | Re-check current credentials and org runner-group state. If still unauthorized, finish every non-admin migration prerequisite, validate the runbook against current GitHub behavior, determine the minimum exact permission and group/repository settings, and produce one executable operator command/checklist. Apply the migration immediately if ordinary authenticated access now permits it; never retry unchanged 403s. |
-| 047 | Refresh java-monorepo PR #1753 and its checks, resolve safe drift, and leave the final merge-ready PR with exact required-check and reviewer state. Do not merge; operator review is the terminal boundary. |
+| 047 | Refresh java-monorepo PR #1753 and its checks, resolve safe drift, and leave the final merge-ready PR with exact required-check and reviewer state. It mixes product/test changes with CI, so operator review remains the merge boundary. |
 | 048 | Diagnose the three package-build failures from current GitHub and Velnor logs. Fix their shared project-side root causes in blockchain-nodes—Dockerfiles and package sources are now in scope—add regression checks, then repeat V-B/V-C from the existing program branch. A lane-neutral failure must receive one shared fix, never lane-specific YAML. |
 | 049 | First write the mandatory capability proposal for `actions/attest-build-provenance@v4`: why Jackin needs it; exact accepted ref, inputs, values, combinations, outputs, failure modes, Sigstore/OIDC/GitHub API behavior, trust/network/storage implications, upstream `actions/runner` and action-source evidence, and fixture proof. Do not implement this new security/network capability until the operator explicitly approves that described surface. After approval, implement the latest native Rust path, manifest validation, fixture coverage, and Jackin Preview V-B/V-C. Advance every non-dependent Jackin task while approval is pending. |
 | 053 | Reproduce Parallax against current exact heads, compare official-runner and Velnor timing/state evidence, and perform a root-cause investigation of the loading-skeleton and CRUD race. Fix the approved browser/job-runtime behavior in Velnor if it diverges; otherwise fix the shared deterministic application/test race in Parallax, now in scope. Add a regression that fails on the old race, then repeat V-B/V-C without weakening assertions or goldens. |
@@ -267,9 +268,10 @@ operator interaction:
 - Execute the item-specific resolution tracks above in dependency order.
   Technical blockers 048, 053, 054, and the policy-compatible work for 057 are
   active implementation tasks, not handoff notes.
-- Re-check other open estate PRs and resolve safe merge drift. Never merge the
-  final review set; leave exact required-check and reviewer state for the
-  operator.
+- Re-check other open estate PRs and resolve safe merge drift. Merge only PRs
+  whose complete diff is GitHub Actions delivery after exact-head canonical
+  and dual-runner proof; leave mixed product/CI PRs with exact required-check
+  and reviewer state for the operator.
 - After each fix, rerun focused local regression gates first, then only the
   stale V-A/V-B/V-C evidence required for that changed surface. Do not replay
   the full campaign without a concrete stale-evidence reason.
@@ -390,9 +392,10 @@ fully verified definition of done below.
 - Plan 039's organization runner groups and repository access are live with the
   documented permission model, followed by a successful registration and
   smoke proof; a prepared runbook alone is insufficient.
-- Plans 047–057 have one final reviewable PR or binding trunk-only delivery
-  record per repository, with required V-B/V-C evidence green. Final PRs remain
-  open for operator review and are never merged by automation.
+- Plans 047–057 plus expanded estate repositories have one final reviewable PR
+  or binding trunk-only delivery record per repository, with required V-B/V-C
+  evidence green. Actions-only PRs may merge after these gates; mixed
+  product/CI PRs remain open for operator review.
 - Every repository has a reviewed concern classification; every required
   concern exists; every common/applicable concern matches its canonical
   behavioral signature; every non-applicable or repo-specific classification
@@ -418,7 +421,7 @@ fully verified definition of done below.
   crossed. If any program PR is still open or any operator action is still
   required, this definition is not met and the goal remains active.
 - Before declaring completion, perform two consecutive independent full audits
-  of the live requirement/evidence matrix, all 13 delivered default branches,
+  of the live requirement/evidence matrix, all 20 delivered default branches,
   the fixture, Velnor, current CI/artifacts, plan statuses, and direction docs.
   Each audit must discover zero new requirement, applicability, canonical-drift,
   missing-required, evidence, delivery, or documentation gap. Record both audit

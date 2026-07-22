@@ -1834,3 +1834,36 @@ same-version local-artifact sentence is superseded and must not be used.
   `v0.1.109` from the signed apt repository and reports the matching package,
   image, daemon, and doctor state. Existing stale registrations must be removed
   before that dispatch.
+
+### 2026-07-22 compiler topology and moving-trunk closure
+
+- Parallax exact GitHub run `29885434328` proved the server public-API trybuild
+  case launched a nested cold Cargo graph; its first attempt exceeded five
+  minutes and its warm retry passed, which the evidence gate correctly rejected.
+  Run `29887096900` then proved the API privacy trybuild case had the same
+  architecture: both 60-second attempts timed out. Commits through `f298c850`
+  replace both nested graphs with ordinary integration-test compilation,
+  source visibility invariants, and syntax-derived facade checks. Commit
+  `13b0acb6` removes the now-orphan workspace dependency after run
+  `29887823678` exposed it through cargo-shear. Focused nextest, facade,
+  structural policy, strict clippy, formatting, locked metadata, and shear are
+  green; exact GitHub run `29888329917` is fully green, including Test without
+  retry evidence and dependency Audit.
+- TableRock `061efb1` restores direct accessibility actions for result cells,
+  external URLs, Quick Switcher, and Explain. Its attempted `needs: rust`
+  serialization treated fleet load as the PTY cause, but the authoritative
+  setup evidence identifies Velnor 0.1.58, whose persistent target predates the
+  source-revision fix. Commit `7d57eaa` removes that workaround and records the
+  20/20 nextest proof; exact GitHub CI `29887254539` is green with Rust and
+  real-server jobs parallel. Moving trunk `c511761` then exposed only rustfmt
+  drift in its new shared PostgreSQL tool seam. Commit `b3e7886` formats that
+  file after focused tablerock-tools nextest and strict clippy passed. Exact
+  GitHub CI `29888578314` is fully green, including parallel real-server,
+  UniFFI, CSV, dependency, and required lanes. Native `29888579521` passed
+  bridge, Swift, and universal-XCFramework stages, then exposed four UI-control
+  failures in its canonical checkpoint. Concurrent trunk-only product work
+  modifies the same native sources/tests; those user changes remain untouched
+  and their delivered head must be tested before isolating any residual fix.
+- No pull request was merged. Sentry was not changed: 1Password remains signed
+  out, so no signed SSH operation or apt-only upgrade is yet possible. No key
+  export, direct package, local apt path, or host bypass was used.
