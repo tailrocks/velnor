@@ -154,6 +154,7 @@ const GITHUB_SCRIPT_INPUTS: &[InputRule] = &[
     ),
 ];
 const RENOVATE_REFS: &[AllowedRef] = &[
+    allowed("3064367f740a1a91cca218698a63902689cce200", "v46"),
     allowed("22e0a16091fc706b04affe6ae53d5e3358ac4023", "v44"),
     allowed("693b9ef15eec82123529a37c782242f091365961", "v43"),
 ];
@@ -1241,6 +1242,23 @@ mod tests {
                     "github_token": "masked",
                     "cache_key_prefix": "mise-v2",
                     "cache_save": "false"
+                }),
+            ),
+            &[],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_job_accepts_current_renovate_action() {
+        validate_job_with_context(
+            &job(
+                "renovatebot/github-action",
+                Some("3064367f740a1a91cca218698a63902689cce200"),
+                serde_json::json!({
+                    "token": "masked",
+                    "renovate-version": "43",
+                    "renovate-image": "ghcr.io/renovatebot/renovate"
                 }),
             ),
             &[],
