@@ -653,12 +653,16 @@ fn audit_workflow(
         .and_then(|value| object_get(value, "group"))
         .and_then(Value::as_str)
     {
-        if !group.contains("github.ref") {
+        let globally_serialized = object_get(yaml, "concurrency")
+            .and_then(|value| object_get(value, "cancel-in-progress"))
+            .and_then(Value::as_bool)
+            == Some(false);
+        if !group.contains("github.ref") && !globally_serialized {
             findings.push(Finding::warn(
                 "uniform-concurrency",
                 file,
                 "$.concurrency.group",
-                "include the workflow identity and github.ref",
+                "include the workflow identity and github.ref, or set cancel-in-progress false for intentional global writer serialization",
             ));
         }
     }
@@ -1401,6 +1405,24 @@ jobs:
         let findings = audit(&yaml);
         assert!(has_rule(&findings, "concurrency"));
         assert!(has_rule(&findings, "timeout"));
+    }
+
+    #[test]
+    fn allows_non_cancellable_global_writer_serialization() {
+        let yaml = BASE.replace(
+            "  group: ci-${{ github.ref }}",
+            "  group: release\n  cancel-in-progress: false",
+        );
+        assert!(!has_rule(&audit(&yaml), "uniform-concurrency"));
+    }
+
+    #[test]
+    fn warns_for_cancellable_global_concurrency() {
+        let yaml = BASE.replace(
+            "  group: ci-${{ github.ref }}",
+            "  group: release\n  cancel-in-progress: true",
+        );
+        assert!(has_rule(&audit(&yaml), "uniform-concurrency"));
     }
 
     #[test]
