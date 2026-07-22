@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env, fs,
+    env,
+    fs::{self, File, OpenOptions},
     io::{BufWriter, Write},
     path::{Path, PathBuf},
     process::Command,
@@ -104,6 +105,36 @@ struct RunServiceJobContext {
 struct AcquiredJobIdentity {
     plan_id: String,
     job_id: String,
+}
+
+/// Host-wide ownership of one run-service job.
+///
+/// GitHub can deliver the same runner request to sibling JIT slots. The run
+/// service acquisition is not a sufficient exclusion boundary, so claim the
+/// plan/job pair locally before either slot touches its deterministic workspace.
+struct JobClaim {
+    _file: File,
+}
+
+impl JobClaim {
+    fn try_acquire(run_root: &Path, plan_id: &str, job_id: &str) -> Result<Option<Self>> {
+        let claims = run_root.join("job-claims");
+        fs::create_dir_all(&claims)
+            .with_context(|| format!("create job claim directory {}", claims.display()))?;
+        let name = crate::container::sanitize_store_key(&format!("{plan_id}-{job_id}"));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(claims.join(name))
+            .context("open host job claim")?;
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
+            Err(error) => Err(error).context("lock host job claim"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2642,6 +2673,18 @@ async fn handle_job_request(
     forensics: &SlotForensics,
     pickup_ms: u64,
 ) -> Result<()> {
+    let capacity_run_root = crate::storage::StorageLayout::resolve()
+        .map(|layout| layout.run_root)
+        .unwrap_or_else(|| daemon_capacity_run_root(config_dir));
+    let Some(_job_claim) =
+        JobClaim::try_acquire(&capacity_run_root, &job.plan.plan_id, &job.job_id)?
+    else {
+        println!(
+            "Skipping duplicate delivery of run-service job {}; another local slot owns it.",
+            job.job_id
+        );
+        return Ok(());
+    };
     println!(
         "Parsed job request {} for job '{}' ({} step(s), {} endpoint(s)).",
         job.request_id,
@@ -2661,9 +2704,6 @@ async fn handle_job_request(
     let mut job = job;
     hydrate_github_variables_from_context(&mut job, &early_context);
     apply_workflow_script_step_names(&mut job, &early_context).await;
-    let capacity_run_root = crate::storage::StorageLayout::resolve()
-        .map(|layout| layout.run_root)
-        .unwrap_or_else(|| daemon_capacity_run_root(config_dir));
     let acquire_storage_leases = || {
         crate::github_adapter::job_variable(&job, "github.repository")
             .filter(|repository| !repository.is_empty())
@@ -7368,6 +7408,26 @@ fn default_agent_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn job_claim_excludes_duplicate_slots_until_owner_drops() {
+        let root = std::env::temp_dir().join(format!("velnor-job-claim-{}", uuid::Uuid::new_v4()));
+
+        let owner = JobClaim::try_acquire(&root, "plan", "job").unwrap();
+        assert!(owner.is_some());
+        assert!(JobClaim::try_acquire(&root, "plan", "job")
+            .unwrap()
+            .is_none());
+        assert!(JobClaim::try_acquire(&root, "plan", "other-job")
+            .unwrap()
+            .is_some());
+
+        drop(owner);
+        assert!(JobClaim::try_acquire(&root, "plan", "job")
+            .unwrap()
+            .is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn stale_workspace_pruner_only_removes_uuid_dirs_below_slots() {
