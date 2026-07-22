@@ -2002,8 +2002,25 @@ where
             NativeActionAdapter::DockerSetupBuildx => {
                 let action_state = state.with_env(state.resolve_env(&action.env));
                 let name = native_input_or(&action_state, action, "name", "velnor-builder");
+                if !input_truthy(&native_input_or(&action_state, action, "cleanup", "true")) {
+                    return Ok(StepExecutionResult {
+                        exit_code: 0,
+                        state: StepCommandState::default(),
+                        skipped: false,
+                        failure_ignored: false,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    });
+                }
+                let keep_state = input_truthy(&native_input_or(
+                    &action_state,
+                    action,
+                    "keep-state",
+                    "false",
+                ));
+                let keep_state_arg = if keep_state { " --keep-state" } else { "" };
                 let script = format!(
-                    "docker buildx rm --keep-state {name} 2>/dev/null || true; echo \"Removing builder {name}\""
+                    "docker buildx rm{keep_state_arg} {name} 2>/dev/null || true; echo \"Removing builder {name}\""
                 );
                 let result = self.native_shell(_container, state, &script, timeout)?;
                 Ok(native_command_result(result, StepCommandState::default()))
@@ -15461,6 +15478,57 @@ fi"#
         assert!(!calls.iter().any(|c| c.contains("'buildx' 'create'")));
 
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_setup_buildx_honors_cleanup_controls() {
+        for (cleanup, keep_state, expected_rm) in [
+            ("false", "false", None),
+            ("true", "false", Some("docker buildx rm builder")),
+            (
+                "true",
+                "true",
+                Some("docker buildx rm --keep-state builder"),
+            ),
+        ] {
+            let temp = temp_dir();
+            fs::create_dir_all(&temp).unwrap();
+            let steps = vec![ExecutableStep::Native {
+                step_id: "buildx".into(),
+                display_name: String::new(),
+                invocation: NativeActionInvocation {
+                    git_ref: String::new(),
+                    adapter: NativeActionAdapter::DockerSetupBuildx,
+                    inputs: [
+                        ("name".into(), "builder".into()),
+                        ("cleanup".into(), cleanup.into()),
+                        ("keep-state".into(), keep_state.into()),
+                    ]
+                    .into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            }];
+            let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+            executor
+                .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+                .unwrap();
+
+            let calls = executor
+                .runner()
+                .calls
+                .iter()
+                .map(|(program, args)| format!("{program} {}", args.join(" ")))
+                .collect::<Vec<_>>();
+            match expected_rm {
+                Some(expected) => assert!(calls.iter().any(|call| call.contains(expected))),
+                None => assert!(!calls.iter().any(|call| call.contains("buildx rm"))),
+            }
+            fs::remove_dir_all(temp).unwrap();
+        }
     }
 
     #[test]
