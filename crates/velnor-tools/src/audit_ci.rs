@@ -792,6 +792,7 @@ fn audit_steps(
                 "cargo test",
                 "cargo nextest",
                 "cargo run",
+                "cargo zigbuild",
                 "rustc ",
             ]
             .iter()
@@ -1288,6 +1289,20 @@ jobs:
             "      - uses: jdx/mise-action@0123456789012345678901234567890123456789\n        with:\n          install_args: rust cargo:cargo-nextest\n      - run: cargo nextest run --workspace --locked",
         );
         assert!(has_rule(&audit(&yaml), "prebuilt-tool"));
+    }
+
+    #[test]
+    fn cross_compile_job_requires_target_cache() {
+        let yaml = BASE
+            .replace(
+                "      - uses: actions/cache@0123456789012345678901234567890123456789\n        with:\n          path: target\n          key: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}\n          restore-keys: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-\n",
+                "",
+            )
+            .replace(
+                "cargo nextest run --workspace --locked",
+                "cargo zigbuild --target x86_64-unknown-linux-musl",
+            );
+        assert!(has_rule(&audit(&yaml), "target-cache"));
     }
 
     #[test]
