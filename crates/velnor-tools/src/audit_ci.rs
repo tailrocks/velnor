@@ -1319,6 +1319,20 @@ jobs:
     }
 
     #[test]
+    fn xtask_job_requires_target_cache() {
+        let yaml = BASE
+            .replace(
+                "      - uses: actions/cache@0123456789012345678901234567890123456789\n        with:\n          path: target\n          key: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}\n          restore-keys: rust-build-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}-\n",
+                "",
+            )
+            .replace(
+                "cargo nextest run --workspace --locked",
+                "cargo xtask policy --output github",
+            );
+        assert!(has_rule(&audit(&yaml), "target-cache"));
+    }
+
+    #[test]
     fn target_override_rejects_literal_target_cache() {
         let yaml = BASE.replace(
             "      - run: cargo nextest run --workspace --locked",
