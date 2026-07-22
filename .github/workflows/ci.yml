@@ -138,9 +138,9 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/src
             ~/.cargo/git/db
-          key: cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-
+            cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-${{ github.job }}-
 
       - name: Cache Cargo target
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -188,9 +188,9 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/src
             ~/.cargo/git/db
-          key: cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-${{ github.job }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-
+            cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-${{ github.job }}-
 
       - name: Cache Cargo target
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
