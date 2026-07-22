@@ -1743,3 +1743,42 @@ same-version local-artifact sentence is superseded and must not be used.
 - TermRock full rerun `29849259484` attempt 4 regenerated the artifact under
   0.1.105. Both Docs and Deploy Pages pass at `deeefef8`; the uploaded Pages
   artifact is 713,886 bytes. No pull request was merged.
+
+### 2026-07-22 final-head reconciliation and defect proof
+
+- Velnor 0.1.108 is committed, tagged, built, and published through the signed
+  Debian repository. Sentry remains on the prior package because the configured
+  `~/.ssh/donbeave-ssh` identity is absent and the local SSH agent has no keys.
+  No direct package, binary, local-path apt, or host-filesystem bypass was used.
+- Exact selected `velnor-trusted` group allowlists were revalidated through the
+  GitHub API: Tailrocks id 3 has 11 repositories, ChainArgos id 4 has 2, and
+  jackin-project id 3 has 1. All named final PRs remain open; their heads and
+  bodies were reconciled to exact evidence. No pull request was merged.
+- Parallax GitHub run `29877446570` exposed compiler-driven trybuild contention;
+  `93b3e340` reserves the complete nextest pool for those binaries. Exact Velnor
+  `29878865107` and GitHub `29879539863` then passed. Combined Storage run
+  `29880330009` exposed a second architectural race: graceful shutdown aborted
+  the managed Greptime supervisor but returned before the child released fixed
+  ports, so immediate restart rejected its own terminating child as foreign.
+- Parallax `705af2ca` makes graceful shutdown own task cancellation and await
+  release of all four engine ports through typed engine-I/O composition. It
+  keeps exact anyhow and file-size ratchets unchanged. Local format, policy,
+  strict all-target server clippy, and 102 server nextest tests pass; 9 real
+  engine tests remain explicitly ignored in the ordinary profile. The focused
+  local real-engine run compiled but its one-time 144 MiB engine download ended
+  early at 83 percent, so it is not claimed as passing evidence.
+- The first pushed Parallax form of that checkpoint was amended after policy
+  exposed intermediate generic-error/file-size drift. A SHA-pinned
+  `--force-with-lease` replaced only that just-pushed commit. Automatic run
+  `29881560389` passed every product gate but correctly rejected the now
+  non-linear push event range; local `HEAD^..HEAD` source hygiene passes and
+  exact dispatch `29882121621` is the replacement proof.
+- TableRock exact trunk CI `29880422990` passed at `e2ccfceb`. Native
+  `29880423048` then exposed five related reachability failures: the connected
+  workbench retained the full direct-connect form and clipped result controls
+  below the fixed test window, while styled import/export buttons did not own
+  their final accessibility identifiers. `d5761ef` structurally contains the
+  connected workbench and restores final-view identifier ownership;
+  `f6591b04` expands the machine-checked screen manifest. Exact CI
+  `29881771351` and Native `29881771295` are active. No assertion, golden,
+  retry, sleep, or fixture contract was weakened.
