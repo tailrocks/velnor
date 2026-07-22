@@ -401,6 +401,20 @@ pub struct OAuthClient {
     http: Client,
 }
 
+/// GitHub rejected JIT OAuth credentials because their runner registration
+/// no longer exists. The daemon must discard the stored JIT configuration and
+/// register again; retrying the same credentials can never recover.
+#[derive(Debug, thiserror::Error)]
+#[error("GitHub runner registration no longer exists: {0}")]
+pub(crate) struct OAuthRegistrationNotFound(pub(crate) String);
+
+fn oauth_registration_not_found(error: &str) -> bool {
+    // Match actions/runner's MessageListener and BrokerMessageListener: the
+    // service's invalid_client code means the runner registration was deleted.
+    // Do not couple recovery to mutable, localized description prose.
+    error.eq_ignore_ascii_case("invalid_client")
+}
+
 impl OAuthClient {
     pub fn new() -> Result<Self> {
         let http = Client::builder()
@@ -482,9 +496,13 @@ impl OAuthClient {
             serde_json::from_str(text.trim()).context("parse OAuth token response")?;
 
         if let Some(error) = token_response.error {
+            let description = token_response.error_description.unwrap_or_default();
+            if oauth_registration_not_found(&error) {
+                return Err(OAuthRegistrationNotFound(description).into());
+            }
             bail!(
                 "OAuth token request failed: error={error}, description={}",
-                token_response.error_description.unwrap_or_default()
+                description
             );
         }
 
@@ -4089,6 +4107,13 @@ mod tests {
             claims["exp"].as_u64().unwrap() - claims["nbf"].as_u64().unwrap(),
             300
         );
+    }
+
+    #[test]
+    fn classifies_only_missing_registration_oauth_errors() {
+        assert!(oauth_registration_not_found("invalid_client"));
+        assert!(oauth_registration_not_found("INVALID_CLIENT"));
+        assert!(!oauth_registration_not_found("temporarily_unavailable"));
     }
 
     #[test]
