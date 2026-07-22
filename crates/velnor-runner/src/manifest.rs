@@ -92,6 +92,7 @@ const fn allowed(value: &'static str, release: &'static str) -> AllowedRef {
 
 const CHECKOUT_REFS: &[AllowedRef] = &[
     allowed(NATIVE_ACTION_REF, "broker-managed checkout"),
+    allowed("9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0", "v7"),
     allowed("3d3c42e5aac5ba805825da76410c181273ba90b1", "v7"),
     allowed("df4cb1c069e1874edd31b4311f1884172cec0e10", "v6"),
     allowed("34e114876b0b11c390a56381ad16ebd13914f8d5", "v4"),
@@ -265,6 +266,21 @@ macro_rules! capability {
 }
 
 pub static ACTIONS: &[ActionCapability] = &[
+    ActionCapability {
+        repository: "jackin-project/jackin-role-action",
+        adapter: NativeActionAdapter::ApprovedComposite,
+        allowed_refs: &[allowed(
+            "80a1acd07257a23b441c546e6fcad12239ef7626",
+            "estate-pinned composite",
+        )],
+        inputs: &[
+            InputRule::Any("path"),
+            InputRule::Any("jackin-version"),
+            InputRule::Literal("skip-build", &["true", "false"]),
+            InputRule::Any("registry-cache-image"),
+        ],
+        notes: "pinned remote composite; expanded into strictly validated native adapters",
+    },
     capability!(
         "actions/checkout",
         Checkout,
@@ -1073,6 +1089,7 @@ mod tests {
     #[test]
     fn manifest_covers_every_native_adapter() {
         let expected = [
+            NativeActionAdapter::ApprovedComposite,
             NativeActionAdapter::Checkout,
             NativeActionAdapter::Cache,
             NativeActionAdapter::UploadArtifact,
@@ -1113,6 +1130,23 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&to_json().unwrap()).unwrap();
         assert_eq!(value["version"], MANIFEST_VERSION);
         assert_eq!(value["actions"].as_array().unwrap().len(), ACTIONS.len());
+    }
+
+    #[test]
+    fn pinned_role_composite_is_admitted_but_not_executed_as_native() {
+        let job = job(
+            "jackin-project/jackin-role-action",
+            Some("80a1acd07257a23b441c546e6fcad12239ef7626"),
+            serde_json::json!({
+                "path": ".",
+                "skip-build": "false",
+                "registry-cache-image": "ghcr.io/jackin-project/the-architect"
+            }),
+        );
+        assert!(violations(&job).is_empty());
+        assert!(
+            crate::action::native_action_adapter("jackin-project/jackin-role-action").is_none()
+        );
     }
 
     #[test]
