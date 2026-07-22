@@ -410,6 +410,12 @@ fn audit_repo_profile(
 ) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
     findings.extend(audit_test_runner_surfaces(root)?);
+    let mise_path = root.join("mise.toml");
+    if mise_path.is_file() {
+        let text = fs::read_to_string(&mise_path)
+            .with_context(|| format!("read {}", mise_path.display()))?;
+        audit_prebuilt_tool_surface("mise.toml", &text, &mut findings);
+    }
     if !root.join(".github/AGENTS.md").is_file() {
         findings.push(Finding::error(
             "uniform-agents",
@@ -605,6 +611,7 @@ fn audit_workflow(
     latest: &mut BTreeMap<String, Option<String>>,
     findings: &mut Vec<Finding>,
 ) {
+    audit_prebuilt_tool_surface(file, text, findings);
     let workload = profile
         .workload_override
         .unwrap_or_else(|| has_trigger(yaml, "push") || has_trigger(yaml, "pull_request"));
@@ -723,6 +730,19 @@ fn audit_workflow(
         audit_steps(
             file, &job_id, &job_path, steps, text, offline, latest, findings,
         );
+    }
+}
+
+fn audit_prebuilt_tool_surface(file: &str, text: &str, findings: &mut Vec<Finding>) {
+    for (index, line) in text.lines().enumerate() {
+        if line.contains("cargo:cargo-nextest") {
+            findings.push(Finding::error(
+                "prebuilt-tool",
+                file,
+                format!("line {}", index + 1),
+                "install nextest from aqua:nextest-rs/nextest/cargo-nextest; CI tooling must not compile from source",
+            ));
+        }
     }
 }
 
@@ -1243,6 +1263,26 @@ jobs:
     #[test]
     fn canonical_workflow_passes_static_rules() {
         assert!(audit(BASE).is_empty());
+    }
+
+    #[test]
+    fn rejects_source_installed_nextest() {
+        let yaml = BASE.replace(
+            "      - run: cargo nextest run --workspace --locked",
+            "      - uses: jdx/mise-action@0123456789012345678901234567890123456789\n        with:\n          install_args: rust cargo:cargo-nextest\n      - run: cargo nextest run --workspace --locked",
+        );
+        assert!(has_rule(&audit(&yaml), "prebuilt-tool"));
+    }
+
+    #[test]
+    fn rejects_source_installed_nextest_in_mise_config() {
+        let mut findings = Vec::new();
+        audit_prebuilt_tool_surface(
+            "mise.toml",
+            "[tools]\n\"cargo:cargo-nextest\" = \"0.9.140\"\n",
+            &mut findings,
+        );
+        assert!(has_rule(&findings, "prebuilt-tool"));
     }
 
     #[test]
