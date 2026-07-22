@@ -2547,6 +2547,7 @@ async fn handle_v2_message(
                 &fallback_run_service_job,
                 &acquired_identity,
                 Some("job_parse".to_string()),
+                &format!("{error:#}"),
             )
             .await?;
             return Err(error).context("parse acquired run-service job");
@@ -2564,6 +2565,7 @@ async fn handle_v2_message(
                 &fallback_run_service_job,
                 &acquired_identity,
                 Some("run_service_client".to_string()),
+                &format!("{error:#}"),
             )
             .await?;
             return Err(error).context("build run-service client from acquired job");
@@ -2737,6 +2739,7 @@ async fn handle_job_request(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),
                 Some("step_mapping".to_string()),
+                "cannot execute scripts because step mapping failed",
             )
             .await?;
             bail!("cannot execute scripts because step mapping failed");
@@ -2746,6 +2749,7 @@ async fn handle_job_request(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),
                 Some("trust_policy".to_string()),
+                &format!("{error:#}"),
             )
             .await?;
             return Err(error);
@@ -2756,6 +2760,7 @@ async fn handle_job_request(
                     &run_service_job,
                     &AcquiredJobIdentity::from_job(&job),
                     Some("capability_validation".to_string()),
+                    &format!("{error:#}"),
                 )
                 .await?;
                 return Err(error);
@@ -2765,6 +2770,7 @@ async fn handle_job_request(
                     &run_service_job,
                     &AcquiredJobIdentity::from_job(&job),
                     Some("nested_capability_validation".to_string()),
+                    &format!("{error:#}"),
                 )
                 .await?;
                 return Err(error);
@@ -2853,6 +2859,7 @@ async fn handle_job_request(
                     &run_service_job,
                     &AcquiredJobIdentity::from_job(&job),
                     Some("executor_panic".to_string()),
+                    &format!("{join_error:#}"),
                 )
                 .await;
                 renewal.abort();
@@ -2898,18 +2905,13 @@ async fn handle_job_request(
                 } else {
                     let infrastructure_failure_category =
                         infrastructure_failure_category(&error).map(ToOwned::to_owned);
-                    let completion = complete_run_service_job_refreshing(
-                        &run_service_job.client,
-                        &stored_for_refresh,
-                        &run_service_job.run_service_url,
-                        &job,
-                        TaskResult::Failed,
-                        BTreeMap::new(),
-                        Vec::new(),
-                        None,
-                        run_service_job.billing_owner_id.clone(),
+                    // Same contract as complete_acquired_job_failure: never complete
+                    // with zero steps, or GitHub hides the rejection reason.
+                    let completion = complete_acquired_job_failure(
+                        &run_service_job,
+                        &AcquiredJobIdentity::from_job(&job),
                         infrastructure_failure_category,
-                        true,
+                        &format!("{error:#}"),
                     )
                     .await;
                     renewal.abort();
@@ -6404,14 +6406,62 @@ fn failed_acquired_job_completion(
     identity: &AcquiredJobIdentity,
     billing_owner_id: Option<String>,
     infrastructure_failure_category: Option<String>,
+    reason: &str,
 ) -> RunServiceCompleteJob {
+    // GitHub renders jobs with empty step_results as zero-step failures with
+    // no operator-visible reason. Always emit one synthetic failed step plus
+    // an annotation so the rejection category and message show up in the UI
+    // (capability validation, trust policy, step mapping, etc.).
+    let now = unix_now_iso8601();
+    let category = infrastructure_failure_category
+        .as_deref()
+        .unwrap_or("pre_execution");
+    let title = format!("Velnor rejected job ({category})");
+    let message = if reason.trim().is_empty() {
+        title.clone()
+    } else {
+        format!("{title}: {reason}")
+    };
+    let step = RunServiceStepResult {
+        external_id: Some(format!("velnor-pre-execution-{category}")),
+        number: Some(1),
+        name: title.clone(),
+        status: TimelineRecordState::Completed,
+        conclusion: TaskResult::Failed,
+        started_at: Some(now.clone()),
+        completed_at: Some(now),
+        completed_log_lines: 1,
+        annotations: vec![RunServiceAnnotation {
+            level: RunServiceAnnotationLevel::Failure,
+            message: message.clone(),
+            title: Some(title),
+            path: None,
+            start_line: None,
+            end_line: None,
+            start_column: None,
+            end_column: None,
+            step_number: Some(1),
+            is_infrastructure_issue: infrastructure_failure_category.is_some(),
+        }],
+    };
     RunServiceCompleteJob {
         plan_id: identity.plan_id.clone(),
         job_id: identity.job_id.clone(),
         conclusion: TaskResult::Failed,
         outputs: BTreeMap::new(),
-        step_results: Vec::new(),
-        annotations: Vec::new(),
+        step_results: vec![step],
+        annotations: vec![RunServiceAnnotation {
+            level: RunServiceAnnotationLevel::Failure,
+            message,
+            title: Some(format!("Velnor pre-execution ({category})")),
+            path: None,
+            start_line: None,
+            end_line: None,
+            start_column: None,
+            end_column: None,
+            step_number: Some(1),
+            is_infrastructure_issue: infrastructure_failure_category.is_some(),
+        }],
         telemetry: Vec::new(),
         environment_url: None,
         billing_owner_id,
@@ -6423,6 +6473,7 @@ async fn complete_acquired_job_failure(
     run_service_job: &RunServiceJobContext,
     identity: &AcquiredJobIdentity,
     infrastructure_failure_category: Option<String>,
+    reason: &str,
 ) -> Result<()> {
     run_service_job
         .client
@@ -6432,6 +6483,7 @@ async fn complete_acquired_job_failure(
                 identity,
                 run_service_job.billing_owner_id.clone(),
                 infrastructure_failure_category,
+                reason,
             ),
         )
         .await
@@ -8593,6 +8645,7 @@ jobs:
             },
             Some("billing-owner".into()),
             Some("executor_panic".into()),
+            "join Docker job execution task: task panicked",
         );
 
         assert_eq!(completion.plan_id, "plan-1");
@@ -8607,8 +8660,22 @@ jobs:
             Some("billing-owner")
         );
         assert!(completion.outputs.is_empty());
-        assert!(completion.step_results.is_empty());
-        assert!(completion.annotations.is_empty());
+        assert_eq!(completion.step_results.len(), 1);
+        assert_eq!(completion.step_results[0].conclusion, TaskResult::Failed);
+        assert_eq!(completion.step_results[0].number, Some(1));
+        assert!(
+            completion.step_results[0].name.contains("executor_panic"),
+            "step name should carry category: {}",
+            completion.step_results[0].name
+        );
+        assert_eq!(completion.annotations.len(), 1);
+        assert!(
+            completion.annotations[0]
+                .message
+                .contains("join Docker job execution task"),
+            "annotation should carry reason: {}",
+            completion.annotations[0].message
+        );
         assert!(completion.telemetry.is_empty());
     }
 
