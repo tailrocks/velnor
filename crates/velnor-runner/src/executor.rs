@@ -5,6 +5,7 @@ use crate::{
         DockerActionInvocation, JavaScriptActionInvocation, NativeActionAdapter,
         NativeActionInvocation,
     },
+    cache::CacheEntryLock,
     checkout::{configure_safe_directory, execute_checkout_with_mirror, CheckoutPlan},
     container::{kache_host, sccache_host, JobContainerSpec, Shell},
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
@@ -20,7 +21,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    fs::OpenOptions,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
@@ -4162,42 +4162,6 @@ fn save_cache_result(
 
 fn cache_entry_complete(path: &Path) -> bool {
     path.is_dir() && path.join(".velnor-complete-v1").is_file()
-}
-
-struct CacheEntryLock {
-    _file: fs::File,
-}
-
-impl CacheEntryLock {
-    fn shared(cache_dir: &Path) -> Result<Self> {
-        Self::acquire(cache_dir, rustix::fs::FlockOperation::LockShared)
-    }
-
-    fn exclusive(cache_dir: &Path) -> Result<Self> {
-        Self::acquire(cache_dir, rustix::fs::FlockOperation::LockExclusive)
-    }
-
-    fn acquire(cache_dir: &Path, operation: rustix::fs::FlockOperation) -> Result<Self> {
-        let store = cache_dir
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("cache entry has no store parent"))?;
-        let locks = store.join(".velnor-locks");
-        fs::create_dir_all(&locks)
-            .with_context(|| format!("create cache lock directory {}", locks.display()))?;
-        let name = cache_dir
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("cache entry has no name"))?;
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(locks.join(name))
-            .with_context(|| format!("open cache entry lock for {}", cache_dir.display()))?;
-        rustix::fs::flock(&file, operation)
-            .with_context(|| format!("lock cache entry {}", cache_dir.display()))?;
-        Ok(Self { _file: file })
-    }
 }
 
 fn verify_cache_copy(source: &Path, destination: &Path) -> Result<()> {
