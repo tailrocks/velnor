@@ -7134,8 +7134,12 @@ fn timing_slo_state(p95: u64, budget: u64) -> &'static str {
     }
 }
 
+fn doctor_runner_is_healthy(runner: &ListedRunner) -> bool {
+    runner.status.as_deref() == Some("online") || runner.busy == Some(true)
+}
+
 /// Fleet health probe: list this daemon's registered runners on GitHub and
-/// fail (non-zero exit) when none are online, so a systemd timer surfaces a
+/// fail (non-zero exit) when none are healthy, so a systemd timer surfaces a
 /// dead fleet loudly instead of jobs queueing in silence (master-plan P1.4).
 pub async fn doctor(args: DoctorArgs) -> Result<()> {
     let Some(pat) = args.pat.as_deref().filter(|p| !p.trim().is_empty()) else {
@@ -7189,9 +7193,16 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         .iter()
         .filter(|runner| runner.busy == Some(true))
         .count();
+    // GitHub reports ephemeral JIT runners as `offline, busy` while they are
+    // executing a job. A busy registration is therefore positive liveness
+    // evidence, not an offline fleet member.
+    let healthy = mine
+        .iter()
+        .filter(|runner| doctor_runner_is_healthy(runner))
+        .count();
 
     println!(
-        "doctor: {} — {online}/{} expected runner(s) online ({} registered, {busy} busy) for prefix '{}'",
+        "doctor: {} — {healthy}/{} expected runner(s) healthy ({online} online, {} registered, {busy} busy) for prefix '{}'",
         args.url, args.slots, mine.len(), args.name
     );
     println!(
@@ -7222,9 +7233,9 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         );
     }
 
-    if online == 0 {
+    if healthy == 0 {
         bail!(
-            "FLEET DOWN: 0 of {} expected runner(s) online for {} (prefix '{}'). \
+            "FLEET DOWN: 0 of {} expected runner(s) healthy for {} (prefix '{}'). \
              Check `systemctl status velnor-daemon*` and the GITHUB_TOKEN in \
              /etc/velnor/*secrets.env.",
             args.slots,
@@ -7232,9 +7243,9 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
             args.name
         );
     }
-    if online < args.slots {
+    if healthy < args.slots {
         eprintln!(
-            "WARNING: only {online}/{} expected runner(s) online — fleet degraded.",
+            "WARNING: only {healthy}/{} expected runner(s) healthy — fleet degraded.",
             args.slots
         );
     }
@@ -7711,6 +7722,18 @@ mod tests {
             status: Some(status.to_string()),
             busy: Some(false),
         }
+    }
+
+    #[test]
+    fn doctor_treats_busy_jit_runner_as_healthy_when_github_reports_offline() {
+        let mut runner = listed_runner("offline");
+        runner.busy = Some(true);
+        assert!(doctor_runner_is_healthy(&runner));
+    }
+
+    #[test]
+    fn doctor_rejects_idle_offline_runner() {
+        assert!(!doctor_runner_is_healthy(&listed_runner("offline")));
     }
 
     #[test]
