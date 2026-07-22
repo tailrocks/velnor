@@ -772,9 +772,10 @@ fn audit_steps(
                 "remove ad-hoc cache CLI reporting; the setup action/native adapter post step owns the report",
             ));
         }
-        if run.contains("self-hosted")
-            || run.contains("velnor-target-mvp")
-            || run.contains("ubuntu-26.04")
+        let lane_identity_run = run.replace("--deny-self-hosted-runners", "");
+        if lane_identity_run.contains("self-hosted")
+            || lane_identity_run.contains("velnor-target-mvp")
+            || lane_identity_run.contains("ubuntu-26.04")
         {
             findings.push(Finding::error(
                 "lane-conditional",
@@ -1339,6 +1340,15 @@ jobs:
         let findings = audit(&yaml);
         assert!(has_rule(&findings, "lane-conditional"));
         assert!(has_rule(&findings, "deprecated"));
+    }
+
+    #[test]
+    fn permits_attestation_self_hosted_denial_policy() {
+        let yaml = BASE.replace(
+            "cargo nextest run --workspace --locked",
+            "gh attestation verify artifact --deny-self-hosted-runners",
+        );
+        assert!(!has_rule(&audit(&yaml), "lane-conditional"));
     }
 
     #[test]
