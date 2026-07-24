@@ -2,7 +2,7 @@
 
 use crate::{
     action::{
-        DockerActionInvocation, JavaScriptActionInvocation, NativeActionAdapter,
+        CacheActionKind, DockerActionInvocation, JavaScriptActionInvocation, NativeActionAdapter,
         NativeActionInvocation,
     },
     cache::CacheEntryLock,
@@ -1449,7 +1449,9 @@ where
                         ..
                     } = step
                     {
-                        if let Some(condition) = native_post_condition(invocation.adapter) {
+                        if let Some(condition) =
+                            native_post_condition(invocation.adapter, invocation.cache_kind)
+                        {
                             native_post_actions.push(PostNativeAction {
                                 step_id: step_context_id.clone(),
                                 display_name: display_name.clone(),
@@ -3673,9 +3675,17 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn native_post_condition(adapter: NativeActionAdapter) -> Option<&'static str> {
+fn native_post_condition(
+    adapter: NativeActionAdapter,
+    cache_kind: Option<CacheActionKind>,
+) -> Option<&'static str> {
     match adapter {
-        NativeActionAdapter::Cache => Some("success()"),
+        // Only the root cache action saves in post; `/restore` and `/save` do
+        // not register a post step. Absent kind defaults to root.
+        NativeActionAdapter::Cache => match cache_kind {
+            Some(CacheActionKind::Restore) | Some(CacheActionKind::Save) => None,
+            Some(CacheActionKind::Root) | None => Some("success()"),
+        },
         NativeActionAdapter::RustCache => Some("success() || env.CACHE_ON_FAILURE == 'true'"),
         // Sccache post step stops the server (always run, matches GitHub's behavior).
         NativeActionAdapter::Sccache => Some("always()"),
@@ -3688,9 +3698,31 @@ fn native_post_condition(adapter: NativeActionAdapter) -> Option<&'static str> {
     }
 }
 
+/// Dispatch an `actions/cache` main step by lifecycle. Root and `/restore`
+/// restore in main; `/save` saves in main with no prior lookup. Root and
+/// `/restore` differ only in the outputs they expose (see below); `/save`
+/// exposes none, matching upstream.
 fn native_cache(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    match action.cache_kind.unwrap_or(CacheActionKind::Root) {
+        CacheActionKind::Root => native_cache_restore_main(action, state, CacheActionKind::Root),
+        CacheActionKind::Restore => {
+            native_cache_restore_main(action, state, CacheActionKind::Restore)
+        }
+        CacheActionKind::Save => native_cache_save_main(action, state),
+    }
+}
+
+/// `actions/cache` root/`restore` main phase: look up the key (with restore-key
+/// prefix fallback) and restore unless `lookup-only`. Output exposure is gated
+/// by kind — root emits only `cache-hit`; `/restore` also emits
+/// `cache-primary-key` and `cache-matched-key`.
+fn native_cache_restore_main(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+    kind: CacheActionKind,
 ) -> Result<StepExecutionResult> {
     let action_state = state.with_env(state.resolve_env(&action.env));
     let key = native_cache_key(action, &action_state, "key");
@@ -3699,11 +3731,12 @@ fn native_cache(
     let fail_on_cache_miss =
         input_truthy(&native_input(action, &action_state, "fail-on-cache-miss"));
     let lookup_only = input_truthy(&native_input(action, &action_state, "lookup-only"));
+    let version = cache_scope_version_for(action, &action_state, &path);
     let t0 = Instant::now();
-    let matched_key = find_cache_match(&action_state, &key, &restore_keys)?;
+    let matched_key = find_cache_match(&action_state, &key, &restore_keys, &version)?;
     if let Some(matched_key) = &matched_key {
         if !lookup_only {
-            restore_cache_paths(&action_state, matched_key, &path)?;
+            restore_cache_paths(&action_state, matched_key, &path, &version)?;
         }
     }
     let restore_ms = t0.elapsed().as_millis();
@@ -3711,11 +3744,14 @@ fn native_cache(
 
     let mut outputs = BTreeMap::new();
     outputs.insert("cache-hit".to_string(), exact_hit.to_string());
-    outputs.insert("cache-primary-key".to_string(), key.clone());
-    outputs.insert(
-        "cache-matched-key".to_string(),
-        matched_key.clone().unwrap_or_default(),
-    );
+    // Upstream root emits only `cache-hit`; `/restore` emits all three.
+    if kind == CacheActionKind::Restore {
+        outputs.insert("cache-primary-key".to_string(), key.clone());
+        outputs.insert(
+            "cache-matched-key".to_string(),
+            matched_key.clone().unwrap_or_default(),
+        );
+    }
 
     let mut state_values = BTreeMap::new();
     if !key.is_empty() {
@@ -3784,6 +3820,20 @@ fn native_cache(
     })
 }
 
+/// `actions/cache/save` main phase: persist directly with no prior lookup or
+/// restore, and expose no outputs. Never materializes an existing entry before
+/// saving; an already-present key is reported as `AlreadyExists`.
+fn native_cache_save_main(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let key = native_cache_key(action, &action_state, "key");
+    let path = native_input(action, &action_state, "path");
+    let version = cache_scope_version_for(action, &action_state, &path);
+    save_cache_result(&action_state, &key, &path, false, &version)
+}
+
 fn native_rust_cache(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
@@ -3792,10 +3842,11 @@ fn native_rust_cache(
     let shared_key = native_cache_key(action, &action_state, "shared-key");
     let cache_directories = native_input(action, &action_state, "cache-directories");
     let cache_on_failure = native_input_or(&action_state, action, "cache-on-failure", "false");
+    let version = cache_scope_version_for(action, &action_state, &cache_directories);
     let t0 = Instant::now();
-    let matched = find_cache_match(&action_state, &shared_key, "")?;
+    let matched = find_cache_match(&action_state, &shared_key, "", &version)?;
     if let Some(matched_key) = &matched {
-        restore_cache_paths(&action_state, matched_key, &cache_directories)?;
+        restore_cache_paths(&action_state, matched_key, &cache_directories, &version)?;
     }
     let restore_ms = t0.elapsed().as_millis();
     let persistent_target =
@@ -3848,12 +3899,13 @@ fn native_cache_save(
     let action_state = state.with_env(state.resolve_env(&action.env));
     let key = native_cache_key(action, &action_state, "key");
     let path = native_input(action, &action_state, "path");
+    let version = cache_scope_version_for(action, &action_state, &path);
     let exact_hit = state
         .outputs
         .get(step_id)
         .and_then(|outputs| outputs.get("cache-hit"))
         .is_some_and(|value| value == "true");
-    save_cache_result(&action_state, &key, &path, exact_hit)
+    save_cache_result(&action_state, &key, &path, exact_hit, &version)
 }
 
 fn native_rust_cache_save(
@@ -3864,12 +3916,13 @@ fn native_rust_cache_save(
     let action_state = state.with_env(state.resolve_env(&action.env));
     let key = native_cache_key(action, &action_state, "shared-key");
     let path = native_input(action, &action_state, "cache-directories");
+    let version = cache_scope_version_for(action, &action_state, &path);
     let exact_hit = state
         .outputs
         .get(step_id)
         .and_then(|outputs| outputs.get("cache-hit"))
         .is_some_and(|value| value == "true");
-    let mut result = save_cache_result(&action_state, &key, &path, exact_hit)?;
+    let mut result = save_cache_result(&action_state, &key, &path, exact_hit, &version)?;
     result.state.summary = result
         .state
         .summary
@@ -3913,12 +3966,59 @@ fn native_cache_key(
     native_input(action, state, name).trim().to_string()
 }
 
+/// Deterministic cache-version segment that isolates entries by runtime
+/// compatibility boundary: the action pin (`git_ref`/SHA), `RUNNER_OS`,
+/// `RUNNER_ARCH`, and the normalized declared paths. It sits below
+/// `<trust>/caches/<repo>` so the same visible key never restores across an
+/// incompatible variant. The user key (with evaluated lock hashes) remains the
+/// toolchain/input identity inside this version.
+fn cache_scope_version_for(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+    paths: &str,
+) -> String {
+    cache_scope_version(
+        &action.git_ref,
+        &cache_scope_runner_field(state, "RUNNER_OS"),
+        &cache_scope_runner_field(state, "RUNNER_ARCH"),
+        paths,
+    )
+}
+
+fn cache_scope_runner_field(state: &JobExecutionState, name: &str) -> String {
+    state.env.get(name).cloned().unwrap_or_default()
+}
+
+fn cache_scope_version(git_ref: &str, runner_os: &str, runner_arch: &str, paths: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(git_ref.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(runner_os.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(runner_arch.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(normalize_cache_scope_paths(paths).as_bytes());
+    let digest = hasher.finalize();
+    format!("cv1-{}", hex_digest(&digest[..16]))
+}
+
+fn normalize_cache_scope_paths(paths: &str) -> String {
+    let mut items: Vec<String> = cache_paths(paths)
+        .into_iter()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .collect();
+    items.sort();
+    items.join("\n")
+}
+
 fn find_cache_match(
     state: &JobExecutionState,
     key: &str,
     restore_keys: &str,
+    version: &str,
 ) -> Result<Option<String>> {
-    let store = cache_store_dir(state)?;
+    let store = cache_store_dir(state, version)?;
     if key.is_empty() || !store.exists() {
         return Ok(None);
     }
@@ -3996,8 +4096,13 @@ fn system_time_nanos(time: SystemTime) -> Option<u128> {
         .map(|duration| duration.as_nanos())
 }
 
-fn restore_cache_paths(state: &JobExecutionState, key: &str, paths: &str) -> Result<()> {
-    let cache_dir = cache_store_dir(state)?.join(sanitize_artifact_name(key));
+fn restore_cache_paths(
+    state: &JobExecutionState,
+    key: &str,
+    paths: &str,
+    version: &str,
+) -> Result<()> {
+    let cache_dir = cache_store_dir(state, version)?.join(sanitize_artifact_name(key));
     let _lock = CacheEntryLock::shared(&cache_dir)?;
     if !cache_entry_complete(&cache_dir) {
         bail!("cache entry '{key}' is incomplete");
@@ -4069,34 +4174,86 @@ fn container_runtime_env(container: &JobContainerSpec) -> Vec<(String, String)> 
     container.env.clone()
 }
 
+/// Structural phase of a save that lost a race for the shared store, so the
+/// summary/stderr can name where contention happened instead of a generic skip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveContentionPhase {
+    Copy,
+    Publish,
+}
+
+impl SaveContentionPhase {
+    fn label(self) -> &'static str {
+        match self {
+            SaveContentionPhase::Copy => "copy",
+            SaveContentionPhase::Publish => "publish",
+        }
+    }
+}
+
+/// Explicit result of a cache save. Replaces the previous string-sniffing on
+/// stdout/stderr so a non-persisting outcome (exact hit, already-exists, empty
+/// key, no paths, contention) can never be reported as "completed".
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SaveOutcome {
+    Persisted {
+        paths: usize,
+    },
+    ExactHit,
+    AlreadyExists,
+    HostPersistent,
+    NoPaths,
+    EmptyKey,
+    Contended {
+        phase: SaveContentionPhase,
+        detail: String,
+    },
+}
+
+/// Lock-wait, copy, and total durations captured while saving, surfaced in the
+/// step summary for observability.
+#[derive(Debug, Clone, Copy, Default)]
+struct SaveTiming {
+    lock_wait_ms: u128,
+    copy_ms: u128,
+    total_ms: u128,
+}
+
 fn save_cache_result(
     state: &JobExecutionState,
     key: &str,
     paths: &str,
     exact_hit: bool,
+    version: &str,
 ) -> Result<StepExecutionResult> {
+    let t0 = Instant::now();
     if key.is_empty() {
         return Ok(cache_save_step_result(
-            0,
-            "Cache save skipped because key is empty\n",
-            "",
+            key,
+            SaveOutcome::EmptyKey,
+            SaveTiming::default(),
         ));
     }
     if exact_hit {
         return Ok(cache_save_step_result(
-            0,
-            &format!("Cache hit occurred on primary key '{key}', not saving cache\n"),
-            "",
+            key,
+            SaveOutcome::ExactHit,
+            SaveTiming::default(),
         ));
     }
-    let t0 = Instant::now();
-    let cache_dir = cache_store_dir(state)?.join(sanitize_artifact_name(key));
+    let cache_dir = cache_store_dir(state, version)?.join(sanitize_artifact_name(key));
+    let lock_start = Instant::now();
     let _lock = CacheEntryLock::exclusive(&cache_dir)?;
+    let lock_wait_ms = lock_start.elapsed().as_millis();
     if cache_entry_complete(&cache_dir) {
         return Ok(cache_save_step_result(
-            0,
-            &format!("Cache entry already exists for primary key '{key}', not saving cache\n"),
-            "",
+            key,
+            SaveOutcome::AlreadyExists,
+            SaveTiming {
+                lock_wait_ms,
+                total_ms: t0.elapsed().as_millis(),
+                ..SaveTiming::default()
+            },
         ));
     }
     // The store is shared across daemon slots: stage the whole entry next to
@@ -4117,6 +4274,7 @@ fn save_cache_result(
     fs::write(staging_dir.join(".velnor-created"), cache_timestamp())
         .with_context(|| format!("write cache timestamp {}", staging_dir.display()))?;
 
+    let copy_start = Instant::now();
     let mut saved = 0usize;
     let mut persistent = 0usize;
     for (index, path) in cache_paths(paths).into_iter().enumerate() {
@@ -4136,29 +4294,36 @@ fn save_cache_result(
         if let Err(error) = copy_cache_source(&source, &target) {
             fs::remove_dir_all(&staging_dir).ok();
             return Ok(cache_save_step_result(
-                0,
-                "",
-                &format!("Cache save skipped after copy contention for key '{key}': {error:#}\n"),
+                key,
+                SaveOutcome::Contended {
+                    phase: SaveContentionPhase::Copy,
+                    detail: format!("{error:#}"),
+                },
+                SaveTiming {
+                    lock_wait_ms,
+                    copy_ms: copy_start.elapsed().as_millis(),
+                    total_ms: t0.elapsed().as_millis(),
+                },
             ));
         }
         saved += 1;
     }
-    let save_ms = t0.elapsed().as_millis();
+    let copy_ms = copy_start.elapsed().as_millis();
     if saved == 0 {
         fs::remove_dir_all(&staging_dir).ok();
-        if persistent > 0 {
-            return Ok(cache_save_step_result(
-                0,
-                &format!(
-                    "{ANSI_GREEN}Cache paths live on Velnor host-persistent storage (always warm); nothing to save for key '{key}'{ANSI_RESET}\n"
-                ),
-                "",
-            ));
-        }
+        let outcome = if persistent > 0 {
+            SaveOutcome::HostPersistent
+        } else {
+            SaveOutcome::NoPaths
+        };
         return Ok(cache_save_step_result(
-            0,
-            "",
-            &format!("Cache not saved because no paths exist for key '{key}'\n"),
+            key,
+            outcome,
+            SaveTiming {
+                lock_wait_ms,
+                copy_ms,
+                total_ms: t0.elapsed().as_millis(),
+            },
         ));
     }
     // Completion marker is written only after every source was copied and
@@ -4173,17 +4338,26 @@ fn save_cache_result(
     {
         fs::remove_dir_all(&staging_dir).ok();
         return Ok(cache_save_step_result(
-            0,
-            "",
-            &format!("Cache save skipped after publish contention for key '{key}': {error:#}\n"),
+            key,
+            SaveOutcome::Contended {
+                phase: SaveContentionPhase::Publish,
+                detail: format!("{error:#}"),
+            },
+            SaveTiming {
+                lock_wait_ms,
+                copy_ms,
+                total_ms: t0.elapsed().as_millis(),
+            },
         ));
     }
     Ok(cache_save_step_result(
-        0,
-        &format!(
-            "{ANSI_GREEN}Saved cache '{key}' with {saved} path(s){ANSI_RESET} ({save_ms}ms)\n"
-        ),
-        "",
+        key,
+        SaveOutcome::Persisted { paths: saved },
+        SaveTiming {
+            lock_wait_ms,
+            copy_ms,
+            total_ms: t0.elapsed().as_millis(),
+        },
     ))
 }
 
@@ -4377,26 +4551,73 @@ fn cache_staging_name(cache_file_name: &str) -> String {
     )
 }
 
-fn cache_save_step_result(exit_code: i32, stdout: &str, stderr: &str) -> StepExecutionResult {
-    let result = if stdout.contains("host-persistent storage") {
-        "host-persistent store — restore/save skipped"
-    } else if stderr.is_empty() {
-        "save completed"
-    } else {
-        "save skipped"
-    };
-    StepExecutionResult {
-        exit_code,
-        state: StepCommandState {
-            summary: format!(
-                "## Velnor cache report\n- Backend: actions/cache (native post)\n- Result: {result}\n"
+/// Render a save outcome. Contention stays non-fatal (exit 0) like upstream,
+/// but only a real `Persisted` outcome prints "saved"; every non-persisting
+/// outcome (including contention, which names its phase) says so explicitly.
+fn cache_save_step_result(
+    key: &str,
+    outcome: SaveOutcome,
+    timing: SaveTiming,
+) -> StepExecutionResult {
+    let (result, stdout, stderr) = match &outcome {
+        SaveOutcome::Persisted { paths } => (
+            "saved".to_string(),
+            format!(
+                "{ANSI_GREEN}Saved cache '{key}' with {paths} path(s){ANSI_RESET} ({}ms)\n",
+                timing.total_ms
             ),
+            String::new(),
+        ),
+        SaveOutcome::ExactHit => (
+            "exact hit — not saved".to_string(),
+            format!("Cache hit occurred on primary key '{key}', not saving cache\n"),
+            String::new(),
+        ),
+        SaveOutcome::AlreadyExists => (
+            "already exists — not saved".to_string(),
+            format!("Cache entry already exists for primary key '{key}', not saving cache\n"),
+            String::new(),
+        ),
+        SaveOutcome::HostPersistent => (
+            "host-persistent store — restore/save skipped".to_string(),
+            format!(
+                "{ANSI_GREEN}Cache paths live on Velnor host-persistent storage (always warm); nothing to save for key '{key}'{ANSI_RESET}\n"
+            ),
+            String::new(),
+        ),
+        SaveOutcome::NoPaths => (
+            "no paths — not saved".to_string(),
+            String::new(),
+            format!("Cache not saved because no paths exist for key '{key}'\n"),
+        ),
+        SaveOutcome::EmptyKey => (
+            "empty key — not saved".to_string(),
+            String::new(),
+            "Cache save skipped because key is empty\n".to_string(),
+        ),
+        SaveOutcome::Contended { phase, detail } => (
+            format!("contention ({}) — not saved", phase.label()),
+            String::new(),
+            format!(
+                "Cache save skipped after {} contention for key '{key}': {detail}\n",
+                phase.label()
+            ),
+        ),
+    };
+    let summary = format!(
+        "## Velnor cache report\n- Backend: actions/cache (native post)\n- Result: {result}\n- Lock wait: {} ms\n- Copy: {} ms\n- Total: {} ms\n",
+        timing.lock_wait_ms, timing.copy_ms, timing.total_ms
+    );
+    StepExecutionResult {
+        exit_code: 0,
+        state: StepCommandState {
+            summary,
             ..StepCommandState::default()
         },
         skipped: false,
         failure_ignored: false,
-        stdout: stdout.to_string(),
-        stderr: stderr.to_string(),
+        stdout,
+        stderr,
     }
 }
 
@@ -5704,7 +5925,12 @@ fn artifact_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
     Ok(run_root.join("_velnor_artifacts").join(run_key))
 }
 
-fn cache_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
+/// Resolve the store directory for a cache entry. Trust and repository remain
+/// the outer boundary; `version` (a runtime-compatibility segment — see
+/// `cache_scope_version`) is appended below `<trust>/caches/<repo>` so the same
+/// visible key cannot cross an OS/arch/action-SHA/path boundary. The
+/// restore-key prefix scan therefore runs inside the versioned directory.
+fn cache_store_dir(state: &JobExecutionState, version: &str) -> Result<PathBuf> {
     let temp = state
         .temp_host
         .as_deref()
@@ -5718,7 +5944,7 @@ fn cache_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
         eprintln!(
             "forensics.lifecycle: persistent actions cache refused: missing github.repository"
         );
-        return Ok(temp.join("_velnor/ephemeral/caches"));
+        return Ok(temp.join("_velnor/ephemeral/caches").join(version));
     };
     let root = crate::storage::cache_class_path(
         &crate::container::daemon_shared_root(shared_work_root(temp)),
@@ -5729,7 +5955,8 @@ fn cache_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
         root,
         &crate::github_adapter::cargo_target_trust_scope(),
     )
-    .join(crate::container::sanitize_store_key(&repository)))
+    .join(crate::container::sanitize_store_key(&repository))
+    .join(version))
 }
 
 fn shared_work_root(temp: &Path) -> PathBuf {
@@ -8323,11 +8550,11 @@ mod tests {
     #[test]
     fn compiler_cache_post_actions_always_run() {
         assert_eq!(
-            native_post_condition(NativeActionAdapter::Sccache),
+            native_post_condition(NativeActionAdapter::Sccache, None),
             Some("always()")
         );
         assert_eq!(
-            native_post_condition(NativeActionAdapter::Kache),
+            native_post_condition(NativeActionAdapter::Kache, None),
             Some("always()")
         );
     }
@@ -9320,6 +9547,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::GitHubRuntimeExport,
+                cache_kind: None,
+                source_path: None,
                 inputs: [("github-token".into(), "ghs_token".into())].into(),
                 env: vec![("ACTIONS_CUSTOM".into(), "${{ env.CUSTOM_RUNTIME }}".into())],
             },
@@ -9380,6 +9609,8 @@ mod tests {
         let action = NativeActionInvocation {
             git_ref: "373c709c69115d41ff229c7e5df9f8788daa9553".into(),
             adapter: NativeActionAdapter::GitHubScript,
+            cache_kind: None,
+            source_path: None,
             inputs: [(
                 "script".into(),
                 "core.setOutput('docs-xtask', process.env.CONTRACT)".into(),
@@ -9430,6 +9661,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::PathsFilter,
+                cache_kind: None,
+                source_path: None,
                 inputs: [(
                     "filters".into(),
                     "construct:\n  - 'docker/construct/**'\n  - '.github/workflows/construct.yml'\ndocs:\n  - 'docs/**'\n".into(),
@@ -9539,6 +9772,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     (
@@ -9575,10 +9810,9 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].exit_code, 0);
         assert_eq!(results[0].state.outputs["cache-hit"], "false");
-        assert_eq!(
-            results[0].state.outputs["cache-primary-key"],
-            format!("rust-script-Linux-{expected_hash}")
-        );
+        // Root exposes only `cache-hit`; the primary key stays internal state.
+        assert!(!results[0].state.outputs.contains_key("cache-primary-key"));
+        assert!(!results[0].state.outputs.contains_key("cache-matched-key"));
         assert_eq!(
             results[0].state.state["primaryKey"],
             format!("rust-script-Linux-{expected_hash}")
@@ -9614,8 +9848,18 @@ mod tests {
         assert_eq!(sanitize_artifact_name("normal-key.v2"), "normal-key.v2");
     }
 
+    /// Versioned store directory a cache test uses to pre-seed or assert
+    /// entries, mirroring `cache_store_dir` + `cache_scope_version` for the
+    /// common case of an empty action ref and no runner os/arch in the env.
+    fn cache_scope_store_dir(root: &Path, repo_key: &str, path: &str) -> PathBuf {
+        root.join("_velnor_caches")
+            .join("trusted")
+            .join(repo_key)
+            .join(cache_scope_version("", "", "", path))
+    }
+
     #[test]
-    fn cache_store_dir_is_scoped_by_trust_and_repo() {
+    fn cache_store_dir_is_scoped_by_trust_repo_and_version() {
         let root = temp_dir();
         let temp = root.join("job/temp");
         fs::create_dir_all(&temp).unwrap();
@@ -9626,10 +9870,16 @@ mod tests {
             Some(temp.clone()),
         );
 
-        let store = cache_store_dir(&state).unwrap();
+        let version = "cv1-abc123";
+        let store = cache_store_dir(&state, version).unwrap();
 
-        assert!(store.ends_with("_velnor_caches/trusted/Org_Repo.Name"));
+        // Trust/repo remain the outer boundary; the version segment sits below.
+        assert!(store.ends_with("_velnor_caches/trusted/Org_Repo.Name/cv1-abc123"));
         assert!(store.starts_with(root.join("_velnor_caches")));
+        assert_eq!(
+            store.parent().unwrap().file_name().unwrap(),
+            "Org_Repo.Name"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -9640,8 +9890,8 @@ mod tests {
         fs::create_dir_all(&temp).unwrap();
         let state = JobExecutionState::new_internal(&[], &[], None, Some(temp.clone()));
         assert_eq!(
-            cache_store_dir(&state).unwrap(),
-            temp.join("_velnor/ephemeral/caches")
+            cache_store_dir(&state, "cv1-abc123").unwrap(),
+            temp.join("_velnor/ephemeral/caches/cv1-abc123")
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -9649,7 +9899,7 @@ mod tests {
     #[test]
     fn cache_hit_output_matches_actions_cache() {
         let root = temp_dir();
-        let store = root.join("_velnor_caches/trusted/Test_Repo");
+        let store = cache_scope_store_dir(&root, "Test_Repo", "~/.cache/rust-script");
         let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
         let exact_cache = store.join("linux-rust-exact");
         let partial_cache = store.join("linux-rust-prefix-new");
@@ -9671,6 +9921,8 @@ mod tests {
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::Cache,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("path".into(), "~/.cache/rust-script".into()),
                         ("key".into(), key.into()),
@@ -9733,6 +9985,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     (
                         "path".into(),
@@ -9791,6 +10045,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::RustCache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [("shared-key".into(), "ci-default-dev-workspace-v2".into())].into(),
                 env: Vec::new(),
             },
@@ -9830,6 +10086,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::RustCache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [("shared-key".into(), "ci-default-dev-workspace-v2".into())].into(),
                 env: Vec::new(),
             },
@@ -9860,6 +10118,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::RustCache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("shared-key".into(), "ci-custom-dir".into()),
                     (
@@ -9897,6 +10157,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "target".into()),
                     ("key".into(), "linux-cache".into()),
@@ -9941,6 +10203,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     ("key".into(), "linux-rust-script-strict".into()),
@@ -9962,6 +10226,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     ("key".into(), "linux-rust-script-strict".into()),
@@ -10004,6 +10270,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     ("key".into(), folded_key.into()),
@@ -10020,13 +10288,21 @@ mod tests {
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
+        // Root exposes only `cache-hit`; the trimmed key is proven by the
+        // internal primaryKey state and the store entry name below.
+        assert!(!save_results[0]
+            .state
+            .outputs
+            .contains_key("cache-primary-key"));
         assert_eq!(
-            save_results[0].state.outputs["cache-primary-key"],
+            save_results[0].state.state["primaryKey"],
             "rust-script-Linux-deadbeef"
         );
-        assert!(root
-            .join("_velnor_caches/trusted/Test_Repo/rust-script-Linux-deadbeef/0/state.bin")
-            .exists());
+        assert!(
+            cache_scope_store_dir(&root, "Test_Repo", "~/.cache/rust-script")
+                .join("rust-script-Linux-deadbeef/0/state.bin")
+                .exists()
+        );
 
         let restore = vec![ExecutableStep::Native {
             step_id: "cache".into(),
@@ -10034,6 +10310,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     ("key".into(), "rust-script-Linux-deadbeef".into()),
@@ -10071,7 +10349,10 @@ mod tests {
     fn incomplete_cache_generation_is_never_a_hit() {
         let root = temp_dir();
         let restore_temp = root.join("restore-job/temp");
-        let entry = root.join("_velnor_caches/trusted/Test_Repo/rustup-v2-linux-key");
+        let version = "cv1-testscope";
+        let entry = root.join(format!(
+            "_velnor_caches/trusted/Test_Repo/{version}/rustup-v2-linux-key"
+        ));
         fs::create_dir_all(entry.join("0/toolchains/1.97.0/bin")).unwrap();
         fs::create_dir_all(root.join("restore-job/home")).unwrap();
         fs::write(entry.join(".velnor-key"), "rustup-v2-linux-key").unwrap();
@@ -10082,7 +10363,7 @@ mod tests {
         state.temp_host = Some(restore_temp);
 
         assert_eq!(
-            find_cache_match(&state, "rustup-v2-linux-key", "rustup-v2-linux-").unwrap(),
+            find_cache_match(&state, "rustup-v2-linux-key", "rustup-v2-linux-", version).unwrap(),
             None
         );
         fs::remove_dir_all(root).unwrap();
@@ -10201,6 +10482,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     ("key".into(), "linux-rust-script-abc".into()),
@@ -10221,9 +10504,11 @@ mod tests {
         assert!(save_results[1]
             .stdout
             .contains("Saved cache 'linux-rust-script-abc'"));
-        assert!(root
-            .join("_velnor_caches/trusted/Test_Repo/linux-rust-script-abc/0/state.bin")
-            .exists());
+        assert!(
+            cache_scope_store_dir(&root, "Test_Repo", "~/.cache/rust-script")
+                .join("linux-rust-script-abc/0/state.bin")
+                .exists()
+        );
 
         let restore = vec![ExecutableStep::Native {
             step_id: "cache".into(),
@@ -10231,6 +10516,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     ("key".into(), "linux-rust-script-abc".into()),
@@ -10247,10 +10534,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
-        assert_eq!(
-            restore_results[0].state.outputs["cache-matched-key"],
-            "linux-rust-script-abc"
-        );
+        // Root exposes only `cache-hit`, not `cache-matched-key`.
+        assert!(!restore_results[0]
+            .state
+            .outputs
+            .contains_key("cache-matched-key"));
         assert_eq!(
             fs::read_to_string(root.join("restore-job/home/.cache/rust-script/state.bin")).unwrap(),
             "cached\n"
@@ -10280,6 +10568,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     ("key".into(), "linux-rust-script-lookup".into()),
@@ -10302,6 +10592,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     ("key".into(), "linux-rust-script-lookup".into()),
@@ -10331,7 +10623,7 @@ mod tests {
     fn native_cache_restore_key_uses_newest_prefix_match() {
         let root = temp_dir();
         let restore_temp = root.join("restore-job/temp");
-        let store = root.join("_velnor_caches/trusted/Test_Repo");
+        let store = cache_scope_store_dir(&root, "Test_Repo", "~/.cache/rust-script");
         let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
         let old_cache = store.join("rust-linux-a-old");
         let new_cache = store.join("rust-linux-z-new");
@@ -10353,6 +10645,9 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                // `/restore` exposes cache-matched-key, which this test asserts.
+                cache_kind: Some(CacheActionKind::Restore),
+                source_path: Some("restore".into()),
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     ("key".into(), "rust-linux-exact-miss".into()),
@@ -10375,10 +10670,343 @@ mod tests {
             restore_results[0].state.outputs["cache-matched-key"],
             "rust-linux-z-new"
         );
+        // `/restore` performs no post save.
+        assert_eq!(restore_results.len(), 1);
         assert_eq!(
             fs::read_to_string(root.join("restore-job/home/.cache/rust-script/state.bin")).unwrap(),
             "new\n"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn native_cache_step(
+        cache_kind: Option<CacheActionKind>,
+        source_path: Option<&str>,
+        inputs: &[(&str, &str)],
+    ) -> ExecutableStep {
+        ExecutableStep::Native {
+            step_id: "cache".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::Cache,
+                cache_kind,
+                source_path: source_path.map(str::to_string),
+                inputs: inputs
+                    .iter()
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .collect(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }
+    }
+
+    #[test]
+    fn native_cache_restore_only_produces_one_result_and_never_saves() {
+        let root = temp_dir();
+        let temp = root.join("restore-job/temp");
+        fs::create_dir_all(root.join("restore-job/home/.cache/rust-script")).unwrap();
+        fs::write(
+            root.join("restore-job/home/.cache/rust-script/state.bin"),
+            "local\n",
+        )
+        .unwrap();
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
+        let steps = vec![native_cache_step(
+            Some(CacheActionKind::Restore),
+            Some("restore"),
+            &[("path", "~/.cache/rust-script"), ("key", "linux-miss")],
+        )];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
+            .unwrap();
+
+        // `/restore` registers no post action.
+        assert_eq!(results.len(), 1);
+        // `/restore` exposes all three outputs.
+        assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        assert!(results[0].state.outputs.contains_key("cache-primary-key"));
+        assert!(results[0].state.outputs.contains_key("cache-matched-key"));
+        // A restore never writes an entry, even when the workspace path exists.
+        let store = cache_scope_store_dir(&root, "Test_Repo", "~/.cache/rust-script");
+        assert!(!store.join("linux-miss").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_cache_save_only_persists_without_prior_restore_and_reports_timing() {
+        let root = temp_dir();
+        let temp = root.join("save-job/temp");
+        let home = root.join("save-job/home/.cache/rust-script");
+        fs::create_dir_all(&home).unwrap();
+        fs::write(home.join("state.bin"), "fresh\n").unwrap();
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
+        let steps = vec![native_cache_step(
+            Some(CacheActionKind::Save),
+            Some("save"),
+            &[("path", "~/.cache/rust-script"), ("key", "linux-save-only")],
+        )];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
+            .unwrap();
+
+        // `/save` registers no post action and exposes no outputs.
+        assert_eq!(results.len(), 1);
+        assert!(results[0].state.outputs.is_empty());
+        assert!(results[0].stdout.contains("Saved cache 'linux-save-only'"));
+        // Timing fields are recorded in the summary.
+        assert!(results[0].state.summary.contains("Lock wait:"));
+        assert!(results[0].state.summary.contains("Copy:"));
+        assert!(results[0].state.summary.contains("Total:"));
+        assert!(results[0].state.summary.contains("Result: saved"));
+        let store = cache_scope_store_dir(&root, "Test_Repo", "~/.cache/rust-script");
+        assert!(store.join("linux-save-only/.velnor-complete-v1").is_file());
+        assert_eq!(
+            fs::read_to_string(store.join("linux-save-only/0/state.bin")).unwrap(),
+            "fresh\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_cache_save_only_does_not_materialize_existing_entry() {
+        let root = temp_dir();
+        let temp = root.join("save-job/temp");
+        let home = root.join("save-job/home/.cache/rust-script");
+        fs::create_dir_all(&home).unwrap();
+        fs::write(home.join("state.bin"), "new\n").unwrap();
+        // Pre-seed a complete entry with different (old) content.
+        let store = cache_scope_store_dir(&root, "Test_Repo", "~/.cache/rust-script");
+        let entry = store.join("linux-existing");
+        fs::create_dir_all(entry.join("0")).unwrap();
+        fs::write(entry.join(".velnor-key"), "linux-existing").unwrap();
+        fs::write(entry.join(".velnor-created"), "1").unwrap();
+        fs::write(entry.join(".velnor-complete-v1"), "complete\n").unwrap();
+        fs::write(entry.join("0/state.bin"), "old\n").unwrap();
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
+        let steps = vec![native_cache_step(
+            Some(CacheActionKind::Save),
+            Some("save"),
+            &[("path", "~/.cache/rust-script"), ("key", "linux-existing")],
+        )];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        // Existing key → already exists; never restored into the workspace and
+        // the stored generation is left untouched.
+        assert!(results[0].state.summary.contains("already exists"));
+        assert!(!results[0].state.summary.contains("completed"));
+        assert_eq!(fs::read_to_string(home.join("state.bin")).unwrap(), "new\n");
+        assert_eq!(
+            fs::read_to_string(entry.join("0/state.bin")).unwrap(),
+            "old\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cache_output_sets_match_upstream_by_kind() {
+        let output_keys = |cache_kind, source_path| {
+            let root = temp_dir();
+            let temp = root.join("job/temp");
+            fs::create_dir_all(root.join("job/home")).unwrap();
+            let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
+            let steps = vec![native_cache_step(
+                cache_kind,
+                source_path,
+                &[("path", "~/.cache/rust-script"), ("key", "some-key")],
+            )];
+            let results = DockerScriptExecutor::new(RecordingRunner::default())
+                .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
+                .unwrap();
+            let keys: std::collections::BTreeSet<String> =
+                results[0].state.outputs.keys().cloned().collect();
+            fs::remove_dir_all(&root).ok();
+            keys
+        };
+
+        let expect = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<std::collections::BTreeSet<String>>()
+        };
+
+        assert_eq!(
+            output_keys(Some(CacheActionKind::Root), None),
+            expect(&["cache-hit"])
+        );
+        assert_eq!(
+            output_keys(Some(CacheActionKind::Restore), Some("restore")),
+            expect(&["cache-hit", "cache-primary-key", "cache-matched-key"])
+        );
+        assert!(output_keys(Some(CacheActionKind::Save), Some("save")).is_empty());
+    }
+
+    #[test]
+    fn cache_scope_version_isolates_each_compatibility_dimension() {
+        let base = cache_scope_version("sha1", "Linux", "X64", "~/.cache/a");
+        // Stable for identical inputs.
+        assert_eq!(
+            base,
+            cache_scope_version("sha1", "Linux", "X64", "~/.cache/a")
+        );
+        // Distinct across every runtime-compatibility dimension.
+        assert_ne!(
+            base,
+            cache_scope_version("sha2", "Linux", "X64", "~/.cache/a")
+        );
+        assert_ne!(
+            base,
+            cache_scope_version("sha1", "Windows", "X64", "~/.cache/a")
+        );
+        assert_ne!(
+            base,
+            cache_scope_version("sha1", "Linux", "ARM64", "~/.cache/a")
+        );
+        assert_ne!(
+            base,
+            cache_scope_version("sha1", "Linux", "X64", "~/.cache/b")
+        );
+        // Paths are normalized (order/whitespace insensitive).
+        assert_eq!(
+            cache_scope_version("sha1", "Linux", "X64", "a\nb"),
+            cache_scope_version("sha1", "Linux", "X64", " b \n a ")
+        );
+        assert!(base.starts_with("cv1-"));
+    }
+
+    #[test]
+    fn native_cache_scope_does_not_cross_runner_os() {
+        let root = temp_dir();
+        let repo = ("GITHUB_REPOSITORY".to_string(), "Test/Repo".to_string());
+        let save_temp = root.join("save/temp");
+        fs::create_dir_all(root.join("save/home/.cache/rust-script")).unwrap();
+        fs::write(
+            root.join("save/home/.cache/rust-script/state.bin"),
+            "linux\n",
+        )
+        .unwrap();
+        let save_env = vec![repo.clone(), ("RUNNER_OS".into(), "Linux".into())];
+        let save = vec![native_cache_step(
+            Some(CacheActionKind::Save),
+            Some("save"),
+            &[("path", "~/.cache/rust-script"), ("key", "shared-key")],
+        )];
+        DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&save_temp), &save, &save_env, &save_temp)
+            .unwrap();
+
+        let restore = vec![native_cache_step(
+            Some(CacheActionKind::Restore),
+            Some("restore"),
+            &[("path", "~/.cache/rust-script"), ("key", "shared-key")],
+        )];
+
+        // A different RUNNER_OS lands in a different version namespace → miss.
+        let win_temp = root.join("win/temp");
+        fs::create_dir_all(root.join("win/home")).unwrap();
+        let win_env = vec![repo.clone(), ("RUNNER_OS".into(), "Windows".into())];
+        let win_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&win_temp), &restore, &win_env, &win_temp)
+            .unwrap();
+        assert_eq!(win_results[0].state.outputs["cache-hit"], "false");
+        assert!(!root.join("win/home/.cache/rust-script/state.bin").exists());
+
+        // Same RUNNER_OS restores the entry.
+        let lin_temp = root.join("lin/temp");
+        fs::create_dir_all(root.join("lin/home")).unwrap();
+        let lin_env = vec![repo, ("RUNNER_OS".into(), "Linux".into())];
+        let lin_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&lin_temp), &restore, &lin_env, &lin_temp)
+            .unwrap();
+        assert_eq!(lin_results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(
+            fs::read_to_string(root.join("lin/home/.cache/rust-script/state.bin")).unwrap(),
+            "linux\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_cache_save_two_writers_yield_single_generation() {
+        use std::sync::{Arc, Barrier};
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        fs::create_dir_all(root.join("job/home/.cache/rust-script")).unwrap();
+        fs::write(
+            root.join("job/home/.cache/rust-script/state.bin"),
+            "payload\n",
+        )
+        .unwrap();
+        let env = vec![("GITHUB_REPOSITORY".to_string(), "Test/Repo".to_string())];
+        let version = cache_scope_version("", "", "", "~/.cache/rust-script");
+
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let env = env.clone();
+                let temp = temp.clone();
+                let version = version.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let state = JobExecutionState::new_internal(&env, &[], None, Some(temp));
+                    barrier.wait();
+                    save_cache_result(
+                        &state,
+                        "contended-key",
+                        "~/.cache/rust-script",
+                        false,
+                        &version,
+                    )
+                    .unwrap()
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        // Exactly one writer persists; the loser reports a non-persisting
+        // outcome (already-exists or declared contention), never "completed".
+        let saved = results
+            .iter()
+            .filter(|result| result.stdout.contains("Saved cache 'contended-key'"))
+            .count();
+        let not_saved = results
+            .iter()
+            .filter(|result| {
+                result.state.summary.contains("already exists")
+                    || result.state.summary.contains("contention")
+            })
+            .count();
+        assert_eq!(saved, 1, "exactly one writer persists");
+        assert_eq!(
+            not_saved, 1,
+            "the loser reports already-exists or contention"
+        );
+        assert!(results
+            .iter()
+            .all(|result| !result.state.summary.contains("completed")));
+
+        // Both observe exactly one complete generation.
+        let store = cache_scope_store_dir(&root, "Test_Repo", "~/.cache/rust-script");
+        let entries: Vec<String> = fs::read_dir(&store)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|name| name != ".velnor-locks")
+            .collect();
+        assert_eq!(entries, vec!["contended-key".to_string()]);
+        assert!(store.join("contended-key/.velnor-complete-v1").is_file());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -10403,6 +11031,8 @@ mod tests {
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerSetupBuildx,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("name".into(), "velnor-builder".into()),
                         ("driver".into(), "docker-container".into()),
@@ -10425,6 +11055,8 @@ mod tests {
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerLogin,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("username".into(), "docker-user".into()),
                         ("password".into(), "${{ secrets.DOCKER_TOKEN }}".into()),
@@ -10442,6 +11074,8 @@ mod tests {
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerMetadata,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("images".into(), "chainargos/rust-bitcoin-processor".into()),
                         (
@@ -10464,6 +11098,8 @@ type=sha,format=long,prefix=,enable=true"
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerBuildPush,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("context".into(), ".".into()),
                         (
@@ -10500,6 +11136,8 @@ type=sha,format=long,prefix=,enable=true"
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerBake,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("files".into(), "backend-rust/docker-bake.hcl".into()),
                         ("targets".into(), "bitcoin-processor-app".into()),
@@ -10657,6 +11295,8 @@ type=sha,format=long,prefix=,enable=true"
                 &NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerLogin,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("username".into(), "docker-user".into()),
                         ("password".into(), "registry-secret".into()),
@@ -10716,6 +11356,8 @@ type=sha,format=long,prefix=,enable=true"
             &NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::ConfigurePages,
+                cache_kind: None,
+                source_path: None,
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
             },
@@ -10813,6 +11455,8 @@ type=sha,format=long,prefix=,enable=true"
             &NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::DeployPages,
+                cache_kind: None,
+                source_path: None,
                 inputs: [("reporting_interval".into(), "0".into())].into(),
                 env: Vec::new(),
             },
@@ -10849,6 +11493,8 @@ type=sha,format=long,prefix=,enable=true"
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::DockerBuildPush,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("context".into(), ".".into()),
                     ("push".into(), "false".into()),
@@ -10910,6 +11556,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::DockerMetadata,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("images".into(), "${{ inputs.image }}".into()),
                     ("tags".into(), tags_input.into()),
@@ -10977,6 +11625,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         let publish_action = NativeActionInvocation {
             git_ref: String::new(),
             adapter: NativeActionAdapter::DockerMetadata,
+            cache_kind: None,
+            source_path: None,
             inputs: [
                 ("images".into(), "${{ inputs.image }}".into()),
                 ("tags".into(), tags_input.into()),
@@ -11005,6 +11655,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         let action = NativeActionInvocation {
             git_ref: String::new(),
             adapter: NativeActionAdapter::DockerMetadata,
+            cache_kind: None,
+            source_path: None,
             inputs: [
                 ("images".into(), "ghcr.io/org/repo/fixture".into()),
                 (
@@ -11035,6 +11687,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         let action = NativeActionInvocation {
             git_ref: String::new(),
             adapter: NativeActionAdapter::DockerMetadata,
+            cache_kind: None,
+            source_path: None,
             inputs: [
                 ("images".into(), "ghcr.io/org/repo/fixture".into()),
                 ("tags".into(), "type=ref,event=branch".into()),
@@ -11065,6 +11719,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::Mise,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [("install".into(), "false".into())].into(),
                     env: Vec::new(),
                 },
@@ -11078,6 +11734,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::SetupMold,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
                 },
@@ -11091,6 +11749,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::Sccache,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
                 },
@@ -11104,6 +11764,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::SetupJust,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
                 },
@@ -11117,6 +11779,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::RustCache,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("shared-key".into(), "kestra-rust-build-cache".into()),
                         ("cache-on-failure".into(), "true".into()),
@@ -11213,6 +11877,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Kache,
+                cache_kind: None,
+                source_path: None,
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
             },
@@ -13608,6 +14274,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("path".into(), "missing-file".into()),
                         ("if-no-files-found".into(), "error".into()),
@@ -14211,6 +14879,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::Cache,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("path".into(), "~/.cache/rust-script".into()),
                         (
@@ -14235,6 +14905,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         (
                             "name".into(),
@@ -14260,6 +14932,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::DownloadArtifact,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("pattern".into(), "construct-digest-*".into()),
                         ("path".into(), "${{ env.DIGEST_DIR }}".into()),
@@ -14280,6 +14954,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::GitHubRuntimeExport,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [("github-token".into(), "ghs_token".into())].into(),
                     env: Vec::new(),
                 },
@@ -14350,8 +15026,10 @@ fi"#
             .collect::<Vec<_>>();
         assert_eq!(node_calls.len(), 0);
         assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        // Root exposes only `cache-hit`; the primary key stays internal state.
+        assert!(!results[0].state.outputs.contains_key("cache-primary-key"));
         assert_eq!(
-            results[0].state.outputs["cache-primary-key"],
+            results[0].state.state["primaryKey"],
             format!("rust-script-Linux-{expected_hash}")
         );
         assert!(results[0]
@@ -14401,6 +15079,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "construct-digest-linux-amd64".into()),
                     ("path".into(), "/__w/digests/linux-amd64.digest".into()),
@@ -14419,6 +15099,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::DownloadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("pattern".into(), "construct-digest-*".into()),
                     ("path".into(), "/__w/downloaded".into()),
@@ -14484,6 +15166,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("name".into(), name.into()),
                         ("path".into(), path.into()),
@@ -14511,6 +15195,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::DownloadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [("path".into(), "/__w/downloaded".into())].into(),
                 env: Vec::new(),
             },
@@ -14562,6 +15248,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "output".into()),
                     ("path".into(), "/github/workspace/output.txt".into()),
@@ -14588,6 +15276,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::DownloadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "output".into()),
                     ("path".into(), "downloads/output".into()),
@@ -14643,6 +15333,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "bin".into()),
                     ("path".into(), "/__w/bin".into()),
@@ -14669,6 +15361,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::DownloadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "bin".into()),
                     ("path".into(), "/__w/downloaded".into()),
@@ -14726,6 +15420,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "jackin-x86_64-unknown-linux-gnu".into()),
                     (
@@ -14783,6 +15479,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "cargo-cache-evidence".into()),
                     (
@@ -14840,6 +15538,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
+                    cache_kind: None,
+                    source_path: None,
                     inputs,
                     env: Vec::new(),
                 },
@@ -14899,6 +15599,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadPagesArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [("path".into(), "site".into())].into(),
                 env: Vec::new(),
             },
@@ -14967,6 +15669,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
+                    cache_kind: None,
+                    source_path: None,
                     inputs,
                     env: Vec::new(),
                 },
@@ -15026,6 +15730,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "construct-digest-amd64".into()),
                     (
@@ -15068,6 +15774,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "result-velnor-app".into()),
                     ("path".into(), "result.json".into()),
@@ -15271,6 +15979,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("name".into(), "github-pages".into()),
                         ("path".into(), "${{ runner.temp }}/artifact.tar".into()),
@@ -15298,6 +16008,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::DeployPages,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("token".into(), "${{ github.token }}".into()),
                         ("artifact_name".into(), "github-pages".into()),
@@ -15546,6 +16258,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::DockerSetupBuildx,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "jackin-construct".into()),
                     ("driver".into(), "docker-container".into()),
@@ -15609,6 +16323,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerSetupBuildx,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("name".into(), "builder".into()),
                         ("cleanup".into(), cleanup.into()),
@@ -15923,6 +16639,8 @@ bitcoin-processor-app.push=true")
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Renovate,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("token".into(), "${{ secrets.RENOVATE_TOKEN }}".into()),
                     ("renovate-version".into(), "43".into()),
@@ -17500,6 +18218,8 @@ bitcoin-processor-app.push=true")
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::DockerBuildPush,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("context".into(), ".".into()),
                     (
@@ -17579,6 +18299,8 @@ bitcoin-processor-app.push=true")
                 &NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::SetupQemu,
+                    cache_kind: None,
+                    source_path: None,
                     inputs,
                     env: Vec::new(),
                 },

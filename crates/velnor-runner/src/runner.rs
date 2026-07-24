@@ -5637,7 +5637,7 @@ fn ordered_executable_steps(
                                     parent_condition,
                                     parent_continue_on_error,
                                     "",
-                                ) {
+                                )? {
                                     continue;
                                 }
                                 let action = resolved_actions
@@ -5699,7 +5699,7 @@ fn ordered_executable_steps(
                     None,
                     false,
                     &step_display_name,
-                ) {
+                )? {
                     continue;
                 }
                 let action = resolved_actions
@@ -5749,7 +5749,7 @@ fn append_resolved_action_steps(
             &action.plan.inputs,
         )?;
     }
-    if let Some(invocation) = action.native_invocation() {
+    if let Some(invocation) = action.native_invocation()? {
         ordered.push(ExecutableStep::Native {
             step_id: action.plan.step_id.clone(),
             display_name: display_name.to_string(),
@@ -5819,7 +5819,7 @@ fn append_resolved_action_steps(
                             action_condition.as_deref(),
                             continue_on_error,
                             "",
-                        ) {
+                        )? {
                             continue;
                         }
                         let nested = resolved_actions
@@ -5865,9 +5865,9 @@ fn append_native_action_step_from_plan(
     parent_condition: Option<&str>,
     parent_continue_on_error: bool,
     display_name: &str,
-) -> bool {
-    let Some(invocation) = native_invocation_from_plan(plan) else {
-        return false;
+) -> Result<bool> {
+    let Some(invocation) = native_invocation_from_plan(plan)? else {
+        return Ok(false);
     };
     ordered.push(ExecutableStep::Native {
         step_id: plan.step_id.clone(),
@@ -5877,7 +5877,7 @@ fn append_native_action_step_from_plan(
         continue_on_error: parent_continue_on_error || plan.continue_on_error,
         timeout_minutes: plan.timeout_minutes,
     });
-    true
+    Ok(true)
 }
 
 fn combine_conditions(parent: Option<&str>, child: Option<&str>) -> Option<String> {
