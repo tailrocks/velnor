@@ -119,6 +119,22 @@ legacy `/var/lib/velnor*/work/_velnor_*` class into its matching canonical
 trust/class path. Velnor reads an existing legacy class only while its
 canonical destination is absent, so migration is explicit and reversible.
 Use `velnor-runner storage paths` and `storage status` to inspect resolution.
+
+Release coherence (plan 010): the `velnor-runner release` command group owns the
+acyclic release-record chain. `release verify-installed` (run automatically as
+`ExecStartPre` on both daemon units) proves the installed binary, package
+version, and compiled manifest match the atomically activated
+`/var/lib/velnor/release/active/record.json`; a missing or mismatched tuple fails
+the start closed so a mixed old/new tuple never runs. Deployment stages a record
+with `release activate --record <release-record.json>` (atomic fsync+rename,
+keeping the exact prior tuple for `release rollback`); `release verify-record`
+checks a record against its independent checksum and internal coherence, and
+`release export` prints this binary's embedded source SHA + crate version. The
+package `postinst` never builds an image and never restarts — activation and
+restart are explicit. Only a `release-build` binary (built from a tagged commit
+whose tag == crate version == `Cargo.lock`) can emit a publishable record; a
+normal build reports `development` and refuses.
+
 Primary-repository bare mirrors live in the regenerable `git-mirrors` cache
 class (`/var/cache/velnor/v1/<trust-scope>/git-mirrors`). Each mirror is keyed
 by owner/repository, locked across slots during delta fetch, and never stores a

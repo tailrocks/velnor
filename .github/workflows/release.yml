@@ -1,3 +1,17 @@
+name: Release
+
+# Plan 010 — the SOLE release coordinator for tailrocks/velnor.
+#
+# release-deb.yml is deleted; its deb sanity guards (binary present, canonical
+# Dockerfile present, size > 1MB, arch/version match — the "empty-deb incident"
+# guard) are folded in below. One tagged commit produces one coherent, acyclic
+# release record binding: source SHA -> crate version -> per-arch binary/deb
+# digests -> OCI image digest -> compiled-manifest hash -> APT coordinate.
+#
+# This workflow holds NO APT credential and performs NO consumer write/dispatch
+# (N6): tailrocks/velnor-apt pulls the published record itself and verifies it
+# before reprepro. Assets are never clobbered — an existing tag/asset is a
+# success only on an exact digest match, otherwise the run fails.
 on:
   push:
     tags:
@@ -5,77 +19,181 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing release tag
+        description: Existing release tag to (re)build coherently (e.g. v0.1.121).
         type: string
         required: true
-      lanes:
-        type: choice
-        default: velnor
-        options: [velnor, github, both]
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.workflow }}-${{ github.ref }}
+  group: release-${{ github.workflow }}-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
+env:
+  GHCR_IMAGE: ghcr.io/tailrocks/velnor-job-ubuntu
+  SOURCE_URL: https://github.com/tailrocks/velnor
+
 jobs:
-  check-version:
-    name: Check version (${{ matrix.config.lane }})
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
-    runs-on: ${{ matrix.config.runner }}
+  identity:
+    name: Resolve + gate release identity
+    timeout-minutes: 20
+    runs-on: ${{ fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     outputs:
-      version: ${{ steps.version.outputs.version }}
+      version: ${{ steps.gate.outputs.version }}
+      commit: ${{ steps.gate.outputs.commit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # Full history so the tag can be peeled to exactly one commit.
+          fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
 
-      - name: Extract version from tag
-        id: version
+      - name: Peel the tag to one commit and reject drift
+        id: gate
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          version="${{ inputs.tag || github.ref_name }}"
-          version="${version#v}"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          version="${TAG#v}"
+
+          # Peel annotated OR lightweight tags to exactly one commit object.
+          commit="$(git rev-list -n 1 "$TAG")"
+          case "$commit" in
+            [0-9a-f]) : ;;
+          esac
+          [ "${#commit}" -eq 40 ] || { echo "::error::tag $TAG did not peel to a 40-hex commit" >&2; exit 1; }
+
+          # The checkout must sit exactly on that commit (non-HEAD checkout is a
+          # coherence failure).
+          head="$(git rev-parse HEAD)"
+          [ "$head" = "$commit" ] || { echo "::error::HEAD $head != tag commit $commit" >&2; exit 1; }
+
+          # Exactly one v* tag may point at this commit (reused/ambiguous lineage
+          # fails closed).
+          tags_here="$(git tag --points-at "$commit" | grep -c '^v' || true)"
+          [ "$tags_here" = "1" ] || { echo "::error::expected exactly one v* tag at $commit, found $tags_here" >&2; exit 1; }
+
+          # Clean tree.
+          [ -z "$(git status --porcelain)" ] || { echo "::error::dirty tree" >&2; exit 1; }
+
+          # tag == crate version == Cargo.lock (the build.rs gate re-checks this,
+          # but fail fast here with a readable message).
+          crate="$(sed -n 's/^version = "\(.*\)"/\1/p' crates/velnor-runner/Cargo.toml | head -n1)"
+          [ "$crate" = "$version" ] || { echo "::error::crate version $crate != tag version $version — bump crate + Cargo.lock before tagging" >&2; exit 1; }
+
+          {
+            echo "version=$version"
+            echo "commit=$commit"
+          } >> "$GITHUB_OUTPUT"
+
+  image:
+    needs: identity
+    name: Build + push one multi-platform GHCR image
+    timeout-minutes: 60
+    runs-on: ${{ fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      index_digest: ${{ steps.push.outputs.digest }}
+      manifest_sha256: ${{ steps.manifest.outputs.sha256 }}
+    env:
+      VERSION: ${{ needs.identity.outputs.version }}
+      COMMIT: ${{ needs.identity.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.identity.outputs.commit }}
+          persist-credentials: false
+
+      - name: Compile the manifest hash from a release-build binary
+        id: manifest
+        run: |
+          set -euo pipefail
+          # The compiled capability manifest export embeds the source SHA + crate
+          # version (plan 010 v7). Hash the exact exported JSON; this hash labels
+          # the image and anchors the release record's manifest identity.
+          cargo run -q -p velnor-runner --locked --features release-build -- capabilities export > manifest.json
+          sha256="$(sha256sum manifest.json | awk '{print $1}')"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push (immutable digest captured)
+        id: push
+        uses: docker/build-push-action@471d1dc4e07e5cd2febe6d6e50c62c8daffdf84a # v6
+        with:
+          context: docker
+          file: docker/job-ubuntu.Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          build-args: |
+            VELNOR_IMAGE_VERSION=${{ needs.identity.outputs.version }}
+          tags: ${{ env.GHCR_IMAGE }}:${{ needs.identity.outputs.version }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.identity.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.identity.outputs.commit }}
+            org.opencontainers.image.source=${{ env.SOURCE_URL }}
+            org.velnor.manifest-sha256=${{ steps.manifest.outputs.sha256 }}
+
+      - name: Capture per-platform digests
+        env:
+          INDEX_DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # Record the index digest and each platform digest as an artifact the
+          # record-assembly job consumes.
+          docker buildx imagetools inspect "${GHCR_IMAGE}@${INDEX_DIGEST}" --format '{{json .}}' > image-digests.json
+          echo "$INDEX_DIGEST" > image-index.digest
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: image-digests
+          path: |
+            image-digests.json
+            image-index.digest
+            manifest.json
 
   build:
-    needs: check-version
-    name: Build ${{ matrix.target }} (${{ matrix.config.lane }})
-    timeout-minutes: 45
+    needs: [identity, image]
+    name: Build ${{ matrix.arch }} binary + deb (release-build)
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
-        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
-    runs-on: ${{ matrix.config.runner }}
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     env:
-      VERSION: ${{ needs.check-version.outputs.version }}
+      VERSION: ${{ needs.identity.outputs.version }}
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-      SCCACHE_GHA_ENABLED: "false"
-      SCCACHE_CACHE_SIZE: 20G
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.identity.outputs.commit }}
+          fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
 
       - name: Install mold linker
         uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-
-      - id: sccache
-        uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
-        continue-on-error: true
-        with:
-          version: v0.16.0
-          disable_annotations: "false"
 
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
@@ -85,96 +203,192 @@ jobs:
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
 
-      - name: Cache Cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: |
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/index
-            ~/.cargo/registry/src
-            ~/.cargo/git/db
-          key: cargo-registry-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            cargo-registry-${{ runner.os }}-
-
-      - name: Cache Cargo target
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        with:
-          path: target
-          key: cargo-target-${{ matrix.config.lane }}-${{ runner.os }}-${{ github.job }}-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', '**/Cargo.toml', '**/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: cargo-target-${{ matrix.config.lane }}-${{ runner.os }}-${{ github.job }}-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', '**/Cargo.toml', '**/Cargo.lock') }}-
-
-      - name: Build
-        run: cargo zigbuild -p velnor-runner --release --locked --target ${{ matrix.target }}.2.17
-
-      - name: Package
+      - name: Install cargo-deb (verified prebuilt only)
         run: |
-          archive="velnor-runner-${VERSION}-${{ matrix.target }}.tar.gz"
+          set -euo pipefail
+          mise exec cargo-binstall -- cargo binstall cargo-deb@3.7.0 \
+            --disable-strategies compile --no-confirm --force
+          cargo-deb --version
+
+      - name: Build (release-build embeds source SHA + tag; fails on drift)
+        run: cargo zigbuild -p velnor-runner --release --locked --features release-build --target ${{ matrix.target }}
+
+      - name: Package tar + independent hash
+        run: |
+          set -euo pipefail
+          archive="velnor-runner-${VERSION}-${{ matrix.arch }}.tar.gz"
           tar -czf "$archive" -C "target/${{ matrix.target }}/release" velnor-runner
-          shasum -a 256 "$archive" > "$archive.sha256"
-          echo "archive=$archive" >> "$GITHUB_ENV"
+          sha256sum "$archive" | awk '{print $1}' > "$archive.sha256"
+          # Independent digest of the raw binary (the record's per-arch binary id).
+          sha256sum "target/${{ matrix.target }}/release/velnor-runner" | awk '{print $1}' > "velnor-runner-${{ matrix.arch }}.bin.sha256"
+
+      - name: Stage acyclic identity files packaged into the deb
+        run: |
+          set -euo pipefail
+          # These depend only on the source (not on the deb digest), so shipping
+          # them inside the deb is acyclic. postinst validates the installed
+          # binary against them offline.
+          mkdir -p crates/velnor-runner/release
+          "target/${{ matrix.target }}/release/velnor-runner" release export > crates/velnor-runner/release/build-identity.json \
+            || cargo run -q -p velnor-runner --locked --features release-build -- release export > crates/velnor-runner/release/build-identity.json
+          cargo run -q -p velnor-runner --locked --features release-build -- capabilities export > crates/velnor-runner/release/manifest.json
+
+      - name: Build .deb (version pinned to the tag)
+        run: |
+          set -euo pipefail
+          cargo deb -p velnor-runner --target ${{ matrix.target }} --no-build --no-strip --deb-version "$VERSION"
+
+      - name: Stage .deb with the empty-deb-incident guards
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          debs=("target/${{ matrix.target }}/debian/velnor-runner_${VERSION}_"*.deb)
+          [ "${#debs[@]}" -eq 1 ] || { echo "::error::expected exactly one ${VERSION} deb, found ${#debs[@]}" >&2; exit 1; }
+          src="${debs[0]}"
+          case "${{ matrix.arch }}" in
+            amd64) expected_arch=amd64 ;;
+            arm64) expected_arch=arm64 ;;
+            *) echo "::error::unsupported arch" >&2; exit 1 ;;
+          esac
+          [ "$(dpkg-deb -f "$src" Version)" = "$VERSION" ] || { echo "::error::deb version != tag" >&2; exit 1; }
+          [ "$(dpkg-deb -f "$src" Architecture)" = "$expected_arch" ] || { echo "::error::deb arch != $expected_arch" >&2; exit 1; }
+          manifest="$(mktemp)"
+          dpkg-deb -c "$src" > "$manifest"
+          grep -q "usr/bin/velnor-runner" "$manifest" || { echo "::error::deb missing usr/bin/velnor-runner" >&2; exit 1; }
+          grep -q "usr/share/velnor/job-ubuntu.Dockerfile" "$manifest" || { echo "::error::deb missing canonical Dockerfile" >&2; exit 1; }
+          [ "$(stat -c%s "$src")" -gt 1000000 ] || { echo "::error::deb suspiciously small: $(stat -c%s "$src") bytes" >&2; exit 1; }
+          dst="velnor-runner-${VERSION}-${{ matrix.arch }}.deb"
+          cp "$src" "$dst"
+          sha256sum "$dst" | awk '{print $1}' > "$dst.sha256"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: velnor-runner-${{ matrix.config.lane }}-${{ matrix.target }}
+          name: release-${{ matrix.arch }}
           path: |
             velnor-runner-*.tar.gz
             velnor-runner-*.tar.gz.sha256
+            velnor-runner-*.deb
+            velnor-runner-*.deb.sha256
+            velnor-runner-*.bin.sha256
 
-  release:
-    needs: [check-version, build]
-    name: Publish release (${{ matrix.config.lane }})
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
-    runs-on: ${{ matrix.config.runner }}
+  record:
+    needs: [identity, image, build]
+    name: Assemble, verify + publish one coherent release
+    timeout-minutes: 30
+    runs-on: ${{ fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     permissions:
       contents: write
-    outputs:
-      arm64_linux: ${{ steps.shas.outputs.arm64_linux }}
-      x86_linux: ${{ steps.shas.outputs.x86_linux }}
     env:
-      VERSION: ${{ needs.check-version.outputs.version }}
+      VERSION: ${{ needs.identity.outputs.version }}
+      COMMIT: ${{ needs.identity.outputs.commit }}
+      INDEX_DIGEST: ${{ needs.image.outputs.index_digest }}
+      MANIFEST_SHA256: ${{ needs.image.outputs.manifest_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        if: matrix.config.writer
         with:
+          ref: ${{ needs.identity.outputs.commit }}
           persist-credentials: false
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        if: matrix.config.writer
         with:
           path: artifacts
-          pattern: velnor-runner-${{ matrix.config.lane }}-*
           merge-multiple: true
 
-      - name: Read platform SHA256s
-        if: matrix.config.writer
-        id: shas
+      - name: Assemble the release record from downloaded artifacts
         run: |
-          read_sha() { awk '{print $1}' "artifacts/$1.sha256"; }
-          {
-            echo "arm64_linux=$(read_sha "velnor-runner-${VERSION}-aarch64-unknown-linux-gnu.tar.gz")"
-            echo "x86_linux=$(read_sha "velnor-runner-${VERSION}-x86_64-unknown-linux-gnu.tar.gz")"
-          } >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          read_sha() { awk '{print $1}' "artifacts/$1"; }
+          bin_amd64="$(read_sha "velnor-runner-amd64.bin.sha256")"
+          bin_arm64="$(read_sha "velnor-runner-arm64.bin.sha256")"
+          deb_amd64="$(read_sha "velnor-runner-${VERSION}-amd64.deb.sha256")"
+          deb_arm64="$(read_sha "velnor-runner-${VERSION}-arm64.deb.sha256")"
+          # Per-platform OCI digests from the image job.
+          plat_amd64="$(jq -r '.manifests[] | select(.platform.architecture=="amd64") | .digest' artifacts/image-digests.json)"
+          plat_arm64="$(jq -r '.manifests[] | select(.platform.architecture=="arm64") | .digest' artifacts/image-digests.json)"
 
-      - name: Create GitHub Release
-        if: matrix.config.writer
+          jq -n \
+            --arg schema "velnor.release-record/v1" \
+            --arg repo "tailrocks/velnor" \
+            --arg tag "v${VERSION}" \
+            --arg commit "$COMMIT" \
+            --arg version "$VERSION" \
+            --argjson mv 7 \
+            --arg mhash "$MANIFEST_SHA256" \
+            --arg bin_amd64 "$bin_amd64" --arg deb_amd64 "$deb_amd64" --arg plat_amd64 "$plat_amd64" \
+            --arg bin_arm64 "$bin_arm64" --arg deb_arm64 "$deb_arm64" --arg plat_arm64 "$plat_arm64" \
+            --arg index "$INDEX_DIGEST" \
+            --arg ref "${GHCR_IMAGE}@${INDEX_DIGEST}" \
+            --arg source "$SOURCE_URL" \
+            '{
+              schema: $schema,
+              build: { repository: $repo, tag: $tag, commit: $commit, crate_version: $version,
+                       debian_version: $version, manifest_version: $mv, manifest_sha256: $mhash },
+              architectures: [
+                { arch: "amd64", target: "x86_64-unknown-linux-gnu", binary_sha256: $bin_amd64, deb_sha256: $deb_amd64, oci_platform_digest: $plat_amd64 },
+                { arch: "arm64", target: "aarch64-unknown-linux-gnu", binary_sha256: $bin_arm64, deb_sha256: $deb_arm64, oci_platform_digest: $plat_arm64 }
+              ],
+              oci_index_digest: $index,
+              oci_image_ref: $ref,
+              oci_labels: { version: $version, revision: $commit, source: $source, manifest_sha256: $mhash },
+              apt: { origin: "Velnor", suite: "stable", component: "main" }
+            }' > record.candidate.json
+
+      - name: Re-verify the record + emit canonical bytes + checksum
+        run: |
+          set -euo pipefail
+          # Independent re-assembly + coherence check; writes canonical
+          # release-record.json + release-record.json.sha256 (the digest lives in
+          # the sidecar, never inside the record — acyclic).
+          cargo run -q -p velnor-runner --locked -- release assemble \
+            --record record.candidate.json \
+            --artifacts artifacts \
+            --out release-record.json
+          cp release-record.json.sha256 SHA256SUMS.record
+          # Publish the compiled manifest + its checksum too, so velnor-apt can
+          # verify sha256(manifest.json) == record.build.manifest_sha256 and that
+          # the manifest's embedded source_sha matches the record commit.
+          cp artifacts/manifest.json manifest.json
+          sha256sum manifest.json | awk '{print $1}' > manifest.json.sha256
+
+      - name: Create release once — no clobber, digest-exact idempotency
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           tag="v${VERSION}"
-          gh release view "$tag" >/dev/null 2>&1 || {
+          # Fail (never mint at main HEAD) if there is nothing to publish.
+          [ -f release-record.json ] || { echo "::error::no assembled record" >&2; exit 1; }
+          if gh release view "$tag" >/dev/null 2>&1; then
+            # Existing release: accept ONLY when every asset we would upload
+            # already matches by exact sha256; otherwise fail (no --clobber).
+            tmp="$(mktemp -d)"
+            fail=0
+            for f in release-record.json release-record.json.sha256 \
+                     manifest.json manifest.json.sha256 \
+                     artifacts/velnor-runner-*.tar.gz artifacts/velnor-runner-*.deb; do
+              name="$(basename "$f")"
+              if gh release download "$tag" --pattern "$name" --dir "$tmp" >/dev/null 2>&1; then
+                if [ "$(sha256sum "$f" | awk '{print $1}')" != "$(sha256sum "$tmp/$name" | awk '{print $1}')" ]; then
+                  echo "::error::existing asset $name differs — refusing to clobber an immutable release" >&2
+                  fail=1
+                fi
+              else
+                echo "::error::release $tag exists but is missing $name — refusing partial overwrite" >&2
+                fail=1
+              fi
+            done
+            [ "$fail" = "0" ] || exit 1
+            echo "Release $tag already published with identical assets; nothing to do."
+          else
             gh release create "$tag" --title "$tag" --generate-notes \
-              || gh release view "$tag" >/dev/null
-          }
-          gh release upload "$tag" \
-            artifacts/velnor-runner-*.tar.gz \
-            artifacts/velnor-runner-*.tar.gz.sha256 \
-            --clobber
+              release-record.json release-record.json.sha256 \
+              manifest.json manifest.json.sha256 \
+              artifacts/velnor-runner-*.tar.gz artifacts/velnor-runner-*.tar.gz.sha256 \
+              artifacts/velnor-runner-*.deb artifacts/velnor-runner-*.deb.sha256
+          fi
+          # NOTE (N6): this workflow deliberately does NOT push to velnor-apt or
+          # dispatch its publish. tailrocks/velnor-apt pulls this record itself
+          # and verifies it before reprepro. No APT credential exists here.
 
-  # Homebrew: to be added modeled exactly on holla's release.yml `homebrew` job
-  # once the tailrocks/homebrew-velnor tap and its push token exist
-  # (docs/master-plan.md P1.8).
+  # Homebrew: to be added modeled on holla's release.yml `homebrew` job once the
+  # tailrocks/homebrew-velnor tap + push token exist (docs/master-plan.md P1.8).

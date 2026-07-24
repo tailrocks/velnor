@@ -20,6 +20,7 @@ mod plan;
 mod platform;
 mod preflight;
 mod protocol;
+mod release;
 mod runner;
 mod runtime_env;
 mod script_step;
@@ -87,6 +88,7 @@ async fn run() -> Result<()> {
         Command::Status(args) => runner::status(args).await,
         Command::Storage(args) => storage::run(args),
         Command::Doctor(args) => runner::doctor(args).await,
+        Command::Release(args) => release::run(args),
     }
 }
 

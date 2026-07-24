@@ -63,7 +63,8 @@ runner-managed job/action capabilities, while isolation and trust policy govern
 script behavior.
 
 Plan 009 (manifest version 6) makes this one transitively-closed admission
-graph. `admit_job` resolves and validates *every* root — local and remote, not
+graph (Plan 010 bumped the export schema to version 7 by adding source-SHA and
+crate-version identity; the admission semantics below are unchanged). `admit_job` resolves and validates *every* root — local and remote, not
 only `./` — recurses nested local and remote composites, resolves defaults and
 `${{ inputs.* }}` before validating a child, bounds depth/nodes, and guards
 cycles. Metadata reads are read-only through an injectable source; rejections

@@ -11,7 +11,10 @@ use crate::cli::{CapabilitiesArgs, CapabilitiesCommand};
 use crate::compiler_cache::CompilerCacheBackend;
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 
-pub const MANIFEST_VERSION: u32 = 6;
+// Plan 009 introduced v6 (action subpaths + reusable-workflow schema). Plan 010
+// adds source-SHA + crate-version identity to the exported manifest so a consumer
+// can bind the compiled manifest to one release commit, bumping the schema to v7.
+pub const MANIFEST_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CapabilityManifest {
@@ -1357,6 +1360,12 @@ pub fn validate_job_with_context(
 #[derive(Serialize)]
 struct ExportManifest<'a> {
     version: u32,
+    /// Plan 010: the exact source commit this binary (and therefore this compiled
+    /// manifest) was built from. `development` for non-release builds. Lets a
+    /// consumer bind the manifest to one release record.
+    source_sha: &'a str,
+    /// The crate version compiled into this binary.
+    crate_version: &'a str,
     actions: Vec<ExportAction<'a>>,
     reusable_workflows: Vec<ExportReusableWorkflow<'a>>,
 }
@@ -1412,6 +1421,8 @@ pub fn to_json() -> Result<String> {
         .collect();
     Ok(serde_json::to_string_pretty(&ExportManifest {
         version: MANIFEST.version,
+        source_sha: env!("VELNOR_SOURCE_SHA"),
+        crate_version: env!("CARGO_PKG_VERSION"),
         actions,
         reusable_workflows,
     })?)
@@ -1502,9 +1513,11 @@ mod tests {
     }
 
     #[test]
-    fn compiled_manifest_is_version_six_and_structurally_immutable() {
-        assert_eq!(MANIFEST_VERSION, 6);
-        assert_eq!(MANIFEST.version, 6);
+    fn compiled_manifest_is_version_seven_and_structurally_immutable() {
+        // Plan 010 bumped v6 -> v7 (source-SHA + crate-version identity in the
+        // export). 009's structural integrity checks remain intact.
+        assert_eq!(MANIFEST_VERSION, 7);
+        assert_eq!(MANIFEST.version, 7);
         assert_manifest_integrity().expect("compiled manifest must pass integrity");
     }
 
@@ -1762,6 +1775,11 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&to_json().unwrap()).unwrap();
         assert_eq!(value["version"], MANIFEST_VERSION);
         assert_eq!(value["actions"].as_array().unwrap().len(), ACTIONS.len());
+        // Plan 010: the export binds the compiled manifest to one source commit +
+        // crate version. In the default (feature-off) build these are the
+        // `development` sentinel from build.rs.
+        assert_eq!(value["source_sha"], env!("VELNOR_SOURCE_SHA"));
+        assert_eq!(value["crate_version"], env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

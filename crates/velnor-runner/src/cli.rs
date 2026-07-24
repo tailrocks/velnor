@@ -33,6 +33,125 @@ pub enum Command {
     /// Probe GitHub for this daemon's registered runners and fail loudly when
     /// the fleet is gone (run from a systemd timer for alerting).
     Doctor(DoctorArgs),
+    /// Plan 010 release-coherence chain: emit/assemble/verify the acyclic release
+    /// record and atomically activate or roll back the installed identity.
+    Release(ReleaseArgs),
+}
+
+/// Default host location of the atomically activated release identity. Both the
+/// package scripts and the daemon `.service` units read from here, so the units
+/// can invoke `release verify-installed` with no arguments.
+pub const ACTIVE_RELEASE_DIR: &str = "/var/lib/velnor/release/active";
+const ACTIVE_RECORD_PATH: &str = "/var/lib/velnor/release/active/record.json";
+const ACTIVE_DEPLOYED_PATH: &str = "/var/lib/velnor/release/active/deployed.json";
+const INSTALLED_BINARY_PATH: &str = "/usr/bin/velnor-runner";
+
+#[derive(Debug, Args)]
+pub struct ReleaseArgs {
+    #[command(subcommand)]
+    pub command: ReleaseCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ReleaseCommand {
+    /// Emit a coherent release record from this (release-build) binary. Refuses
+    /// to run from a development build.
+    Emit(ReleaseEmitArgs),
+    /// Re-assemble and re-verify a record from downloaded artifacts.
+    Assemble(ReleaseAssembleArgs),
+    /// Verify a release record against its independent checksum and internal
+    /// coherence.
+    VerifyRecord(ReleaseVerifyRecordArgs),
+    /// Validate the installed binary/package/manifest against the active record.
+    /// Run by both `.service` units before ExecStart.
+    VerifyInstalled(ReleaseVerifyInstalledArgs),
+    /// Atomically activate a record, demoting the current active to rollback.
+    Activate(ReleaseActivateArgs),
+    /// Restore the previous coherent record.
+    Rollback(ReleaseRollbackArgs),
+    /// Print this binary's embedded build identity (or a deployed identity file).
+    Export(ReleaseExportArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ReleaseEmitArgs {
+    /// Path to the assembled release record JSON to validate + persist.
+    #[arg(long)]
+    pub record: PathBuf,
+    /// Release store root the immutable record is written under.
+    #[arg(long, default_value = ACTIVE_RELEASE_DIR)]
+    pub out_dir: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct ReleaseAssembleArgs {
+    /// Candidate record JSON.
+    #[arg(long)]
+    pub record: PathBuf,
+    /// Directory of downloaded artifacts (per-arch `*.bin.sha256` sidecars) to
+    /// cross-check the record's digests against.
+    #[arg(long)]
+    pub artifacts: Option<PathBuf>,
+    /// Write the re-verified canonical record + checksum here.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct ReleaseVerifyRecordArgs {
+    /// Release record JSON.
+    #[arg(long)]
+    pub record: PathBuf,
+    /// Independent checksum file (`<sha256>  <name>` format).
+    #[arg(long)]
+    pub checksum: Option<PathBuf>,
+    /// Independent checksum as a bare 64-hex string.
+    #[arg(long)]
+    pub sha256: Option<String>,
+    /// Optional APT publication record to cross-check binds this source record.
+    #[arg(long)]
+    pub publication: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct ReleaseVerifyInstalledArgs {
+    /// Active release record.
+    #[arg(long, default_value = ACTIVE_RECORD_PATH)]
+    pub record: PathBuf,
+    /// Active deployed-identity pointer.
+    #[arg(long, default_value = ACTIVE_DEPLOYED_PATH)]
+    pub deployed: PathBuf,
+    /// Installed binary to hash.
+    #[arg(long, default_value = INSTALLED_BINARY_PATH)]
+    pub binary: PathBuf,
+    /// Host architecture override (amd64|arm64); defaults to the running arch.
+    #[arg(long)]
+    pub arch: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct ReleaseActivateArgs {
+    /// Release store root.
+    #[arg(long, default_value = ACTIVE_RELEASE_DIR)]
+    pub dir: PathBuf,
+    /// Record to activate.
+    #[arg(long)]
+    pub record: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct ReleaseRollbackArgs {
+    /// Release store root.
+    #[arg(long, default_value = ACTIVE_RELEASE_DIR)]
+    pub dir: PathBuf,
+}
+
+#[derive(Debug, Args)]
+pub struct ReleaseExportArgs {
+    /// Optional deployed-identity file to pretty-print instead of the embedded
+    /// build identity.
+    #[arg(long)]
+    pub deployed: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
