@@ -1,4 +1,5 @@
 mod action;
+mod admission;
 mod attestation;
 mod cache;
 mod capacity;
@@ -53,6 +54,13 @@ fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 }
 
 async fn run() -> Result<()> {
+    // Production admission is unconditional and immutable. Refuse to start if a
+    // removed capability-bypass variable is present or a non-strict validation
+    // mode is requested, and fail fast if the compiled manifest is not
+    // structurally immutable. Both run before any command is dispatched.
+    cli::enforce_strict_capability_env()?;
+    manifest::assert_manifest_integrity()?;
+
     let cli = Cli::parse();
 
     // Spans/events go to <config-base>/logs/trace.jsonl for the long-running

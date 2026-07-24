@@ -1708,8 +1708,6 @@ fn daemon_slot_run_args(
         emergency_reserve_bytes: args.emergency_reserve_bytes,
         job_peak_bytes: args.job_peak_bytes,
         node_action_image: args.node_action_image.clone(),
-        diagnostic_node_sidecar: args.diagnostic_node_sidecar,
-        skip_capability_validation: args.skip_capability_validation,
         work_dir: daemon_slot_child_path(args.work_dir.as_deref(), slot_index, slot_count),
         docker_host_work_dir: daemon_slot_child_path(
             args.docker_host_work_dir.as_deref(),
@@ -2836,28 +2834,33 @@ async fn handle_job_request(
             .await?;
             return Err(error);
         }
-        if !args.skip_capability_validation {
-            if let Err(error) = crate::manifest::validate_job_with_context(&job, &early_context) {
-                complete_acquired_job_failure(
-                    &run_service_job,
-                    &AcquiredJobIdentity::from_job(&job),
-                    Some("capability_validation".to_string()),
-                    &format!("{error:#}"),
-                )
-                .await?;
-                return Err(error);
-            }
-            if let Err(error) = preflight_local_action_closure(&job, &early_context) {
-                complete_acquired_job_failure(
-                    &run_service_job,
-                    &AcquiredJobIdentity::from_job(&job),
-                    Some("nested_capability_validation".to_string()),
-                    &format!("{error:#}"),
-                )
-                .await?;
-                return Err(error);
-            }
+        // Strict capability admission is unconditional: there is no bypass. The
+        // flat job-level checks run first, then the transitively-closed action
+        // admission graph is completed here — before lease renewal, leases,
+        // checkout, downloads, containers, caches, or credentials.
+        if let Err(error) = crate::manifest::validate_job_with_context(&job, &early_context) {
+            complete_acquired_job_failure(
+                &run_service_job,
+                &AcquiredJobIdentity::from_job(&job),
+                Some("capability_validation".to_string()),
+                &format!("{error:#}"),
+            )
+            .await?;
+            return Err(error);
         }
+        let admission_graph = match admit_job_closure(&job, &early_context) {
+            Ok(graph) => graph,
+            Err(error) => {
+                complete_acquired_job_failure(
+                    &run_service_job,
+                    &AcquiredJobIdentity::from_job(&job),
+                    Some("action_admission".to_string()),
+                    &format!("{error:#}"),
+                )
+                .await?;
+                return Err(error);
+            }
+        };
         // Lease publication mutates the runtime store, so it must follow all
         // trust and strict-capability checks. Keep the guards through result
         // upload by binding them in the execution scope.
@@ -2942,8 +2945,6 @@ async fn handle_job_request(
         let docker_image = args.docker_image.clone();
         let resource_options = job_resource_options(&args.job_cpus, &args.job_memory);
         let node_action_image = args.node_action_image.clone();
-        let allow_unknown_action_diagnostics =
-            args.skip_capability_validation && args.diagnostic_node_sidecar;
         let trust_scope = args.trust_scope.clone();
         let run_service_url = run_service_job.run_service_url.clone();
         let billing_owner_id = run_service_job.billing_owner_id.clone();
@@ -2962,7 +2963,7 @@ async fn handle_job_request(
                 &docker_image,
                 resource_options,
                 &node_action_image,
-                allow_unknown_action_diagnostics,
+                &admission_graph,
                 &trust_scope,
                 &run_service_url,
                 billing_owner_id,
@@ -4075,6 +4076,24 @@ fn kill_job_container(container_name: &str) {
     }
 }
 
+/// Counters for the mutable side-effect classes that plan 009 requires to occur
+/// strictly after a job's action closure has been admitted. They start at zero
+/// in `execute_script_job_inner` (admission already succeeded) and only increment
+/// as each side effect is performed, so a regression that reorders a side effect
+/// before admission would be observable.
+#[derive(Debug, Default)]
+struct JobSideEffectCounters {
+    container_precreate: std::sync::atomic::AtomicUsize,
+    checkout: std::sync::atomic::AtomicUsize,
+    action_download: std::sync::atomic::AtomicUsize,
+}
+
+impl JobSideEffectCounters {
+    fn record(counter: &std::sync::atomic::AtomicUsize, count: usize) {
+        counter.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_script_job(
     config_dir: &std::path::Path,
@@ -4083,7 +4102,7 @@ fn execute_script_job(
     docker_image: &str,
     resource_options: Vec<String>,
     node_action_image: &str,
-    allow_unknown_action_diagnostics: bool,
+    admission_graph: &crate::admission::AdmissionGraph,
     trust_scope: &str,
     run_service_url: &str,
     billing_owner_id: Option<String>,
@@ -4100,7 +4119,7 @@ fn execute_script_job(
         docker_image,
         resource_options,
         node_action_image,
-        allow_unknown_action_diagnostics,
+        admission_graph,
         trust_scope,
         run_service_url,
         billing_owner_id,
@@ -4128,7 +4147,7 @@ fn execute_script_job_inner(
     docker_image: &str,
     resource_options: Vec<String>,
     node_action_image: &str,
-    allow_unknown_action_diagnostics: bool,
+    admission_graph: &crate::admission::AdmissionGraph,
     trust_scope: &str,
     run_service_url: &str,
     billing_owner_id: Option<String>,
@@ -4139,6 +4158,9 @@ fn execute_script_job_inner(
     daemon_id: String,
 ) -> Result<ScriptJobResult> {
     let execution_started = Instant::now();
+    // Side-effect ledger: admission has already completed, so every counter here
+    // starts at zero and only increments after the closure was admitted.
+    let side_effects = JobSideEffectCounters::default();
     let workspace = job_dir.join("workspace");
     let temp = job_dir.join("temp");
     let home = job_dir.join("home");
@@ -4245,6 +4267,7 @@ fn execute_script_job_inner(
         (step_id, unix_now_iso8601())
     });
     let precreated_environment = PrecreatedJobEnvironment::spawn(container.clone());
+    JobSideEffectCounters::record(&side_effects.container_precreate, 1);
     let mut checkout_order: i32 = if initialize_containers_step.is_some() {
         2
     } else {
@@ -4256,6 +4279,7 @@ fn execute_script_job_inner(
     // place the checkout step was missing.
     let mut eager_checkout_step_logs: Vec<StepLog> = Vec::new();
     for plan in &eager_checkout_plans {
+        JobSideEffectCounters::record(&side_effects.checkout, 1);
         checkout_order += 1;
         // The Results Service only accepts GUID external ids — a raw plan id
         // such as `checkout1` makes it drop the step record entirely, leaving
@@ -4345,6 +4369,12 @@ fn execute_script_job_inner(
         &resolved_local_actions,
         &actions,
     )?);
+    // Consume the admission graph: every repository action to be materialized
+    // must already be part of the admitted closure. Planning never re-resolves
+    // identity — a plan outside the graph is a hard failure, not a re-validation.
+    for plan in &repository_action_plans {
+        verify_repository_action_admitted(plan, admission_graph)?;
+    }
     let resolved_actions = if repository_action_plans.is_empty() {
         Vec::new()
     } else {
@@ -4353,12 +4383,30 @@ fn execute_script_job_inner(
             &repository_action_plans,
             &actions,
         )?;
+        JobSideEffectCounters::record(&side_effects.action_download, resolved_actions.len());
+        // Nested actions discovered while downloading remote composites must
+        // also belong to the admitted closure.
+        for action in &resolved_actions {
+            verify_repository_action_admitted(&action.plan, admission_graph)?;
+        }
         println!(
             "Downloaded and resolved {} repository action(s).",
             resolved_actions.len()
         );
         resolved_actions
     };
+    println!(
+        "Side effects after admission: {} container precreate, {} checkout, {} action download.",
+        side_effects
+            .container_precreate
+            .load(std::sync::atomic::Ordering::Relaxed),
+        side_effects
+            .checkout
+            .load(std::sync::atomic::Ordering::Relaxed),
+        side_effects
+            .action_download
+            .load(std::sync::atomic::Ordering::Relaxed),
+    );
     let ordered_steps = ordered_executable_steps(
         job,
         script_steps,
@@ -4367,7 +4415,6 @@ fn execute_script_job_inner(
         &local_actions,
         &actions,
         &runtime_checkout_plans,
-        allow_unknown_action_diagnostics,
     )?;
 
     let plan = github_normalized_job_plan(
@@ -5143,43 +5190,56 @@ fn workflow_source_context(context_data: &[(String, Value)]) -> Option<WorkflowS
     })
 }
 
-fn preflight_local_action_closure(
+/// Complete the transitively-closed action admission graph before any side
+/// effect. Builds the read-only Contents-API metadata source from the job
+/// repository token and admits every root (local and remote), recursing nested
+/// local and remote closures. Replaces the former flat + local-only preflight
+/// split; planning consumes the returned graph and never re-resolves identity.
+fn admit_job_closure(
     job: &AgentJobRequestMessage,
     context_data: &[(String, Value)],
-) -> Result<()> {
-    let local_paths: Vec<String> = job
-        .steps
-        .iter()
-        .filter(|step| step.enabled)
-        .filter_map(|step| step.reference.as_ref())
-        .filter_map(|reference| {
-            reference
-                .path
-                .as_deref()
-                .or(reference.name.as_deref())
-                .filter(|value| value.starts_with("./"))
-                .map(ToOwned::to_owned)
-        })
-        .collect();
-    if local_paths.is_empty() {
-        return Ok(());
-    }
-    let source = workflow_source_context(context_data)
-        .context("local action preflight requires exact workflow repository and SHA")?;
-    // Local action metadata lives in the workflow repository. The
-    // SystemVssConnection token authenticates Actions service endpoints and
+) -> Result<crate::admission::AdmissionGraph> {
+    // The SystemVssConnection token authenticates Actions service endpoints and
     // does not carry repository Contents API scope; use the same repository
     // token preference as checkout.
     let token = job_repository_access_token(job)
-        .context("local action preflight requires the job repository access token")?;
+        .context("action admission requires the job repository access token")?;
     let api_url = context_string(context_data, "github.api_url")
         .unwrap_or_else(|| "https://api.github.com".to_string());
-    preflight_local_paths(
-        &source.repository,
-        &source.sha,
-        &local_paths,
-        &token,
-        &api_url,
+    let source = crate::admission::ContentsApiMetadataSource::new(token, api_url)
+        .context("build read-only action metadata source")?;
+    let graph =
+        crate::admission::admit_job(job, context_data, &source).map_err(anyhow::Error::new)?;
+    println!(
+        "Admitted action closure: {} node(s) from {} read-only metadata fetch(es).",
+        graph.nodes.len(),
+        source.reads()
+    );
+    Ok(graph)
+}
+
+/// Confirm a repository action is part of the admitted closure. Planning uses
+/// this instead of re-running capability validation: an identity outside the
+/// admission graph is a hard failure, never a re-resolution.
+fn verify_repository_action_admitted(
+    plan: &RepositoryActionPlan,
+    admission_graph: &crate::admission::AdmissionGraph,
+) -> Result<()> {
+    if admission_graph.contains_remote_action(
+        &plan.repository,
+        &plan.git_ref,
+        plan.source_path.as_deref(),
+    ) {
+        return Ok(());
+    }
+    bail!(
+        "repository action '{}@{}{}' is outside the admitted closure — planning consumes the admission graph and never re-resolves",
+        plan.repository,
+        plan.git_ref,
+        plan.source_path
+            .as_deref()
+            .map(|path| format!("/{path}"))
+            .unwrap_or_default()
     )
 }
 
@@ -5194,148 +5254,7 @@ fn job_repository_access_token(job: &AgentJobRequestMessage) -> Option<String> {
         })
 }
 
-fn preflight_local_paths(
-    repository: &str,
-    sha: &str,
-    paths: &[String],
-    token: &str,
-    api_url: &str,
-) -> Result<()> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("velnor-runner")
-        .build()?;
-    let mut visited = std::collections::BTreeSet::new();
-    for path in paths {
-        preflight_action_metadata(
-            &client,
-            api_url,
-            token,
-            repository,
-            sha,
-            path.trim_start_matches("./"),
-            &mut visited,
-            0,
-        )?;
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn preflight_action_metadata(
-    client: &reqwest::blocking::Client,
-    api_url: &str,
-    token: &str,
-    repository: &str,
-    action_ref: &str,
-    action_path: &str,
-    visited: &mut std::collections::BTreeSet<String>,
-    depth: usize,
-) -> Result<()> {
-    const MAX_COMPOSITE_DEPTH: usize = 10;
-    if depth > MAX_COMPOSITE_DEPTH {
-        bail!("composite action depth exceeded {MAX_COMPOSITE_DEPTH}");
-    }
-    let key = format!("{repository}@{action_ref}:{action_path}");
-    if !visited.insert(key) {
-        return Ok(());
-    }
-    let metadata =
-        fetch_action_metadata(client, api_url, token, repository, action_ref, action_path)?;
-    if !metadata.runs.using.eq_ignore_ascii_case("composite") {
-        return Ok(());
-    }
-    for step in &metadata.runs.steps {
-        let Some(uses) = step.uses.as_deref() else {
-            continue;
-        };
-        if uses.starts_with("docker://") {
-            bail!("unsupported nested container action '{uses}' in {repository}@{action_ref}");
-        }
-        if uses.starts_with("./") {
-            preflight_action_metadata(
-                client,
-                api_url,
-                token,
-                repository,
-                action_ref,
-                uses.trim_start_matches("./"),
-                visited,
-                depth + 1,
-            )?;
-            continue;
-        }
-        let (target, target_ref) = uses
-            .rsplit_once('@')
-            .with_context(|| format!("nested action uses is missing @ref: {uses}"))?;
-        let mut segments = target.split('/');
-        let owner = segments.next().context("nested action owner is missing")?;
-        let repo = segments
-            .next()
-            .context("nested action repository is missing")?;
-        let target_repository = format!("{owner}/{repo}");
-        let target_path = segments.collect::<Vec<_>>().join("/");
-        crate::manifest::validate_resolved_action(
-            step.name.as_deref().unwrap_or("nested-action"),
-            &target_repository,
-            target_ref,
-            &step.with,
-        )?;
-        preflight_action_metadata(
-            client,
-            api_url,
-            token,
-            &target_repository,
-            target_ref,
-            &target_path,
-            visited,
-            depth + 1,
-        )?;
-    }
-    Ok(())
-}
-
-fn fetch_action_metadata(
-    client: &reqwest::blocking::Client,
-    api_url: &str,
-    token: &str,
-    repository: &str,
-    action_ref: &str,
-    action_path: &str,
-) -> Result<crate::action::ActionMetadata> {
-    let base = api_url.trim_end_matches('/');
-    let directory = action_path.trim_matches('/');
-    let candidates = ["action.yml", "action.yaml"];
-    let mut last_status = None;
-    for file in candidates {
-        let metadata_path = if directory.is_empty() {
-            file.to_string()
-        } else {
-            format!("{directory}/{file}")
-        };
-        let response = client
-            .get(format!(
-                "{base}/repos/{repository}/contents/{metadata_path}?ref={action_ref}"
-            ))
-            .bearer_auth(token)
-            .header("Accept", "application/vnd.github.raw+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()?;
-        last_status = Some(response.status());
-        if response.status().is_success() {
-            return crate::action::parse_action_metadata(&response.text()?)
-                .with_context(|| format!("parse {repository}@{action_ref}:{metadata_path}"));
-        }
-        if response.status() != reqwest::StatusCode::NOT_FOUND {
-            response.error_for_status()?;
-        }
-    }
-    bail!(
-        "action metadata not found for {repository}@{action_ref}:{directory} (last status {})",
-        last_status.map_or_else(|| "none".to_string(), |status| status.to_string())
-    )
-}
-
-fn context_string(context_data: &[(String, Value)], path: &str) -> Option<String> {
+pub(crate) fn context_string(context_data: &[(String, Value)], path: &str) -> Option<String> {
     let mut parts = path.split('.');
     let first = parts.next()?;
     let mut value = context_data
@@ -5586,7 +5505,6 @@ fn ordered_executable_steps(
     local_actions: &[(LocalActionPlan, Option<ActionMetadata>)],
     actions_host: &std::path::Path,
     runtime_checkout_plans: &[CheckoutPlan],
-    allow_unknown_action_diagnostics: bool,
 ) -> Result<Vec<ExecutableStep>> {
     let mut ordered = Vec::new();
     let mut script_iter = script_steps.iter();
@@ -5664,7 +5582,6 @@ fn ordered_executable_steps(
                                     parent_condition,
                                     parent_continue_on_error,
                                     "",
-                                    allow_unknown_action_diagnostics,
                                 )?;
                             }
                             CompositeActionInvocation::Outputs(outputs) => {
@@ -5727,7 +5644,6 @@ fn ordered_executable_steps(
                     None,
                     false,
                     &step_display_name,
-                    allow_unknown_action_diagnostics,
                 )?;
             }
             _ => bail!("unsupported enabled step in job"),
@@ -5745,17 +5661,13 @@ fn append_resolved_action_steps(
     parent_condition: Option<&str>,
     parent_continue_on_error: bool,
     display_name: &str,
-    allow_unknown_action_diagnostics: bool,
 ) -> Result<()> {
+    // Planning consumes the admission graph and never re-resolves identity here:
+    // the closure was validated in full by `admit_job` before any side effect,
+    // and `execute_script_job_inner` cross-checked every materialized action
+    // against the graph. An unknown action that still reaches this point is a
+    // hard failure below, not a permissive fallback.
     let continue_on_error = parent_continue_on_error || action.plan.continue_on_error;
-    if !allow_unknown_action_diagnostics && !action.plan.repository.starts_with("./") {
-        crate::manifest::validate_resolved_action(
-            &action.plan.step_id,
-            &action.plan.repository,
-            &action.plan.git_ref,
-            &action.plan.inputs,
-        )?;
-    }
     if let Some(invocation) = action.native_invocation()? {
         ordered.push(ExecutableStep::Native {
             step_id: action.plan.step_id.clone(),
@@ -5771,18 +5683,8 @@ fn append_resolved_action_steps(
         bail!("{message}");
     }
     match &action.runtime {
-        ActionRuntime::JavaScript { .. } if allow_unknown_action_diagnostics => {
-            ordered.push(ExecutableStep::JavaScript {
-                step_id: action.plan.step_id.clone(),
-                display_name: display_name.to_string(),
-                invocation: action.javascript_invocation(actions_host)?,
-                condition: combine_conditions(parent_condition, action.plan.condition.as_deref()),
-                continue_on_error,
-                timeout_minutes: action.plan.timeout_minutes,
-            })
-        }
         ActionRuntime::JavaScript { .. } => bail!(
-            "unknown action '{}@{}' reached execution — capability validation must reject this earlier",
+            "unknown action '{}@{}' reached execution — capability admission must reject this earlier",
             action.plan.repository,
             action.plan.git_ref
         ),
@@ -5846,7 +5748,6 @@ fn append_resolved_action_steps(
                             action_condition.as_deref(),
                             continue_on_error,
                             "",
-                            allow_unknown_action_diagnostics,
                         )?;
                     }
                     CompositeActionInvocation::Outputs(outputs) => {
@@ -7572,8 +7473,6 @@ mod tests {
             emergency_reserve_bytes: 10 * 1024 * 1024 * 1024,
             job_peak_bytes: 30 * 1024 * 1024 * 1024,
             node_action_image: String::new(),
-            diagnostic_node_sidecar: false,
-            skip_capability_validation: false,
             work_dir: None,
             docker_host_work_dir: None,
             skip_preflight: false,
@@ -8098,8 +7997,6 @@ jobs:
             emergency_reserve_bytes: 10 * 1024 * 1024 * 1024,
             job_peak_bytes: 30 * 1024 * 1024 * 1024,
             node_action_image: String::new(),
-            diagnostic_node_sidecar: false,
-            skip_capability_validation: false,
             work_dir: None,
             docker_host_work_dir: None,
             skip_preflight: false,
@@ -9518,7 +9415,6 @@ runs:
             &[(local_plan, Some(metadata))],
             Path::new("/tmp/actions"),
             &[],
-            false,
         )
         .unwrap();
 
@@ -9592,7 +9488,6 @@ runs:
             &[],
             Path::new("/tmp/actions"),
             &runtime_checkout_plans,
-            false,
         )
         .unwrap();
 
@@ -9767,7 +9662,6 @@ runs:
             &[(local_plan, Some(local_metadata))],
             Path::new("/tmp/actions"),
             &[],
-            true,
         )
         .unwrap();
 
@@ -9798,7 +9692,10 @@ runs:
     }
 
     #[test]
-    fn unknown_javascript_action_requires_diagnostic_flags() {
+    fn unknown_javascript_action_is_rejected_at_planning() {
+        // The diagnostic bypass is gone: an unknown JavaScript action that
+        // somehow reaches planning is a hard failure. Admission must have
+        // rejected it earlier; there is no permissive Node-sidecar fallback.
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "messageType": "PipelineAgentJobRequest",
             "plan": { "planId": "plan" },
@@ -9864,20 +9761,11 @@ runs:
         ];
 
         let plans = vec![resolved[1].plan.clone()];
-        let error =
-            ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[], false)
-                .unwrap_err();
-        assert!(error.to_string().contains("unsupported capability"));
-        let ordered =
-            ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[], true)
-                .unwrap();
-
-        let ExecutableStep::JavaScript { invocation, .. } = &ordered[0] else {
-            panic!("repository action should expand to JavaScript step")
-        };
-        assert_eq!(
-            invocation.main_container_path,
-            "/__a/_actions/acme_action/v1/sub/action/sub.js"
+        let error = ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[])
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("reached execution"),
+            "unknown JS action must hard-fail at planning, got: {error}"
         );
     }
 
@@ -9922,17 +9810,9 @@ runs:
                 runtime: metadata.runtime().unwrap(),
                 metadata: metadata.clone(),
             }];
-            let error = ordered_executable_steps(
-                &job,
-                &[],
-                &[plan],
-                &resolved,
-                &[],
-                actions_host,
-                &[],
-                false,
-            )
-            .unwrap_err();
+            let error =
+                ordered_executable_steps(&job, &[], &[plan], &resolved, &[], actions_host, &[])
+                    .unwrap_err();
             assert!(
                 error.to_string().contains("jdx/mise-action"),
                 "expected error for {repository} to mention jdx/mise-action, got: {error}"
@@ -9941,10 +9821,13 @@ runs:
     }
 
     #[test]
-    fn local_composite_unknown_nested_action_fails_read_only_preflight() {
+    fn local_composite_unknown_nested_action_fails_admission_read_only() {
         use std::io::{Read, Write};
         use std::net::TcpListener;
 
+        // Exercises the production Contents-API admission source end-to-end: a
+        // local composite whose nested remote action is unknown must be rejected
+        // read-only, before any executor/cache/service/container exists.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let api = format!("http://{}", listener.local_addr().unwrap());
         let server = std::thread::spawn(move || {
@@ -9966,18 +9849,37 @@ runs:
             .unwrap();
         });
 
-        let error = preflight_local_paths(
-            "acme/repo",
-            "deadbeef",
-            &["./.github/actions/local".into()],
-            "token",
-            &api,
-        )
-        .unwrap_err();
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Local composite",
+            "requestId": 1,
+            "steps": [{
+                "id": "local",
+                "reference": {
+                    "type": "Repository",
+                    "name": "./.github/actions/local",
+                    "path": "./.github/actions/local"
+                }
+            }]
+        }))
+        .unwrap();
+        let context = vec![(
+            "github".to_string(),
+            serde_json::json!({ "repository": "acme/repo", "workflow_sha": "deadbeef" }),
+        )];
+        let source = crate::admission::ContentsApiMetadataSource::new("token", api).unwrap();
+        let error = crate::admission::admit_job(&job, &context, &source).unwrap_err();
         server.join().unwrap();
-        assert!(error.to_string().contains("unsupported capability"));
-        // This preflight owns no executor, cache, service, or container handle;
-        // rejection therefore happens before any of those mutable phases exist.
+        assert_eq!(source.reads(), 1, "only the local composite was fetched");
+        assert_eq!(error.field, "uses");
+        assert!(error
+            .ancestry
+            .0
+            .iter()
+            .any(|hop| hop.contains("acme/unknown")));
     }
 
     #[test]
@@ -10033,7 +9935,7 @@ runs:
         let resolved = resolve_actions_from_cache(&plans, actions_host);
 
         let ordered =
-            ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[], false)
+            ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[])
                 .unwrap_or_else(|error| panic!("plan target action inventory: {error:#}"));
 
         assert!(
@@ -10112,17 +10014,9 @@ runs:
             metadata,
         };
 
-        let ordered = ordered_executable_steps(
-            &job,
-            &[],
-            &plans,
-            &[resolved],
-            &[],
-            actions_host,
-            &[],
-            false,
-        )
-        .unwrap();
+        let ordered =
+            ordered_executable_steps(&job, &[], &plans, &[resolved], &[], actions_host, &[])
+                .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native {
@@ -10171,8 +10065,7 @@ runs:
         let plans = repository_action_plans(&job.steps, actions_host).unwrap();
 
         let ordered =
-            ordered_executable_steps(&job, &[], &plans, &[], &[], actions_host, &[], false)
-                .unwrap();
+            ordered_executable_steps(&job, &[], &plans, &[], &[], actions_host, &[]).unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native { invocation, .. } = &ordered[0] else {
@@ -10277,17 +10170,9 @@ runs:
             metadata,
         };
 
-        let ordered = ordered_executable_steps(
-            &job,
-            &[],
-            &plans,
-            &[resolved],
-            &[],
-            actions_host,
-            &[],
-            false,
-        )
-        .unwrap();
+        let ordered =
+            ordered_executable_steps(&job, &[], &plans, &[resolved], &[], actions_host, &[])
+                .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native {
@@ -10382,17 +10267,9 @@ runs:
             metadata: upload_metadata,
         };
 
-        let ordered = ordered_executable_steps(
-            &job,
-            &[],
-            &plans,
-            &[pages, upload],
-            &[],
-            actions_host,
-            &[],
-            false,
-        )
-        .unwrap();
+        let ordered =
+            ordered_executable_steps(&job, &[], &plans, &[pages, upload], &[], actions_host, &[])
+                .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native {
@@ -11162,7 +11039,6 @@ runs:
             &[(plan, None)],
             Path::new("/tmp/actions"),
             &[],
-            false,
         )
         .unwrap();
 

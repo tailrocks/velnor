@@ -19,6 +19,10 @@ WatchdogSec=180
 Environment=VELNOR_JOB_CPUS=4
 Environment=VELNOR_JOB_MEMORY=12g
 Environment=VELNOR_STORAGE_ROOT=/var
+# Strict capability admission is the only supported mode. The daemon refuses to
+# start if this is unset to anything else or if a removed bypass variable is
+# present. Do not override this in velnor.env.
+Environment=VELNOR_CAPABILITY_VALIDATION=strict
 EnvironmentFile=/etc/velnor/velnor.env
 EnvironmentFile=-/etc/velnor/secrets.env
 ExecStart=/usr/bin/velnor-runner daemon \

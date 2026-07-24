@@ -318,14 +318,6 @@ pub struct RunArgs {
     #[arg(long, default_value = "")]
     pub node_action_image: String,
 
-    /// Diagnostic only: permit the Node sidecar when capability validation is also skipped.
-    #[arg(long, env = "VELNOR_DIAGNOSTIC_NODE_SIDECAR")]
-    pub diagnostic_node_sidecar: bool,
-
-    /// Diagnostic only: skip the strict capability preflight.
-    #[arg(long, env = "VELNOR_SKIP_CAPABILITY_VALIDATION")]
-    pub skip_capability_validation: bool,
-
     /// Host work directory for Docker job state. Defaults under the runner config directory.
     #[arg(long)]
     pub work_dir: Option<PathBuf>,
@@ -459,14 +451,6 @@ pub struct DaemonArgs {
     #[arg(long, default_value = "")]
     pub node_action_image: String,
 
-    /// Diagnostic only: permit the Node sidecar when capability validation is also skipped.
-    #[arg(long, env = "VELNOR_DIAGNOSTIC_NODE_SIDECAR")]
-    pub diagnostic_node_sidecar: bool,
-
-    /// Diagnostic only: skip the strict capability preflight.
-    #[arg(long, env = "VELNOR_SKIP_CAPABILITY_VALIDATION")]
-    pub skip_capability_validation: bool,
-
     /// Base host work directory for Docker job state. For --slots > 1, each slot uses a slot-N child.
     #[arg(long)]
     pub work_dir: Option<PathBuf>,
@@ -516,4 +500,154 @@ pub struct StatusArgs {
     /// Validate that local config is ready for current target repository x64 Linux jobs.
     #[arg(long)]
     pub check_target_mvp: bool,
+}
+
+/// Legacy capability-bypass environment variables whose corresponding CLI flags
+/// were removed. Their mere presence in a production runner's environment is a
+/// deployment error and fails startup fast.
+const REMOVED_BYPASS_ENV_VARS: &[&str] = &[
+    "VELNOR_SKIP_CAPABILITY_VALIDATION",
+    "VELNOR_DIAGNOSTIC_NODE_SIDECAR",
+];
+
+/// Enforce the strict-capability deployment policy before the CLI dispatches any
+/// command. Production admission is unconditional and cannot be bypassed, so a
+/// removed bypass variable — or any `VELNOR_CAPABILITY_VALIDATION` value other
+/// than `strict` — fails startup. The received value is never echoed.
+pub fn enforce_strict_capability_env() -> anyhow::Result<()> {
+    enforce_strict_capability_env_from(|name| std::env::var(name).ok())
+}
+
+fn enforce_strict_capability_env_from(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> anyhow::Result<()> {
+    for name in REMOVED_BYPASS_ENV_VARS {
+        if lookup(name).is_some() {
+            anyhow::bail!(
+                "{name} is set, but capability-bypass switches were removed. \
+                 Unset it: production admission is always strict."
+            );
+        }
+    }
+    if let Some(value) = lookup("VELNOR_CAPABILITY_VALIDATION") {
+        if value != "strict" {
+            anyhow::bail!(
+                "VELNOR_CAPABILITY_VALIDATION must be 'strict' (received a non-strict value); \
+                 strict is the only supported capability-validation mode."
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        move |name: &str| map.get(name).cloned()
+    }
+
+    #[test]
+    fn strict_env_default_absent_is_accepted() {
+        enforce_strict_capability_env_from(lookup(&[])).unwrap();
+    }
+
+    #[test]
+    fn strict_env_explicit_strict_is_accepted() {
+        enforce_strict_capability_env_from(lookup(&[("VELNOR_CAPABILITY_VALIDATION", "strict")]))
+            .unwrap();
+    }
+
+    #[test]
+    fn strict_env_rejects_removed_skip_flag_presence() {
+        for value in ["1", "0", "true", "false", ""] {
+            let error = enforce_strict_capability_env_from(lookup(&[(
+                "VELNOR_SKIP_CAPABILITY_VALIDATION",
+                value,
+            )]))
+            .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("VELNOR_SKIP_CAPABILITY_VALIDATION"));
+        }
+    }
+
+    #[test]
+    fn strict_env_rejects_removed_diagnostic_sidecar_presence() {
+        let error =
+            enforce_strict_capability_env_from(lookup(&[("VELNOR_DIAGNOSTIC_NODE_SIDECAR", "1")]))
+                .unwrap_err();
+        assert!(error.to_string().contains("VELNOR_DIAGNOSTIC_NODE_SIDECAR"));
+    }
+
+    #[test]
+    fn strict_env_rejects_non_strict_capability_validation_values() {
+        for value in [
+            "legacy",
+            "false",
+            "off",
+            "skip",
+            "permissive",
+            "0",
+            "STRICT",
+        ] {
+            let error = enforce_strict_capability_env_from(lookup(&[(
+                "VELNOR_CAPABILITY_VALIDATION",
+                value,
+            )]))
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("strict"),
+                "value {value} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn removed_capability_bypass_flags_are_not_parseable() {
+        use clap::Parser;
+        for flag in ["--skip-capability-validation", "--diagnostic-node-sidecar"] {
+            assert!(
+                Cli::try_parse_from(["velnor-runner", "run", flag]).is_err(),
+                "flag {flag} must not be accepted"
+            );
+            assert!(
+                Cli::try_parse_from(["velnor-runner", "daemon", flag]).is_err(),
+                "flag {flag} must not be accepted on daemon"
+            );
+        }
+    }
+
+    #[test]
+    fn help_text_exposes_no_capability_bypass_path() {
+        use clap::CommandFactory;
+        let mut command = Cli::command();
+        let mut help = Vec::new();
+        command.write_long_help(&mut help).unwrap();
+        let rendered = String::from_utf8(help).unwrap();
+        assert!(!rendered.contains("skip-capability"));
+        assert!(!rendered.contains("diagnostic-node-sidecar"));
+        // Per-subcommand help must also be clean.
+        for name in ["run", "daemon"] {
+            let mut sub = Cli::command();
+            let sub = sub.find_subcommand_mut(name).unwrap();
+            let mut sub_help = Vec::new();
+            sub.write_long_help(&mut sub_help).unwrap();
+            let rendered = String::from_utf8(sub_help).unwrap();
+            assert!(
+                !rendered.contains("skip-capability"),
+                "{name} help exposes skip-capability"
+            );
+            assert!(
+                !rendered.contains("diagnostic-node-sidecar"),
+                "{name} help exposes diagnostic-node-sidecar"
+            );
+        }
+    }
 }
