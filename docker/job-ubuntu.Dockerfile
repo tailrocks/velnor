@@ -58,7 +58,6 @@ RUN apt-get update \
         libxfixes3 \
         libxkbcommon0 \
         libxrandr2 \
-        mold \
         openssh-client \
         pipx \
         pkg-config \
@@ -153,19 +152,27 @@ RUN ver="$KACHE_VERSION" && \
     rm -rf "$tmp" && \
     kache --version
 
+# Plan 008: the whole job toolchain is a committed, locked mise config
+# (docker/job-mise.toml + docker/job-mise.lock) installed fail-closed. The only
+# network bootstrap is the mise binary itself; every tool (rust, nextest,
+# rust-script, just, protoc, gh, mold, cosign) comes from `mise install
+# --locked` against pinned URLs/checksums — no apt/Cargo/curl per-tool installs.
 # The cargo:* tools compile from source: registry/git cache mounts + sccache
-# (scoped to this RUN — runtime jobs choose their own RUSTC_WRAPPER) make a
-# version bump rebuild warm instead of cold.
+# (scoped to this RUN) make a version bump rebuild warm instead of cold.
+COPY docker/job-mise.toml /opt/mise/config/config.toml
+COPY docker/job-mise.lock /opt/mise/config/config.lock
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/sccache-build \
     mkdir -p /opt/mise/bin && \
+    # Baked bootstrap of the mise binary at the fleet-pinned version. This is
+    # the read-only /opt/mise/bin bootstrap; runtime never rewrites it.
     curl -fsSL https://mise.run | MISE_VERSION="v2026.7.7" MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
-    # gh: GitHub-hosted runner images preinstall the GitHub CLI and estate
-    # scripts rely on it (e.g. jackin-role-action's download script) —
-    # drop-in parity requires it in the job image too.
+    mise trust /opt/mise/config/config.toml && \
+    # Fail-closed, non-interactive install of the entire locked toolchain.
     RUSTC_WRAPPER=sccache SCCACHE_DIR=/sccache-build \
-    mise use --global rust@1.97.1 'cargo:cargo-nextest@0.9.140' 'cargo:rust-script@0.36.0' just@1.57.0 protoc@35.1 gh@2.96.0 && \
+    MISE_LOCKFILE=1 MISE_LOCKED=1 MISE_LOCKED_VERIFY_PROVENANCE=1 \
+    mise install --locked --yes && \
     mise reshim && \
     rustup component add rustfmt clippy && \
     rustup target add \
@@ -179,20 +186,9 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     mise exec -- rust-script --version && \
     mise exec -- just --version && \
     mise exec -- protoc --version && \
-    mise exec -- gh --version
-
-# cosign: backs the native sigstore/cosign-installer adapter and the
-# `cosign sign` steps in the agent-role publish workflows.
-RUN cosign_ver="v3.1.2" && \
-    case "$(uname -m)" in \
-      x86_64) cs_arch="amd64" ;; \
-      aarch64|arm64) cs_arch="arm64" ;; \
-      *) echo "unsupported arch $(uname -m) for cosign" >&2; exit 1 ;; \
-    esac && \
-    curl -fsSL -o /usr/local/bin/cosign \
-      "https://github.com/sigstore/cosign/releases/download/${cosign_ver}/cosign-linux-${cs_arch}" && \
-    chmod 0755 /usr/local/bin/cosign && \
-    cosign version
+    mise exec -- gh --version && \
+    mise exec -- mold --version && \
+    mise exec -- cosign version
 
 # hadolint: backs the native hadolint/hadolint-action adapter.
 RUN hadolint_ver="v2.14.0" && \

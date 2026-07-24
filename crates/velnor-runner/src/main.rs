@@ -14,6 +14,7 @@ mod git_mirror;
 mod github_adapter;
 mod job_message;
 mod manifest;
+mod mise;
 mod plan;
 mod platform;
 mod preflight;

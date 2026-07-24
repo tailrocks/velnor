@@ -8,6 +8,9 @@ cargo-binstall = "1.21.0"
 zig = "0.16.0"
 
 [settings]
+# Plan 008: mandatory committed lockfile. `mise` reads pinned URLs/checksums
+# from mise.lock and (under MISE_LOCKED in CI/jobs) refuses unlocked artifacts.
+lockfile = true
 idiomatic_version_file_enable_tools = ["rust"]
 cargo.binstall_only = true
 cargo.binstall_quickinstall = true

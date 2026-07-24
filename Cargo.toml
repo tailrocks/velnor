@@ -34,6 +34,9 @@ tar = "0.4.46"
 sigstore-sign = { version = "0.11.0", default-features = false, features = ["native-tls"] }
 thiserror = "2.0.12"
 time = { version = "0.3.41", features = ["formatting", "parsing"] }
+# Strict, non-regex parsing of mise config/lock TOML for the fail-closed mise
+# policy (crates/velnor-runner/src/mise.rs). Never hand-parse lock TOML.
+toml = "0.9"
 tokio = { version = "1.45.1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 url = "2.5.4"
 uuid = { version = "1.18.1", features = ["v4"] }

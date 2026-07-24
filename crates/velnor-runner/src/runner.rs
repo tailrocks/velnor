@@ -2742,6 +2742,12 @@ async fn handle_job_request(
                         .context("derive mise install GC scope")?
                         .to_string_lossy()
                         .to_string();
+                let mise_binary_scope =
+                    crate::container::mise_binary_store_host(&work_root, &repository_key)
+                        .strip_prefix(&mise_root)
+                        .context("derive mise binary GC scope")?
+                        .to_string_lossy()
+                        .to_string();
                 let rustup_scope =
                     crate::container::rustup_executable_store_host(&work_root, &repository_key)
                         .strip_prefix(&mise_root)
@@ -2768,6 +2774,7 @@ async fn handle_job_request(
                     ("cargo", cargo_bin_scope),
                     ("mise", "cache".into()),
                     ("mise", mise_install_scope),
+                    ("mise", mise_binary_scope),
                     ("mise", rustup_scope),
                 ]
                 .into_iter()

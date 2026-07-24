@@ -149,6 +149,12 @@ impl JobContainerSpec {
             // its own file locks.
             "-v".into(),
             self.mount_arg(&self.mise_executable_store_host(), "/opt/mise/installs"),
+            // Persistent per-version mise BINARY store (Plan 008 Step 2). Scoped
+            // by trust/repository like `installs`; the setup script publishes a
+            // verified `<os-arch>/<exact-version>/mise` here so a fresh job
+            // reuses it. `/opt/mise/bin` stays the read-only baked bootstrap.
+            "-v".into(),
+            self.mount_arg(&self.mise_binary_store_host(), "/opt/velnor/mise-binaries"),
             // mise's Rust backend stores compiler payloads and selection state
             // in rustup, not in /opt/mise. Keep it in the same trust/repository
             // scope or an ephemeral container loses the selected toolchain.
@@ -721,6 +727,21 @@ impl JobContainerSpec {
         )
     }
 
+    /// Persistent per-version mise binary store for this job's trust/repository
+    /// scope. Without a repository identity the store stays job-ephemeral, so
+    /// persistence is never granted to an unidentified job.
+    pub(crate) fn mise_binary_store_host(&self) -> PathBuf {
+        self.repository_store_key().map_or_else(
+            || {
+                eprintln!(
+                    "forensics.lifecycle: persistent mise binary store refused: missing github.repository"
+                );
+                self.temp_host.join("_velnor/ephemeral/mise-binaries")
+            },
+            |repository| mise_binary_store_host(&self.temp_host, &repository),
+        )
+    }
+
     fn rustup_executable_store_host(&self) -> PathBuf {
         self.repository_store_key().map_or_else(
             || {
@@ -1078,6 +1099,30 @@ fn mise_executable_store_host_for_scope(
         .join(sanitize_store_key(repository))
 }
 
+/// Host-persistent per-version mise BINARY store, scoped by trust + repository.
+///
+/// The setup script writes `<os-arch>/<exact-version>/mise` plus `metadata.json`
+/// inside this scope (Plan 008 Step 2), so a fresh job reuses a verified binary
+/// instead of mutating the read-only baked `/opt/mise/bin` bootstrap. Lives
+/// under the same `mise` cache class as `installs`/`rustup`, so the mise GC
+/// budget covers it and a per-scope lease protects it while a job holds it.
+pub(crate) fn mise_binary_store_host(temp_host: &Path, repository: &str) -> PathBuf {
+    mise_binary_store_host_for_scope(
+        temp_host,
+        &crate::github_adapter::cargo_target_trust_scope(),
+        repository,
+    )
+}
+
+fn mise_binary_store_host_for_scope(
+    temp_host: &Path,
+    trust_scope: &str,
+    repository: &str,
+) -> PathBuf {
+    crate::storage::child_with_legacy_trust(mise_store_host(temp_host), "binaries", trust_scope)
+        .join(sanitize_store_key(repository))
+}
+
 /// Host-persistent rustup state used by mise's Rust backend, scoped by the
 /// same trust/repository boundary as executable mise installs.
 pub(crate) fn rustup_executable_store_host(temp_host: &Path, repository: &str) -> PathBuf {
@@ -1338,6 +1383,18 @@ mod tests {
                 "/var/lib/velnor/work/_velnor_mise/rustup/trusted/ChainArgos_java-monorepo"
             )
         );
+        // Plan 008: the persistent mise binary store is a distinct `binaries`
+        // subdir under the same trust/repository boundary as `installs`.
+        assert_eq!(
+            mise_binary_store_host_for_scope(temp, "trusted", "ChainArgos/java-monorepo"),
+            PathBuf::from(
+                "/var/lib/velnor/work/_velnor_mise/binaries/trusted/ChainArgos_java-monorepo"
+            )
+        );
+        assert_ne!(
+            mise_binary_store_host_for_scope(temp, "trusted", "ChainArgos/java-monorepo"),
+            mise_executable_store_host_for_scope(temp, "trusted", "ChainArgos/java-monorepo"),
+        );
     }
 
     #[test]
@@ -1408,6 +1465,9 @@ mod tests {
             .contains(&"/tmp/_velnor_cargo/bin/trusted/acme_repo:/github/home/.cargo/bin".into()));
         assert!(args
             .contains(&"/tmp/_velnor_mise/installs/trusted/acme_repo:/opt/mise/installs".into()));
+        assert!(args.contains(
+            &"/tmp/_velnor_mise/binaries/trusted/acme_repo:/opt/velnor/mise-binaries".into()
+        ));
         assert!(args.contains(&"/tmp/_velnor_mise/rustup/trusted/acme_repo:/root/.rustup".into()));
         assert!(args.contains(
             &"/tmp/_velnor_cargo/registry/cache:/github/home/.cargo/registry/cache".into()

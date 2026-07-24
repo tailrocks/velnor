@@ -59,8 +59,13 @@ a stale tool image; image-build failure fails the package transaction.
 - Regenerable class ceilings default to targets 200 GiB, actions cache 50 GiB,
   and artifacts/Cargo/mise 20 GiB each. Override with the corresponding
   `VELNOR_BUDGET_{TARGETS,CACHES,ARTIFACTS,CARGO,MISE}_BYTES` variables.
-  The mise class includes repo-scoped `/opt/mise/installs` and the matching
-  `/root/.rustup` payload; they are one executable-tool lifetime and budget.
+  The mise class includes repo-scoped `/opt/mise/installs`, the persistent
+  per-version mise binary store mounted at `/opt/velnor/mise-binaries`, and the
+  matching `/root/.rustup` payload; they are one executable-tool lifetime and
+  budget. mise runs fail-closed against committed lockfiles: a job's tools
+  install only with `mise install --locked` (recorded checksums/provenance) and
+  each exact mise binary version is verified and persisted for reuse instead of
+  re-fetched — the baked `/opt/mise/bin` bootstrap is never mutated.
 - Optional Rust target persistence: set `VELNOR_CARGO_TARGET_PERSIST=true` in
   the daemon env only for trusted target scopes. Velnor stores targets under
   `_velnor_targets/<trust-scope>/<generation>/<repo>/<workflow>/<job-bucket>`

@@ -40,6 +40,12 @@ pub enum InputRule {
     Literal(&'static str, &'static [&'static str]),
     RequiredLiteral(&'static str, &'static [&'static str]),
     Forbidden(&'static str),
+    /// Value is admissible iff the pure predicate returns true. `accepted`
+    /// documents the constraint in violation messages (the value itself stays
+    /// redacted). Used for the strict mise date-version and `install_args`
+    /// tool-key shape rules; membership against the committed lock is enforced
+    /// at install time by `crate::mise`.
+    Predicate(&'static str, fn(&str) -> bool, &'static [&'static str]),
 }
 
 impl InputRule {
@@ -48,7 +54,8 @@ impl InputRule {
             Self::Any(name)
             | Self::Literal(name, _)
             | Self::RequiredLiteral(name, _)
-            | Self::Forbidden(name) => name,
+            | Self::Forbidden(name)
+            | Self::Predicate(name, _, _) => name,
         }
     }
 }
@@ -193,9 +200,20 @@ const DOWNLOAD_INPUTS: &[InputRule] = &[
     InputRule::Literal("merge-multiple", &["true", "false"]),
 ];
 const MISE_INPUTS: &[InputRule] = &[
-    InputRule::Literal("version", &["2026.7.7"]),
+    // Exact mise date-version only; omission (empty) resolves to the fleet pin.
+    InputRule::Predicate(
+        "version",
+        crate::mise::is_valid_mise_version,
+        &["exact YYYY.M.D mise version, or omitted for the fleet-pinned latest"],
+    ),
     InputRule::Literal("install", &["true", "false"]),
-    InputRule::Any("install_args"),
+    // Whitespace-separated bare tool keys; membership in the committed lock is
+    // enforced fail-closed at install time (crate::mise).
+    InputRule::Predicate(
+        "install_args",
+        crate::mise::is_valid_install_args_shape,
+        &["whitespace-separated tool keys committed in mise.lock (no flags/@version/URLs/paths)"],
+    ),
     InputRule::Any("working_directory"),
     InputRule::Any("github_token"),
     InputRule::Literal("cache_key_prefix", &["mise-v2"]),
@@ -920,6 +938,15 @@ fn validate_inputs(
                     allowed.iter().map(|value| (*value).to_string()).collect(),
                 ))
             }
+            Some(InputRule::Predicate(_, check, _)) if check(value.trim()) => {}
+            Some(InputRule::Predicate(_, _, accepted)) => violations.push(violation(
+                step,
+                repository,
+                action_ref,
+                &format!("with.{name}"),
+                value,
+                accepted.iter().map(|value| (*value).to_string()).collect(),
+            )),
             Some(InputRule::Forbidden(_)) => violations.push(violation(
                 step,
                 repository,
@@ -1301,12 +1328,29 @@ mod tests {
         ));
         assert_eq!(errors[0].field, "with.cache_key_prefix");
 
+        // Post-008 the version must be an exact YYYY.M.D date-version; a
+        // selector like `latest` (a live lookup) is rejected before install.
         let errors = violations(&job(
             "jdx/mise-action",
             Some("dad1bfd3df957f44999b559dd69dc1671cb4e9ea"),
-            serde_json::json!({"version": "2025.1.0"}),
+            serde_json::json!({"version": "latest"}),
         ));
         assert_eq!(errors[0].field, "with.version");
+
+        // A leading `v` and a flag-shaped install arg are likewise rejected.
+        let errors = violations(&job(
+            "jdx/mise-action",
+            Some("dad1bfd3df957f44999b559dd69dc1671cb4e9ea"),
+            serde_json::json!({"version": "v2026.7.7"}),
+        ));
+        assert_eq!(errors[0].field, "with.version");
+
+        let errors = violations(&job(
+            "jdx/mise-action",
+            Some("dad1bfd3df957f44999b559dd69dc1671cb4e9ea"),
+            serde_json::json!({"install_args": "--yes"}),
+        ));
+        assert_eq!(errors[0].field, "with.install_args");
     }
 
     #[test]

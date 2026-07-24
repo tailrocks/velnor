@@ -2068,9 +2068,32 @@ where
             "cache_save",
             "true",
         ));
+        // 008-R5: resolve the exact mise binary version now (an omitted version
+        // becomes the fleet pin — never a live "latest" lookup) so it is
+        // auditable and keys the persistent binary store.
+        let exact_version = crate::mise::resolve_effective_mise_version(&version)
+            .context("resolve exact mise binary version")?;
+        eprintln!(
+            "mise: resolved binary version {exact_version} (requested {:?})",
+            version.trim()
+        );
+        // Fail closed before any install: the effective config must have a
+        // tracked, clean, adjacent lock with lockfile=true, and every
+        // install_args token must be committed in that lock.
+        if install {
+            let checkout_root = container.workspace_host.as_path();
+            let workdir_host = mise_working_directory_host(checkout_root, &working_directory);
+            crate::mise::enforce_locked_mise_policy(
+                checkout_root,
+                &workdir_host,
+                &install_args,
+                &crate::mise::GitCli,
+            )
+            .context("mise locked-install policy rejected this job before running any command")?;
+        }
         let script = setup_mise_script(
             install,
-            &version,
+            &exact_version,
             &install_args,
             &working_directory,
             &cache_key_prefix,
@@ -2102,11 +2125,15 @@ where
         let _ = fs::remove_file(&env_path);
         let _ = fs::remove_file(&redacted_path);
         let path = mise_step_path(&result.stdout);
-        if result.stdout.contains("__VELNOR_MISE_BIN__") {
+        if result.stdout.contains("__VELNOR_MISE_BIN__")
+            || result.stdout.contains("__VELNOR_MISE_SELF__")
+        {
             let filtered: Vec<&str> = result
                 .stdout
                 .lines()
-                .filter(|l| !l.starts_with("__VELNOR_MISE_BIN__"))
+                .filter(|l| {
+                    !l.starts_with("__VELNOR_MISE_BIN__") && !l.starts_with("__VELNOR_MISE_SELF__")
+                })
                 .collect();
             result.stdout = filtered.join("\n");
             if !result.stdout.is_empty() {
@@ -2229,7 +2256,8 @@ where
         Ok(native_command_result(
             result,
             StepCommandState {
-                path: vec!["/root/.cargo/bin".to_string()],
+                // just is now a locked mise tool; expose the mise shims dir.
+                path: vec!["/opt/mise/shims".to_string()],
                 ..StepCommandState::default()
             },
         ))
@@ -2292,10 +2320,10 @@ where
         ))
     }
 
-    /// Native `sigstore/cosign-installer`: the job image preinstalls a pinned
-    /// cosign at /usr/local/bin; when the requested release matches (or is the
-    /// action default) it is used directly, otherwise the requested version is
-    /// downloaded from the official GitHub release into install-dir.
+    /// Native `sigstore/cosign-installer`: install the admitted locked `cosign`
+    /// mise key fail-closed, link it into install-dir (added to PATH like the
+    /// action), and verify the version. A requested release differing from the
+    /// committed lock fails closed — Velnor never downloads cosign outside mise.
     fn native_cosign_installer(
         &mut self,
         container: &JobContainerSpec,
@@ -3292,120 +3320,225 @@ fn rewrite_command_file_env_for_action_container(env: &mut [(String, String)]) {
     }
 }
 
+/// Setup script for the native mise adapter (Plan 008).
+///
+/// `exact_version` is already resolved by the caller (an explicit exact version,
+/// or the fleet pin for an omitted one — 008-R5). The script never bootstraps
+/// mise over the network: it publishes a verified per-version binary into the
+/// repository-scoped persistent store (`/opt/velnor/mise-binaries`) by copying
+/// the read-only baked `/opt/mise/bin` bootstrap to same-filesystem staging,
+/// self-updating it to the exact version with project config disabled, verifying
+/// the reported version + SHA-256, then atomically publishing it. A fresh job
+/// reuses that binary when version/hash match; corruption fails closed. Tool
+/// installs are strictly `mise install --locked` under the fail-closed
+/// `MISE_LOCKED`/`MISE_LOCKED_VERIFY_PROVENANCE` contract.
+///
+/// The bootstrap and store paths are env-overridable (`VELNOR_MISE_BOOTSTRAP`,
+/// `VELNOR_MISE_BINARY_STORE`) so the reuse/integrity behavior is exercised by
+/// tests with isolated stores and a controlled fake updater.
 fn setup_mise_script(
     install: bool,
-    version: &str,
+    exact_version: &str,
     install_args: &str,
     working_directory: &str,
     cache_key_prefix: &str,
     cache_save: bool,
 ) -> String {
-    let version = shell_single_quote(version);
-    let install_args = shell_single_quote(install_args);
-    let working_directory = shell_single_quote(working_directory);
-    let cache_key_prefix = shell_single_quote(cache_key_prefix);
     let install_flag = if install { "1" } else { "" };
     let cache_save_flag = if cache_save { "1" } else { "" };
-    format!(
-        r#"set -e
+    MISE_SETUP_TEMPLATE
+        .replace("@@EXACT_VERSION@@", &shell_single_quote(exact_version))
+        .replace("@@INSTALL_FLAG@@", install_flag)
+        .replace("@@INSTALL_ARGS@@", &shell_single_quote(install_args))
+        .replace(
+            "@@WORKING_DIRECTORY@@",
+            &shell_single_quote(working_directory),
+        )
+        .replace(
+            "@@CACHE_KEY_PREFIX@@",
+            &shell_single_quote(cache_key_prefix),
+        )
+        .replace("@@CACHE_SAVE_FLAG@@", cache_save_flag)
+}
+
+const MISE_SETUP_TEMPLATE: &str = r#"set -e
 # Use the euid's home (/root) so rustup-init doesn't fail the $HOME vs euid check.
 export HOME=/root
-bin="/opt/mise/bin"
-mise_home="/opt/mise"
-mkdir -p "$bin" "$mise_home/shims" "$mise_home/cache" "$mise_home/config" "/root/.cargo/bin"
-# Set PATH before the mise check so the pre-installed image binary is found and
-# curl re-download is skipped. /root/.cargo/bin precedes /opt/mise/shims so that
-# the real cargo binary (from rustup) shadows any mise cargo shim, avoiding
-# "cargo is not a valid shim" failures when mise calls cargo internally.
-export PATH="$bin:/root/.cargo/bin:$mise_home/shims:$PATH"
-if ! command -v mise >/dev/null 2>&1; then
-  curl -fsSL https://mise.run | MISE_INSTALL_PATH="$bin/mise" sh
-fi
+# mise_home and the env-export dir default to the production mounts; tests point
+# them at isolated dirs (no /opt or /__t write on the test host).
+mise_home="${VELNOR_MISE_HOME:-/opt/mise}"
+: "${VELNOR_MISE_ENV_DIR:=/__t/_velnor}"
+mkdir -p "$mise_home/shims" "$mise_home/cache" "$mise_home/config"
 export MISE_DATA_DIR="$mise_home"
 export MISE_CACHE_DIR="$mise_home/cache"
 export MISE_CONFIG_DIR="$mise_home/config"
 export MISE_TRUSTED_CONFIG_PATHS="/__w"
-# Match mise-action's process environment: do not override CARGO_HOME or
-# RUSTUP_HOME while mise resolves tools. Those overrides make mise's Rust
-# backend publish the image-baked rustup proxy directory as its active bin
-# path, silently selecting the baked toolchain instead of rust-toolchain.toml.
-# Cargo remains discoverable through PATH for cargo-backed mise tools.
-requested_version={version}
-install_requested="{install_flag}"
-cache_key_prefix={cache_key_prefix}
-cache_save_requested="{cache_save_flag}"
+# The read-only baked bootstrap and the repository-scoped persistent binary
+# store. Overridable so tests can point them at isolated directories.
+: "${VELNOR_MISE_BOOTSTRAP:=/opt/mise/bin/mise}"
+: "${VELNOR_MISE_BINARY_STORE:=/opt/velnor/mise-binaries}"
+_velnor_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+exact_version=@@EXACT_VERSION@@
+install_requested="@@INSTALL_FLAG@@"
+install_args=@@INSTALL_ARGS@@
+working_directory=@@WORKING_DIRECTORY@@
+cache_key_prefix=@@CACHE_KEY_PREFIX@@
+cache_save_requested="@@CACHE_SAVE_FLAG@@"
 # Upstream cache_save controls archive publication after installation, not
 # mutation of the action's local mise directory. Velnor replaces that remote
-# archive transport with its repository-scoped persistent mount, so both
-# policies use the local store and neither enables a remote backend.
+# archive transport with its repository-scoped persistent mount.
 echo "Velnor local mise cache: generation=$cache_key_prefix cache_save=$cache_save_requested"
-if [ -n "$requested_version" ] || [ -n "$install_requested" ]; then
-  # All slots share the mounted mise binary and tool store. One lock covers
-  # the version transition, tool installation, and environment export so a
-  # concurrent job cannot observe a mixed generation.
-  exec 9>"$mise_home/cache/.velnor-install.lock"
+if [ -z "$exact_version" ]; then
+  echo "mise: no exact version resolved; refusing a network 'latest' lookup under MISE_LOCKED" >&2
+  exit 1
+fi
+case "$(uname -m)" in
+  x86_64|amd64) os_arch="linux-x64" ;;
+  aarch64|arm64) os_arch="linux-arm64" ;;
+  *) os_arch="$(uname -s)-$(uname -m)" ;;
+esac
+store_dir="$VELNOR_MISE_BINARY_STORE/$os_arch/$exact_version"
+mise_bin="$store_dir/mise"
+meta="$store_dir/metadata.json"
+mkdir -p "$VELNOR_MISE_BINARY_STORE"
+# All slots share the repository-scoped store. One exclusive lock covers the
+# binary publish, tool install, and environment export so a concurrent job
+# never observes a mixed generation. flock is always present in the Linux job
+# image (util-linux); the guard only matters on non-Linux test hosts.
+exec 9>"$VELNOR_MISE_BINARY_STORE/.velnor-mise.lock"
+if command -v flock >/dev/null 2>&1; then
   flock -x 9
 fi
-if [ -n "$requested_version" ]; then
-  # mise-action v4 makes an explicit version observable even when a different
-  # binary already exists. This is the same exact self-update command used by
-  # upstream v4 when the installed and requested versions differ.
-  installed_version=$(mise --version | awk '{{print $1}}' | sed 's/^v//')
-  if [ "$installed_version" != "$requested_version" ]; then
-    mise self-update "$requested_version" -y
+publish_needed=1
+if [ -x "$mise_bin" ] && [ -f "$meta" ]; then
+  recorded_hash=$(sed -n 's/.*"sha256":[ ]*"\([0-9a-f]*\)".*/\1/p' "$meta")
+  recorded_version=$(sed -n 's/.*"version":[ ]*"\([^"]*\)".*/\1/p' "$meta")
+  actual_hash=$(_velnor_sha256 "$mise_bin")
+  if [ -n "$recorded_hash" ] && [ "$recorded_hash" = "$actual_hash" ] && [ "$recorded_version" = "$exact_version" ]; then
+    publish_needed=0
+    echo "mise: reusing persisted $exact_version ($os_arch) sha256=$actual_hash"
+  else
+    echo "mise: persisted binary failed integrity check (version/hash mismatch); failing closed" >&2
+    exit 1
   fi
 fi
-install_args={install_args}
-working_directory={working_directory}
+if [ "$publish_needed" = "1" ]; then
+  if [ ! -x "$VELNOR_MISE_BOOTSTRAP" ]; then
+    echo "mise: baked bootstrap $VELNOR_MISE_BOOTSTRAP is missing; cannot publish persistent binary" >&2
+    exit 1
+  fi
+  mkdir -p "$store_dir"
+  staging="$store_dir/.mise.staging.$$"
+  rm -f "$staging"
+  # Copy the read-only baked bootstrap onto the same filesystem as the final
+  # path so publication is an atomic rename. /opt/mise/bin is never written.
+  cp "$VELNOR_MISE_BOOTSTRAP" "$staging"
+  chmod 0755 "$staging"
+  # Self-update to the exact version with project config disabled so no
+  # workspace mise.toml can influence the binary update.
+  ( cd / && MISE_CONFIG_FILE="" MISE_TRUSTED_CONFIG_PATHS="" "$staging" self-update "$exact_version" -y )
+  reported=$("$staging" --version 2>/dev/null | awk '{print $1}' | sed 's/^v//')
+  if [ "$reported" != "$exact_version" ]; then
+    echo "mise: self-update produced '$reported', expected '$exact_version'; failing closed" >&2
+    rm -f "$staging"
+    exit 1
+  fi
+  staged_hash=$(_velnor_sha256 "$staging")
+  sync 2>/dev/null || true
+  chmod 0555 "$staging"
+  mv -f "$staging" "$mise_bin"
+  printf '{"version":"%s","sha256":"%s","os_arch":"%s"}\n' "$exact_version" "$staged_hash" "$os_arch" > "$meta"
+  sync 2>/dev/null || true
+  echo "mise: published persistent $exact_version ($os_arch) sha256=$staged_hash"
+fi
+mise_bin_dir=$(dirname "$mise_bin")
+# native_mise reads this marker and prepends the persisted binary dir to the
+# PATH of subsequent steps (in place of the baked /opt/mise/bin).
+echo "__VELNOR_MISE_SELF__$mise_bin_dir"
+export PATH="$mise_bin_dir:/root/.cargo/bin:$mise_home/shims:$PATH"
 if [ -n "$working_directory" ]; then
   cd "$working_directory"
 fi
 if [ -n "$install_requested" ]; then
-  # Trust the workspace config so mise actually reads mise.toml from the checkout.
+  # Trust the workspace config so mise reads mise.toml from the checkout.
   for f in "/__w/mise.toml" "/__w/.mise.toml" "/__w/.mise/config.toml"; do
-    [ -f "$f" ] && mise trust "$f" 2>/dev/null || true
+    [ -f "$f" ] && "$mise_bin" trust "$f" 2>/dev/null || true
   done
-  mise trust --all 2>/dev/null || true
-  # Velnor shares the mise store across jobs. If a previous interrupted install
-  # left an empty version dir, mise can treat it as installed and skip the real
-  # download. Drop those poisoned entries before installing.
-  find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d -empty -exec rm -rf {{}} + 2>/dev/null || true
-  echo "::group::mise install"
+  "$mise_bin" trust --all 2>/dev/null || true
+  # Drop poisoned empty version dirs a previous interrupted install may have left.
+  find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d -empty -exec rm -rf {} + 2>/dev/null || true
+  echo "::group::mise install (locked)"
+  # Fail closed: enforce the committed lockfile, refuse unlocked artifacts, and
+  # treat a provenance-API failure as fatal.
+  export MISE_LOCKFILE=1 MISE_LOCKED=1 MISE_LOCKED_VERIFY_PROVENANCE=1
   if [ -n "$install_args" ]; then
-    mise install $install_args
+    "$mise_bin" install --locked --yes $install_args
   else
-    mise install
+    "$mise_bin" install --locked --yes
   fi
   echo "::endgroup::"
 else
-  command -v mise >/dev/null 2>&1
+  "$mise_bin" --version >/dev/null 2>&1
 fi
 # Emit active mise tool bin dirs as markers. native_mise parses these and adds
-# them to PATH for subsequent steps. Do not enumerate every version root:
-# pipx version roots contain a same-named virtualenv directory (for example
-# `<version>/reuse`) which shadows the real `<version>/bin/reuse` executable
-# and produces EACCES. `mise bin-paths` is authoritative for active tools;
-# nested `bin` directories cover executables installed into managed runtimes.
-{{
-  mise bin-paths 2>/dev/null || true
+# them to PATH. `mise bin-paths` is authoritative; nested `bin` dirs cover
+# executables installed into managed runtimes (pipx version roots also contain a
+# same-named virtualenv dir that would shadow the real executable).
+{
+  "$mise_bin" bin-paths 2>/dev/null || true
   find "$mise_home/installs" -mindepth 3 -maxdepth 3 -type d -name bin 2>/dev/null || true
-}} | awk 'NF && !seen[$0]++ {{ print "__VELNOR_MISE_BIN__" $0 }}'
-# Match mise-action's environment export. Write through the job temp mount so
-# values never enter the streamed action log; native_mise reads and deletes
-# these files, exports every non-PATH string, and registers redacted values as
-# masks before subsequent steps can emit them.
+} | awk 'NF && !seen[$0]++ { print "__VELNOR_MISE_BIN__" $0 }'
+# Match mise-action's environment export through the job temp mount so values
+# never enter the streamed action log; native_mise reads/deletes these files.
 umask 077
-mkdir -p /__t/_velnor
-mise env --redacted --json > /__t/_velnor/mise-env-redacted.json
-mise env --json > /__t/_velnor/mise-env.json
+mkdir -p "$VELNOR_MISE_ENV_DIR"
+"$mise_bin" env --redacted --json > "$VELNOR_MISE_ENV_DIR/mise-env-redacted.json"
+"$mise_bin" env --json > "$VELNOR_MISE_ENV_DIR/mise-env.json"
 echo "mise install completed, cargo: $(command -v cargo 2>/dev/null || echo 'not found')"
-mise --version
-"#,
-    )
+"$mise_bin" --version
+"#;
+
+/// Map the mise action `working_directory` input (a container path under `/__w`,
+/// or a workspace-relative path) to its host path inside the checkout mount so
+/// the fail-closed lock policy can inspect the real files.
+fn mise_working_directory_host(checkout_root: &Path, working_directory: &str) -> PathBuf {
+    let working_directory = working_directory.trim();
+    if working_directory.is_empty() || working_directory == "/__w" {
+        return checkout_root.to_path_buf();
+    }
+    if let Some(rel) = working_directory.strip_prefix("/__w/") {
+        return checkout_root.join(rel);
+    }
+    let path = Path::new(working_directory);
+    if path.is_absolute() {
+        // Passed through so the policy's inside-checkout check rejects it.
+        path.to_path_buf()
+    } else {
+        checkout_root.join(path)
+    }
 }
 
 fn mise_step_path(output: &str) -> Vec<String> {
-    let mut path = vec!["/opt/mise/bin".to_string()];
+    let mut path = Vec::new();
+    // Prefer the persisted per-version mise binary dir the setup step published;
+    // fall back to the baked bootstrap when no marker is present.
+    for line in output.lines() {
+        if let Some(dir) = line.strip_prefix("__VELNOR_MISE_SELF__") {
+            let dir = dir.trim();
+            if !dir.is_empty() && !path.iter().any(|entry| entry == dir) {
+                path.push(dir.to_string());
+            }
+        }
+    }
+    if path.is_empty() {
+        path.push("/opt/mise/bin".to_string());
+    }
     // Add the active mise tool install bin dirs before shims. A pipx install
     // has both `<version>/reuse/` (the virtualenv directory) and
     // `<version>/bin/reuse` (the executable); a stale/shared shim can resolve
@@ -3577,57 +3710,73 @@ fn hadolint_script(inputs: &HadolintInputs) -> String {
     script
 }
 
-/// POSIX-sh script for the native cosign-installer adapter. The preinstalled
-/// /usr/local/bin/cosign satisfies any request whose version matches; a
-/// different requested release is downloaded from sigstore's GitHub release.
-fn cosign_installer_script(release: &str, install_dir: &str) -> String {
-    let release = release.trim();
-    let want = shell_single_quote(release.trim_start_matches('v'));
-    // install_dir may contain $HOME by contract (the action default) — expand
-    // in-shell, so single-quoting must not apply to the whole value.
-    let dir = install_dir.trim().replace('\'', "'\"'\"'");
+// Exact versions of the admitted locked mise keys backing the mold/just/cosign
+// adapters. These MUST match docker/job-mise.lock (Plan 008 Step 3); the job
+// image bakes these versions, so a job-time `mise install --locked` is an
+// integrity re-check, never a download over an unlocked path.
+const MOLD_LOCKED_VERSION: &str = "2.41.0";
+const JUST_LOCKED_VERSION: &str = "1.57.0";
+const COSIGN_LOCKED_VERSION: &str = "3.1.2";
+
+/// Shared prologue for the project-tool adapters (Plan 008 N8): point mise at
+/// the baked global locked config and install one admitted tool key in
+/// fail-closed mode. There is deliberately no apt/Cargo/curl fallback.
+fn locked_mise_install(key: &str) -> String {
     format!(
-        r#"set -u
-WANT={want}
-DIR="{dir}"
-mkdir -p "$DIR"
-have=""
-if command -v cosign >/dev/null 2>&1; then
-  have=$(cosign version 2>/dev/null | sed -n 's/^GitVersion:[[:space:]]*v\{{0,1\}}//p' | head -1)
-fi
-if [ -n "$have" ] && {{ [ -z "$WANT" ] || [ "$have" = "$WANT" ]; }}; then
-  ln -sf "$(command -v cosign)" "$DIR/cosign"
-  echo "cosign $have (preinstalled)"
-else
-  ver="${{WANT:-$have}}"
-  if [ -z "$ver" ]; then echo "no cosign available and no version requested" >&2; exit 1; fi
-  case "$(uname -m)" in
-    x86_64) arch="amd64" ;;
-    aarch64|arm64) arch="arm64" ;;
-    *) echo "unsupported arch $(uname -m) for cosign" >&2; exit 1 ;;
-  esac
-  curl -fsSL -o "$DIR/cosign" "https://github.com/sigstore/cosign/releases/download/v${{ver}}/cosign-linux-${{arch}}"
-  chmod 0755 "$DIR/cosign"
-  echo "cosign v${{ver}} installed to $DIR"
-fi
-echo "__VELNOR_COSIGN_DIR__$DIR"
-"#
+        "set -e\n\
+         export MISE_DATA_DIR=/opt/mise MISE_CACHE_DIR=/opt/mise/cache MISE_CONFIG_DIR=/opt/mise/config\n\
+         export MISE_LOCKFILE=1 MISE_LOCKED=1 MISE_LOCKED_VERIFY_PROVENANCE=1\n\
+         export PATH=\"/opt/mise/bin:/opt/mise/shims:$PATH\"\n\
+         mise install --locked --yes {}\n",
+        shell_single_quote(key)
     )
 }
 
-fn setup_mold_script() -> String {
-    r#"set -e
-if ! command -v mold >/dev/null 2>&1; then
-  if command -v apt-get >/dev/null 2>&1; then
-    apt-get update
-    apt-get install -y --no-install-recommends mold
-  else
-    echo "mold is not installed and apt-get is unavailable" >&2
-    exit 1
-  fi
+/// Native `sigstore/cosign-installer`: install the admitted locked `cosign`
+/// mise key, verify the version, and expose install-dir on PATH (matching the
+/// action). A requested release that differs from the committed lock fails
+/// closed — Velnor never downloads cosign outside mise.
+fn cosign_installer_script(release: &str, install_dir: &str) -> String {
+    let want = shell_single_quote(release.trim().trim_start_matches('v'));
+    // install_dir may contain $HOME by contract (the action default) — expand
+    // in-shell, so single-quoting must not apply to the whole value.
+    let dir = install_dir.trim().replace('\'', "'\"'\"'");
+    let mut script = locked_mise_install("cosign");
+    script.push_str(&format!(
+        r#"WANT={want}
+DIR="{dir}"
+LOCKED='{ver}'
+if [ -n "$WANT" ] && [ "$WANT" != "$LOCKED" ]; then
+  echo "cosign release '$WANT' requested but the committed locked version is '$LOCKED'; refusing a non-mise download" >&2
+  exit 1
 fi
-mold --version
-# Wire mold as the Cargo linker (mirrors rui314/setup-mold upstream behavior).
+mkdir -p "$DIR"
+resolved="$(command -v cosign)"
+ln -sf "$resolved" "$DIR/cosign"
+cosign version 2>&1 | grep -F "$LOCKED"
+echo "cosign $LOCKED (locked mise) linked into $DIR"
+echo "__VELNOR_COSIGN_DIR__$DIR"
+"#,
+        want = want,
+        dir = dir,
+        ver = COSIGN_LOCKED_VERSION,
+    ));
+    script
+}
+
+/// Native `rui314/setup-mold`: install the admitted locked `mold` mise key,
+/// verify the version, then wire it as the Cargo linker (mirrors upstream).
+fn setup_mold_script() -> String {
+    let mut script = locked_mise_install("mold");
+    script.push_str(&format!(
+        "mold --version | grep -F '{MOLD_LOCKED_VERSION}'\n"
+    ));
+    script.push_str(MOLD_LINKER_SNIPPET);
+    script
+}
+
+// Cargo linker wiring for mold. No interpolation, so it stays a plain literal.
+const MOLD_LINKER_SNIPPET: &str = r#"# Wire mold as the Cargo linker (mirrors rui314/setup-mold upstream behavior).
 # Use cc (gcc) with -fuse-ld=mold rather than requiring clang, so this works on
 # systems without clang installed. mold supports being invoked via gcc's linker
 # flag on both x86_64 and aarch64 Linux.
@@ -3645,30 +3794,16 @@ if ! grep -qF '[target.aarch64-unknown-linux-gnu]' "$CARGO_CFG" 2>/dev/null; the
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 MOLDEOF
 fi
-"#
-    .to_string()
-}
+"#;
 
+/// Native `extractions/setup-just` (and equivalents): install the admitted
+/// locked `just` mise key and verify the version. No apt/Cargo fallback.
 fn setup_just_script() -> String {
-    r#"set -e
-if command -v just >/dev/null 2>&1; then
-  just --version
-  exit 0
-fi
-if command -v apt-get >/dev/null 2>&1; then
-  apt-get update
-  apt-get install -y --no-install-recommends just
-elif command -v cargo >/dev/null 2>&1; then
-  export CARGO_HOME="${CARGO_HOME:-/github/home/.cargo}"
-  mkdir -p "$CARGO_HOME/bin"
-  cargo install just --locked
-else
-  echo "just is not installed and neither apt-get nor cargo is available" >&2
-  exit 1
-fi
-just --version
-"#
-    .to_string()
+    let mut script = locked_mise_install("just");
+    script.push_str(&format!(
+        "just --version | grep -F '{JUST_LOCKED_VERSION}'\n"
+    ));
+    script
 }
 
 fn shell_single_quote(value: &str) -> String {
@@ -9186,33 +9321,250 @@ mod tests {
     }
 
     #[test]
-    fn mise_setup_exports_cargo_backend_tool_bins() {
+    fn mise_setup_persists_binary_and_installs_locked() {
         let script = setup_mise_script(true, "2026.7.7", "", "", "mise-v2", false);
 
+        // Persistent per-version binary store, not a mutation of /opt/mise/bin.
+        assert!(script.contains("exact_version='2026.7.7'"));
+        assert!(script.contains(r#"store_dir="$VELNOR_MISE_BINARY_STORE/$os_arch/$exact_version""#));
+        assert!(script.contains("VELNOR_MISE_BINARY_STORE:=/opt/velnor/mise-binaries"));
+        assert!(script.contains("VELNOR_MISE_BOOTSTRAP:=/opt/mise/bin/mise"));
+        assert!(script.contains(r#""$staging" self-update "$exact_version" -y"#));
+        assert!(script.contains(r#"mv -f "$staging" "$mise_bin""#));
+        assert!(script.contains("chmod 0555"));
+        assert!(script.contains("__VELNOR_MISE_SELF__"));
+        // Exactly one exclusive lock covers publish + install + export.
+        assert_eq!(script.matches("flock -x 9").count(), 1);
+        assert!(script.contains(".velnor-mise.lock"));
+        // Integrity: reuse checks recorded version + sha256, fails closed.
+        assert!(script.contains("_velnor_sha256"));
+        assert!(script.contains("failing closed"));
+
+        // Locked, fail-closed install — never plain `mise install`, never a
+        // network mise.run bootstrap or self-update of /opt/mise/bin.
+        assert!(script.contains(r#""$mise_bin" install --locked --yes"#));
+        assert!(script.contains("MISE_LOCKED=1"));
+        assert!(script.contains("MISE_LOCKED_VERIFY_PROVENANCE=1"));
+        assert!(!script.contains("https://mise.run"));
+        assert!(!script.contains("curl"));
+        assert!(!script.contains(r#"bin="/opt/mise/bin""#));
+
+        // Existing invariants preserved.
         assert!(script.contains("mise bin-paths"));
-        assert!(script.contains(r#"flock -x 9"#));
-        assert_eq!(script.matches(r#"flock -x 9"#).count(), 1);
-        assert!(!script.contains(r#"flock -x 8"#));
-        assert!(script.contains(r#".velnor-install.lock"#));
-        assert!(script.contains(r#"mise self-update "$requested_version" -y"#));
-        assert!(script.contains("requested_version='2026.7.7'"));
         assert!(script.contains("cache_key_prefix='mise-v2'"));
         assert!(script.contains("cache_save_requested=\"\""));
-        assert!(script.contains("-type d -empty -exec rm -rf"));
-        assert_eq!(
-            script
-                .matches(r#"find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d"#)
-                .count(),
-            1,
-            "only the poisoned-empty-entry cleanup may scan version roots"
-        );
         assert!(script.contains(r#"find "$mise_home/installs" -mindepth 3 -maxdepth 3"#));
         assert!(script.contains("__VELNOR_MISE_BIN__"));
-        assert!(script.contains("pipx version roots contain a same-named virtualenv"));
         assert!(!script.contains("export CARGO_HOME="));
         assert!(!script.contains("export RUSTUP_HOME="));
-        assert!(script.contains("mise env --redacted --json"));
-        assert!(script.contains("mise env --json"));
+        assert!(script.contains("env --redacted --json"));
+        assert!(script.contains("env --json"));
+    }
+
+    // Fake `mise` binary: `self-update <v>` rewrites itself to deterministically
+    // report `<v>` (stable content → stable hash); `install` and `self-update`
+    // append markers to $VELNOR_FAKE_LOG so the test can count them.
+    #[cfg(unix)]
+    const FAKE_MISE: &str = r#"#!/bin/sh
+log="$VELNOR_FAKE_LOG"
+case "$1" in
+  self-update)
+    printf 'self-update %s\n' "$2" >> "$log"
+    cat > "$0" <<INNER
+#!/bin/sh
+log="\$VELNOR_FAKE_LOG"
+case "\$1" in
+  --version) echo "$2 linux-x64 (fake)" ;;
+  install) printf 'install %s\n' "\$*" >> "\$log"; echo installed ;;
+  self-update) printf 'self-update %s\n' "\$2" >> "\$log" ;;
+  bin-paths) : ;;
+  trust) : ;;
+  env) echo '{}' ;;
+  *) : ;;
+esac
+INNER
+    chmod 0755 "$0"
+    ;;
+  --version) echo "0.0.0 linux-x64 (bootstrap)" ;;
+  install) printf 'install %s\n' "$*" >> "$log"; echo installed ;;
+  bin-paths) : ;;
+  trust) : ;;
+  env) echo '{}' ;;
+  *) : ;;
+esac
+"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn mise_persistent_binary_is_published_once_and_reused_across_jobs() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let base = temp_dir().join(format!("mise-reuse-{}", uuid::Uuid::new_v4()));
+        let bootstrap = base.join("baked/mise");
+        let store = base.join("persistent-store");
+        let log = base.join("fake.log");
+        fs::create_dir_all(bootstrap.parent().unwrap()).unwrap();
+        fs::create_dir_all(&store).unwrap();
+        fs::write(&bootstrap, FAKE_MISE).unwrap();
+        fs::set_permissions(&bootstrap, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(&log, "").unwrap();
+        let bootstrap_before = fs::read(&bootstrap).unwrap();
+
+        // Requested exact version differs from the fake bootstrap (0.0.0).
+        let script = setup_mise_script(true, "2026.7.8", "", "", "mise-v2", false);
+
+        let run_job = |job: &str| -> std::process::Output {
+            let mise_home = base.join(format!("{job}/mise-home"));
+            let env_dir = base.join(format!("{job}/env"));
+            fs::create_dir_all(&mise_home).unwrap();
+            fs::create_dir_all(&env_dir).unwrap();
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&script)
+                .stdin(std::process::Stdio::null()) // closed stdin: zero prompts
+                .env("VELNOR_MISE_BOOTSTRAP", &bootstrap)
+                .env("VELNOR_MISE_BINARY_STORE", &store)
+                .env("VELNOR_MISE_HOME", &mise_home)
+                .env("VELNOR_MISE_ENV_DIR", &env_dir)
+                .env("VELNOR_FAKE_LOG", &log)
+                .output()
+                .expect("run mise setup script")
+        };
+
+        // Job 1: fresh store → one publish (self-update), one locked install.
+        let out1 = run_job("job-1");
+        assert!(
+            out1.status.success(),
+            "job 1 failed: {}",
+            String::from_utf8_lossy(&out1.stderr)
+        );
+        let stdout1 = String::from_utf8_lossy(&out1.stdout);
+        assert!(
+            stdout1.contains("published persistent 2026.7.8"),
+            "{stdout1}"
+        );
+        assert!(stdout1.contains("__VELNOR_MISE_SELF__"));
+
+        let published = store.join("linux-x64/2026.7.8/mise");
+        let published_alt = store.join("linux-arm64/2026.7.8/mise");
+        let bin_path = if published.exists() {
+            published
+        } else {
+            published_alt
+        };
+        assert!(bin_path.exists(), "persistent binary not published");
+        let hash1 = fs::read(&bin_path).unwrap();
+        let meta = fs::read_to_string(bin_path.parent().unwrap().join("metadata.json")).unwrap();
+        assert!(meta.contains("\"version\":\"2026.7.8\""));
+        assert!(meta.contains("\"sha256\":\""));
+        // chmod 0555 on the published binary.
+        let mode = fs::metadata(&bin_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o555, "published binary must be 0555");
+
+        // Job 2: new job dirs, SAME persistent store → reuse, no second update.
+        let out2 = run_job("job-2");
+        assert!(
+            out2.status.success(),
+            "job 2 failed: {}",
+            String::from_utf8_lossy(&out2.stderr)
+        );
+        let stdout2 = String::from_utf8_lossy(&out2.stdout);
+        assert!(stdout2.contains("reusing persisted 2026.7.8"), "{stdout2}");
+        assert!(!stdout2.contains("published persistent"));
+
+        // Identical binary path + hash across both jobs.
+        let hash2 = fs::read(&bin_path).unwrap();
+        assert_eq!(hash1, hash2, "reused binary content must be identical");
+
+        // Exactly one self-update total, two locked installs total.
+        let log_text = fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            log_text.matches("self-update 2026.7.8").count(),
+            1,
+            "binary must be updated exactly once across two jobs: {log_text}"
+        );
+        assert_eq!(
+            log_text.matches("install --locked --yes").count(),
+            2,
+            "each job runs one locked install: {log_text}"
+        );
+
+        // No fallback installer or network marker anywhere.
+        for text in [&stdout1, &stdout2] {
+            assert!(!text.contains("mise.run"));
+            assert!(!text.contains("apt-get"));
+            assert!(!text.contains("cargo install"));
+        }
+
+        // The read-only baked bootstrap was never mutated.
+        assert_eq!(
+            fs::read(&bootstrap).unwrap(),
+            bootstrap_before,
+            "the baked bootstrap must not be written"
+        );
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mise_persistent_store_fails_closed_on_corruption() {
+        use std::process::Command;
+
+        let base = temp_dir().join(format!("mise-corrupt-{}", uuid::Uuid::new_v4()));
+        let bootstrap = base.join("baked/mise");
+        let store = base.join("persistent-store");
+        let log = base.join("fake.log");
+        fs::create_dir_all(bootstrap.parent().unwrap()).unwrap();
+        fs::create_dir_all(&store).unwrap();
+        fs::write(&bootstrap, FAKE_MISE).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&bootstrap, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(&log, "").unwrap();
+        let script = setup_mise_script(true, "2026.7.8", "", "", "mise-v2", false);
+
+        let mise_home = base.join("mise-home");
+        let env_dir = base.join("env");
+        fs::create_dir_all(&mise_home).unwrap();
+        fs::create_dir_all(&env_dir).unwrap();
+        let run = || {
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&script)
+                .stdin(std::process::Stdio::null())
+                .env("VELNOR_MISE_BOOTSTRAP", &bootstrap)
+                .env("VELNOR_MISE_BINARY_STORE", &store)
+                .env("VELNOR_MISE_HOME", &mise_home)
+                .env("VELNOR_MISE_ENV_DIR", &env_dir)
+                .env("VELNOR_FAKE_LOG", &log)
+                .output()
+                .expect("run mise setup script")
+        };
+
+        assert!(run().status.success(), "initial publish must succeed");
+        let bin_path = if store.join("linux-x64/2026.7.8/mise").exists() {
+            store.join("linux-x64/2026.7.8/mise")
+        } else {
+            store.join("linux-arm64/2026.7.8/mise")
+        };
+        // Tamper with the persisted binary; the hash no longer matches metadata.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(&bin_path, "tampered\n").unwrap();
+
+        let out = run();
+        assert!(
+            !out.status.success(),
+            "a corrupt persisted binary must fail closed"
+        );
+        assert!(String::from_utf8_lossy(&out.stderr).contains("integrity check"));
+
+        fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -11827,7 +12179,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .unwrap();
         assert!(mise_shims < baked_rustup);
         assert_eq!(results[0].state.env["RUSTUP_TOOLCHAIN"], "1.97.1");
-        assert!(results[3].state.path.contains(&"/root/.cargo/bin".into()));
+        // just is now a locked mise tool exposed via the mise shims dir.
+        assert!(results[3].state.path.contains(&"/opt/mise/shims".into()));
         assert_eq!(results[4].state.outputs["cache-hit"], "false");
         assert_eq!(results[4].state.env["CACHE_ON_FAILURE"], "true");
         let docker_exec_calls = executor
@@ -11841,15 +12194,23 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .collect::<Vec<_>>();
         // mise, mold, just (main steps) + sccache start + sccache post (show-stats + stop)
         assert_eq!(docker_exec_calls.len(), 5);
-        assert!(docker_exec_calls
+        // Plan 008: no runtime mise.run bootstrap, no apt/Cargo installers —
+        // mold and just are locked mise installs, one toolchain contract (N8).
+        assert!(!docker_exec_calls
             .iter()
             .any(|args| args.iter().any(|arg| arg.contains("https://mise.run"))));
+        assert!(!docker_exec_calls
+            .iter()
+            .any(|args| args.iter().any(|arg| arg.contains("apt-get"))));
+        assert!(!docker_exec_calls
+            .iter()
+            .any(|args| args.iter().any(|arg| arg.contains("cargo install"))));
         assert!(docker_exec_calls.iter().any(|args| args
             .iter()
-            .any(|arg| arg.contains("apt-get install -y --no-install-recommends mold"))));
+            .any(|arg| arg.contains("mise install --locked --yes 'mold'"))));
         assert!(docker_exec_calls.iter().any(|args| args
             .iter()
-            .any(|arg| arg.contains("apt-get install -y --no-install-recommends just"))));
+            .any(|arg| arg.contains("mise install --locked --yes 'just'"))));
         assert!(docker_exec_calls
             .iter()
             .any(|args| args.iter().any(|arg| arg.contains("sccache --show-stats"))));
@@ -18258,15 +18619,25 @@ bitcoin-processor-app.push=true")
     }
 
     #[test]
-    fn cosign_installer_script_prefers_preinstalled_and_downloads_on_mismatch() {
-        let script = cosign_installer_script("v3.1.1", "$HOME/.cosign");
-        assert!(script.contains("WANT='3.1.1'"));
+    fn cosign_installer_uses_locked_mise_and_rejects_other_releases() {
+        // Requesting the locked version installs via mise, links install-dir,
+        // verifies the version, and never downloads over curl.
+        let script = cosign_installer_script("v3.1.2", "$HOME/.cosign");
+        assert!(script.contains("mise install --locked --yes 'cosign'"));
+        assert!(script.contains("MISE_LOCKED=1"));
+        assert!(script.contains("WANT='3.1.2'"));
+        assert!(script.contains("LOCKED='3.1.2'"));
         assert!(script.contains("DIR=\"$HOME/.cosign\""));
         assert!(script.contains("command -v cosign"));
-        assert!(script.contains(
-            "https://github.com/sigstore/cosign/releases/download/v${ver}/cosign-linux-${arch}"
-        ));
         assert!(script.contains("__VELNOR_COSIGN_DIR__"));
+        assert!(!script.contains("curl"));
+        assert!(!script.contains("releases/download"));
+
+        // A different requested release fails closed (no fallback download).
+        let mismatch = cosign_installer_script("v3.1.1", "$HOME/.cosign");
+        assert!(mismatch.contains("WANT='3.1.1'"));
+        assert!(mismatch.contains("refusing a non-mise download"));
+        assert!(!mismatch.contains("curl"));
     }
 
     #[test]
@@ -18331,11 +18702,14 @@ bitcoin-processor-app.push=true")
     // ── setup_mold_script ─────────────────────────────────────────────────
 
     #[test]
-    fn setup_mold_script_does_not_require_clang() {
-        // Removing `linker = "clang"` was necessary because clang is not installed
-        // in the arm64 job image. The script must use -fuse-ld=mold with the
-        // default cc (gcc) linker instead.
+    fn setup_mold_script_installs_locked_mise_and_wires_gcc_linker() {
         let script = setup_mold_script();
+        // Plan 008 N8: mold is a locked mise install, never apt.
+        assert!(script.contains("mise install --locked --yes 'mold'"));
+        assert!(script.contains("MISE_LOCKED=1"));
+        assert!(!script.contains("apt-get"));
+        assert!(script.contains("mold --version | grep -F '2.41.0'"));
+        // Cargo-linker wiring is unchanged: gcc + -fuse-ld=mold, no clang.
         assert!(
             !script.contains("linker = \"clang\""),
             "script must not require clang as linker: {script}"
@@ -18344,12 +18718,18 @@ bitcoin-processor-app.push=true")
             script.contains("fuse-ld=mold"),
             "script must wire mold via -fuse-ld=mold: {script}"
         );
-        // Still configures both x86_64 and aarch64 targets.
         assert!(script.contains("x86_64-unknown-linux-gnu"));
         assert!(script.contains("aarch64-unknown-linux-gnu"));
-        // Installs mold via apt if not present.
-        assert!(script.contains("apt-get install"));
-        assert!(script.contains("mold --version"));
+    }
+
+    #[test]
+    fn setup_just_script_installs_locked_mise_without_apt_or_cargo() {
+        let script = setup_just_script();
+        assert!(script.contains("mise install --locked --yes 'just'"));
+        assert!(script.contains("MISE_LOCKED=1"));
+        assert!(script.contains("just --version | grep -F '1.57.0'"));
+        assert!(!script.contains("apt-get"));
+        assert!(!script.contains("cargo install"));
     }
 
     // ── RunServiceStepResult fields ───────────────────────────────────────
