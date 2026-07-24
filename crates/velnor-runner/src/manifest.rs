@@ -11,12 +11,16 @@ use crate::cli::{CapabilitiesArgs, CapabilitiesCommand};
 use crate::compiler_cache::CompilerCacheBackend;
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 
-pub const MANIFEST_VERSION: u32 = 5;
+// Plan 009 introduced v6 (action subpaths + reusable-workflow schema). Plan 010
+// adds source-SHA + crate-version identity to the exported manifest so a consumer
+// can bind the compiled manifest to one release commit, bumping the schema to v7.
+pub const MANIFEST_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CapabilityManifest {
     pub version: u32,
     pub actions: &'static [ActionCapability],
+    pub reusable_workflows: &'static [ReusableWorkflow],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -24,6 +28,11 @@ pub struct ActionCapability {
     pub repository: &'static str,
     pub adapter: NativeActionAdapter,
     pub allowed_refs: &'static [AllowedRef],
+    /// Non-root action subpaths this repository exposes (for example
+    /// `actions/cache` exposes `restore` and `save`). The root action is always
+    /// admissible; any subpath outside this set fails closed. Empty means the
+    /// repository is only ever used at its root.
+    pub allowed_subpaths: &'static [&'static str],
     pub inputs: &'static [InputRule],
     pub notes: &'static str,
 }
@@ -34,12 +43,34 @@ pub struct AllowedRef {
     pub release: &'static str,
 }
 
+/// A server-expanded reusable workflow (`jobs.<id>.uses`) that Velnor admits.
+/// This is distinct from a runner-side action: GitHub resolves the workflow
+/// server-side and dispatches an expanded job to Velnor, so admission cross-
+/// checks the workflow's repository, path, and immutable full-SHA ref plus the
+/// dispatched inputs — it never parses `jobs.<id>.uses` as a runner action.
+#[derive(Debug, Clone, Copy)]
+pub struct ReusableWorkflow {
+    pub repository: &'static str,
+    /// Workflow file path within the repository, e.g.
+    /// `.github/workflows/publish.yml`.
+    pub path: &'static str,
+    pub allowed_refs: &'static [AllowedRef],
+    pub inputs: &'static [InputRule],
+    pub notes: &'static str,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum InputRule {
     Any(&'static str),
     Literal(&'static str, &'static [&'static str]),
     RequiredLiteral(&'static str, &'static [&'static str]),
     Forbidden(&'static str),
+    /// Value is admissible iff the pure predicate returns true. `accepted`
+    /// documents the constraint in violation messages (the value itself stays
+    /// redacted). Used for the strict mise date-version and `install_args`
+    /// tool-key shape rules; membership against the committed lock is enforced
+    /// at install time by `crate::mise`.
+    Predicate(&'static str, fn(&str) -> bool, &'static [&'static str]),
 }
 
 impl InputRule {
@@ -48,7 +79,8 @@ impl InputRule {
             Self::Any(name)
             | Self::Literal(name, _)
             | Self::RequiredLiteral(name, _)
-            | Self::Forbidden(name) => name,
+            | Self::Forbidden(name)
+            | Self::Predicate(name, _, _) => name,
         }
     }
 }
@@ -193,9 +225,20 @@ const DOWNLOAD_INPUTS: &[InputRule] = &[
     InputRule::Literal("merge-multiple", &["true", "false"]),
 ];
 const MISE_INPUTS: &[InputRule] = &[
-    InputRule::Literal("version", &["2026.7.7"]),
+    // Exact mise date-version only; omission (empty) resolves to the fleet pin.
+    InputRule::Predicate(
+        "version",
+        crate::mise::is_valid_mise_version,
+        &["exact YYYY.M.D mise version, or omitted for the fleet-pinned latest"],
+    ),
     InputRule::Literal("install", &["true", "false"]),
-    InputRule::Any("install_args"),
+    // Whitespace-separated bare tool keys; membership in the committed lock is
+    // enforced fail-closed at install time (crate::mise).
+    InputRule::Predicate(
+        "install_args",
+        crate::mise::is_valid_install_args_shape,
+        &["whitespace-separated tool keys committed in mise.lock (no flags/@version/URLs/paths)"],
+    ),
     InputRule::Any("working_directory"),
     InputRule::Any("github_token"),
     InputRule::Literal("cache_key_prefix", &["mise-v2"]),
@@ -258,10 +301,14 @@ const BUILD_PUSH_INPUTS: &[InputRule] = &[
 
 macro_rules! capability {
     ($repo:literal, $adapter:ident, $refs:expr, $inputs:expr) => {
+        capability!($repo, $adapter, $refs, $inputs, subpaths: &[])
+    };
+    ($repo:literal, $adapter:ident, $refs:expr, $inputs:expr, subpaths: $subpaths:expr) => {
         ActionCapability {
             repository: $repo,
             adapter: NativeActionAdapter::$adapter,
             allowed_refs: $refs,
+            allowed_subpaths: $subpaths,
             inputs: $inputs,
             notes: "native Rust adapter; estate pin sweep 2026-07-18",
         }
@@ -282,6 +329,7 @@ pub static ACTIONS: &[ActionCapability] = &[
                 "latest-build artifact API lookup (#80)",
             ),
         ],
+        allowed_subpaths: &[],
         inputs: &[
             InputRule::Any("path"),
             InputRule::Any("jackin-version"),
@@ -306,7 +354,13 @@ pub static ACTIONS: &[ActionCapability] = &[
             InputRule::Literal("lfs", &["true", "false"]),
         ]
     ),
-    capability!("actions/cache", Cache, CACHE_REFS, CACHE_INPUTS),
+    capability!(
+        "actions/cache",
+        Cache,
+        CACHE_REFS,
+        CACHE_INPUTS,
+        subpaths: &["restore", "save"]
+    ),
     capability!(
         "actions/attest-build-provenance",
         AttestBuildProvenance,
@@ -518,10 +572,199 @@ pub static ACTIONS: &[ActionCapability] = &[
     ),
 ];
 
+/// Inputs dispatched to the approved publish reusable workflow via
+/// `jobs.<id>.with`. These mirror the composite `jackin-role-action` surface the
+/// estate already admits; the exact `on.workflow_call.inputs` schema of
+/// `publish.yml@80a1acd0…` MUST be reconciled against that immutable file before
+/// real in-order execution (plan 009 STOP: "exact current workflow schema cannot
+/// be derived without new approval").
+const PUBLISH_WORKFLOW_INPUTS: &[InputRule] = &[
+    InputRule::Any("jackin-version"),
+    InputRule::Literal("skip-build", &["true", "false"]),
+    InputRule::Any("registry-cache-image"),
+];
+
+pub static REUSABLE_WORKFLOWS: &[ReusableWorkflow] = &[ReusableWorkflow {
+    repository: "jackin-project/jackin-role-action",
+    path: ".github/workflows/publish.yml",
+    allowed_refs: &[allowed(
+        "80a1acd07257a23b441c546e6fcad12239ef7626",
+        "estate-pinned publish reusable workflow",
+    )],
+    inputs: PUBLISH_WORKFLOW_INPUTS,
+    notes: "server-expanded reusable workflow; identity/full-SHA/inputs admitted, jobs.<id>.uses never parsed as a runner action",
+}];
+
 pub static MANIFEST: CapabilityManifest = CapabilityManifest {
     version: MANIFEST_VERSION,
     actions: ACTIONS,
+    reusable_workflows: REUSABLE_WORKFLOWS,
 };
+
+/// Exact `(repository, mutable-tag)` identities that are deliberately retained as
+/// a documented N2 exception while pre-plan-041 fixtures still reference mutable
+/// tags. `assert_manifest_integrity` accepts these and ONLY these mutable refs;
+/// every other non-`__native` ref must be a full 40-hex SHA. Remove this
+/// allowlist when plan 041 migrates the fixture to immutable refs.
+const PLAN_041_FIXTURE_TRANSITION_ALLOWLIST: &[(&str, &str)] = &[
+    ("actions/checkout", "v4"),
+    ("actions/checkout", "v6"),
+    ("actions/checkout", "v7"),
+    ("actions/upload-artifact", "v7"),
+    ("actions/download-artifact", "v8"),
+    ("jdx/mise-action", "v4"),
+    ("mozilla-actions/sccache-action", "v0.0.10"),
+    ("rui314/setup-mold", "v1"),
+    ("swatinem/rust-cache", "v2"),
+    ("dorny/paths-filter", "v4"),
+    ("crazy-max/ghaction-github-runtime", "v4"),
+    ("docker/setup-buildx-action", "v4"),
+    ("docker/login-action", "v4"),
+    ("docker/bake-action", "v7"),
+    ("actions/upload-pages-artifact", "v5"),
+    ("actions/deploy-pages", "v5"),
+    ("docker/metadata-action", "v6"),
+    ("docker/build-push-action", "v7"),
+];
+
+fn is_full_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_unsafe_subpath(subpath: &str) -> bool {
+    subpath.is_empty()
+        || subpath.starts_with('/')
+        || subpath
+            .split('/')
+            .any(|segment| segment == ".." || segment.is_empty())
+}
+
+/// Startup integrity gate for the compiled manifest. Run once before any work is
+/// accepted; a violation is a programming error in the compiled manifest, so it
+/// fails hard (`bail!`). It rejects any non-`__native` action/workflow ref that
+/// is neither a full 40-hex SHA nor an explicit plan-041 transition tag,
+/// duplicate action/workflow identities, duplicate or unsafe subpaths, and
+/// `__native` used for anything but broker-managed checkout.
+pub fn assert_manifest_integrity() -> Result<()> {
+    assert_manifest_integrity_of(ACTIONS, REUSABLE_WORKFLOWS)
+}
+
+fn assert_manifest_integrity_of(
+    actions: &[ActionCapability],
+    reusable_workflows: &[ReusableWorkflow],
+) -> Result<()> {
+    let mut seen_repositories: Vec<String> = Vec::new();
+    for capability in actions {
+        let repository = capability.repository.to_ascii_lowercase();
+        if seen_repositories.contains(&repository) {
+            anyhow::bail!("manifest integrity: duplicate action repository '{repository}'");
+        }
+        seen_repositories.push(repository.clone());
+
+        let mut seen_refs: Vec<&str> = Vec::new();
+        for allowed_ref in capability.allowed_refs {
+            if seen_refs.contains(&allowed_ref.value) {
+                anyhow::bail!(
+                    "manifest integrity: duplicate ref '{}' for '{}'",
+                    allowed_ref.value,
+                    capability.repository
+                );
+            }
+            seen_refs.push(allowed_ref.value);
+
+            if allowed_ref.value == NATIVE_ACTION_REF {
+                // `__native` authorizes broker-managed checkout only; it must
+                // never stand in for a metadata-fetched action ref.
+                if capability.adapter != NativeActionAdapter::Checkout {
+                    anyhow::bail!(
+                        "manifest integrity: '__native' ref is only valid for broker-managed checkout, found on '{}'",
+                        capability.repository
+                    );
+                }
+                continue;
+            }
+            if is_full_sha(allowed_ref.value) {
+                continue;
+            }
+            if PLAN_041_FIXTURE_TRANSITION_ALLOWLIST
+                .iter()
+                .any(|(repo, tag)| {
+                    repo.eq_ignore_ascii_case(capability.repository) && *tag == allowed_ref.value
+                })
+            {
+                continue;
+            }
+            anyhow::bail!(
+                "manifest integrity: mutable ref '{}' for '{}' is neither a 40-hex SHA nor a plan-041 transition tag",
+                allowed_ref.value,
+                capability.repository
+            );
+        }
+
+        let mut seen_subpaths: Vec<&str> = Vec::new();
+        for subpath in capability.allowed_subpaths {
+            if is_unsafe_subpath(subpath) {
+                anyhow::bail!(
+                    "manifest integrity: unsafe subpath '{}' for '{}'",
+                    subpath,
+                    capability.repository
+                );
+            }
+            if seen_subpaths.contains(subpath) {
+                anyhow::bail!(
+                    "manifest integrity: duplicate subpath '{}' for '{}'",
+                    subpath,
+                    capability.repository
+                );
+            }
+            seen_subpaths.push(subpath);
+        }
+    }
+
+    let mut seen_workflows: Vec<(String, String)> = Vec::new();
+    for workflow in reusable_workflows {
+        let identity = (
+            workflow.repository.to_ascii_lowercase(),
+            workflow.path.to_ascii_lowercase(),
+        );
+        if seen_workflows.contains(&identity) {
+            anyhow::bail!(
+                "manifest integrity: duplicate reusable workflow '{}/{}'",
+                workflow.repository,
+                workflow.path
+            );
+        }
+        seen_workflows.push(identity);
+        if is_unsafe_subpath(workflow.path) {
+            anyhow::bail!(
+                "manifest integrity: unsafe reusable workflow path '{}'",
+                workflow.path
+            );
+        }
+        // Reusable-workflow admission is new in manifest v6; it grants no
+        // plan-041 transition exception — every ref must be a full 40-hex SHA.
+        for allowed_ref in workflow.allowed_refs {
+            if !is_full_sha(allowed_ref.value) {
+                anyhow::bail!(
+                    "manifest integrity: reusable workflow '{}/{}' ref '{}' is not a 40-hex SHA",
+                    workflow.repository,
+                    workflow.path,
+                    allowed_ref.value
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Look up a reusable workflow capability by repository and workflow path.
+pub fn find_reusable_workflow(repository: &str, path: &str) -> Option<&'static ReusableWorkflow> {
+    let path = path.trim_start_matches('/');
+    REUSABLE_WORKFLOWS.iter().find(|workflow| {
+        workflow.repository.eq_ignore_ascii_case(repository)
+            && workflow.path.trim_start_matches('/') == path
+    })
+}
 
 pub fn find(repository: &str) -> Option<&'static ActionCapability> {
     ACTIONS
@@ -533,6 +776,7 @@ pub fn validate_resolved_action(
     step: &str,
     repository: &str,
     action_ref: &str,
+    source_path: Option<&str>,
     inputs: &BTreeMap<String, String>,
 ) -> Result<()> {
     let capability = find(repository).ok_or_else(|| {
@@ -567,12 +811,122 @@ pub fn validate_resolved_action(
         )
         .into());
     }
+    if let Some(error) = subpath_violation(step, repository, action_ref, source_path, capability) {
+        return Err(error.into());
+    }
     let mut found = Vec::new();
-    validate_inputs(&mut found, step, repository, action_ref, capability, inputs);
+    validate_inputs(
+        &mut found,
+        step,
+        repository,
+        action_ref,
+        capability.inputs,
+        inputs,
+    );
     if let Some(error) = found.into_iter().next() {
         return Err(error.into());
     }
     Ok(())
+}
+
+/// Validate an action subpath against the capability's admitted subpaths. Root
+/// (absent/empty) is always admissible; a traversal/absolute path or any subpath
+/// outside the declared set fails closed.
+fn subpath_violation(
+    step: &str,
+    repository: &str,
+    action_ref: &str,
+    source_path: Option<&str>,
+    capability: &ActionCapability,
+) -> Option<CapabilityViolation> {
+    let subpath = source_path
+        .map(|value| value.trim().trim_matches('/'))
+        .filter(|value| !value.is_empty())?;
+    if is_unsafe_subpath(subpath)
+        || !capability
+            .allowed_subpaths
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(subpath))
+    {
+        let mut accepted = vec!["<root>".to_string()];
+        accepted.extend(capability.allowed_subpaths.iter().map(|s| s.to_string()));
+        return Some(violation(
+            step, repository, action_ref, "path", subpath, accepted,
+        ));
+    }
+    None
+}
+
+/// Validate a server-expanded reusable workflow identity and its dispatched
+/// inputs. `workflow_ref` must be the immutable full-SHA ref carried by
+/// `github.job_workflow_ref`; a mutable ref, unknown identity, or disallowed
+/// input fails closed. The received value is never surfaced.
+pub fn validate_reusable_workflow(
+    step: &str,
+    repository: &str,
+    path: &str,
+    workflow_ref: &str,
+    inputs: &BTreeMap<String, String>,
+) -> Result<()> {
+    let identity = format!("{repository}/{path}");
+    let workflow = find_reusable_workflow(repository, path).ok_or_else(|| {
+        violation(
+            step,
+            &identity,
+            workflow_ref,
+            "uses",
+            &identity,
+            REUSABLE_WORKFLOWS
+                .iter()
+                .map(|item| format!("{}/{}", item.repository, item.path))
+                .collect(),
+        )
+    })?;
+    if !workflow
+        .allowed_refs
+        .iter()
+        .any(|candidate| candidate.value == workflow_ref)
+    {
+        return Err(violation(
+            step,
+            &identity,
+            workflow_ref,
+            "ref",
+            workflow_ref,
+            workflow
+                .allowed_refs
+                .iter()
+                .map(|candidate| candidate.value.to_string())
+                .collect(),
+        )
+        .into());
+    }
+    let mut found = Vec::new();
+    validate_inputs(
+        &mut found,
+        step,
+        &identity,
+        workflow_ref,
+        workflow.inputs,
+        inputs,
+    );
+    if let Some(error) = found.into_iter().next() {
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+/// Whether `input_name` is capability-affecting (constrained) for `repository`:
+/// true unless the repository declares it as a free-form `Any` input. An unknown
+/// repository or input counts as constrained (it is rejected outright), so an
+/// unresolved `${{ … }}` expression in such an input must fail admission.
+pub fn action_input_is_constrained(repository: &str, input_name: &str) -> bool {
+    match find(repository) {
+        Some(capability) => !capability.inputs.iter().any(
+            |rule| matches!(rule, InputRule::Any(name) if name.eq_ignore_ascii_case(input_name)),
+        ),
+        None => true,
+    }
 }
 
 pub fn violations(job: &AgentJobRequestMessage) -> Vec<CapabilityViolation> {
@@ -650,6 +1004,15 @@ pub fn violations_with_context(
                     .collect(),
             ));
         }
+        if let Some(error) = subpath_violation(
+            &step_name,
+            repository,
+            action_ref,
+            reference.path.as_deref(),
+            capability,
+        ) {
+            violations.push(error);
+        }
         let inputs = match string_inputs(step) {
             Ok(inputs) => inputs
                 .into_iter()
@@ -677,7 +1040,7 @@ pub fn violations_with_context(
             &step_name,
             repository,
             action_ref,
-            capability,
+            capability.inputs,
             &inputs,
         );
     }
@@ -895,12 +1258,11 @@ fn validate_inputs(
     step: &str,
     repository: &str,
     action_ref: &str,
-    capability: &ActionCapability,
+    rules: &[InputRule],
     inputs: &BTreeMap<String, String>,
 ) {
     for (name, value) in inputs {
-        match capability
-            .inputs
+        match rules
             .iter()
             .copied()
             .find(|rule| rule.name().eq_ignore_ascii_case(name))
@@ -920,6 +1282,15 @@ fn validate_inputs(
                     allowed.iter().map(|value| (*value).to_string()).collect(),
                 ))
             }
+            Some(InputRule::Predicate(_, check, _)) if check(value.trim()) => {}
+            Some(InputRule::Predicate(_, _, accepted)) => violations.push(violation(
+                step,
+                repository,
+                action_ref,
+                &format!("with.{name}"),
+                value,
+                accepted.iter().map(|value| (*value).to_string()).collect(),
+            )),
             Some(InputRule::Forbidden(_)) => violations.push(violation(
                 step,
                 repository,
@@ -934,15 +1305,11 @@ fn validate_inputs(
                 action_ref,
                 &format!("with.{name}"),
                 value,
-                capability
-                    .inputs
-                    .iter()
-                    .map(|rule| rule.name().to_string())
-                    .collect(),
+                rules.iter().map(|rule| rule.name().to_string()).collect(),
             )),
         }
     }
-    for rule in capability.inputs {
+    for rule in rules {
         if let InputRule::RequiredLiteral(name, allowed) = rule {
             if !inputs.keys().any(|input| input.eq_ignore_ascii_case(name)) {
                 violations.push(violation(
@@ -993,12 +1360,28 @@ pub fn validate_job_with_context(
 #[derive(Serialize)]
 struct ExportManifest<'a> {
     version: u32,
+    /// Plan 010: the exact source commit this binary (and therefore this compiled
+    /// manifest) was built from. `development` for non-release builds. Lets a
+    /// consumer bind the manifest to one release record.
+    source_sha: &'a str,
+    /// The crate version compiled into this binary.
+    crate_version: &'a str,
     actions: Vec<ExportAction<'a>>,
+    reusable_workflows: Vec<ExportReusableWorkflow<'a>>,
 }
 #[derive(Serialize)]
 struct ExportAction<'a> {
     repository: &'a str,
     adapter: String,
+    allowed_refs: Vec<&'a str>,
+    allowed_subpaths: Vec<&'a str>,
+    inputs: Vec<&'a str>,
+    notes: &'a str,
+}
+#[derive(Serialize)]
+struct ExportReusableWorkflow<'a> {
+    repository: &'a str,
+    path: &'a str,
     allowed_refs: Vec<&'a str>,
     inputs: Vec<&'a str>,
     notes: &'a str,
@@ -1016,13 +1399,32 @@ pub fn to_json() -> Result<String> {
                 .iter()
                 .map(|reference| reference.value)
                 .collect(),
+            allowed_subpaths: item.allowed_subpaths.to_vec(),
+            inputs: item.inputs.iter().map(|input| input.name()).collect(),
+            notes: item.notes,
+        })
+        .collect();
+    let reusable_workflows = MANIFEST
+        .reusable_workflows
+        .iter()
+        .map(|item| ExportReusableWorkflow {
+            repository: item.repository,
+            path: item.path,
+            allowed_refs: item
+                .allowed_refs
+                .iter()
+                .map(|reference| reference.value)
+                .collect(),
             inputs: item.inputs.iter().map(|input| input.name()).collect(),
             notes: item.notes,
         })
         .collect();
     Ok(serde_json::to_string_pretty(&ExportManifest {
         version: MANIFEST.version,
+        source_sha: env!("VELNOR_SOURCE_SHA"),
+        crate_version: env!("CARGO_PKG_VERSION"),
         actions,
+        reusable_workflows,
     })?)
 }
 
@@ -1095,6 +1497,240 @@ mod tests {
         .unwrap()
     }
 
+    fn capability_with(
+        repository: &'static str,
+        allowed_refs: &'static [AllowedRef],
+        allowed_subpaths: &'static [&'static str],
+    ) -> ActionCapability {
+        ActionCapability {
+            repository,
+            adapter: NativeActionAdapter::Cache,
+            allowed_refs,
+            allowed_subpaths,
+            inputs: &[],
+            notes: "synthetic",
+        }
+    }
+
+    #[test]
+    fn compiled_manifest_is_version_seven_and_structurally_immutable() {
+        // Plan 010 bumped v6 -> v7 (source-SHA + crate-version identity in the
+        // export). 009's structural integrity checks remain intact.
+        assert_eq!(MANIFEST_VERSION, 7);
+        assert_eq!(MANIFEST.version, 7);
+        assert_manifest_integrity().expect("compiled manifest must pass integrity");
+    }
+
+    #[test]
+    fn every_non_native_ref_is_full_sha_or_documented_transition_tag() {
+        for capability in ACTIONS {
+            for allowed_ref in capability.allowed_refs {
+                if allowed_ref.value == NATIVE_ACTION_REF {
+                    assert_eq!(
+                        capability.adapter,
+                        NativeActionAdapter::Checkout,
+                        "__native only for checkout"
+                    );
+                    continue;
+                }
+                let is_sha = is_full_sha(allowed_ref.value);
+                let is_transition =
+                    PLAN_041_FIXTURE_TRANSITION_ALLOWLIST
+                        .iter()
+                        .any(|(repo, tag)| {
+                            repo.eq_ignore_ascii_case(capability.repository)
+                                && *tag == allowed_ref.value
+                        });
+                assert!(
+                    is_sha || is_transition,
+                    "{} ref '{}' is neither SHA nor transition tag",
+                    capability.repository,
+                    allowed_ref.value
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn integrity_rejects_new_mutable_tag() {
+        let actions = [capability_with(
+            "acme/widget",
+            &[AllowedRef {
+                value: "v9",
+                release: "not on the allowlist",
+            }],
+            &[],
+        )];
+        let error = assert_manifest_integrity_of(&actions, &[]).unwrap_err();
+        assert!(error.to_string().contains("mutable ref"));
+    }
+
+    #[test]
+    fn integrity_rejects_duplicate_identities_and_unsafe_subpaths() {
+        const SHA_REF: &[AllowedRef] = &[AllowedRef {
+            value: "0000000000000000000000000000000000000000",
+            release: "",
+        }];
+        let duplicate = [
+            capability_with("acme/dup", SHA_REF, &[]),
+            capability_with("acme/dup", SHA_REF, &[]),
+        ];
+        assert!(assert_manifest_integrity_of(&duplicate, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate action repository"));
+
+        let traversal = [capability_with("acme/trav", SHA_REF, &["../escape"])];
+        assert!(assert_manifest_integrity_of(&traversal, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("unsafe subpath"));
+
+        let absolute = [capability_with("acme/abs", SHA_REF, &["/etc"])];
+        assert!(assert_manifest_integrity_of(&absolute, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("unsafe subpath"));
+    }
+
+    #[test]
+    fn integrity_rejects_native_ref_outside_checkout() {
+        let actions = [ActionCapability {
+            repository: "acme/notcheckout",
+            adapter: NativeActionAdapter::Cache,
+            allowed_refs: &[AllowedRef {
+                value: NATIVE_ACTION_REF,
+                release: "",
+            }],
+            allowed_subpaths: &[],
+            inputs: &[],
+            notes: "synthetic",
+        }];
+        assert!(assert_manifest_integrity_of(&actions, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("__native"));
+    }
+
+    #[test]
+    fn integrity_rejects_mutable_reusable_workflow_ref() {
+        let workflows = [ReusableWorkflow {
+            repository: "acme/flows",
+            path: ".github/workflows/x.yml",
+            allowed_refs: &[AllowedRef {
+                value: "v1",
+                release: "",
+            }],
+            inputs: &[],
+            notes: "synthetic",
+        }];
+        assert!(assert_manifest_integrity_of(&[], &workflows)
+            .unwrap_err()
+            .to_string()
+            .contains("not a 40-hex SHA"));
+    }
+
+    #[test]
+    fn validate_resolved_action_enforces_admitted_subpaths() {
+        let inputs = BTreeMap::from([
+            ("path".to_string(), "target".to_string()),
+            ("key".to_string(), "k".to_string()),
+        ]);
+        // Root, restore, and save are admitted.
+        for subpath in [None, Some("restore"), Some("save")] {
+            validate_resolved_action(
+                "cache",
+                "actions/cache",
+                "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+                subpath,
+                &inputs,
+            )
+            .unwrap();
+        }
+        // An unknown subpath fails on the `path` field.
+        let error = validate_resolved_action(
+            "cache",
+            "actions/cache",
+            "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+            Some("bogus"),
+            &inputs,
+        )
+        .unwrap_err();
+        let violation = error.downcast_ref::<CapabilityViolation>().unwrap();
+        assert_eq!(violation.field, "path");
+
+        // Traversal is rejected.
+        assert!(validate_resolved_action(
+            "cache",
+            "actions/cache",
+            "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+            Some("../etc"),
+            &inputs,
+        )
+        .is_err());
+
+        // A repository with no declared subpaths rejects any subpath.
+        assert!(validate_resolved_action(
+            "checkout",
+            "actions/checkout",
+            "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
+            Some("sub"),
+            &BTreeMap::new(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn reusable_workflow_validation_enforces_identity_ref_and_inputs() {
+        let publish_sha = "80a1acd07257a23b441c546e6fcad12239ef7626";
+        // Approved identity + immutable ref + no inputs is admitted.
+        validate_reusable_workflow(
+            "wf",
+            "jackin-project/jackin-role-action",
+            ".github/workflows/publish.yml",
+            publish_sha,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        // Unknown identity is rejected.
+        assert!(validate_reusable_workflow(
+            "wf",
+            "acme/unknown",
+            ".github/workflows/publish.yml",
+            publish_sha,
+            &BTreeMap::new(),
+        )
+        .is_err());
+
+        // A mismatched ref is rejected.
+        let error = validate_reusable_workflow(
+            "wf",
+            "jackin-project/jackin-role-action",
+            ".github/workflows/publish.yml",
+            "1111111111111111111111111111111111111111",
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CapabilityViolation>().unwrap().field,
+            "ref"
+        );
+    }
+
+    #[test]
+    fn constrained_input_classification() {
+        // Free-form `Any` inputs are unconstrained; literals/predicates are.
+        assert!(!action_input_is_constrained("actions/cache", "path"));
+        assert!(action_input_is_constrained("actions/cache", "lookup-only"));
+        // Unknown repositories and inputs count as constrained.
+        assert!(action_input_is_constrained("acme/unknown", "whatever"));
+        assert!(action_input_is_constrained(
+            "actions/cache",
+            "not-a-real-input"
+        ));
+    }
+
     #[test]
     fn manifest_covers_every_native_adapter() {
         let expected = [
@@ -1139,6 +1775,11 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&to_json().unwrap()).unwrap();
         assert_eq!(value["version"], MANIFEST_VERSION);
         assert_eq!(value["actions"].as_array().unwrap().len(), ACTIONS.len());
+        // Plan 010: the export binds the compiled manifest to one source commit +
+        // crate version. In the default (feature-off) build these are the
+        // `development` sentinel from build.rs.
+        assert_eq!(value["source_sha"], env!("VELNOR_SOURCE_SHA"));
+        assert_eq!(value["crate_version"], env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
@@ -1301,12 +1942,29 @@ mod tests {
         ));
         assert_eq!(errors[0].field, "with.cache_key_prefix");
 
+        // Post-008 the version must be an exact YYYY.M.D date-version; a
+        // selector like `latest` (a live lookup) is rejected before install.
         let errors = violations(&job(
             "jdx/mise-action",
             Some("dad1bfd3df957f44999b559dd69dc1671cb4e9ea"),
-            serde_json::json!({"version": "2025.1.0"}),
+            serde_json::json!({"version": "latest"}),
         ));
         assert_eq!(errors[0].field, "with.version");
+
+        // A leading `v` and a flag-shaped install arg are likewise rejected.
+        let errors = violations(&job(
+            "jdx/mise-action",
+            Some("dad1bfd3df957f44999b559dd69dc1671cb4e9ea"),
+            serde_json::json!({"version": "v2026.7.7"}),
+        ));
+        assert_eq!(errors[0].field, "with.version");
+
+        let errors = violations(&job(
+            "jdx/mise-action",
+            Some("dad1bfd3df957f44999b559dd69dc1671cb4e9ea"),
+            serde_json::json!({"install_args": "--yes"}),
+        ));
+        assert_eq!(errors[0].field, "with.install_args");
     }
 
     #[test]

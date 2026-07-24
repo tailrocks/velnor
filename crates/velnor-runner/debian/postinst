@@ -1,18 +1,35 @@
 #!/bin/sh
+# Plan 010 — transactional host activation, post-unpack.
+#
+# This script NEVER builds an image and NEVER restarts a daemon. The old
+# postinst rebuilt a mutable Dockerfile and `try-restart ... || true`, trusting a
+# single mutable image label with no manifest/source/digest check and restarting
+# before equality. That is replaced with: validate the installed binary against
+# the shipped acyclic identity, and (if a release record is already staged) prove
+# coherence and pull the immutable OCI digest — then STAGE. Activation + restart
+# are a separate, explicit `velnor-runner release activate` step run by the
+# deployment flow, never here.
 set -e
+
+BIN=/usr/bin/velnor-runner
+SHARE=/usr/share/velnor
+ACTIVE_DIR=/var/lib/velnor/release/active
+
+fail() {
+  echo "velnor-runner postinst: $1" >&2
+  exit 1
+}
 
 case "$1" in
   configure)
-    # State directories for runner work + JIT config.
     install -d -m 0750 /var/lib/velnor /var/lib/velnor/work
-    # Keep the config file readable only by root.
+    install -d -m 0750 /var/lib/velnor/release "$ACTIVE_DIR"
+
     if [ -f /etc/velnor/velnor.env ]; then
       chmod 0640 /etc/velnor/velnor.env || true
     fi
-    # Secrets split: migrate a real token out of velnor.env into secrets.env
-    # (0600, never shipped or overwritten by the package) so config tooling and
-    # conffile handling can never wipe it again. Idempotent: only runs when the
-    # token still lives in velnor.env and secrets.env does not exist yet.
+    # Secrets split (unchanged from prior behavior): migrate a real token out of
+    # velnor.env into secrets.env (0600, never shipped/overwritten). Idempotent.
     if [ -f /etc/velnor/velnor.env ] && [ ! -f /etc/velnor/secrets.env ]; then
       token_line=$(grep '^GITHUB_TOKEN=..*' /etc/velnor/velnor.env || true)
       case "$token_line" in
@@ -25,39 +42,61 @@ case "$1" in
           ;;
       esac
     fi
+
+    # --- Identity validation (offline, no network, no build) ----------------
+    # The installed binary's embedded source SHA + crate version MUST match the
+    # acyclic identity shipped in the deb, and its compiled manifest MUST match
+    # the shipped manifest export. This proves binary <-> package <-> manifest
+    # coherence for exactly this deb before anything is activated.
+    if [ -x "$BIN" ] && [ -f "$SHARE/build-identity.json" ]; then
+      installed_sha="$("$BIN" release export | sed -n 's/.*"source_sha": *"\([0-9a-f]*\)".*/\1/p' | head -n1)"
+      shipped_sha="$(sed -n 's/.*"source_sha": *"\([0-9a-f]*\)".*/\1/p' "$SHARE/build-identity.json" | head -n1)"
+      [ -n "$shipped_sha" ] || fail "shipped build-identity.json has no source_sha"
+      [ "$installed_sha" = "$shipped_sha" ] \
+        || fail "installed binary source SHA does not match the packaged build identity"
+      if [ -f "$SHARE/manifest.json" ]; then
+        binary_hash="$("$BIN" capabilities export | sha256sum | awk '{print $1}')"
+        shipped_hash="$(sha256sum "$SHARE/manifest.json" | awk '{print $1}')"
+        [ "$binary_hash" = "$shipped_hash" ] \
+          || fail "installed binary's compiled manifest does not match the packaged manifest"
+      fi
+    fi
+
     if [ -d /run/systemd/system ]; then
       systemctl daemon-reload || true
+      # Enable (not start) — fresh installs stay stopped until the operator fills
+      # in config AND a coherent release record is activated. Both daemon units
+      # run `release verify-installed` as ExecStartPre, so a start without a
+      # staged coherent tuple fails closed.
       systemctl enable velnor-daemon.service || true
-      # Native adapters rely on exact tools baked into the package-matched job
-      # image. Never restart a fleet onto a stale image after an apt upgrade.
-      package_version=$(dpkg-query -W -f='${Version}' velnor-runner)
-      image_version=$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' velnor/job-ubuntu:26.04 2>/dev/null || true)
-      if [ "$image_version" != "$package_version" ]; then
-        echo "Building velnor/job-ubuntu:26.04 for package $package_version..."
-        DOCKER_BUILDKIT=1 docker build --pull \
-          --build-arg "VELNOR_IMAGE_VERSION=$package_version" \
-          --file /usr/share/velnor/job-ubuntu.Dockerfile \
-          --tag velnor/job-ubuntu:26.04 \
-          /usr/share/velnor
-      fi
-      # Restart only if it was already running (clean upgrade); fresh installs
-      # stay stopped until the operator fills in /etc/velnor/velnor.env.
-      systemctl try-restart velnor-daemon.service || true
-      # Restart any template instances (velnor-daemon@<name>) that are running.
-      for unit in $(systemctl list-units --no-legend --plain 'velnor-daemon@*.service' 2>/dev/null | awk '{print $1}'); do
-        systemctl try-restart "$unit" || true
-      done
-      # Fleet health probe: every 10 minutes, fails loudly when 0 runners are
-      # online. Instances: systemctl enable --now velnor-doctor@<name>.timer
       systemctl enable --now velnor-doctor.timer || true
-      for unit in $(systemctl list-units --no-legend --plain 'velnor-daemon@*.service' 2>/dev/null | awk '{print $1}' | sed 's/^velnor-daemon@//; s/\.service$//'); do
-        systemctl enable --now "velnor-doctor@${unit}.timer" || true
+      for name in $(systemctl list-units --no-legend --plain 'velnor-daemon@*.service' 2>/dev/null | awk '{print $1}' | sed 's/^velnor-daemon@//; s/\.service$//'); do
+        systemctl enable --now "velnor-doctor@${name}.timer" || true
       done
     fi
-    echo "velnor-runner installed. Set GITHUB_TOKEN in /etc/velnor/secrets.env (0600),"
-    echo "VELNOR_URL etc. in /etc/velnor/velnor.env, then:  sudo systemctl start velnor-daemon"
-    echo "Multiple targets: /etc/velnor/<name>.env + <name>.secrets.env, then:"
-    echo "  sudo systemctl enable --now velnor-daemon@<name>"
+
+    # --- If a record is already staged, prove coherence + pull the OCI digest -
+    # (Never restart — activation is explicit.)
+    if [ -x "$BIN" ] && [ -f "$ACTIVE_DIR/record.json" ] && [ -f "$ACTIVE_DIR/deployed.json" ]; then
+      "$BIN" release verify-installed \
+        --record "$ACTIVE_DIR/record.json" \
+        --deployed "$ACTIVE_DIR/deployed.json" \
+        --binary "$BIN" \
+        || fail "staged release record is not coherent with the installed binary/package/manifest"
+      if command -v docker >/dev/null 2>&1; then
+        image_ref="$(sed -n 's/.*"oci_image_ref": *"\([^"]*\)".*/\1/p' "$ACTIVE_DIR/record.json" | head -n1)"
+        if [ -n "$image_ref" ]; then
+          docker pull "$image_ref" >/dev/null 2>&1 \
+            || echo "postinst: warning: could not pre-pull $image_ref (activation will re-verify)." >&2
+        fi
+      fi
+    fi
+
+    echo "velnor-runner installed. NOTE: this package never restarts the fleet."
+    echo "Configure /etc/velnor/secrets.env (0600) + /etc/velnor/velnor.env, then"
+    echo "activate a coherent release and start:"
+    echo "  sudo velnor-runner release activate --record <release-record.json>"
+    echo "  sudo systemctl start velnor-daemon    # (ExecStartPre verifies coherence)"
     ;;
 esac
 

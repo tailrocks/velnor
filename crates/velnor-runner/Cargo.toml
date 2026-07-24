@@ -48,7 +48,18 @@ assets = [
   ["debian/velnor-doctor@.service", "lib/systemd/system/velnor-doctor@.service", "644"],
   ["debian/velnor-doctor@.timer", "lib/systemd/system/velnor-doctor@.timer", "644"],
   ["debian/velnor.env", "etc/velnor/velnor.env", "640"],
+  # Plan 010: the release workflow writes these two acyclic-safe identity files
+  # (they depend only on the source, NOT on the deb digest, so shipping them
+  # inside the deb creates no cycle) into release/ before `cargo deb`. postinst
+  # validates the installed binary against them, offline, before any activation.
+  # The full release record is NOT shipped here — it records this deb's digest,
+  # so packaging it would be circular; it is staged out-of-band by `release
+  # activate` during deployment.
+  ["release/build-identity.json", "usr/share/velnor/build-identity.json", "644"],
+  ["release/manifest.json", "usr/share/velnor/manifest.json", "644"],
   ["../../docker/job-ubuntu.Dockerfile", "usr/share/velnor/job-ubuntu.Dockerfile", "644"],
+  ["../../docker/job-mise.toml", "usr/share/velnor/job-mise.toml", "644"],
+  ["../../docker/job-mise.lock", "usr/share/velnor/job-mise.lock", "644"],
   ["../../README.md", "usr/share/doc/velnor-runner/README.md", "644"],
 ]
 
@@ -71,6 +82,7 @@ tar.workspace = true
 sigstore-sign.workspace = true
 thiserror.workspace = true
 time.workspace = true
+toml.workspace = true
 tokio.workspace = true
 url.workspace = true
 uuid.workspace = true
@@ -89,6 +101,11 @@ wiremock = "=0.6.5"
 
 [features]
 default = []
+# Plan 010: embed the exact git source SHA + release tag at compile time and
+# fail the build unless tag == crate version == Cargo.lock (see build.rs). OFF by
+# default so the normal build/test path never touches git and never fails on an
+# untagged tree; the release workflow turns it on for the shipped binary only.
+release-build = []
 # OTLP span export, activated at runtime only when VELNOR_OTLP_ENDPOINT is set.
 otel = [
   "dep:tracing-opentelemetry",

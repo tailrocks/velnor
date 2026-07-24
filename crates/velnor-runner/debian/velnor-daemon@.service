@@ -17,8 +17,16 @@ WatchdogSec=180
 Environment=VELNOR_JOB_CPUS=4
 Environment=VELNOR_JOB_MEMORY=12g
 Environment=VELNOR_STORAGE_ROOT=/var
+# Strict capability admission is the only supported mode. The daemon refuses to
+# start if this is set to anything else or if a removed bypass variable is
+# present. Do not override this in the instance env file.
+Environment=VELNOR_CAPABILITY_VALIDATION=strict
 EnvironmentFile=/etc/velnor/%i.env
 EnvironmentFile=-/etc/velnor/%i.secrets.env
+# Plan 010: prove installed binary/package/manifest coherence with the active
+# release record before start; a missing/mismatched tuple fails closed so a
+# mixed old/new tuple never runs.
+ExecStartPre=/usr/bin/velnor-runner release verify-installed
 ExecStart=/usr/bin/velnor-runner daemon \
   --url ${VELNOR_URL} \
   --name ${VELNOR_NAME} \

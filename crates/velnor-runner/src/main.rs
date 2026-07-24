@@ -1,4 +1,5 @@
 mod action;
+mod admission;
 mod attestation;
 mod cache;
 mod capacity;
@@ -14,10 +15,12 @@ mod git_mirror;
 mod github_adapter;
 mod job_message;
 mod manifest;
+mod mise;
 mod plan;
 mod platform;
 mod preflight;
 mod protocol;
+mod release;
 mod runner;
 mod runtime_env;
 mod script_step;
@@ -52,6 +55,13 @@ fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
 }
 
 async fn run() -> Result<()> {
+    // Production admission is unconditional and immutable. Refuse to start if a
+    // removed capability-bypass variable is present or a non-strict validation
+    // mode is requested, and fail fast if the compiled manifest is not
+    // structurally immutable. Both run before any command is dispatched.
+    cli::enforce_strict_capability_env()?;
+    manifest::assert_manifest_integrity()?;
+
     let cli = Cli::parse();
 
     // Spans/events go to <config-base>/logs/trace.jsonl for the long-running
@@ -78,6 +88,7 @@ async fn run() -> Result<()> {
         Command::Status(args) => runner::status(args).await,
         Command::Storage(args) => storage::run(args),
         Command::Doctor(args) => runner::doctor(args).await,
+        Command::Release(args) => release::run(args),
     }
 }
 
