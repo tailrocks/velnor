@@ -1459,6 +1459,27 @@ pub fn run(args: CapabilitiesArgs) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn collect_uses(value: &serde_yaml::Value, uses: &mut Vec<String>) {
+        match value {
+            serde_yaml::Value::Mapping(mapping) => {
+                for (key, value) in mapping {
+                    if key.as_str() == "uses" {
+                        if let Some(action) = value.as_str() {
+                            uses.push(action.to_string());
+                        }
+                    }
+                    collect_uses(value, uses);
+                }
+            }
+            serde_yaml::Value::Sequence(sequence) => {
+                for value in sequence {
+                    collect_uses(value, uses);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn job(
         repository: &str,
         action_ref: Option<&str>,
@@ -1519,6 +1540,50 @@ mod tests {
         assert_eq!(MANIFEST_VERSION, 7);
         assert_eq!(MANIFEST.version, 7);
         assert_manifest_integrity().expect("compiled manifest must pass integrity");
+    }
+
+    #[test]
+    fn release_workflow_action_refs_are_compiled_into_the_manifest() {
+        let workflow: serde_yaml::Value =
+            serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
+                .expect("release workflow must parse");
+        let mut uses = Vec::new();
+        collect_uses(&workflow, &mut uses);
+
+        for action in uses {
+            if action.starts_with("./") {
+                continue;
+            }
+            let (path, action_ref) = action
+                .rsplit_once('@')
+                .unwrap_or_else(|| panic!("release action must have a ref: {action}"));
+            let mut segments = path.split('/');
+            let repository = format!(
+                "{}/{}",
+                segments.next().expect("action owner"),
+                segments.next().expect("action repository")
+            );
+            let subpath = segments.collect::<Vec<_>>().join("/");
+            let capability = ACTIONS
+                .iter()
+                .find(|candidate| candidate.repository.eq_ignore_ascii_case(&repository))
+                .unwrap_or_else(|| panic!("release action is absent from manifest: {action}"));
+            assert!(
+                capability
+                    .allowed_refs
+                    .iter()
+                    .any(|candidate| candidate.value == action_ref),
+                "release action ref is absent from manifest: {action}"
+            );
+            assert!(
+                subpath.is_empty()
+                    || capability
+                        .allowed_subpaths
+                        .iter()
+                        .any(|candidate| *candidate == subpath),
+                "release action subpath is absent from manifest: {action}"
+            );
+        }
     }
 
     #[test]
