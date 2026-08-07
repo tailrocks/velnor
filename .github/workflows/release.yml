@@ -6,6 +6,9 @@ name: Release
 # Dockerfile present, size > 1MB, arch/version match — the "empty-deb incident"
 # guard) are folded in below. One tagged commit produces one coherent, acyclic
 # release record binding: source SHA -> crate version -> per-arch binary/deb
+# Velnor remains the release default. During a fully drained recovery window,
+# `VELNOR_AUTOMATIC_LANES=github` moves the single release writer to GitHub;
+# removing the variable restores Velnor without changing workflow code.
 # digests -> OCI image digest -> compiled-manifest hash -> APT coordinate.
 #
 # This workflow holds NO APT credential and performs NO consumer write/dispatch
@@ -38,7 +41,7 @@ jobs:
   identity:
     name: Resolve + gate release identity
     timeout-minutes: 20
-    runs-on: ${{ fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     outputs:
       version: ${{ steps.gate.outputs.version }}
       commit: ${{ steps.gate.outputs.commit }}
@@ -94,7 +97,7 @@ jobs:
     needs: identity
     name: Build + push one multi-platform GHCR image
     timeout-minutes: 60
-    runs-on: ${{ fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     permissions:
       contents: read
       packages: write
@@ -187,7 +190,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - arch: arm64
             target: aarch64-unknown-linux-gnu
-    runs-on: ${{ fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     env:
       VERSION: ${{ needs.identity.outputs.version }}
       CARGO_INCREMENTAL: "0"
@@ -294,7 +297,7 @@ jobs:
     needs: [identity, image, build]
     name: Assemble, verify + publish one coherent release
     timeout-minutes: 30
-    runs-on: ${{ fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     permissions:
       contents: write
     env:
