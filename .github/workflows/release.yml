@@ -216,6 +216,11 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Install cargo-deb (verified prebuilt only)
+        env:
+          # cargo-binstall performs GitHub API discovery independently of mise.
+          # Authenticate parallel release jobs so they do not share the tiny
+          # anonymous rate limit and fail nondeterministically with HTTP 403.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           mise exec cargo-binstall -- cargo binstall cargo-deb@3.7.0 \
