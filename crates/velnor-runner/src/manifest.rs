@@ -1459,15 +1459,31 @@ pub fn run(args: CapabilitiesArgs) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn collect_uses(value: &serde_yaml::Value, uses: &mut Vec<String>) {
+    fn collect_uses(value: &serde_yaml::Value, uses: &mut Vec<(String, Vec<String>)>) {
         match value {
             serde_yaml::Value::Mapping(mapping) => {
+                let action = mapping
+                    .iter()
+                    .find(|(key, _)| key.as_str() == "uses")
+                    .and_then(|(_, value)| value.as_str());
+                if let Some(action) = action {
+                    let inputs = mapping
+                        .iter()
+                        .find(|(key, _)| key.as_str() == "with")
+                        .and_then(|(_, value)| match value {
+                            serde_yaml::Value::Mapping(inputs) => Some(
+                                inputs
+                                    .keys()
+                                    .map(|key| key.as_str().to_string())
+                                    .collect::<Vec<_>>(),
+                            ),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    uses.push((action.to_string(), inputs));
+                }
                 for (key, value) in mapping {
-                    if key.as_str() == "uses" {
-                        if let Some(action) = value.as_str() {
-                            uses.push(action.to_string());
-                        }
-                    }
+                    let _ = key;
                     collect_uses(value, uses);
                 }
             }
@@ -1550,7 +1566,7 @@ mod tests {
         let mut uses = Vec::new();
         collect_uses(&workflow, &mut uses);
 
-        for action in uses {
+        for (action, inputs) in uses {
             if action.starts_with("./") {
                 continue;
             }
@@ -1583,6 +1599,16 @@ mod tests {
                         .any(|candidate| *candidate == subpath),
                 "release action subpath is absent from manifest: {action}"
             );
+            for input in inputs {
+                assert!(
+                    capability
+                        .inputs
+                        .iter()
+                        .copied()
+                        .any(|rule| rule.name().eq_ignore_ascii_case(&input)),
+                    "release action input is absent from manifest: {action} with.{input}"
+                );
+            }
         }
     }
 
