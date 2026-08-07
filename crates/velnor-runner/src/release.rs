@@ -1092,7 +1092,7 @@ fn activate_command(args: ReleaseActivateArgs) -> Result<()> {
     if binary_sha256 != architecture.binary_sha256 {
         bail!("installed binary digest disagrees with release record");
     }
-    let manifest_sha256 = Sha256Hex::of_bytes(crate::manifest::to_json()?.as_bytes());
+    let manifest_sha256 = Sha256Hex::of_bytes(crate::manifest::to_json_document()?.as_bytes());
     if manifest_sha256 != record.build.manifest_sha256 {
         bail!("compiled manifest digest disagrees with release record");
     }

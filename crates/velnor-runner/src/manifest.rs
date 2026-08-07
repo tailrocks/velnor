@@ -1428,9 +1428,18 @@ pub fn to_json() -> Result<String> {
     })?)
 }
 
+/// Canonical bytes emitted by `capabilities export` and hashed into release
+/// records. Keep framing here so release activation cannot hash a subtly
+/// different representation of the same JSON value.
+pub fn to_json_document() -> Result<String> {
+    let mut document = to_json()?;
+    document.push('\n');
+    Ok(document)
+}
+
 pub fn run(args: CapabilitiesArgs) -> Result<()> {
     match args.command {
-        CapabilitiesCommand::Export => println!("{}", to_json()?),
+        CapabilitiesCommand::Export => print!("{}", to_json_document()?),
         CapabilitiesCommand::Check { job_dump } => {
             let bytes = std::fs::read(&job_dump)?;
             let job: AgentJobRequestMessage = serde_json::from_slice(&bytes)?;
@@ -1912,7 +1921,12 @@ mod tests {
 
     #[test]
     fn manifest_exports_json() {
-        let value: serde_json::Value = serde_json::from_str(&to_json().unwrap()).unwrap();
+        let json = to_json().unwrap();
+        let document = to_json_document().unwrap();
+        assert_eq!(document, format!("{json}\n"));
+        assert!(!json.ends_with('\n'));
+        assert!(document.ends_with('\n'));
+        let value: serde_json::Value = serde_json::from_str(&document).unwrap();
         assert_eq!(value["version"], MANIFEST_VERSION);
         assert_eq!(value["actions"].as_array().unwrap().len(), ACTIONS.len());
         // Plan 010: the export binds the compiled manifest to one source commit +
