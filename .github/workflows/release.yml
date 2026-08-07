@@ -112,6 +112,11 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+        with:
+          install_args: rust
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Compile the manifest hash from a release-build binary
         id: manifest
         run: |
