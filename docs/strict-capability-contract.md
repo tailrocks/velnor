@@ -24,7 +24,9 @@ Plan 033 closed the first product-path enforcement gaps:
 - native adapters are selected by repository name without enforcing an approved
   action ref **(closed: plan 033)**;
 - the native sccache adapter ignores invocation inputs **(closed: plan 033)**;
-- unknown JavaScript actions may execute in a Node sidecar **(closed: plan 033)**;
+- unknown JavaScript actions may execute in a Node sidecar **(closed: plan 033;
+  the diagnostic bypass and the unknown-JS execution branch were fully removed by
+  plan 009 — the product path now hard-fails)**;
 - input allowlists and allowed-value schemas are not centralized
   **(closed: plan 033)**.
 
@@ -59,6 +61,21 @@ safe validation point before the affected action performs a side effect.
 Arbitrary scripts cannot be understood statically; the strict guarantee covers
 runner-managed job/action capabilities, while isolation and trust policy govern
 script behavior.
+
+Plan 009 (manifest version 6) makes this one transitively-closed admission
+graph (Plan 010 bumped the export schema to version 7 by adding source-SHA and
+crate-version identity; the admission semantics below are unchanged). `admit_job` resolves and validates *every* root — local and remote, not
+only `./` — recurses nested local and remote composites, resolves defaults and
+`${{ inputs.* }}` before validating a child, bounds depth/nodes, and guards
+cycles. Metadata reads are read-only through an injectable source; rejections
+carry the complete ancestry and never the received value. Manifest identities
+are structurally immutable: every non-`__native` action/workflow ref is a full
+40-hex SHA (a small, explicitly listed set of mutable fixture-transition tags is
+retained as a documented exception until plan 041 migrates the fixture), action
+subpaths are constrained (`actions/cache`: root/`restore`/`save`), and a
+server-expanded reusable workflow is admitted by repository/path/full-SHA and
+dispatched inputs — its `jobs.<id>.uses` is never parsed as a runner action.
+Planning consumes the graph and never re-resolves identity.
 
 The compiled Rust manifest is also exportable as JSON. Each entry declares:
 
@@ -186,7 +203,12 @@ action post step owns reporting.
    **Implemented by plan 033.** Remaining job/container/expression dimensions
    extend the same manifest in subsequent plans.
 2. Remove unknown-action sidecar fallback from the product path.
-   **Implemented by plan 033;** both diagnostic flags are required to reach it.
+   **Implemented by plan 033; the diagnostic flags
+   (`--skip-capability-validation`, `--diagnostic-node-sidecar`) and their env
+   bindings were deleted by plan 009.** Production admission is unconditional:
+   startup rejects any legacy bypass variable or a non-`strict`
+   `VELNOR_CAPABILITY_VALIDATION`, and the packaged daemon units pin
+   `VELNOR_CAPABILITY_VALIDATION=strict`.
 3. Make every native adapter declare and test its exact surface; an ignored
    provided input is a failure. **Implemented by plan 033.** Surface changes
    require a manifest version bump.

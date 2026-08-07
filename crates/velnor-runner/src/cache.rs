@@ -327,6 +327,16 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             candidate_depth: if mise_legacy { 2 } else { 1 },
             gc_managed: true,
         },
+        // Plan 008: persistent per-version mise binaries, same trust/repository
+        // boundary and mise budget as installs.
+        StoreRoot {
+            kind: CacheStore::Mise,
+            path: mise.join("binaries"),
+            scope_prefix: vec!["binaries".into()],
+            scope_depth: if mise_legacy { 2 } else { 1 },
+            candidate_depth: if mise_legacy { 2 } else { 1 },
+            gc_managed: true,
+        },
         StoreRoot {
             kind: CacheStore::Mise,
             path: mise.join("rustup"),
@@ -1204,6 +1214,7 @@ mod tests {
             ("cargo", "bin/tailrocks_playground"),
             ("mise", "cache"),
             ("mise", "installs/tailrocks_playground"),
+            ("mise", "binaries/tailrocks_playground"),
             ("mise", "rustup/tailrocks_playground"),
         ];
         let mut leases = Vec::new();
@@ -1232,6 +1243,7 @@ mod tests {
             ("cargo", "bin/tailrocks_other"),
             ("mise", "cache"),
             ("mise", "installs/tailrocks_other"),
+            ("mise", "binaries/tailrocks_other"),
             ("mise", "rustup/tailrocks_other"),
         ] {
             leases.push(
@@ -1302,6 +1314,20 @@ mod tests {
                 "/mise/installs/other",
                 CacheStore::Mise,
                 &["installs", "tailrocks_other"],
+                90,
+                10,
+            ),
+            entry(
+                "/mise/binaries/playground",
+                CacheStore::Mise,
+                &["binaries", "tailrocks_playground"],
+                90,
+                10,
+            ),
+            entry(
+                "/mise/binaries/other",
+                CacheStore::Mise,
+                &["binaries", "tailrocks_other"],
                 90,
                 10,
             ),

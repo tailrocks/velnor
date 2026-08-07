@@ -40,6 +40,8 @@ pub struct GitHubApiError {
     pub status: u16,
     pub action: String,
     pub body: String,
+    pub retry_after_seconds: Option<u64>,
+    pub rate_limit_reset_epoch: Option<u64>,
 }
 
 fn github_api_error(
@@ -51,8 +53,90 @@ fn github_api_error(
         status,
         action: action.into(),
         body: body.into(),
+        retry_after_seconds: None,
+        rate_limit_reset_epoch: None,
     }
     .into()
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct GitHubRetryHint {
+    retry_after_seconds: Option<u64>,
+    rate_limit_reset_epoch: Option<u64>,
+}
+
+impl GitHubRetryHint {
+    fn delay(self, now_epoch: u64) -> Option<std::time::Duration> {
+        let retry_after = self.retry_after_seconds.unwrap_or(0);
+        let until_reset = self
+            .rate_limit_reset_epoch
+            .map(|reset| reset.saturating_sub(now_epoch))
+            .unwrap_or(0);
+        let seconds = retry_after.max(until_reset);
+        (seconds > 0).then(|| std::time::Duration::from_secs(seconds))
+    }
+}
+
+fn parse_github_retry_headers(headers: &[u8]) -> GitHubRetryHint {
+    let mut hint = GitHubRetryHint::default();
+    for line in String::from_utf8_lossy(headers).lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("retry-after") {
+            hint.retry_after_seconds = value.parse().ok();
+        } else if name.eq_ignore_ascii_case("x-ratelimit-reset") {
+            hint.rate_limit_reset_epoch = value.parse().ok();
+        }
+    }
+    hint
+}
+
+fn github_retry_hint_from_header_map(headers: &HeaderMap) -> GitHubRetryHint {
+    let parse = |name: &'static str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok())
+    };
+    GitHubRetryHint {
+        retry_after_seconds: parse("retry-after"),
+        rate_limit_reset_epoch: parse("x-ratelimit-reset"),
+    }
+}
+
+fn github_api_error_with_retry(
+    action: impl Into<String>,
+    status: u16,
+    body: impl Into<String>,
+    hint: GitHubRetryHint,
+) -> anyhow::Error {
+    GitHubApiError {
+        status,
+        action: action.into(),
+        body: body.into(),
+        retry_after_seconds: hint.retry_after_seconds,
+        rate_limit_reset_epoch: hint.rate_limit_reset_epoch,
+    }
+    .into()
+}
+
+pub fn github_api_retry_delay(error: &anyhow::Error) -> Option<std::time::Duration> {
+    let now_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<GitHubApiError>())
+        .and_then(|error| {
+            GitHubRetryHint {
+                retry_after_seconds: error.retry_after_seconds,
+                rate_limit_reset_epoch: error.rate_limit_reset_epoch,
+            }
+            .delay(now_epoch)
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -604,9 +688,12 @@ impl RegistrationClient {
         let ua = RUNNER_USER_AGENT.to_string();
 
         let mut last_err = anyhow::anyhow!("no attempts made");
+        let mut retry_delay = None;
         for attempt in 0..3u32 {
             if attempt > 0 {
-                let backoff = std::time::Duration::from_secs(u64::from(attempt) * 5);
+                let backoff = retry_delay
+                    .take()
+                    .unwrap_or_else(|| std::time::Duration::from_secs(u64::from(attempt) * 5));
                 eprintln!(
                     "JIT config error (attempt {}/3), retrying in {}s",
                     attempt,
@@ -623,6 +710,7 @@ impl RegistrationClient {
                 let tmp = std::env::temp_dir();
                 let cfg_path = tmp.join(format!("velnor-jit-{}.cfg", uuid::Uuid::new_v4()));
                 let body_path = tmp.join(format!("velnor-jit-{}.body", uuid::Uuid::new_v4()));
+                let headers_path = tmp.join(format!("velnor-jit-{}.headers", uuid::Uuid::new_v4()));
                 let cfg = format!(
                     "header = \"User-Agent: {ua2}\"\n\
                      header = \"Authorization: Bearer {pat2}\"\n\
@@ -652,13 +740,17 @@ impl RegistrationClient {
                 let out = std::process::Command::new("curl")
                     .arg("--config")
                     .arg(&cfg_path)
+                    .arg("--dump-header")
+                    .arg(&headers_path)
                     .arg("--data")
                     .arg(format!("@{}", body_path.display()))
                     .arg(&url2)
                     .output();
                 let _ = std::fs::remove_file(&cfg_path);
                 let _ = std::fs::remove_file(&body_path);
-                out
+                let headers = std::fs::read(&headers_path).unwrap_or_default();
+                let _ = std::fs::remove_file(&headers_path);
+                out.map(|output| (output, headers))
             })
             .await
             .context("spawn_blocking curl")?;
@@ -667,7 +759,7 @@ impl RegistrationClient {
                 Err(e) => {
                     last_err = anyhow::Error::from(e).context("send JIT runner config request");
                 }
-                Ok(output) => {
+                Ok((output, headers)) => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     let (json_part, status_str) =
                         stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
@@ -677,14 +769,22 @@ impl RegistrationClient {
                             .context("parse JIT runner config response");
                     }
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    last_err = github_api_error(
+                    let hint = parse_github_retry_headers(&headers);
+                    last_err = github_api_error_with_retry(
                         "JIT runner config request",
                         status,
                         format!("{json_part}, stderr={stderr}"),
+                        hint,
                     );
                     if status == 409 {
                         return Err(last_err);
                     }
+                    retry_delay = hint.delay(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    );
                 }
             }
         }
@@ -720,11 +820,13 @@ impl RegistrationClient {
                 .context("send list runners request")?;
             let status = response.status();
             if !status.is_success() {
+                let hint = github_retry_hint_from_header_map(response.headers());
                 let body = response.text().await.unwrap_or_default();
-                return Err(github_api_error(
+                return Err(github_api_error_with_retry(
                     "list runners request",
                     status.as_u16(),
                     body,
+                    hint,
                 ));
             }
             let page: Page = response
@@ -762,11 +864,13 @@ impl RegistrationClient {
             .context("send list runner groups request")?;
         let status = response.status();
         if !status.is_success() {
+            let hint = github_retry_hint_from_header_map(response.headers());
             let body = response.text().await.unwrap_or_default();
-            return Err(github_api_error(
+            return Err(github_api_error_with_retry(
                 "list runner groups request",
                 status.as_u16(),
                 body,
+                hint,
             ));
         }
         response
@@ -801,11 +905,12 @@ impl RegistrationClient {
         let pat = pat.to_string();
         let ua = RUNNER_USER_AGENT.to_string();
 
-        let output = tokio::task::spawn_blocking(move || {
+        let (output, headers) = tokio::task::spawn_blocking(move || {
             use std::io::Write;
             use std::os::unix::fs::OpenOptionsExt;
             let tmp = std::env::temp_dir();
             let cfg_path = tmp.join(format!("velnor-del-{}.cfg", uuid::Uuid::new_v4()));
+            let headers_path = tmp.join(format!("velnor-del-{}.headers", uuid::Uuid::new_v4()));
             let cfg = format!(
                 "header = \"User-Agent: {ua}\"\n\
                  header = \"Authorization: Bearer {pat}\"\n\
@@ -826,10 +931,14 @@ impl RegistrationClient {
             let out = std::process::Command::new("curl")
                 .arg("--config")
                 .arg(&cfg_path)
+                .arg("--dump-header")
+                .arg(&headers_path)
                 .arg(&url)
                 .output();
             let _ = std::fs::remove_file(&cfg_path);
-            out
+            let headers = std::fs::read(&headers_path).unwrap_or_default();
+            let _ = std::fs::remove_file(&headers_path);
+            out.map(|output| (output, headers))
         })
         .await
         .context("spawn_blocking curl delete")?
@@ -841,7 +950,12 @@ impl RegistrationClient {
         if status == 204 || status == 404 {
             return Ok(());
         }
-        Err(github_api_error("delete runner request", status, body))
+        Err(github_api_error_with_retry(
+            "delete runner request",
+            status,
+            body,
+            parse_github_retry_headers(&headers),
+        ))
     }
 }
 
@@ -4668,5 +4782,42 @@ mod tests {
         let settings: DecodedJitRunnerSettings = serde_json::from_str(json).unwrap();
         assert!(settings.use_v2_flow);
         assert!(!settings.ephemeral);
+    }
+
+    #[test]
+    fn github_retry_headers_drive_reset_aware_delay() {
+        let hint = parse_github_retry_headers(
+            b"HTTP/2 403\r\nRetry-After: 17\r\nX-RateLimit-Reset: 1060\r\n\r\n",
+        );
+        assert_eq!(hint.retry_after_seconds, Some(17));
+        assert_eq!(hint.rate_limit_reset_epoch, Some(1060));
+        assert_eq!(hint.delay(1000), Some(std::time::Duration::from_secs(60)));
+
+        let error = github_api_error_with_retry("quota", 403, "exhausted", hint);
+        assert!(github_api_retry_delay(&error).is_some());
+    }
+
+    #[test]
+    fn reqwest_header_map_preserves_github_retry_metadata() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("29"));
+        headers.insert("x-ratelimit-reset", HeaderValue::from_static("123456"));
+
+        assert_eq!(
+            github_retry_hint_from_header_map(&headers),
+            GitHubRetryHint {
+                retry_after_seconds: Some(29),
+                rate_limit_reset_epoch: Some(123456),
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_retry_headers_are_ignored_without_exposing_values() {
+        let hint = parse_github_retry_headers(
+            b"Retry-After: later\r\nX-RateLimit-Reset: invalid\r\nAuthorization: secret\r\n",
+        );
+        assert_eq!(hint, GitHubRetryHint::default());
+        assert_eq!(hint.delay(1000), None);
     }
 }

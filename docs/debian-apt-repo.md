@@ -1,13 +1,22 @@
 # Velnor runner — Debian package + apt-native repository
 
-**Status: implemented and fully automatic** since v0.1.4 (amd64) / v0.1.6
-(arm64): `git tag vX.Y.Z && git push origin vX.Y.Z` runs CI, builds both debs with a
-binary-presence + size guard, attaches tar.gz + deb assets to the GitHub
-release, uploads to `tailrocks/velnor-apt`, and triggers the signed reprepro
-publish to GitHub Pages — zero manual steps. The packaged daemon ships
+**Status: implemented; publication decoupled for coherence (plan 010).**
+`git tag vX.Y.Z && git push origin vX.Y.Z` runs the single `release.yml`
+coordinator (release-deb.yml is deleted; its binary-presence + size + arch guards
+are folded in). It builds both debs and the multi-platform GHCR job image once,
+then assembles ONE acyclic `release-record.json` binding source SHA -> crate
+version -> per-arch binary/deb digests -> OCI image digest -> compiled-manifest
+hash -> APT coordinate, and attaches the record + checksum + tar.gz + deb assets
+to the GitHub release. Assets are never clobbered (an existing tag succeeds only
+on an exact digest match). The source holds **no** APT credential and does **not**
+push to or dispatch `tailrocks/velnor-apt` (N6): the apt repo pulls the published
+record itself and verifies schema/source/tag/version/all-hashes/OCI before
+`reprepro` (see velnor-apt `verify-release.sh`). The packaged daemon ships
 never-exit supervision, sd_notify watchdog, `velnor-daemon@<name>` template
-instances, `/etc/velnor/secrets.env` (0600, operator-owned), and
-`velnor-doctor` timers. The design below documents the pieces.
+instances, `/etc/velnor/secrets.env` (0600, operator-owned), `velnor-doctor`
+timers, and — new in plan 010 — a transactional `preinst`/`postinst` that never
+builds/never restarts and a `release verify-installed` ExecStartPre coherence
+gate on both daemon units. The design below documents the pieces.
 
 Goal: install and upgrade the Velnor runner daemon with native apt:
 

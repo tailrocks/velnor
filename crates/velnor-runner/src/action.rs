@@ -140,6 +140,35 @@ pub enum NativeActionAdapter {
     CosignInstaller,
 }
 
+/// GitHub cache lifecycle carried by an `actions/cache` invocation. The root
+/// action restores in main and saves in post; `/restore` only restores; `/save`
+/// only saves. Velnor must preserve the distinction the action subpath encodes
+/// instead of collapsing every form into the root behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheActionKind {
+    Root,
+    Restore,
+    Save,
+}
+
+/// Classify an `actions/cache` invocation from its action subpath. Absent or
+/// empty = root; exact `restore`/`save` = the matching subaction. Any other
+/// subpath is rejected rather than silently treated as root, so an unknown cache
+/// form fails closed before it can restore/save with the wrong lifecycle.
+pub fn cache_action_kind(source_path: Option<&str>) -> Result<CacheActionKind> {
+    match source_path
+        .map(|value| value.trim().trim_matches('/'))
+        .filter(|value| !value.is_empty())
+    {
+        None => Ok(CacheActionKind::Root),
+        Some(path) if path.eq_ignore_ascii_case("restore") => Ok(CacheActionKind::Restore),
+        Some(path) if path.eq_ignore_ascii_case("save") => Ok(CacheActionKind::Save),
+        Some(other) => bail!(
+            "unsupported actions/cache subpath '{other}': only the root action, 'restore', and 'save' are recognized"
+        ),
+    }
+}
+
 pub fn native_action_adapter(repository: &str) -> Option<NativeActionAdapter> {
     match repository.to_ascii_lowercase().as_str() {
         "actions/checkout" => Some(NativeActionAdapter::Checkout),
@@ -517,12 +546,19 @@ pub struct DockerActionInvocation {
 pub struct NativeActionInvocation {
     pub git_ref: String,
     pub adapter: NativeActionAdapter,
+    /// Cache lifecycle for the `actions/cache` adapter (`None` for every other
+    /// adapter). Preserving this through invocation is what keeps root/restore/
+    /// save from collapsing into a single behavior.
+    pub cache_kind: Option<CacheActionKind>,
+    /// Action subpath retained from the plan (e.g. `restore`, `save`), so the
+    /// invocation no longer drops the GitHub lifecycle identity.
+    pub source_path: Option<String>,
     pub inputs: BTreeMap<String, String>,
     pub env: Vec<(String, String)>,
 }
 
 impl ResolvedAction {
-    pub fn native_invocation(&self) -> Option<NativeActionInvocation> {
+    pub fn native_invocation(&self) -> Result<Option<NativeActionInvocation>> {
         native_invocation_from_plan(&self.plan)
     }
 
@@ -681,13 +717,28 @@ impl ResolvedAction {
     }
 }
 
-pub fn native_invocation_from_plan(plan: &RepositoryActionPlan) -> Option<NativeActionInvocation> {
-    native_action_adapter(&plan.repository).map(|adapter| NativeActionInvocation {
+pub fn native_invocation_from_plan(
+    plan: &RepositoryActionPlan,
+) -> Result<Option<NativeActionInvocation>> {
+    let Some(adapter) = native_action_adapter(&plan.repository) else {
+        return Ok(None);
+    };
+    // Only the cache adapter carries a lifecycle; deriving it here (and failing
+    // on an unknown subpath) keeps the classification at the single point where
+    // the plan's `source_path` is turned into an invocation.
+    let cache_kind = if adapter == NativeActionAdapter::Cache {
+        Some(cache_action_kind(plan.source_path.as_deref())?)
+    } else {
+        None
+    };
+    Ok(Some(NativeActionInvocation {
         git_ref: plan.git_ref.clone(),
         adapter,
+        cache_kind,
+        source_path: plan.source_path.clone(),
         inputs: plan.inputs.clone(),
         env: plan.env.clone(),
-    })
+    }))
 }
 
 pub fn composite_script_steps(
@@ -2415,6 +2466,93 @@ runs:
         assert_eq!(resolved.len(), 2);
         assert_eq!(fetches, 1);
         std::fs::remove_dir_all(actions_host).ok();
+    }
+
+    fn cache_plan(step_id: &str, source_path: Option<&str>) -> RepositoryActionPlan {
+        RepositoryActionPlan {
+            step_id: step_id.into(),
+            repository: "actions/cache".into(),
+            git_ref: "v4".into(),
+            source_path: source_path.map(str::to_string),
+            repository_dir: PathBuf::from("/tmp/_actions/actions_cache/v4"),
+            action_dir: PathBuf::from("/tmp/_actions/actions_cache/v4"),
+            inputs: BTreeMap::new(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }
+    }
+
+    #[test]
+    fn native_invocation_preserves_cache_lifecycle() {
+        let root = native_invocation_from_plan(&cache_plan("cache", None))
+            .unwrap()
+            .unwrap();
+        assert_eq!(root.adapter, NativeActionAdapter::Cache);
+        assert_eq!(root.cache_kind, Some(CacheActionKind::Root));
+        assert_eq!(root.source_path, None);
+
+        // An empty subpath is the root form, not an error.
+        let empty = native_invocation_from_plan(&cache_plan("cache", Some("")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(empty.cache_kind, Some(CacheActionKind::Root));
+
+        let restore = native_invocation_from_plan(&cache_plan("cache-restore", Some("restore")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(restore.cache_kind, Some(CacheActionKind::Restore));
+        assert_eq!(restore.source_path.as_deref(), Some("restore"));
+
+        let save = native_invocation_from_plan(&cache_plan("cache-save", Some("save")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(save.cache_kind, Some(CacheActionKind::Save));
+        assert_eq!(save.source_path.as_deref(), Some("save"));
+    }
+
+    #[test]
+    fn native_invocation_survives_nested_composite_cache_plan() {
+        // A composite action expands each nested step into a
+        // `RepositoryActionPlan`; the subpath it carries must classify the same
+        // way through `native_invocation_from_plan` as a top-level reference.
+        let mut nested = cache_plan("composite__cache-save", Some("save"));
+        nested.env = vec![("GITHUB_ACTION".into(), "outer-composite".into())];
+        let invocation = native_invocation_from_plan(&nested).unwrap().unwrap();
+        assert_eq!(invocation.cache_kind, Some(CacheActionKind::Save));
+        assert_eq!(invocation.source_path.as_deref(), Some("save"));
+    }
+
+    #[test]
+    fn native_invocation_rejects_unknown_cache_subpath() {
+        let error = native_invocation_from_plan(&cache_plan("cache", Some("delete"))).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported actions/cache subpath"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn native_invocation_leaves_non_cache_adapters_without_cache_kind() {
+        let mut plan = cache_plan("upload", None);
+        plan.repository = "actions/upload-artifact".into();
+        plan.source_path = Some("ignored".into());
+        let invocation = native_invocation_from_plan(&plan).unwrap().unwrap();
+        assert_eq!(invocation.adapter, NativeActionAdapter::UploadArtifact);
+        // Non-cache adapters keep their prior behavior: no lifecycle, and a
+        // non-cache subpath is never rejected here.
+        assert_eq!(invocation.cache_kind, None);
+        assert_eq!(invocation.source_path.as_deref(), Some("ignored"));
+    }
+
+    #[test]
+    fn native_invocation_is_none_for_unknown_repository() {
+        let mut plan = cache_plan("setup", None);
+        plan.repository = "owner/unknown-action".into();
+        assert!(native_invocation_from_plan(&plan).unwrap().is_none());
     }
 
     #[test]
