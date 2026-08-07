@@ -1627,6 +1627,41 @@ mod tests {
     }
 
     #[test]
+    fn release_record_provisions_rust_before_independent_verification() {
+        let workflow: serde_yaml::Value =
+            serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
+                .expect("release workflow must parse");
+        let steps = workflow["jobs"]["record"]["steps"]
+            .as_sequence()
+            .expect("record job steps");
+        let mise = steps
+            .iter()
+            .position(|step| {
+                step.get("uses")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|uses| uses.starts_with("jdx/mise-action@"))
+                    && step
+                        .get("with")
+                        .and_then(|with| with.get("install_args"))
+                        .and_then(serde_yaml::Value::as_str)
+                        == Some("rust")
+            })
+            .expect("record job must provision the locked Rust toolchain");
+        let verify = steps
+            .iter()
+            .position(|step| {
+                step.get("run")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|run| run.contains("release assemble"))
+            })
+            .expect("record job must independently verify the release");
+        assert!(
+            mise < verify,
+            "Rust must be provisioned before record verification"
+        );
+    }
+
+    #[test]
     fn every_non_native_ref_is_full_sha_or_documented_transition_tag() {
         for capability in ACTIONS {
             for allowed_ref in capability.allowed_refs {
