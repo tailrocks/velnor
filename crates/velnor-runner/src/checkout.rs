@@ -430,9 +430,14 @@ where
             fetch.extend([
                 "--tags".to_string(),
                 "origin".to_string(),
+                // FETCH_HEAD is ordered by requested refspec. Keep the exact
+                // workflow ref first: checkout uses FETCH_HEAD below, while
+                // the remaining refspecs only populate full history/tags.
+                // Putting the wildcard first made FETCH_HEAD resolve to the
+                // lexicographically first branch (observed on v0.1.122).
+                git_ref.to_string(),
                 "+refs/heads/*:refs/remotes/origin/*".to_string(),
                 "+refs/tags/*:refs/tags/*".to_string(),
-                git_ref.to_string(),
             ]);
         }
     }
@@ -1075,7 +1080,7 @@ fn format_git_args(args: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::executor::CommandResult;
+    use crate::executor::{CommandResult, ProcessCommandRunner};
 
     #[derive(Default)]
     struct RecordingRunner {
@@ -1359,8 +1364,91 @@ mod tests {
             .contains(&"+refs/heads/*:refs/remotes/origin/*".to_string()));
         assert!(fetch.1.contains(&"+refs/tags/*:refs/tags/*".to_string()));
         assert!(fetch.1.contains(&"--tags".to_string()));
+        let origin = fetch.1.iter().position(|arg| arg == "origin").unwrap();
+        let requested = fetch.1.iter().position(|arg| arg == "main").unwrap();
+        let wildcard = fetch
+            .1
+            .iter()
+            .position(|arg| arg == "+refs/heads/*:refs/remotes/origin/*")
+            .unwrap();
+        assert_eq!(requested, origin + 1);
+        assert!(requested < wildcard, "requested ref must own FETCH_HEAD");
 
         std::fs::remove_dir_all(temp).ok();
+    }
+
+    #[test]
+    fn full_fetch_checkout_keeps_exact_requested_commit_in_fetch_head() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-checkout-fetch-head-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let source = root.join("source");
+        let destination = root.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main", source.to_str().unwrap()]);
+        git(&[
+            "-C",
+            source.to_str().unwrap(),
+            "config",
+            "user.email",
+            "test@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            source.to_str().unwrap(),
+            "config",
+            "user.name",
+            "Velnor Test",
+        ]);
+        std::fs::write(source.join("state"), "requested\n").unwrap();
+        git(&["-C", source.to_str().unwrap(), "add", "state"]);
+        git(&["-C", source.to_str().unwrap(), "commit", "-m", "requested"]);
+        let requested = git(&["-C", source.to_str().unwrap(), "rev-parse", "HEAD"]);
+        git(&[
+            "-C",
+            source.to_str().unwrap(),
+            "checkout",
+            "-b",
+            "aaa-unrelated",
+        ]);
+        std::fs::write(source.join("state"), "unrelated\n").unwrap();
+        git(&["-C", source.to_str().unwrap(), "commit", "-am", "unrelated"]);
+
+        fetch_git_ref(
+            &mut ProcessCommandRunner,
+            source.to_str().unwrap(),
+            &requested,
+            &destination,
+            None,
+            None,
+            true,
+            false,
+            true,
+            false,
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            git(&["-C", destination.to_str().unwrap(), "rev-parse", "HEAD"]),
+            requested
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
