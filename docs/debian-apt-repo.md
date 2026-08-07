@@ -72,7 +72,12 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
    - Private key and passphrase are stored securely by maintainers and manually copied into the GitHub repository secrets `APT_GPG_PRIVATE_KEY` / `APT_GPG_PASSPHRASE` (no loading from external secret managers happens inside GitHub Actions). Imported in CI for reprepro `SignWith`.
    - Public key published at `https://velnor-apt.tailrocks.com/velnor.gpg` (and in the repo) for users to install into `/etc/apt/keyrings`.
 
-4. **Host on GitHub Pages** — the reprepro output tree (`dists/`, `pool/`, `velnor.gpg`) is deployed via a GitHub Actions workflow (using the official `actions/deploy-pages`). The index on Pages is generated fresh each time with only current versions (no state branch; old versions forgotten from index per maintainer preference). GitHub Pages is deployed via GitHub Actions (recommended; never "Deploy from a branch"). Served at `https://velnor-apt.tailrocks.com/`.
+4. **Host on GitHub Pages** — the isolated signed tree (`dists/`, `pool/`,
+   `velnor.gpg`) is deployed through the official Pages actions. Every index
+   contains exactly the candidate and its signed rollback predecessor. The
+   publisher verifies prior `InRelease`, package hashes, and publication-record
+   signature before carrying that pair forward. No state branch is used. Served
+   at `https://velnor-apt.tailrocks.com/`.
 
 ### Where it lives (storage decision)
 
@@ -88,7 +93,9 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
   `Release` index on Pages pointing at the asset URLs. Use this only if the
   `pool/` ever gets large; for now velnor-runner `.deb` ≈ 12 MB and a few
   versions sit comfortably inside Pages' ~1 GB repo / ~100 GB-month limits.
-- **Keep it lean**: the index on Pages includes only current versions. Old .debs remain in historical Releases (for manual download if needed) but are not part of the current apt repo.
+- **Keep it lean**: the index exposes exactly two versions: current candidate
+  and its verified rollback predecessor. Older `.deb` files remain in immutable
+  historical Releases but are not indexed.
 
 ## CI (GitHub Actions, on tag `v*`)
 
@@ -99,12 +106,16 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
 2. Stages per-arch debs + shas as artifacts.
 3. Attaches the `.deb`(s) to the velnor source GitHub Release.
 4. If `GH_VELNOR_APT_TOKEN` is present, cross-uploads the .debs to the `velnor-apt` repository's Releases (same tag) and triggers `publish.yml` in the apt repo via `gh workflow run -f version=$TAG`.
-5. The apt-repo's `publish.yml` then downloads the .debs from *its own* Releases (default GITHUB_TOKEN is sufficient), runs reprepro (fresh index with only the current version's debs), and deploys to Pages.
+5. The apt-repo's `publish.yml` downloads candidate `.deb` files from its own
+   Release, recovers the exact prior pair from the signed live repository,
+   verifies its signed publication identity, builds a fresh two-version index,
+   and deploys it to Pages.
 
 The `.deb` build + attachment to the original release is the responsibility of
 the source project. The apt publisher consumes only the apt repository's own
-release assets. The Pages index is generated fresh with only the requested
-version; historical packages remain in Releases.
+release assets. The Pages index is generated fresh with the requested version
+plus its exact signed rollback predecessor; older historical packages remain
+in Releases.
 6. Also attach the raw `.deb`(s) to the GitHub Release for direct download.
 
 Each new tag → new `.deb` in the pool → regenerated signed `Release` → `apt
