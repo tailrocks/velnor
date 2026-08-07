@@ -62,7 +62,7 @@ jobs:
           # Peel annotated OR lightweight tags to exactly one commit object.
           commit="$(git rev-list -n 1 "$TAG")"
           case "$commit" in
-            [0-9a-f]) : ;;
+            *[!0-9a-f]*|'') echo "::error::tag $TAG did not peel to lowercase hex" >&2; exit 1 ;;
           esac
           [ "${#commit}" -eq 40 ] || { echo "::error::tag $TAG did not peel to a 40-hex commit" >&2; exit 1; }
 
@@ -116,8 +116,10 @@ jobs:
           # The compiled capability manifest export embeds the source SHA + crate
           # version (plan 010 v7). Hash the exact exported JSON; this hash labels
           # the image and anchors the release record's manifest identity.
-          cargo run -q -p velnor-runner --locked --features release-build -- capabilities export > manifest.json
-          sha256="$(sha256sum manifest.json | awk '{print $1}')"
+          manifest="$RUNNER_TEMP/velnor-manifest.json"
+          cargo run -q -p velnor-runner --locked --features release-build -- capabilities export > "$manifest"
+          sha256="$(sha256sum "$manifest" | awk '{print $1}')"
+          cp "$manifest" manifest.json
           echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3
@@ -213,6 +215,16 @@ jobs:
       - name: Build (release-build embeds source SHA + tag; fails on drift)
         run: cargo zigbuild -p velnor-runner --release --locked --features release-build --target ${{ matrix.target }}
 
+      - name: Export acyclic identity from a clean tagged tree
+        run: |
+          set -euo pipefail
+          identity="$RUNNER_TEMP/velnor-release-${{ matrix.arch }}"
+          mkdir -p "$identity"
+          cargo run -q -p velnor-runner --locked --features release-build -- \
+            release export > "$identity/build-identity.json"
+          cargo run -q -p velnor-runner --locked --features release-build -- \
+            capabilities export > "$identity/manifest.json"
+
       - name: Package tar + independent hash
         run: |
           set -euo pipefail
@@ -229,9 +241,9 @@ jobs:
           # them inside the deb is acyclic. postinst validates the installed
           # binary against them offline.
           mkdir -p crates/velnor-runner/release
-          "target/${{ matrix.target }}/release/velnor-runner" release export > crates/velnor-runner/release/build-identity.json \
-            || cargo run -q -p velnor-runner --locked --features release-build -- release export > crates/velnor-runner/release/build-identity.json
-          cargo run -q -p velnor-runner --locked --features release-build -- capabilities export > crates/velnor-runner/release/manifest.json
+          identity="$RUNNER_TEMP/velnor-release-${{ matrix.arch }}"
+          cp "$identity/build-identity.json" crates/velnor-runner/release/build-identity.json
+          cp "$identity/manifest.json" crates/velnor-runner/release/manifest.json
 
       - name: Build .deb (version pinned to the tag)
         run: |
