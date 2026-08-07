@@ -1613,6 +1613,20 @@ mod tests {
     }
 
     #[test]
+    fn release_workflow_reads_platforms_from_imagetools_inspect_schema() {
+        let workflow = include_str!("../../../.github/workflows/release.yml");
+        for architecture in ["amd64", "arm64"] {
+            let selector = format!(
+                ".manifest.manifests[] | select(.platform.architecture==\"{architecture}\") | .digest"
+            );
+            assert!(
+                workflow.contains(&selector),
+                "release record must read {architecture} from the manifest nested in the imagetools JSON output"
+            );
+        }
+    }
+
+    #[test]
     fn every_non_native_ref_is_full_sha_or_documented_transition_tag() {
         for capability in ACTIONS {
             for allowed_ref in capability.allowed_refs {
