@@ -2638,20 +2638,13 @@ where
         let action_state = state.with_env(state.resolve_env(&action.env));
         let context = native_input_or(&action_state, action, "context", ".");
         let mut args = vec!["buildx".to_string(), "build".to_string()];
-        // The command runs inside the job container with CWD /__w (the
-        // workspace), so context-relative Dockerfile paths resolve naturally;
-        // join relative files to the context like the upstream action does.
+        // build-push-action resolves an explicit `file` from the workspace,
+        // independently from `context`. Passing context/file twice here turned
+        // `context: docker`, `file: docker/Dockerfile` into
+        // `docker/docker/Dockerfile`.
         let file_input = native_input(action, &action_state, "file");
         if !file_input.trim().is_empty() {
-            let file_path = if std::path::Path::new(&file_input).is_absolute()
-                || context.trim().is_empty()
-                || context.trim() == "."
-            {
-                file_input.clone()
-            } else {
-                format!("{}/{}", context.trim_end_matches('/'), file_input)
-            };
-            push_arg(&mut args, "--file", &file_path);
+            push_arg(&mut args, "--file", &file_input);
         }
         push_arg(
             &mut args,
@@ -18624,6 +18617,46 @@ bitcoin-processor-app.push=true")
         assert!(invocation.contains("'--output'"));
         assert!(!invocation.contains("'--push'"));
         assert!(invocation.contains("'--metadata-file'"));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn docker_build_push_keeps_explicit_dockerfile_workspace_relative() {
+        let temp = temp_dir();
+        fs::create_dir_all(temp.join("work")).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "build".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::DockerBuildPush,
+                cache_kind: None,
+                source_path: None,
+                inputs: [
+                    ("context".into(), "docker".into()),
+                    ("file".into(), "docker/job-ubuntu.Dockerfile".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        let calls = docker_call_strings(&executor.runner().calls);
+        let invocation = calls
+            .iter()
+            .find(|call| call.contains("'buildx' 'build'"))
+            .expect("buildx build invoked");
+        assert!(invocation.contains("'--file' 'docker/job-ubuntu.Dockerfile'"));
+        assert!(!invocation.contains("docker/docker/job-ubuntu.Dockerfile"));
+        assert!(invocation.contains("'docker'"));
         fs::remove_dir_all(temp).unwrap();
     }
 
