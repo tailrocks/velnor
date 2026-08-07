@@ -6,10 +6,14 @@ in [master-plan.md](master-plan.md), [mission.md](mission.md), and
 
 ## Production operation (Debian package)
 
-The runner installs and upgrades via apt (repo: `velnor-apt.tailrocks.com`):
+The runner installs, upgrades, downgrades, and rolls back only via the signed
+apt repository (`velnor-apt.tailrocks.com`), always pinned to a verified exact
+version:
 
 ```sh
-sudo apt-get update && sudo apt-get install velnor-runner   # or upgrade
+sudo apt-get update
+apt-cache policy velnor-runner
+sudo apt-get install velnor-runner=X.Y.Z
 ```
 
 For first-install repository/keyring setup and the maintainer's complete
@@ -19,11 +23,14 @@ servers never install a local release asset.
 
 Configuration (one daemon per target scope):
 
-Production upgrades on Sentry come only from that signed repository. Commit and
-push the source, tag the new version, wait for `release-deb.yml` and
-`tailrocks/velnor-apt`'s `publish.yml` to pass, verify the signed repository
-offers the new version, then run the apt command above. Do not deploy with
-`dpkg -i` or install a local `.deb` path with apt.
+Production changes on Sentry come only from that signed repository. Commit and
+push the source, create the signed tag, wait for Velnor's immutable source
+release/record and `tailrocks/velnor-apt`'s signed publication, verify the
+signature, publication record, exact candidate and predecessor, drain the
+fleet, then run the exact-version apt commands above. Do not use a local or
+downloaded `.deb`, `dpkg -i`, a local apt path, a copied binary, or a local
+build. A verified release record is activation metadata, not an installation
+path.
 
 The package ships the canonical job-image Dockerfile. During configuration,
 `postinst` compares the image's OCI version label with the Debian package

@@ -238,9 +238,14 @@ operator interaction:
 - Do not bypass a target repository's `AGENTS.md`. If current instructions
   conflict with an old plan, current repository instructions win and the plan
   must be reconciled.
-- Any Sentry installation or upgrade must follow commit + push + tag +
-  `release-deb.yml` + signed `velnor-apt` publication + `apt-get update &&
-  apt-get install`. Never deploy a local package or binary directly.
+- Any Sentry installation, upgrade, downgrade, rollback, or forward recovery
+  must follow green signed commit + push + signed tag + immutable source
+  release/record + signed `velnor-apt` publication + signature/publication and
+  exact-candidate verification + drain + `apt-get update` +
+  `apt-get install velnor-runner=<exact-version>` + installed/runtime proof.
+  Never use a local or downloaded `.deb`, direct `dpkg -i`, local-path apt, a
+  copied binary, or a local build. Release-record downloads are verified
+  activation metadata only; they never replace signed-APT installation.
 - Never delete ambiguous or non-Velnor host resources. Resolve exact ownership
   first and use only plan-approved, recoverable or narrowly targeted actions.
 
