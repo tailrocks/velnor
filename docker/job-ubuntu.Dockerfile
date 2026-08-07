@@ -160,7 +160,7 @@ RUN ver="$KACHE_VERSION" && \
 # The cargo:* tools compile from source: registry/git cache mounts + sccache
 # (scoped to this RUN) make a version bump rebuild warm instead of cold.
 COPY docker/job-mise.toml /opt/mise/config/config.toml
-COPY docker/job-mise.lock /opt/mise/config/config.lock
+COPY docker/job-mise.lock /opt/mise/config/mise.lock
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/sccache-build \
