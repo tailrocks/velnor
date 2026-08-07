@@ -43,10 +43,10 @@ pub const FLEET_PINNED_MISE_VERSION: &str = "2026.7.7";
 const CONFIG_LOCK_PAIRS: &[(&str, &str)] = &[
     ("mise.toml", "mise.lock"),
     (".mise.toml", ".mise.lock"),
-    ("mise/config.toml", "mise/config.lock"),
-    (".mise/config.toml", ".mise/config.lock"),
+    ("mise/config.toml", "mise/mise.lock"),
+    (".mise/config.toml", ".mise/mise.lock"),
     (".config/mise.toml", ".config/mise.lock"),
-    (".config/mise/config.toml", ".config/mise/config.lock"),
+    (".config/mise/config.toml", ".config/mise/mise.lock"),
 ];
 
 /// Is `value` an admissible mise binary version selector?
@@ -603,6 +603,35 @@ backend = "aqua:protocolbuffers/protobuf/protoc"
             root.canonicalize().unwrap().join("mise.lock")
         );
         fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn directory_config_uses_mise_lock_not_config_lock() {
+        let root = scratch("directory-lock-name");
+        write(
+            &root.join(".config/mise/config.toml"),
+            "[settings]\nlockfile = true\n",
+        );
+        write(&root.join(".config/mise/mise.lock"), "# lock\n");
+        let git = FakeGit {
+            tracked: true,
+            clean: true,
+        };
+
+        let resolved = resolve_locked_mise_config(&root, &root, &git).unwrap();
+
+        assert_eq!(
+            resolved.lock,
+            root.canonicalize().unwrap().join(".config/mise/mise.lock")
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn job_image_places_lock_at_mise_config_root() {
+        let dockerfile = include_str!("../../../docker/job-ubuntu.Dockerfile");
+        assert!(dockerfile.contains("COPY docker/job-mise.lock /opt/mise/config/mise.lock"));
+        assert!(!dockerfile.contains("/opt/mise/config/config.lock"));
     }
 
     #[test]
