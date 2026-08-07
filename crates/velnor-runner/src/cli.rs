@@ -41,7 +41,7 @@ pub enum Command {
 /// Default host location of the atomically activated release identity. Both the
 /// package scripts and the daemon `.service` units read from here, so the units
 /// can invoke `release verify-installed` with no arguments.
-pub const ACTIVE_RELEASE_DIR: &str = "/var/lib/velnor/release/active";
+pub const ACTIVE_RELEASE_DIR: &str = "/var/lib/velnor/release";
 const ACTIVE_RECORD_PATH: &str = "/var/lib/velnor/release/active/record.json";
 const ACTIVE_DEPLOYED_PATH: &str = "/var/lib/velnor/release/active/deployed.json";
 const INSTALLED_BINARY_PATH: &str = "/usr/bin/velnor-runner";

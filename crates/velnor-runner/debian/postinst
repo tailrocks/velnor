@@ -13,7 +13,8 @@ set -e
 
 BIN=/usr/bin/velnor-runner
 SHARE=/usr/share/velnor
-ACTIVE_DIR=/var/lib/velnor/release/active
+RELEASE_DIR=/var/lib/velnor/release
+ACTIVE_DIR=$RELEASE_DIR/active
 
 fail() {
   echo "velnor-runner postinst: $1" >&2
@@ -23,7 +24,13 @@ fail() {
 case "$1" in
   configure)
     install -d -m 0750 /var/lib/velnor /var/lib/velnor/work
-    install -d -m 0750 /var/lib/velnor/release "$ACTIVE_DIR"
+    install -d -m 0750 "$RELEASE_DIR" "$RELEASE_DIR/records"
+    # Pre-010 packages may have left an empty concrete active directory. The
+    # transactional store uses an atomically replaced active symlink instead.
+    if [ -d "$ACTIVE_DIR" ] && [ ! -L "$ACTIVE_DIR" ]; then
+      rmdir "$ACTIVE_DIR" 2>/dev/null \
+        || fail "legacy active directory is nonempty; refusing pointer migration"
+    fi
 
     if [ -f /etc/velnor/velnor.env ]; then
       chmod 0640 /etc/velnor/velnor.env || true

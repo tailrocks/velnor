@@ -126,8 +126,11 @@ acyclic release-record chain. `release verify-installed` (run automatically as
 version, and compiled manifest match the atomically activated
 `/var/lib/velnor/release/active/record.json`; a missing or mismatched tuple fails
 the start closed so a mixed old/new tuple never runs. Deployment stages a record
-with `release activate --record <release-record.json>` (atomic fsync+rename,
-keeping the exact prior tuple for `release rollback`); `release verify-record`
+with `release activate --record <release-record.json>`. Activation first pulls
+and verifies the exact OCI digest and labels, stores immutable
+`records/<tag>/{record,deployed}.json`, then atomically replaces the `active`
+relative symlink. The prior complete tuple remains behind the `previous`
+symlink for `release rollback`; `release verify-record`
 checks a record against its independent checksum and internal coherence, and
 `release export` prints this binary's embedded source SHA + crate version. The
 package `postinst` never builds an image and never restarts — activation and

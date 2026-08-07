@@ -25,6 +25,10 @@ fn debian_lifecycle_preserves_operator_units_and_covers_instances() {
             "postinst must not contain operator-state/network mutation: {forbidden}"
         );
     }
+    assert!(postinst.contains("install -d -m 0750 \"$RELEASE_DIR\" \"$RELEASE_DIR/records\""));
+    assert!(!postinst.contains("install -d -m 0750 \"$ACTIVE_DIR\""));
+    assert!(postinst.contains("rmdir \"$ACTIVE_DIR\""));
+    assert!(postinst.contains("legacy active directory is nonempty; refusing pointer migration"));
     assert!(prerm.contains("'velnor-daemon@*.service'"));
     assert!(prerm.contains("systemctl stop \"$unit\""));
     assert!(postrm.contains("'velnor-daemon@*.service'"));
@@ -518,7 +522,7 @@ fn publication_and_deployed_round_trip() {
             },
         ],
         signer_fingerprint: "261EDAC957DEB801".to_string(),
-        previous: Some(PreviousPointer {
+        previous: Some(PreviousPointer::Coherent {
             tag: "v0.1.120".to_string(),
             source_record_sha256: digest_of("prev-record"),
         }),
@@ -549,7 +553,7 @@ fn publication_for(record: &ReleaseRecord) -> PublicationRecord {
             sha256: digest_of("packages-amd64"),
         }],
         signer_fingerprint: "261EDAC957DEB801".to_string(),
-        previous: Some(PreviousPointer {
+        previous: Some(PreviousPointer::Coherent {
             tag: "v0.1.120".to_string(),
             source_record_sha256: digest_of("prev-record"),
         }),
@@ -594,7 +598,7 @@ fn verify_publication_binds_catches_each_field() {
 
     // Previous pointer must reference a DIFFERENT release than the current one.
     let mut self_previous = publication_for(&record);
-    self_previous.previous = Some(PreviousPointer {
+    self_previous.previous = Some(PreviousPointer::Coherent {
         tag: record.build.tag.clone(),
         source_record_sha256: record.digest(),
     });
@@ -602,6 +606,32 @@ fn verify_publication_binds_catches_each_field() {
         verify_publication_binds(&self_previous, &record),
         Err(CoherenceError::PublicationPrevious)
     );
+}
+
+#[test]
+fn publication_accepts_only_the_explicit_legacy_rollback_bridge() {
+    let record = valid_record();
+    let mut publication = publication_for(&record);
+    publication.previous = Some(PreviousPointer::LegacyObserved("v0.1.120".into()));
+    assert_eq!(
+        verify_publication_binds(&publication, &record),
+        Err(CoherenceError::PublicationPrevious)
+    );
+    publication.previous = Some(PreviousPointer::LegacyObserved("v0.1.121".into()));
+    // The fixture's current tag is v0.1.121, so self-reference remains denied.
+    assert_eq!(
+        verify_publication_binds(&publication, &record),
+        Err(CoherenceError::PublicationPrevious)
+    );
+    let mut candidate = record.clone();
+    candidate.build.tag = "v0.1.131".into();
+    candidate.build.crate_version = "0.1.131".into();
+    candidate.build.debian_version = "0.1.131".into();
+    candidate.oci_labels.version = "0.1.131".into();
+    publication.tag = "v0.1.131".into();
+    publication.crate_version = "0.1.131".into();
+    publication.source_record_sha256 = candidate.digest();
+    assert_eq!(verify_publication_binds(&publication, &candidate), Ok(()));
 }
 
 // --- atomic on-disk activation ---------------------------------------------
@@ -652,14 +682,20 @@ fn store_activate_and_rollback_restore_exact_tuple() {
     assert_eq!(v120.verify(), Ok(()));
 
     let v121 = valid_record();
+    let host = Arch::host().unwrap();
+    let deployed120 = deployed_for(&v120, host);
+    let deployed121 = deployed_for(&v121, host);
 
-    store.store_record(&v120).unwrap();
-    store.store_record(&v121).unwrap();
-    store.activate("v0.1.120").unwrap();
-    store.activate("v0.1.121").unwrap();
+    store.activate(&v120, &deployed120).unwrap();
+    store.activate(&v121, &deployed121).unwrap();
 
     assert_eq!(store.active_tag().unwrap().as_deref(), Some("v0.1.121"));
     assert_eq!(store.previous_tag().unwrap().as_deref(), Some("v0.1.120"));
+    assert_eq!(
+        std::fs::read(dir.path().join("active/record.json")).unwrap(),
+        v121.to_canonical_json().as_bytes()
+    );
+    assert!(dir.path().join("active/deployed.json").is_file());
 
     let restored = store.rollback().unwrap();
     assert_eq!(restored, "v0.1.120");
@@ -691,7 +727,10 @@ fn store_record_refuses_to_clobber_divergent_bytes() {
 fn activate_requires_a_stored_record() {
     let dir = TempDir::new("noactivate");
     let store = ReleaseStore::new(dir.path());
-    assert!(store.activate("v0.1.121").is_err());
+    let record = valid_record();
+    let mut deployed = deployed_for(&record, Arch::host().unwrap());
+    deployed.record_sha256 = digest_of("wrong-record");
+    assert!(store.activate(&record, &deployed).is_err());
 }
 
 #[test]

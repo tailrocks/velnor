@@ -22,10 +22,12 @@
 //! a development binary. The pure verify/parse logic is exercised entirely by
 //! fixtures so the normal (feature-off) test path proves the whole model.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -315,10 +317,14 @@ pub struct PackagesIndex {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PreviousPointer {
-    pub tag: String,
-    pub source_record_sha256: Sha256Hex,
+#[serde(untagged)]
+pub enum PreviousPointer {
+    Coherent {
+        tag: String,
+        source_record_sha256: Sha256Hex,
+    },
+    /// One-time bridge for the last signed package predating release records.
+    LegacyObserved(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -622,9 +628,20 @@ pub fn verify_publication_binds(
         }
     }
     if let Some(previous) = &publication.previous {
-        // The previous pointer must reference a strictly different release tuple.
-        if previous.tag == record.build.tag || previous.source_record_sha256 == record.digest() {
-            return Err(CoherenceError::PublicationPrevious);
+        match previous {
+            PreviousPointer::Coherent {
+                tag,
+                source_record_sha256,
+            } => {
+                if tag == &record.build.tag || source_record_sha256 == &record.digest() {
+                    return Err(CoherenceError::PublicationPrevious);
+                }
+            }
+            PreviousPointer::LegacyObserved(tag) => {
+                if tag != "v0.1.121" || tag == &record.build.tag {
+                    return Err(CoherenceError::PublicationPrevious);
+                }
+            }
         }
     }
     Ok(())
@@ -742,7 +759,21 @@ impl ReleaseStore {
     }
 
     pub fn record_path(&self, tag: &str) -> PathBuf {
-        self.root.join("records").join(format!("{tag}.json"))
+        self.root.join("records").join(tag).join("record.json")
+    }
+    pub fn deployed_path(&self, tag: &str) -> PathBuf {
+        self.root.join("records").join(tag).join("deployed.json")
+    }
+    pub fn read_record(&self, tag: &str) -> Result<ReleaseRecord> {
+        let path = self.record_path(tag);
+        let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        let record: ReleaseRecord =
+            serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+        record.verify().map_err(anyhow::Error::from)?;
+        if record.build.tag != tag {
+            bail!("stored release record tag disagrees with its directory");
+        }
+        Ok(record)
     }
     fn active_path(&self) -> PathBuf {
         self.root.join("active")
@@ -782,24 +813,39 @@ impl ReleaseStore {
     }
 
     pub fn active_tag(&self) -> Result<Option<String>> {
-        read_optional_line(&self.active_path())
+        read_optional_link_tag(&self.active_path())
     }
     pub fn previous_tag(&self) -> Result<Option<String>> {
-        read_optional_line(&self.previous_path())
+        read_optional_link_tag(&self.previous_path())
     }
 
     /// Atomically make `tag` active, demoting the current active tag to
     /// `previous`. The record for `tag` must already be stored.
-    pub fn activate(&self, tag: &str) -> Result<()> {
-        if !self.record_path(tag).exists() {
-            bail!("cannot activate {tag}: no stored record");
+    pub fn activate(&self, record: &ReleaseRecord, deployed: &DeployedIdentity) -> Result<()> {
+        let tag = &record.build.tag;
+        verify_installed(
+            deployed,
+            record,
+            Arch::host().context("unsupported host architecture")?,
+            &deployed.binary_sha256,
+        )
+        .map_err(anyhow::Error::from)?;
+        self.store_record(record)?;
+        let deployed_bytes = serde_json::to_vec_pretty(deployed)?;
+        let deployed_path = self.deployed_path(tag);
+        if deployed_path.exists() {
+            if fs::read(&deployed_path)? != deployed_bytes {
+                bail!("deployed identity for {tag} already exists with different bytes");
+            }
+        } else {
+            write_atomic(&deployed_path, &deployed_bytes)?;
         }
         if let Some(current) = self.active_tag()? {
-            if current != tag {
-                write_atomic(&self.previous_path(), format!("{current}\n").as_bytes())?;
+            if current != *tag {
+                write_atomic_symlink(&self.previous_path(), &current)?;
             }
         }
-        write_atomic(&self.active_path(), format!("{tag}\n").as_bytes())?;
+        write_atomic_symlink(&self.active_path(), tag)?;
         Ok(())
     }
 
@@ -809,20 +855,43 @@ impl ReleaseStore {
         let previous = self
             .previous_tag()?
             .context("no previous tag recorded — cannot roll back")?;
-        if !self.record_path(&previous).exists() {
+        if !self.record_path(&previous).exists() || !self.deployed_path(&previous).exists() {
             bail!("cannot roll back to {previous}: its record is missing");
         }
-        write_atomic(&self.active_path(), format!("{previous}\n").as_bytes())?;
+        if let Some(current) = self.active_tag()? {
+            write_atomic_symlink(&self.previous_path(), &current)?;
+        }
+        write_atomic_symlink(&self.active_path(), &previous)?;
         Ok(previous)
     }
 }
 
-fn read_optional_line(path: &Path) -> Result<Option<String>> {
-    match fs::read_to_string(path) {
-        Ok(text) => Ok(Some(text.trim().to_string())),
+fn read_optional_link_tag(path: &Path) -> Result<Option<String>> {
+    match fs::read_link(path) {
+        Ok(target) => Ok(target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err.into()),
     }
+}
+
+fn write_atomic_symlink(path: &Path, tag: &str) -> Result<()> {
+    use std::os::unix::fs::symlink;
+    let parent = path.parent().context("release pointer has no parent")?;
+    fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(
+        ".{}.tmp",
+        path.file_name().unwrap().to_string_lossy()
+    ));
+    let _ = fs::remove_file(&tmp);
+    symlink(Path::new("records").join(tag), &tmp)?;
+    fs::rename(&tmp, path)?;
+    if let Ok(handle) = fs::File::open(parent) {
+        let _ = handle.sync_all();
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -948,18 +1017,117 @@ fn verify_installed_command(args: ReleaseVerifyInstalledArgs) -> Result<()> {
     Ok(())
 }
 
+fn docker_output(args: &[&str]) -> Result<Vec<u8>> {
+    let output = Command::new("docker")
+        .args(args)
+        .output()
+        .context("execute docker for release activation")?;
+    if !output.status.success() {
+        bail!("docker release activation step failed");
+    }
+    Ok(output.stdout)
+}
+
+fn verify_and_tag_release_image(record: &ReleaseRecord) -> Result<()> {
+    docker_output(&["pull", &record.oci_image_ref])?;
+    let repo_digests: Vec<String> = serde_json::from_slice(&docker_output(&[
+        "image",
+        "inspect",
+        &record.oci_image_ref,
+        "--format",
+        "{{json .RepoDigests}}",
+    ])?)?;
+    let expected_ref = format!(
+        "{}@{}",
+        record.oci_image_ref.split('@').next().unwrap(),
+        record.oci_index_digest
+    );
+    if !repo_digests.iter().any(|item| item == &expected_ref) {
+        bail!("pulled OCI image digest disagrees with release record");
+    }
+    let labels: BTreeMap<String, String> = serde_json::from_slice(&docker_output(&[
+        "image",
+        "inspect",
+        &record.oci_image_ref,
+        "--format",
+        "{{json .Config.Labels}}",
+    ])?)?;
+    let required_labels = [
+        (
+            "org.opencontainers.image.version",
+            record.oci_labels.version.as_str(),
+        ),
+        (
+            "org.opencontainers.image.revision",
+            record.oci_labels.revision.as_str(),
+        ),
+        (
+            "org.opencontainers.image.source",
+            record.oci_labels.source.as_str(),
+        ),
+        (
+            "org.velnor.manifest-sha256",
+            record.oci_labels.manifest_sha256.as_str(),
+        ),
+    ];
+    if required_labels
+        .iter()
+        .any(|(key, value)| labels.get(*key).map(String::as_str) != Some(*value))
+    {
+        bail!("pulled OCI image labels disagree with release record");
+    }
+    docker_output(&["tag", &record.oci_image_ref, "velnor/job-ubuntu:26.04"])?;
+    Ok(())
+}
+
 fn activate_command(args: ReleaseActivateArgs) -> Result<()> {
     let (_, record) = read_record_file(&args.record)?;
     record.verify().map_err(anyhow::Error::from)?;
+    let host = Arch::host().context("unsupported host architecture")?;
+    let architecture = record
+        .architecture(host)
+        .context("release record lacks host architecture")?;
+    let installed_binary = Path::new("/usr/bin/velnor-runner");
+    let binary_sha256 = sha256_file(installed_binary)?;
+    if binary_sha256 != architecture.binary_sha256 {
+        bail!("installed binary digest disagrees with release record");
+    }
+    let manifest_sha256 = Sha256Hex::of_bytes(crate::manifest::to_json()?.as_bytes());
+    if manifest_sha256 != record.build.manifest_sha256 {
+        bail!("compiled manifest digest disagrees with release record");
+    }
+
+    verify_and_tag_release_image(&record)?;
+
+    let deployed = DeployedIdentity {
+        schema: DEPLOYED_IDENTITY_SCHEMA.to_string(),
+        package_version: record.build.debian_version.clone(),
+        crate_version: record.build.crate_version.clone(),
+        source_commit: record.build.commit.clone(),
+        binary_sha256,
+        manifest_version: record.build.manifest_version,
+        manifest_sha256,
+        oci_image_digest: record.oci_index_digest.clone(),
+        record_sha256: record.digest(),
+    };
+    verify_installed(&deployed, &record, host, &deployed.binary_sha256)
+        .map_err(anyhow::Error::from)?;
     let store = ReleaseStore::new(&args.dir);
-    store.store_record(&record)?;
-    store.activate(&record.build.tag)?;
+    store.activate(&record, &deployed)?;
     println!("activated {}", record.build.tag);
     Ok(())
 }
 
 fn rollback_command(args: ReleaseRollbackArgs) -> Result<()> {
     let store = ReleaseStore::new(&args.dir);
+    let previous = store
+        .previous_tag()?
+        .context("no previous release is available")?;
+    let record = store.read_record(&previous)?;
+    // A rollback changes both halves of the runtime tuple while the fleet is
+    // drained: first make the exact prior image locally runnable, then switch
+    // the filesystem pointer. Any verification failure leaves active unchanged.
+    verify_and_tag_release_image(&record)?;
     let restored = store.rollback()?;
     println!("rolled back to {restored}");
     Ok(())
