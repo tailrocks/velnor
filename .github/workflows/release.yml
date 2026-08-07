@@ -322,8 +322,8 @@ jobs:
           deb_amd64="$(read_sha "velnor-runner-${VERSION}-amd64.deb.sha256")"
           deb_arm64="$(read_sha "velnor-runner-${VERSION}-arm64.deb.sha256")"
           # Per-platform OCI digests from the image job.
-          plat_amd64="$(jq -r '.manifests[] | select(.platform.architecture=="amd64") | .digest' artifacts/image-digests.json)"
-          plat_arm64="$(jq -r '.manifests[] | select(.platform.architecture=="arm64") | .digest' artifacts/image-digests.json)"
+          plat_amd64="$(jq -r '.manifest.manifests[] | select(.platform.architecture=="amd64") | .digest' artifacts/image-digests.json)"
+          plat_arm64="$(jq -r '.manifest.manifests[] | select(.platform.architecture=="arm64") | .digest' artifacts/image-digests.json)"
 
           jq -n \
             --arg schema "velnor.release-record/v1" \
