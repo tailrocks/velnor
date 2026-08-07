@@ -73,7 +73,15 @@ impl JobContainerSpec {
     }
 
     pub fn create_network_args(&self) -> Vec<String> {
-        vec!["network".into(), "create".into(), self.network.clone()]
+        vec![
+            "network".into(),
+            "create".into(),
+            "--label".into(),
+            format!("velnor.daemon-id={}", self.daemon_id),
+            "--label".into(),
+            format!("velnor.job-id={}", self.name),
+            self.network.clone(),
+        ]
     }
 
     pub fn start_args(&self) -> Vec<String> {
@@ -201,6 +209,8 @@ impl JobContainerSpec {
         args.extend([
             "--label".into(),
             format!("velnor.daemon-id={}", self.daemon_id),
+            "--label".into(),
+            format!("velnor.job-id={}", self.name),
         ]);
         args.extend(self.options.iter().cloned());
         args.extend(self.resource_options.iter().cloned());
@@ -1268,6 +1278,22 @@ mod tests {
             cargo_target_host: None,
             compiler_cache_backend: CompilerCacheBackend::Sccache,
         }
+    }
+
+    #[test]
+    fn job_network_carries_daemon_and_job_ownership_labels() {
+        assert_eq!(
+            spec().create_network_args(),
+            vec![
+                "network",
+                "create",
+                "--label",
+                "velnor.daemon-id=test-daemon",
+                "--label",
+                "velnor.job-id=velnor-job-1",
+                "velnor-net-1",
+            ]
+        );
     }
 
     fn container_test_temp(name: &str) -> PathBuf {

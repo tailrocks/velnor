@@ -6,7 +6,7 @@
 # single mutable image label with no manifest/source/digest check and restarting
 # before equality. That is replaced with: validate the installed binary against
 # the shipped acyclic identity, and (if a release record is already staged) prove
-# coherence and pull the immutable OCI digest — then STAGE. Activation + restart
+# coherence. Activation, image acquisition, and restart
 # are a separate, explicit `velnor-runner release activate` step run by the
 # deployment flow, never here.
 set -e
@@ -64,39 +64,28 @@ case "$1" in
 
     if [ -d /run/systemd/system ]; then
       systemctl daemon-reload || true
-      # Enable (not start) — fresh installs stay stopped until the operator fills
-      # in config AND a coherent release record is activated. Both daemon units
-      # run `release verify-installed` as ExecStartPre, so a start without a
-      # staged coherent tuple fails closed.
-      systemctl enable velnor-daemon.service || true
-      systemctl enable --now velnor-doctor.timer || true
-      for name in $(systemctl list-units --no-legend --plain 'velnor-daemon@*.service' 2>/dev/null | awk '{print $1}' | sed 's/^velnor-daemon@//; s/\.service$//'); do
-        systemctl enable --now "velnor-doctor@${name}.timer" || true
-      done
+      # Unit enablement, masking, and activation belong to the operator. Package
+      # upgrades preserve systemd's existing state by doing nothing here; fresh
+      # installs remain disabled. In particular, never revive the obsolete
+      # default daemon/doctor or invent doctors for inactive template instances.
     fi
 
-    # --- If a record is already staged, prove coherence + pull the OCI digest -
-    # (Never restart — activation is explicit.)
+    # --- If a record is already staged, prove offline coherence --------------
+    # Image acquisition is network work. It belongs to explicit activation,
+    # never a dpkg maintainer script.
     if [ -x "$BIN" ] && [ -f "$ACTIVE_DIR/record.json" ] && [ -f "$ACTIVE_DIR/deployed.json" ]; then
       "$BIN" release verify-installed \
         --record "$ACTIVE_DIR/record.json" \
         --deployed "$ACTIVE_DIR/deployed.json" \
         --binary "$BIN" \
         || fail "staged release record is not coherent with the installed binary/package/manifest"
-      if command -v docker >/dev/null 2>&1; then
-        image_ref="$(sed -n 's/.*"oci_image_ref": *"\([^"]*\)".*/\1/p' "$ACTIVE_DIR/record.json" | head -n1)"
-        if [ -n "$image_ref" ]; then
-          docker pull "$image_ref" >/dev/null 2>&1 \
-            || echo "postinst: warning: could not pre-pull $image_ref (activation will re-verify)." >&2
-        fi
-      fi
     fi
 
     echo "velnor-runner installed. NOTE: this package never restarts the fleet."
     echo "Configure /etc/velnor/secrets.env (0600) + /etc/velnor/velnor.env, then"
     echo "activate a coherent release and start:"
     echo "  sudo velnor-runner release activate --record <release-record.json>"
-    echo "  sudo systemctl start velnor-daemon    # (ExecStartPre verifies coherence)"
+    echo "  sudo systemctl enable --now velnor-daemon@<name>  # operator-selected instance"
     ;;
 esac
 

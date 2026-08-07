@@ -3,6 +3,7 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     env,
@@ -49,12 +50,13 @@ use crate::{
     job_message::{ActionReferenceType, AgentJobRequestMessage, VariableValue},
     platform,
     protocol::{
-        decode_jit_config, AcquireJobOutcome, BrokerClient, DistributedTaskClient, GitHubApiError,
-        GitHubJitConfigRequest, GitHubScope, ListedRunner, OAuthAccessToken, OAuthClient,
-        OAuthJwtCredentials, RegistrationClient, RunServiceAnnotation, RunServiceAnnotationLevel,
-        RunServiceClient, RunServiceCompleteJob, RunServiceStepResult, RunServiceTelemetry,
-        RunServiceVariableValue, RunnerJobRequestRef, RunnerStatus, TaskAgentSession, TaskResult,
-        TimelineRecord, TimelineRecordFeedLines, TimelineRecordState, RUNNER_JOB_REQUEST,
+        decode_jit_config, github_api_retry_delay, AcquireJobOutcome, BrokerClient,
+        DistributedTaskClient, GitHubApiError, GitHubJitConfigRequest, GitHubScope, ListedRunner,
+        OAuthAccessToken, OAuthClient, OAuthJwtCredentials, RegistrationClient,
+        RunServiceAnnotation, RunServiceAnnotationLevel, RunServiceClient, RunServiceCompleteJob,
+        RunServiceStepResult, RunServiceTelemetry, RunServiceVariableValue, RunnerJobRequestRef,
+        RunnerStatus, TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines,
+        TimelineRecordState, RUNNER_JOB_REQUEST,
     },
     runtime_env::job_runtime_env,
     script_step::{StepAnnotation, StepAnnotationLevel},
@@ -501,23 +503,24 @@ fn resolve_runner_group_id(
 
 async fn remove_existing_jit_config_for_replace(dir: &Path, pat: Option<&str>) -> Result<()> {
     if let Ok(stored) = config::load(dir) {
-        if let (Some(pat), Some(agent_id)) = (pat, stored.settings.agent_id) {
+        if let Some(agent_id) = stored.settings.agent_id {
+            let pat = pat.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot replace registered JIT runner id {agent_id} without a GitHub PAT; local identity preserved"
+                )
+            })?;
             let scope = GitHubScope::parse(&stored.settings.github_url)?;
-            // Best-effort: a runner that is mid-job returns 422 ("currently
-            // busy"). That must NOT crash daemon startup — the busy runner will
-            // finish and go offline on its own; we just drop the stale local
-            // config and register a fresh JIT runner for this slot.
-            match RegistrationClient::new()?
+            RegistrationClient::new()?
                 .delete_runner(&scope, pat, agent_id)
                 .await
-            {
-                Ok(()) => println!(
-                    "Deleted or confirmed absent existing JIT runner id {agent_id} before replace."
-                ),
-                Err(e) => eprintln!(
-                    "Warning: could not delete existing JIT runner id {agent_id} before replace (continuing): {e:#}"
-                ),
-            }
+                .with_context(|| {
+                    format!(
+                        "delete existing JIT runner id {agent_id} before replace; local identity preserved"
+                    )
+                })?;
+            println!(
+                "Deleted or confirmed absent existing JIT runner id {agent_id} before replace."
+            );
         }
         if config::remove(dir)? {
             println!(
@@ -600,6 +603,17 @@ fn local_failure(error: anyhow::Error) -> anyhow::Error {
     anyhow::Error::new(LocalRunnerFailure(error))
 }
 
+/// Missing or corrupt local identity is recoverable registration state, not a
+/// persistent host fault. Supervisor must rebuild it instead of backing off on
+/// a slot that can never become usable.
+#[derive(Debug, thiserror::Error)]
+#[error("local runner identity unavailable: {0}")]
+struct LocalRunnerIdentityUnavailable(#[source] anyhow::Error);
+
+fn local_identity_unavailable(error: anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(LocalRunnerIdentityUnavailable(error))
+}
+
 fn registration_was_deleted(error: &anyhow::Error) -> bool {
     error
         .chain()
@@ -614,9 +628,9 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let dir = config::config_dir(args.config_dir.clone())?;
     wait_for_prior_slot_teardown(&dir).await?;
     preflight_before_executable_run(&args, &dir).map_err(local_failure)?;
-    let stored = config::load(&dir).map_err(local_failure)?;
+    let stored = config::load(&dir).map_err(local_identity_unavailable)?;
     let agent_id = stored.settings.agent_id.ok_or_else(|| {
-        local_failure(anyhow::anyhow!(
+        local_identity_unavailable(anyhow::anyhow!(
             "runner is not configured: missing agent_id"
         ))
     })?;
@@ -643,9 +657,30 @@ fn daemon_forensic_log(config_base: &Path, message: &str) {
 /// jobs ("runner lost communication") — the architecture must make a restart
 /// wait for running jobs, with systemd's TimeoutStopSec as the only bound.
 static DRAINING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static DAEMON_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) fn draining() -> bool {
     DRAINING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn notify_daemon_ready(usable_slots: usize, slots: usize) {
+    if DAEMON_READY.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    crate::sd_notify::status(&format!(
+        "ready: {usable_slots}/{slots} runner slot(s) configured"
+    ));
+    crate::sd_notify::ready();
+    if let Some(interval) = crate::sd_notify::watchdog_interval() {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                crate::sd_notify::watchdog_ping();
+            }
+        });
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -726,18 +761,6 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
         }
     }
 
-    crate::sd_notify::ready();
-    if let Some(interval) = crate::sd_notify::watchdog_interval() {
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(interval);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tick.tick().await;
-                crate::sd_notify::watchdog_ping();
-            }
-        });
-    }
-
     if !supervised {
         return daemon_pass(&args, slots).await;
     }
@@ -799,12 +822,12 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "default".to_string());
         prune_stale_velnor_docker_resources(&daemon_id);
-        if let Some(work_root) = args.work_dir.as_deref() {
-            prune_stale_job_workspaces(work_root);
-        }
     }
-    let resolved_args = resolve_daemon_runner_group_once(args).await?;
-    configure_daemon_slots(&resolved_args, &config_base, slots).await?;
+    let mut resolved_args = resolve_daemon_runner_group_once(args).await?;
+    let usable_slots = configure_daemon_slots(&resolved_args, &config_base, slots).await?;
+    // Startup preflight covered every executable slot before JIT configuration.
+    // Child cycles must not repeat the same expensive check.
+    resolved_args.skip_preflight = true;
     if draining() {
         return Ok(());
     }
@@ -812,6 +835,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         println!("Daemon JIT config dry run complete; skipped polling GitHub for jobs.");
         return Ok(());
     }
+    notify_daemon_ready(usable_slots, slots);
     let mut slot_tasks = JoinSet::new();
 
     println!(
@@ -954,6 +978,13 @@ fn slot_retry_delay(attempt: u32, slot_index: usize) -> Duration {
     Duration::from_secs(capped + jitter)
 }
 
+fn slot_retry_delay_for_error(attempt: u32, slot_index: usize, error: &anyhow::Error) -> Duration {
+    let backoff = slot_retry_delay(attempt, slot_index);
+    github_api_retry_delay(error)
+        .map(|hint| hint.max(backoff))
+        .unwrap_or(backoff)
+}
+
 /// Wait for a slot retry without making SIGTERM drain wait behind a long
 /// capacity/JIT backoff. Returns true as soon as drain is requested.
 async fn sleep_slot_retry_or_drain(delay: Duration) -> bool {
@@ -1017,6 +1048,13 @@ fn free_space_bytes(path: &Path) -> Option<u64> {
 
 /// Classify an operator-supplied GitHub token. `None` means the shape is
 /// plausible; `Some(message)` is a precise, actionable problem description.
+fn token_fingerprint(token: &str) -> String {
+    Sha256::digest(token.as_bytes())[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 pub fn diagnose_github_token(token: Option<&str>) -> Option<String> {
     let token = token.unwrap_or("").trim();
     if token.is_empty() {
@@ -1027,11 +1065,13 @@ pub fn diagnose_github_token(token: Option<&str>) -> Option<String> {
         );
     }
     if token.contains("${") || token.contains("$(") {
+        let fingerprint = token_fingerprint(token);
         return Some(format!(
-            "GITHUB_TOKEN is a literal unexpanded placeholder ({}…). systemd \
+            "GITHUB_TOKEN is a literal unexpanded placeholder (class=placeholder, length={}, fingerprint={}). systemd \
              EnvironmentFile does NOT expand variables — put the real token value \
              in the file.",
-            &token[..token.len().min(12)]
+            token.len(),
+            fingerprint
         ));
     }
     let plausible = token.starts_with("ghp_")
@@ -1041,11 +1081,13 @@ pub fn diagnose_github_token(token: Option<&str>) -> Option<String> {
         || token.starts_with("ghr_")
         || token.starts_with("github_pat_");
     if !plausible {
+        let fingerprint = token_fingerprint(token);
         return Some(format!(
-            "GITHUB_TOKEN does not look like a GitHub token (saw {}…; expected a \
+            "GITHUB_TOKEN does not look like a GitHub token (class=unknown, length={}, fingerprint={}; expected a \
              ghp_/gho_/ghs_/github_pat_ prefix). Verify the value in the \
              EnvironmentFile.",
-            &token[..token.len().min(6)]
+            token.len(),
+            fingerprint
         ));
     }
     None
@@ -1113,6 +1155,25 @@ async fn run_daemon_slot(
                 if sleep_slot_retry_or_drain(Duration::from_secs(5)).await {
                     continue;
                 }
+                continue;
+            }
+            if error
+                .downcast_ref::<LocalRunnerIdentityUnavailable>()
+                .is_some()
+            {
+                local_failure_streak = 0;
+                eprintln!(
+                    "daemon slot-{slot_index} cycle {cycle} has missing/corrupt local identity; rebuilding it: {error:#}"
+                );
+                daemon_forensic_log(
+                    &config_base,
+                    &format!(
+                        "slot-{slot_index} cycle {cycle} local identity unavailable; rebuilding: {error:#}"
+                    ),
+                );
+                reconfigure_daemon_slot_forever(&args, &config_base, slot_index, slots, cycle)
+                    .await;
+                cycle += 1;
                 continue;
             }
             if error.downcast_ref::<LocalRunnerFailure>().is_some() {
@@ -1200,7 +1261,7 @@ async fn reconfigure_daemon_slot_forever(
         match retry_daemon_slot_jit_config(args, config_base, slot_index, slots, cycle).await {
             Ok(()) => return,
             Err(error) => {
-                let delay = slot_retry_delay(attempt, slot_index);
+                let delay = slot_retry_delay_for_error(attempt, slot_index, &error);
                 let diagnosis = diagnose_github_token(args.pat.as_deref())
                     .map(|d| format!(" GITHUB_TOKEN problem: {d}"))
                     .unwrap_or_default();
@@ -1228,12 +1289,13 @@ async fn recycle_daemon_slot(
     // removing the config first loses the id and orphans the registration on
     // GitHub, forcing the 409 delete-by-name dance on the next configure (and
     // polluting the runner list until GitHub's ~1-day ephemeral GC).
-    if let Err(error) = delete_and_remove_daemon_slot_jit_config(args, &slot_dir).await {
-        eprintln!(
-            "Warning: clean recycle of daemon slot-{slot_index} could not delete the old registration (continuing): {error:#}"
-        );
-        let _ = config::remove(&slot_dir);
-    }
+    delete_and_remove_daemon_slot_jit_config(args, &slot_dir)
+        .await
+        .with_context(|| {
+            format!(
+                "retire daemon slot-{slot_index} registration before replacement; local identity preserved"
+            )
+        })?;
     println!(
         "Discarded JIT runner config for {} after cycle {cycle}.",
         daemon_slot_name(slot_index)
@@ -1272,6 +1334,12 @@ async fn retry_daemon_slot_jit_config(
     slots: usize,
     cycle: u64,
 ) -> Result<()> {
+    let slot_dir = daemon_slot_config_dir(config_base, slot_index, slots);
+    delete_and_remove_daemon_slot_jit_config(args, &slot_dir)
+        .await
+        .with_context(|| {
+            format!("retire daemon slot-{slot_index} registration before JIT reconfigure")
+        })?;
     let configure_args = daemon_slot_configure_args(args, config_base, slot_index, slots)?;
     configure(configure_args).await.with_context(|| {
         format!("retry JIT config for daemon slot-{slot_index} after cycle {cycle}")
@@ -1320,9 +1388,13 @@ async fn resolve_daemon_runner_group_once(args: &DaemonArgs) -> Result<DaemonArg
     Ok(resolved)
 }
 
-async fn configure_daemon_slots(args: &DaemonArgs, config_base: &Path, slots: usize) -> Result<()> {
+async fn configure_daemon_slots(
+    args: &DaemonArgs,
+    config_base: &Path,
+    slots: usize,
+) -> Result<usize> {
     if args.url.is_none() {
-        return Ok(());
+        return Ok(slots);
     }
 
     println!("Configuring {slots} Velnor daemon JIT runner slot(s) before polling GitHub.");
@@ -1332,7 +1404,7 @@ async fn configure_daemon_slots(args: &DaemonArgs, config_base: &Path, slots: us
     for slot_index in 1..=slots {
         if draining() {
             cleanup_configured_daemon_slots(args, config_base, slots, &configured_slots).await;
-            return Ok(());
+            return Ok(usable_slots);
         }
         let slot_config_dir = daemon_slot_config_dir(config_base, slot_index, slots);
         if !daemon_slot_should_configure_jit(
@@ -1347,10 +1419,6 @@ async fn configure_daemon_slots(args: &DaemonArgs, config_base: &Path, slots: us
             );
             usable_slots += 1;
             continue;
-        }
-
-        if args.replace && !args.dry_run_registration {
-            delete_and_remove_daemon_slot_jit_config(args, &slot_config_dir).await?;
         }
 
         let configure_args = daemon_slot_configure_args(args, config_base, slot_index, slots)?;
@@ -1381,7 +1449,7 @@ async fn configure_daemon_slots(args: &DaemonArgs, config_base: &Path, slots: us
             "Daemon starting with {usable_slots}/{slots} runner slot(s); skipped slot(s): {skipped_slots:?}."
         );
     }
-    Ok(())
+    Ok(usable_slots)
 }
 
 async fn cleanup_configured_daemon_slots(
@@ -1409,19 +1477,20 @@ async fn delete_and_remove_daemon_slot_jit_config(
         return Ok(());
     };
 
-    if let (Some(pat), Some(agent_id)) = (args.pat.as_ref(), stored.settings.agent_id) {
+    if let Some(agent_id) = stored.settings.agent_id {
+        let pat = args.pat.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "cannot delete daemon JIT runner id {agent_id} without a GitHub PAT; local identity preserved"
+            )
+        })?;
         let scope = GitHubScope::parse(&stored.settings.github_url)?;
-        // Best-effort (see remove_existing_jit_config_for_replace): a busy runner
-        // returns 422 and must not abort daemon startup.
-        match RegistrationClient::new()?
+        RegistrationClient::new()?
             .delete_runner(&scope, pat, agent_id)
             .await
-        {
-            Ok(()) => println!("Deleted or confirmed absent daemon JIT runner id {agent_id}."),
-            Err(e) => eprintln!(
-                "Warning: could not delete daemon JIT runner id {agent_id} (continuing): {e:#}"
-            ),
-        }
+            .with_context(|| {
+                format!("delete daemon JIT runner id {agent_id}; local identity preserved")
+            })?;
+        println!("Deleted or confirmed absent daemon JIT runner id {agent_id}.");
     }
 
     if config::remove(slot_dir)? {
@@ -1435,10 +1504,12 @@ async fn delete_and_remove_daemon_slot_jit_config(
 
 fn daemon_slot_should_configure_jit(
     slot_config_dir: &Path,
-    replace: bool,
+    _replace: bool,
     dry_run_registration: bool,
 ) -> bool {
-    replace || dry_run_registration || config::load(slot_config_dir).is_err()
+    // A valid local identity is authoritative across daemon/package restarts.
+    // Replacing it before a successor exists creates configless dead slots.
+    dry_run_registration || config::load(slot_config_dir).is_err()
 }
 
 fn daemon_should_poll_after_jit_config(args: &DaemonArgs) -> bool {
@@ -1583,7 +1654,22 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
         );
     }
 
-    let networks = ids_from(&["network", "ls", "-q", "--filter", "name=velnor-net"]);
+    let networks = ids_from(&["network", "ls", "-q", "--filter", "name=velnor-net"])
+        .into_iter()
+        .filter(|id| {
+            docker(&[
+                "network",
+                "inspect",
+                "--format",
+                "{{ index .Labels \"velnor.daemon-id\" }}",
+                id,
+            ])
+            .filter(|output| output.status.success())
+            .is_some_and(|output| {
+                daemon_owns_resource(String::from_utf8_lossy(&output.stdout).trim(), daemon_id)
+            })
+        })
+        .collect::<Vec<_>>();
     if !networks.is_empty() {
         let mut args = vec!["network".to_string(), "rm".to_string()];
         args.extend(networks.iter().cloned());
@@ -1610,48 +1696,6 @@ fn daemon_owns_resource(owner: &str, daemon_id: &str) -> bool {
             })
 }
 
-/// A fresh daemon pass has no surviving jobs from the previous process, so
-/// UUID-named job workspaces below its own slot roots are stale by definition.
-/// Restrict deletion to this exact shape; shared stores and operator files at
-/// the work-root or slot level are never candidates.
-fn prune_stale_job_workspaces(work_root: &Path) {
-    let Ok(slots) = std::fs::read_dir(work_root) else {
-        return;
-    };
-    let mut removed = 0usize;
-    for slot in slots.flatten() {
-        let Ok(file_type) = slot.file_type() else {
-            continue;
-        };
-        if !file_type.is_dir() || !slot.file_name().to_string_lossy().starts_with("slot-") {
-            continue;
-        }
-        let Ok(entries) = std::fs::read_dir(slot.path()) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            if !file_type.is_dir()
-                || uuid::Uuid::parse_str(&entry.file_name().to_string_lossy()).is_err()
-            {
-                continue;
-            }
-            match std::fs::remove_dir_all(entry.path()) {
-                Ok(()) => removed += 1,
-                Err(error) => eprintln!(
-                    "Failed to prune stale Velnor job workspace {}: {error}",
-                    entry.path().display()
-                ),
-            }
-        }
-    }
-    if removed > 0 {
-        eprintln!("Pruned {removed} stale Velnor job workspace(s) at startup.");
-    }
-}
-
 fn daemon_slot_configure_args(
     args: &DaemonArgs,
     config_base: &Path,
@@ -1671,7 +1715,9 @@ fn daemon_slot_configure_args(
         labels: args.labels.clone(),
         target_mvp_labels: args.target_mvp_labels,
         target_mvp_arm_label: args.target_mvp_arm_label,
-        replace: args.replace,
+        // Daemon replacement is lifecycle-driven after a JIT runner finishes
+        // or GitHub proves it gone. Startup never destroys a valid identity.
+        replace: false,
         pool_id: args.pool_id,
         pool_name: args.pool_name.clone(),
         dry_run: args.dry_run_registration,
@@ -2674,7 +2720,7 @@ async fn handle_job_request(
     let capacity_run_root = crate::storage::StorageLayout::resolve()
         .map(|layout| layout.run_root)
         .unwrap_or_else(|| daemon_capacity_run_root(config_dir));
-    let Some(_job_claim) =
+    let Some(job_claim) =
         JobClaim::try_acquire(&capacity_run_root, &job.plan.plan_id, &job.job_id)?
     else {
         println!(
@@ -3089,6 +3135,7 @@ async fn handle_job_request(
                 teardown,
                 forensics.clone(),
                 timing_record,
+                job_claim,
             );
         } else if let Ok(json) = serde_json::to_string(&timing_record) {
             forensics.lifecycle(&format!("job-timing {json}"));
@@ -4833,8 +4880,12 @@ fn spawn_post_completion_teardown(
     teardown: TeardownHandle,
     forensics: SlotForensics,
     mut timing_record: JobTimingRecord,
+    job_claim: JobClaim,
 ) {
     let task = std::thread::spawn(move || {
+        // Claim ownership follows deterministic resources. Duplicate delivery
+        // cannot recreate them until Docker and workspace teardown completes.
+        let _job_claim = job_claim;
         let _span = tracing::info_span!("job-teardown").entered();
         let teardown_started = Instant::now();
         teardown.run();
@@ -7349,30 +7400,6 @@ mod tests {
     }
 
     #[test]
-    fn stale_workspace_pruner_only_removes_uuid_dirs_below_slots() {
-        let root = std::env::temp_dir().join(format!("velnor-work-prune-{}", uuid::Uuid::new_v4()));
-        let stale = root
-            .join("slot-1")
-            .join("4675b50d-5bf9-529b-8082-648f9c52c3b2");
-        let keep_slot = root.join("slot-1/preflight");
-        let keep_shared = root.join("_velnor_cargo/registry");
-        let keep_other = root
-            .join("other")
-            .join("6e0ed314-4298-5b5b-be02-b2914d9427e3");
-        for path in [&stale, &keep_slot, &keep_shared, &keep_other] {
-            std::fs::create_dir_all(path).unwrap();
-        }
-
-        prune_stale_job_workspaces(&root);
-
-        assert!(!stale.exists());
-        assert!(keep_slot.exists());
-        assert!(keep_shared.exists());
-        assert!(keep_other.exists());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
     fn runner_group_name_resolves_case_insensitively() {
         let groups = vec![crate::protocol::RunnerGroup {
             id: 42,
@@ -7400,12 +7427,14 @@ mod tests {
         assert!(diagnose_github_token(Some("  "))
             .unwrap()
             .contains("empty or unset"));
-        assert!(diagnose_github_token(Some("${VELNOR_GITHUB_TOKEN}"))
-            .unwrap()
-            .contains("unexpanded placeholder"));
-        assert!(diagnose_github_token(Some("hunter2"))
-            .unwrap()
-            .contains("does not look like a GitHub token"));
+        let placeholder = diagnose_github_token(Some("${VELNOR_GITHUB_TOKEN}")).unwrap();
+        assert!(placeholder.contains("unexpanded placeholder"));
+        assert!(placeholder.contains("class=placeholder"));
+        assert!(!placeholder.contains("VELNOR_GITHUB_TOKEN"));
+        let garbage = diagnose_github_token(Some("hunter2")).unwrap();
+        assert!(garbage.contains("does not look like a GitHub token"));
+        assert!(garbage.contains("class=unknown"));
+        assert!(!garbage.contains("hunter2"));
     }
 
     #[test]
@@ -7700,21 +7729,29 @@ mod tests {
             status: 401,
             action: "get broker message".into(),
             body: String::new(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: None,
         });
         let forbidden_error = anyhow::Error::from(GitHubApiError {
             status: 403,
             action: "get broker message".into(),
             body: "denied".into(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: None,
         });
         let server_error = anyhow::Error::from(GitHubApiError {
             status: 500,
             action: "get broker message".into(),
             body: "oops".into(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: None,
         });
         let missing_runner = anyhow::Error::from(GitHubApiError {
             status: 404,
             action: "get broker message".into(),
             body: r#"{"errorKind":"RunnerNotFound"}"#.into(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: None,
         });
         let string_error = anyhow::anyhow!("get broker message failed: status=401, body=");
 
@@ -7732,11 +7769,15 @@ mod tests {
             status: 401,
             action: "complete run-service job".into(),
             body: String::new(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: None,
         });
         let server_error = anyhow::Error::from(GitHubApiError {
             status: 500,
             action: "complete run-service job".into(),
             body: String::new(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: None,
         });
 
         assert!(should_refresh_completion_after_error(&auth_error, false));
@@ -7761,6 +7802,12 @@ mod tests {
         let remote = anyhow::anyhow!("broker polling failed 10 consecutive times");
         assert!(remote.downcast_ref::<LocalRunnerFailure>().is_none());
         assert!(!registration_was_deleted(&remote));
+
+        let missing = local_identity_unavailable(anyhow::anyhow!("runner.json missing"));
+        assert!(missing
+            .downcast_ref::<LocalRunnerIdentityUnavailable>()
+            .is_some());
+        assert!(missing.downcast_ref::<LocalRunnerFailure>().is_none());
     }
 
     #[test]
@@ -8106,7 +8153,7 @@ jobs:
             configure_args.labels,
             vec!["velnor".to_string(), "ubuntu-24.04".to_string()]
         );
-        assert!(configure_args.replace);
+        assert!(!configure_args.replace);
         assert_eq!(configure_args.pool_name.as_deref(), Some("Default"));
     }
 
@@ -8157,12 +8204,12 @@ jobs:
     }
 
     #[test]
-    fn daemon_slot_jit_config_skips_valid_existing_config_unless_replace() {
+    fn daemon_slot_jit_config_preserves_valid_identity_across_replace_startup() {
         let dir = unique_temp_dir("daemon-slot-config");
         config::save(&dir, &stored_config()).unwrap();
 
         assert!(!daemon_slot_should_configure_jit(&dir, false, false));
-        assert!(daemon_slot_should_configure_jit(&dir, true, false));
+        assert!(!daemon_slot_should_configure_jit(&dir, true, false));
         assert!(daemon_slot_should_configure_jit(&dir, false, true));
 
         fs::remove_dir_all(&dir).unwrap();
@@ -8170,11 +8217,11 @@ jobs:
     }
 
     #[tokio::test]
-    async fn configure_replace_dry_run_removes_stale_local_jit_config() {
+    async fn configure_replace_dry_run_preserves_registered_local_identity() {
         let dir = unique_temp_dir("configure-replace-dry-run");
         config::save(&dir, &stored_config()).unwrap();
 
-        configure(ConfigureArgs {
+        let error = configure(ConfigureArgs {
             url: "https://github.com/owner/repo".into(),
             pat: None,
             name: Some("velnor-replaced".into()),
@@ -8188,29 +8235,35 @@ jobs:
             config_dir: Some(dir.clone()),
         })
         .await
-        .unwrap();
+        .unwrap_err()
+        .to_string();
 
         let stored = config::load(&dir).unwrap();
-        assert_eq!(stored.settings.agent_name, "velnor-replaced");
-        assert_eq!(stored.settings.agent_id, None);
+        assert!(error.contains("without a GitHub PAT"));
+        assert!(error.contains("local identity preserved"));
+        assert_eq!(stored.settings.agent_name, "velnor");
+        assert_eq!(stored.settings.agent_id, Some(2));
         assert!(!stored.settings.ephemeral);
 
         fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
-    async fn daemon_failed_slot_cleanup_without_pat_removes_only_local_slot_config() {
+    async fn daemon_failed_slot_cleanup_without_pat_preserves_registered_identity() {
         let base = unique_temp_dir("daemon-slot-local-cleanup");
         let slot_dir = daemon_slot_config_dir(&base, 2, 2);
         config::save(&slot_dir, &stored_config()).unwrap();
         let mut args = daemon_args(2);
         args.url = Some("https://github.com/owner/repo".into());
 
-        delete_and_remove_daemon_slot_jit_config(&args, &slot_dir)
+        let error = delete_and_remove_daemon_slot_jit_config(&args, &slot_dir)
             .await
-            .unwrap();
+            .unwrap_err()
+            .to_string();
 
-        assert!(config::load(&slot_dir).is_err());
+        assert!(error.contains("without a GitHub PAT"));
+        assert!(error.contains("local identity preserved"));
+        assert_eq!(config::load(&slot_dir).unwrap().settings.agent_id, Some(2));
         assert!(base.join("slots").exists());
 
         fs::remove_dir_all(base).unwrap();
@@ -10907,6 +10960,32 @@ runs:
         .await
         .unwrap()
         .unwrap();
+    }
+
+    #[test]
+    fn job_claim_remains_exclusive_when_transferred_to_teardown_owner() {
+        let root = unique_temp_dir("job-claim-teardown-owner");
+        let claim = JobClaim::try_acquire(&root, "plan", "job")
+            .unwrap()
+            .unwrap();
+        let release = Arc::new(AtomicBool::new(false));
+        let release_in_teardown = Arc::clone(&release);
+        let teardown = std::thread::spawn(move || {
+            let _claim = claim;
+            while !release_in_teardown.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+        });
+
+        assert!(JobClaim::try_acquire(&root, "plan", "job")
+            .unwrap()
+            .is_none());
+        release.store(true, Ordering::SeqCst);
+        teardown.join().unwrap();
+        assert!(JobClaim::try_acquire(&root, "plan", "job")
+            .unwrap()
+            .is_some());
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn timing_record(job_id: &str, pickup_ms: u64) -> JobTimingRecord {

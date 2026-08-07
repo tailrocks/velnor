@@ -6,6 +6,31 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 
+#[test]
+fn debian_lifecycle_preserves_operator_units_and_covers_instances() {
+    let postinst = include_str!("../../debian/postinst");
+    let prerm = include_str!("../../debian/prerm");
+    let postrm = include_str!("../../debian/postrm");
+
+    for forbidden in [
+        "systemctl enable velnor-daemon.service",
+        "systemctl enable --now velnor-doctor.timer",
+        "systemctl restart",
+        "systemctl try-restart",
+        "docker build",
+        "docker pull",
+    ] {
+        assert!(
+            !postinst.contains(forbidden),
+            "postinst must not contain operator-state/network mutation: {forbidden}"
+        );
+    }
+    assert!(prerm.contains("'velnor-daemon@*.service'"));
+    assert!(prerm.contains("systemctl stop \"$unit\""));
+    assert!(postrm.contains("'velnor-daemon@*.service'"));
+    assert!(postrm.contains("systemctl disable \"$unit\""));
+}
+
 // --- deterministic fixtures ------------------------------------------------
 
 fn digest_of(seed: &str) -> Sha256Hex {

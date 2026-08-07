@@ -9296,7 +9296,10 @@ mod tests {
             .unwrap()
             .as_nanos();
         let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("velnor-executor-test-{nonce}-{sequence}"))
+        std::env::temp_dir().join(format!(
+            "velnor-executor-test-{}-{nonce}-{sequence}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -9645,6 +9648,21 @@ esac
         }
     }
 
+    fn expected_network_create_args() -> Vec<String> {
+        [
+            "network",
+            "create",
+            "--label",
+            "velnor.daemon-id=test-daemon",
+            "--label",
+            "velnor.job-id=job",
+            "net",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    }
+
     #[test]
     fn verifies_docker_bind_mount_visibility_when_enabled() {
         let temp = temp_dir();
@@ -9711,7 +9729,7 @@ esac
                 .runner()
                 .calls
                 .iter()
-                .any(|(_, args)| args == &["network", "create", "net"]),
+                .any(|(_, args)| args == &expected_network_create_args()),
             "lazy startup unexpectedly recreated the network: {:?}",
             executor.runner().calls
         );
@@ -9774,16 +9792,7 @@ esac
         assert_eq!(result.exit_code, 0);
         let runner = executor.runner();
         let calls = &runner.calls;
-        assert_eq!(
-            calls[0],
-            (
-                "docker".into(),
-                vec!["network", "create", "net"]
-                    .into_iter()
-                    .map(String::from)
-                    .collect()
-            )
-        );
+        assert_eq!(calls[0], ("docker".into(), expected_network_create_args()));
         assert_eq!(calls[1].1[0], "run");
         assert_eq!(calls[2].1[0], "exec");
         assert!(calls[2]
@@ -12288,7 +12297,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         executor.execute_step(&container, &step, &temp).unwrap();
 
         let calls = &executor.runner().calls;
-        assert_eq!(calls[0].1, vec!["network", "create", "net"]);
+        assert_eq!(calls[0].1, expected_network_create_args());
         assert_eq!(calls[1].1[0], "run");
         assert!(calls[1].1.windows(2).any(|pair| pair == ["--name", "svc"]));
         assert_eq!(calls[2].1[0], "inspect");
@@ -12345,10 +12354,10 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
 
         assert_eq!(results.len(), 1);
         let calls = &executor.runner().calls;
-        assert_eq!(calls[0].1, vec!["network", "create", "net"]);
+        assert_eq!(calls[0].1, expected_network_create_args());
         assert_eq!(calls[1].1, vec!["rm", "--force", "job"]);
         assert_eq!(calls[2].1, vec!["network", "rm", "net"]);
-        assert_eq!(calls[3].1, vec!["network", "create", "net"]);
+        assert_eq!(calls[3].1, expected_network_create_args());
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -12369,10 +12378,10 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
 
         assert!(error.to_string().contains("docker run"));
         let calls = &executor.runner().calls;
-        assert_eq!(calls[0].1, vec!["network", "create", "net"]);
+        assert_eq!(calls[0].1, expected_network_create_args());
         assert_eq!(calls[1].1, vec!["rm", "--force", "job"]);
         assert_eq!(calls[2].1, vec!["network", "rm", "net"]);
-        assert_eq!(calls[3].1, vec!["network", "create", "net"]);
+        assert_eq!(calls[3].1, expected_network_create_args());
         assert_eq!(calls[4].1[0], "run");
         assert_eq!(calls[5].1, vec!["rm", "--force", "job"]);
         assert_eq!(calls[6].1, vec!["network", "rm", "net"]);
