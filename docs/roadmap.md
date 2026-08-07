@@ -382,6 +382,14 @@ export, Rust cache, and sccache.
 
 ## Verification Strategy
 
+Sentry deployment is permanently signed-APT-only. Every installation, upgrade,
+downgrade, rollback, and forward recovery follows: green signed commit, signed
+tag, immutable source release/record, signed `velnor-apt` publication,
+signature/publication/exact-candidate verification, fleet drain,
+`apt-get update`, exact-version `apt-get install`, then package/binary/record/
+OCI/runtime proof. Local or downloaded packages, `dpkg -i`, local-path apt,
+copied binaries, and local builds are forbidden deployment paths.
+
 Verification must be staged.
 
 Local non-mutating gates:

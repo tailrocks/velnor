@@ -196,8 +196,14 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 - 2026-07-21: **Every Sentry install and upgrade is apt-only** (operator): the
   signed `velnor-apt` repository is mandatory for first installation and every
-  upgrade. Local `.deb`, direct `dpkg -i`, copied binaries, and local-path apt
-  sources are prohibited.
+  upgrade, downgrade, rollback, and forward recovery. Required chain: green
+  signed commit -> signed tag -> immutable source release/record -> signed
+  `velnor-apt` publish -> verify signature/publication/exact candidate -> drain
+  -> `apt-get update` -> `apt-get install velnor-runner=<exact-version>` ->
+  verify package/binary/record/OCI/runtime. Local or downloaded `.deb`, direct
+  `dpkg -i`, copied binaries, local builds, and local-path apt are prohibited.
+  A verified immutable release record is activation metadata, never a substitute
+  package path.
 
 - 2026-07-21: **Final estate state was operator-reviewable, not auto-merged**
   (merge restriction superseded for Actions-only PRs on 2026-07-22):

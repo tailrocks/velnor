@@ -154,35 +154,46 @@ avoids the deprecated global `apt-key` / `trusted.gpg.d`).
 
 ## Maintainer release and Sentry deployment
 
-1. Ensure the release commit is signed off, pushed, and green. Create the next
+Sentry has one package-deployment path: the configured signed apt repository.
+This rule covers first install, upgrade, downgrade, rollback, and forward
+recovery.
+
+1. Ensure the release commit is signed off, pushed, and green. Create a signed
    `vX.Y.Z` tag on that exact commit and push only that tag.
-2. Monitor Velnor's `Release deb` workflow. It must build amd64 and arm64,
-   validate package contents/size, attach assets to both matching Releases, and
-   dispatch `tailrocks/velnor-apt`'s `Publish apt repo` workflow.
-3. Monitor the apt publish and Pages deployment. Verify the signed index and
-   candidate before touching a host. `apt-get update` performs the signature
-   verification using the repository-scoped key; it must complete without a
-   signature warning:
-   ```bash
-   curl -fsSL https://velnor-apt.tailrocks.com/dists/stable/InRelease | head
-   apt-cache policy velnor-runner
-   ```
-4. On Sentry, drain the daemons, then install only from the configured signed
+2. Monitor Velnor's `Release` workflow. It must build amd64 and arm64, validate
+   the packages, publish immutable assets and the release record, and dispatch
+   `tailrocks/velnor-apt`'s `Publish apt repo` workflow.
+3. Monitor apt publication and Pages deployment. Before touching Sentry, verify
+   the `InRelease` signature and signed publication record bind the requested
+   tag, source-record digest, exact candidate, and exact rollback predecessor.
+   On Sentry, `apt-get update` must complete without a signature warning and
+   policy must report the requested exact version from the configured HTTPS
    repository:
    ```bash
    sudo apt-get update
-   sudo apt-get install velnor-runner
-   dpkg-query -W velnor-runner
-   docker image inspect velnor/job-ubuntu:26.04 \
-     --format '{{ index .Config.Labels "org.opencontainers.image.version" }}'
-   sudo systemctl start velnor-daemon velnor-daemon@fixture # plus instances
+   apt-cache policy velnor-runner
    ```
-5. Run doctor and the fixture smoke. The Pages index intentionally contains
-   only the version selected by the latest publish. To roll back, dispatch
-   `tailrocks/velnor-apt`'s `Publish apt repo` with the previously released tag,
-   wait for its signed publish and Pages deployment, run `apt-get update`, and
-   verify that version is the candidate before
-   `apt-get install velnor-runner=<version>`. Never sideload a release asset.
+4. Drain all intended Velnor daemons. Confirm GitHub reports every managed
+   runner idle and no Velnor job container remains. Then install the verified
+   exact version, never an unpinned candidate:
+   ```bash
+   sudo apt-get install velnor-runner=X.Y.Z
+   dpkg-query -W velnor-runner
+   ```
+5. Verify the installed package and binary against the immutable release
+   record, activate and verify the exact OCI digest and complete labels, inspect
+   atomic `active`/`previous` pointers, then start only the intended instance
+   units. Run doctor and the fixture smoke before restoring traffic.
+6. Rollback uses only the exact signed predecessor already retained in the
+   repository: drain, verify its signed identity, `apt-get update`, and
+   `apt-get install velnor-runner=<exact-predecessor>`. Prove rollback, then use
+   the same exact signed-APT procedure to move forward. Never republish an old
+   release merely to roll back.
+
+Never deploy a local or downloaded `.deb`, use direct `dpkg -i`, install an apt
+local path, copy a binary, or build/install from a checkout on Sentry. A
+checksummed immutable release-record download is activation metadata only; it
+does not install executable code and cannot replace any apt step.
 
 Verified 2026-07-18 against both repositories and the live host:
 `tailrocks/velnor-apt` publishes amd64+arm64 with a signed reprepro index
@@ -193,4 +204,4 @@ and its signed repository/Pages run is
 [`29638791029`](https://github.com/tailrocks/velnor-apt/actions/runs/29638791029).
 Those run URLs are historical proof of the chain, not a current version pin;
 every later deployment must follow this same tag-to-signed-apt chain and verify
-the candidate reported by `apt-cache policy` before changing a host.
+the exact version reported by `apt-cache policy` before changing a host.
