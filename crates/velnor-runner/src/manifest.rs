@@ -187,6 +187,7 @@ const GITHUB_SCRIPT_INPUTS: &[InputRule] = &[
     ),
 ];
 const RENOVATE_REFS: &[AllowedRef] = &[
+    allowed("316d7cd859606d6039a2182b7d69199e9b036835", "v46.2.1"),
     allowed("3064367f740a1a91cca218698a63902689cce200", "v46"),
     allowed("22e0a16091fc706b04affe6ae53d5e3358ac4023", "v44"),
     allowed("693b9ef15eec82123529a37c782242f091365961", "v43"),
@@ -196,6 +197,7 @@ const BUILDX_REFS: &[AllowedRef] = &[
     allowed("v4", "fixture transition until plan 041"),
 ];
 const LOGIN_REFS: &[AllowedRef] = &[
+    allowed("abd2ef45e78c5afb21d64d4ca52ee8550d9572c7", "v4"),
     allowed("af1e73f918a031802d376d3c8bbc3fe56130a9b0", "v4"),
     allowed("v4", "fixture transition until plan 041"),
 ];
@@ -2094,12 +2096,22 @@ mod tests {
         validate_job_with_context(
             &job(
                 "renovatebot/github-action",
-                Some("3064367f740a1a91cca218698a63902689cce200"),
+                Some("316d7cd859606d6039a2182b7d69199e9b036835"),
                 serde_json::json!({
                     "token": "masked",
                     "renovate-version": "43",
                     "renovate-image": "ghcr.io/renovatebot/renovate"
                 }),
+            ),
+            &[],
+        )
+        .unwrap();
+
+        validate_job_with_context(
+            &job(
+                "docker/login-action",
+                Some("abd2ef45e78c5afb21d64d4ca52ee8550d9572c7"),
+                serde_json::json!({"username": "masked", "password": "masked"}),
             ),
             &[],
         )
