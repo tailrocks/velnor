@@ -163,12 +163,14 @@ COPY docker/job-mise.lock /opt/mise/config/mise.lock
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/sccache-build \
+    --mount=type=secret,id=mise_github_token,required=true \
     mkdir -p /opt/mise/bin && \
     # Baked bootstrap of the mise binary at the fleet-pinned version. This is
     # the read-only /opt/mise/bin bootstrap; runtime never rewrites it.
     curl -fsSL https://mise.run | MISE_VERSION="v2026.7.7" MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
     mise trust /opt/mise/config/config.toml && \
     # Fail-closed, non-interactive install of the entire locked toolchain.
+    MISE_GITHUB_TOKEN="$(cat /run/secrets/mise_github_token)" \
     RUSTC_WRAPPER=sccache SCCACHE_DIR=/sccache-build \
     MISE_LOCKFILE=1 MISE_LOCKED=1 MISE_LOCKED_VERIFY_PROVENANCE=1 \
     mise install --locked --yes && \

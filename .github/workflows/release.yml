@@ -195,6 +195,8 @@ jobs:
           push: true
           cache-from: type=gha,scope=velnor-job-ubuntu
           cache-to: type=gha,scope=velnor-job-ubuntu,mode=max
+          secrets: |
+            mise_github_token=${{ github.token }}
           build-args: |
             VELNOR_IMAGE_VERSION=${{ needs.identity.outputs.version }}
           tags: ${{ env.GHCR_IMAGE }}:${{ needs.identity.outputs.version }}
