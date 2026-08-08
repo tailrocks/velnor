@@ -1285,17 +1285,14 @@ async fn recycle_daemon_slot(
     cycle: u64,
 ) -> Result<()> {
     let slot_dir = daemon_slot_config_dir(config_base, slot_index, slots);
-    // Delete the runner registration BY ID before discarding local config:
-    // removing the config first loses the id and orphans the registration on
-    // GitHub, forcing the 409 delete-by-name dance on the next configure (and
-    // polluting the runner list until GitHub's ~1-day ephemeral GC).
-    delete_and_remove_daemon_slot_jit_config(args, &slot_dir)
-        .await
-        .with_context(|| {
-            format!(
-                "retire daemon slot-{slot_index} registration before replacement; local identity preserved"
-            )
-        })?;
+    // A JIT runner is server-side ephemeral: GitHub automatically
+    // deregisters it after its single job. Only discard the consumed local
+    // identity here. Calling DELETE after every successful job wastes one
+    // REST request per cycle and can park every slot behind the shared API
+    // rate limit. Failed/unused JIT identities still take the explicit delete
+    // path so they do not linger until GitHub's expiry window.
+    remove_completed_daemon_slot_jit_config(&slot_dir)
+        .with_context(|| format!("discard consumed daemon slot-{slot_index} JIT identity"))?;
     println!(
         "Discarded JIT runner config for {} after cycle {cycle}.",
         daemon_slot_name(slot_index)
@@ -1308,6 +1305,16 @@ async fn recycle_daemon_slot(
         "forensics.lifecycle event=next-jit-ready timestamp={}",
         unix_now_iso8601()
     );
+    Ok(())
+}
+
+fn remove_completed_daemon_slot_jit_config(slot_dir: &Path) -> Result<()> {
+    if config::remove(slot_dir)? {
+        println!(
+            "Removed consumed local daemon JIT runner config from {}",
+            slot_dir.display()
+        );
+    }
     Ok(())
 }
 
@@ -8259,6 +8266,18 @@ jobs:
         assert_eq!(config::load(&slot_dir).unwrap().settings.agent_id, Some(2));
         assert!(base.join("slots").exists());
 
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn daemon_completed_slot_cleanup_needs_no_pat_or_rest_delete() {
+        let base = unique_temp_dir("daemon-completed-slot-cleanup");
+        let slot_dir = daemon_slot_config_dir(&base, 1, 1);
+        config::save(&slot_dir, &stored_config()).unwrap();
+
+        remove_completed_daemon_slot_jit_config(&slot_dir).unwrap();
+
+        assert!(config::load(&slot_dir).is_err());
         fs::remove_dir_all(base).unwrap();
     }
 
