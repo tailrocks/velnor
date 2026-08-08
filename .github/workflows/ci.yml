@@ -53,22 +53,33 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
-        with:
-          install_args: "rust"
-          github_token: ${{ secrets.GITHUB_TOKEN }}
       # Bootstrap guard for fleets older than this fix: their mise adapter put
-      # concurrent jobs on one mutable RUSTUP_HOME. Bypass rustup completely
-      # until the repaired runner is deployed everywhere.
-      - run: |
+      # concurrent jobs on one mutable RUSTUP_HOME. The exact toolchain is
+      # already baked into the Velnor image, so bypass setup and rustup until
+      # the repaired runner is deployed everywhere.
+      - name: Format with baked Velnor toolchain
+        if: matrix.config.lane == 'Velnor'
+        run: |
           case "$(uname -m)" in
             x86_64) host=x86_64-unknown-linux-gnu ;;
             aarch64|arm64) host=aarch64-unknown-linux-gnu ;;
             *) echo "unsupported Rust host: $(uname -m)" >&2; exit 1 ;;
           esac
-          toolchain_bin="/root/.rustup/toolchains/${RUSTUP_TOOLCHAIN%%-*}-$host/bin"
+          toolchain="$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)"
+          test -n "$toolchain"
+          toolchain_bin="/root/.rustup/toolchains/$toolchain-$host/bin"
           export PATH="$toolchain_bin:$PATH"
           "$toolchain_bin/cargo" fmt --all --check
+
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+        if: matrix.config.lane == 'GitHub'
+        with:
+          install_args: "rust"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Format on GitHub lane
+        if: matrix.config.lane == 'GitHub'
+        run: cargo fmt --all --check
 
   actionlint:
     name: Actionlint (${{ matrix.config.lane }})
@@ -101,10 +112,19 @@ jobs:
         with:
           persist-credentials: false
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+        if: matrix.config.lane == 'GitHub'
         with:
           install_args: "rust aqua:EmbarkStudios/cargo-deny"
           github_token: ${{ secrets.GITHUB_TOKEN }}
-      - run: cargo deny check advisories
+      - name: Deny with baked Velnor toolchain
+        if: matrix.config.lane == 'Velnor'
+        run: |
+          deny="$(find /opt/mise/installs -type f -name cargo-deny -perm -111 -print -quit)"
+          test -n "$deny"
+          "$deny" check advisories
+      - name: Deny on GitHub lane
+        if: matrix.config.lane == 'GitHub'
+        run: cargo deny check advisories
 
   clippy:
     name: Clippy (${{ matrix.config.lane }})
@@ -131,6 +151,7 @@ jobs:
           disable_annotations: "false"
 
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+        if: matrix.config.lane == 'GitHub'
         with:
           install_args: "rust"
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -155,8 +176,25 @@ jobs:
           restore-keys: |
             cargo-target-${{ matrix.config.lane }}-${{ runner.os }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', '**/Cargo.toml', '**/Cargo.lock') }}-
 
-      - run: rustup component add clippy
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Install clippy on GitHub lane
+        if: matrix.config.lane == 'GitHub'
+        run: rustup component add clippy
+      - name: Clippy with baked Velnor toolchain
+        if: matrix.config.lane == 'Velnor'
+        run: |
+          case "$(uname -m)" in
+            x86_64) host=x86_64-unknown-linux-gnu ;;
+            aarch64|arm64) host=aarch64-unknown-linux-gnu ;;
+            *) echo "unsupported Rust host: $(uname -m)" >&2; exit 1 ;;
+          esac
+          toolchain="$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)"
+          test -n "$toolchain"
+          toolchain_bin="/root/.rustup/toolchains/$toolchain-$host/bin"
+          export PATH="$toolchain_bin:$PATH"
+          "$toolchain_bin/cargo" clippy --workspace --all-targets --locked -- -D warnings
+      - name: Clippy on GitHub lane
+        if: matrix.config.lane == 'GitHub'
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
   rust:
     name: Test (${{ matrix.config.lane }})
@@ -183,6 +221,7 @@ jobs:
           disable_annotations: "false"
 
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+        if: matrix.config.lane == 'GitHub'
         with:
           install_args: "rust aqua:nextest-rs/nextest/cargo-nextest"
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -207,7 +246,24 @@ jobs:
           restore-keys: |
             cargo-target-${{ matrix.config.lane }}-${{ runner.os }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', '.cargo/config.toml', '**/Cargo.toml', '**/Cargo.lock') }}-
 
-      - run: cargo nextest run --workspace --locked --color=always
+      - name: Test with baked Velnor toolchain
+        if: matrix.config.lane == 'Velnor'
+        run: |
+          case "$(uname -m)" in
+            x86_64) host=x86_64-unknown-linux-gnu ;;
+            aarch64|arm64) host=aarch64-unknown-linux-gnu ;;
+            *) echo "unsupported Rust host: $(uname -m)" >&2; exit 1 ;;
+          esac
+          toolchain="$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)"
+          test -n "$toolchain"
+          toolchain_bin="/root/.rustup/toolchains/$toolchain-$host/bin"
+          nextest="$(find /opt/mise/installs -type f -name cargo-nextest -perm -111 -print -quit)"
+          test -n "$nextest"
+          export PATH="$toolchain_bin:$PATH"
+          "$nextest" nextest run --workspace --locked --color=always
+      - name: Test on GitHub lane
+        if: matrix.config.lane == 'GitHub'
+        run: cargo nextest run --workspace --locked --color=always
 
   ci-required:
     needs: [fmt, actionlint, deny, clippy, rust]
