@@ -150,11 +150,12 @@ impl JobContainerSpec {
                 &self.cargo_executable_store_host(),
                 "/github/home/.cargo/bin",
             ),
-            // Host-persistent mise tool store: installed tools are executable,
-            // so `installs` is scoped by trust/repository. The mise binary,
-            // shims and global config stay baked in the image. `cache` is
-            // download data and remains daemon-shared for warmth; mise uses
-            // its own file locks.
+            // Host-persistent mise tool store: installed tools are executable
+            // and mutable (managed runtimes can receive global packages after
+            // setup), so `installs` is scoped by slot + trust/repository. One
+            // job owns a slot at a time, preventing cross-job npm/pip/cargo
+            // mutation races while keeping later jobs on that slot warm. The
+            // download-only cache remains daemon-shared.
             "-v".into(),
             self.mount_arg(&self.mise_executable_store_host(), "/opt/mise/installs"),
             // Persistent per-version mise BINARY store (Plan 008 Step 2). Scoped
@@ -715,15 +716,19 @@ impl JobContainerSpec {
     }
 
     pub(crate) fn mise_executable_store_host(&self) -> PathBuf {
-        self.repository_store_key().map_or_else(
-            || {
+        match (self.repository_store_key(), slot_store_key(&self.temp_host)) {
+            (Some(repository), Some(slot)) => {
+                mise_executable_store_host(&self.temp_host, &repository)
+                    .join("slots")
+                    .join(slot)
+            }
+            _ => {
                 eprintln!(
-                    "forensics.lifecycle: persistent mise install store refused: missing github.repository"
+                    "forensics.lifecycle: persistent mise install store refused: missing github.repository or runner slot identity"
                 );
                 self.temp_host.join("_velnor/ephemeral/mise-installs")
-            },
-            |repository| mise_executable_store_host(&self.temp_host, &repository),
-        )
+            }
+        }
     }
 
     /// Persistent per-version mise binary store for this job's trust/repository
@@ -1143,6 +1148,14 @@ fn daemon_store_root(temp_host: &Path) -> PathBuf {
     daemon_shared_root(per_slot_root)
 }
 
+/// Resolve the stable runner slot from a production job temp path
+/// (`…/slot-N/<job>/temp`). Executable stores must not fall back to a shared
+/// scope when this identity is absent: that would recreate concurrent mutation.
+fn slot_store_key(temp_host: &Path) -> Option<String> {
+    let slot = temp_host.parent()?.parent()?.file_name()?.to_str()?;
+    slot.starts_with("slot-").then(|| sanitize_store_key(slot))
+}
+
 /// Sanitize a job/store key into a filesystem-safe directory name.
 pub(crate) fn sanitize_store_key(name: &str) -> String {
     let mut key: String = name
@@ -1437,8 +1450,9 @@ mod tests {
         ));
         assert!(args
             .contains(&"/tmp/_velnor_cargo/bin/trusted/acme_repo:/github/home/.cargo/bin".into()));
-        assert!(args
-            .contains(&"/tmp/_velnor_mise/installs/trusted/acme_repo:/opt/mise/installs".into()));
+        assert!(
+            args.contains(&"/tmp/temp/_velnor/ephemeral/mise-installs:/opt/mise/installs".into())
+        );
         assert!(args.contains(
             &"/tmp/_velnor_mise/binaries/trusted/acme_repo:/opt/velnor/mise-binaries".into()
         ));
@@ -1490,6 +1504,36 @@ mod tests {
         assert!(!args
             .last()
             .is_some_and(|script| script.contains("/root/.rustup")));
+    }
+
+    #[test]
+    fn mise_installs_are_warm_per_slot_but_isolated_between_slots() {
+        let mut first = spec();
+        first.temp_host = "/var/lib/velnor/work/slot-3/job-a/temp".into();
+        let mut same_slot = spec();
+        same_slot.temp_host = "/var/lib/velnor/work/slot-3/job-b/temp".into();
+        let mut other_slot = spec();
+        other_slot.temp_host = "/var/lib/velnor/work/slot-4/job-c/temp".into();
+
+        let expected = PathBuf::from(
+            "/var/lib/velnor/work/_velnor_mise/installs/trusted/acme_repo/slots/slot-3",
+        );
+        assert_eq!(first.mise_executable_store_host(), expected);
+        assert_eq!(same_slot.mise_executable_store_host(), expected);
+        assert!(first.start_args().contains(
+            &"/var/lib/velnor/work/_velnor_mise/installs/trusted/acme_repo/slots/slot-3:/opt/mise/installs"
+                .into()
+        ));
+        assert_eq!(
+            other_slot.mise_executable_store_host(),
+            PathBuf::from(
+                "/var/lib/velnor/work/_velnor_mise/installs/trusted/acme_repo/slots/slot-4"
+            )
+        );
+        assert_ne!(
+            first.mise_executable_store_host(),
+            other_slot.mise_executable_store_host()
+        );
     }
 
     #[test]
