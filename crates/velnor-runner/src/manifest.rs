@@ -551,7 +551,7 @@ pub static ACTIONS: &[ActionCapability] = &[
     capability!(
         "docker/setup-qemu-action",
         SetupQemu,
-        &[allowed("c7c53464625b32c7a7e944ae62b3e17d2b600130", "v3")],
+        &[allowed("96fe6ef7f33517b61c61be40b68a1882f3264fb8", "v4")],
         &[
             InputRule::Any("image"),
             InputRule::Any("platforms"),
