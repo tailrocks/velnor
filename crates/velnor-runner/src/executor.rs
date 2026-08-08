@@ -3046,10 +3046,12 @@ where
 
     pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
+        let buildkit_result = self.cleanup_job_buildkit(container);
         let service_result = self.cleanup_services(container);
         let network_result = self.run_docker(&container.remove_network_args());
 
         container_result?;
+        buildkit_result?;
         service_result?;
         network_result?;
         Ok(())
@@ -3069,8 +3071,69 @@ where
     }
 
     pub(crate) fn cleanup_job_and_network(&mut self, container: &JobContainerSpec) -> Result<()> {
-        self.run_docker_remove_container(&container.remove_container_args())?;
-        self.run_docker(&container.remove_network_args())?;
+        let container_result = self.run_docker_remove_container(&container.remove_container_args());
+        let buildkit_result = self.cleanup_job_buildkit(container);
+        let network_result = self.run_docker(&container.remove_network_args());
+        container_result?;
+        buildkit_result?;
+        network_result?;
+        Ok(())
+    }
+
+    /// Remove every BuildKit daemon whose buildx builder belongs to this job.
+    ///
+    /// A cancelled job can skip setup-buildx's post action. The buildx client
+    /// configuration lives inside the disposable job container, so host-side
+    /// teardown cannot use `docker buildx rm`. Buildx names its daemon and
+    /// state volume from the builder name; every native builder is suffixed
+    /// with the job's unique scope. Match that exact suffix, then remove the
+    /// daemon together with its anonymous/named state volume.
+    fn cleanup_job_buildkit(&mut self, container: &JobContainerSpec) -> Result<()> {
+        let scope = job_scope_from_temp(Some(&container.temp_host));
+        let filter = format!("name=-{scope}0$");
+        let listed = self.run_docker(&[
+            "ps".into(),
+            "--all".into(),
+            "--quiet".into(),
+            "--filter".into(),
+            filter,
+        ])?;
+        let ids = listed
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if !ids.is_empty() {
+            let mut args = vec!["rm".into(), "--force".into()];
+            args.extend(ids);
+            self.run_docker_remove_container(&args)?;
+        }
+
+        // Buildx creates a named `<container>_state` volume. Docker's
+        // `rm --volumes` deliberately removes only anonymous volumes, so the
+        // state volume requires a separate exact-suffix query and removal.
+        let volume_filter = format!("name=-{scope}0_state$");
+        let listed_volumes = self.run_docker(&[
+            "volume".into(),
+            "ls".into(),
+            "--quiet".into(),
+            "--filter".into(),
+            volume_filter,
+        ])?;
+        let volumes = listed_volumes
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if !volumes.is_empty() {
+            let mut args = vec!["volume".into(), "rm".into()];
+            args.extend(volumes);
+            self.run_docker(&args)?;
+        }
         Ok(())
     }
 
@@ -3259,6 +3322,7 @@ where
 
     fn cleanup_stale(&mut self, container: &JobContainerSpec) {
         self.run_docker(&container.remove_container_args()).ok();
+        self.cleanup_job_buildkit(container).ok();
         for service in container.services.iter().rev() {
             self.run_docker(&service.remove_args()).ok();
         }
@@ -6759,20 +6823,23 @@ fn sanitize_artifact_name(name: &str) -> String {
 }
 
 fn job_scoped_buildx_builder_name(requested: &str, state: &JobExecutionState) -> String {
-    let temp = state.temp_host.as_deref();
+    format!(
+        "{}-{}",
+        sanitize_artifact_name(requested),
+        job_scope_from_temp(state.temp_host.as_deref())
+    )
+}
+
+fn job_scope_from_temp(temp: Option<&Path>) -> String {
     let scope_path = temp
         .filter(|path| path.file_name().is_some_and(|name| name == "temp"))
         .and_then(Path::parent)
         .or(temp);
-    let scope = scope_path
+    scope_path
         .and_then(Path::file_name)
         .and_then(|name| name.to_str())
-        .unwrap_or("job");
-    format!(
-        "{}-{}",
-        sanitize_artifact_name(requested),
-        sanitize_artifact_name(scope)
-    )
+        .map(sanitize_artifact_name)
+        .unwrap_or_else(|| "job".to_string())
 }
 
 fn pages_url_for_repository(repository: &str) -> String {
@@ -9074,6 +9141,29 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct BuildkitCleanupRunner {
+        calls: Vec<Vec<String>>,
+    }
+
+    impl CommandRunner for BuildkitCleanupRunner {
+        fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push(args.to_vec());
+            let stdout = match args.first().map(String::as_str) {
+                Some("ps") => "buildkit-one\nbuildkit-two\n",
+                Some("volume") if args.get(1).is_some_and(|arg| arg == "ls") => {
+                    "buildkit-one_state\nbuildkit-two_state\n"
+                }
+                _ => "",
+            };
+            Ok(CommandResult {
+                code: 0,
+                stdout: stdout.to_string(),
+                stderr: String::new(),
+            })
+        }
+    }
+
     struct ServiceContextRunner;
 
     impl CommandRunner for ServiceContextRunner {
@@ -9857,12 +9947,63 @@ esac
         assert!(calls
             .iter()
             .any(|(_, args)| { args.starts_with(&["rm".into(), "--force".into(), "job".into()]) }));
+        assert!(calls.iter().any(|(_, args)| args
+            == &[
+                "ps".into(),
+                "--all".into(),
+                "--quiet".into(),
+                "--filter".into(),
+                format!(
+                    "name=-{}0$",
+                    sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap())
+                ),
+            ]));
         assert!(calls.iter().any(|(_, args)| args.starts_with(&[
             "network".into(),
             "rm".into(),
             "net".into()
         ])));
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn cleanup_removes_job_scoped_buildkit_daemons_and_state_volumes() {
+        let root = temp_dir();
+        let temp = root.join("job-scope").join("temp");
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        let mut executor = DockerScriptExecutor::new(BuildkitCleanupRunner::default());
+
+        executor.cleanup_job_buildkit(&spec).unwrap();
+
+        assert_eq!(
+            executor.runner().calls,
+            vec![
+                vec!["ps", "--all", "--quiet", "--filter", "name=-job-scope0$"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect::<Vec<_>>(),
+                vec!["rm", "--force", "buildkit-one", "buildkit-two"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect::<Vec<_>>(),
+                vec![
+                    "volume",
+                    "ls",
+                    "--quiet",
+                    "--filter",
+                    "name=-job-scope0_state$",
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+                vec!["volume", "rm", "buildkit-one_state", "buildkit-two_state"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect::<Vec<_>>(),
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -9960,6 +10101,38 @@ esac
         );
         assert_eq!(
             calls[4].1,
+            vec![
+                "ps",
+                "--all",
+                "--quiet",
+                "--filter",
+                &format!(
+                    "name=-{}0$",
+                    sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap())
+                )
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            calls[5].1,
+            vec![
+                "volume",
+                "ls",
+                "--quiet",
+                "--filter",
+                &format!(
+                    "name=-{}0_state$",
+                    sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap())
+                )
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            calls[6].1,
             vec!["network", "rm", "net"]
                 .into_iter()
                 .map(String::from)
@@ -9988,7 +10161,7 @@ esac
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
-            codes: vec![0, 0, 7, 0, 0],
+            codes: vec![0, 0, 7, 0, 0, 0, 0],
         });
 
         let result = executor
@@ -9996,9 +10169,11 @@ esac
             .unwrap();
 
         assert_eq!(result.exit_code, 7);
-        assert_eq!(executor.runner().calls.len(), 5);
+        assert_eq!(executor.runner().calls.len(), 7);
         assert_eq!(executor.runner().calls[3].1[0], "rm");
-        assert_eq!(executor.runner().calls[4].1[0], "network");
+        assert_eq!(executor.runner().calls[4].1[0], "ps");
+        assert_eq!(executor.runner().calls[5].1[0], "volume");
+        assert_eq!(executor.runner().calls[6].1[0], "network");
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -10040,13 +10215,15 @@ esac
         assert_eq!(results.len(), 2);
         let runner = executor.runner();
         let calls = &runner.calls;
-        assert_eq!(calls.len(), 6);
+        assert_eq!(calls.len(), 8);
         assert_eq!(calls[0].1[0], "network");
         assert_eq!(calls[1].1[0], "run");
         assert_eq!(calls[2].1[0], "exec");
         assert_eq!(calls[3].1[0], "exec");
         assert_eq!(calls[4].1[0], "rm");
-        assert_eq!(calls[5].1[0], "network");
+        assert_eq!(calls[5].1[0], "ps");
+        assert_eq!(calls[6].1[0], "volume");
+        assert_eq!(calls[7].1[0], "network");
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -12509,8 +12686,10 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         let calls = &executor.runner().calls;
         assert_eq!(calls[0].1, expected_network_create_args());
         assert_eq!(calls[1].1, vec!["rm", "--force", "job"]);
-        assert_eq!(calls[2].1, vec!["network", "rm", "net"]);
-        assert_eq!(calls[3].1, expected_network_create_args());
+        assert_eq!(calls[2].1[0], "ps");
+        assert_eq!(calls[3].1[0], "volume");
+        assert_eq!(calls[4].1, vec!["network", "rm", "net"]);
+        assert_eq!(calls[5].1, expected_network_create_args());
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -12522,7 +12701,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 1, 0, 0],
+            codes: vec![1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
         });
 
         let error = executor
@@ -12533,11 +12712,15 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         let calls = &executor.runner().calls;
         assert_eq!(calls[0].1, expected_network_create_args());
         assert_eq!(calls[1].1, vec!["rm", "--force", "job"]);
-        assert_eq!(calls[2].1, vec!["network", "rm", "net"]);
-        assert_eq!(calls[3].1, expected_network_create_args());
-        assert_eq!(calls[4].1[0], "run");
-        assert_eq!(calls[5].1, vec!["rm", "--force", "job"]);
-        assert_eq!(calls[6].1, vec!["network", "rm", "net"]);
+        assert_eq!(calls[2].1[0], "ps");
+        assert_eq!(calls[3].1[0], "volume");
+        assert_eq!(calls[4].1, vec!["network", "rm", "net"]);
+        assert_eq!(calls[5].1, expected_network_create_args());
+        assert_eq!(calls[6].1[0], "run");
+        assert_eq!(calls[7].1, vec!["rm", "--force", "job"]);
+        assert_eq!(calls[8].1[0], "ps");
+        assert_eq!(calls[9].1[0], "volume");
+        assert_eq!(calls[10].1, vec!["network", "rm", "net"]);
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -15373,14 +15556,16 @@ fi"#
 
         assert_eq!(results.len(), 3);
         let calls = &executor.runner().calls;
-        assert_eq!(calls.len(), 7);
+        assert_eq!(calls.len(), 9);
         assert_eq!(calls[0].1[0], "network");
         assert_eq!(calls[1].1[0], "run");
         assert_eq!(calls[2].1[0], "exec");
         assert_eq!(calls[3].1[0], "run");
         assert_eq!(calls[4].1[0], "exec");
         assert_eq!(calls[5].1[0], "rm");
-        assert_eq!(calls[6].1[0], "network");
+        assert_eq!(calls[6].1[0], "ps");
+        assert_eq!(calls[7].1[0], "volume");
+        assert_eq!(calls[8].1[0], "network");
         assert!(calls[3].1.contains(&"INPUT_NAME=value".into()));
         assert!(calls[3].1.contains(&"GITHUB_REPOSITORY=acme/repo".into()));
         assert!(calls[3].1.contains(&"TOKEN=ghs_token".into()));
