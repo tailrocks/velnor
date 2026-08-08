@@ -2661,6 +2661,10 @@ where
                 driver,
                 "--use".to_string(),
             ];
+            let resource_options = buildx_driver_resource_options(&container.resource_options)?;
+            if !resource_options.is_empty() {
+                args.extend(["--driver-opt".to_string(), resource_options.join(",")]);
+            }
             if let Some(config) = buildkitd_config_container {
                 args.extend(["--config".to_string(), config]);
             }
@@ -6830,6 +6834,35 @@ fn job_scoped_buildx_builder_name(requested: &str, state: &JobExecutionState) ->
     )
 }
 
+fn buildx_driver_resource_options(resource_options: &[String]) -> Result<Vec<String>> {
+    let mut options = Vec::new();
+    let mut pairs = resource_options.chunks_exact(2);
+    for pair in &mut pairs {
+        match pair[0].as_str() {
+            "--memory" => options.push(format!("memory={}", pair[1])),
+            "--cpus" => {
+                let cpus = pair[1]
+                    .parse::<f64>()
+                    .with_context(|| format!("invalid job CPU limit '{}'", pair[1]))?;
+                if !cpus.is_finite() || cpus <= 0.0 {
+                    bail!("invalid job CPU limit '{}'", pair[1]);
+                }
+                let quota = (cpus * 100_000.0).round();
+                if quota > u64::MAX as f64 {
+                    bail!("job CPU limit '{}' is too large", pair[1]);
+                }
+                options.push("cpu-period=100000".to_string());
+                options.push(format!("cpu-quota={quota:.0}"));
+            }
+            option => bail!("unsupported BuildKit resource option '{option}'"),
+        }
+    }
+    if !pairs.remainder().is_empty() {
+        bail!("job resource options must be flag/value pairs");
+    }
+    Ok(options)
+}
+
 fn job_scope_from_temp(temp: Option<&Path>) -> String {
     let scope_path = temp
         .filter(|path| path.file_name().is_some_and(|name| name == "temp"))
@@ -10007,6 +10040,23 @@ esac
     }
 
     #[test]
+    fn buildkit_resource_limits_are_derived_and_fail_closed() {
+        assert_eq!(
+            buildx_driver_resource_options(&[
+                "--cpus".into(),
+                "2.5".into(),
+                "--memory".into(),
+                "12g".into(),
+            ])
+            .unwrap(),
+            ["cpu-period=100000", "cpu-quota=250000", "memory=12g"]
+        );
+        assert!(buildx_driver_resource_options(&["--cpus".into(), "0".into()]).is_err());
+        assert!(buildx_driver_resource_options(&["--pids-limit".into(), "512".into()]).is_err());
+        assert!(buildx_driver_resource_options(&["--memory".into()]).is_err());
+    }
+
+    #[test]
     fn precreated_environment_skips_lazy_container_start() {
         let temp = temp_dir();
         fs::create_dir_all(&temp).unwrap();
@@ -11865,10 +11915,12 @@ type=sha,format=long,prefix=,enable=true"
             env: Vec::new(),
             codes: vec![0, 0, 1],
         });
+        let mut spec = container(&temp);
+        spec.resource_options = vec!["--cpus".into(), "4".into(), "--memory".into(), "12g".into()];
 
         let results = executor
             .execute_ordered_steps_with_context(
-                &container(&temp),
+                &spec,
                 &steps,
                 &[
                     (
@@ -11912,6 +11964,7 @@ type=sha,format=long,prefix=,enable=true"
         );
         assert!(calls.iter().any(|c| c
             .contains(&format!("'buildx' 'create' '--name' '{builder}'"))
+            && c.contains("'--driver-opt' 'cpu-period=100000,cpu-quota=400000,memory=12g'")
             && c.contains(&format!(
                 "'--config' '/__t/buildkitd-config-{builder}.toml'"
             ))));
