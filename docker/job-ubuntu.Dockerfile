@@ -20,6 +20,7 @@ RUN apt-get update \
         fonts-wqy-zenhei \
         git \
         git-lfs \
+        gnupg \
         jq \
         libbz2-dev \
         libasound2t64 \
@@ -72,6 +73,8 @@ RUN apt-get update \
         xvfb \
         zip \
         zstd \
+    && gpg --version \
+    && gpgv --version \
     && rm -rf /var/lib/apt/lists/*
 
 # Pre-install mise and the Rust CI toolchain at /opt/mise (not bind-mounted by
