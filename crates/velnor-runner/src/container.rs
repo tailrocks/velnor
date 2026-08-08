@@ -373,12 +373,13 @@ impl JobContainerSpec {
         for (name, value) in env {
             let is_secret = env_name_is_secret(name) || env_value_is_secret(value, secret_masks);
             if is_secret && value.contains('\n') {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("secret environment variable {name} contains a newline"),
-                ));
-            }
-            if is_secret {
+                // Docker env files are line-oriented and cannot represent an
+                // armored key or certificate. Ask Docker to forward this
+                // variable from its own process environment instead: the
+                // value stays out of argv, logs, and the env-file parser.
+                prepared.args.extend(["-e".into(), name.clone()]);
+                prepared.process_env.push((name.clone(), value.clone()));
+            } else if is_secret {
                 let env_file = write_exec_env_file(&self.temp_host, name, value)?;
                 prepared
                     .args
@@ -780,6 +781,7 @@ impl JobContainerSpec {
 pub struct PreparedDockerArgs {
     pub args: Vec<String>,
     env_files: Vec<ExecEnvFile>,
+    process_env: Vec<(String, String)>,
 }
 
 impl PreparedDockerArgs {
@@ -787,11 +789,16 @@ impl PreparedDockerArgs {
         Self {
             args,
             env_files: Vec::new(),
+            process_env: Vec::new(),
         }
     }
 
     pub fn args(&self) -> &[String] {
         &self.args
+    }
+
+    pub fn process_env(&self) -> &[(String, String)] {
+        &self.process_env
     }
 }
 
@@ -1679,17 +1686,23 @@ mod tests {
     }
 
     #[test]
-    fn multiline_secret_is_rejected_instead_of_exposed() {
-        let error = spec()
+    fn multiline_secret_uses_docker_process_env_without_argv_exposure() {
+        let prepared = spec()
             .prepare_exec_process_args(
                 "/__w",
                 &[("ACTIONS_RUNTIME_TOKEN".into(), "line-one\nline-two".into())],
                 &[],
                 &["printenv".into()],
             )
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert!(!error.to_string().contains("line-one"));
+            .unwrap();
+
+        let joined = prepared.args().join("\0");
+        assert!(joined.contains("-e\0ACTIONS_RUNTIME_TOKEN"));
+        assert!(!joined.contains("line-one"));
+        assert_eq!(
+            prepared.process_env(),
+            &[("ACTIONS_RUNTIME_TOKEN".into(), "line-one\nline-two".into())]
+        );
     }
 
     #[test]

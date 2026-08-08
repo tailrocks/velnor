@@ -68,6 +68,19 @@ pub trait CommandRunner {
         self.run(program, args)
     }
 
+    fn run_timeout_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout: Duration,
+    ) -> Result<CommandResult> {
+        if !env.is_empty() {
+            bail!("command runner does not support process environment forwarding");
+        }
+        self.run_timeout(program, args, timeout)
+    }
+
     fn run_streaming_timeout(
         &mut self,
         program: &str,
@@ -77,6 +90,20 @@ pub trait CommandRunner {
     ) -> Result<CommandResult> {
         let _ = timeout;
         self.run_streaming(program, args, on_output)
+    }
+
+    fn run_streaming_timeout_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout: Duration,
+        on_output: &mut dyn FnMut(CommandStream, &str),
+    ) -> Result<CommandResult> {
+        if !env.is_empty() {
+            bail!("command runner does not support streaming process environment forwarding");
+        }
+        self.run_streaming_timeout(program, args, timeout, on_output)
     }
 
     fn run_streaming(
@@ -107,6 +134,20 @@ pub trait CommandRunner {
     ) -> Result<CommandResult> {
         let _ = timeout;
         self.run_with_stdin(program, args, stdin)
+    }
+
+    fn run_with_stdin_timeout_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        stdin: &str,
+        timeout: Duration,
+    ) -> Result<CommandResult> {
+        if !env.is_empty() {
+            bail!("command runner does not support stdin process environment forwarding");
+        }
+        self.run_with_stdin_timeout(program, args, stdin, timeout)
     }
 
     fn run_with_stdin(
@@ -166,11 +207,24 @@ impl CommandRunner for ProcessCommandRunner {
         args: &[String],
         timeout: Duration,
     ) -> Result<CommandResult> {
+        self.run_timeout_with_env(program, args, &[], timeout)
+    }
+
+    fn run_timeout_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout: Duration,
+    ) -> Result<CommandResult> {
         // Called from spawn_blocking context — synchronous blocking is fine here.
-        let child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(args)
+            .envs(env.iter().map(|(name, value)| (name, value)))
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = command
             .spawn()
             .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
         let (timed_out, watchdog_cancel, watchdog) =
@@ -211,10 +265,24 @@ impl CommandRunner for ProcessCommandRunner {
         timeout: Duration,
         on_output: &mut dyn FnMut(CommandStream, &str),
     ) -> Result<CommandResult> {
-        let mut child = Command::new(program)
+        self.run_streaming_timeout_with_env(program, args, &[], timeout, on_output)
+    }
+
+    fn run_streaming_timeout_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout: Duration,
+        on_output: &mut dyn FnMut(CommandStream, &str),
+    ) -> Result<CommandResult> {
+        let mut command = Command::new(program);
+        command
             .args(args)
+            .envs(env.iter().map(|(name, value)| (name, value)))
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
             .spawn()
             .with_context(|| format!("run {program} {}", args.join(" ")))?;
         let stdout = child
@@ -303,11 +371,25 @@ impl CommandRunner for ProcessCommandRunner {
         stdin: &str,
         timeout: Duration,
     ) -> Result<CommandResult> {
-        let mut child = Command::new(program)
+        self.run_with_stdin_timeout_with_env(program, args, &[], stdin, timeout)
+    }
+
+    fn run_with_stdin_timeout_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        stdin: &str,
+        timeout: Duration,
+    ) -> Result<CommandResult> {
+        let mut command = Command::new(program);
+        command
             .args(args)
+            .envs(env.iter().map(|(name, value)| (name, value)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
             .spawn()
             .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
         let (timed_out, watchdog_cancel, watchdog) =
@@ -1345,9 +1427,10 @@ where
                             &live_masks,
                         );
                     };
-                    let step_result = self.runner.run_streaming_timeout(
+                    let step_result = self.runner.run_streaming_timeout_with_env(
                         "docker",
                         exec_args.args(),
+                        exec_args.process_env(),
                         effective_step_timeout(step.timeout_minutes, self.job_timeout_minutes),
                         &mut on_output,
                     )?;
@@ -1772,9 +1855,12 @@ where
             &node_image,
             entrypoint_container_path,
         )?;
-        let step_result = self
-            .runner
-            .run_timeout("docker", exec_args.args(), timeout)?;
+        let step_result = self.runner.run_timeout_with_env(
+            "docker",
+            exec_args.args(),
+            exec_args.process_env(),
+            timeout,
+        )?;
         let mut state = command_files.collect_state()?;
         state.merge(parse_workflow_commands_from_output(
             &step_result.stdout,
@@ -1887,9 +1973,12 @@ where
             entrypoint.as_deref(),
             &args,
         )?;
-        let step_result = self
-            .runner
-            .run_timeout("docker", exec_args.args(), timeout)?;
+        let step_result = self.runner.run_timeout_with_env(
+            "docker",
+            exec_args.args(),
+            exec_args.process_env(),
+            timeout,
+        )?;
         let mut state = command_files.collect_state()?;
         state.merge(parse_workflow_commands_from_output(
             &step_result.stdout,
@@ -2395,9 +2484,13 @@ where
                 &secret_masks,
                 &["sh".to_string(), "-c".to_string(), cmd],
             )?;
-            return self
-                .runner
-                .run_with_stdin_timeout("docker", exec_args.args(), stdin, timeout);
+            return self.runner.run_with_stdin_timeout_with_env(
+                "docker",
+                exec_args.args(),
+                exec_args.process_env(),
+                stdin,
+                timeout,
+            );
         }
         self.native_shell(container, state, &cmd, timeout)
     }
@@ -2474,8 +2567,13 @@ where
                 );
             }
         };
-        self.runner
-            .run_streaming_timeout("docker", args.args(), timeout, &mut on_output)
+        self.runner.run_streaming_timeout_with_env(
+            "docker",
+            args.args(),
+            args.process_env(),
+            timeout,
+            &mut on_output,
+        )
     }
 
     fn native_renovate(
@@ -2515,7 +2613,8 @@ where
             &[],
         )?;
         Ok(native_command_result(
-            self.runner.run_timeout("docker", args.args(), timeout)?,
+            self.runner
+                .run_timeout_with_env("docker", args.args(), args.process_env(), timeout)?,
             StepCommandState::default(),
         ))
     }
@@ -8674,6 +8773,48 @@ fn docker_run_container_name(args: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_forwards_multiline_env_on_all_timed_paths() {
+        let env = &[(
+            "VELNOR_MULTILINE".to_string(),
+            "line-one\nline-two".to_string(),
+        )];
+        let args = &[
+            "-c".to_string(),
+            "printf %s \"$VELNOR_MULTILINE\"".to_string(),
+        ];
+        let mut runner = ProcessCommandRunner;
+
+        let regular = runner
+            .run_timeout_with_env("sh", args, env, Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(regular.stdout, "line-one\nline-two");
+
+        let mut streamed = String::new();
+        let mut on_output = |_: CommandStream, line: &str| streamed.push_str(line);
+        let streaming = runner
+            .run_streaming_timeout_with_env("sh", args, env, Duration::from_secs(5), &mut on_output)
+            .unwrap();
+        assert_eq!(streaming.stdout, "line-one\nline-two\n");
+        assert_eq!(streamed, "line-oneline-two");
+
+        let stdin_args = &[
+            "-c".to_string(),
+            "read input; printf '%s|%s' \"$VELNOR_MULTILINE\" \"$input\"".to_string(),
+        ];
+        let with_stdin = runner
+            .run_with_stdin_timeout_with_env(
+                "sh",
+                stdin_args,
+                env,
+                "payload\n",
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(with_stdin.stdout, "line-one\nline-two|payload");
+    }
 
     #[test]
     fn compiler_cache_setup_scripts_never_download_tools() {
