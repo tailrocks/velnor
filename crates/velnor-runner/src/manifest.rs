@@ -197,6 +197,7 @@ const BUILDX_REFS: &[AllowedRef] = &[
     allowed("v4", "fixture transition until plan 041"),
 ];
 const LOGIN_REFS: &[AllowedRef] = &[
+    allowed("dbcb813823bdd20940b903addbd779551569679f", "v4.6.0"),
     allowed("abd2ef45e78c5afb21d64d4ca52ee8550d9572c7", "v4"),
     allowed("af1e73f918a031802d376d3c8bbc3fe56130a9b0", "v4"),
     allowed("v4", "fixture transition until plan 041"),
@@ -2110,7 +2111,7 @@ mod tests {
         validate_job_with_context(
             &job(
                 "docker/login-action",
-                Some("abd2ef45e78c5afb21d64d4ca52ee8550d9572c7"),
+                Some("dbcb813823bdd20940b903addbd779551569679f"),
                 serde_json::json!({"username": "masked", "password": "masked"}),
             ),
             &[],
