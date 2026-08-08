@@ -57,7 +57,10 @@ jobs:
         with:
           install_args: "rust"
           github_token: ${{ secrets.GITHUB_TOKEN }}
-      - run: cargo fmt --all --check
+      # Bootstrap guard for fleets older than this fix: their mise adapter put
+      # the generic rustup shim before the image-baked rustup proxy. Keep this
+      # until the repaired runner is deployed everywhere.
+      - run: export PATH="/root/.cargo/bin:$PATH"; cargo fmt --all --check
 
   actionlint:
     name: Actionlint (${{ matrix.config.lane }})
