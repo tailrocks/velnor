@@ -58,9 +58,17 @@ jobs:
           install_args: "rust"
           github_token: ${{ secrets.GITHUB_TOKEN }}
       # Bootstrap guard for fleets older than this fix: their mise adapter put
-      # the generic rustup shim before the image-baked rustup proxy. Keep this
+      # concurrent jobs on one mutable RUSTUP_HOME. Bypass rustup completely
       # until the repaired runner is deployed everywhere.
-      - run: export PATH="/root/.cargo/bin:$PATH"; cargo fmt --all --check
+      - run: |
+          case "$(uname -m)" in
+            x86_64) host=x86_64-unknown-linux-gnu ;;
+            aarch64|arm64) host=aarch64-unknown-linux-gnu ;;
+            *) echo "unsupported Rust host: $(uname -m)" >&2; exit 1 ;;
+          esac
+          toolchain_bin="/root/.rustup/toolchains/${RUSTUP_TOOLCHAIN%%-*}-$host/bin"
+          export PATH="$toolchain_bin:$PATH"
+          "$toolchain_bin/cargo" fmt --all --check
 
   actionlint:
     name: Actionlint (${{ matrix.config.lane }})
