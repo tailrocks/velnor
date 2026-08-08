@@ -36,7 +36,7 @@ use anyhow::{bail, Context, Result};
 /// exact version admitted by `manifest.rs`. There is no field in `mise.lock`
 /// for the mise binary itself (the lock pins *tools*), so this constant is the
 /// authoritative committed record of the fleet pin.
-pub const FLEET_PINNED_MISE_VERSION: &str = "2026.7.7";
+pub const FLEET_PINNED_MISE_VERSION: &str = "2026.8.3";
 
 /// Config file names mise recognizes, each paired with its adjacent lock name.
 /// Ordered by mise's own precedence (nearest, most specific first).

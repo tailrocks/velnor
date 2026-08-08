@@ -3819,8 +3819,8 @@ fn hadolint_script(inputs: &HadolintInputs) -> String {
 // image bakes these versions, so a job-time `mise install --locked` is an
 // integrity re-check, never a download over an unlocked path.
 const MOLD_LOCKED_VERSION: &str = "2.41.0";
-const JUST_LOCKED_VERSION: &str = "1.57.0";
-const COSIGN_LOCKED_VERSION: &str = "3.1.2";
+const JUST_LOCKED_VERSION: &str = "1.58.0";
+const COSIGN_LOCKED_VERSION: &str = "3.1.3";
 
 /// Shared prologue for the project-tool adapters (Plan 008 N8): point mise at
 /// the baked global locked config and install one admitted tool key in
@@ -18824,11 +18824,11 @@ bitcoin-processor-app.push=true")
     fn cosign_installer_uses_locked_mise_and_rejects_other_releases() {
         // Requesting the locked version installs via mise, links install-dir,
         // verifies the version, and never downloads over curl.
-        let script = cosign_installer_script("v3.1.2", "$HOME/.cosign");
+        let script = cosign_installer_script("v3.1.3", "$HOME/.cosign");
         assert!(script.contains("mise install --locked --yes 'cosign'"));
         assert!(script.contains("MISE_LOCKED=1"));
-        assert!(script.contains("WANT='3.1.2'"));
-        assert!(script.contains("LOCKED='3.1.2'"));
+        assert!(script.contains("WANT='3.1.3'"));
+        assert!(script.contains("LOCKED='3.1.3'"));
         assert!(script.contains("DIR=\"$HOME/.cosign\""));
         assert!(script.contains("command -v cosign"));
         assert!(script.contains("__VELNOR_COSIGN_DIR__"));
@@ -18929,7 +18929,7 @@ bitcoin-processor-app.push=true")
         let script = setup_just_script();
         assert!(script.contains("mise install --locked --yes 'just'"));
         assert!(script.contains("MISE_LOCKED=1"));
-        assert!(script.contains("just --version | grep -F '1.57.0'"));
+        assert!(script.contains("just --version | grep -F '1.58.0'"));
         assert!(!script.contains("apt-get"));
         assert!(!script.contains("cargo install"));
     }
