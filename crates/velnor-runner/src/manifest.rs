@@ -197,6 +197,7 @@ const BUILDX_REFS: &[AllowedRef] = &[
     allowed("v4", "fixture transition until plan 041"),
 ];
 const LOGIN_REFS: &[AllowedRef] = &[
+    allowed("dbcb813823bdd20940b903addbd779551569679f", "v4.6.0"),
     allowed("abd2ef45e78c5afb21d64d4ca52ee8550d9572c7", "v4"),
     allowed("af1e73f918a031802d376d3c8bbc3fe56130a9b0", "v4"),
     allowed("v4", "fixture transition until plan 041"),
@@ -324,6 +325,10 @@ pub static ACTIONS: &[ActionCapability] = &[
         repository: "jackin-project/jackin-role-action",
         adapter: NativeActionAdapter::ApprovedComposite,
         allowed_refs: &[
+            allowed(
+                "041f17a6d32f8fd2a8ef03c2a63be58346993136",
+                "latest composite with mise 2026.8.3 (#95)",
+            ),
             allowed(
                 "80a1acd07257a23b441c546e6fcad12239ef7626",
                 "estate-pinned composite",
@@ -576,25 +581,31 @@ pub static ACTIONS: &[ActionCapability] = &[
     ),
 ];
 
-/// Inputs dispatched to the approved publish reusable workflow via
-/// `jobs.<id>.with`. These mirror the composite `jackin-role-action` surface the
-/// estate already admits; the exact `on.workflow_call.inputs` schema of
-/// `publish.yml@80a1acd0…` MUST be reconciled against that immutable file before
-/// real in-order execution (plan 009 STOP: "exact current workflow schema cannot
-/// be derived without new approval").
+/// Exact `on.workflow_call.inputs` surface of the latest approved publish
+/// workflow. Runner expressions are resolved by GitHub before broker admission;
+/// Velnor validates their resulting scalar values here.
 const PUBLISH_WORKFLOW_INPUTS: &[InputRule] = &[
     InputRule::Any("jackin-version"),
-    InputRule::Literal("skip-build", &["true", "false"]),
-    InputRule::Any("registry-cache-image"),
+    InputRule::Any("registry"),
+    InputRule::Any("runner-amd64"),
+    InputRule::Any("runner-arm64"),
+    InputRule::Any("runner-merge"),
+    InputRule::Literal("publish", &["true", "false"]),
 ];
 
 pub static REUSABLE_WORKFLOWS: &[ReusableWorkflow] = &[ReusableWorkflow {
     repository: "jackin-project/jackin-role-action",
     path: ".github/workflows/publish.yml",
-    allowed_refs: &[allowed(
-        "80a1acd07257a23b441c546e6fcad12239ef7626",
-        "estate-pinned publish reusable workflow",
-    )],
+    allowed_refs: &[
+        allowed(
+            "041f17a6d32f8fd2a8ef03c2a63be58346993136",
+            "latest publish workflow with mise 2026.8.3 (#95)",
+        ),
+        allowed(
+            "80a1acd07257a23b441c546e6fcad12239ef7626",
+            "estate-pinned publish reusable workflow",
+        ),
+    ],
     inputs: PUBLISH_WORKFLOW_INPUTS,
     notes: "server-expanded reusable workflow; identity/full-SHA/inputs admitted, jobs.<id>.uses never parsed as a runner action",
 }];
@@ -1830,7 +1841,7 @@ mod tests {
 
     #[test]
     fn reusable_workflow_validation_enforces_identity_ref_and_inputs() {
-        let publish_sha = "80a1acd07257a23b441c546e6fcad12239ef7626";
+        let publish_sha = "041f17a6d32f8fd2a8ef03c2a63be58346993136";
         // Approved identity + immutable ref + no inputs is admitted.
         validate_reusable_workflow(
             "wf",
@@ -1939,7 +1950,7 @@ mod tests {
     fn pinned_role_composite_is_admitted_but_not_executed_as_native() {
         let job = job(
             "jackin-project/jackin-role-action",
-            Some("889e01e1fec152cc68271385f8976319244d9251"),
+            Some("041f17a6d32f8fd2a8ef03c2a63be58346993136"),
             serde_json::json!({
                 "path": ".",
                 "skip-build": "false",
@@ -2110,7 +2121,7 @@ mod tests {
         validate_job_with_context(
             &job(
                 "docker/login-action",
-                Some("abd2ef45e78c5afb21d64d4ca52ee8550d9572c7"),
+                Some("dbcb813823bdd20940b903addbd779551569679f"),
                 serde_json::json!({"username": "masked", "password": "masked"}),
             ),
             &[],
