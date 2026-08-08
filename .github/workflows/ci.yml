@@ -119,6 +119,14 @@ jobs:
       - name: Deny with baked Velnor toolchain
         if: matrix.config.lane == 'Velnor'
         run: |
+          case "$(uname -m)" in
+            x86_64) host=x86_64-unknown-linux-gnu ;;
+            aarch64|arm64) host=aarch64-unknown-linux-gnu ;;
+            *) echo "unsupported Rust host: $(uname -m)" >&2; exit 1 ;;
+          esac
+          toolchain="$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)"
+          test -n "$toolchain"
+          export PATH="/root/.rustup/toolchains/$toolchain-$host/bin:$PATH"
           deny="$(find /opt/mise/installs -type f -name cargo-deny -perm -111 -print -quit)"
           test -n "$deny"
           "$deny" check advisories
