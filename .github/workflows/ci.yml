@@ -128,7 +128,7 @@ jobs:
           test -n "$toolchain"
           export PATH="/root/.rustup/toolchains/$toolchain-$host/bin:$PATH"
           deny="$(find /opt/mise/installs -type f -name cargo-deny -perm -111 -print -quit)"
-          test -n "$deny"
+          test -n "$deny" || { echo "baked cargo-deny is missing" >&2; exit 1; }
           "$deny" check advisories
       - name: Deny on GitHub lane
         if: matrix.config.lane == 'GitHub'

@@ -1,9 +1,5 @@
 FROM ubuntu:26.04@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb
 
-ARG VELNOR_IMAGE_VERSION=development
-LABEL org.opencontainers.image.version="${VELNOR_IMAGE_VERSION}" \
-      org.opencontainers.image.source="https://github.com/tailrocks/velnor"
-
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         bash \
@@ -203,3 +199,10 @@ RUN hadolint_ver="v2.14.0" && \
     hadolint --version
 
 WORKDIR /__w
+
+# Release metadata must remain after every expensive filesystem layer. Putting
+# this ARG/LABEL near FROM makes each version bump invalidate the complete
+# dual-architecture toolchain build even though no installed byte changed.
+ARG VELNOR_IMAGE_VERSION=development
+LABEL org.opencontainers.image.version="${VELNOR_IMAGE_VERSION}" \
+      org.opencontainers.image.source="https://github.com/tailrocks/velnor"
