@@ -2791,19 +2791,10 @@ where
             );
             secret_files.push(secret_file);
         }
-        let mut dropped_gha_cache = 0usize;
         for cache in input_values(&native_input(action, &action_state, "cache-from")) {
-            if is_gha_cache_value(&cache) {
-                dropped_gha_cache += 1;
-                continue;
-            }
             push_arg(&mut args, "--cache-from", &cache);
         }
         for cache in input_values(&native_input(action, &action_state, "cache-to")) {
-            if is_gha_cache_value(&cache) {
-                dropped_gha_cache += 1;
-                continue;
-            }
             push_arg(&mut args, "--cache-to", &cache);
         }
         // The `outputs` input maps to buildx --output (e.g. the publish
@@ -2832,13 +2823,7 @@ where
             &format!("/tmp/{metadata_name}"),
         );
         args.push(container_context_path(&context));
-        let mut result = self.container_docker(container, &action_state, &args, None, timeout)?;
-        if dropped_gha_cache > 0 {
-            result.stdout = format!(
-                "[velnor] dropped {dropped_gha_cache} type=gha cache option(s): the persistent local builder cache covers them on the Velnor lane\n{}",
-                result.stdout
-            );
-        }
+        let result = self.container_docker(container, &action_state, &args, None, timeout)?;
         let metadata_path = action_state
             .temp_host
             .clone()
@@ -2886,12 +2871,7 @@ where
         for file in input_values(&native_input(action, &action_state, "files")) {
             push_arg(&mut args, "--file", &file);
         }
-        let mut dropped_gha_cache = 0usize;
         for set in input_values(&native_input(action, &action_state, "set")) {
-            if is_gha_bake_set_entry(&set) {
-                dropped_gha_cache += 1;
-                continue;
-            }
             push_arg(&mut args, "--set", &set);
         }
         if input_truthy(&native_input(action, &action_state, "push")) {
@@ -2902,13 +2882,7 @@ where
             &action_state,
             "targets",
         )));
-        let mut result = self.container_docker(container, &action_state, &args, None, timeout)?;
-        if dropped_gha_cache > 0 {
-            result.stdout = format!(
-                "[velnor] dropped {dropped_gha_cache} type=gha cache option(s): the persistent local builder cache covers them on the Velnor lane\n{}",
-                result.stdout
-            );
-        }
+        let result = self.container_docker(container, &action_state, &args, None, timeout)?;
         Ok(native_command_result(result, StepCommandState::default()))
     }
 
@@ -4235,26 +4209,6 @@ fn native_rust_cache_save(
         .summary
         .replace("actions/cache (native post)", "rust-cache (native post)");
     Ok(result)
-}
-
-/// `type=gha` buildx cache options pay GitHub's cache API latency from the
-/// self-hosted host while the persistent named builder already keeps a local
-/// layer cache — pure overhead on the Velnor lane (master-plan P3.7). The
-/// docker adapters drop them; all other cache types pass through.
-fn is_gha_cache_value(value: &str) -> bool {
-    value
-        .trim()
-        .split(',')
-        .any(|part| part.trim().eq_ignore_ascii_case("type=gha"))
-}
-
-/// Bake `--set` form: `<target-pattern>.cache-from=type=gha,...`.
-fn is_gha_bake_set_entry(entry: &str) -> bool {
-    let Some((key, value)) = entry.split_once('=') else {
-        return false;
-    };
-    (key.trim().ends_with(".cache-from") || key.trim().ends_with(".cache-to"))
-        && is_gha_cache_value(value)
 }
 
 fn cache_lookup_keys(key: &str, restore_keys: &str) -> Vec<String> {
@@ -11987,10 +11941,12 @@ type=sha,format=long,prefix=,enable=true"
                 && c.contains("'--tag' 'chainargos/rust-bitcoin-processor:abcdef1234567890'")
         });
         assert!(build_call.is_some());
-        // type=gha cache options are dropped on the Velnor lane (persistent
-        // local builder cache); the step output records the substitution.
-        assert!(!calls[build_call.unwrap()].contains("type=gha"));
-        assert!(results[3].stdout.contains("[velnor] dropped"));
+        // The builder is job-scoped and removed after completion, so external
+        // cache import/export must survive to make the next isolated job hot.
+        assert!(calls[build_call.unwrap()]
+            .contains("'--cache-from' 'type=gha,scope=bitcoin-processor-app-pr'"));
+        assert!(calls[build_call.unwrap()]
+            .contains("'--cache-to' 'type=gha,scope=bitcoin-processor-app-pr,mode=max'"));
         // Non-secret runtime env remains inline, while credentials use a
         // mode-0600 env file and never occur in the process argument vector.
         let build_invocation = &calls[build_call.unwrap()];
@@ -12010,7 +11966,10 @@ type=sha,format=long,prefix=,enable=true"
             .iter()
             .position(|c| c.contains("'buildx' 'bake'") && c.contains("'bitcoin-processor-app'"));
         assert!(bake_call.is_some());
-        assert!(!calls[bake_call.unwrap()].contains("type=gha"));
+        assert!(calls[bake_call.unwrap()]
+            .contains("'--set' '*.cache-from=type=gha,scope=rust-workspace'"));
+        assert!(calls[bake_call.unwrap()]
+            .contains("'--set' '*.cache-to=type=gha,scope=rust-workspace,mode=max'"));
         let bake_invocation = &calls[bake_call.unwrap()];
         assert!(bake_invocation.contains("PUSH=false"));
         assert!(bake_invocation.contains("SHA=abcdef1234567890"));
