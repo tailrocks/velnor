@@ -95,6 +95,15 @@ pub fn checkout_plans(
                 format!("Run {reference_name}@{reference_ref}")
             }
         });
+        let token = checkout_token(step, job)?.or_else(|| {
+            // Prefer system.github.token (the GITHUB_TOKEN with repo access) over
+            // SystemVssConnection's AccessToken (runner OAuth token, no repo scope).
+            job.variables
+                .get("system.github.token")
+                .and_then(|v| v.value.clone())
+                .filter(|v| !v.is_empty())
+                .or_else(|| system_access_token(job.system_connection()))
+        });
         plans.push(CheckoutPlan {
             step_id: checkout_step_id(step, index),
             display_name,
@@ -118,16 +127,7 @@ pub fn checkout_plans(
                     })
             }),
             destination,
-            token: checkout_token(step, job)
-                // Prefer system.github.token (the GITHUB_TOKEN with repo access) over
-                // SystemVssConnection's AccessToken (runner OAuth token, no repo scope).
-                .or_else(|| {
-                    job.variables
-                        .get("system.github.token")
-                        .and_then(|v| v.value.clone())
-                        .filter(|v| !v.is_empty())
-                })
-                .or_else(|| system_access_token(job.system_connection())),
+            token,
             fetch_depth: checkout_fetch_depth(step)?,
             fetch_tags: checkout_fetch_tags(step),
             persist_credentials: checkout_persist_credentials(step),
@@ -875,13 +875,20 @@ fn checkout_clean(step: &ActionStep) -> bool {
         .unwrap_or(true)
 }
 
-fn checkout_token(step: &ActionStep, job: &AgentJobRequestMessage) -> Option<String> {
-    let token = step
+fn checkout_token(step: &ActionStep, job: &AgentJobRequestMessage) -> Result<Option<String>> {
+    let Some(token) = step
         .inputs
         .as_ref()
-        .and_then(|inputs| input_string(inputs, &["token", "Token"]))
-        .filter(|value| !value.is_empty())?;
-    resolve_token_expression(token, job)
+        .and_then(|inputs| input_string_or_expression(inputs, &["token", "Token"]))
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(resolved) = resolve_token_expression(&token, job).filter(|value| !value.is_empty())
+    else {
+        bail!("explicit checkout token expression did not resolve");
+    };
+    Ok(Some(resolved))
 }
 
 fn resolve_token_expression(token: &str, job: &AgentJobRequestMessage) -> Option<String> {
@@ -975,6 +982,45 @@ fn input_value_as_str(value: &Value) -> Option<&str> {
             .as_object()
             .and_then(|object| direct_input_string(object, &["value", "Value", "lit", "Lit"]))
     })
+}
+
+fn input_string_or_expression(value: &Value, names: &[&str]) -> Option<String> {
+    input_string(value, names)
+        .map(ToOwned::to_owned)
+        .or_else(|| input_expression(value, names).map(|expr| format!("${{{{ {expr} }}}}")))
+}
+
+fn input_expression<'a>(value: &'a Value, names: &[&str]) -> Option<&'a str> {
+    let object = value.as_object()?;
+    if let Some(expression) = names
+        .iter()
+        .filter_map(|name| object.get(*name))
+        .find_map(expression_value_as_str)
+    {
+        return Some(expression);
+    }
+    let map = object.get("map").or_else(|| object.get("Map"))?;
+    map.as_array()?.iter().find_map(|item| {
+        let item = item.as_object()?;
+        let name = input_name_field(item)?;
+        if !names
+            .iter()
+            .any(|expected| name.eq_ignore_ascii_case(expected))
+        {
+            return None;
+        }
+        item.get("value")
+            .or_else(|| item.get("Value"))
+            .and_then(expression_value_as_str)
+    })
+}
+
+fn expression_value_as_str(value: &Value) -> Option<&str> {
+    value
+        .as_object()?
+        .get("expr")
+        .or_else(|| value.as_object()?.get("Expr"))
+        .and_then(Value::as_str)
 }
 
 fn job_string<'a>(job: &'a AgentJobRequestMessage, name: &str) -> Option<&'a str> {
@@ -1602,7 +1648,7 @@ mod tests {
                         { "Key": { "lit": "repository", "type": 0 }, "Value": { "lit": "acme/homebrew-tap", "type": 0 } },
                         { "Key": { "lit": "ref", "type": 0 }, "Value": { "lit": "main", "type": 0 } },
                         { "Key": { "lit": "path", "type": 0 }, "Value": { "lit": "homebrew-tap", "type": 0 } },
-                        { "Key": { "lit": "token", "type": 0 }, "Value": { "lit": "${{ secrets.HOMEBREW_TAP_TOKEN }}", "type": 0 } },
+                        { "Key": { "lit": "token", "type": 0 }, "Value": { "expr": "secrets.HOMEBREW_TAP_TOKEN", "type": 3 } },
                         { "Key": { "lit": "fetch-depth", "type": 0 }, "Value": { "lit": "0", "type": 0 } },
                         { "Key": { "lit": "persist-credentials", "type": 0 }, "Value": { "lit": "false", "type": 0 } },
                         { "Key": { "lit": "clean", "type": 0 }, "Value": { "lit": "false", "type": 0 } },
@@ -1626,6 +1672,43 @@ mod tests {
         assert!(plans[0].fetch_tags);
         assert!(!plans[0].persist_credentials);
         assert!(!plans[0].clean);
+    }
+
+    #[test]
+    fn explicit_unresolved_checkout_secret_does_not_fall_back_to_github_token() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "CI",
+            "requestId": 1,
+            "variables": {
+                "github.repository": { "value": "acme/repo" },
+                "github.sha": { "value": "abc123" },
+                "system.github.token": { "value": "repo-token", "isSecret": true }
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" },
+                "inputs": {
+                    "type": "map",
+                    "map": [
+                        { "Key": { "lit": "repository", "type": 0 }, "Value": { "lit": "acme/homebrew-tap", "type": 0 } },
+                        { "Key": { "lit": "token", "type": 0 }, "Value": { "expr": "secrets.MISSING_TOKEN", "type": 3 } }
+                    ]
+                }
+            }]
+        }))
+        .unwrap();
+
+        let error = checkout_plans(&job, Path::new("/tmp/work")).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "explicit checkout token expression did not resolve"
+        );
+        assert!(!error.to_string().contains("MISSING_TOKEN"));
+        assert!(!error.to_string().contains("repo-token"));
     }
 
     #[test]
