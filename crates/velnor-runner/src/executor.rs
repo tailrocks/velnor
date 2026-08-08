@@ -3554,10 +3554,13 @@ fn mise_step_path(output: &str) -> Vec<String> {
             }
         }
     }
-    path.push("/opt/mise/shims".to_string());
-    // Keep the image-baked rustup proxies as a final fallback for projects
-    // that do not select Rust through mise.
+    // Rust installed by mise is backed by rustup under /root/.cargo/bin. Keep
+    // those real, root-owned proxies ahead of mise's generic shims: rustfmt
+    // asks `rustup component list`, and resolving that command back to the
+    // mise shim recursively re-enters the same probe until the host exhausts
+    // its process table. Direct pinned tool bins above still take precedence.
     path.push("/root/.cargo/bin".to_string());
+    path.push("/opt/mise/shims".to_string());
     path
 }
 
@@ -9587,6 +9590,10 @@ esac
             path.iter().position(|entry| entry == pipx_bin)
                 < path.iter().position(|entry| entry == "/opt/mise/shims")
         );
+        assert!(
+            path.iter().position(|entry| entry == "/root/.cargo/bin")
+                < path.iter().position(|entry| entry == "/opt/mise/shims")
+        );
     }
 
     #[test]
@@ -12191,7 +12198,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .iter()
             .position(|path| path == "/root/.cargo/bin")
             .unwrap();
-        assert!(mise_shims < baked_rustup);
+        assert!(baked_rustup < mise_shims);
         assert_eq!(results[0].state.env["RUSTUP_TOOLCHAIN"], "1.97.1");
         // just is now a locked mise tool exposed via the mise shims dir.
         assert!(results[3].state.path.contains(&"/opt/mise/shims".into()));

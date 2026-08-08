@@ -32,11 +32,12 @@ downloaded `.deb`, `dpkg -i`, a local apt path, a copied binary, or a local
 build. A verified release record is activation metadata, not an installation
 path.
 
-The package ships the canonical job-image Dockerfile. During configuration,
-`postinst` compares the image's OCI version label with the Debian package
-version and rebuilds `velnor/job-ubuntu:26.04` before restarting any daemon when
-they differ. An apt upgrade therefore cannot leave native adapters paired with
-a stale tool image; image-build failure fails the package transaction.
+The package ships the canonical job-image Dockerfile and acyclic build identity.
+During configuration, `postinst` verifies the installed binary and compiled
+manifest against that package-owned identity. It performs no network work,
+image build, activation, or restart. During a drained upgrade the active pointer
+continues to name the exact rollback predecessor; daemon `ExecStartPre` rejects
+that temporary mismatch until the operator activates the new signed record.
 
 - Default instance: `/etc/velnor/velnor.env` (URL, name, labels, slots,
   work dir) + `/etc/velnor/secrets.env` (0600, `GITHUB_TOKEN=...` — never

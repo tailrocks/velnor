@@ -29,6 +29,10 @@ fn debian_lifecycle_preserves_operator_units_and_covers_instances() {
     assert!(!postinst.contains("install -d -m 0750 \"$ACTIVE_DIR\""));
     assert!(postinst.contains("rmdir \"$ACTIVE_DIR\""));
     assert!(postinst.contains("legacy active directory is nonempty; refusing pointer migration"));
+    assert!(
+        !postinst.contains("release verify-installed"),
+        "postinst must not compare new package bytes with the active rollback predecessor"
+    );
     assert!(prerm.contains("'velnor-daemon@*.service'"));
     assert!(prerm.contains("systemctl stop \"$unit\""));
     assert!(postrm.contains("'velnor-daemon@*.service'"));

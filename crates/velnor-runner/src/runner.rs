@@ -2792,12 +2792,6 @@ async fn handle_job_request(
                         .context("derive mise binary GC scope")?
                         .to_string_lossy()
                         .to_string();
-                let rustup_scope =
-                    crate::container::rustup_executable_store_host(&work_root, &repository_key)
-                        .strip_prefix(&mise_root)
-                        .context("derive rustup GC scope")?
-                        .to_string_lossy()
-                        .to_string();
                 let actions_cache =
                     crate::storage::cache_class_path(&work_root, "caches", "_velnor_caches");
                 let actions_cache_scope = if actions_cache
@@ -2819,7 +2813,6 @@ async fn handle_job_request(
                     ("mise", "cache".into()),
                     ("mise", mise_install_scope),
                     ("mise", mise_binary_scope),
-                    ("mise", rustup_scope),
                 ]
                 .into_iter()
                 .map(|(class, scope)| {

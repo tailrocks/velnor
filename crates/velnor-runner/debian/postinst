@@ -6,7 +6,11 @@
 # single mutable image label with no manifest/source/digest check and restarting
 # before equality. That is replaced with: validate the installed binary against
 # the shipped acyclic identity, and (if a release record is already staged) prove
-# coherence. Activation, image acquisition, and restart
+# coherence against the package's own shipped identity. The active pointer is
+# deliberately NOT checked here: during a drained upgrade it still names the
+# exact rollback predecessor until the operator activates the new record.
+# ExecStartPre fails closed on that temporary mismatch, so no daemon can start.
+# Activation, image acquisition, and restart
 # are a separate, explicit `velnor-runner release activate` step run by the
 # deployment flow, never here.
 set -e
@@ -75,17 +79,6 @@ case "$1" in
       # upgrades preserve systemd's existing state by doing nothing here; fresh
       # installs remain disabled. In particular, never revive the obsolete
       # default daemon/doctor or invent doctors for inactive template instances.
-    fi
-
-    # --- If a record is already staged, prove offline coherence --------------
-    # Image acquisition is network work. It belongs to explicit activation,
-    # never a dpkg maintainer script.
-    if [ -x "$BIN" ] && [ -f "$ACTIVE_DIR/record.json" ] && [ -f "$ACTIVE_DIR/deployed.json" ]; then
-      "$BIN" release verify-installed \
-        --record "$ACTIVE_DIR/record.json" \
-        --deployed "$ACTIVE_DIR/deployed.json" \
-        --binary "$BIN" \
-        || fail "staged release record is not coherent with the installed binary/package/manifest"
     fi
 
     echo "velnor-runner installed. NOTE: this package never restarts the fleet."

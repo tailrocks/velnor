@@ -180,8 +180,8 @@ recovery.
    sudo apt-get install velnor-runner=X.Y.Z
    dpkg-query -W velnor-runner
    ```
-5. Verify the installed package and binary against the immutable release
-   record, activate and verify the exact OCI digest and complete labels, inspect
+5. Activate the immutable release record, verify the installed package and
+   binary plus exact OCI digest and complete labels, inspect
    atomic `active`/`previous` pointers, then start only the intended instance
    units. Run doctor and the fixture smoke before restoring traffic.
 6. Rollback uses only the exact signed predecessor already retained in the
