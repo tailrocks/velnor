@@ -3427,8 +3427,15 @@ if [ "$publish_needed" = "1" ]; then
     exit 1
   fi
   mkdir -p "$store_dir"
-  staging="$store_dir/.mise.staging.$$"
-  rm -f "$staging"
+  # mise dispatches by argv[0]: an executable named `.mise.staging.*` is
+  # interpreted as a shim instead of the mise CLI. Keep the executable's
+  # basename exactly `mise` inside a private staging directory, and clean the
+  # directory on every exit so interrupted publication cannot poison PATH.
+  staging_dir="$store_dir/.staging.$$"
+  staging="$staging_dir/mise"
+  rm -rf "$staging_dir"
+  mkdir -p "$staging_dir"
+  trap 'rm -rf "$staging_dir"' EXIT HUP INT TERM
   # Copy the read-only baked bootstrap onto the same filesystem as the final
   # path so publication is an atomic rename. /opt/mise/bin is never written.
   cp "$VELNOR_MISE_BOOTSTRAP" "$staging"
@@ -3446,6 +3453,8 @@ if [ "$publish_needed" = "1" ]; then
   sync 2>/dev/null || true
   chmod 0555 "$staging"
   mv -f "$staging" "$mise_bin"
+  rmdir "$staging_dir"
+  trap - EXIT HUP INT TERM
   printf '{"version":"%s","sha256":"%s","os_arch":"%s"}\n' "$exact_version" "$staged_hash" "$os_arch" > "$meta"
   sync 2>/dev/null || true
   echo "mise: published persistent $exact_version ($os_arch) sha256=$staged_hash"
@@ -9326,6 +9335,9 @@ mod tests {
         assert!(script.contains("VELNOR_MISE_BINARY_STORE:=/opt/velnor/mise-binaries"));
         assert!(script.contains("VELNOR_MISE_BOOTSTRAP:=/opt/mise/bin/mise"));
         assert!(script.contains(r#""$staging" self-update "$exact_version" -y"#));
+        assert!(script.contains(r#"staging="$staging_dir/mise""#));
+        assert!(script.contains("trap 'rm -rf \"$staging_dir\"' EXIT HUP INT TERM"));
+        assert!(!script.contains(r#"staging="$store_dir/.mise.staging"#));
         assert!(script.contains(r#"mv -f "$staging" "$mise_bin""#));
         assert!(script.contains("chmod 0555"));
         assert!(script.contains("__VELNOR_MISE_SELF__"));
