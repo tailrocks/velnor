@@ -145,12 +145,14 @@ const DOWNLOAD_REFS: &[AllowedRef] = &[
     allowed("v8", "fixture transition until plan 041"),
 ];
 const MISE_REFS: &[AllowedRef] = &[
+    allowed("7e36c90d9ab29c415a2384db3006f3ec8a8cc654", "v4.2.4"),
     allowed("dad1bfd3df957f44999b559dd69dc1671cb4e9ea", "v4.2.1"),
     allowed("e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d", "v4.2.0"),
     allowed("dba19683ed58901619b14f395a24841710cb4925", "v4.1.0"),
     allowed("v4", "fixture transition until plan 041"),
 ];
 const SCCACHE_REFS: &[AllowedRef] = &[
+    allowed("fc920bf0ec8de6ee65d409111f7ec508035751ba", "v0.0.11"),
     allowed("9e7fa8a12102821edf02ca5dbea1acd0f89a2696", "v0.0.10"),
     allowed("v0.0.10", "fixture transition until plan 041"),
 ];
@@ -2059,6 +2061,28 @@ mod tests {
                     "cache_key_prefix": "mise-v2",
                     "cache_save": "false"
                 }),
+            ),
+            &[],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_job_accepts_current_mise_and_sccache_pins() {
+        validate_job_with_context(
+            &job(
+                "jdx/mise-action",
+                Some("7e36c90d9ab29c415a2384db3006f3ec8a8cc654"),
+                serde_json::json!({}),
+            ),
+            &[],
+        )
+        .unwrap();
+        validate_job_with_context(
+            &job(
+                "mozilla-actions/sccache-action",
+                Some("fc920bf0ec8de6ee65d409111f7ec508035751ba"),
+                serde_json::json!({}),
             ),
             &[],
         )
