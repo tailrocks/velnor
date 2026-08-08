@@ -1,12 +1,15 @@
 name: Renovate
 
 on:
-  merge_group:
   schedule:
     - cron: "0 6 * * *"
   push:
     branches:
       - main
+    paths:
+      - renovate.json
+      - .github/renovate.json
+      - .github/workflows/renovate.yml
   workflow_dispatch:
     inputs:
       lanes:
