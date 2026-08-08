@@ -1636,26 +1636,21 @@ mod tests {
     }
 
     #[test]
-    fn release_record_provisions_rust_before_independent_verification() {
+    fn release_record_downloads_compiled_tool_before_independent_verification() {
         let workflow: serde_yaml::Value =
             serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
                 .expect("release workflow must parse");
         let steps = workflow["jobs"]["record"]["steps"]
             .as_sequence()
             .expect("record job steps");
-        let mise = steps
+        let download = steps
             .iter()
             .position(|step| {
                 step.get("uses")
                     .and_then(serde_yaml::Value::as_str)
-                    .is_some_and(|uses| uses.starts_with("jdx/mise-action@"))
-                    && step
-                        .get("with")
-                        .and_then(|with| with.get("install_args"))
-                        .and_then(serde_yaml::Value::as_str)
-                        == Some("rust")
+                    .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
             })
-            .expect("record job must provision the locked Rust toolchain");
+            .expect("record job must download the compiled release tool");
         let verify = steps
             .iter()
             .position(|step| {
@@ -1665,8 +1660,8 @@ mod tests {
             })
             .expect("record job must independently verify the release");
         assert!(
-            mise < verify,
-            "Rust must be provisioned before record verification"
+            download < verify,
+            "compiled release tool must be downloaded before record verification"
         );
     }
 

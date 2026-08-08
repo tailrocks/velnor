@@ -93,8 +93,61 @@ jobs:
             echo "commit=$commit"
           } >> "$GITHUB_OUTPUT"
 
-  image:
+  metadata:
     needs: identity
+    name: Compile release metadata once
+    timeout-minutes: 30
+    runs-on: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    outputs:
+      manifest_sha256: ${{ steps.export.outputs.manifest_sha256 }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      SCCACHE_GHA_ENABLED: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' }}
+      SCCACHE_CACHE_SIZE: 20G
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.identity.outputs.commit }}
+          fetch-depth: 1
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Install mold linker
+        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: v0.16.0
+
+      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+        with:
+          install_args: rust
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Export metadata from one release-build binary
+        id: export
+        run: |
+          set -euo pipefail
+          cargo build -q -p velnor-runner --release --locked --features release-build
+          runner=target/release/velnor-runner
+          "$runner" release export > build-identity.json
+          "$runner" capabilities export > manifest.json
+          sha256="$(sha256sum manifest.json | awk '{print $1}')"
+          echo "manifest_sha256=$sha256" >> "$GITHUB_OUTPUT"
+          cp "$runner" velnor-release-tool
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-metadata
+          path: |
+            build-identity.json
+            manifest.json
+            velnor-release-tool
+
+  image:
+    needs: [identity, metadata]
     name: Build + push one multi-platform GHCR image
     timeout-minutes: 60
     runs-on: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
@@ -103,7 +156,7 @@ jobs:
       packages: write
     outputs:
       index_digest: ${{ steps.push.outputs.digest }}
-      manifest_sha256: ${{ steps.manifest.outputs.sha256 }}
+      manifest_sha256: ${{ needs.metadata.outputs.manifest_sha256 }}
     env:
       VERSION: ${{ needs.identity.outputs.version }}
       COMMIT: ${{ needs.identity.outputs.commit }}
@@ -115,26 +168,15 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
-      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          install_args: rust
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Compile the manifest hash from a release-build binary
-        id: manifest
-        run: |
-          set -euo pipefail
-          # The compiled capability manifest export embeds the source SHA + crate
-          # version (plan 010 v7). Hash the exact exported JSON; this hash labels
-          # the image and anchors the release record's manifest identity.
-          manifest="$RUNNER_TEMP/velnor-manifest.json"
-          cargo run -q -p velnor-runner --locked --features release-build -- capabilities export > "$manifest"
-          sha256="$(sha256sum "$manifest" | awk '{print $1}')"
-          cp "$manifest" manifest.json
-          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          name: release-metadata
 
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        with:
+          cleanup: false
+          keep-state: true
 
       - name: Log in to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
@@ -151,6 +193,8 @@ jobs:
           file: docker/job-ubuntu.Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          cache-from: type=gha,scope=velnor-job-ubuntu
+          cache-to: type=gha,scope=velnor-job-ubuntu,mode=max
           build-args: |
             VELNOR_IMAGE_VERSION=${{ needs.identity.outputs.version }}
           tags: ${{ env.GHCR_IMAGE }}:${{ needs.identity.outputs.version }}
@@ -158,7 +202,7 @@ jobs:
             org.opencontainers.image.version=${{ needs.identity.outputs.version }}
             org.opencontainers.image.revision=${{ needs.identity.outputs.commit }}
             org.opencontainers.image.source=${{ env.SOURCE_URL }}
-            org.velnor.manifest-sha256=${{ steps.manifest.outputs.sha256 }}
+            org.velnor.manifest-sha256=${{ needs.metadata.outputs.manifest_sha256 }}
 
       - name: Capture per-platform digests
         env:
@@ -179,7 +223,7 @@ jobs:
             manifest.json
 
   build:
-    needs: [identity, image]
+    needs: [identity, metadata]
     name: Build ${{ matrix.arch }} binary + deb (release-build)
     timeout-minutes: 60
     strategy:
@@ -196,6 +240,8 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+      SCCACHE_GHA_ENABLED: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' }}
+      SCCACHE_CACHE_SIZE: 20G
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -206,6 +252,10 @@ jobs:
 
       - name: Install mold linker
         uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        with:
+          version: v0.16.0
 
       - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
         with:
@@ -230,15 +280,10 @@ jobs:
       - name: Build (release-build embeds source SHA + tag; fails on drift)
         run: cargo zigbuild -p velnor-runner --release --locked --features release-build --target ${{ matrix.target }}
 
-      - name: Export acyclic identity from a clean tagged tree
-        run: |
-          set -euo pipefail
-          identity="$RUNNER_TEMP/velnor-release-${{ matrix.arch }}"
-          mkdir -p "$identity"
-          cargo run -q -p velnor-runner --locked --features release-build -- \
-            release export > "$identity/build-identity.json"
-          cargo run -q -p velnor-runner --locked --features release-build -- \
-            capabilities export > "$identity/manifest.json"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-metadata
+          path: release-metadata
 
       - name: Package tar + independent hash
         run: |
@@ -256,9 +301,8 @@ jobs:
           # them inside the deb is acyclic. postinst validates the installed
           # binary against them offline.
           mkdir -p crates/velnor-runner/release
-          identity="$RUNNER_TEMP/velnor-release-${{ matrix.arch }}"
-          cp "$identity/build-identity.json" crates/velnor-runner/release/build-identity.json
-          cp "$identity/manifest.json" crates/velnor-runner/release/manifest.json
+          cp release-metadata/build-identity.json crates/velnor-runner/release/build-identity.json
+          cp release-metadata/manifest.json crates/velnor-runner/release/manifest.json
 
       - name: Build .deb (version pinned to the tag)
         run: |
@@ -299,7 +343,7 @@ jobs:
             velnor-runner-*.bin.sha256
 
   record:
-    needs: [identity, image, build]
+    needs: [identity, metadata, image, build]
     name: Assemble, verify + publish one coherent release
     timeout-minutes: 30
     runs-on: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
@@ -315,11 +359,6 @@ jobs:
         with:
           ref: ${{ needs.identity.outputs.commit }}
           persist-credentials: false
-
-      - uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
-        with:
-          install_args: rust
-          github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -371,7 +410,8 @@ jobs:
           # Independent re-assembly + coherence check; writes canonical
           # release-record.json + release-record.json.sha256 (the digest lives in
           # the sidecar, never inside the record — acyclic).
-          cargo run -q -p velnor-runner --locked -- release assemble \
+          chmod +x artifacts/velnor-release-tool
+          artifacts/velnor-release-tool release assemble \
             --record record.candidate.json \
             --artifacts artifacts \
             --out release-record.json
