@@ -8,13 +8,12 @@
 lockfile = true
 
 [tools]
-# Rust CI toolchain. core:rust and cargo:* are version-locked only (no URL
-# pinning is available for those backends); every aqua-backed tool below pins
-# an exact URL + checksum (and provenance where upstream publishes it).
+# Rust CI toolchain. Every release-backed tool below pins an exact URL and
+# checksum (plus provenance where upstream publishes it).
 rust = { version = "1.97.1", components = "clippy,rustfmt" }
 "aqua:nextest-rs/nextest/cargo-nextest" = "0.9.140"
 "aqua:EmbarkStudios/cargo-deny" = "0.20.2"
-"cargo:rust-script" = "0.36.0"
+"github:fornwall/rust-script" = "0.36.0"
 just = "1.57.0"
 protoc = "35.1"
 gh = "2.96.0"
