@@ -28,10 +28,6 @@ checksum = "sha256:bc2a998567816eef7b087b920036f49fb89aa2a8a603f6a3d84098be160b6
 url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.140/cargo-nextest-0.9.140-x86_64-unknown-linux-musl.tar.gz"
 url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/467467089"
 
-[[tools."cargo:rust-script"]]
-version = "0.36.0"
-backend = "cargo:rust-script"
-
 [[tools.cosign]]
 version = "3.1.2"
 backend = "aqua:sigstore/cosign"
@@ -63,6 +59,20 @@ checksum = "sha256:83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8b
 url = "https://github.com/cli/cli/releases/download/v2.96.0/gh_2.96.0_linux_amd64.tar.gz"
 url_api = "https://api.github.com/repos/cli/cli/releases/assets/464728543"
 provenance = "github-attestations"
+
+[[tools."github:fornwall/rust-script"]]
+version = "0.36.0"
+backend = "github:fornwall/rust-script"
+
+[tools."github:fornwall/rust-script"."platforms.linux-arm64"]
+checksum = "sha256:650059eae66de119bf29853bb4a0820a01a6c278e17b1e6a53f9a0ca6ebc74db"
+url = "https://github.com/fornwall/rust-script/releases/download/0.36.0/rust-script-aarch64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/fornwall/rust-script/releases/assets/283099327"
+
+[tools."github:fornwall/rust-script"."platforms.linux-x64"]
+checksum = "sha256:974484518ebd6dbe18f356fd5446171c43dc590d7189c53e7482b36c3af88a4b"
+url = "https://github.com/fornwall/rust-script/releases/download/0.36.0/rust-script-x86_64-unknown-linux-gnu.tar.gz"
+url_api = "https://api.github.com/repos/fornwall/rust-script/releases/assets/283099032"
 
 [[tools.just]]
 version = "1.57.0"
