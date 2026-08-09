@@ -399,6 +399,9 @@ impl JobContainerSpec {
     /// persist on the host), the rustup toolchain store stays at the
     /// image-baked /root/.rustup, and cargo's registry/git live under the
     /// job home (backed by the host-persistent cargo store mounts).
+    /// PATH resolves the image-baked rustup proxy before mise shims. Otherwise
+    /// a shimmed tool such as `gh` can make mise probe shimmed `rustup`,
+    /// recursively forking until the job exhausts its cgroup.
     /// Re-asserted per exec because OrbStack (macOS dev hosts) injects the
     /// host user's HOME into exec'd processes; explicit -e wins. Step env
     /// (GITHUB_ENV and `env:` blocks) is appended after these, and docker
@@ -408,6 +411,7 @@ impl JobContainerSpec {
             "HOME=/github/home".to_string(),
             "RUSTUP_HOME=/root/.rustup".to_string(),
             "CARGO_HOME=/github/home/.cargo".to_string(),
+            "PATH=/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
             format!(
                 "VELNOR_DOCKER_HOST_TEMP={}",
                 self.docker_host_path(&self.temp_host).display()
@@ -1590,6 +1594,8 @@ mod tests {
                 "-e",
                 "CARGO_HOME=/github/home/.cargo",
                 "-e",
+                "PATH=/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "-e",
                 "VELNOR_DOCKER_HOST_TEMP=/tmp/temp",
                 "-e",
                 "VELNOR_DOCKER_HOST_WORKSPACE=/tmp/work",
@@ -1627,6 +1633,8 @@ mod tests {
                 "RUSTUP_HOME=/root/.rustup",
                 "-e",
                 "CARGO_HOME=/github/home/.cargo",
+                "-e",
+                "PATH=/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 "-e",
                 "VELNOR_DOCKER_HOST_TEMP=/tmp/temp",
                 "-e",
