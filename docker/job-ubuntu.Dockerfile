@@ -192,7 +192,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     mise exec -- cosign version
 
 # hadolint: backs the native hadolint/hadolint-action adapter.
-RUN hadolint_ver="v2.14.0" && \
+RUN hadolint_ver="v2.15.0" && \
     case "$(uname -m)" in \
       x86_64) hl_arch="x86_64" ;; \
       aarch64|arm64) hl_arch="arm64" ;; \
