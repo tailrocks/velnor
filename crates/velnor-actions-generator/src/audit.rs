@@ -9,6 +9,7 @@
 
 use std::path::Path;
 
+use crate::cache::CacheContract;
 use crate::composite;
 use crate::model::{FleetManifest, OWNERS, is_sha40};
 use crate::render::{
@@ -30,6 +31,7 @@ const AUDIT_CALVER: &str = "2026.7.0";
 /// gate, or routing violation.
 pub fn audit(root: &Path) -> Result<String, String> {
     let manifest = FleetManifest::load(root)?;
+    CacheContract::load(&root.join("fleet").join("caches.toml"))?;
 
     // Composite building blocks must exist and match their canonical bytes exactly
     // (body included), so a neutered run-script fails the audit.

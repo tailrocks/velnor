@@ -18,6 +18,10 @@ branches are never used.
   applicable gate in the lane has already succeeded. A lane whose gate failed
   never reaches this step, so its contract output stays empty and the lane fails.
   Skipped work never produces `contract=success`.
+- `cache-contract/` — validates the versioned trusted cache declaration hash,
+  authority scope, full-peak quota reservation, byte attribution, cleanup state,
+  and immutable materialization identity. It performs no restore/save itself and
+  emits success only after every runtime authority field passes.
 
 The callable workflows in `.github/workflows/ci-<class>.yml` reference these
 composites at the immutable `fleet/block-sha` commit.

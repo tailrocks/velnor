@@ -8,6 +8,7 @@
 use std::path::{Path, PathBuf};
 
 pub mod audit;
+pub mod cache;
 pub mod composite;
 pub mod model;
 pub mod render;
