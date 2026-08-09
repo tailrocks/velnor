@@ -12,6 +12,10 @@ Requires=docker.service
 # with backoff), so Restart=always is a backstop, not the recovery mechanism.
 Type=notify
 WatchdogSec=180
+# Registration intentionally retries through transient GitHub/network failures
+# and large fleets provision slots before READY=1. The systemd default 90s
+# startup timeout can therefore kill a healthy daemon mid-registration.
+TimeoutStartSec=0
 # Config lives in velnor.env; the token lives in secrets.env (0600, never
 # shipped or touched by the package) so config tooling cannot wipe it.
 # velnor.env is still read first for backward compatibility — values in

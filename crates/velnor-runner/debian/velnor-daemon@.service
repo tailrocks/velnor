@@ -14,6 +14,10 @@ Requires=docker.service
 # semantics of Type=notify/WatchdogSec and the never-exit retry behavior.
 Type=notify
 WatchdogSec=180
+# Registration intentionally retries through transient GitHub/network failures
+# and large fleets provision slots before READY=1. The systemd default 90s
+# startup timeout can therefore kill a healthy daemon mid-registration.
+TimeoutStartSec=0
 Environment=VELNOR_JOB_CPUS=4
 Environment=VELNOR_JOB_MEMORY=12g
 Environment=VELNOR_STORAGE_ROOT=/var
