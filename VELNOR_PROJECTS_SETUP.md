@@ -51,6 +51,6 @@ Velnor unified CI contract (2026-08-09):
 ```
 <!-- fleet-map:end -->
 
-Implementation graph: `/Users/donbeave/Projects/tailrocks/velnor-project/plans/github-actions-unification/README.md`.
+Implementation follows the marked contract and the tracked execution plan supplied with the active goal.
 
 Older Velnor evidence under `docs/` is historical and non-normative whenever it conflicts with the marked contract.

@@ -16,6 +16,6 @@ Velnor unified CI contract (2026-08-09):
 - Supersession: every conflicting earlier execution authority, estate count or membership, class, selector, default, trust route, cache policy, or merge-context statement in this repository is historical and non-executable.
 <!-- unified-ci-contract:end -->
 
-Current graph: `/Users/donbeave/Projects/tailrocks/velnor-project/plans/github-actions-unification/README.md`.
+Current execution follows the marked contract and the tracked active goal graph.
 
 Earlier numbered plans are historical and non-executable.
