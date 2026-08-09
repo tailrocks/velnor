@@ -988,7 +988,8 @@ fn script_with_path_prelude(script: &str, path_prepend: &[String]) -> String {
     // unmounted container /root — the cargo-registry cache could never save
     // and warm restores were invisible to steps. Native mise setup prepends its
     // repository-selected shims/tool bins ahead of the image-baked rustup
-    // fallback; jobs without mise retain the normal image PATH.
+    // fallback. The exec base environment independently asserts a safe PATH
+    // with the real rustup proxy before mise's generic shims.
     let mut prelude = Vec::new();
     if !path_prepend.is_empty() {
         let joined = path_prepend
