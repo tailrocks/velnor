@@ -1,140 +1,118 @@
-# Fleet membership — the exhaustive, canonical map of every estate repository to
-# exactly one normalized class. This file is DATA consumed by the generator; it is
-# never hand-forked per repository. Counts are enforced by the generator and audit:
-# exactly 24 members = 16 code + 4 tap + 2 apt + 1 infra + 1 fixture.
-#
-# Each member declares its `slug` (owner/repo), its `class`, and the immutable
-# 40-hex `baseline_sha` (the default-branch tip captured at planning time). The
-# organization is derived from the slug owner. A slug that is malformed, a SHA
-# that is not 40 lowercase hex, a duplicate member, an unknown class, or a wrong
-# per-class count all fail generation before any output is accepted.
-
-# --- code (16) ---
+# Exhaustive canonical fleet: 28 repositories = 20 code + 5 tap + 2 apt + 1 fixture.
+# Baselines are immutable default-branch heads captured by Plan 005.
 
 [[repository]]
 slug = "jackin-project/jackin"
 class = "code"
-baseline_sha = "3e6376d213f2aae66b00b376057ff0863c988040"
-
+baseline_sha = "b234e078eeeb2d0798b8ac75530cc24e2ba2e620"
 [[repository]]
 slug = "jackin-project/jackin-the-architect"
 class = "code"
-baseline_sha = "4c41b18f1a5569c87ddc7cab0ff9bfadb1fcd18f"
-
+baseline_sha = "54adb4cbef6a613f0978b3bb5390ddff17afdbbe"
 [[repository]]
 slug = "jackin-project/jackin-role-action"
 class = "code"
-baseline_sha = "fe19fd85db2d4aaa0e4b9b486e931f0ff1d0bc5f"
-
+baseline_sha = "041f17a6d32f8fd2a8ef03c2a63be58346993136"
 [[repository]]
 slug = "jackin-project/jackin-agent-smith"
 class = "code"
-baseline_sha = "7d0d5cbb51012fd2774a733c823b39a0fa7339b9"
-
+baseline_sha = "9deeba864d9c620f20900fd4aa4cc606b1511eab"
 [[repository]]
 slug = "jackin-project/jackin-sentinel"
 class = "code"
-baseline_sha = "edb4dc529cf92022110c71cf494b12b358ba7599"
-
+baseline_sha = "6b37441224187112747893a50fba88823175234d"
+[[repository]]
+slug = "jackin-project/jackin-dev"
+class = "code"
+baseline_sha = "b841a0c9e73d142b5a2283f704f54f36d7a986f8"
 [[repository]]
 slug = "tailrocks/parallax"
 class = "code"
-baseline_sha = "76577fb1b935686514b9315ee20d3fdde66a9e20"
-
+baseline_sha = "69754e7dd4baa4eae625991f8c2c3a23bbb47fdc"
 [[repository]]
 slug = "tailrocks/tablerock"
 class = "code"
-baseline_sha = "3a638efd22db70bf5bda342cf86efcb08a32abf2"
-
+baseline_sha = "7463cf43091ff6db955afdc3c79e61c37c2cf163"
 [[repository]]
 slug = "tailrocks/velnor"
 class = "code"
-baseline_sha = "aaa97c2c6fa63042de1250de53d047f1b1f84c08"
-
+baseline_sha = "d421a836c826cea829077f4f7df4942942f0bee6"
 [[repository]]
 slug = "tailrocks/holla"
 class = "code"
-baseline_sha = "7eb0257ecce0b3d6a40c698d1621a0e7eb4fa7f6"
-
+baseline_sha = "0c63a9cf43b2a8b5584f1cb1e6a854cefed82ceb"
 [[repository]]
 slug = "tailrocks/ruxel"
 class = "code"
-baseline_sha = "e812f4701b8aeb79974da4118c271ef3b5b173fa"
-
+baseline_sha = "87211e6035470e22496e6ed466237869775386ac"
 [[repository]]
 slug = "tailrocks/parallax-telemetry-playground"
 class = "code"
 baseline_sha = "177121294dfc14ef2fd10daa1601836071c94da6"
-
 [[repository]]
 slug = "tailrocks/termrock"
 class = "code"
-baseline_sha = "855a0494ec5a03e870148cb426bd2acaa19d9a2b"
-
+baseline_sha = "40e3f0e00f0cff2df57ab98217d60b211697c224"
 [[repository]]
 slug = "tailrocks/schemalane"
 class = "code"
 baseline_sha = "dc07de7b4079554417ea1af2005c4b8569cde0c8"
-
 [[repository]]
 slug = "tailrocks/pg-bigdecimal"
 class = "code"
 baseline_sha = "3767514e7208f106944d17db296da457b19b1598"
-
 [[repository]]
 slug = "tailrocks/tracing-request-level"
 class = "code"
 baseline_sha = "cb18b2c44d5aa3b370ecd5a9d523501f7a4d1047"
-
+[[repository]]
+slug = "tailrocks/tailrocks-skills"
+class = "code"
+baseline_sha = "04987c81e6d2b1e404c1ad56532cefda9da951bf"
 [[repository]]
 slug = "ChainArgos/java-monorepo"
 class = "code"
-baseline_sha = "4c7fc7f6d2191bab598d21065b023f841b998994"
-
-# --- tap (4) ---
+baseline_sha = "eba00cc78f31cd13451433353621a705580a2301"
+[[repository]]
+slug = "ChainArgos/jackin-agent-brown"
+class = "code"
+baseline_sha = "395611503aeeee83fe318f12b97d7a17a5cda8aa"
+[[repository]]
+slug = "ChainArgos/blockchain-nodes"
+class = "code"
+baseline_sha = "21c2031d9fd82756a2da3e3c76aa8f3ad6eb219c"
 
 [[repository]]
 slug = "jackin-project/homebrew-tap"
 class = "tap"
-baseline_sha = "34f01b55fce870f2ea18080e8129626a0f8c04e0"
-
+baseline_sha = "f6268720aa777fe368e22caa1966fa92cabcf61b"
 [[repository]]
 slug = "tailrocks/homebrew-tablerock"
 class = "tap"
 baseline_sha = "3b857631bdeefbec3fbdd6c1984326dd5647679b"
-
 [[repository]]
 slug = "tailrocks/homebrew-holla"
 class = "tap"
-baseline_sha = "a9fb910c535a1048701c9c299620ecb7953919a3"
-
+baseline_sha = "03e4686da678107b91ca25e04f33987906ae27e3"
 [[repository]]
 slug = "tailrocks/homebrew-parallax"
 class = "tap"
 baseline_sha = "3a5b3c372d45b994c1531001e3fde820788c4c30"
-
-# --- apt (2) ---
+[[repository]]
+slug = "tailrocks/homebrew-ruxel"
+class = "tap"
+baseline_sha = "5dadefbe09cbe3becfb49e9308e58deef56a2f1d"
 
 [[repository]]
 slug = "tailrocks/velnor-apt"
 class = "apt"
-baseline_sha = "d73705b66848f3908a0f00eee0474e20a824935a"
-
+baseline_sha = "9f6f2aa49ce70342bf54a1f9080f33c22dd22f27"
 [[repository]]
 slug = "tailrocks/holla-apt"
 class = "apt"
 baseline_sha = "f20fec54ceffd92cc478893a1b0de35bf1382300"
 
-# --- infra (1) ---
-
-[[repository]]
-slug = "jackin-project/jackin-github-terraform"
-class = "infra"
-baseline_sha = "ed9b5aa04c7f7e6ffe5e749e9c40b158e8e264bb"
-
-# --- fixture (1) ---
-
 [[repository]]
 slug = "tailrocks/velnor-actions-fixture"
 class = "fixture"
-baseline_sha = "ed0b986c1dba20e3ef74d18f8b8560ca7e57d538"
+baseline_sha = "c270b04c84fb039a41e92892dbdf4eb5a6efa04f"

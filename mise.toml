@@ -54,7 +54,7 @@ depends = ["_toolchain"]
 run = "cargo deny check advisories"
 
 [tasks.generate]
-description = "Render the five class templates and callable workflows from fleet data"
+description = "Render the four class templates and callable workflows from fleet data"
 depends = ["_toolchain"]
 run = "cargo run --locked -p velnor-actions-generator -- generate --root ."
 
@@ -63,6 +63,11 @@ description = "Audit the fleet: regenerate, compare committed bytes, prove the c
 depends = ["_toolchain"]
 run = "cargo run --locked -p velnor-actions-generator -- audit --root ."
 
+[tasks.remote-closure-check]
+description = "Fetch pinned remote actions and verify their recursive executable closure"
+depends = ["_toolchain"]
+run = "cargo run --locked -p velnor-actions-generator -- verify-remote --root ."
+
 [tasks.ci]
 description = "Run every repository gate"
-depends = ["fmt", "lint", "test", "actionlint", "deny", "generator-check"]
+depends = ["fmt", "lint", "test", "actionlint", "deny", "generator-check", "remote-closure-check"]

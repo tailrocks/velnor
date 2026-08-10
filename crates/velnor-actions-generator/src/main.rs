@@ -2,8 +2,8 @@
 //!
 //! Subcommands:
 //! - `check --root PATH` — skeleton layout self-check (unchanged from plan 004).
-//! - `generate --root PATH` — render the five class templates (and, once the
-//!   block SHA is bound, the five callable workflows).
+//! - `generate --root PATH` — render the four class templates (and, once the
+//!   block SHA is bound, the four callable workflows).
 //! - `render-consumer --root PATH --repository OWNER/REPO --release-sha SHA
 //!   --calver VER --output DIR` — materialize one consumer's `ci.yml`.
 //! - `audit --root PATH` — full fleet audit; prints the exact fleet-valid line.
@@ -37,11 +37,24 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<String, String> {
         Some("generate") => run_generate(args),
         Some("render-consumer") => run_render_consumer(args),
         Some("audit") => run_audit(args),
+        Some("verify-remote") => run_verify_remote(args),
         Some(other) => Err(format!("unknown subcommand: {other}")),
         None => Err(
             "missing subcommand (expected: check, generate, render-consumer, or audit)".to_string(),
         ),
     }
+}
+
+fn run_verify_remote(mut args: impl Iterator<Item = String>) -> Result<String, String> {
+    let mut root: Option<PathBuf> = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--root" => root = Some(PathBuf::from(require_value(&mut args, "--root")?)),
+            other => return Err(format!("unexpected argument: {other}")),
+        }
+    }
+    let root = root.ok_or("verify-remote requires --root PATH")?;
+    audit::verify_remote_closure(&root)
 }
 
 fn run_check(mut args: impl Iterator<Item = String>) -> Result<String, String> {

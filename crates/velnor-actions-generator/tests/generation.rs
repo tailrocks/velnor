@@ -2,6 +2,7 @@
 
 mod common;
 
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 use velnor_actions_generator::model::{FleetManifest, is_sha40};
@@ -17,16 +18,24 @@ fn load() -> FleetManifest {
 #[test]
 fn exact_membership_and_counts() {
     let m = load();
-    assert_eq!(m.repositories().len(), 24, "24 members");
-    assert_eq!(m.members_of(RepositoryClass::Code).len(), 16);
-    assert_eq!(m.members_of(RepositoryClass::Tap).len(), 4);
+    assert_eq!(m.repositories().len(), 28, "28 members");
+    assert_eq!(m.members_of(RepositoryClass::Code).len(), 20);
+    assert_eq!(m.members_of(RepositoryClass::Tap).len(), 5);
     assert_eq!(m.members_of(RepositoryClass::Apt).len(), 2);
-    assert_eq!(m.members_of(RepositoryClass::Infra).len(), 1);
     assert_eq!(m.members_of(RepositoryClass::Fixture).len(), 1);
-    assert_eq!(m.classes().len(), 5);
+    assert_eq!(m.classes().len(), 4);
     for r in m.repositories() {
         assert!(is_sha40(&r.baseline_sha), "{} sha is 40-hex", r.slug);
     }
+}
+
+#[test]
+fn repository_inventory_bytes_are_exactly_bound() {
+    let bytes = std::fs::read(common::repo_root().join("fleet").join("repositories.toml")).unwrap();
+    assert_eq!(
+        hex::encode(Sha256::digest(bytes)),
+        "7c7d8bed7d95bb985bab68c64065260c494da20c233d6c97d05c3ea3b338c85c"
+    );
 }
 
 fn write_repos(dir: &Path, body: &str) {
@@ -121,7 +130,7 @@ fn templates_are_deterministic() {
 }
 
 #[test]
-fn exactly_five_templates_render() {
+fn exactly_four_templates_render() {
     // One committed template per class, byte-equal to a fresh render.
     for class in ALL_CLASSES {
         let committed = std::fs::read_to_string(
@@ -138,14 +147,14 @@ fn exactly_five_templates_render() {
 #[test]
 fn audit_passes_on_repo() {
     let line = audit::audit(&common::repo_root()).expect("audit passes");
-    assert_eq!(line, "fleet valid: 24 repositories, 5 classes, 5 templates");
+    assert_eq!(line, "fleet valid: 28 repositories, 4 classes, 4 templates");
 }
 
 #[test]
 fn bound_fixture_audit_passes() {
     let dir = common::bound_fixture(DUMMY_SHA);
     let line = audit::audit(&dir).expect("bound audit passes");
-    assert_eq!(line, "fleet valid: 24 repositories, 5 classes, 5 templates");
+    assert_eq!(line, "fleet valid: 28 repositories, 4 classes, 4 templates");
 }
 
 #[test]
@@ -310,4 +319,46 @@ fn generate_is_idempotent() {
     let after =
         std::fs::read_to_string(dir.join(".github").join("workflows").join("ci-code.yml")).unwrap();
     assert_eq!(before, after);
+}
+
+#[test]
+fn release_goldens_bind_consumer_interface_and_callable_metrics_schema() {
+    let root = common::repo_root();
+    for (path, expected) in [
+        (
+            "templates/code/ci.yml",
+            "66443236c216c1298096fb4a58c93c45f4b601c0217bd3d6194d0f69b59db1af",
+        ),
+        (
+            "templates/tap/ci.yml",
+            "4487e1060032463003bb12e376cc7d6cfbaeb672b0b296f63d1e24575e2fe426",
+        ),
+        (
+            "templates/apt/ci.yml",
+            "a3d491af8b71baa5b892c8db1959d05a39d5256c6cfe27be5a4e73fd5c40cb6b",
+        ),
+        (
+            "templates/fixture/ci.yml",
+            "70a2a68ebd629effb693c7ed2cc4949ee1491de475ee5d56d80e13b4c2c17305",
+        ),
+        (
+            ".github/workflows/ci-code.yml",
+            "0ee7d02e78a077ca0a3808551d1b2e23eef35b3fdf396109345eda3ba20f6f19",
+        ),
+        (
+            ".github/workflows/ci-tap.yml",
+            "26587fe43b10b5affaa927cf7c2772463e4febca50eba4ca95dba9f8bc9fd0b7",
+        ),
+        (
+            ".github/workflows/ci-apt.yml",
+            "b314dc0c2269df5a00dd252a2aa892a9197b47dd758c8a23384d31a7527da005",
+        ),
+        (
+            ".github/workflows/ci-fixture.yml",
+            "2d548a02025eb57c4e682992ce383dd2554a241341720f390042dc3b29c1bc04",
+        ),
+    ] {
+        let bytes = std::fs::read(root.join(path)).unwrap();
+        assert_eq!(hex::encode(Sha256::digest(bytes)), expected, "{path}");
+    }
 }

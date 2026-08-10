@@ -38,6 +38,8 @@ pub struct CacheDeclaration {
     pub lock_globs: Vec<String>,
     /// Stable execution phase.
     pub phase: String,
+    /// Atomic full-peak reservation required before Velnor cache access.
+    pub peak_bytes: u64,
     /// Whether a same-lock earlier phase may restore partially.
     pub compatible_phase_prefix: bool,
     /// Whether a prior compatible lock may restore partially.
@@ -79,6 +81,13 @@ impl CacheContract {
             let class = parse_class(&item.class)?;
             validate_token("cache id", &item.id)?;
             validate_token("phase", &item.phase)?;
+            if item.peak_bytes == 0 || item.peak_bytes > 9_000_000_000_000_000_000 {
+                return Err(format!(
+                    "invalid peak_bytes for {}/{}",
+                    class.code(),
+                    item.id
+                ));
+            }
             if !seen.insert((class.code(), item.id.clone())) {
                 return Err(format!(
                     "duplicate cache identity {}/{}",
@@ -97,6 +106,7 @@ impl CacheContract {
                 paths: item.paths,
                 lock_globs: item.lock_globs,
                 phase: item.phase,
+                peak_bytes: item.peak_bytes,
                 compatible_phase_prefix: item.compatible_phase_prefix,
                 compatible_lock_prefix: item.compatible_lock_prefix,
             });
@@ -226,6 +236,7 @@ struct CacheEntry {
     paths: Vec<String>,
     lock_globs: Vec<String>,
     phase: String,
+    peak_bytes: u64,
     compatible_phase_prefix: bool,
     compatible_lock_prefix: bool,
 }
@@ -349,10 +360,12 @@ fn validate_correctness_inputs(
         "**/yarn.lock",
         "mise.toml",
     ];
-    const BUILD_INPUTS: [&str; 4] = [
+    const BUILD_INPUTS: [&str; 6] = [
         "**/.cargo/config.toml",
         "**/Cargo.lock",
         "**/Cargo.toml",
+        "mise.lock",
+        "mise.toml",
         "rust-toolchain.toml",
     ];
     let required: &[&str] = match (class, id) {

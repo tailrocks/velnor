@@ -22,4 +22,6 @@ jobs:
       - name: Set up mise toolchain
         uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
       - name: Run repository CI gates
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: mise run ci

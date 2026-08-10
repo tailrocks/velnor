@@ -8,9 +8,9 @@ hand-edit these templates — change the shared class model or the declared repo
 data and regenerate. Every external Action reference is pinned to a full 40-hex commit
 SHA; mutable tags or branches are never used.
 
-## The five templates
+## The four templates
 
-`<class>/ci.yml` (code, tap, apt, infra, fixture) is the consumer workflow every
+`<class>/ci.yml` (code, tap, apt, fixture) is the consumer workflow every
 repository of that class ships as `.github/workflows/ci.yml`. Each template:
 
 - declares three static owner-local reusable-workflow calls — one per owner
@@ -18,9 +18,10 @@ repository of that class ships as `.github/workflows/ci.yml`. Each template:
   `github.repository_owner`; exactly one runs and the other two skip;
 - shares one anchored `@FLEET_SHA@ # @CALVER@` release pin across all three calls
   (the only non-executable placeholders), replaced together by `render-consumer`;
-- exposes the sole `lane` selector (`velnor` default, `github`, `both`) on
+- exposes the sole `lane` selector (`github`, `velnor`, `both`) on
   `workflow_dispatch`, and triggers on `pull_request`, `push`, `merge_group`, and
-  `workflow_dispatch`;
+  `workflow_dispatch`; omitted lane defaults to GitHub for `jackin-project` and
+  Velnor for `tailrocks` and `ChainArgos`;
 - ends with a fail-closed `ci-required` aggregator that uses `if: always()` and a
   positive truth table: it accepts only a recognized owner whose selected call and
   explicit contract output are both `success` while the other two calls are

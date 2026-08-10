@@ -20,3 +20,4 @@ hex = "0.4.3"
 serde = { version = "1.0.228", features = ["derive"] }
 sha2 = "0.11.0"
 toml = { version = "0.9.8", default-features = false, features = ["parse", "serde"] }
+yaml-rust2 = "0.11.0"

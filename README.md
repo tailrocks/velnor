@@ -17,8 +17,8 @@ Canonical source of the Velnor Actions fleet.
 
 ## Layout
 
-- `fleet/` — declared data: `repositories.toml` (the exhaustive 24-member map to
-  five classes), `classes.toml` (the five class contracts), `caches.toml`
+- `fleet/` — declared data: `repositories.toml` (the exhaustive 28-member map to
+  four classes), `classes.toml` (the four class contracts), `caches.toml`
   (trusted class cache IDs, paths, lock inputs, phases, and compatible restore
   prefixes), and `block-sha` (the
   immutable commit that pins the internal composite-action closure used by the
@@ -27,9 +27,9 @@ Canonical source of the Velnor Actions fleet.
   command identically on either lane), `aggregate` (emits the lane contract), and
   `cache-contract` (fails closed on missing cache authority, quota, attribution,
   cleanup, or materialization evidence).
-- `.github/workflows/ci-<class>.yml` — the five owner-local callable (`workflow_call`)
+- `.github/workflows/ci-<class>.yml` — the four owner-local callable (`workflow_call`)
   workflows, one per class. Generated; each pins its composite closure to `block-sha`.
-- `templates/<class>/ci.yml` — the five normalized consumer templates, one per class,
+- `templates/<class>/ci.yml` — the four normalized consumer templates, one per class,
   byte-identical within a class. Each has three owner-local reusable-workflow calls
   (jackin-project / tailrocks / ChainArgos) selected by `github.repository_owner`, a
   shared `@<sha> # <CalVer>` release pin, and a fail-closed `ci-required` aggregator.
@@ -40,13 +40,13 @@ Canonical source of the Velnor Actions fleet.
 
 ## Generator CLI
 
-- `generate --root .` — render the five templates (and, once `block-sha` is bound,
-  the five callable workflows).
+- `generate --root .` — render the four templates (and, once `block-sha` is bound,
+  the four callable workflows).
 - `render-consumer --root . --repository OWNER/REPO --release-sha <40-hex> --calver
   <CalVer> --output DIR` — materialize one consumer's `DIR/.github/workflows/ci.yml`,
   replacing `@FLEET_SHA@`/`@CALVER@` atomically.
 - `audit --root .` — the full fleet audit (prints
-  `fleet valid: 24 repositories, 5 classes, 5 templates`).
+  `fleet valid: 28 repositories, 4 classes, 4 templates`).
 
 ## Gates
 

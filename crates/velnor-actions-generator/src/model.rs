@@ -1,7 +1,7 @@
 //! Fleet data model and validation.
 //!
-//! This module owns the parsed, validated fleet: the 24-member repository
-//! manifest and the five class contracts. Parsing is fail-closed — an invalid
+//! This module owns the parsed, validated fleet: the 28-member repository
+//! manifest and the four class contracts. Parsing is fail-closed — an invalid
 //! slug, a non-40-hex SHA, a duplicate or unclassified member, a wrong per-class
 //! count, an empty gate command, or an implicit gate applicability all reject
 //! before any output is accepted.
@@ -22,12 +22,11 @@ pub const OWNERS: [&str; 3] = ["jackin-project", "tailrocks", "ChainArgos"];
 pub const CODE_STANDARD_COMMAND: &str = "mise run ci";
 
 /// Required member count per class, in canonical [`crate::ALL_CLASSES`] order:
-/// 16 code, 4 tap, 2 apt, 1 infra, 1 fixture (total 24).
-pub const REQUIRED_COUNTS: [(RepositoryClass, usize); 5] = [
-    (RepositoryClass::Code, 16),
-    (RepositoryClass::Tap, 4),
+/// 20 code, 5 tap, 2 apt, 1 fixture (total 28).
+pub const REQUIRED_COUNTS: [(RepositoryClass, usize); 4] = [
+    (RepositoryClass::Code, 20),
+    (RepositoryClass::Tap, 5),
     (RepositoryClass::Apt, 2),
-    (RepositoryClass::Infra, 1),
     (RepositoryClass::Fixture, 1),
 ];
 
@@ -170,7 +169,7 @@ impl Repository {
     }
 }
 
-/// The fully validated fleet: 24 repositories and five class contracts.
+/// The fully validated fleet: 28 repositories and four class contracts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FleetManifest {
     repositories: Vec<Repository>,
@@ -195,13 +194,13 @@ impl FleetManifest {
         })
     }
 
-    /// All 24 repositories, in declaration order.
+    /// All 28 repositories, in declaration order.
     #[must_use]
     pub fn repositories(&self) -> &[Repository] {
         &self.repositories
     }
 
-    /// The five class contracts, in canonical [`crate::ALL_CLASSES`] order.
+    /// The four class contracts, in canonical [`crate::ALL_CLASSES`] order.
     #[must_use]
     pub fn classes(&self) -> &[ClassContract] {
         &self.classes
@@ -339,7 +338,6 @@ struct ClassesFile {
     code: ClassEntry,
     tap: ClassEntry,
     apt: ClassEntry,
-    infra: ClassEntry,
     fixture: ClassEntry,
 }
 
@@ -371,7 +369,6 @@ fn load_classes(path: &Path) -> Result<Vec<ClassContract>, String> {
         (RepositoryClass::Code, file.code),
         (RepositoryClass::Tap, file.tap),
         (RepositoryClass::Apt, file.apt),
-        (RepositoryClass::Infra, file.infra),
         (RepositoryClass::Fixture, file.fixture),
     ];
 

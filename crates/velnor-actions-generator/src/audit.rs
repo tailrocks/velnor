@@ -2,12 +2,14 @@
 //!
 //! Regenerates every composite building-block action and every template (and, once
 //! the block SHA is bound, every callable workflow) in memory, compares against the
-//! committed bytes, materializes all 24 repositories to prove each equals its class
+//! committed bytes, materializes all 28 repositories to prove each equals its class
 //! template, and enforces the closure, owner-fan-out, aggregation, gate, and routing
 //! invariants. Any one-byte hand edit to a generated file — including a neutered
 //! composite run-script body — fails the audit.
 
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Component, Path};
+use std::process::Command;
 
 use crate::cache::CacheContract;
 use crate::composite;
@@ -16,6 +18,30 @@ use crate::render::{
     self, ACTIONS_REPO, CALVER_PLACEHOLDER, CANONICAL_OWNER, FLEET_SHA_PLACEHOLDER,
 };
 use crate::{ALL_CLASSES, RepositoryClass};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+
+const REMOTE_CLOSURE_SCHEMA: u32 = 1;
+
+#[derive(Debug, Deserialize)]
+struct RemoteClosure {
+    schema_version: u32,
+    action: Vec<RemoteAction>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteAction {
+    root: String,
+    sha: String,
+    files: Vec<RemoteFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteFile {
+    path: String,
+    kind: String,
+    sha256: String,
+}
 
 /// A deterministic disposable release identity used only to exercise
 /// materialization during the audit (never written anywhere).
@@ -31,7 +57,8 @@ const AUDIT_CALVER: &str = "2026.7.0";
 /// gate, or routing violation.
 pub fn audit(root: &Path) -> Result<String, String> {
     let manifest = FleetManifest::load(root)?;
-    CacheContract::load(&root.join("fleet").join("caches.toml"))?;
+    let caches = CacheContract::load(&root.join("fleet").join("caches.toml"))?;
+    let remote_closure = load_remote_closure(root)?;
 
     // Composite building blocks must exist and match their canonical bytes exactly
     // (body included), so a neutered run-script fails the audit.
@@ -47,7 +74,7 @@ pub fn audit(root: &Path) -> Result<String, String> {
         audit_consumer_structure(class, &rendered)?;
     }
 
-    // Materialize all 24 repositories and prove each equals its class template.
+    // Materialize all 28 repositories and prove each equals its class template.
     audit_materialization(&manifest)?;
 
     // If the block SHA is bound, audit the full callable-workflow closure.
@@ -56,10 +83,10 @@ pub fn audit(root: &Path) -> Result<String, String> {
         let block_sha = read_block_sha(&block_sha_path)?;
         for class in ALL_CLASSES {
             let contract = manifest.class(class);
-            let rendered = render::callable_workflow(contract, &block_sha);
+            let rendered = render::callable_workflow(contract, &caches, &block_sha);
             let committed = read_committed(&callable_path(root, class))?;
             require_equal(&committed, &rendered, &callable_path_display(class))?;
-            audit_callable_structure(class, &rendered, &block_sha)?;
+            audit_callable_structure(class, &rendered, &block_sha, &remote_closure)?;
         }
     }
 
@@ -69,6 +96,214 @@ pub fn audit(root: &Path) -> Result<String, String> {
         manifest.classes().len(),
         ALL_CLASSES.len(),
     ))
+}
+
+fn load_remote_closure(root: &Path) -> Result<RemoteClosure, String> {
+    let path = root.join("fleet").join("remote-actions.toml");
+    let bytes = std::fs::read_to_string(&path)
+        .map_err(|error| format!("reading {}: {error}", path.display()))?;
+    let closure: RemoteClosure =
+        toml::from_str(&bytes).map_err(|error| format!("parsing {}: {error}", path.display()))?;
+    if closure.schema_version != REMOTE_CLOSURE_SCHEMA || closure.action.is_empty() {
+        return Err("remote action closure has unsupported schema or no actions".to_string());
+    }
+    let mut roots = BTreeSet::new();
+    for action in &closure.action {
+        if action.root.split('/').count() != 2 || !is_sha40(&action.sha) || action.files.is_empty()
+        {
+            return Err(format!(
+                "invalid remote action identity {}@{}",
+                action.root, action.sha
+            ));
+        }
+        if !roots.insert((&action.root, &action.sha)) {
+            return Err(format!(
+                "duplicate remote action {}@{}",
+                action.root, action.sha
+            ));
+        }
+        let mut paths = BTreeSet::new();
+        let mut manifests = 0;
+        let mut behaviors = 0;
+        for file in &action.files {
+            validate_relative_path(&file.path)?;
+            if !paths.insert(&file.path) {
+                return Err(format!(
+                    "duplicate remote closure path {}/{}",
+                    action.root, file.path
+                ));
+            }
+            match file.kind.as_str() {
+                "manifest" => manifests += 1,
+                "behavior" => behaviors += 1,
+                other => return Err(format!("unknown remote closure kind {other:?}")),
+            }
+            if file.sha256.len() != 64
+                || !file
+                    .sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            {
+                return Err(format!(
+                    "malformed SHA-256 for {}/{}",
+                    action.root, file.path
+                ));
+            }
+        }
+        if manifests == 0 || behaviors == 0 {
+            return Err(format!(
+                "{} has no manifest or executable behavior",
+                action.root
+            ));
+        }
+    }
+    Ok(closure)
+}
+
+fn validate_relative_path(path: &str) -> Result<(), String> {
+    if path.is_empty()
+        || path.contains('\n')
+        || Path::new(path)
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(format!("unsafe remote closure path {path:?}"));
+    }
+    Ok(())
+}
+
+/// Fetch every admitted file from its immutable commit, verify SHA-256, parse
+/// each action manifest, and prove its exact Node `main`/`pre`/`post` closure.
+pub fn verify_remote_closure(root: &Path) -> Result<String, String> {
+    let closure = load_remote_closure(root)?;
+    let mut handles = Vec::new();
+    for action in &closure.action {
+        for file in &action.files {
+            let action_root = action.root.clone();
+            let sha = action.sha.clone();
+            let path = file.path.clone();
+            let expected = file.sha256.clone();
+            handles.push(std::thread::spawn(move || {
+                let endpoint = format!("repos/{action_root}/contents/{path}?ref={sha}");
+                let output = Command::new("gh")
+                    .args([
+                        "api",
+                        "-H",
+                        "Accept: application/vnd.github.raw+json",
+                        &endpoint,
+                    ])
+                    .output()
+                    .map_err(|error| format!("executing gh for {endpoint}: {error}"))?;
+                if !output.status.success() {
+                    return Err(format!(
+                        "fetching {endpoint} failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ));
+                }
+                let observed = hex::encode(Sha256::digest(&output.stdout));
+                if observed != expected {
+                    return Err(format!(
+                        "remote closure hash mismatch for {action_root}/{path}: expected {expected}, observed {observed}"
+                    ));
+                }
+                Ok(((action_root, path), output.stdout))
+            }));
+        }
+    }
+    let mut fetched = BTreeMap::new();
+    for handle in handles {
+        let (identity, bytes) = handle
+            .join()
+            .map_err(|_| "remote closure fetch worker panicked".to_string())??;
+        if fetched.insert(identity.clone(), bytes).is_some() {
+            return Err(format!("duplicate fetched remote file {identity:?}"));
+        }
+    }
+    for action in &closure.action {
+        let declared_behaviors = action
+            .files
+            .iter()
+            .filter(|file| file.kind == "behavior")
+            .map(|file| file.path.clone())
+            .collect::<BTreeSet<_>>();
+        let mut derived_behaviors = BTreeSet::new();
+        for manifest in action.files.iter().filter(|file| file.kind == "manifest") {
+            let raw = fetched
+                .get(&(action.root.clone(), manifest.path.clone()))
+                .ok_or_else(|| {
+                    format!("missing fetched manifest {}/{}", action.root, manifest.path)
+                })?;
+            derive_node_behaviors(&manifest.path, raw, &mut derived_behaviors)?;
+        }
+        if derived_behaviors != declared_behaviors {
+            return Err(format!(
+                "remote executable closure mismatch for {}: derived {derived_behaviors:?}, declared {declared_behaviors:?}",
+                action.root
+            ));
+        }
+    }
+    Ok(format!(
+        "remote closure valid: {} actions",
+        closure.action.len()
+    ))
+}
+
+fn derive_node_behaviors(
+    manifest_path: &str,
+    raw: &[u8],
+    output: &mut BTreeSet<String>,
+) -> Result<(), String> {
+    let text = std::str::from_utf8(raw)
+        .map_err(|error| format!("manifest {manifest_path} is not UTF-8: {error}"))?;
+    let documents = yaml_rust2::YamlLoader::load_from_str(text)
+        .map_err(|error| format!("parsing remote manifest {manifest_path}: {error}"))?;
+    let document = documents
+        .first()
+        .ok_or_else(|| format!("empty remote manifest {manifest_path}"))?;
+    let using = document["runs"]["using"]
+        .as_str()
+        .ok_or_else(|| format!("manifest {manifest_path} has no string runs.using"))?;
+    if !matches!(using, "node12" | "node16" | "node20" | "node24") {
+        return Err(format!(
+            "manifest {manifest_path} uses unsupported runtime {using:?}; closure must fail closed"
+        ));
+    }
+    let parent = Path::new(manifest_path).parent().unwrap_or(Path::new(""));
+    for (field, required) in [("main", true), ("pre", false), ("post", false)] {
+        let value = document["runs"][field].as_str();
+        if required && value.is_none() {
+            return Err(format!("manifest {manifest_path} has no runs.{field}"));
+        }
+        if let Some(value) = value {
+            let joined = normalize_join(parent, Path::new(value))?;
+            output.insert(joined);
+        }
+    }
+    Ok(())
+}
+
+fn normalize_join(parent: &Path, child: &Path) -> Result<String, String> {
+    let mut segments = Vec::new();
+    for component in parent.components().chain(child.components()) {
+        match component {
+            Component::Normal(segment) => segments.push(
+                segment
+                    .to_str()
+                    .ok_or_else(|| "non-UTF-8 remote behavior path".to_string())?,
+            ),
+            Component::ParentDir => {
+                segments
+                    .pop()
+                    .ok_or_else(|| "remote behavior path escapes action root".to_string())?;
+            }
+            Component::CurDir => {}
+            _ => return Err("absolute remote behavior path".to_string()),
+        }
+    }
+    if segments.is_empty() {
+        return Err("empty remote behavior path".to_string());
+    }
+    Ok(segments.join("/"))
 }
 
 fn template_path(root: &Path, class: RepositoryClass) -> std::path::PathBuf {
@@ -179,6 +414,21 @@ fn uses_refs(text: &str) -> Vec<String> {
     refs
 }
 
+fn uses_identities(text: &str) -> Vec<String> {
+    let mut identities = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start().trim_start_matches("- ").trim_start();
+        let Some(rest) = trimmed.strip_prefix("uses:") else {
+            continue;
+        };
+        let value = rest.split_whitespace().next().unwrap_or_default();
+        if !value.starts_with("./") && !value.starts_with('.') {
+            identities.push(value.to_string());
+        }
+    }
+    identities
+}
+
 fn audit_consumer_structure(class: RepositoryClass, rendered: &str) -> Result<(), String> {
     let what = template_path_display(class);
     let file = render::callable_file_name(class);
@@ -255,6 +505,7 @@ fn audit_callable_structure(
     class: RepositoryClass,
     rendered: &str,
     block_sha: &str,
+    remote_closure: &RemoteClosure,
 ) -> Result<(), String> {
     let what = callable_path_display(class);
 
@@ -286,6 +537,7 @@ fn audit_callable_structure(
             return Err(format!("{what}: non-40-hex or mutable ref {reference:?}"));
         }
     }
+    audit_admitted_closure(rendered, block_sha, &what, remote_closure)?;
 
     // Public unmerged-code events route the Velnor lane to GitHub-hosted; no
     // public-unmerged Velnor route is allowed.
@@ -312,6 +564,54 @@ fn audit_callable_structure(
             && cmd.trim().is_empty()
         {
             return Err(format!("{what}: rendered gate has an empty command"));
+        }
+    }
+    Ok(())
+}
+
+fn audit_admitted_closure(
+    rendered: &str,
+    block_sha: &str,
+    what: &str,
+    closure: &RemoteClosure,
+) -> Result<(), String> {
+    for identity in uses_identities(rendered) {
+        let (target, reference) = identity
+            .rsplit_once('@')
+            .ok_or_else(|| format!("{what}: action identity has no ref {identity:?}"))?;
+        let mut segments = target.split('/');
+        let owner = segments.next().unwrap_or_default();
+        let repository = segments.next().unwrap_or_default();
+        let root = format!("{owner}/{repository}");
+        if root == format!("{CANONICAL_OWNER}/{ACTIONS_REPO}") {
+            if reference != block_sha {
+                return Err(format!(
+                    "{what}: internal action is not block-bound: {identity}"
+                ));
+            }
+            continue;
+        }
+        let Some(action) = closure
+            .action
+            .iter()
+            .find(|action| action.root == root && action.sha == reference)
+        else {
+            return Err(format!("{what}: unadmitted remote action {identity}"));
+        };
+        let subpath = target.split('/').skip(2).collect::<Vec<_>>().join("/");
+        let manifest = if subpath.is_empty() {
+            "action.yml".to_string()
+        } else {
+            format!("{subpath}/action.yml")
+        };
+        if !action
+            .files
+            .iter()
+            .any(|file| file.kind == "manifest" && file.path == manifest)
+        {
+            return Err(format!(
+                "{what}: action identity {identity} has no bound manifest {manifest}"
+            ));
         }
     }
     Ok(())
@@ -366,5 +666,42 @@ fn require_contains(text: &str, needle: &str, what: &str, label: &str) -> Result
         Ok(())
     } else {
         Err(format!("{what}: missing {label}"))
+    }
+}
+
+#[cfg(test)]
+mod remote_closure_tests {
+    use super::*;
+
+    #[test]
+    fn node_manifest_derives_exact_main_pre_post_set() {
+        let raw = br#"runs:
+  using: node24
+  pre: ../dist/pre.js
+  main: ../dist/main.js
+  post: ../dist/post.js
+"#;
+        let mut output = BTreeSet::new();
+        derive_node_behaviors("sub/action.yml", raw, &mut output).unwrap();
+        assert_eq!(
+            output,
+            ["dist/main.js", "dist/post.js", "dist/pre.js"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
+    }
+
+    #[test]
+    fn unknown_runtime_missing_main_and_escape_fail_closed() {
+        for raw in [
+            "runs:\n  using: nodeevil\n  main: dist/main.js\n",
+            "runs:\n  using: node24\n",
+            "runs:\n  using: node24\n  main: ../../escape.js\n",
+        ] {
+            assert!(
+                derive_node_behaviors("action.yml", raw.as_bytes(), &mut BTreeSet::new()).is_err()
+            );
+        }
     }
 }

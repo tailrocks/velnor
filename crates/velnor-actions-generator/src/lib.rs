@@ -13,10 +13,10 @@ pub mod composite;
 pub mod model;
 pub mod render;
 
-/// One of the five normalized repository classes the fleet generator maps every
+/// One of the four normalized repository classes the fleet generator maps every
 /// canonical repository onto exactly once.
 ///
-/// The variants are declared in canonical order: code, tap, apt, infra, fixture.
+/// The variants are declared in canonical order: code, tap, apt, fixture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RepositoryClass {
     /// Rust library and binary code repositories.
@@ -25,8 +25,6 @@ pub enum RepositoryClass {
     Tap,
     /// Debian/apt package repositories.
     Apt,
-    /// Shared infrastructure repository.
-    Infra,
     /// Test fixture repository.
     Fixture,
 }
@@ -39,18 +37,16 @@ impl RepositoryClass {
             RepositoryClass::Code => "code",
             RepositoryClass::Tap => "tap",
             RepositoryClass::Apt => "apt",
-            RepositoryClass::Infra => "infra",
             RepositoryClass::Fixture => "fixture",
         }
     }
 }
 
-/// The five repository classes in canonical order: code, tap, apt, infra, fixture.
-pub const ALL_CLASSES: [RepositoryClass; 5] = [
+/// The four repository classes in canonical order: code, tap, apt, fixture.
+pub const ALL_CLASSES: [RepositoryClass; 4] = [
     RepositoryClass::Code,
     RepositoryClass::Tap,
     RepositoryClass::Apt,
-    RepositoryClass::Infra,
     RepositoryClass::Fixture,
 ];
 
@@ -84,10 +80,10 @@ pub fn validate_layout(root: &Path) -> Result<(), String> {
 /// Generate every deterministic output from the declared fleet data under `root`.
 ///
 /// Always writes the two composite building-block actions to
-/// `actions/<name>/action.yml` (from their canonical bytes) and renders the five
+/// `actions/<name>/action.yml` (from their canonical bytes) and renders the four
 /// consumer class templates to
 /// `templates/<class>/ci.yml`. When `fleet/block-sha` is bound to a 40-hex commit
-/// SHA, also renders the five owner-local callable workflows to
+/// SHA, also renders the four owner-local callable workflows to
 /// `.github/workflows/ci-<class>.yml`, pinning their internal composite closure to
 /// that SHA. Returns the written paths in a stable order.
 ///
@@ -97,6 +93,7 @@ pub fn validate_layout(root: &Path) -> Result<(), String> {
 /// failure while writing.
 pub fn generate(root: &Path) -> Result<Vec<PathBuf>, String> {
     let manifest = model::FleetManifest::load(root)?;
+    let caches = cache::CacheContract::load(&root.join("fleet").join("caches.toml"))?;
     let mut written = Vec::new();
 
     // Composite building blocks: canonical bytes live in `composite`, so they are
@@ -133,7 +130,7 @@ pub fn generate(root: &Path) -> Result<Vec<PathBuf>, String> {
         let dir = root.join(".github").join("workflows");
         std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
         for class in ALL_CLASSES {
-            let body = render::callable_workflow(manifest.class(class), block_sha);
+            let body = render::callable_workflow(manifest.class(class), &caches, block_sha);
             let path = dir.join(render::callable_file_name(class));
             write_if_changed(&path, &body)?;
             written.push(path);
