@@ -373,13 +373,13 @@ pub static ACTIONS: &[ActionCapability] = &[
     capability!(
         "actions/attest-build-provenance",
         AttestBuildProvenance,
-        &[allowed(
-            "0f67c3f4856b2e3261c31976d6725780e5e4c373",
-            "v4.1.1"
-        )],
+        &[
+            allowed("0f67c3f4856b2e3261c31976d6725780e5e4c373", "v4.1.1"),
+            allowed("4d101475d8b20a2381f78447822ac1eab6504dd8", "v4.2.2"),
+        ],
         &[InputRule::RequiredLiteral(
             "subject-path",
-            &["dist/*.tar.gz"]
+            &["dist/*.tar.gz", "dist/l2-subject.json"]
         )]
     ),
     capability!(
@@ -1977,6 +1977,13 @@ mod tests {
             serde_json::json!({"subject-path": "dist/*.tar.gz"}),
         ));
         assert!(errors.is_empty(), "{errors:#?}");
+
+        let fixture_errors = violations(&job(
+            "actions/attest-build-provenance",
+            Some("4d101475d8b20a2381f78447822ac1eab6504dd8"),
+            serde_json::json!({"subject-path": "dist/l2-subject.json"}),
+        ));
+        assert!(fixture_errors.is_empty(), "{fixture_errors:#?}");
     }
 
     #[test]

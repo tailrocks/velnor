@@ -5328,10 +5328,15 @@ fn native_attest_build_provenance(
                 .get("GITHUB_REPOSITORY_VISIBILITY")
                 .cloned()
         });
+    let subject_path = action
+        .inputs
+        .get("subject-path")
+        .context("actions/attest-build-provenance requires subject-path")?;
 
     let result =
         crate::attestation::attest_build_provenance(crate::attestation::AttestationRequest {
             workspace,
+            subject_path,
             runner_temp,
             runner_temp_container: "/__t",
             oidc_url,
