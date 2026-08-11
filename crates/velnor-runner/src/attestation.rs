@@ -38,6 +38,7 @@ pub struct AttestationResult {
 
 pub struct AttestationRequest<'a> {
     pub workspace: &'a Path,
+    pub subject_path: &'a str,
     pub runner_temp: &'a Path,
     pub runner_temp_container: &'a str,
     pub oidc_url: &'a str,
@@ -50,7 +51,7 @@ pub struct AttestationRequest<'a> {
 }
 
 pub fn attest_build_provenance(request: AttestationRequest<'_>) -> Result<AttestationResult> {
-    let subjects = collect_subjects(request.workspace)?;
+    let subjects = collect_subjects(request.workspace, request.subject_path)?;
     let client = Client::builder()
         .user_agent("velnor-runner")
         .timeout(Duration::from_secs(30))
@@ -197,35 +198,37 @@ fn bounded_response_detail(body: &str) -> String {
     }
 }
 
-fn collect_subjects(workspace: &Path) -> Result<Vec<Subject>> {
+fn collect_subjects(workspace: &Path, subject_path: &str) -> Result<Vec<Subject>> {
     let dist = workspace.join("dist");
     let mut subjects = Vec::new();
-    for entry in fs::read_dir(&dist).with_context(|| format!("read {}", dist.display()))? {
-        let entry = entry.context("read dist entry")?;
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.ends_with(".tar.gz") || !entry.file_type().context("read subject type")?.is_file()
-        {
-            continue;
-        }
-        let mut reader =
-            BufReader::new(File::open(&path).with_context(|| format!("open subject {name}"))?);
-        let mut hasher = Sha256::new();
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let count = reader
-                .read(&mut buffer)
-                .with_context(|| format!("read subject {name}"))?;
-            if count == 0 {
-                break;
+    match subject_path {
+        "dist/*.tar.gz" => {
+            for entry in fs::read_dir(&dist).with_context(|| format!("read {}", dist.display()))? {
+                let entry = entry.context("read dist entry")?;
+                let path = entry.path();
+                let name = entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("subject path is not valid UTF-8"))?;
+                if !name.ends_with(".tar.gz")
+                    || !entry.file_type().context("read subject type")?.is_file()
+                {
+                    continue;
+                }
+                subjects.push(hash_subject(&path, name)?);
             }
-            hasher.update(&buffer[..count]);
         }
-        let digest = hasher.finalize();
-        subjects.push(Subject {
-            name,
-            sha256: hex_lower(digest.as_ref()),
-        });
+        "dist/l2-subject.json" => {
+            let path = dist.join("l2-subject.json");
+            if fs::symlink_metadata(&path)
+                .with_context(|| format!("read subject type {}", path.display()))?
+                .file_type()
+                .is_file()
+            {
+                subjects.push(hash_subject(&path, "l2-subject.json".into())?);
+            }
+        }
+        _ => bail!("unsupported subject-path '{subject_path}'"),
     }
     subjects.sort_by(|left, right| {
         left.name
@@ -234,7 +237,7 @@ fn collect_subjects(workspace: &Path) -> Result<Vec<Subject>> {
     });
     subjects.dedup();
     if subjects.is_empty() {
-        bail!("subject-path 'dist/*.tar.gz' matched no regular files");
+        bail!("subject-path '{subject_path}' matched no regular files");
     }
     if subjects.len() > SUBJECT_LIMIT {
         bail!(
@@ -243,6 +246,27 @@ fn collect_subjects(workspace: &Path) -> Result<Vec<Subject>> {
         );
     }
     Ok(subjects)
+}
+
+fn hash_subject(path: &Path, name: String) -> Result<Subject> {
+    let mut reader =
+        BufReader::new(File::open(path).with_context(|| format!("open subject {name}"))?);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .with_context(|| format!("read subject {name}"))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let digest = hasher.finalize();
+    Ok(Subject {
+        name,
+        sha256: hex_lower(digest.as_ref()),
+    })
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -507,7 +531,7 @@ mod tests {
         fs::write(root.join("dist/b.tar.gz"), b"b").unwrap();
         fs::write(root.join("dist/a.tar.gz"), b"a").unwrap();
         fs::write(root.join("dist/ignored.zip"), b"z").unwrap();
-        let subjects = collect_subjects(&root).unwrap();
+        let subjects = collect_subjects(&root, "dist/*.tar.gz").unwrap();
         assert_eq!(
             subjects
                 .iter()
@@ -523,8 +547,20 @@ mod tests {
         let root = std::env::temp_dir().join(format!("velnor-attest-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join("dist/not-a-file.tar.gz")).unwrap();
         fs::write(root.join("dist/ignored.zip"), b"z").unwrap();
-        let error = collect_subjects(&root).unwrap_err();
+        let error = collect_subjects(&root, "dist/*.tar.gz").unwrap_err();
         assert!(error.to_string().contains("matched no regular files"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn subject_collection_accepts_exact_l2_json_only() {
+        let root = std::env::temp_dir().join(format!("velnor-attest-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("dist")).unwrap();
+        fs::write(root.join("dist/l2-subject.json"), b"{}\n").unwrap();
+        fs::write(root.join("dist/ignored.tar.gz"), b"ignored").unwrap();
+        let subjects = collect_subjects(&root, "dist/l2-subject.json").unwrap();
+        assert_eq!(subjects.len(), 1);
+        assert_eq!(subjects[0].name, "l2-subject.json");
         fs::remove_dir_all(root).unwrap();
     }
 
