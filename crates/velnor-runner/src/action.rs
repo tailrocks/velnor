@@ -712,7 +712,10 @@ impl ResolvedAction {
             &self.metadata,
             workspace_container,
             actions_host,
+            &self.plan.repository_dir,
             &action_path,
+            &mut BTreeSet::new(),
+            0,
         )
     }
 }
@@ -775,18 +778,42 @@ pub fn composite_action_invocations(
         metadata,
         workspace_container,
         actions_host,
+        local_workspace_root(&plan.action_dir)?,
         &action_path,
+        &mut BTreeSet::new(),
+        0,
     )
 }
 
+fn local_workspace_root(action_dir: &Path) -> Result<&Path> {
+    action_dir
+        .ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == ".github"))
+        .and_then(Path::parent)
+        .with_context(|| {
+            format!(
+                "local action path {} is outside .github/actions",
+                action_dir.display()
+            )
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn composite_action_invocations_with_path(
     step_id_prefix: &str,
     inputs: &BTreeMap<String, String>,
     metadata: &ActionMetadata,
     workspace_container: &str,
     actions_host: &Path,
+    local_root_host: &Path,
     action_path: &str,
+    local_stack: &mut BTreeSet<PathBuf>,
+    depth: usize,
 ) -> Result<Vec<CompositeActionInvocation>> {
+    const MAX_LOCAL_COMPOSITE_DEPTH: usize = 16;
+    if depth > MAX_LOCAL_COMPOSITE_DEPTH {
+        bail!("nested local composite depth exceeds {MAX_LOCAL_COMPOSITE_DEPTH}")
+    }
     let action_inputs = effective_inputs(metadata, inputs);
     let mut invocations = Vec::new();
     let mut step_ids = BTreeMap::new();
@@ -796,6 +823,54 @@ fn composite_action_invocations_with_path(
             step_ids.insert(id.to_string(), step_id.clone());
         }
         if let Some(uses) = step.uses.as_deref() {
+            if uses.starts_with('.') {
+                let nested_dir = local_action_dir(local_root_host, uses)?;
+                if !local_stack.insert(nested_dir.clone()) {
+                    bail!("nested local composite cycle at '{}'", nested_dir.display())
+                }
+                let metadata_path = action_metadata_path(&nested_dir)?;
+                let nested_metadata = parse_action_metadata(
+                    &fs::read_to_string(&metadata_path)
+                        .with_context(|| format!("read {}", metadata_path.display()))?,
+                )?;
+                if nested_metadata.runtime()? != ActionRuntime::Composite {
+                    bail!("nested local action '{uses}' is not a composite action")
+                }
+                let nested_inputs = step
+                    .with
+                    .iter()
+                    .map(|(name, value)| {
+                        (
+                            name.clone(),
+                            render_composite_scoped_value(
+                                value,
+                                &action_inputs,
+                                action_path,
+                                workspace_container,
+                                &step_ids,
+                            ),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let nested_action_path = if nested_dir.starts_with(actions_host) {
+                    container_path(actions_host, &nested_dir)?
+                } else {
+                    workspace_container_path(workspace_container, &nested_dir)?
+                };
+                invocations.extend(composite_action_invocations_with_path(
+                    &step_id,
+                    &nested_inputs,
+                    &nested_metadata,
+                    workspace_container,
+                    actions_host,
+                    local_root_host,
+                    &nested_action_path,
+                    local_stack,
+                    depth + 1,
+                )?);
+                local_stack.remove(&nested_dir);
+                continue;
+            }
             let reference = parse_repository_uses(uses)?;
             let inputs = step
                 .with
@@ -2161,6 +2236,68 @@ runs:
             plans[0].condition.as_deref(),
             Some("${{ 'ghs_token' != '' }}")
         );
+    }
+
+    #[test]
+    fn expands_nested_local_composite_before_execution() {
+        let workspace = std::env::temp_dir().join(format!(
+            "velnor-nested-local-composite-{}",
+            std::process::id()
+        ));
+        let root = workspace.join(".github/actions/root");
+        let nested = workspace.join(".github/actions/nested");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            nested.join("action.yml"),
+            r#"
+runs:
+  using: composite
+  steps:
+    - id: prove
+      shell: bash
+      run: echo "closure=nested" >> "$GITHUB_OUTPUT"
+outputs:
+  closure:
+    value: ${{ steps.prove.outputs.closure }}
+"#,
+        )
+        .unwrap();
+        let metadata = parse_action_metadata(
+            r#"
+runs:
+  using: composite
+  steps:
+    - id: nested
+      uses: ./.github/actions/nested
+outputs:
+  closure:
+    value: ${{ steps.nested.outputs.closure }}
+"#,
+        )
+        .unwrap();
+        let plan = LocalActionPlan {
+            step_id: "root".into(),
+            action_dir: root,
+            inputs: BTreeMap::new(),
+        };
+
+        let invocations =
+            composite_action_invocations(&plan, &metadata, "/__w", Path::new("/__a")).unwrap();
+
+        assert!(matches!(
+            invocations[0],
+            CompositeActionInvocation::Script(_)
+        ));
+        assert!(matches!(
+            &invocations[1],
+            CompositeActionInvocation::Outputs(outputs) if outputs.step_id == "root-nested"
+        ));
+        assert!(matches!(
+            &invocations[2],
+            CompositeActionInvocation::Outputs(outputs) if outputs.step_id == "root"
+        ));
+        fs::remove_dir_all(workspace).unwrap();
     }
 
     #[test]
