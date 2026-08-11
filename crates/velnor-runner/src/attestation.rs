@@ -69,13 +69,20 @@ pub fn attest_build_provenance(request: AttestationRequest<'_>) -> Result<Attest
     let statement_bytes =
         serde_json::to_vec(&statement).context("serialize provenance statement")?;
 
+    let repository_visibility = resolve_repository_visibility(
+        &client,
+        request.api_url,
+        request.repository,
+        request.github_token,
+        request.repository_visibility,
+    )?;
     let signing_token = request_oidc_token(
         &client,
         request.oidc_url,
         request.oidc_request_token,
         "sigstore",
     )?;
-    let public_good = request.repository_visibility == Some("public");
+    let public_good = repository_visibility == "public";
     let bundle = sign_statement(
         &statement_bytes,
         &signing_token,
@@ -135,6 +142,50 @@ pub fn attest_build_provenance(request: AttestationRequest<'_>) -> Result<Attest
         subjects,
         public_good,
     })
+}
+
+fn resolve_repository_visibility(
+    client: &Client,
+    api_url: &str,
+    repository: &str,
+    token: &str,
+    context_visibility: Option<&str>,
+) -> Result<String> {
+    let response = client
+        .get(format!(
+            "{}/repos/{repository}",
+            api_url.trim_end_matches('/')
+        ))
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2026-03-10")
+        .send()
+        .context("resolve repository visibility")?
+        .error_for_status()
+        .context("resolve repository visibility")?;
+    let body: Value = response
+        .json()
+        .context("decode repository visibility response")?;
+    let visibility = parse_repository_visibility(&body)?;
+    if let Some(context_visibility) = context_visibility {
+        if context_visibility != visibility {
+            bail!(
+                "repository visibility disagrees between job context ({context_visibility}) and GitHub API ({visibility})"
+            );
+        }
+    }
+    Ok(visibility.to_owned())
+}
+
+fn parse_repository_visibility(body: &Value) -> Result<&str> {
+    let visibility = body
+        .get("visibility")
+        .and_then(Value::as_str)
+        .context("repository response is missing visibility")?;
+    match visibility {
+        "public" | "private" | "internal" => Ok(visibility),
+        _ => bail!("repository response has unknown visibility"),
+    }
 }
 
 fn upload_attestation(client: &Client, url: &str, token: &str, bundle: &Value) -> Result<Value> {
@@ -598,5 +649,17 @@ mod tests {
         assert!(!detail.contains('\n'));
         assert!(detail.ends_with('…'));
         assert_eq!(detail.chars().count(), 4097);
+    }
+
+    #[test]
+    fn repository_visibility_is_closed_and_explicit() {
+        for visibility in ["public", "private", "internal"] {
+            assert_eq!(
+                parse_repository_visibility(&json!({"visibility": visibility})).unwrap(),
+                visibility
+            );
+        }
+        assert!(parse_repository_visibility(&json!({})).is_err());
+        assert!(parse_repository_visibility(&json!({"visibility": "unknown"})).is_err());
     }
 }
