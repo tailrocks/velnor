@@ -327,35 +327,35 @@ fn release_goldens_bind_consumer_interface_and_callable_metrics_schema() {
     for (path, expected) in [
         (
             "templates/code/ci.yml",
-            "66443236c216c1298096fb4a58c93c45f4b601c0217bd3d6194d0f69b59db1af",
+            "d8530b7d041fa2a8ca9d1dacb5ff8c50cb06ca95fda7659dc58da098cc94faa7",
         ),
         (
             "templates/tap/ci.yml",
-            "4487e1060032463003bb12e376cc7d6cfbaeb672b0b296f63d1e24575e2fe426",
+            "b98f0b5d2fdb0f2e3dc041f0f1f04ca99e8799254e39242e1b2d91f2d33e9dc9",
         ),
         (
             "templates/apt/ci.yml",
-            "a3d491af8b71baa5b892c8db1959d05a39d5256c6cfe27be5a4e73fd5c40cb6b",
+            "37658c47a60eb41ce637f91b989d371126155d59df15d2b55c90c9bee6c0ef7a",
         ),
         (
             "templates/fixture/ci.yml",
-            "70a2a68ebd629effb693c7ed2cc4949ee1491de475ee5d56d80e13b4c2c17305",
+            "0921b0e4ce80f5ef128d13eee109d2b02c4cd176cc6a20850acffafa3aa4d03e",
         ),
         (
             ".github/workflows/ci-code.yml",
-            "0ee7d02e78a077ca0a3808551d1b2e23eef35b3fdf396109345eda3ba20f6f19",
+            "4bb9fc6fdb890175b32c9684ee31d8ec5cb6352ea248e4a3ed9224fd8bd6a683",
         ),
         (
             ".github/workflows/ci-tap.yml",
-            "26587fe43b10b5affaa927cf7c2772463e4febca50eba4ca95dba9f8bc9fd0b7",
+            "99b54716662903e3b17be08601d4fb8609c40f371979cfc47064ba3a82ec433c",
         ),
         (
             ".github/workflows/ci-apt.yml",
-            "b314dc0c2269df5a00dd252a2aa892a9197b47dd758c8a23384d31a7527da005",
+            "1f403f026c8ed189ae44fb1d8e623831c83a6d06e122011cfcbeb5d375dc27ab",
         ),
         (
             ".github/workflows/ci-fixture.yml",
-            "2d548a02025eb57c4e682992ce383dd2554a241341720f390042dc3b29c1bc04",
+            "e3be45fe2aa14de2f5049096cef81d3eb8cc744b998131409492d06d9adae228",
         ),
     ] {
         let bytes = std::fs::read(root.join(path)).unwrap();

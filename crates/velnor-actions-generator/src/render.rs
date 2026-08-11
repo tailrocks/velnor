@@ -158,6 +158,7 @@ pub fn consumer_template(class: RepositoryClass) -> String {
             &format!("if: ${{{{ github.repository_owner == '{owner}' }}}}"),
         );
         b.line(4, "permissions:");
+        b.line(6, "actions: read");
         b.line(6, "contents: read");
         b.line(
             4,

@@ -89,6 +89,7 @@ jobs:
     name: jackin-project
     if: ${{ github.repository_owner == 'jackin-project' }}
     permissions:
+      actions: read
       contents: read
     uses: jackin-project/velnor-actions/.github/workflows/ci-fixture.yml@@FLEET_SHA@ # @CALVER@
     with:
@@ -109,6 +110,7 @@ jobs:
     name: tailrocks
     if: ${{ github.repository_owner == 'tailrocks' }}
     permissions:
+      actions: read
       contents: read
     uses: tailrocks/velnor-actions/.github/workflows/ci-fixture.yml@@FLEET_SHA@ # @CALVER@
     with:
@@ -129,6 +131,7 @@ jobs:
     name: ChainArgos
     if: ${{ github.repository_owner == 'ChainArgos' }}
     permissions:
+      actions: read
       contents: read
     uses: ChainArgos/velnor-actions/.github/workflows/ci-fixture.yml@@FLEET_SHA@ # @CALVER@
     with:

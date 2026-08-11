@@ -26,6 +26,11 @@ fn exactly_three_static_owner_calls() {
             "if: ${{{{ github.repository_owner == '{owner}' }}}}"
         )));
     }
+    assert_eq!(
+        t.matches("      actions: read").count(),
+        3,
+        "each reusable-call job must delegate the callable's actions:read permission"
+    );
     // No dynamic `uses:` — the ref never contains an expression.
     for line in t.lines() {
         if line.contains("uses:") {
