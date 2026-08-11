@@ -34,8 +34,8 @@ use crate::{
         LocalActionPlan, RepositoryActionPlan, ResolvedAction,
     },
     checkout::{
-        checkout_plans, checkout_step_id, cleanup_checkout_credentials, configure_safe_directory,
-        CheckoutPlan,
+        checkout_plan, checkout_plans, checkout_step_id, cleanup_checkout_credentials,
+        configure_safe_directory, CheckoutPlan,
     },
     cli::{ConfigureArgs, DaemonArgs, DoctorArgs, PreflightArgs, RemoveArgs, RunArgs, StatusArgs},
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
@@ -47,7 +47,10 @@ use crate::{
         github_job_container_spec, github_normalized_job_plan, job_container_name,
         system_connection_access_token, GitHubJobContainerPaths,
     },
-    job_message::{ActionReferenceType, AgentJobRequestMessage, VariableValue},
+    job_message::{
+        ActionReferenceType, ActionStep, ActionStepDefinitionReference, AgentJobRequestMessage,
+        VariableValue,
+    },
     platform,
     protocol::{
         decode_jit_config, github_api_retry_delay, AcquireJobOutcome, BrokerClient,
@@ -4460,6 +4463,7 @@ fn execute_script_job_inner(
         &repository_action_plans,
         &resolved_actions,
         &local_actions,
+        &workspace,
         &actions,
         &runtime_checkout_plans,
     )?;
@@ -5554,6 +5558,7 @@ fn ordered_executable_steps(
     repository_action_plans: &[RepositoryActionPlan],
     resolved_actions: &[ResolvedAction],
     local_actions: &[(LocalActionPlan, Option<ActionMetadata>)],
+    workspace_host: &std::path::Path,
     actions_host: &std::path::Path,
     runtime_checkout_plans: &[CheckoutPlan],
 ) -> Result<Vec<ExecutableStep>> {
@@ -5610,6 +5615,8 @@ fn ordered_executable_steps(
                                 if append_native_action_step_from_plan(
                                     &mut ordered,
                                     &plan,
+                                    job,
+                                    workspace_host,
                                     parent_condition,
                                     parent_continue_on_error,
                                     "",
@@ -5629,6 +5636,8 @@ fn ordered_executable_steps(
                                     &mut ordered,
                                     action,
                                     resolved_actions,
+                                    job,
+                                    workspace_host,
                                     actions_host,
                                     parent_condition,
                                     parent_continue_on_error,
@@ -5671,6 +5680,8 @@ fn ordered_executable_steps(
                 if append_native_action_step_from_plan(
                     &mut ordered,
                     plan,
+                    job,
+                    workspace_host,
                     None,
                     false,
                     &step_display_name,
@@ -5691,6 +5702,8 @@ fn ordered_executable_steps(
                     &mut ordered,
                     action,
                     resolved_actions,
+                    job,
+                    workspace_host,
                     actions_host,
                     None,
                     false,
@@ -5708,6 +5721,8 @@ fn append_resolved_action_steps(
     ordered: &mut Vec<ExecutableStep>,
     action: &ResolvedAction,
     resolved_actions: &[ResolvedAction],
+    job: &AgentJobRequestMessage,
+    workspace_host: &std::path::Path,
     actions_host: &std::path::Path,
     parent_condition: Option<&str>,
     parent_continue_on_error: bool,
@@ -5776,6 +5791,8 @@ fn append_resolved_action_steps(
                         if append_native_action_step_from_plan(
                             ordered,
                             &plan,
+                            job,
+                            workspace_host,
                             action_condition.as_deref(),
                             continue_on_error,
                             "",
@@ -5795,6 +5812,8 @@ fn append_resolved_action_steps(
                             ordered,
                             nested,
                             resolved_actions,
+                            job,
+                            workspace_host,
                             actions_host,
                             action_condition.as_deref(),
                             continue_on_error,
@@ -5821,6 +5840,8 @@ fn append_resolved_action_steps(
 fn append_native_action_step_from_plan(
     ordered: &mut Vec<ExecutableStep>,
     plan: &RepositoryActionPlan,
+    job: &AgentJobRequestMessage,
+    workspace_host: &std::path::Path,
     parent_condition: Option<&str>,
     parent_continue_on_error: bool,
     display_name: &str,
@@ -5828,6 +5849,39 @@ fn append_native_action_step_from_plan(
     let Some(invocation) = native_invocation_from_plan(plan)? else {
         return Ok(false);
     };
+    if invocation.adapter == crate::action::NativeActionAdapter::Checkout {
+        let step = ActionStep {
+            r#type: None,
+            id: None,
+            name: None,
+            display_name: Some(display_name.to_string()),
+            display_name_token: None,
+            enabled: true,
+            condition: combine_conditions(parent_condition, plan.condition.as_deref()),
+            continue_on_error: Some(Value::Bool(
+                parent_continue_on_error || plan.continue_on_error,
+            )),
+            timeout_in_minutes: plan.timeout_minutes.map(Value::from),
+            context_name: Some(plan.step_id.clone()),
+            reference: Some(ActionStepDefinitionReference {
+                r#type: Some(ActionReferenceType::Repository),
+                name: Some(plan.repository.clone()),
+                git_ref: Some(plan.git_ref.clone()),
+                repository_type: Some("GitHub".to_string()),
+                path: plan.source_path.clone(),
+                image: None,
+            }),
+            environment: None,
+            inputs: Some(serde_json::to_value(&plan.inputs)?),
+        };
+        ordered.push(ExecutableStep::Checkout(checkout_plan(
+            job,
+            workspace_host,
+            &step,
+            0,
+        )?));
+        return Ok(true);
+    }
     ordered.push(ExecutableStep::Native {
         step_id: plan.step_id.clone(),
         display_name: display_name.to_string(),
@@ -9478,6 +9532,7 @@ runs:
             &[],
             &[],
             &[(local_plan, Some(metadata))],
+            Path::new("/tmp/workspace"),
             Path::new("/tmp/actions"),
             &[],
         )
@@ -9502,6 +9557,73 @@ runs:
         assert!(matches!(
             &ordered[3],
             ExecutableStep::CompositeEnd { step_id } if step_id == "aggregate"
+        ));
+    }
+
+    #[test]
+    fn ordered_steps_execute_checkout_inside_local_composite() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "L2 closure",
+            "requestId": 1,
+            "resources": {
+                "repositories": [{
+                    "alias": "self",
+                    "name": "tailrocks/velnor-actions-fixture",
+                    "version": "abc123",
+                    "properties": {
+                        "cloneUrl": "https://github.com/tailrocks/velnor-actions-fixture.git"
+                    }
+                }]
+            },
+            "steps": [{
+                "id": "closure",
+                "reference": {
+                    "type": "Repository",
+                    "name": "./.github/actions/l2-root"
+                }
+            }]
+        }))
+        .unwrap();
+        let local_plan = LocalActionPlan {
+            step_id: "closure".into(),
+            action_dir: Path::new("/tmp/workspace").join(".github/actions/l2-root"),
+            inputs: BTreeMap::new(),
+        };
+        let metadata = parse_action_metadata(
+            r#"
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        persist-credentials: "false"
+"#,
+        )
+        .unwrap();
+
+        let ordered = ordered_executable_steps(
+            &job,
+            &[],
+            &[],
+            &[],
+            &[(local_plan, Some(metadata))],
+            Path::new("/tmp/workspace"),
+            Path::new("/tmp/actions"),
+            &[],
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &ordered[1],
+            ExecutableStep::Checkout(plan)
+                if plan.step_id == "closure-1"
+                    && plan.destination == Path::new("/tmp/workspace")
+                    && plan.version.as_deref() == Some("abc123")
+                    && !plan.persist_credentials
         ));
     }
 
@@ -9551,6 +9673,7 @@ runs:
             &[],
             &[],
             &[],
+            Path::new("/tmp/workspace"),
             Path::new("/tmp/actions"),
             &runtime_checkout_plans,
         )
@@ -9725,6 +9848,7 @@ runs:
             &[],
             &[resolved],
             &[(local_plan, Some(local_metadata))],
+            Path::new("/tmp/workspace"),
             Path::new("/tmp/actions"),
             &[],
         )
@@ -9826,8 +9950,17 @@ runs:
         ];
 
         let plans = vec![resolved[1].plan.clone()];
-        let error = ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[])
-            .unwrap_err();
+        let error = ordered_executable_steps(
+            &job,
+            &[],
+            &plans,
+            &resolved,
+            &[],
+            Path::new("/tmp/workspace"),
+            actions_host,
+            &[],
+        )
+        .unwrap_err();
         assert!(
             error.to_string().contains("reached execution"),
             "unknown JS action must hard-fail at planning, got: {error}"
@@ -9875,9 +10008,17 @@ runs:
                 runtime: metadata.runtime().unwrap(),
                 metadata: metadata.clone(),
             }];
-            let error =
-                ordered_executable_steps(&job, &[], &[plan], &resolved, &[], actions_host, &[])
-                    .unwrap_err();
+            let error = ordered_executable_steps(
+                &job,
+                &[],
+                &[plan],
+                &resolved,
+                &[],
+                Path::new("/tmp/workspace"),
+                actions_host,
+                &[],
+            )
+            .unwrap_err();
             assert!(
                 error.to_string().contains("jdx/mise-action"),
                 "expected error for {repository} to mention jdx/mise-action, got: {error}"
@@ -9999,9 +10140,17 @@ runs:
         let plans = repository_action_plans(&job.steps, actions_host).unwrap();
         let resolved = resolve_actions_from_cache(&plans, actions_host);
 
-        let ordered =
-            ordered_executable_steps(&job, &[], &plans, &resolved, &[], actions_host, &[])
-                .unwrap_or_else(|error| panic!("plan target action inventory: {error:#}"));
+        let ordered = ordered_executable_steps(
+            &job,
+            &[],
+            &plans,
+            &resolved,
+            &[],
+            Path::new("/tmp/workspace"),
+            actions_host,
+            &[],
+        )
+        .unwrap_or_else(|error| panic!("plan target action inventory: {error:#}"));
 
         assert!(
             ordered.len() >= plans.len(),
@@ -10079,9 +10228,17 @@ runs:
             metadata,
         };
 
-        let ordered =
-            ordered_executable_steps(&job, &[], &plans, &[resolved], &[], actions_host, &[])
-                .unwrap();
+        let ordered = ordered_executable_steps(
+            &job,
+            &[],
+            &plans,
+            &[resolved],
+            &[],
+            Path::new("/tmp/workspace"),
+            actions_host,
+            &[],
+        )
+        .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native {
@@ -10129,8 +10286,17 @@ runs:
         let actions_host = Path::new("/tmp/actions");
         let plans = repository_action_plans(&job.steps, actions_host).unwrap();
 
-        let ordered =
-            ordered_executable_steps(&job, &[], &plans, &[], &[], actions_host, &[]).unwrap();
+        let ordered = ordered_executable_steps(
+            &job,
+            &[],
+            &plans,
+            &[],
+            &[],
+            Path::new("/tmp/workspace"),
+            actions_host,
+            &[],
+        )
+        .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native { invocation, .. } = &ordered[0] else {
@@ -10235,9 +10401,17 @@ runs:
             metadata,
         };
 
-        let ordered =
-            ordered_executable_steps(&job, &[], &plans, &[resolved], &[], actions_host, &[])
-                .unwrap();
+        let ordered = ordered_executable_steps(
+            &job,
+            &[],
+            &plans,
+            &[resolved],
+            &[],
+            Path::new("/tmp/workspace"),
+            actions_host,
+            &[],
+        )
+        .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native {
@@ -10332,9 +10506,17 @@ runs:
             metadata: upload_metadata,
         };
 
-        let ordered =
-            ordered_executable_steps(&job, &[], &plans, &[pages, upload], &[], actions_host, &[])
-                .unwrap();
+        let ordered = ordered_executable_steps(
+            &job,
+            &[],
+            &plans,
+            &[pages, upload],
+            &[],
+            Path::new("/tmp/workspace"),
+            actions_host,
+            &[],
+        )
+        .unwrap();
 
         assert_eq!(ordered.len(), 1);
         let ExecutableStep::Native {
@@ -11128,6 +11310,7 @@ runs:
             &[],
             &[],
             &[(plan, None)],
+            Path::new("/tmp/workspace"),
             Path::new("/tmp/actions"),
             &[],
         )

@@ -71,74 +71,82 @@ pub fn checkout_plans(
         if !step.enabled || !is_checkout_step(step) {
             continue;
         }
-
-        let self_repository = self_repository(job)?;
-        let checkout_repository = checkout_repository(step);
-        let clone_url = checkout_clone_url(checkout_repository.as_deref(), &self_repository)?;
-        let destination = workspace_host.join(checkout_path(step)?);
-        let reference_name = step
-            .reference
-            .as_ref()
-            .and_then(|r| r.name.as_deref())
-            .unwrap_or("");
-        let reference_ref = step
-            .reference
-            .as_ref()
-            .and_then(|r| r.git_ref.as_deref())
-            .unwrap_or("");
-        let display_name = step.display_name_template().unwrap_or_else(|| {
-            if reference_name.is_empty() {
-                String::new()
-            } else if reference_ref.is_empty() {
-                format!("Run {reference_name}")
-            } else {
-                format!("Run {reference_name}@{reference_ref}")
-            }
-        });
-        let token = checkout_token(step, job)?.or_else(|| {
-            // Prefer system.github.token (the GITHUB_TOKEN with repo access) over
-            // SystemVssConnection's AccessToken (runner OAuth token, no repo scope).
-            job.variables
-                .get("system.github.token")
-                .and_then(|v| v.value.clone())
-                .filter(|v| !v.is_empty())
-                .or_else(|| system_access_token(job.system_connection()))
-        });
-        plans.push(CheckoutPlan {
-            step_id: checkout_step_id(step, index),
-            display_name,
-            clone_url,
-            version: checkout_ref(step).or_else(|| {
-                checkout_repository
-                    .as_deref()
-                    .filter(|repository| {
-                        self_repository
-                            .name
-                            .as_deref()
-                            .is_some_and(|self_name| repository.eq_ignore_ascii_case(self_name))
-                    })
-                    .and_then(|_| self_repository.version.clone())
-                    .or_else(|| {
-                        if checkout_repository.is_none() {
-                            self_repository.version.clone()
-                        } else {
-                            None
-                        }
-                    })
-            }),
-            destination,
-            token,
-            fetch_depth: checkout_fetch_depth(step)?,
-            fetch_tags: checkout_fetch_tags(step),
-            persist_credentials: checkout_persist_credentials(step),
-            clean: checkout_clean(step),
-            lfs: checkout_lfs(step),
-            condition: step.condition.clone(),
-            continue_on_error: crate::script_step::step_continue_on_error(step),
-            timeout_minutes: crate::script_step::step_timeout_minutes(step),
-        });
+        plans.push(checkout_plan(job, workspace_host, step, index)?);
     }
     Ok(plans)
+}
+
+pub(crate) fn checkout_plan(
+    job: &AgentJobRequestMessage,
+    workspace_host: &Path,
+    step: &ActionStep,
+    index: usize,
+) -> Result<CheckoutPlan> {
+    let self_repository = self_repository(job)?;
+    let checkout_repository = checkout_repository(step);
+    let clone_url = checkout_clone_url(checkout_repository.as_deref(), &self_repository)?;
+    let destination = workspace_host.join(checkout_path(step)?);
+    let reference_name = step
+        .reference
+        .as_ref()
+        .and_then(|r| r.name.as_deref())
+        .unwrap_or("");
+    let reference_ref = step
+        .reference
+        .as_ref()
+        .and_then(|r| r.git_ref.as_deref())
+        .unwrap_or("");
+    let display_name = step.display_name_template().unwrap_or_else(|| {
+        if reference_name.is_empty() {
+            String::new()
+        } else if reference_ref.is_empty() {
+            format!("Run {reference_name}")
+        } else {
+            format!("Run {reference_name}@{reference_ref}")
+        }
+    });
+    let token = checkout_token(step, job)?.or_else(|| {
+        // Prefer system.github.token (the GITHUB_TOKEN with repo access) over
+        // SystemVssConnection's AccessToken (runner OAuth token, no repo scope).
+        job.variables
+            .get("system.github.token")
+            .and_then(|v| v.value.clone())
+            .filter(|v| !v.is_empty())
+            .or_else(|| system_access_token(job.system_connection()))
+    });
+    Ok(CheckoutPlan {
+        step_id: checkout_step_id(step, index),
+        display_name,
+        clone_url,
+        version: checkout_ref(step).or_else(|| {
+            checkout_repository
+                .as_deref()
+                .filter(|repository| {
+                    self_repository
+                        .name
+                        .as_deref()
+                        .is_some_and(|self_name| repository.eq_ignore_ascii_case(self_name))
+                })
+                .and_then(|_| self_repository.version.clone())
+                .or_else(|| {
+                    if checkout_repository.is_none() {
+                        self_repository.version.clone()
+                    } else {
+                        None
+                    }
+                })
+        }),
+        destination,
+        token,
+        fetch_depth: checkout_fetch_depth(step)?,
+        fetch_tags: checkout_fetch_tags(step),
+        persist_credentials: checkout_persist_credentials(step),
+        clean: checkout_clean(step),
+        lfs: checkout_lfs(step),
+        condition: step.condition.clone(),
+        continue_on_error: crate::script_step::step_continue_on_error(step),
+        timeout_minutes: crate::script_step::step_timeout_minutes(step),
+    })
 }
 
 #[cfg(test)]
