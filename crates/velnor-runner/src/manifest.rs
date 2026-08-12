@@ -620,7 +620,7 @@ pub static REUSABLE_WORKFLOWS: &[ReusableWorkflow] = &[
         repository: "tailrocks/velnor-actions",
         path: ".github/workflows/package-signer.yml",
         allowed_refs: &[allowed(
-            "efc76f791d36afa4f00732f452d2ba120b94ff96",
+            "643c534b0e35f916d62c2386c1684387ade86a16",
             "fleet 2026.8.5 hosted package signer",
         )],
         inputs: PACKAGE_SIGNER_WORKFLOW_INPUTS,
