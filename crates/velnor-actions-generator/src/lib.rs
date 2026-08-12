@@ -11,6 +11,7 @@ pub mod audit;
 pub mod cache;
 pub mod composite;
 pub mod model;
+pub mod package;
 pub mod render;
 
 /// One of the four normalized repository classes the fleet generator maps every
@@ -94,6 +95,7 @@ pub fn validate_layout(root: &Path) -> Result<(), String> {
 pub fn generate(root: &Path) -> Result<Vec<PathBuf>, String> {
     let manifest = model::FleetManifest::load(root)?;
     let caches = cache::CacheContract::load(&root.join("fleet").join("caches.toml"))?;
+    let packages = package::PackagePolicy::load(root)?;
     let mut written = Vec::new();
 
     // Composite building blocks: canonical bytes live in `composite`, so they are
@@ -133,6 +135,26 @@ pub fn generate(root: &Path) -> Result<Vec<PathBuf>, String> {
             let body = render::callable_workflow(manifest.class(class), &caches, block_sha);
             let path = dir.join(render::callable_file_name(class));
             write_if_changed(&path, &body)?;
+            written.push(path);
+        }
+        let updater = packages.render_updater();
+        for (name, body) in [
+            ("package-signer.yml", package::SIGNER_WORKFLOW),
+            ("package-updater.yml", updater.as_str()),
+        ] {
+            let path = dir.join(name);
+            write_if_changed(&path, body)?;
+            written.push(path);
+        }
+        for (class, body) in [
+            ("tap", package::TAP_TEMPLATE),
+            ("apt", package::APT_TEMPLATE),
+        ] {
+            let path = root
+                .join("templates")
+                .join(class)
+                .join("package-update.yml");
+            write_if_changed(&path, body)?;
             written.push(path);
         }
     }

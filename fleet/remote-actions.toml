@@ -44,3 +44,35 @@ files = [
   { path = "action.yml", kind = "manifest", sha256 = "e98559b7a31ba31be4709f20d22102dc2737fa630f69a339eb89981151e505fe" },
   { path = "dist/index.js", kind = "behavior", sha256 = "f2b9b31a73b1952584858e152e912c3825ad8ae061f280edab14b842f40893c7" },
 ]
+
+[[action]]
+root = "actions/create-github-app-token"
+sha = "bcd2ba49218906704ab6c1aa796996da409d3eb1"
+files = [
+  { path = "action.yml", kind = "manifest", sha256 = "2c4c77d1cafa8d792ab4a9d449799221baf95176a47692ad9a0b350b0a2618ed" },
+  { path = "dist/main.cjs", kind = "behavior", sha256 = "69bf44f79381cf78e2dd6733e4188c447a4681d34d0641a5727ec2be83097913" },
+  { path = "dist/post.cjs", kind = "behavior", sha256 = "9ef7a54b90188a39be3be2e8c76b327ff4d681c0aed9314f4376409fc9301666" },
+]
+
+[[action]]
+root = "actions/attest-build-provenance"
+sha = "43d14bc2b83dec42d39ecae14e916627a18bb661"
+files = [
+  { path = "action.yml", kind = "manifest", sha256 = "70468c90d247618b7ffad979b5b9db08caabb8f0566e6443b29c502c96af15bf" },
+]
+
+[[action]]
+root = "actions/attest-build-provenance"
+sha = "864457a58d4733d7f1574bd8821fa24e02cf7538"
+files = [
+  { path = "predicate/action.yml", kind = "manifest", sha256 = "7c768aff7de1e4404e658d89d4541bbece24709a7ba46c9b2bea01441670b7d9" },
+  { path = "dist/index.js", kind = "behavior", sha256 = "bc0343edabdcd89a854737bd59e21055e9422206a627fa0cb5dca4b37b9ac789" },
+]
+
+[[action]]
+root = "actions/attest"
+sha = "daf44fb950173508f38bd2406030372c1d1162b1"
+files = [
+  { path = "action.yml", kind = "manifest", sha256 = "f83833dbde4404cb0c2589219a683be4913ad2251ccf17132f706689da9b6190" },
+  { path = "dist/index.js", kind = "behavior", sha256 = "b0d6285fcc39ace5042fb76fb87b2c8378cc4e6ee2255c33bee6e46b60b1e9a2" },
+]

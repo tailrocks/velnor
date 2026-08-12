@@ -14,6 +14,7 @@ use std::process::Command;
 use crate::cache::CacheContract;
 use crate::composite;
 use crate::model::{FleetManifest, OWNERS, is_sha40};
+use crate::package::{self, PackagePolicy};
 use crate::render::{
     self, ACTIONS_REPO, CALVER_PLACEHOLDER, CANONICAL_OWNER, FLEET_SHA_PLACEHOLDER,
 };
@@ -58,6 +59,7 @@ const AUDIT_CALVER: &str = "2026.7.0";
 pub fn audit(root: &Path) -> Result<String, String> {
     let manifest = FleetManifest::load(root)?;
     let caches = CacheContract::load(&root.join("fleet").join("caches.toml"))?;
+    let packages = PackagePolicy::load(root)?;
     let remote_closure = load_remote_closure(root)?;
 
     // Composite building blocks must exist and match their canonical bytes exactly
@@ -87,6 +89,44 @@ pub fn audit(root: &Path) -> Result<String, String> {
             let committed = read_committed(&callable_path(root, class))?;
             require_equal(&committed, &rendered, &callable_path_display(class))?;
             audit_callable_structure(class, &rendered, &block_sha, &remote_closure)?;
+        }
+        let updater = packages.render_updater();
+        for (path, expected) in [
+            (
+                root.join(".github/workflows/package-signer.yml"),
+                package::SIGNER_WORKFLOW,
+            ),
+            (
+                root.join(".github/workflows/package-updater.yml"),
+                updater.as_str(),
+            ),
+            (
+                root.join("templates/tap/package-update.yml"),
+                package::TAP_TEMPLATE,
+            ),
+            (
+                root.join("templates/apt/package-update.yml"),
+                package::APT_TEMPLATE,
+            ),
+        ] {
+            let committed = read_committed(&path)?;
+            require_equal(&committed, expected, &path.display().to_string())?;
+            if path.starts_with(root.join(".github/workflows")) {
+                for reference in uses_refs(expected) {
+                    if !is_sha40(&reference) {
+                        return Err(format!(
+                            "{}: non-40-hex or mutable ref {reference:?}",
+                            path.display()
+                        ));
+                    }
+                }
+                audit_admitted_closure(
+                    expected,
+                    &block_sha,
+                    &path.display().to_string(),
+                    &remote_closure,
+                )?;
+            }
         }
     }
 
@@ -124,7 +164,6 @@ fn load_remote_closure(root: &Path) -> Result<RemoteClosure, String> {
         }
         let mut paths = BTreeSet::new();
         let mut manifests = 0;
-        let mut behaviors = 0;
         for file in &action.files {
             validate_relative_path(&file.path)?;
             if !paths.insert(&file.path) {
@@ -135,7 +174,7 @@ fn load_remote_closure(root: &Path) -> Result<RemoteClosure, String> {
             }
             match file.kind.as_str() {
                 "manifest" => manifests += 1,
-                "behavior" => behaviors += 1,
+                "behavior" => {}
                 other => return Err(format!("unknown remote closure kind {other:?}")),
             }
             if file.sha256.len() != 64
@@ -150,11 +189,8 @@ fn load_remote_closure(root: &Path) -> Result<RemoteClosure, String> {
                 ));
             }
         }
-        if manifests == 0 || behaviors == 0 {
-            return Err(format!(
-                "{} has no manifest or executable behavior",
-                action.root
-            ));
+        if manifests == 0 {
+            return Err(format!("{} has no manifest", action.root));
         }
     }
     Ok(closure)
@@ -227,19 +263,51 @@ pub fn verify_remote_closure(root: &Path) -> Result<String, String> {
             .map(|file| file.path.clone())
             .collect::<BTreeSet<_>>();
         let mut derived_behaviors = BTreeSet::new();
+        let mut derived_actions = BTreeSet::new();
         for manifest in action.files.iter().filter(|file| file.kind == "manifest") {
             let raw = fetched
                 .get(&(action.root.clone(), manifest.path.clone()))
                 .ok_or_else(|| {
                     format!("missing fetched manifest {}/{}", action.root, manifest.path)
                 })?;
-            derive_node_behaviors(&manifest.path, raw, &mut derived_behaviors)?;
+            derive_manifest_closure(
+                &manifest.path,
+                raw,
+                &mut derived_behaviors,
+                &mut derived_actions,
+            )?;
         }
         if derived_behaviors != declared_behaviors {
             return Err(format!(
                 "remote executable closure mismatch for {}: derived {derived_behaviors:?}, declared {declared_behaviors:?}",
                 action.root
             ));
+        }
+        for (root, sha) in derived_actions {
+            let mut segments = root.split('/');
+            let repository = format!(
+                "{}/{}",
+                segments.next().unwrap_or_default(),
+                segments.next().unwrap_or_default()
+            );
+            let subpath = segments.collect::<Vec<_>>().join("/");
+            let manifest = if subpath.is_empty() {
+                "action.yml".to_string()
+            } else {
+                format!("{subpath}/action.yml")
+            };
+            if !closure.action.iter().any(|candidate| {
+                candidate.root == repository
+                    && candidate.sha == sha
+                    && candidate
+                        .files
+                        .iter()
+                        .any(|file| file.kind == "manifest" && file.path == manifest)
+            }) {
+                return Err(format!(
+                    "remote composite closure omits nested action {root}@{sha}"
+                ));
+            }
         }
     }
     Ok(format!(
@@ -248,10 +316,11 @@ pub fn verify_remote_closure(root: &Path) -> Result<String, String> {
     ))
 }
 
-fn derive_node_behaviors(
+fn derive_manifest_closure(
     manifest_path: &str,
     raw: &[u8],
     output: &mut BTreeSet<String>,
+    actions: &mut BTreeSet<(String, String)>,
 ) -> Result<(), String> {
     let text = std::str::from_utf8(raw)
         .map_err(|error| format!("manifest {manifest_path} is not UTF-8: {error}"))?;
@@ -263,7 +332,27 @@ fn derive_node_behaviors(
     let using = document["runs"]["using"]
         .as_str()
         .ok_or_else(|| format!("manifest {manifest_path} has no string runs.using"))?;
-    if !matches!(using, "node12" | "node16" | "node20" | "node24") {
+    if using == "composite" {
+        let steps = document["runs"]["steps"]
+            .as_vec()
+            .ok_or_else(|| format!("composite manifest {manifest_path} has no runs.steps"))?;
+        for step in steps {
+            let uses = step["uses"].as_str().ok_or_else(|| {
+                format!("composite manifest {manifest_path} has a step without uses")
+            })?;
+            let (root, sha) = uses
+                .split_once('@')
+                .ok_or_else(|| format!("nested action {uses:?} is not immutable"))?;
+            if root.split('/').count() < 2 || !is_sha40(sha) {
+                return Err(format!(
+                    "nested action {uses:?} is not an immutable remote action"
+                ));
+            }
+            actions.insert((root.to_string(), sha.to_string()));
+        }
+        return Ok(());
+    }
+    if !matches!(using, "node20" | "node24") {
         return Err(format!(
             "manifest {manifest_path} uses unsupported runtime {using:?}; closure must fail closed"
         ));
@@ -682,7 +771,7 @@ mod remote_closure_tests {
   post: ../dist/post.js
 "#;
         let mut output = BTreeSet::new();
-        derive_node_behaviors("sub/action.yml", raw, &mut output).unwrap();
+        derive_manifest_closure("sub/action.yml", raw, &mut output, &mut BTreeSet::new()).unwrap();
         assert_eq!(
             output,
             ["dist/main.js", "dist/post.js", "dist/pre.js"]
@@ -700,7 +789,29 @@ mod remote_closure_tests {
             "runs:\n  using: node24\n  main: ../../escape.js\n",
         ] {
             assert!(
-                derive_node_behaviors("action.yml", raw.as_bytes(), &mut BTreeSet::new()).is_err()
+                derive_manifest_closure(
+                    "action.yml",
+                    raw.as_bytes(),
+                    &mut BTreeSet::new(),
+                    &mut BTreeSet::new(),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn obsolete_node_runtimes_fail_closed() {
+        for runtime in ["node12", "node16"] {
+            let raw = format!("runs:\n  using: {runtime}\n  main: dist/main.js\n");
+            assert!(
+                derive_manifest_closure(
+                    "action.yml",
+                    raw.as_bytes(),
+                    &mut BTreeSet::new(),
+                    &mut BTreeSet::new(),
+                )
+                .is_err()
             );
         }
     }

@@ -151,6 +151,57 @@ fn audit_passes_on_repo() {
 }
 
 #[test]
+fn package_policy_and_workflows_are_closed_and_hosted_only() {
+    use velnor_actions_generator::package::{
+        APT_TEMPLATE, PackagePolicy, SIGNER_WORKFLOW, TAP_TEMPLATE, UPDATER_WORKFLOW,
+    };
+    PackagePolicy::load(&common::repo_root()).expect("package policy loads");
+    for body in [
+        SIGNER_WORKFLOW,
+        UPDATER_WORKFLOW,
+        TAP_TEMPLATE,
+        APT_TEMPLATE,
+    ] {
+        assert!(!body.contains("pull_request_target"));
+        assert!(!body.contains("secrets: inherit"));
+        assert!(!body.contains("runs-on: self-hosted"));
+    }
+    assert!(UPDATER_WORKFLOW.contains("--deny-self-hosted-runners"));
+    assert!(UPDATER_WORKFLOW.contains("sha256sum --check --strict"));
+    assert!(
+        UPDATER_WORKFLOW
+            .contains("actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1")
+    );
+    assert!(UPDATER_WORKFLOW.contains("git commit --signoff"));
+    assert!(UPDATER_WORKFLOW.contains("test \"$BRANCH\" != \"main\""));
+}
+
+#[test]
+fn package_generation_writes_exact_callables_and_templates() {
+    let dir = common::bound_fixture(DUMMY_SHA);
+    let updater = velnor_actions_generator::package::PackagePolicy::load(&dir)
+        .unwrap()
+        .render_updater();
+    for (path, expected) in [
+        (
+            ".github/workflows/package-signer.yml",
+            velnor_actions_generator::package::SIGNER_WORKFLOW,
+        ),
+        (".github/workflows/package-updater.yml", updater.as_str()),
+        (
+            "templates/tap/package-update.yml",
+            velnor_actions_generator::package::TAP_TEMPLATE,
+        ),
+        (
+            "templates/apt/package-update.yml",
+            velnor_actions_generator::package::APT_TEMPLATE,
+        ),
+    ] {
+        assert_eq!(std::fs::read_to_string(dir.join(path)).unwrap(), expected);
+    }
+}
+
+#[test]
 fn bound_fixture_audit_passes() {
     let dir = common::bound_fixture(DUMMY_SHA);
     let line = audit::audit(&dir).expect("bound audit passes");
