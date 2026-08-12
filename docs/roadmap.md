@@ -21,7 +21,7 @@ named by the marked contract.** `master-plan.md` is historical evidence. This
 document remains the runner-internal implementation reference.
 
 Status 2026-06-11: the implementation goal below (drop-in V2/JIT runner,
-Docker job isolation, native adapters, daemon slots) is **achieved and in
+Docker job execution for trusted work, native adapters, daemon slots) is **achieved and in
 production** — three dual-lane repos run Velnor by default; the daemon ships
 as a Debian package with never-exit supervision, sd_notify watchdog,
 template instances, and doctor timers (master-plan P0/P1 complete). Active
@@ -30,6 +30,14 @@ native HTTP transport, zero-copy logs, dynamic slots, org-level JIT), P3b
 (native-adapter completeness — no JS product path), P4 (UX parity matrix).
 Sections below describe standing architecture; the marked contract governs
 unified-CI conflicts.
+
+The current host-socket Docker model is not a lower-trust or Build L3
+isolation boundary. Public unmerged code stays GitHub-hosted. The proposed
+microVM, guest-local Docker, signing, cleanup, cache/network, and disk-safety
+boundary is frozen in [Build L3 boundary
+v1](security/build-l3-boundary-v1.md) with its [versioned threat/control/test
+matrix](security/build-l3-threat-control-test-v1.tsv). Both are design-only
+until Plans 012 and 017 implement and prove them live.
 
 ## Hard Rules
 

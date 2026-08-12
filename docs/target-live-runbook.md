@@ -102,6 +102,12 @@ rootless/containerized daemon mode, but Phase 0 uses the host socket because the
 two target repositories need Buildx/Bake and direct Docker commands to work from
 inside the job container.
 
+This model is restricted to admitted trusted work. It is not Build L3 and must
+not receive public unmerged code. The accepted lower-trust target is one fresh
+microVM per job with guest-local Docker and no host socket, as defined by
+[Build L3 boundary v1](security/build-l3-boundary-v1.md). A privileged
+container-only DinD variant is not an accepted host boundary.
+
 ## Run Public Fixture First
 
 Before the real target repositories, use the public fixture:
