@@ -34,8 +34,10 @@ conclusions in the GitHub UI — is **achieved and in production**:
 - GitHub still parses workflows, expands matrices and reusable workflows,
   schedules jobs, manages secrets, and renders the Actions UI. Velnor
   replaces only the runner side, over GitHub's current V2 JIT/broker/
-  run-service/Results Service protocol, executing every assigned Linux job
-  in an isolated Docker container.
+  run-service/Results Service protocol, executing every assigned trusted Linux
+  job in a Docker container. The current host-socket model is a compatibility
+  boundary, not lower-trust or Build L3 isolation. The design-only target is
+  [Build L3 boundary v1](security/build-l3-boundary-v1.md).
 - The estate program standardizes the exact 28 repositories in
   `VELNOR_PROJECTS_SETUP.md` on one generated class surface with sole `lane`
   selector and organization-scoped defaults. Repositories whose delivery is blocked retain their pushed

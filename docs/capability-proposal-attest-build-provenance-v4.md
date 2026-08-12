@@ -1,5 +1,12 @@
 # Capability proposal: `actions/attest-build-provenance@v4.1.1`
 
+This adapter can support GitHub-compatible Build L2 evidence. Its ephemeral
+key alone does not establish Build L3 while tenant work retains host Docker or
+writable cross-run influence. Velnor-signed consumer admission remains closed
+until the design in
+[`security/build-l3-boundary-v1.md`](security/build-l3-boundary-v1.md) is
+implemented and passes the one/eight-slot live proof.
+
 Status: **approved by the operator 2026-07-21; implementation and proof in progress**.
 
 This proposal is intentionally narrower than the upstream action. Approval of
