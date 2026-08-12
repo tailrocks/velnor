@@ -50,7 +50,9 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<String, String> {
 fn run_render_package_consumer(mut args: impl Iterator<Item = String>) -> Result<String, String> {
     let mut root = PathBuf::from(".");
     let mut repository = None;
-    let mut release_sha = None;
+    let mut jackin_release_sha = None;
+    let mut tailrocks_release_sha = None;
+    let mut chainargos_release_sha = None;
     let mut calver = None;
     let mut output = None;
     let mut old_digest = None;
@@ -60,7 +62,15 @@ fn run_render_package_consumer(mut args: impl Iterator<Item = String>) -> Result
         match arg.as_str() {
             "--root" => root = PathBuf::from(require_value(&mut args, "--root")?),
             "--repository" => repository = Some(require_value(&mut args, "--repository")?),
-            "--release-sha" => release_sha = Some(require_value(&mut args, "--release-sha")?),
+            "--jackin-release-sha" => {
+                jackin_release_sha = Some(require_value(&mut args, "--jackin-release-sha")?)
+            }
+            "--tailrocks-release-sha" => {
+                tailrocks_release_sha = Some(require_value(&mut args, "--tailrocks-release-sha")?)
+            }
+            "--chainargos-release-sha" => {
+                chainargos_release_sha = Some(require_value(&mut args, "--chainargos-release-sha")?)
+            }
             "--calver" => calver = Some(require_value(&mut args, "--calver")?),
             "--output" => output = Some(PathBuf::from(require_value(&mut args, "--output")?)),
             "--old-signer-digest" => {
@@ -76,7 +86,12 @@ fn run_render_package_consumer(mut args: impl Iterator<Item = String>) -> Result
         }
     }
     let repository = repository.ok_or("render-package-consumer requires --repository")?;
-    let release_sha = release_sha.ok_or("render-package-consumer requires --release-sha")?;
+    let release_shas = [
+        jackin_release_sha.ok_or("render-package-consumer requires --jackin-release-sha")?,
+        tailrocks_release_sha.ok_or("render-package-consumer requires --tailrocks-release-sha")?,
+        chainargos_release_sha
+            .ok_or("render-package-consumer requires --chainargos-release-sha")?,
+    ];
     let calver = calver.ok_or("render-package-consumer requires --calver")?;
     let output = output.ok_or("render-package-consumer requires --output")?;
     let old = match (
@@ -92,8 +107,14 @@ fn run_render_package_consumer(mut args: impl Iterator<Item = String>) -> Result
             );
         }
     };
-    let path =
-        render_package_consumer_to_dir(&root, &repository, &release_sha, &calver, old, &output)?;
+    let path = render_package_consumer_to_dir(
+        &root,
+        &repository,
+        [&release_shas[0], &release_shas[1], &release_shas[2]],
+        &calver,
+        old,
+        &output,
+    )?;
     Ok(format!("rendered {}", path.display()))
 }
 

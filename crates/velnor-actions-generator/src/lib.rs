@@ -196,13 +196,13 @@ pub fn render_consumer_to_dir(
 pub fn render_package_consumer_to_dir(
     root: &Path,
     repository: &str,
-    release_sha: &str,
+    release_shas: [&str; 3],
     calver: &str,
     old_signer: Option<(&str, &str, &str)>,
     output: &Path,
 ) -> Result<PathBuf, String> {
     let policy = package::PackagePolicy::load(root)?;
-    let body = policy.render_consumer(repository, release_sha, calver, old_signer)?;
+    let body = policy.render_consumer(repository, release_shas, calver, old_signer)?;
     let dir = output.join(".github").join("workflows");
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let path = dir.join("package-update.yml");

@@ -222,16 +222,23 @@ fn package_consumer_renderer_binds_current_and_bounded_old_signers() {
     let policy = velnor_actions_generator::package::PackagePolicy::load(&common::repo_root())
         .expect("package policy loads");
     let current = "1111111111111111111111111111111111111111";
+    let owner_shas = [
+        current,
+        "3333333333333333333333333333333333333333",
+        "4444444444444444444444444444444444444444",
+    ];
     let old = "2222222222222222222222222222222222222222";
     let rendered = policy
         .render_consumer(
             "tailrocks/homebrew-tablerock",
-            current,
+            owner_shas,
             "2026.8.6",
             Some((old, "2026-08-12T00:00:00Z", "2026-09-11T00:00:00Z")),
         )
         .expect("bounded rotation renders");
-    assert_eq!(rendered.matches(current).count(), 3);
+    assert_eq!(rendered.matches(current).count(), 1);
+    assert_eq!(rendered.matches(owner_shas[1]).count(), 1);
+    assert_eq!(rendered.matches(owner_shas[2]).count(), 1);
     assert_eq!(
         rendered
             .matches("1e062d5bbe329873047ee8a8e79bba0811e53b65")
@@ -244,24 +251,29 @@ fn package_consumer_renderer_binds_current_and_bounded_old_signers() {
 
     assert!(
         policy
-            .render_consumer("tailrocks/not-a-consumer", current, "2026.8.6", None)
-            .is_err()
-    );
-    assert!(
-        policy
-            .render_consumer("tailrocks/homebrew-tablerock", "main", "2026.8.6", None)
-            .is_err()
-    );
-    assert!(
-        policy
-            .render_consumer("tailrocks/homebrew-tablerock", current, "v1", None)
+            .render_consumer("tailrocks/not-a-consumer", owner_shas, "2026.8.6", None)
             .is_err()
     );
     assert!(
         policy
             .render_consumer(
                 "tailrocks/homebrew-tablerock",
-                current,
+                ["main", owner_shas[1], owner_shas[2]],
+                "2026.8.6",
+                None
+            )
+            .is_err()
+    );
+    assert!(
+        policy
+            .render_consumer("tailrocks/homebrew-tablerock", owner_shas, "v1", None)
+            .is_err()
+    );
+    assert!(
+        policy
+            .render_consumer(
+                "tailrocks/homebrew-tablerock",
+                owner_shas,
                 "2026.8.6",
                 Some((
                     "1e062d5bbe329873047ee8a8e79bba0811e53b65",

@@ -154,12 +154,14 @@ impl PackagePolicy {
     pub fn render_consumer(
         &self,
         repository: &str,
-        release_sha: &str,
+        release_shas: [&str; 3],
         calver: &str,
         old_signer: Option<(&str, &str, &str)>,
     ) -> Result<String, String> {
-        if !is_sha40(release_sha) {
-            return Err("release SHA is not 40 lowercase hexadecimal characters".into());
+        if release_shas.iter().any(|sha| !is_sha40(sha)) {
+            return Err(
+                "every owner release SHA must be 40 lowercase hexadecimal characters".into(),
+            );
         }
         if !valid_calver(calver) {
             return Err("CalVer must be YYYY.M.D with numeric components".into());
@@ -187,14 +189,18 @@ impl PackagePolicy {
             _ => return Err("package policy contains an unknown kind".into()),
         };
         let rendered = template
-            .replace("@FLEET_SHA@", release_sha)
+            .replace("@JACKIN_FLEET_SHA@", release_shas[0])
+            .replace("@TAILROCKS_FLEET_SHA@", release_shas[1])
+            .replace("@CHAINARGOS_FLEET_SHA@", release_shas[2])
             .replace("@CALVER@", calver)
             .replace("@CURRENT_SIGNER_DIGEST@", &row.signer_digest)
             .replace("@OLD_SIGNER_DIGEST@", old_digest)
             .replace("@OLD_SIGNER_ACTIVATED_AT@", activated_at)
             .replace("@OLD_SIGNER_EXPIRES_AT@", expires_at);
         for placeholder in [
-            "@FLEET_SHA@",
+            "@JACKIN_FLEET_SHA@",
+            "@TAILROCKS_FLEET_SHA@",
+            "@CHAINARGOS_FLEET_SHA@",
             "@CALVER@",
             "@CURRENT_SIGNER_DIGEST@",
             "@OLD_SIGNER_DIGEST@",
