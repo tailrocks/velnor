@@ -496,14 +496,7 @@ fn sign_statement(
         runtime.block_on(async move {
             let identity = IdentityToken::from_jwt(&token).context("parse Sigstore OIDC token")?;
             if public_good {
-                let config = SigningConfig {
-                    fulcio_url: "https://fulcio.sigstore.dev".into(),
-                    rekor_url: RekorApiVersion::V2.default_url().into(),
-                    tsa_url: None,
-                    signing_scheme: sigstore_sign::crypto::SigningScheme::EcdsaP256Sha256,
-                    rekor_api_version: RekorApiVersion::V2,
-                    oidc_url: None,
-                };
+                let config = public_good_signing_config();
                 return SigningContext::with_config(config)
                     .signer(identity)
                     .sign_raw_statement(&statement)
@@ -515,6 +508,17 @@ fn sign_statement(
     })
     .join()
     .map_err(|_| anyhow::anyhow!("Sigstore signing thread panicked"))?
+}
+
+fn public_good_signing_config() -> SigningConfig {
+    SigningConfig {
+        fulcio_url: "https://fulcio.sigstore.dev".into(),
+        rekor_url: RekorApiVersion::V1.default_url().into(),
+        tsa_url: None,
+        signing_scheme: sigstore_sign::crypto::SigningScheme::EcdsaP256Sha256,
+        rekor_api_version: RekorApiVersion::V1,
+        oidc_url: None,
+    }
 }
 
 async fn sign_private_statement(
@@ -661,5 +665,14 @@ mod tests {
         }
         assert!(parse_repository_visibility(&json!({})).is_err());
         assert!(parse_repository_visibility(&json!({"visibility": "unknown"})).is_err());
+    }
+
+    #[test]
+    fn public_good_signing_uses_github_compatible_rekor_v1_dsse() {
+        let config = public_good_signing_config();
+        assert_eq!(config.fulcio_url, "https://fulcio.sigstore.dev");
+        assert_eq!(config.rekor_url, "https://rekor.sigstore.dev");
+        assert_eq!(config.rekor_api_version, RekorApiVersion::V1);
+        assert_eq!(config.tsa_url, None);
     }
 }
