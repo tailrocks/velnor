@@ -120,9 +120,10 @@ impl PackagePolicy {
         let mut source_cases = String::new();
         for row in &self.consumer {
             let patterns = row.assets.join("\\n");
+            let channels = row.channels.join("\\n");
             policy_cases.push_str(&format!(
-                "            {}) SOURCE_REPOSITORY={}; ASSET_PATTERNS=$'{}' ;;\n",
-                row.slug, row.source, patterns
+                "            {}) SOURCE_REPOSITORY={}; ASSET_PATTERNS=$'{}'; ALLOWED_CHANNELS=$'{}' ;;\n",
+                row.slug, row.source, patterns, channels
             ));
             source_cases.push_str(&format!(
                 "            {}) SOURCE_REPOSITORY={} ;;\n",

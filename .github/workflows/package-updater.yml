@@ -7,6 +7,9 @@ on:
       consumer-repository:
         required: true
         type: string
+      channel:
+        required: true
+        type: string
       current-signer-digest:
         required: true
         type: string
@@ -48,23 +51,35 @@ jobs:
       - name: Poll and bind latest immutable release
         env:
           CONSUMER_REPOSITORY: ${{ inputs.consumer-repository }}
+          CHANNEL: ${{ inputs.channel }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           test "$CONSUMER_REPOSITORY" = "$GITHUB_REPOSITORY"
           case "$CONSUMER_REPOSITORY" in
-            jackin-project/homebrew-tap) SOURCE_REPOSITORY=jackin-project/jackin; ASSET_PATTERNS=$'jackin-*-aarch64-apple-darwin.tar.gz\njackin-*-x86_64-apple-darwin.tar.gz' ;;
-            tailrocks/homebrew-tablerock) SOURCE_REPOSITORY=tailrocks/tablerock; ASSET_PATTERNS=$'tablerock-*-aarch64-apple-darwin.tar.gz\ntablerock-*-x86_64-apple-darwin.tar.gz' ;;
-            tailrocks/homebrew-parallax) SOURCE_REPOSITORY=tailrocks/parallax; ASSET_PATTERNS=$'parallax-*-aarch64-apple-darwin.tar.gz\nparallax-*-x86_64-apple-darwin.tar.gz' ;;
-            tailrocks/homebrew-holla) SOURCE_REPOSITORY=tailrocks/holla; ASSET_PATTERNS=$'holla-*-aarch64-apple-darwin.tar.gz\nholla-*-x86_64-apple-darwin.tar.gz' ;;
-            tailrocks/velnor-apt) SOURCE_REPOSITORY=tailrocks/velnor; ASSET_PATTERNS=$'velnor-runner_*_amd64.deb\nvelnor-runner_*_arm64.deb' ;;
-            tailrocks/holla-apt) SOURCE_REPOSITORY=tailrocks/holla; ASSET_PATTERNS=$'holla_*_amd64.deb\nholla_*_arm64.deb' ;;
+            jackin-project/homebrew-tap) SOURCE_REPOSITORY=jackin-project/jackin; ASSET_PATTERNS=$'jackin-*-aarch64-apple-darwin.tar.gz\njackin-*-x86_64-apple-darwin.tar.gz'; ALLOWED_CHANNELS=$'stable\npreview\ndev' ;;
+            tailrocks/homebrew-tablerock) SOURCE_REPOSITORY=tailrocks/tablerock; ASSET_PATTERNS=$'tablerock-*-aarch64-apple-darwin.tar.gz\ntablerock-*-x86_64-apple-darwin.tar.gz'; ALLOWED_CHANNELS=$'stable\npreview\ndev' ;;
+            tailrocks/homebrew-parallax) SOURCE_REPOSITORY=tailrocks/parallax; ASSET_PATTERNS=$'parallax-*-aarch64-apple-darwin.tar.gz\nparallax-*-x86_64-apple-darwin.tar.gz'; ALLOWED_CHANNELS=$'stable\npreview\ndev' ;;
+            tailrocks/homebrew-holla) SOURCE_REPOSITORY=tailrocks/holla; ASSET_PATTERNS=$'holla-*-aarch64-apple-darwin.tar.gz\nholla-*-x86_64-apple-darwin.tar.gz'; ALLOWED_CHANNELS=$'stable\npreview\ndev' ;;
+            tailrocks/velnor-apt) SOURCE_REPOSITORY=tailrocks/velnor; ASSET_PATTERNS=$'velnor-runner_*_amd64.deb\nvelnor-runner_*_arm64.deb'; ALLOWED_CHANNELS=$'stable' ;;
+            tailrocks/holla-apt) SOURCE_REPOSITORY=tailrocks/holla; ASSET_PATTERNS=$'holla_*_amd64.deb\nholla_*_arm64.deb'; ALLOWED_CHANNELS=$'stable' ;;
             *) echo "unknown consumer" >&2; exit 1 ;;
           esac
+          test "$CHANNEL" = stable
+          grep -Fx -- "$CHANNEL" <<<"$ALLOWED_CHANNELS" >/dev/null
           [[ "$SOURCE_REPOSITORY" =~ ^(jackin-project|tailrocks)/[a-z0-9][a-z0-9._-]*$ ]]
           test -n "$ASSET_PATTERNS"
           mkdir -m 0700 verified
-          gh api "repos/$SOURCE_REPOSITORY/releases/latest" > verified/release.json
+          gh api --paginate "repos/$SOURCE_REPOSITORY/releases?per_page=100" \
+            | jq -cs '
+                add
+                | map(select(
+                    (.draft | not) and (.prerelease | not) and
+                    (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+                  ))
+                | sort_by(.published_at)
+                | if length == 0 then error("no immutable stable release") else last end
+              ' > verified/release.json
           jq -e 'type=="object" and (.draft|not) and (.prerelease|not) and (.tag_name|type=="string") and (.assets|type=="array")' verified/release.json >/dev/null
           tag=$(jq -r .tag_name verified/release.json)
           [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
@@ -207,7 +222,7 @@ jobs:
           VERIFIED: ${{ runner.temp }}/verified
         run: |
           set -euo pipefail
-          [[ "$BRANCH" =~ ^package-update/[a-z0-9][a-z0-9._-]*$ ]]
+          [[ "$BRANCH" =~ ^package-update/[a-z0-9][a-z0-9._-]*/(stable|preview|dev)$ ]]
           printf '%s' "$EVIDENCE" | base64 -d | jq -e 'type == "array" and length > 0' >/dev/null
           test "$(sha256sum "$VERIFIED/identity.json" | cut -d' ' -f1)" = "$IDENTITY"
           sed "s#  verified/#  $VERIFIED/#" "$VERIFIED/consumer-SHA256SUMS" | sha256sum --check --strict

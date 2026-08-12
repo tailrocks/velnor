@@ -178,6 +178,17 @@ fn package_policy_and_workflows_are_closed_and_hosted_only() {
     );
     assert!(UPDATER_WORKFLOW.contains("git commit --signoff"));
     assert!(UPDATER_WORKFLOW.contains("test \"$BRANCH\" != \"main\""));
+    assert!(UPDATER_WORKFLOW.contains("test \"$CHANNEL\" = stable"));
+    assert!(UPDATER_WORKFLOW.contains("no immutable stable release"));
+    assert!(!UPDATER_WORKFLOW.contains("releases/latest"));
+    assert!(TAP_TEMPLATE.matches("channel: stable").count() == 3);
+    assert!(APT_TEMPLATE.matches("channel: stable").count() == 3);
+    assert!(
+        TAP_TEMPLATE
+            .matches("package-update/verified/stable")
+            .count()
+            == 3
+    );
 }
 
 #[test]
