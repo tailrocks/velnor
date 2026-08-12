@@ -70,6 +70,11 @@ jobs:
           esac
           [ "${#commit}" -eq 40 ] || { echo "::error::tag $TAG did not peel to a 40-hex commit" >&2; exit 1; }
 
+          # Older native checkout adapters fetch the requested tag but may leave
+          # workflow_dispatch on the caller SHA. Move to the already-resolved
+          # immutable commit before validating the checkout identity.
+          git checkout --detach "$commit"
+
           # The checkout must sit exactly on that commit (non-HEAD checkout is a
           # coherence failure).
           head="$(git rev-parse HEAD)"
