@@ -505,7 +505,9 @@ jobs:
             --slurpfile assets assets.jsonl \
             '{schema:"velnor.package-release.v1",source_repository:$source_repository,source_ref:$source_ref,source_commit:$source_commit,version:$version,assets:$assets}' \
             > release-manifest.json
-          sha256sum --check --strict SHA256SUMS
+          # SHA256SUMS binds artifact basenames. Verify from the downloaded
+          # artifact corpus before copying those exact bytes to signer-input.
+          (cd artifacts && sha256sum --check --strict ../SHA256SUMS)
 
       - name: Stage package subjects for hosted signer
         run: |
