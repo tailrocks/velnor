@@ -424,6 +424,42 @@ jobs:
           cp artifacts/manifest.json manifest.json
           sha256sum manifest.json | awk '{print $1}' > manifest.json.sha256
 
+      - name: Assemble consumer release manifest and independent checksums
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          subjects=(artifacts/velnor-runner-*.tar.gz artifacts/velnor-runner-*.deb)
+          test "${#subjects[@]}" -eq 4
+          : > SHA256SUMS
+          : > assets.jsonl
+          for subject in "${subjects[@]}"; do
+            name=$(basename "$subject")
+            digest=$(sha256sum "$subject" | awk '{print $1}')
+            printf '%s  %s\n' "$digest" "$name" >> SHA256SUMS
+            jq -cn --arg name "$name" --arg sha256 "$digest" '{name:$name,sha256:$sha256}' >> assets.jsonl
+          done
+          jq -S -n \
+            --arg source_repository "$GITHUB_REPOSITORY" \
+            --arg source_ref "refs/tags/v${VERSION}" \
+            --arg source_commit "$COMMIT" \
+            --arg version "$VERSION" \
+            --slurpfile assets assets.jsonl \
+            '{schema:"velnor.package-release.v1",source_repository:$source_repository,source_ref:$source_ref,source_commit:$source_commit,version:$version,assets:$assets}' \
+            > release-manifest.json
+          sha256sum --check --strict SHA256SUMS
+
+      - name: Stage package subjects for hosted signer
+        run: |
+          set -euo pipefail
+          mkdir signer-input
+          cp artifacts/velnor-runner-*.tar.gz artifacts/velnor-runner-*.deb signer-input/
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: package-subjects
+          path: signer-input
+          if-no-files-found: error
+
       - name: Create release once — no clobber, digest-exact idempotency
         env:
           GH_TOKEN: ${{ github.token }}
@@ -457,12 +493,61 @@ jobs:
             gh release create "$tag" --title "$tag" --generate-notes \
               release-record.json release-record.json.sha256 \
               manifest.json manifest.json.sha256 \
+              release-manifest.json SHA256SUMS \
               artifacts/velnor-runner-*.tar.gz artifacts/velnor-runner-*.tar.gz.sha256 \
               artifacts/velnor-runner-*.deb artifacts/velnor-runner-*.deb.sha256
           fi
           # NOTE (N6): this workflow deliberately does NOT push to velnor-apt or
           # dispatch its publish. tailrocks/velnor-apt pulls this record itself
           # and verifies it before reprepro. No APT credential exists here.
+
+  sign-amd64-tar:
+    needs: [identity, record]
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@efc76f791d36afa4f00732f452d2ba120b94ff96 # 2026.8.5
+    with:
+      artifact-name: package-subjects
+      subject-path: velnor-runner-${{ needs.identity.outputs.version }}-amd64.tar.gz
+      source-ref: refs/tags/v${{ needs.identity.outputs.version }}
+
+  sign-arm64-tar:
+    needs: [identity, record]
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@efc76f791d36afa4f00732f452d2ba120b94ff96 # 2026.8.5
+    with:
+      artifact-name: package-subjects
+      subject-path: velnor-runner-${{ needs.identity.outputs.version }}-arm64.tar.gz
+      source-ref: refs/tags/v${{ needs.identity.outputs.version }}
+
+  sign-amd64-deb:
+    needs: [identity, record]
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@efc76f791d36afa4f00732f452d2ba120b94ff96 # 2026.8.5
+    with:
+      artifact-name: package-subjects
+      subject-path: velnor-runner-${{ needs.identity.outputs.version }}-amd64.deb
+      source-ref: refs/tags/v${{ needs.identity.outputs.version }}
+
+  sign-arm64-deb:
+    needs: [identity, record]
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    uses: tailrocks/velnor-actions/.github/workflows/package-signer.yml@efc76f791d36afa4f00732f452d2ba120b94ff96 # 2026.8.5
+    with:
+      artifact-name: package-subjects
+      subject-path: velnor-runner-${{ needs.identity.outputs.version }}-arm64.deb
+      source-ref: refs/tags/v${{ needs.identity.outputs.version }}
 
   # Homebrew: to be added modeled on holla's release.yml `homebrew` job once the
   # tailrocks/homebrew-velnor tap + push token exist (docs/master-plan.md P1.8).
