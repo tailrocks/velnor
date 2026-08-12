@@ -1,5 +1,5 @@
 {
   "schema": "velnor-actions.fleet-release.v1",
-  "calver": "2026.8.11",
-  "source_sha": "f27f84869196ab3ee97a8ab296e250f0af3d9203"
+  "calver": "2026.8.12",
+  "source_sha": "0d8de23c6ac87d5a28ab2f73d675c8597bc4f43c"
 }
