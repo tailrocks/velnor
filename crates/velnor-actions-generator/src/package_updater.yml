@@ -222,6 +222,10 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
           persist-credentials: true
+      - uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
+        with:
+          install: false
+          cache: false
       - name: Create signed-off update branch and PR
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}

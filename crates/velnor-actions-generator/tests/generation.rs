@@ -315,6 +315,8 @@ fn updater_executes_explicit_current_then_old_signer_alternatives() {
     assert!(body.contains("$SOURCE_OWNER/velnor-actions/.github/workflows/package-signer.yml"));
     assert!(body.contains("keys == [\"accepted_signer_digest\",\"verification\"]"));
     assert!(body.contains("if length > 0 and all(.[];"));
+    assert!(body.contains("jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654"));
+    assert!(body.contains("install: false\n          cache: false"));
     assert!(body.contains(".verification | type == \"array\" and length > 0"));
     assert!(!body.contains("all(.[]; type == \"array\""));
 }
