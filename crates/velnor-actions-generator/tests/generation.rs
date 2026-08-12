@@ -161,6 +161,16 @@ fn package_policy_and_workflows_are_closed_and_hosted_only() {
     assert!(!package_policy.contains(".tar.xz"));
     assert_eq!(package_policy.matches(".tar.gz").count(), 16);
     assert_eq!(package_policy.matches(".zip").count(), 2);
+    for producer_asset in [
+        "velnor-runner-*-amd64.deb",
+        "velnor-runner-*-arm64.deb",
+        "holla-*-x86_64-unknown-linux-gnu.deb",
+        "holla-*-aarch64-unknown-linux-gnu.deb",
+    ] {
+        assert!(package_policy.contains(producer_asset));
+    }
+    assert!(!package_policy.contains("velnor-runner_*_amd64.deb"));
+    assert!(!package_policy.contains("holla_*_amd64.deb"));
     for body in [
         SIGNER_WORKFLOW,
         UPDATER_WORKFLOW,
