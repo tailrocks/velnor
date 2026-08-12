@@ -41,7 +41,7 @@ slug = "tailrocks/velnor-apt"
 kind = "apt"
 source = "tailrocks/velnor"
 source_ref = "refs/tags/v*"
-signer_digest = "643c534b0e35f916d62c2386c1684387ade86a16"
+signer_digest = "643c5341b160be151a7fae19b89b6a4f8ab3b275"
 channels = ["stable"]
 assets = ["velnor-runner-*-amd64.deb", "velnor-runner-*-arm64.deb"]
 
