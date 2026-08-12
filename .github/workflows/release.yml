@@ -119,6 +119,19 @@ jobs:
           fetch-tags: true
           persist-credentials: false
 
+      - name: Normalize immutable release checkout
+        env:
+          SOURCE_COMMIT: ${{ needs.identity.outputs.commit }}
+        run: |
+          set -euo pipefail
+          case "$SOURCE_COMMIT" in
+            *[!0-9a-f]*|'') echo "::error::invalid source commit" >&2; exit 1 ;;
+          esac
+          [ "${#SOURCE_COMMIT}" -eq 40 ] || { echo "::error::source commit must be 40 hex" >&2; exit 1; }
+          git cat-file -e "${SOURCE_COMMIT}^{commit}"
+          git checkout --detach "$SOURCE_COMMIT"
+          [ "$(git rev-parse HEAD)" = "$SOURCE_COMMIT" ] || { echo "::error::checkout did not reach $SOURCE_COMMIT" >&2; exit 1; }
+
       - name: Install mold linker
         uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
 
@@ -172,6 +185,19 @@ jobs:
           fetch-depth: 1
           fetch-tags: true
           persist-credentials: false
+
+      - name: Normalize immutable release checkout
+        env:
+          SOURCE_COMMIT: ${{ needs.identity.outputs.commit }}
+        run: |
+          set -euo pipefail
+          case "$SOURCE_COMMIT" in
+            *[!0-9a-f]*|'') echo "::error::invalid source commit" >&2; exit 1 ;;
+          esac
+          [ "${#SOURCE_COMMIT}" -eq 40 ] || { echo "::error::source commit must be 40 hex" >&2; exit 1; }
+          git cat-file -e "${SOURCE_COMMIT}^{commit}"
+          git checkout --detach "$SOURCE_COMMIT"
+          [ "$(git rev-parse HEAD)" = "$SOURCE_COMMIT" ] || { echo "::error::checkout did not reach $SOURCE_COMMIT" >&2; exit 1; }
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -256,6 +282,19 @@ jobs:
           fetch-depth: 1
           fetch-tags: true
           persist-credentials: false
+
+      - name: Normalize immutable release checkout
+        env:
+          SOURCE_COMMIT: ${{ needs.identity.outputs.commit }}
+        run: |
+          set -euo pipefail
+          case "$SOURCE_COMMIT" in
+            *[!0-9a-f]*|'') echo "::error::invalid source commit" >&2; exit 1 ;;
+          esac
+          [ "${#SOURCE_COMMIT}" -eq 40 ] || { echo "::error::source commit must be 40 hex" >&2; exit 1; }
+          git cat-file -e "${SOURCE_COMMIT}^{commit}"
+          git checkout --detach "$SOURCE_COMMIT"
+          [ "$(git rev-parse HEAD)" = "$SOURCE_COMMIT" ] || { echo "::error::checkout did not reach $SOURCE_COMMIT" >&2; exit 1; }
 
       - name: Install mold linker
         uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
@@ -365,7 +404,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.identity.outputs.commit }}
+          fetch-depth: 1
+          fetch-tags: true
           persist-credentials: false
+
+      - name: Normalize immutable release checkout
+        env:
+          SOURCE_COMMIT: ${{ needs.identity.outputs.commit }}
+        run: |
+          set -euo pipefail
+          case "$SOURCE_COMMIT" in
+            *[!0-9a-f]*|'') echo "::error::invalid source commit" >&2; exit 1 ;;
+          esac
+          [ "${#SOURCE_COMMIT}" -eq 40 ] || { echo "::error::source commit must be 40 hex" >&2; exit 1; }
+          git cat-file -e "${SOURCE_COMMIT}^{commit}"
+          git checkout --detach "$SOURCE_COMMIT"
+          [ "$(git rev-parse HEAD)" = "$SOURCE_COMMIT" ] || { echo "::error::checkout did not reach $SOURCE_COMMIT" >&2; exit 1; }
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
