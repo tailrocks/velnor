@@ -140,6 +140,7 @@ pub fn consumer_template(class: RepositoryClass) -> String {
     b.line(0, "permissions:");
     b.line(2, "actions: read");
     b.line(2, "contents: read");
+    b.line(2, "pull-requests: read");
     b.blank();
     b.line(0, "concurrency:");
     b.line(2, "group: ${{ inputs.benchmark_campaign != '' && format('{0}-{1}-{2}', github.workflow, inputs.benchmark_campaign, inputs.benchmark_wave) || format('{0}-{1}', github.workflow, github.ref) }}");
@@ -160,6 +161,7 @@ pub fn consumer_template(class: RepositoryClass) -> String {
         b.line(4, "permissions:");
         b.line(6, "actions: read");
         b.line(6, "contents: read");
+        b.line(6, "pull-requests: read");
         b.line(
             4,
             &format!(

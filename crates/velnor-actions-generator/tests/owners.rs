@@ -31,6 +31,11 @@ fn exactly_three_static_owner_calls() {
         3,
         "each reusable-call job must delegate the callable's actions:read permission"
     );
+    assert_eq!(
+        t.matches("      pull-requests: read").count(),
+        3,
+        "each reusable-call job must delegate the callable's PR-read permission"
+    );
     // No dynamic `uses:` — the ref never contains an expression.
     for line in t.lines() {
         if line.contains("uses:") {
