@@ -94,6 +94,17 @@ impl PackagePolicy {
             {
                 return Err(format!("{} has an unsafe asset pattern", row.slug));
             }
+            let expected_suffix = if row.kind == "tap" { ".tar.gz" } else { ".deb" };
+            if row
+                .assets
+                .iter()
+                .any(|asset| !asset.ends_with(expected_suffix))
+            {
+                return Err(format!(
+                    "{} has an asset outside its package format {expected_suffix}",
+                    row.slug
+                ));
+            }
         }
         let expected: BTreeSet<_> = TAP_CONSUMERS.into_iter().chain(APT_CONSUMERS).collect();
         if seen != expected {

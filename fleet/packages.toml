@@ -6,7 +6,7 @@ kind = "tap"
 source = "jackin-project/jackin"
 source_ref = "refs/tags/v*"
 channels = ["stable", "preview", "dev"]
-assets = ["jackin-*-aarch64-apple-darwin.tar.xz", "jackin-*-x86_64-apple-darwin.tar.xz"]
+assets = ["jackin-*-aarch64-apple-darwin.tar.gz", "jackin-*-x86_64-apple-darwin.tar.gz"]
 
 [[consumer]]
 slug = "tailrocks/homebrew-tablerock"
@@ -14,7 +14,7 @@ kind = "tap"
 source = "tailrocks/tablerock"
 source_ref = "refs/tags/v*"
 channels = ["stable", "preview", "dev"]
-assets = ["tablerock-*-aarch64-apple-darwin.tar.xz", "tablerock-*-x86_64-apple-darwin.tar.xz"]
+assets = ["tablerock-*-aarch64-apple-darwin.tar.gz", "tablerock-*-x86_64-apple-darwin.tar.gz"]
 
 [[consumer]]
 slug = "tailrocks/homebrew-parallax"
@@ -22,7 +22,7 @@ kind = "tap"
 source = "tailrocks/parallax"
 source_ref = "refs/tags/v*"
 channels = ["stable", "preview", "dev"]
-assets = ["parallax-*-aarch64-apple-darwin.tar.xz", "parallax-*-x86_64-apple-darwin.tar.xz"]
+assets = ["parallax-*-aarch64-apple-darwin.tar.gz", "parallax-*-x86_64-apple-darwin.tar.gz"]
 
 [[consumer]]
 slug = "tailrocks/homebrew-holla"
@@ -30,7 +30,7 @@ kind = "tap"
 source = "tailrocks/holla"
 source_ref = "refs/tags/v*"
 channels = ["stable", "preview", "dev"]
-assets = ["holla-*-aarch64-apple-darwin.tar.xz", "holla-*-x86_64-apple-darwin.tar.xz"]
+assets = ["holla-*-aarch64-apple-darwin.tar.gz", "holla-*-x86_64-apple-darwin.tar.gz"]
 
 [[consumer]]
 slug = "tailrocks/velnor-apt"

@@ -156,6 +156,10 @@ fn package_policy_and_workflows_are_closed_and_hosted_only() {
         APT_TEMPLATE, PackagePolicy, SIGNER_WORKFLOW, TAP_TEMPLATE, UPDATER_WORKFLOW,
     };
     PackagePolicy::load(&common::repo_root()).expect("package policy loads");
+    let package_policy = std::fs::read_to_string(common::repo_root().join("fleet/packages.toml"))
+        .expect("package policy bytes");
+    assert!(!package_policy.contains(".tar.xz"));
+    assert_eq!(package_policy.matches(".tar.gz").count(), 8);
     for body in [
         SIGNER_WORKFLOW,
         UPDATER_WORKFLOW,
@@ -256,6 +260,9 @@ fn updater_executes_explicit_current_then_old_signer_alternatives() {
     assert!(body.contains("for signer_digest in \"${accepted_digests[@]}\""));
     assert!(body.contains("--signer-digest \"$signer_digest\""));
     assert!(body.contains("$SOURCE_OWNER/velnor-actions/.github/workflows/package-signer.yml"));
+    assert!(body.contains("keys == [\"accepted_signer_digest\",\"verification\"]"));
+    assert!(body.contains(".verification | type == \"array\" and length > 0"));
+    assert!(!body.contains("all(.[]; type == \"array\""));
 }
 
 #[test]

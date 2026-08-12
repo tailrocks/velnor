@@ -152,7 +152,14 @@ jobs:
         name: Normalize verified evidence
         run: |
           set -euo pipefail
-          evidence=$(jq -csS 'if length > 0 and all(.[]; type == "array" and length > 0) then . else error("empty verification") end' verified/verification.jsonl | base64 -w0)
+          evidence=$(jq -csS '
+            if length > 0 and all(.;
+              type == "object" and
+              keys == ["accepted_signer_digest","verification"] and
+              (.accepted_signer_digest | test("^[0-9a-f]{40}$")) and
+              (.verification | type == "array" and length > 0)
+            ) then . else error("invalid verification evidence") end
+          ' verified/verification.jsonl | base64 -w0)
           identity=$(sha256sum verified/identity.json | cut -d' ' -f1)
           {
             echo "evidence=$evidence"
