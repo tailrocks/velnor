@@ -593,22 +593,40 @@ const PUBLISH_WORKFLOW_INPUTS: &[InputRule] = &[
     InputRule::Literal("publish", &["true", "false"]),
 ];
 
-pub static REUSABLE_WORKFLOWS: &[ReusableWorkflow] = &[ReusableWorkflow {
-    repository: "jackin-project/jackin-role-action",
-    path: ".github/workflows/publish.yml",
-    allowed_refs: &[
-        allowed(
-            "041f17a6d32f8fd2a8ef03c2a63be58346993136",
-            "latest publish workflow with mise 2026.8.3 (#95)",
-        ),
-        allowed(
-            "80a1acd07257a23b441c546e6fcad12239ef7626",
-            "estate-pinned publish reusable workflow",
-        ),
-    ],
-    inputs: PUBLISH_WORKFLOW_INPUTS,
-    notes: "server-expanded reusable workflow; identity/full-SHA/inputs admitted, jobs.<id>.uses never parsed as a runner action",
-}];
+const PACKAGE_SIGNER_WORKFLOW_INPUTS: &[InputRule] = &[
+    InputRule::Any("artifact-name"),
+    InputRule::Any("subject-path"),
+    InputRule::Any("source-ref"),
+];
+
+pub static REUSABLE_WORKFLOWS: &[ReusableWorkflow] = &[
+    ReusableWorkflow {
+        repository: "jackin-project/jackin-role-action",
+        path: ".github/workflows/publish.yml",
+        allowed_refs: &[
+            allowed(
+                "041f17a6d32f8fd2a8ef03c2a63be58346993136",
+                "latest publish workflow with mise 2026.8.3 (#95)",
+            ),
+            allowed(
+                "80a1acd07257a23b441c546e6fcad12239ef7626",
+                "estate-pinned publish reusable workflow",
+            ),
+        ],
+        inputs: PUBLISH_WORKFLOW_INPUTS,
+        notes: "server-expanded reusable workflow; identity/full-SHA/inputs admitted, jobs.<id>.uses never parsed as a runner action",
+    },
+    ReusableWorkflow {
+        repository: "tailrocks/velnor-actions",
+        path: ".github/workflows/package-signer.yml",
+        allowed_refs: &[allowed(
+            "efc76f791d36afa4f00732f452d2ba120b94ff96",
+            "fleet 2026.8.5 hosted package signer",
+        )],
+        inputs: PACKAGE_SIGNER_WORKFLOW_INPUTS,
+        notes: "hosted package signer; full-SHA and closed inputs admitted",
+    },
+];
 
 pub static MANIFEST: CapabilityManifest = CapabilityManifest {
     version: MANIFEST_VERSION,
@@ -1604,6 +1622,33 @@ mod tests {
                 segments.next().expect("action repository")
             );
             let subpath = segments.collect::<Vec<_>>().join("/");
+            if !subpath.is_empty() {
+                let workflow_path = subpath.as_str();
+                if let Some(workflow) = REUSABLE_WORKFLOWS.iter().find(|candidate| {
+                    candidate.repository.eq_ignore_ascii_case(&repository)
+                        && candidate.path.trim_start_matches(".github/workflows/")
+                            == workflow_path.trim_start_matches(".github/workflows/")
+                }) {
+                    assert!(
+                        workflow
+                            .allowed_refs
+                            .iter()
+                            .any(|candidate| candidate.value == action_ref),
+                        "release workflow ref is absent from manifest: {action}"
+                    );
+                    for input in inputs {
+                        assert!(
+                            workflow
+                                .inputs
+                                .iter()
+                                .copied()
+                                .any(|rule| rule.name().eq_ignore_ascii_case(&input)),
+                            "release workflow input is absent from manifest: {action} with.{input}"
+                        );
+                    }
+                    continue;
+                }
+            }
             let capability = ACTIONS
                 .iter()
                 .find(|candidate| candidate.repository.eq_ignore_ascii_case(&repository))
