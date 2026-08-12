@@ -194,6 +194,13 @@ fn package_policy_and_workflows_are_closed_and_hosted_only() {
     assert!(!UPDATER_WORKFLOW.contains("releases/latest"));
     assert!(TAP_TEMPLATE.matches("channel: stable").count() == 3);
     assert!(APT_TEMPLATE.matches("channel: stable").count() == 3);
+    for template in [TAP_TEMPLATE, APT_TEMPLATE] {
+        assert!(template.contains("needs: [jackin_project, tailrocks, chainargos]"));
+        assert!(template.contains("needs.jackin_project.result"));
+        assert!(template.contains("needs.chainargos.result"));
+        assert!(!template.contains("needs.jackin-project"));
+        assert!(!template.contains("needs.ChainArgos"));
+    }
     assert!(
         TAP_TEMPLATE
             .matches("package-update/verified/stable")
