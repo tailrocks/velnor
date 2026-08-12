@@ -185,7 +185,7 @@ jobs:
         run: |
           set -euo pipefail
           evidence=$(jq -csS '
-            if length > 0 and all(.;
+            if length > 0 and all(.[];
               type == "object" and
               keys == ["accepted_signer_digest","verification"] and
               (.accepted_signer_digest | test("^[0-9a-f]{40}$")) and
