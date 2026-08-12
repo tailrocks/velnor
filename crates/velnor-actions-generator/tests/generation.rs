@@ -202,6 +202,63 @@ fn package_generation_writes_exact_callables_and_templates() {
 }
 
 #[test]
+fn package_consumer_renderer_binds_current_and_bounded_old_signers() {
+    let policy = velnor_actions_generator::package::PackagePolicy::load(&common::repo_root())
+        .expect("package policy loads");
+    let current = "1111111111111111111111111111111111111111";
+    let old = "2222222222222222222222222222222222222222";
+    let rendered = policy
+        .render_consumer(
+            "tailrocks/homebrew-tablerock",
+            current,
+            "2026.8.6",
+            Some((old, "2026-08-12T00:00:00Z", "2026-09-11T00:00:00Z")),
+        )
+        .expect("bounded rotation renders");
+    assert_eq!(rendered.matches(current).count(), 6);
+    assert_eq!(rendered.matches(old).count(), 3);
+    assert!(!rendered.contains("@FLEET_SHA@"));
+    assert!(rendered.contains("old-signer-expires-at: \"2026-09-11T00:00:00Z\""));
+
+    assert!(
+        policy
+            .render_consumer("tailrocks/not-a-consumer", current, "2026.8.6", None)
+            .is_err()
+    );
+    assert!(
+        policy
+            .render_consumer("tailrocks/homebrew-tablerock", "main", "2026.8.6", None)
+            .is_err()
+    );
+    assert!(
+        policy
+            .render_consumer("tailrocks/homebrew-tablerock", current, "v1", None)
+            .is_err()
+    );
+    assert!(
+        policy
+            .render_consumer(
+                "tailrocks/homebrew-tablerock",
+                current,
+                "2026.8.6",
+                Some((current, "2026-08-12T00:00:00Z", "2026-09-11T00:00:00Z")),
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn updater_executes_explicit_current_then_old_signer_alternatives() {
+    let body = velnor_actions_generator::package::UPDATER_WORKFLOW;
+    assert!(body.contains("accepted_digests=(\"$CURRENT_SIGNER_DIGEST\")"));
+    assert!(body.contains("accepted_digests+=(\"$OLD_SIGNER_DIGEST\")"));
+    assert!(body.contains("30 * 24 * 60 * 60"));
+    assert!(body.contains("for signer_digest in \"${accepted_digests[@]}\""));
+    assert!(body.contains("--signer-digest \"$signer_digest\""));
+    assert!(body.contains("$SOURCE_OWNER/velnor-actions/.github/workflows/package-signer.yml"));
+}
+
+#[test]
 fn bound_fixture_audit_passes() {
     let dir = common::bound_fixture(DUMMY_SHA);
     let line = audit::audit(&dir).expect("bound audit passes");

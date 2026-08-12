@@ -15,7 +15,10 @@ jobs:
     uses: jackin-project/velnor-actions/.github/workflows/package-updater.yml@@FLEET_SHA@ # @CALVER@
     with:
       consumer-repository: ${{ github.repository }}
-      signer-digest: "@SIGNER_DIGEST@"
+      current-signer-digest: "@CURRENT_SIGNER_DIGEST@"
+      old-signer-digest: "@OLD_SIGNER_DIGEST@"
+      old-signer-activated-at: "@OLD_SIGNER_ACTIVATED_AT@"
+      old-signer-expires-at: "@OLD_SIGNER_EXPIRES_AT@"
       branch: "package-update/verified-stable"
     secrets:
       app_private_key: ${{ secrets.PACKAGE_UPDATER_APP_PRIVATE_KEY }}
@@ -24,7 +27,10 @@ jobs:
     uses: tailrocks/velnor-actions/.github/workflows/package-updater.yml@@FLEET_SHA@ # @CALVER@
     with:
       consumer-repository: ${{ github.repository }}
-      signer-digest: "@SIGNER_DIGEST@"
+      current-signer-digest: "@CURRENT_SIGNER_DIGEST@"
+      old-signer-digest: "@OLD_SIGNER_DIGEST@"
+      old-signer-activated-at: "@OLD_SIGNER_ACTIVATED_AT@"
+      old-signer-expires-at: "@OLD_SIGNER_EXPIRES_AT@"
       branch: "package-update/verified-stable"
     secrets:
       app_private_key: ${{ secrets.PACKAGE_UPDATER_APP_PRIVATE_KEY }}
@@ -33,7 +39,10 @@ jobs:
     uses: ChainArgos/velnor-actions/.github/workflows/package-updater.yml@@FLEET_SHA@ # @CALVER@
     with:
       consumer-repository: ${{ github.repository }}
-      signer-digest: "@SIGNER_DIGEST@"
+      current-signer-digest: "@CURRENT_SIGNER_DIGEST@"
+      old-signer-digest: "@OLD_SIGNER_DIGEST@"
+      old-signer-activated-at: "@OLD_SIGNER_ACTIVATED_AT@"
+      old-signer-expires-at: "@OLD_SIGNER_EXPIRES_AT@"
       branch: "package-update/verified-stable"
     secrets:
       app_private_key: ${{ secrets.PACKAGE_UPDATER_APP_PRIVATE_KEY }}

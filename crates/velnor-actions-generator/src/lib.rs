@@ -192,6 +192,24 @@ pub fn render_consumer_to_dir(
     Ok(path)
 }
 
+/// Materialize one package consumer's owner-routed updater workflow.
+pub fn render_package_consumer_to_dir(
+    root: &Path,
+    repository: &str,
+    release_sha: &str,
+    calver: &str,
+    old_signer: Option<(&str, &str, &str)>,
+    output: &Path,
+) -> Result<PathBuf, String> {
+    let policy = package::PackagePolicy::load(root)?;
+    let body = policy.render_consumer(repository, release_sha, calver, old_signer)?;
+    let dir = output.join(".github").join("workflows");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    let path = dir.join("package-update.yml");
+    std::fs::write(&path, body).map_err(|e| format!("writing {}: {e}", path.display()))?;
+    Ok(path)
+}
+
 fn write_if_changed(path: &Path, body: &str) -> Result<(), String> {
     if let Ok(existing) = std::fs::read_to_string(path)
         && existing == body

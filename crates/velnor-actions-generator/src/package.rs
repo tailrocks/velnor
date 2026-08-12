@@ -134,6 +134,89 @@ impl PackagePolicy {
                 ),
             )
     }
+
+    pub fn render_consumer(
+        &self,
+        repository: &str,
+        release_sha: &str,
+        calver: &str,
+        old_signer: Option<(&str, &str, &str)>,
+    ) -> Result<String, String> {
+        if !is_sha40(release_sha) {
+            return Err("release SHA is not 40 lowercase hexadecimal characters".into());
+        }
+        if !valid_calver(calver) {
+            return Err("CalVer must be YYYY.M.D with numeric components".into());
+        }
+        let row = self
+            .consumer
+            .iter()
+            .find(|row| row.slug == repository)
+            .ok_or_else(|| format!("{repository:?} is not a package consumer"))?;
+        let (old_digest, activated_at, expires_at) = match old_signer {
+            None => ("", "", ""),
+            Some((digest, activated, expires)) => {
+                if !is_sha40(digest) || digest == release_sha {
+                    return Err("old signer digest must be a distinct 40-hex SHA".into());
+                }
+                if !looks_rfc3339_utc(activated) || !looks_rfc3339_utc(expires) {
+                    return Err("rotation timestamps must be UTC RFC3339 seconds".into());
+                }
+                (digest, activated, expires)
+            }
+        };
+        let template = match row.kind.as_str() {
+            "tap" => TAP_TEMPLATE,
+            "apt" => APT_TEMPLATE,
+            _ => return Err("package policy contains an unknown kind".into()),
+        };
+        let rendered = template
+            .replace("@FLEET_SHA@", release_sha)
+            .replace("@CALVER@", calver)
+            .replace("@CURRENT_SIGNER_DIGEST@", release_sha)
+            .replace("@OLD_SIGNER_DIGEST@", old_digest)
+            .replace("@OLD_SIGNER_ACTIVATED_AT@", activated_at)
+            .replace("@OLD_SIGNER_EXPIRES_AT@", expires_at);
+        for placeholder in [
+            "@FLEET_SHA@",
+            "@CALVER@",
+            "@CURRENT_SIGNER_DIGEST@",
+            "@OLD_SIGNER_DIGEST@",
+            "@OLD_SIGNER_ACTIVATED_AT@",
+            "@OLD_SIGNER_EXPIRES_AT@",
+        ] {
+            if rendered.contains(placeholder) {
+                return Err(format!("package consumer rendering left {placeholder}"));
+            }
+        }
+        Ok(rendered)
+    }
+}
+
+fn is_sha40(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn valid_calver(value: &str) -> bool {
+    let parts: Vec<_> = value.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+}
+
+fn looks_rfc3339_utc(value: &str) -> bool {
+    value.len() == 20
+        && value.ends_with('Z')
+        && value.as_bytes()[4] == b'-'
+        && value.as_bytes()[7] == b'-'
+        && value.as_bytes()[10] == b'T'
+        && value.as_bytes()[13] == b':'
+        && value.as_bytes()[16] == b':'
+        && value[..19].bytes().filter(|b| b.is_ascii_digit()).count() == 14
 }
 
 pub const SIGNER_WORKFLOW: &str = include_str!("package_signer.yml");

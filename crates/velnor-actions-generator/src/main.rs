@@ -15,7 +15,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use velnor_actions_generator::{
-    ALL_CLASSES, REQUIRED_LAYOUT, audit, generate, render_consumer_to_dir, validate_layout,
+    ALL_CLASSES, REQUIRED_LAYOUT, audit, generate, render_consumer_to_dir,
+    render_package_consumer_to_dir, validate_layout,
 };
 
 fn main() -> ExitCode {
@@ -36,6 +37,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<String, String> {
         Some("check") => run_check(args),
         Some("generate") => run_generate(args),
         Some("render-consumer") => run_render_consumer(args),
+        Some("render-package-consumer") => run_render_package_consumer(args),
         Some("audit") => run_audit(args),
         Some("verify-remote") => run_verify_remote(args),
         Some(other) => Err(format!("unknown subcommand: {other}")),
@@ -43,6 +45,56 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<String, String> {
             "missing subcommand (expected: check, generate, render-consumer, or audit)".to_string(),
         ),
     }
+}
+
+fn run_render_package_consumer(mut args: impl Iterator<Item = String>) -> Result<String, String> {
+    let mut root = PathBuf::from(".");
+    let mut repository = None;
+    let mut release_sha = None;
+    let mut calver = None;
+    let mut output = None;
+    let mut old_digest = None;
+    let mut old_activated = None;
+    let mut old_expires = None;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--root" => root = PathBuf::from(require_value(&mut args, "--root")?),
+            "--repository" => repository = Some(require_value(&mut args, "--repository")?),
+            "--release-sha" => release_sha = Some(require_value(&mut args, "--release-sha")?),
+            "--calver" => calver = Some(require_value(&mut args, "--calver")?),
+            "--output" => output = Some(PathBuf::from(require_value(&mut args, "--output")?)),
+            "--old-signer-digest" => {
+                old_digest = Some(require_value(&mut args, "--old-signer-digest")?)
+            }
+            "--old-signer-activated-at" => {
+                old_activated = Some(require_value(&mut args, "--old-signer-activated-at")?)
+            }
+            "--old-signer-expires-at" => {
+                old_expires = Some(require_value(&mut args, "--old-signer-expires-at")?)
+            }
+            other => return Err(format!("unexpected argument: {other}")),
+        }
+    }
+    let repository = repository.ok_or("render-package-consumer requires --repository")?;
+    let release_sha = release_sha.ok_or("render-package-consumer requires --release-sha")?;
+    let calver = calver.ok_or("render-package-consumer requires --calver")?;
+    let output = output.ok_or("render-package-consumer requires --output")?;
+    let old = match (
+        old_digest.as_deref(),
+        old_activated.as_deref(),
+        old_expires.as_deref(),
+    ) {
+        (None, None, None) => None,
+        (Some(d), Some(a), Some(e)) => Some((d, a, e)),
+        _ => {
+            return Err(
+                "old signer rotation requires digest, activation, and expiry together".into(),
+            );
+        }
+    };
+    let path =
+        render_package_consumer_to_dir(&root, &repository, &release_sha, &calver, old, &output)?;
+    Ok(format!("rendered {}", path.display()))
 }
 
 fn run_verify_remote(mut args: impl Iterator<Item = String>) -> Result<String, String> {

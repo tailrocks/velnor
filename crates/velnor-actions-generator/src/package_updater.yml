@@ -7,9 +7,21 @@ on:
       consumer-repository:
         required: true
         type: string
-      signer-digest:
+      current-signer-digest:
         required: true
         type: string
+      old-signer-digest:
+        required: false
+        type: string
+        default: ""
+      old-signer-activated-at:
+        required: false
+        type: string
+        default: ""
+      old-signer-expires-at:
+        required: false
+        type: string
+        default: ""
       branch:
         required: true
         type: string
@@ -85,25 +97,56 @@ jobs:
       - name: Verify hosted provenance
         env:
           CONSUMER_REPOSITORY: ${{ inputs.consumer-repository }}
-          SIGNER_DIGEST: ${{ inputs.signer-digest }}
+          CURRENT_SIGNER_DIGEST: ${{ inputs.current-signer-digest }}
+          OLD_SIGNER_DIGEST: ${{ inputs.old-signer-digest }}
+          OLD_SIGNER_ACTIVATED_AT: ${{ inputs.old-signer-activated-at }}
+          OLD_SIGNER_EXPIRES_AT: ${{ inputs.old-signer-expires-at }}
         run: |
           set -euo pipefail
 @CONSUMER_SOURCE_CASES@
-          SIGNER_WORKFLOW="$SOURCE_REPOSITORY/.github/workflows/package-sign.yml"
-          [[ "$SIGNER_DIGEST" =~ ^[0-9a-f]{40}$ ]]
+          SOURCE_OWNER=${SOURCE_REPOSITORY%%/*}
+          SIGNER_WORKFLOW="$SOURCE_OWNER/velnor-actions/.github/workflows/package-signer.yml"
+          [[ "$CURRENT_SIGNER_DIGEST" =~ ^[0-9a-f]{40}$ ]]
+          accepted_digests=("$CURRENT_SIGNER_DIGEST")
+          if [[ -n "$OLD_SIGNER_DIGEST$OLD_SIGNER_ACTIVATED_AT$OLD_SIGNER_EXPIRES_AT" ]]; then
+            [[ "$OLD_SIGNER_DIGEST" =~ ^[0-9a-f]{40}$ ]]
+            test "$OLD_SIGNER_DIGEST" != "$CURRENT_SIGNER_DIGEST"
+            [[ "$OLD_SIGNER_ACTIVATED_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+            [[ "$OLD_SIGNER_EXPIRES_AT" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+            activated_epoch=$(date -u -d "$OLD_SIGNER_ACTIVATED_AT" +%s)
+            expires_epoch=$(date -u -d "$OLD_SIGNER_EXPIRES_AT" +%s)
+            now_epoch=$(date -u +%s)
+            test "$activated_epoch" -le "$now_epoch"
+            test "$now_epoch" -lt "$expires_epoch"
+            test "$expires_epoch" -le "$((activated_epoch + 30 * 24 * 60 * 60))"
+            accepted_digests+=("$OLD_SIGNER_DIGEST")
+          fi
           source_ref=$(jq -r .source_ref verified/identity.json)
           source_digest=$(jq -r .source_digest verified/identity.json)
           : > verified/verification.jsonl
           while IFS= read -r artifact; do
-            gh attestation verify "verified/$artifact" \
-              --repo "$SOURCE_REPOSITORY" \
-              --source-ref "$source_ref" \
-              --source-digest "$source_digest" \
-              --signer-workflow "$SIGNER_WORKFLOW" \
-              --signer-digest "$SIGNER_DIGEST" \
-              --predicate-type https://slsa.dev/provenance/v1 \
-              --deny-self-hosted-runners \
-              --format json | jq -c . >> verified/verification.jsonl
+            verified_digest=""
+            for signer_digest in "${accepted_digests[@]}"; do
+              report=$(mktemp)
+              if gh attestation verify "verified/$artifact" \
+                --repo "$SOURCE_REPOSITORY" \
+                --source-ref "$source_ref" \
+                --source-digest "$source_digest" \
+                --signer-workflow "$SIGNER_WORKFLOW" \
+                --signer-digest "$signer_digest" \
+                --predicate-type https://slsa.dev/provenance/v1 \
+                --deny-self-hosted-runners \
+                --format json > "$report"; then
+                test -z "$verified_digest"
+                verified_digest="$signer_digest"
+                jq -c --arg accepted_signer_digest "$signer_digest" \
+                  '{accepted_signer_digest:$accepted_signer_digest,verification:.}' "$report" \
+                  >> verified/verification.jsonl
+              fi
+              rm -f "$report"
+              test -z "$verified_digest" || break
+            done
+            test -n "$verified_digest"
           done < verified/artifacts.list
       - id: normalize
         name: Normalize verified evidence
