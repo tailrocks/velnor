@@ -120,6 +120,7 @@ jobs:
       - name: Verify hosted provenance
         env:
           CONSUMER_REPOSITORY: ${{ inputs.consumer-repository }}
+          GH_TOKEN: ${{ github.token }}
           CURRENT_SIGNER_DIGEST: ${{ inputs.current-signer-digest }}
           OLD_SIGNER_DIGEST: ${{ inputs.old-signer-digest }}
           OLD_SIGNER_ACTIVATED_AT: ${{ inputs.old-signer-activated-at }}

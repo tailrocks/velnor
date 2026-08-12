@@ -307,6 +307,7 @@ fn package_consumer_renderer_binds_current_and_bounded_old_signers() {
 fn updater_executes_explicit_current_then_old_signer_alternatives() {
     let body = velnor_actions_generator::package::UPDATER_WORKFLOW;
     assert!(body.contains("accepted_digests=(\"$CURRENT_SIGNER_DIGEST\")"));
+    assert!(body.contains("GH_TOKEN: ${{ github.token }}"));
     assert!(body.contains("accepted_digests+=(\"$OLD_SIGNER_DIGEST\")"));
     assert!(body.contains("30 * 24 * 60 * 60"));
     assert!(body.contains("for signer_digest in \"${accepted_digests[@]}\""));
