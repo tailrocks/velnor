@@ -4,8 +4,8 @@
 # this same file (byte-identical within the class) as .github/workflows/ci.yml.
 # The three owner-local reusable-workflow calls are selected solely by
 # github.repository_owner: exactly one runs and the other two skip. The shared
-# release SHA pin and CalVer version comment are identical across all three
-# calls and are replaced together at release time by render-consumer.
+# owner-local release SHA pins and one CalVer version identify one mirrored release
+# and are replaced together at release time by render-consumer.
 name: CI
 run-name: ${{ inputs.recovery_proof_id != '' && format('CI recovery {0}', inputs.recovery_proof_id) || inputs.benchmark_campaign != '' && format('CI benchmark {0}/{1}', inputs.benchmark_campaign, inputs.benchmark_wave) || inputs.cache_proof_id != '' && format('CI cache proof {0}', inputs.cache_proof_id) || 'CI' }}
 
@@ -93,7 +93,7 @@ jobs:
       actions: read
       contents: read
       pull-requests: read
-    uses: jackin-project/velnor-actions/.github/workflows/ci-apt.yml@@FLEET_SHA@ # @CALVER@
+    uses: jackin-project/velnor-actions/.github/workflows/ci-apt.yml@JACKIN_FLEET_SHA@ # @CALVER@
     with:
       lane: ${{ (github.event_name == 'workflow_dispatch' && inputs.lane != '' && inputs.lane) || (github.repository_owner == 'jackin-project' && 'github') || ((github.repository_owner == 'tailrocks' || github.repository_owner == 'ChainArgos') && 'velnor') || 'invalid' }}
       recovery_proof_id: ${{ inputs.recovery_proof_id || '' }}
@@ -115,7 +115,7 @@ jobs:
       actions: read
       contents: read
       pull-requests: read
-    uses: tailrocks/velnor-actions/.github/workflows/ci-apt.yml@@FLEET_SHA@ # @CALVER@
+    uses: tailrocks/velnor-actions/.github/workflows/ci-apt.yml@TAILROCKS_FLEET_SHA@ # @CALVER@
     with:
       lane: ${{ (github.event_name == 'workflow_dispatch' && inputs.lane != '' && inputs.lane) || (github.repository_owner == 'jackin-project' && 'github') || ((github.repository_owner == 'tailrocks' || github.repository_owner == 'ChainArgos') && 'velnor') || 'invalid' }}
       recovery_proof_id: ${{ inputs.recovery_proof_id || '' }}
@@ -137,7 +137,7 @@ jobs:
       actions: read
       contents: read
       pull-requests: read
-    uses: ChainArgos/velnor-actions/.github/workflows/ci-apt.yml@@FLEET_SHA@ # @CALVER@
+    uses: ChainArgos/velnor-actions/.github/workflows/ci-apt.yml@CHAINARGOS_FLEET_SHA@ # @CALVER@
     with:
       lane: ${{ (github.event_name == 'workflow_dispatch' && inputs.lane != '' && inputs.lane) || (github.repository_owner == 'jackin-project' && 'github') || ((github.repository_owner == 'tailrocks' || github.repository_owner == 'ChainArgos') && 'velnor') || 'invalid' }}
       recovery_proof_id: ${{ inputs.recovery_proof_id || '' }}

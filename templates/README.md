@@ -16,8 +16,10 @@ repository of that class ships as `.github/workflows/ci.yml`. Each template:
 - declares three static owner-local reusable-workflow calls — one per owner
   (jackin-project, tailrocks, ChainArgos) — selected only by exact
   `github.repository_owner`; exactly one runs and the other two skip;
-- shares one anchored `@FLEET_SHA@ # @CALVER@` release pin across all three calls
-  (the only non-executable placeholders), replaced together by `render-consumer`;
+- gives each static call an owner-local SHA placeholder and shares one anchored
+  `@CALVER@` across all three calls (the only non-executable placeholders), all
+  replaced together by `render-consumer`; this binds the same CalVer release while
+  allowing the three mirror tags to target their independent Git histories;
 - exposes the sole `lane` selector (`github`, `velnor`, `both`) on
   `workflow_dispatch`, and triggers on `pull_request`, `push`, `merge_group`, and
   `workflow_dispatch`; omitted lane defaults to GitHub for `jackin-project` and
@@ -29,4 +31,6 @@ repository of that class ships as `.github/workflows/ci.yml`. Each template:
 
 Materialize one with
 `mise exec -- cargo run -p velnor-actions-generator -- render-consumer
---repository OWNER/REPO --release-sha <40-hex> --calver <CalVer> --output DIR`.
+--repository OWNER/REPO --jackin-release-sha <40-hex>
+--tailrocks-release-sha <40-hex> --chainargos-release-sha <40-hex>
+--calver <CalVer> --output DIR`.

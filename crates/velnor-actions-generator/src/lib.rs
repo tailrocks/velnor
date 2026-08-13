@@ -173,7 +173,7 @@ pub fn generate(root: &Path) -> Result<Vec<PathBuf>, String> {
 pub fn render_consumer_to_dir(
     root: &Path,
     repository: &str,
-    release_sha: &str,
+    release_shas: [&str; 3],
     calver: &str,
     output: &Path,
 ) -> Result<PathBuf, String> {
@@ -184,7 +184,7 @@ pub fn render_consumer_to_dir(
         .find(|r| r.slug == repository)
         .ok_or_else(|| format!("{repository:?} is not a fleet member"))?;
     let template = render::consumer_template(repo.class);
-    let body = render::render_consumer(&template, release_sha, calver)?;
+    let body = render::render_consumer(&template, release_shas, calver)?;
     let dir = output.join(".github").join("workflows");
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
     let path = dir.join("ci.yml");

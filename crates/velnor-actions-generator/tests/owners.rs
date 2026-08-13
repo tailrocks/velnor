@@ -6,8 +6,6 @@ use velnor_actions_generator::RepositoryClass;
 use velnor_actions_generator::model::OWNERS;
 use velnor_actions_generator::render;
 
-const DUMMY_SHA: &str = "abcdef0123456789abcdef0123456789abcdef01";
-
 fn code_template() -> String {
     render::consumer_template(RepositoryClass::Code)
 }
@@ -18,9 +16,9 @@ fn exactly_three_static_owner_calls() {
     assert_eq!(OWNERS, ["jackin-project", "tailrocks", "ChainArgos"]);
     // Exactly three reusable-workflow calls.
     assert_eq!(t.matches("uses:").count(), 3);
-    for owner in OWNERS {
+    for (owner, placeholder) in OWNERS.iter().zip(render::OWNER_SHA_PLACEHOLDERS) {
         assert!(t.contains(&format!(
-            "uses: {owner}/velnor-actions/.github/workflows/ci-code.yml@@FLEET_SHA@ # @CALVER@"
+            "uses: {owner}/velnor-actions/.github/workflows/ci-code.yml{placeholder} # @CALVER@"
         )));
         assert!(t.contains(&format!(
             "if: ${{{{ github.repository_owner == '{owner}' }}}}"
@@ -76,16 +74,18 @@ fn ci_required_uses_positive_truth_table() {
 }
 
 #[test]
-fn three_calls_share_one_sha_and_calver() {
+fn three_calls_bind_owner_shas_and_share_one_calver() {
     let t = code_template();
-    let out = render::render_consumer(&t, DUMMY_SHA, "2026.7.0").unwrap();
-    // Exactly three coherent, identical pins.
-    assert_eq!(out.matches(&format!("@{DUMMY_SHA} # 2026.7.0")).count(), 3);
-    // No mixed pin: the SHA never appears without its CalVer comment beside it.
-    for line in out.lines() {
-        if line.contains(&format!("@{DUMMY_SHA}")) {
-            assert!(line.contains("# 2026.7.0"), "coherent pin on: {line}");
-        }
+    let shas = [
+        "1111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222",
+        "3333333333333333333333333333333333333333",
+    ];
+    let out = render::render_consumer(&t, shas, "2026.7.0").unwrap();
+    for (owner, sha) in OWNERS.iter().zip(shas) {
+        assert!(out.contains(&format!(
+            "uses: {owner}/velnor-actions/.github/workflows/ci-code.yml@{sha} # 2026.7.0"
+        )));
     }
 }
 

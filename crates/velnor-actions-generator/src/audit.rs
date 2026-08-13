@@ -17,6 +17,7 @@ use crate::model::{FleetManifest, OWNERS, is_sha40};
 use crate::package::{self, PackagePolicy};
 use crate::render::{
     self, ACTIONS_REPO, CALVER_PLACEHOLDER, CANONICAL_OWNER, FLEET_SHA_PLACEHOLDER,
+    OWNER_SHA_PLACEHOLDERS,
 };
 use crate::{ALL_CLASSES, RepositoryClass};
 use serde::Deserialize;
@@ -524,9 +525,9 @@ fn audit_consumer_structure(class: RepositoryClass, rendered: &str) -> Result<()
 
     // Exactly three static owner-local reusable calls, one per recognized owner,
     // selected only by exact github.repository_owner. No dynamic `uses`.
-    for owner in OWNERS {
+    for (owner, release_placeholder) in OWNERS.iter().zip(OWNER_SHA_PLACEHOLDERS) {
         let call = format!(
-            "uses: {owner}/{ACTIONS_REPO}/.github/workflows/{file}@{FLEET_SHA_PLACEHOLDER} # {CALVER_PLACEHOLDER}"
+            "uses: {owner}/{ACTIONS_REPO}/.github/workflows/{file}{release_placeholder} # {CALVER_PLACEHOLDER}"
         );
         if !rendered.contains(&call) {
             return Err(format!("{what}: missing owner-local call for {owner}"));
@@ -709,13 +710,15 @@ fn audit_admitted_closure(
 fn audit_materialization(manifest: &FleetManifest) -> Result<(), String> {
     for class in ALL_CLASSES {
         let template = render::consumer_template(class);
-        let class_bytes = render::render_consumer(&template, AUDIT_RELEASE_SHA, AUDIT_CALVER)?;
+        let release_shas = [AUDIT_RELEASE_SHA; 3];
+        let class_bytes = render::render_consumer(&template, release_shas, AUDIT_CALVER)?;
 
-        // Three coherent owner references sharing one SHA and one CalVer.
+        // Three coherent owner references sharing one CalVer. Each SHA is
+        // owner-local; the audit fixture intentionally uses the same bytes.
         let want_ref = format!("@{AUDIT_RELEASE_SHA} # {AUDIT_CALVER}");
         if class_bytes.matches(&want_ref).count() != OWNERS.len() {
             return Err(format!(
-                "class {} materialization does not share one SHA/CalVer across all {} owner calls",
+                "class {} materialization does not bind all {} owner calls to the release",
                 class.code(),
                 OWNERS.len()
             ));
@@ -727,7 +730,7 @@ fn audit_materialization(manifest: &FleetManifest) -> Result<(), String> {
                 class.code()
             ));
         }
-        if render::render_consumer(&class_bytes, AUDIT_RELEASE_SHA, AUDIT_CALVER).is_ok() {
+        if render::render_consumer(&class_bytes, release_shas, AUDIT_CALVER).is_ok() {
             return Err(format!(
                 "class {} accepted a second repository-specific substitution",
                 class.code()
@@ -737,7 +740,7 @@ fn audit_materialization(manifest: &FleetManifest) -> Result<(), String> {
         // Every member of the class materializes to the identical bytes: no
         // per-repository fork or slug-specific substitution.
         for repo in manifest.members_of(class) {
-            let repo_bytes = render::render_consumer(&template, AUDIT_RELEASE_SHA, AUDIT_CALVER)?;
+            let repo_bytes = render::render_consumer(&template, release_shas, AUDIT_CALVER)?;
             if repo_bytes != class_bytes {
                 return Err(format!(
                     "repository {} does not materialize to its class {} template bytes",

@@ -114,7 +114,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
-          EXPECTED_CALLER_TEMPLATE_SHA256: 552fa230668e1f792bfcf945e1e99dc62276c2064acf99860753f83e9fd4b60e
+          EXPECTED_CALLER_TEMPLATE_SHA256: 229a1e50cd82191fbc549c159cd8c58c36c7d0b0f95d87bf9e8a4b6a4cd77791
           DECLARED_CACHE_IDS: tools
         run: |
           set -euo pipefail
@@ -149,12 +149,21 @@ jobs:
             [[ "${#pin_rows[@]}" == 3 ]] || fail "caller does not contain exactly three generated owner pins"
             owners="$(printf '%s\n' "${pin_rows[@]}" | cut -f1 | LC_ALL=C sort -u | paste -sd, -)"
             [[ "${owners}" == 'ChainArgos,jackin-project,tailrocks' ]] || fail "caller owner pin set mismatch"
-            fleet_sha="$(printf '%s\n' "${pin_rows[@]}" | cut -f2 | sort -u)"
             fleet_calver="$(printf '%s\n' "${pin_rows[@]}" | cut -f3 | sort -u)"
-            [[ "${fleet_sha}" =~ ^[0-9a-f]{40}$ && "${fleet_calver}" =~ ^20[0-9]{2}\.[0-9]+\.[0-9]+$ ]] || fail "caller release pin mismatch"
-            [[ "$(printf '%s\n' "${pin_rows[@]}" | cut -f2 | sort -u | wc -l | tr -d ' ')" == 1 && "$(printf '%s\n' "${pin_rows[@]}" | cut -f3 | sort -u | wc -l | tr -d ' ')" == 1 ]] || fail "caller uses mixed release pins"
-            sed "s/@${fleet_sha} # ${fleet_calver}/@@FLEET_SHA@ # @CALVER@/g" "${workflow_file}" > "${normalized_file}"
-            [[ "$(grep -Fc '@@FLEET_SHA@ # @CALVER@' "${normalized_file}")" == 3 ]] || fail "caller normalization count mismatch"
+            [[ "${fleet_calver}" =~ ^20[0-9]{2}\.[0-9]+\.[0-9]+$ && "$(printf '%s\n' "${pin_rows[@]}" | cut -f3 | sort -u | wc -l | tr -d ' ')" == 1 ]] || fail "caller uses mixed release versions"
+            cp "${workflow_file}" "${normalized_file}"
+            for owner in jackin-project tailrocks ChainArgos; do
+              owner_sha="$(printf '%s\n' "${pin_rows[@]}" | awk -F '\t' -v owner="${owner}" '$1 == owner { print $2 }')"
+              [[ "${owner_sha}" =~ ^[0-9a-f]{40}$ ]] || fail "caller owner release pin mismatch"
+              case "${owner}" in
+                jackin-project) placeholder='@JACKIN_FLEET_SHA@' ;;
+                tailrocks) placeholder='@TAILROCKS_FLEET_SHA@' ;;
+                ChainArgos) placeholder='@CHAINARGOS_FLEET_SHA@' ;;
+              esac
+              sed "\\~uses: ${owner}/velnor-actions/~ s/@${owner_sha} # ${fleet_calver}/${placeholder} # @CALVER@/" "${normalized_file}" > "${normalized_file}.next"
+              mv "${normalized_file}.next" "${normalized_file}"
+            done
+            [[ "$(grep -Ec '@(JACKIN|TAILROCKS|CHAINARGOS)_FLEET_SHA@ # @CALVER@' "${normalized_file}")" == 3 ]] || fail "caller normalization count mismatch"
             normalized_sha256="$(sha256sum "${normalized_file}" | cut -d' ' -f1)"
             [[ "${EXPECTED_CALLER_TEMPLATE_SHA256}" =~ ^[0-9a-f]{64}$ && "${normalized_sha256}" == "${EXPECTED_CALLER_TEMPLATE_SHA256}" ]] || fail "caller is not the exact generated class template"
           }

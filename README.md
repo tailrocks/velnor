@@ -32,7 +32,8 @@ Canonical source of the Velnor Actions fleet.
 - `templates/<class>/ci.yml` — the four normalized consumer templates, one per class,
   byte-identical within a class. Each has three owner-local reusable-workflow calls
   (jackin-project / tailrocks / ChainArgos) selected by `github.repository_owner`, a
-  shared `@<sha> # <CalVer>` release pin, and a fail-closed `ci-required` aggregator.
+  owner-local `@<sha> # <CalVer>` release pins, and a fail-closed `ci-required`
+  aggregator.
 - `crates/velnor-actions-generator/` — the Rust generator: `model` (data + validation),
   `render` (deterministic rendering), `cache` (trusted cache declaration/key
   validation), `audit` (regeneration, byte, closure, and fail-closed aggregation
@@ -42,9 +43,12 @@ Canonical source of the Velnor Actions fleet.
 
 - `generate --root .` — render the four templates (and, once `block-sha` is bound,
   the four callable workflows).
-- `render-consumer --root . --repository OWNER/REPO --release-sha <40-hex> --calver
-  <CalVer> --output DIR` — materialize one consumer's `DIR/.github/workflows/ci.yml`,
-  replacing `@FLEET_SHA@`/`@CALVER@` atomically.
+- `render-consumer --root . --repository OWNER/REPO --jackin-release-sha <40-hex>
+  --tailrocks-release-sha <40-hex> --chainargos-release-sha <40-hex> --calver
+  <CalVer> --output DIR` — materialize one consumer's
+  `DIR/.github/workflows/ci.yml`, atomically replacing the three owner-local SHA
+  placeholders and their shared CalVer. Each SHA is the target of that owner's
+  immutable mirror tag; mirror histories need not share commit identities.
 - `audit --root .` — the full fleet audit (prints
   `fleet valid: 28 repositories, 4 classes, 4 templates`).
 

@@ -3,9 +3,9 @@
 //! Every rendered file is byte-stable: Unix (LF) line endings, UTF-8, a single
 //! final newline, no trailing whitespace, and content that depends only on
 //! declared data — never on timestamps, host paths, repository slug, or
-//! environment. The two consumer-facing release tokens (`@FLEET_SHA@` and
-//! `@CALVER@`) are the only non-executable placeholders; `render_consumer`
-//! replaces them atomically.
+//! environment. The four consumer-facing release tokens (one owner-local SHA
+//! per mirror plus `@CALVER@`) are the only non-executable placeholders;
+//! `render_consumer` replaces them atomically.
 
 use crate::RepositoryClass;
 use crate::cache::{CacheContract, CacheDeclaration};
@@ -19,8 +19,13 @@ pub const CANONICAL_OWNER: &str = "tailrocks";
 /// The fleet repository name shared across all three owner-local mirrors.
 pub const ACTIONS_REPO: &str = "velnor-actions";
 
-/// The `@FLEET_SHA@` release-pin placeholder (the consumer's immutable ref).
+/// Legacy shared release-pin placeholder, rejected if it survives rendering.
 pub const FLEET_SHA_PLACEHOLDER: &str = "@FLEET_SHA@";
+pub const OWNER_SHA_PLACEHOLDERS: [&str; 3] = [
+    "@JACKIN_FLEET_SHA@",
+    "@TAILROCKS_FLEET_SHA@",
+    "@CHAINARGOS_FLEET_SHA@",
+];
 /// The `@CALVER@` release-version-comment placeholder.
 pub const CALVER_PLACEHOLDER: &str = "@CALVER@";
 
@@ -85,8 +90,8 @@ impl Builder {
 }
 
 /// Render the committed consumer template for a class. The three owner-local
-/// reusable-workflow calls share the same anchored `@FLEET_SHA@ # @CALVER@`
-/// release pin; `render_consumer` replaces both tokens together at release time.
+/// reusable-workflow calls bind their owner-local mirror commit and share one
+/// anchored `@CALVER@`; `render_consumer` replaces all four tokens together.
 #[must_use]
 pub fn consumer_template(class: RepositoryClass) -> String {
     let file = callable_file_name(class);
@@ -115,11 +120,11 @@ pub fn consumer_template(class: RepositoryClass) -> String {
     );
     b.line(
         0,
-        "# release SHA pin and CalVer version comment are identical across all three",
+        "# owner-local release SHA pins and one CalVer version identify one mirrored release",
     );
     b.line(
         0,
-        "# calls and are replaced together at release time by render-consumer.",
+        "# and are replaced together at release time by render-consumer.",
     );
     b.line(0, "name: CI");
     b.line(0, "run-name: ${{ inputs.recovery_proof_id != '' && format('CI recovery {0}', inputs.recovery_proof_id) || inputs.benchmark_campaign != '' && format('CI benchmark {0}/{1}', inputs.benchmark_campaign, inputs.benchmark_wave) || inputs.cache_proof_id != '' && format('CI cache proof {0}', inputs.cache_proof_id) || 'CI' }}");
@@ -151,7 +156,7 @@ pub fn consumer_template(class: RepositoryClass) -> String {
     b.blank();
     b.line(0, "jobs:");
 
-    for owner in OWNERS {
+    for (owner, release_placeholder) in OWNERS.iter().zip(OWNER_SHA_PLACEHOLDERS) {
         b.line(2, &format!("{owner}:"));
         b.line(4, &format!("name: {owner}"));
         b.line(
@@ -165,7 +170,7 @@ pub fn consumer_template(class: RepositoryClass) -> String {
         b.line(
             4,
             &format!(
-                "uses: {owner}/{ACTIONS_REPO}/.github/workflows/{file}@{FLEET_SHA_PLACEHOLDER} # {CALVER_PLACEHOLDER}"
+                "uses: {owner}/{ACTIONS_REPO}/.github/workflows/{file}{release_placeholder} # {CALVER_PLACEHOLDER}"
             ),
         );
         b.line(4, "with:");
@@ -2141,12 +2146,21 @@ protected_dispatch() {
   [[ "${#pin_rows[@]}" == 3 ]] || fail "caller does not contain exactly three generated owner pins"
   owners="$(printf '%s\n' "${pin_rows[@]}" | cut -f1 | LC_ALL=C sort -u | paste -sd, -)"
   [[ "${owners}" == 'ChainArgos,jackin-project,tailrocks' ]] || fail "caller owner pin set mismatch"
-  fleet_sha="$(printf '%s\n' "${pin_rows[@]}" | cut -f2 | sort -u)"
   fleet_calver="$(printf '%s\n' "${pin_rows[@]}" | cut -f3 | sort -u)"
-  [[ "${fleet_sha}" =~ ^[0-9a-f]{40}$ && "${fleet_calver}" =~ ^20[0-9]{2}\.[0-9]+\.[0-9]+$ ]] || fail "caller release pin mismatch"
-  [[ "$(printf '%s\n' "${pin_rows[@]}" | cut -f2 | sort -u | wc -l | tr -d ' ')" == 1 && "$(printf '%s\n' "${pin_rows[@]}" | cut -f3 | sort -u | wc -l | tr -d ' ')" == 1 ]] || fail "caller uses mixed release pins"
-  sed "s/@${fleet_sha} # ${fleet_calver}/@@FLEET_SHA@ # @CALVER@/g" "${workflow_file}" > "${normalized_file}"
-  [[ "$(grep -Fc '@@FLEET_SHA@ # @CALVER@' "${normalized_file}")" == 3 ]] || fail "caller normalization count mismatch"
+  [[ "${fleet_calver}" =~ ^20[0-9]{2}\.[0-9]+\.[0-9]+$ && "$(printf '%s\n' "${pin_rows[@]}" | cut -f3 | sort -u | wc -l | tr -d ' ')" == 1 ]] || fail "caller uses mixed release versions"
+  cp "${workflow_file}" "${normalized_file}"
+  for owner in jackin-project tailrocks ChainArgos; do
+    owner_sha="$(printf '%s\n' "${pin_rows[@]}" | awk -F '\t' -v owner="${owner}" '$1 == owner { print $2 }')"
+    [[ "${owner_sha}" =~ ^[0-9a-f]{40}$ ]] || fail "caller owner release pin mismatch"
+    case "${owner}" in
+      jackin-project) placeholder='@JACKIN_FLEET_SHA@' ;;
+      tailrocks) placeholder='@TAILROCKS_FLEET_SHA@' ;;
+      ChainArgos) placeholder='@CHAINARGOS_FLEET_SHA@' ;;
+    esac
+    sed "\\~uses: ${owner}/velnor-actions/~ s/@${owner_sha} # ${fleet_calver}/${placeholder} # @CALVER@/" "${normalized_file}" > "${normalized_file}.next"
+    mv "${normalized_file}.next" "${normalized_file}"
+  done
+  [[ "$(grep -Ec '@(JACKIN|TAILROCKS|CHAINARGOS)_FLEET_SHA@ # @CALVER@' "${normalized_file}")" == 3 ]] || fail "caller normalization count mismatch"
   normalized_sha256="$(sha256sum "${normalized_file}" | cut -d' ' -f1)"
   [[ "${EXPECTED_CALLER_TEMPLATE_SHA256}" =~ ^[0-9a-f]{64}$ && "${normalized_sha256}" == "${EXPECTED_CALLER_TEMPLATE_SHA256}" ]] || fail "caller is not the exact generated class template"
 }
@@ -2233,20 +2247,23 @@ lock_wait_ms="$(read_field LOCK_WAIT_MS)"
 "#;
 
 /// Materialize a consumer file from a committed template by atomically replacing
-/// every `@FLEET_SHA@` with `release_sha` and every `@CALVER@` with `calver`.
+/// each owner-local SHA placeholder with the corresponding entry in
+/// `release_shas` and every `@CALVER@` with `calver`.
 ///
 /// Refuses output that still contains either placeholder or that leaves a mixed
-/// pin (a `@FLEET_SHA@` without an accompanying replaced `@CALVER@` on the same
-/// reference, or vice versa).
+/// pin (an owner-local SHA without an accompanying replaced `@CALVER@` on the
+/// same reference, or vice versa).
 ///
 /// # Errors
 ///
 /// Returns `Err` if the inputs are invalid or any placeholder survives.
-pub fn render_consumer(template: &str, release_sha: &str, calver: &str) -> Result<String, String> {
-    if !crate::model::is_sha40(release_sha) {
-        return Err(format!(
-            "release SHA {release_sha:?} is not 40 lowercase hex"
-        ));
+pub fn render_consumer(
+    template: &str,
+    release_shas: [&str; 3],
+    calver: &str,
+) -> Result<String, String> {
+    if release_shas.iter().any(|sha| !crate::model::is_sha40(sha)) {
+        return Err("every owner release SHA must be 40 lowercase hex".to_string());
     }
     if calver.trim().is_empty() {
         return Err("CalVer must be non-empty".to_string());
@@ -2254,20 +2271,29 @@ pub fn render_consumer(template: &str, release_sha: &str, calver: &str) -> Resul
     if calver.contains('\n') || calver.contains('#') {
         return Err(format!("CalVer {calver:?} contains a forbidden character"));
     }
-    let expected_refs = template.matches(FLEET_SHA_PLACEHOLDER).count();
-    let out = template
-        .replace(FLEET_SHA_PLACEHOLDER, release_sha)
-        .replace(CALVER_PLACEHOLDER, calver);
-    if out.contains(FLEET_SHA_PLACEHOLDER) || out.contains(CALVER_PLACEHOLDER) {
+    let mut out = template.to_string();
+    for (placeholder, sha) in OWNER_SHA_PLACEHOLDERS.iter().zip(release_shas) {
+        if out.matches(placeholder).count() != 1 {
+            return Err(format!("expected exactly one {placeholder} placeholder"));
+        }
+        out = out.replace(placeholder, &format!("@{sha}"));
+    }
+    out = out.replace(CALVER_PLACEHOLDER, calver);
+    if OWNER_SHA_PLACEHOLDERS.iter().any(|p| out.contains(p))
+        || out.contains(FLEET_SHA_PLACEHOLDER)
+        || out.contains(CALVER_PLACEHOLDER)
+    {
         return Err("materialized output still contains a placeholder".to_string());
     }
-    // Every rendered reference must carry the same replaced SHA and CalVer: the
-    // count of pinned refs must match the count of version comments.
-    let sha_refs = out.matches(&format!("@{release_sha} # {calver}")).count();
-    if sha_refs != expected_refs {
-        return Err(format!(
-            "mixed pin: expected {expected_refs} coherent @<sha> # <calver> references, found {sha_refs}"
-        ));
+    for (owner, sha) in OWNERS.iter().zip(release_shas) {
+        if out
+            .matches(&format!("uses: {owner}/{ACTIONS_REPO}/.github/workflows/"))
+            .count()
+            != 1
+            || !out.contains(&format!("@{sha} # {calver}"))
+        {
+            return Err("mixed owner release SHA/CalVer binding".to_string());
+        }
     }
     Ok(out)
 }

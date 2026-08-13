@@ -280,7 +280,7 @@ fn fake_recovery_gh() -> std::path::PathBuf {
     let executable = root.join("gh");
     let workflow = render::render_consumer(
         &render::consumer_template(RepositoryClass::Code),
-        DUMMY_SHA,
+        [DUMMY_SHA; 3],
         "2026.7.0",
     )
     .unwrap();

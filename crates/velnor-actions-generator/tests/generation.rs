@@ -438,9 +438,9 @@ fn every_member_materializes_to_class_bytes() {
     let calver = "2026.7.0";
     for class in ALL_CLASSES {
         let template = render::consumer_template(class);
-        let class_bytes = render::render_consumer(&template, sha, calver).unwrap();
+        let class_bytes = render::render_consumer(&template, [sha; 3], calver).unwrap();
         for repo in m.members_of(class) {
-            let repo_bytes = render::render_consumer(&template, sha, calver).unwrap();
+            let repo_bytes = render::render_consumer(&template, [sha; 3], calver).unwrap();
             assert_eq!(
                 repo_bytes,
                 class_bytes,
@@ -455,13 +455,13 @@ fn every_member_materializes_to_class_bytes() {
 #[test]
 fn render_consumer_refuses_leftover_and_second_substitution() {
     let template = render::consumer_template(RepositoryClass::Code);
-    let out = render::render_consumer(&template, DUMMY_SHA, "2026.7.0").unwrap();
+    let out = render::render_consumer(&template, [DUMMY_SHA; 3], "2026.7.0").unwrap();
     assert!(!out.contains(FLEET_SHA_PLACEHOLDER));
     assert!(!out.contains(CALVER_PLACEHOLDER));
     // A second substitution has nothing to replace and must be refused.
-    assert!(render::render_consumer(&out, DUMMY_SHA, "2026.7.0").is_err());
+    assert!(render::render_consumer(&out, [DUMMY_SHA; 3], "2026.7.0").is_err());
     // A non-40-hex release SHA is refused.
-    assert!(render::render_consumer(&template, "main", "2026.7.0").is_err());
+    assert!(render::render_consumer(&template, ["main"; 3], "2026.7.0").is_err());
 }
 
 #[test]
@@ -470,7 +470,7 @@ fn render_consumer_to_dir_writes_only_ci_yml() {
     let path = velnor_actions_generator::render_consumer_to_dir(
         &common::repo_root(),
         "tailrocks/velnor",
-        DUMMY_SHA,
+        [DUMMY_SHA; 3],
         "2026.7.0",
         &out,
     )
@@ -498,35 +498,35 @@ fn release_goldens_bind_consumer_interface_and_callable_metrics_schema() {
     for (path, expected) in [
         (
             "templates/code/ci.yml",
-            "494474fe641f61a41015241f52caf9975f4f78c1f449fc8023059ac07960a20c",
+            "7efcca63ad6737a76c73eca4c3d1944c6cffa7aa11f72b1dafcdf7878b4b7b1a",
         ),
         (
             "templates/tap/ci.yml",
-            "fa7594036974b32594485a380fe8c0b6fc21133f6dce355171b208526e91b463",
+            "3f01fb24c3655045ff43dbcfde47ac67668084badf5f2104050d85bc406ef348",
         ),
         (
             "templates/apt/ci.yml",
-            "552fa230668e1f792bfcf945e1e99dc62276c2064acf99860753f83e9fd4b60e",
+            "229a1e50cd82191fbc549c159cd8c58c36c7d0b0f95d87bf9e8a4b6a4cd77791",
         ),
         (
             "templates/fixture/ci.yml",
-            "dea5960a0d49d003b6e1e1a5eafae7576ebe60ced5acc62e0883004dfa64df30",
+            "a456ca2de834a51cc57c6a08bdbdcce3d3a756f01959bb908c976e0d256ac163",
         ),
         (
             ".github/workflows/ci-code.yml",
-            "defaa5aa904d526d9b51b7bb1caa73830fe4753c8f54f588935a639d8d45a99b",
+            "cfa9c2f0f548cdd915121a9d495977f8434cb07bc43b91380fdac04bf102c66e",
         ),
         (
             ".github/workflows/ci-tap.yml",
-            "bae4aeb15b28db1b55b38b055aec295832ce3b54a8a5e138351f486b9872f877",
+            "0eb78ff6ee5a9ba589727a84009e9ce7194b066ea74c07cbf0d76f62300fadec",
         ),
         (
             ".github/workflows/ci-apt.yml",
-            "4ca77bec5ef4940c169199dbad29724afee3887e5590734cd0c1ac6bfb831a5b",
+            "3f8ec75f8aee50649174510192dc0714fc02b2d3b86adfbf60f8856e111019be",
         ),
         (
             ".github/workflows/ci-fixture.yml",
-            "52f630624dd5f2cbc85d446239360bef774bfd64675c9a5aa4d6f27408e86bc1",
+            "50a5c853fff2fb44cdc8b4e1e0c5858561458c3648c5167883ffc8816628af58",
         ),
     ] {
         let bytes = std::fs::read(root.join(path)).unwrap();
