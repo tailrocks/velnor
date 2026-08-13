@@ -3631,8 +3631,10 @@ if [ -n "$install_requested" ]; then
   # Repair and validate through the repository-selected mise environment; this
   # never chooses an unpinned toolchain or bypasses the committed lockfile.
   if "$mise_bin" current rust >/dev/null 2>&1; then
-    "$mise_bin" exec -- rustup component add cargo
+    "$mise_bin" exec -- rustup component add cargo clippy rustfmt
     "$mise_bin" exec -- cargo --version
+    "$mise_bin" exec -- cargo clippy --version
+    "$mise_bin" exec -- cargo fmt --version
   fi
   echo "::endgroup::"
 else
@@ -9591,8 +9593,10 @@ mod tests {
         // Locked, fail-closed install — never plain `mise install`, never a
         // network mise.run bootstrap or self-update of /opt/mise/bin.
         assert!(script.contains(r#""$mise_bin" install --locked --yes"#));
-        assert!(script.contains(r#""$mise_bin" exec -- rustup component add cargo"#));
+        assert!(script.contains(r#""$mise_bin" exec -- rustup component add cargo clippy rustfmt"#));
         assert!(script.contains(r#""$mise_bin" exec -- cargo --version"#));
+        assert!(script.contains(r#""$mise_bin" exec -- cargo clippy --version"#));
+        assert!(script.contains(r#""$mise_bin" exec -- cargo fmt --version"#));
         assert!(script.contains("MISE_LOCKED=1"));
         assert!(script.contains("MISE_LOCKED_VERIFY_PROVENANCE=1"));
         assert!(!script.contains("https://mise.run"));
