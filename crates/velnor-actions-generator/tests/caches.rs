@@ -373,15 +373,18 @@ fn benchmark_cache_state(
         "set -euo pipefail\n{}\nbenchmark_cache_state \"${{MODE}}\" \"${{ROLE}}\" \"${{GITHUB_HIT}}\" \"${{VELNOR_HIT}}\"",
         velnor_actions_generator::render::CACHE_TEMPERATURE_FUNCTION
     );
-    let output = std::process::Command::new("bash")
+    let child = std::process::Command::new("bash")
         .arg("-c")
         .arg(script)
         .env("MODE", mode)
         .env("ROLE", role)
         .env("GITHUB_HIT", github_hit)
         .env("VELNOR_HIT", velnor_hit)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
+    let output = child.wait_with_output().unwrap();
     output
         .status
         .success()

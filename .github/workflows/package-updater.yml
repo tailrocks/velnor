@@ -260,4 +260,8 @@ jobs:
           git add --all
           git commit --signoff -m "chore(package): update verified release"
           git push --force-with-lease origin "$BRANCH"
-          gh pr view "$BRANCH" >/dev/null 2>&1 || gh pr create --base main --head "$BRANCH" --title "chore(package): update verified release" --body "Verified consumer-owned package update."
+          OPEN_PR_COUNT="$(gh pr list --state open --head "$BRANCH" --base main --json number --jq 'length')"
+          test "$OPEN_PR_COUNT" -le 1
+          if test "$OPEN_PR_COUNT" -eq 0; then
+            gh pr create --base main --head "$BRANCH" --title "chore(package): update verified release" --body "Verified consumer-owned package update."
+          fi

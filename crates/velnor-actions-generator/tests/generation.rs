@@ -199,6 +199,8 @@ fn package_policy_and_workflows_are_closed_and_hosted_only() {
     assert!(UPDATER_WORKFLOW.contains("git commit --signoff"));
     assert!(UPDATER_WORKFLOW.contains("git status --porcelain --untracked-files=all"));
     assert!(!UPDATER_WORKFLOW.contains("if git diff --quiet"));
+    assert!(UPDATER_WORKFLOW.contains("gh pr list --state open --head \"$BRANCH\" --base main"));
+    assert!(!UPDATER_WORKFLOW.contains("gh pr view \"$BRANCH\""));
     assert!(UPDATER_WORKFLOW.contains("test \"$BRANCH\" != \"main\""));
     assert!(UPDATER_WORKFLOW.contains("test \"$CHANNEL\" = stable"));
     assert!(UPDATER_WORKFLOW.contains("no immutable stable release"));

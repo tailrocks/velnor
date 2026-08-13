@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::process::Stdio;
 
 use velnor_actions_generator::{ALL_CLASSES, REQUIRED_LAYOUT, validate_layout};
 
@@ -43,12 +44,17 @@ fn validate_layout_fails_on_missing_root() {
 
 #[test]
 fn cli_check_prints_exact_success_text() {
-    let output = Command::new(env!("CARGO_BIN_EXE_velnor-actions-generator"))
+    let child = Command::new(env!("CARGO_BIN_EXE_velnor-actions-generator"))
         .arg("check")
         .arg("--root")
         .arg(repo_root())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("generator binary runs");
+    let output = child
+        .wait_with_output()
+        .expect("generator binary completes");
     assert!(output.status.success(), "check exits zero on a valid root");
     assert_eq!(
         String::from_utf8(output.stdout).expect("utf8 stdout"),

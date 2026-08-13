@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::cache::CacheContract;
 use crate::composite;
@@ -113,14 +113,7 @@ pub fn audit(root: &Path) -> Result<String, String> {
             let committed = read_committed(&path)?;
             require_equal(&committed, expected, &path.display().to_string())?;
             if path.starts_with(root.join(".github/workflows")) {
-                for reference in uses_refs(expected) {
-                    if !is_sha40(&reference) {
-                        return Err(format!(
-                            "{}: non-40-hex or mutable ref {reference:?}",
-                            path.display()
-                        ));
-                    }
-                }
+                audit_immutable_uses(expected, &path)?;
                 audit_admitted_closure(
                     expected,
                     &block_sha,
@@ -137,6 +130,18 @@ pub fn audit(root: &Path) -> Result<String, String> {
         manifest.classes().len(),
         ALL_CLASSES.len(),
     ))
+}
+
+fn audit_immutable_uses(workflow: &str, path: &Path) -> Result<(), String> {
+    for reference in uses_refs(workflow) {
+        if !is_sha40(&reference) {
+            return Err(format!(
+                "{}: non-40-hex or mutable ref {reference:?}",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn load_remote_closure(root: &Path) -> Result<RemoteClosure, String> {
@@ -222,15 +227,20 @@ pub fn verify_remote_closure(root: &Path) -> Result<String, String> {
             let expected = file.sha256.clone();
             handles.push(std::thread::spawn(move || {
                 let endpoint = format!("repos/{action_root}/contents/{path}?ref={sha}");
-                let output = Command::new("gh")
+                let child = Command::new("gh")
                     .args([
                         "api",
                         "-H",
                         "Accept: application/vnd.github.raw+json",
                         &endpoint,
                     ])
-                    .output()
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
                     .map_err(|error| format!("executing gh for {endpoint}: {error}"))?;
+                let output = child
+                    .wait_with_output()
+                    .map_err(|error| format!("waiting for gh for {endpoint}: {error}"))?;
                 if !output.status.success() {
                     return Err(format!(
                         "fetching {endpoint} failed: {}",
