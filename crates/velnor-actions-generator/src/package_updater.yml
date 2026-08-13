@@ -240,7 +240,7 @@ jobs:
           git config user.email "$BOT_EMAIL"
           git switch -C "$BRANCH"
           mise run package-update
-          if git diff --quiet; then echo NO_CHANGE_VERIFIED; exit 0; fi
+          if test -z "$(git status --porcelain --untracked-files=all)"; then echo NO_CHANGE_VERIFIED; exit 0; fi
           git add --all
           git commit --signoff -m "chore(package): update verified release"
           git push --force-with-lease origin "$BRANCH"
