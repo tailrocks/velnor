@@ -2941,7 +2941,7 @@ async fn handle_job_request(
         // the JIT slot is idle-polling). Hold until this scope ends so
         // concurrent daemons share a truthful host admission budget. Retry
         // backpressure while the run-service renewal keeps the job lease live.
-        let _job_peak_reservation = loop {
+        let job_peak_reservation = loop {
             match reserve_job_peak_capacity(config_dir, args) {
                 Ok(reservation) => {
                     println!(
@@ -2959,6 +2959,7 @@ async fn handle_job_request(
                 }
             }
         };
+        let reserved_bytes = job_peak_reservation.bytes;
         let _storage_leases = match acquire_storage_leases() {
             Ok(leases) => leases,
             Err(error) => {
@@ -3021,6 +3022,7 @@ async fn handle_job_request(
                 Some(step_start_sender),
                 Some(step_log_sender),
                 daemon_id,
+                reserved_bytes,
             )
         })
         .await;
@@ -4161,6 +4163,7 @@ fn execute_script_job(
     step_start_sender: Option<tokio::sync::mpsc::UnboundedSender<StepStartEvent>>,
     step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
     daemon_id: String,
+    reserved_bytes: u64,
 ) -> Result<ScriptJobResult> {
     let job_dir = job_work_dir(config_dir, work_dir, job);
     let result = execute_script_job_inner(
@@ -4178,6 +4181,7 @@ fn execute_script_job(
         step_start_sender,
         step_log_sender,
         daemon_id,
+        reserved_bytes,
     );
     if result.is_err() {
         if let Err(e) = fs::remove_dir_all(&job_dir) {
@@ -4206,6 +4210,7 @@ fn execute_script_job_inner(
     step_start_sender: Option<tokio::sync::mpsc::UnboundedSender<StepStartEvent>>,
     step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
     daemon_id: String,
+    reserved_bytes: u64,
 ) -> Result<ScriptJobResult> {
     let execution_started = Instant::now();
     // Side-effect ledger: admission has already completed, so every counter here
@@ -4294,7 +4299,11 @@ fn execute_script_job_inner(
     let (runtime_checkout_plans, eager_checkout_plans): (Vec<_>, Vec<_>) = checkout_plans
         .into_iter()
         .partition(CheckoutPlan::requires_runtime_context);
-    let base_env = job_runtime_env(job);
+    let mut base_env = job_runtime_env(job);
+    base_env.extend(crate::runtime_env::cache_authority_env(
+        job,
+        reserved_bytes,
+    )?);
     let eager_checkout_plans = eager_checkout_plans
         .into_iter()
         .map(|plan| resolve_checkout_plan_context(plan, &base_env, &context_data))
@@ -4997,7 +5006,7 @@ impl Drop for PrecreatedJobEnvironment {
     }
 }
 
-fn job_context_data(job: &AgentJobRequestMessage) -> Vec<(String, Value)> {
+pub(crate) fn job_context_data(job: &AgentJobRequestMessage) -> Vec<(String, Value)> {
     let mut context_data = job.context_data.clone();
     let github_token = job
         .variables
