@@ -437,6 +437,7 @@ jobs:
           # Per-platform OCI digests from the image job.
           plat_amd64="$(jq -r '.manifest.manifests[] | select(.platform.architecture=="amd64") | .digest' artifacts/image-digests.json)"
           plat_arm64="$(jq -r '.manifest.manifests[] | select(.platform.architecture=="arm64") | .digest' artifacts/image-digests.json)"
+          manifest_version="$(jq -er '.version | select(type == "number" and floor == . and . > 0)' artifacts/manifest.json)"
 
           jq -n \
             --arg schema "velnor.release-record/v1" \
@@ -444,7 +445,7 @@ jobs:
             --arg tag "v${VERSION}" \
             --arg commit "$COMMIT" \
             --arg version "$VERSION" \
-            --argjson mv 7 \
+            --argjson mv "$manifest_version" \
             --arg mhash "$MANIFEST_SHA256" \
             --arg bin_amd64 "$bin_amd64" --arg deb_amd64 "$deb_amd64" --arg plat_amd64 "$plat_amd64" \
             --arg bin_arm64 "$bin_arm64" --arg deb_arm64 "$deb_arm64" --arg plat_arm64 "$plat_arm64" \
