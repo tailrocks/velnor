@@ -3632,6 +3632,21 @@ if [ -n "$install_requested" ]; then
   # never chooses an unpinned toolchain or bypasses the committed lockfile.
   if "$mise_bin" current rust >/dev/null 2>&1; then
     "$mise_bin" exec -- rustup component add cargo clippy rustfmt
+    if ! "$mise_bin" exec -- cargo --version >/dev/null 2>&1 \
+      || ! "$mise_bin" exec -- cargo clippy --version >/dev/null 2>&1 \
+      || ! "$mise_bin" exec -- cargo fmt --version >/dev/null 2>&1; then
+      # rustup can report a component "up to date" while its proxy says the
+      # component is not applicable when a persisted minimal/incomplete
+      # toolchain predates the locked mise install.  That state is not usable
+      # and must not be accepted merely because the version directory exists.
+      # Rebuild the exact committed Rust pin through mise, then add and prove
+      # the mandatory components again.  No live version selection occurs.
+      rust_toolchain=$("$mise_bin" current rust)
+      echo "mise: Rust $rust_toolchain component probes failed; rebuilding locked toolchain" >&2
+      "$mise_bin" exec -- rustup toolchain uninstall "$rust_toolchain"
+      "$mise_bin" install --locked --yes --force rust
+      "$mise_bin" exec -- rustup component add cargo clippy rustfmt
+    fi
     "$mise_bin" exec -- cargo --version
     "$mise_bin" exec -- cargo clippy --version
     "$mise_bin" exec -- cargo fmt --version
@@ -9594,6 +9609,8 @@ mod tests {
         // network mise.run bootstrap or self-update of /opt/mise/bin.
         assert!(script.contains(r#""$mise_bin" install --locked --yes"#));
         assert!(script.contains(r#""$mise_bin" exec -- rustup component add cargo clippy rustfmt"#));
+        assert!(script.contains(r#""$mise_bin" install --locked --yes --force rust"#));
+        assert!(script.contains(r#"rustup toolchain uninstall "$rust_toolchain""#));
         assert!(script.contains(r#""$mise_bin" exec -- cargo --version"#));
         assert!(script.contains(r#""$mise_bin" exec -- cargo clippy --version"#));
         assert!(script.contains(r#""$mise_bin" exec -- cargo fmt --version"#));
