@@ -1802,6 +1802,23 @@ mod tests {
     }
 
     #[test]
+    fn release_record_derives_manifest_version_from_compiled_artifact() {
+        let workflow = include_str!("../../../.github/workflows/release.yml");
+        assert!(
+            workflow.contains("manifest_version=\"$(jq -er '.version"),
+            "release assembly must read the compiled manifest version"
+        );
+        assert!(
+            workflow.contains("--argjson mv \"$manifest_version\""),
+            "release record must bind the derived manifest version"
+        );
+        assert!(
+            !workflow.contains("--argjson mv 7"),
+            "release assembly must not retain a stale schema literal"
+        );
+    }
+
+    #[test]
     fn release_record_downloads_compiled_tool_before_independent_verification() {
         let workflow: serde_yaml::Value =
             serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
