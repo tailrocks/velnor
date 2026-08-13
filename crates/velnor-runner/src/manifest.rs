@@ -883,13 +883,7 @@ pub fn validate_resolved_action(
         return Err(error.into());
     }
     if repository.eq_ignore_ascii_case("tailrocks/velnor-actions") {
-        validate_unified_ci_composite_inputs(
-            step,
-            repository,
-            action_ref,
-            source_path,
-            inputs,
-        )?;
+        validate_unified_ci_composite_inputs(step, repository, action_ref, source_path, inputs)?;
     }
     let mut found = Vec::new();
     validate_inputs(
