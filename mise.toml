@@ -32,3 +32,6 @@ run = "cargo deny check advisories"
 
 [tasks.check]
 depends = ["fmt", "actionlint", "deny", "lint", "test"]
+
+[tasks.ci]
+depends = ["check"]
