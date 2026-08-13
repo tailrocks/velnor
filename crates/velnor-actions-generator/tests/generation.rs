@@ -16,6 +16,15 @@ fn load() -> FleetManifest {
 }
 
 #[test]
+fn consumer_pushes_are_limited_to_default_branch_and_release_tags() {
+    let rendered = render::consumer_template(RepositoryClass::Code);
+    assert!(
+        rendered.contains("  push:\n    branches:\n      - main\n    tags:\n      - \"**\"\n"),
+        "non-default branch pushes must not create a competing required-check context"
+    );
+}
+
+#[test]
 fn exact_membership_and_counts() {
     let m = load();
     assert_eq!(m.repositories().len(), 28, "28 members");
@@ -498,35 +507,35 @@ fn release_goldens_bind_consumer_interface_and_callable_metrics_schema() {
     for (path, expected) in [
         (
             "templates/code/ci.yml",
-            "7efcca63ad6737a76c73eca4c3d1944c6cffa7aa11f72b1dafcdf7878b4b7b1a",
+            "ef65d7fbbd265d09f76599603cfaf88b3465db43c7238c47141db4eff07ddee9",
         ),
         (
             "templates/tap/ci.yml",
-            "3f01fb24c3655045ff43dbcfde47ac67668084badf5f2104050d85bc406ef348",
+            "04f2c650a0a2248057b3add49b819da723b072b51cca77dd7ddb0d20d615e25c",
         ),
         (
             "templates/apt/ci.yml",
-            "229a1e50cd82191fbc549c159cd8c58c36c7d0b0f95d87bf9e8a4b6a4cd77791",
+            "f372c6150e2133939ef6cea4b5e564ff77410bc2265bec3ad4661e014e57864d",
         ),
         (
             "templates/fixture/ci.yml",
-            "a456ca2de834a51cc57c6a08bdbdcce3d3a756f01959bb908c976e0d256ac163",
+            "1826d54b69b3af9e58f357c80e4ee5cf01bb2a30f7f1069866b572f919c099fe",
         ),
         (
             ".github/workflows/ci-code.yml",
-            "cfa9c2f0f548cdd915121a9d495977f8434cb07bc43b91380fdac04bf102c66e",
+            "71d3eb2c94ae1d35bdfdf23d3224fa7970644cb2101623760738f4aded1f7892",
         ),
         (
             ".github/workflows/ci-tap.yml",
-            "0eb78ff6ee5a9ba589727a84009e9ce7194b066ea74c07cbf0d76f62300fadec",
+            "fc6fadcfa9d04b5db896b4a011084a58ca7c27fd97659fff6e12efcf41b023c8",
         ),
         (
             ".github/workflows/ci-apt.yml",
-            "3f8ec75f8aee50649174510192dc0714fc02b2d3b86adfbf60f8856e111019be",
+            "9c87f771e2bb0f137be2713c5e70edb80c61512c3cab8c441cd3d5e0666d3089",
         ),
         (
             ".github/workflows/ci-fixture.yml",
-            "50a5c853fff2fb44cdc8b4e1e0c5858561458c3648c5167883ffc8816628af58",
+            "73b12c059a9b0313d1a3ac22b9a9d4959eae3eb26c64ae9cbbf3aa8d3d716d77",
         ),
     ] {
         let bytes = std::fs::read(root.join(path)).unwrap();

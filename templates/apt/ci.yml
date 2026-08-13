@@ -12,6 +12,10 @@ run-name: ${{ inputs.recovery_proof_id != '' && format('CI recovery {0}', inputs
 on:
   pull_request:
   push:
+    branches:
+      - main
+    tags:
+      - "**"
   merge_group:
   workflow_dispatch:
     inputs:

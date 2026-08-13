@@ -132,6 +132,10 @@ pub fn consumer_template(class: RepositoryClass) -> String {
     b.line(0, "on:");
     b.line(2, "pull_request:");
     b.line(2, "push:");
+    b.line(4, "branches:");
+    b.line(6, "- main");
+    b.line(4, "tags:");
+    b.line(6, "- \"**\"");
     b.line(2, "merge_group:");
     b.line(2, "workflow_dispatch:");
     b.line(4, "inputs:");
