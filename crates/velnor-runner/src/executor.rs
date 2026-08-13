@@ -7464,10 +7464,15 @@ impl JobExecutionState {
 
     fn resolve_step_output_expression(&self, expression: &str) -> Option<&str> {
         let expression = expression.strip_prefix("steps.")?;
-        let (step_id, expression) = expression.split_once(".outputs.")?;
+        let (step_id, output) = expression.split_once(".outputs")?;
+        let output = if let Some(output) = output.strip_prefix('.') {
+            output
+        } else {
+            output.strip_prefix("['")?.strip_suffix("']")?
+        };
         self.outputs
             .get(step_id)
-            .and_then(|outputs| outputs.get(expression))
+            .and_then(|outputs| outputs.get(output))
             .map(String::as_str)
     }
 
@@ -12771,6 +12776,10 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert_eq!(state.masks, vec!["secret"]);
         assert_eq!(
             state.resolve_expressions("value=${{ steps.producer.outputs.answer }}"),
+            "value=42"
+        );
+        assert_eq!(
+            state.resolve_expressions("value=${{ steps.producer.outputs['answer'] }}"),
             "value=42"
         );
         assert_eq!(
