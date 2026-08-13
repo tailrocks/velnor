@@ -14,7 +14,7 @@ use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 // Plan 009 introduced v6 (action subpaths + reusable-workflow schema). Plan 010
 // adds source-SHA + crate-version identity to the exported manifest so a consumer
 // can bind the compiled manifest to one release commit, bumping the schema to v7.
-pub const MANIFEST_VERSION: u32 = 7;
+pub const MANIFEST_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CapabilityManifest {
@@ -1698,11 +1698,11 @@ mod tests {
     }
 
     #[test]
-    fn compiled_manifest_is_version_seven_and_structurally_immutable() {
-        // Plan 010 bumped v6 -> v7 (source-SHA + crate-version identity in the
-        // export). 009's structural integrity checks remain intact.
-        assert_eq!(MANIFEST_VERSION, 7);
-        assert_eq!(MANIFEST.version, 7);
+    fn compiled_manifest_is_version_eight_and_structurally_immutable() {
+        // Unified-CI composite admission changes the accepted capability surface,
+        // so the compiled manifest identity advances from v7 to v8.
+        assert_eq!(MANIFEST_VERSION, 8);
+        assert_eq!(MANIFEST.version, 8);
         assert_manifest_integrity().expect("compiled manifest must pass integrity");
     }
 
