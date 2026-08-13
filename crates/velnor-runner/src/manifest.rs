@@ -322,6 +322,41 @@ macro_rules! capability {
 
 pub static ACTIONS: &[ActionCapability] = &[
     ActionCapability {
+        repository: "tailrocks/velnor-actions",
+        adapter: NativeActionAdapter::ApprovedComposite,
+        allowed_refs: &[allowed(
+            "3057391f93f3bfc0fe570ee08cfcea9533ea3f92",
+            "unified CI release 2026.8.18",
+        )],
+        allowed_subpaths: &[
+            "actions/run-gate",
+            "actions/cache-contract",
+            "actions/aggregate",
+        ],
+        inputs: &[
+            InputRule::Any("name"),
+            InputRule::Any("command"),
+            InputRule::Any("schema-version"),
+            InputRule::Any("declaration-sha256"),
+            InputRule::Any("expected-declaration-sha256"),
+            InputRule::Any("cache-id"),
+            InputRule::Any("expected-cache-id"),
+            InputRule::Any("scope"),
+            InputRule::Any("expected-scope"),
+            InputRule::Any("cache-owner"),
+            InputRule::Any("expected-cache-owner"),
+            InputRule::Any("reservation-id"),
+            InputRule::Any("expected-reservation-id"),
+            InputRule::Any("required-peak-bytes"),
+            InputRule::Any("quota-reserved-bytes"),
+            InputRule::Any("attributed-bytes"),
+            InputRule::Any("cleanup-state"),
+            InputRule::Any("materialization-id"),
+            InputRule::Any("expected-materialization-id"),
+        ],
+        notes: "pinned unified-CI composites; exact subpaths fetched and recursively validated",
+    },
+    ActionCapability {
         repository: "jackin-project/jackin-role-action",
         adapter: NativeActionAdapter::ApprovedComposite,
         allowed_refs: &[
@@ -847,6 +882,15 @@ pub fn validate_resolved_action(
     if let Some(error) = subpath_violation(step, repository, action_ref, source_path, capability) {
         return Err(error.into());
     }
+    if repository.eq_ignore_ascii_case("tailrocks/velnor-actions") {
+        validate_unified_ci_composite_inputs(
+            step,
+            repository,
+            action_ref,
+            source_path,
+            inputs,
+        )?;
+    }
     let mut found = Vec::new();
     validate_inputs(
         &mut found,
@@ -858,6 +902,74 @@ pub fn validate_resolved_action(
     );
     if let Some(error) = found.into_iter().next() {
         return Err(error.into());
+    }
+    Ok(())
+}
+
+fn validate_unified_ci_composite_inputs(
+    step: &str,
+    repository: &str,
+    action_ref: &str,
+    source_path: Option<&str>,
+    inputs: &BTreeMap<String, String>,
+) -> Result<()> {
+    const RUN_GATE: &[&str] = &["name", "command"];
+    const CACHE_CONTRACT: &[&str] = &[
+        "schema-version",
+        "declaration-sha256",
+        "expected-declaration-sha256",
+        "cache-id",
+        "expected-cache-id",
+        "scope",
+        "expected-scope",
+        "cache-owner",
+        "expected-cache-owner",
+        "reservation-id",
+        "expected-reservation-id",
+        "required-peak-bytes",
+        "quota-reserved-bytes",
+        "attributed-bytes",
+        "cleanup-state",
+        "materialization-id",
+        "expected-materialization-id",
+    ];
+    let subpath = source_path
+        .map(|value| value.trim().trim_matches('/'))
+        .filter(|value| !value.is_empty());
+    let accepted = match subpath {
+        Some("actions/run-gate") => RUN_GATE,
+        Some("actions/cache-contract") => CACHE_CONTRACT,
+        Some("actions/aggregate") => &[],
+        _ => {
+            return Err(violation(
+                step,
+                repository,
+                action_ref,
+                "subpath",
+                subpath.unwrap_or("<root>"),
+                vec![
+                    "actions/run-gate".to_string(),
+                    "actions/cache-contract".to_string(),
+                    "actions/aggregate".to_string(),
+                ],
+            )
+            .into());
+        }
+    };
+    if let Some(name) = inputs.keys().find(|name| {
+        !accepted
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(name))
+    }) {
+        return Err(violation(
+            step,
+            repository,
+            action_ref,
+            "input",
+            name,
+            accepted.iter().map(|name| (*name).to_string()).collect(),
+        )
+        .into());
     }
     Ok(())
 }
@@ -1933,6 +2045,60 @@ mod tests {
             "actions/cache",
             "not-a-real-input"
         ));
+    }
+
+    #[test]
+    fn pinned_unified_ci_composites_are_exactly_scoped() {
+        let sha = "3057391f93f3bfc0fe570ee08cfcea9533ea3f92";
+        let inputs = BTreeMap::from([
+            ("name".to_string(), "test".to_string()),
+            ("command".to_string(), "mise run test".to_string()),
+        ]);
+        validate_resolved_action(
+            "gate",
+            "tailrocks/velnor-actions",
+            sha,
+            Some("actions/run-gate"),
+            &inputs,
+        )
+        .unwrap();
+        for (rejected, field) in [
+            ("actions/not-approved", "path"),
+            ("../actions/run-gate", "path"),
+        ] {
+            let error = validate_resolved_action(
+                "gate",
+                "tailrocks/velnor-actions",
+                sha,
+                Some(rejected),
+                &inputs,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<CapabilityViolation>().unwrap().field,
+                field
+            );
+        }
+        assert!(validate_resolved_action(
+            "gate",
+            "tailrocks/velnor-actions",
+            "1111111111111111111111111111111111111111",
+            Some("actions/run-gate"),
+            &inputs,
+        )
+        .is_err());
+        let error = validate_resolved_action(
+            "aggregate",
+            "tailrocks/velnor-actions",
+            sha,
+            Some("actions/aggregate"),
+            &BTreeMap::from([("command".to_string(), "true".to_string())]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CapabilityViolation>().unwrap().field,
+            "input"
+        );
     }
 
     #[test]
