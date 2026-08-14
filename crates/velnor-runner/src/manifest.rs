@@ -146,6 +146,7 @@ const DOWNLOAD_REFS: &[AllowedRef] = &[
     allowed("v8", "fixture transition until plan 041"),
 ];
 const MISE_REFS: &[AllowedRef] = &[
+    allowed("3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518", "v4.2.5"),
     allowed("7e36c90d9ab29c415a2384db3006f3ec8a8cc654", "v4.2.4"),
     allowed("dad1bfd3df957f44999b559dd69dc1671cb4e9ea", "v4.2.1"),
     allowed("e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d", "v4.2.0"),
