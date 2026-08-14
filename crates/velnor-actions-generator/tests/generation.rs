@@ -203,7 +203,9 @@ fn package_policy_and_workflows_are_closed_and_hosted_only() {
     assert!(!UPDATER_WORKFLOW.contains("gh pr view \"$BRANCH\""));
     assert!(UPDATER_WORKFLOW.contains("test \"$BRANCH\" != \"main\""));
     assert!(UPDATER_WORKFLOW.contains("test \"$CHANNEL\" = stable"));
-    assert!(UPDATER_WORKFLOW.contains("no immutable stable release"));
+    assert!(UPDATER_WORKFLOW.contains("available=false"));
+    assert!(UPDATER_WORKFLOW.contains("updater is a verified no-op"));
+    assert!(UPDATER_WORKFLOW.contains("needs.verify.outputs.available == 'true'"));
     assert!(!UPDATER_WORKFLOW.contains("releases/latest"));
     assert!(TAP_TEMPLATE.matches("channel: stable").count() == 3);
     assert!(APT_TEMPLATE.matches("channel: stable").count() == 3);

@@ -42,13 +42,15 @@ jobs:
       attestations: read
       contents: read
     outputs:
+      available: ${{ steps.poll.outputs.available }}
       evidence: ${{ steps.normalize.outputs.evidence }}
       identity: ${{ steps.normalize.outputs.identity }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Poll and bind latest immutable release
+      - id: poll
+        name: Poll and bind latest immutable release
         env:
           CONSUMER_REPOSITORY: ${{ inputs.consumer-repository }}
           CHANNEL: ${{ inputs.channel }}
@@ -78,8 +80,15 @@ jobs:
                     (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
                   ))
                 | sort_by(.published_at)
-                | if length == 0 then error("no immutable stable release") else last end
-              ' > verified/release.json
+              ' > verified/releases.json
+          release_count=$(jq -e 'length' verified/releases.json)
+          if test "$release_count" -eq 0; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "No immutable stable release is available; updater is a verified no-op."
+            exit 0
+          fi
+          echo "available=true" >> "$GITHUB_OUTPUT"
+          jq -e 'last' verified/releases.json > verified/release.json
           jq -e 'type=="object" and (.draft|not) and (.prerelease|not) and (.tag_name|type=="string") and (.assets|type=="array")' verified/release.json >/dev/null
           tag=$(jq -r .tag_name verified/release.json)
           [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
@@ -118,6 +127,7 @@ jobs:
           sha256sum --check --strict verified/consumer-SHA256SUMS
           jq -nS --arg source_repository "$SOURCE_REPOSITORY" --arg source_ref "$source_ref" --arg source_digest "$source_digest" --slurpfile manifest verified/release-manifest.json '{source_repository:$source_repository,source_ref:$source_ref,source_digest:$source_digest,manifest:$manifest[0]}' > verified/identity.json
       - name: Verify hosted provenance
+        if: ${{ steps.poll.outputs.available == 'true' }}
         env:
           CONSUMER_REPOSITORY: ${{ inputs.consumer-repository }}
           GH_TOKEN: ${{ github.token }}
@@ -182,6 +192,7 @@ jobs:
           done < verified/artifacts.list
       - id: normalize
         name: Normalize verified evidence
+        if: ${{ steps.poll.outputs.available == 'true' }}
         run: |
           set -euo pipefail
           evidence=$(jq -csS '
@@ -198,6 +209,7 @@ jobs:
             echo "identity=$identity"
           } >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.poll.outputs.available == 'true' }}
         with:
           name: verified-package
           path: verified
@@ -206,6 +218,7 @@ jobs:
 
   mutate:
     needs: verify
+    if: ${{ needs.verify.outputs.available == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
