@@ -13,6 +13,7 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use globset::{Glob, GlobBuilder, GlobSetBuilder};
+use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use rayon::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -2012,6 +2013,9 @@ where
             NativeActionAdapter::AttestBuildProvenance => {
                 native_attest_build_provenance(action, state)
             }
+            NativeActionAdapter::CreateGitHubAppToken => {
+                native_create_github_app_token(action, state)
+            }
             NativeActionAdapter::Mise => self.native_mise(_container, action, state, timeout),
             NativeActionAdapter::Sccache => self.native_sccache(_container, action, state, timeout),
             NativeActionAdapter::Kache => self.native_kache(_container, action, state, timeout),
@@ -2129,6 +2133,7 @@ where
                 let result = self.native_shell(_container, state, &script, timeout)?;
                 Ok(native_command_result(result, StepCommandState::default()))
             }
+            NativeActionAdapter::CreateGitHubAppToken => native_revoke_github_app_token(state),
             _ => bail!(
                 "native action adapter {:?} for step '{}' does not have a post action",
                 action.adapter,
@@ -4001,6 +4006,7 @@ fn native_post_condition(
         NativeActionAdapter::DockerSetupBuildx => Some("always()"),
         // GitHub's login-action post logs out (drops registry credentials).
         NativeActionAdapter::DockerLogin => Some("always()"),
+        NativeActionAdapter::CreateGitHubAppToken => Some("always()"),
         _ => None,
     }
 }
@@ -5475,6 +5481,173 @@ fn native_configure_pages(
         failure_ignored: false,
         stdout: format!("Configured GitHub Pages at {base_url}\n"),
         stderr: String::new(),
+    })
+}
+
+fn native_create_github_app_token(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let repository = action_state
+        .env
+        .get("GITHUB_REPOSITORY")
+        .context("actions/create-github-app-token requires GITHUB_REPOSITORY")?;
+    let (repository_owner, repository_name) = repository
+        .split_once('/')
+        .context("GITHUB_REPOSITORY must be owner/name")?;
+    let owner = native_input_or(&action_state, action, "owner", repository_owner);
+    let repositories = native_input_or(&action_state, action, "repositories", repository_name);
+    if owner != repository_owner || repositories != repository_name {
+        bail!("actions/create-github-app-token is restricted to current repository {repository}");
+    }
+    let api_url = native_input_or(
+        &action_state,
+        action,
+        "github-api-url",
+        "https://api.github.com",
+    );
+    if api_url.trim_end_matches('/') != "https://api.github.com" {
+        bail!("actions/create-github-app-token requires github-api-url=https://api.github.com");
+    }
+    if input_truthy(&native_input_or(
+        &action_state,
+        action,
+        "skip-token-revoke",
+        "false",
+    )) {
+        bail!("actions/create-github-app-token does not permit skip-token-revoke");
+    }
+    let app_id = native_input(action, &action_state, "app-id");
+    let private_key = native_input(action, &action_state, "private-key");
+    if app_id.trim().is_empty() || private_key.trim().is_empty() {
+        bail!("actions/create-github-app-token requires app-id and private-key");
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_secs();
+    let claims = serde_json::json!({
+        "iat": now.saturating_sub(60),
+        "exp": now.saturating_add(540),
+        "iss": app_id,
+    });
+    let jwt = jsonwebtoken::encode(
+        &Header::new(Algorithm::RS256),
+        &claims,
+        &EncodingKey::from_rsa_pem(private_key.as_bytes())
+            .context("parse GitHub App private key")?,
+    )
+    .context("sign GitHub App JWT")?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("build GitHub App API client")?;
+    let installation_endpoint =
+        format!("https://api.github.com/repos/{repository_owner}/{repository_name}/installation");
+    let installation: Value = github_app_response(
+        client
+            .get(&installation_endpoint)
+            .bearer_auth(&jwt)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "velnor-runner")
+            .send(),
+        "resolve GitHub App installation",
+    )?;
+    let installation_id = installation
+        .get("id")
+        .and_then(Value::as_u64)
+        .context("GitHub App installation response is missing id")?;
+    let app_slug = installation
+        .get("app_slug")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let token_endpoint =
+        format!("https://api.github.com/app/installations/{installation_id}/access_tokens");
+    let token_response: Value = github_app_response(
+        client
+            .post(&token_endpoint)
+            .bearer_auth(&jwt)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "velnor-runner")
+            .json(&serde_json::json!({"repositories": [repository_name]}))
+            .send(),
+        "create GitHub App installation token",
+    )?;
+    let token = token_response
+        .get("token")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("GitHub App token response is missing token")?
+        .to_string();
+    let expires_at = token_response
+        .get("expires_at")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    Ok(native_success_with_state(StepCommandState {
+        outputs: [
+            ("token".to_string(), token.clone()),
+            ("installation-id".to_string(), installation_id.to_string()),
+            ("app-slug".to_string(), app_slug.to_string()),
+        ]
+        .into(),
+        state: [
+            ("token".to_string(), token.clone()),
+            ("expiresAt".to_string(), expires_at),
+        ]
+        .into(),
+        masks: vec![token],
+        ..StepCommandState::default()
+    }))
+}
+
+fn github_app_response(
+    response: std::result::Result<reqwest::blocking::Response, reqwest::Error>,
+    operation: &str,
+) -> Result<Value> {
+    let response = response.with_context(|| operation.to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!("{operation} failed with HTTP {status}");
+    }
+    response
+        .json()
+        .with_context(|| format!("decode response for {operation}"))
+}
+
+fn native_revoke_github_app_token(state: &JobExecutionState) -> Result<StepExecutionResult> {
+    let token = state.env.get("STATE_token").cloned().unwrap_or_default();
+    if token.is_empty() {
+        return Ok(native_success_with_state(StepCommandState::default()));
+    }
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("build GitHub App revoke client")?
+        .delete("https://api.github.com/installation/token")
+        .bearer_auth(&token)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "velnor-runner")
+        .send();
+    let stderr = match response {
+        Ok(response) if response.status().is_success() => String::new(),
+        Ok(response) => format!(
+            "Warning: failed to revoke GitHub App token: HTTP {}\n",
+            response.status()
+        ),
+        Err(error) => format!("Warning: failed to revoke GitHub App token: {error}\n"),
+    };
+    Ok(StepExecutionResult {
+        exit_code: 0,
+        state: StepCommandState::default(),
+        skipped: false,
+        failure_ignored: false,
+        stdout: "GitHub App token revoked\n".to_string(),
+        stderr,
     })
 }
 

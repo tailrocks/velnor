@@ -14,7 +14,8 @@ use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 // Plan 009 introduced v6 (action subpaths + reusable-workflow schema). Plan 010
 // adds source-SHA + crate-version identity to the exported manifest so a consumer
 // can bind the compiled manifest to one release commit, bumping the schema to v7.
-pub const MANIFEST_VERSION: u32 = 8;
+// Approved composites introduced v8; the native GitHub App token adapter is v9.
+pub const MANIFEST_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CapabilityManifest {
@@ -416,6 +417,22 @@ pub static ACTIONS: &[ActionCapability] = &[
             "subject-path",
             &["dist/*.tar.gz", "dist/l2-subject.json"]
         )]
+    ),
+    capability!(
+        "actions/create-github-app-token",
+        CreateGitHubAppToken,
+        &[allowed(
+            "bcd2ba49218906704ab6c1aa796996da409d3eb1",
+            "v3.0.0"
+        )],
+        &[
+            InputRule::Any("app-id"),
+            InputRule::Any("private-key"),
+            InputRule::Any("owner"),
+            InputRule::Any("repositories"),
+            InputRule::Literal("github-api-url", &["https://api.github.com"]),
+            InputRule::Literal("skip-token-revoke", &["false"]),
+        ]
     ),
     capability!(
         "actions/upload-artifact",
@@ -1698,11 +1715,11 @@ mod tests {
     }
 
     #[test]
-    fn compiled_manifest_is_version_eight_and_structurally_immutable() {
+    fn compiled_manifest_is_version_nine_and_structurally_immutable() {
         // Unified-CI composite admission changes the accepted capability surface,
-        // so the compiled manifest identity advances from v7 to v8.
-        assert_eq!(MANIFEST_VERSION, 8);
-        assert_eq!(MANIFEST.version, 8);
+        // and the approved GitHub App token adapter advances it from v8 to v9.
+        assert_eq!(MANIFEST_VERSION, 9);
+        assert_eq!(MANIFEST.version, 9);
         assert_manifest_integrity().expect("compiled manifest must pass integrity");
     }
 
