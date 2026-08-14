@@ -183,6 +183,21 @@ The equal 20 GiB ceiling is for fair initial measurement, not eternal tuning.
 Changing it versions the manifest. The filesystem controller may reclaim an
 inactive store below its backend ceiling under pressure.
 
+### GitHub App package-updater token
+
+The pinned `actions/create-github-app-token` v3 action has one approved native
+surface: mint a token for the current repository and current owner. The adapter
+accepts `app-id`, `private-key`, `owner`, and `repositories`; optional API URL
+and revoke inputs may only retain `https://api.github.com` and `false`.
+Cross-owner, multi-repository, enterprise-host, permission-expansion, and
+skip-revocation requests fail before network access.
+
+The adapter signs the short-lived GitHub App JWT in process, resolves the
+current repository installation, requests a repository-scoped installation
+token, masks it before later steps, and exposes the upstream token,
+installation-id, and app-slug outputs. The post action always attempts token
+revocation. Neither the private key nor token is written to logs.
+
 ## Standard estate use
 
 Production workflows select one backend and contain one setup action. Sccache
@@ -205,7 +220,7 @@ action post step owns reporting.
 2. Remove unknown-action sidecar fallback from the product path.
    **Implemented by plan 033; the diagnostic flags
    (`--skip-capability-validation`, `--diagnostic-node-sidecar`) and their env
-   bindings were deleted by plan 009.** Production admission is unconditional:
+bindings were deleted by plan 009.** Production admission is unconditional:
    startup rejects any legacy bypass variable or a non-`strict`
    `VELNOR_CAPABILITY_VALIDATION`, and the packaged daemon units pin
    `VELNOR_CAPABILITY_VALIDATION=strict`.

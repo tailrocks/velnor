@@ -120,6 +120,7 @@ pub enum NativeActionAdapter {
     ConfigurePages,
     DeployPages,
     AttestBuildProvenance,
+    CreateGitHubAppToken,
     PathsFilter,
     Mise,
     Sccache,
@@ -179,6 +180,7 @@ pub fn native_action_adapter(repository: &str) -> Option<NativeActionAdapter> {
         "actions/configure-pages" => Some(NativeActionAdapter::ConfigurePages),
         "actions/deploy-pages" => Some(NativeActionAdapter::DeployPages),
         "actions/attest-build-provenance" => Some(NativeActionAdapter::AttestBuildProvenance),
+        "actions/create-github-app-token" => Some(NativeActionAdapter::CreateGitHubAppToken),
         "dorny/paths-filter" => Some(NativeActionAdapter::PathsFilter),
         "jdx/mise-action" => Some(NativeActionAdapter::Mise),
         "mozilla-actions/sccache-action" => Some(NativeActionAdapter::Sccache),
@@ -3279,6 +3281,10 @@ runs:
             (
                 "actions/attest-build-provenance",
                 NativeActionAdapter::AttestBuildProvenance,
+            ),
+            (
+                "actions/create-github-app-token",
+                NativeActionAdapter::CreateGitHubAppToken,
             ),
             ("dorny/paths-filter", NativeActionAdapter::PathsFilter),
             ("jdx/mise-action", NativeActionAdapter::Mise),
