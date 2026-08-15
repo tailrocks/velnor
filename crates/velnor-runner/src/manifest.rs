@@ -189,6 +189,7 @@ const GITHUB_SCRIPT_INPUTS: &[InputRule] = &[
     ),
 ];
 const RENOVATE_REFS: &[AllowedRef] = &[
+    allowed("e09d604f8f803bb527bd8321ed5be06c460b8682", "v46.2.2"),
     allowed("316d7cd859606d6039a2182b7d69199e9b036835", "v46.2.1"),
     allowed("3064367f740a1a91cca218698a63902689cce200", "v46"),
     allowed("22e0a16091fc706b04affe6ae53d5e3358ac4023", "v44"),
@@ -2372,7 +2373,7 @@ mod tests {
         validate_job_with_context(
             &job(
                 "renovatebot/github-action",
-                Some("316d7cd859606d6039a2182b7d69199e9b036835"),
+                Some("e09d604f8f803bb527bd8321ed5be06c460b8682"),
                 serde_json::json!({
                     "token": "masked",
                     "renovate-version": "43",
