@@ -10954,8 +10954,12 @@ esac
 
     #[test]
     fn native_cache_treats_root_rustup_path_as_velnor_provided() {
-        assert!(velnor_static_persistent_cache_path("/root/.rustup/toolchains"));
-        assert!(velnor_static_persistent_cache_path("/root/.rustup/update-hashes"));
+        assert!(velnor_static_persistent_cache_path(
+            "/root/.rustup/toolchains"
+        ));
+        assert!(velnor_static_persistent_cache_path(
+            "/root/.rustup/update-hashes"
+        ));
     }
 
     #[test]
