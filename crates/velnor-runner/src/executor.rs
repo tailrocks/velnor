@@ -4076,7 +4076,7 @@ fn native_cache_restore_main(
 
     let persistent_paths = cache_paths(&path)
         .iter()
-        .filter(|path| velnor_persistent_cache_path(path))
+        .filter(|path| velnor_persistent_cache_path(&action_state, path))
         .count();
     let mut stdout = String::new();
     if let Some(matched_key) = &matched_key {
@@ -4404,7 +4404,7 @@ fn restore_cache_paths(
         // Paths that live on Velnor's host-persistent mounts (cargo
         // registry/git, mise installs, sccache) are always warm — copying
         // store bytes over them would be pure waste.
-        if velnor_persistent_cache_path(&path) {
+        if velnor_persistent_cache_path(state, &path) {
             continue;
         }
         let source = cache_dir.join(index.to_string());
@@ -4428,7 +4428,22 @@ fn restore_cache_paths(
 /// toolchain store, and the shared sccache dir. These are always warm; the
 /// actions/cache adapter neither tars them into the store nor copies store bytes
 /// back over them.
-fn velnor_persistent_cache_path(path: &str) -> bool {
+fn velnor_persistent_cache_path(state: &JobExecutionState, path: &str) -> bool {
+    if state.persistent_workspace_target && workspace_target_cache_path(path) {
+        return true;
+    }
+    velnor_static_persistent_cache_path(path)
+}
+
+fn workspace_target_cache_path(path: &str) -> bool {
+    let path = path.trim();
+    matches!(path, "target" | "./target" | "/__w/target")
+        || path.starts_with("target/")
+        || path.starts_with("./target/")
+        || path.starts_with("/__w/target/")
+}
+
+fn velnor_static_persistent_cache_path(path: &str) -> bool {
     let path = path.trim();
     let home_relative = path
         .strip_prefix("~/")
@@ -4444,8 +4459,6 @@ fn velnor_persistent_cache_path(path: &str) -> bool {
     }
     path == "/opt/mise"
         || path.starts_with("/opt/mise/")
-        || path == "/__w/target"
-        || path.starts_with("/__w/target/")
         || path == "/root/.rustup"
         || path.starts_with("/root/.rustup/")
         || path == "/var/cache/sccache"
@@ -4458,7 +4471,9 @@ fn rust_cache_covered_by_persistent_storage(
 ) -> bool {
     let paths = cache_paths(cache_directories);
     if !paths.is_empty() {
-        return paths.iter().all(|path| velnor_persistent_cache_path(path));
+        return paths
+            .iter()
+            .all(|path| velnor_persistent_cache_path(state, path));
     }
     state.persistent_workspace_target
 }
@@ -4571,7 +4586,7 @@ fn save_cache_result(
     let mut saved = 0usize;
     let mut persistent = 0usize;
     for (index, path) in cache_paths(paths).into_iter().enumerate() {
-        if velnor_persistent_cache_path(&path) {
+        if velnor_persistent_cache_path(state, &path) {
             persistent += 1;
             continue;
         }
@@ -10939,8 +10954,54 @@ esac
 
     #[test]
     fn native_cache_treats_root_rustup_path_as_velnor_provided() {
-        assert!(velnor_persistent_cache_path("/root/.rustup/toolchains"));
-        assert!(velnor_persistent_cache_path("/root/.rustup/update-hashes"));
+        assert!(velnor_static_persistent_cache_path("/root/.rustup/toolchains"));
+        assert!(velnor_static_persistent_cache_path("/root/.rustup/update-hashes"));
+    }
+
+    #[test]
+    fn workspace_target_cache_paths_include_relative_workflow_inputs() {
+        assert!(workspace_target_cache_path("target"));
+        assert!(workspace_target_cache_path("./target/debug"));
+        assert!(workspace_target_cache_path("/__w/target/release"));
+        assert!(!workspace_target_cache_path("nested/target"));
+    }
+
+    #[test]
+    fn native_cache_skips_relative_target_when_native_target_is_persistent() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        spec.cargo_target_host = Some(temp.join("target-store"));
+        let steps = vec![ExecutableStep::Native {
+            step_id: "cache".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
+                inputs: [
+                    ("path".into(), "target".into()),
+                    ("key".into(), "build-output-Linux-X64-lock".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&spec, &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| result
+            .state
+            .summary
+            .contains("host-persistent store — restore/save skipped")));
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
@@ -11045,15 +11106,16 @@ esac
             timeout_minutes: None,
         }];
 
+        let mut spec = container(&temp);
+        spec.cargo_target_host = Some(temp.join("target-store"));
         let results = DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
         assert_eq!(results[0].state.outputs["cache-hit"], "true");
         assert!(results[0]
             .stdout
             .contains("Rust cache paths live on Velnor host-persistent storage"));
-        assert!(velnor_persistent_cache_path("/__w/target/debug"));
         fs::remove_dir_all(temp).unwrap();
     }
 
