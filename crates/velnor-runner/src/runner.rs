@@ -7118,8 +7118,9 @@ fn recent_job_timings(config_base: &Path, slots: usize, limit: usize) -> Vec<Job
             .then(left.2.cmp(&right.2))
     });
     let keep_from = records.len().saturating_sub(limit);
+    records.drain(..keep_from);
     records
-        .drain(..keep_from)
+        .into_iter()
         .map(|(_, _, _, record)| record)
         .collect()
 }
