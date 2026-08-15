@@ -1766,7 +1766,10 @@ where
                 }
             }
         }
-        if target_materialized {
+        if target_materialized
+            && step_error.is_none()
+            && persistent_target_results_publishable(&results)
+        {
             if let Err(error) = publish_persistent_target(
                 container,
                 state.env.get("GITHUB_SHA").map(String::as_str),
@@ -4847,6 +4850,12 @@ fn publish_persistent_target(
         return Err(error);
     }
     Ok(())
+}
+
+fn persistent_target_results_publishable(results: &[StepExecutionResult]) -> bool {
+    results
+        .iter()
+        .all(|result| result.skipped || result.exit_code == 0)
 }
 
 fn cache_staging_name(cache_file_name: &str) -> String {
@@ -11434,6 +11443,33 @@ esac
             stale_time
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn persistent_target_publishes_only_after_successful_steps() {
+        let result = |exit_code, skipped| StepExecutionResult {
+            exit_code,
+            state: StepCommandState::default(),
+            skipped,
+            failure_ignored: false,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+
+        assert!(persistent_target_results_publishable(&[
+            result(0, false),
+            result(0, true),
+        ]));
+        assert!(!persistent_target_results_publishable(&[
+            result(0, false),
+            result(1, false),
+        ]));
+        assert!(!persistent_target_results_publishable(&[
+            StepExecutionResult {
+                failure_ignored: true,
+                ..result(1, false)
+            },
+        ]));
     }
 
     #[test]
