@@ -7049,6 +7049,12 @@ fn parse_job_timing_line(line: &str) -> Option<JobTimingRecord> {
     serde_json::from_str(json.trim()).ok()
 }
 
+fn parse_timestamped_job_timing_line(line: &str) -> Option<(&str, JobTimingRecord)> {
+    let (prefix, _) = line.split_once("job-timing ")?;
+    let timestamp = prefix.split_whitespace().next()?;
+    Some((timestamp, parse_job_timing_line(line)?))
+}
+
 fn percentile(values: &mut [u64], percentile: usize) -> u64 {
     if values.is_empty() {
         return 0;
@@ -7090,18 +7096,33 @@ fn recent_job_timings(config_base: &Path, slots: usize, limit: usize) -> Vec<Job
         return Vec::new();
     };
     let mut records = Vec::new();
-    for slot_dir in slot_dirs {
+    for (slot_index, slot_dir) in slot_dirs.into_iter().enumerate() {
+        let mut line_index = 0_usize;
         for file_name in [format!("{LIFECYCLE_LOG}.1"), LIFECYCLE_LOG.to_string()] {
             let path = slot_dir.join("logs").join(file_name);
             let Ok(contents) = fs::read_to_string(path) else {
                 continue;
             };
-            records.extend(contents.lines().filter_map(parse_job_timing_line));
+            for line in contents.lines() {
+                if let Some((timestamp, record)) = parse_timestamped_job_timing_line(line) {
+                    records.push((timestamp.to_owned(), slot_index, line_index, record));
+                }
+                line_index = line_index.saturating_add(1);
+            }
         }
     }
+    records.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then(left.1.cmp(&right.1))
+            .then(left.2.cmp(&right.2))
+    });
     let keep_from = records.len().saturating_sub(limit);
     records.drain(..keep_from);
     records
+        .into_iter()
+        .map(|(_, _, _, record)| record)
+        .collect()
 }
 
 fn print_doctor_slos(records: &[JobTimingRecord]) {
@@ -11275,15 +11296,51 @@ runs:
         let current = timing_record("current", 2);
         fs::write(
             logs.join(format!("{LIFECYCLE_LOG}.1")),
-            format!("job-timing {}\n", serde_json::to_string(&old).unwrap()),
+            format!(
+                "2026-07-18T00:00:00Z job-timing {}\n",
+                serde_json::to_string(&old).unwrap()
+            ),
         )
         .unwrap();
         fs::write(
             logs.join(LIFECYCLE_LOG),
-            format!("job-timing {}\n", serde_json::to_string(&current).unwrap()),
+            format!(
+                "2026-07-18T00:00:01Z job-timing {}\n",
+                serde_json::to_string(&current).unwrap()
+            ),
         )
         .unwrap();
         assert_eq!(recent_job_timings(&root, 1, 1), vec![current]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recent_job_timings_orders_records_across_slots_by_timestamp() {
+        let root = std::env::temp_dir().join(format!("velnor-timing-{}", uuid::Uuid::new_v4()));
+        for slot in 1..=2 {
+            fs::create_dir_all(root.join("slots").join(format!("slot-{slot}")).join("logs"))
+                .unwrap();
+        }
+        let newest = timing_record("newest-slot-1", 1);
+        let older = timing_record("older-slot-2", 2);
+        fs::write(
+            root.join("slots/slot-1/logs").join(LIFECYCLE_LOG),
+            format!(
+                "2026-07-18T00:00:02Z job-timing {}\n",
+                serde_json::to_string(&newest).unwrap()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.join("slots/slot-2/logs").join(LIFECYCLE_LOG),
+            format!(
+                "2026-07-18T00:00:01Z job-timing {}\n",
+                serde_json::to_string(&older).unwrap()
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(recent_job_timings(&root, 2, 1), vec![newest]);
         fs::remove_dir_all(root).unwrap();
     }
 
