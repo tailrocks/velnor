@@ -251,6 +251,10 @@ const MISE_INPUTS: &[InputRule] = &[
     ),
     InputRule::Any("working_directory"),
     InputRule::Any("github_token"),
+    // Upstream controls Actions-cache transport with this boolean. Velnor's
+    // repository-scoped local mise store does not use that transport, but the
+    // input remains part of the pinned action's admitted interface.
+    InputRule::Literal("cache", &["true", "false"]),
     InputRule::Literal("cache_key_prefix", &["mise-v2"]),
     InputRule::Literal("cache_save", &["true", "false"]),
 ];
@@ -2393,6 +2397,7 @@ mod tests {
                     "version": "2026.7.7",
                     "install_args": "rust zig",
                     "github_token": "masked",
+                    "cache": "false",
                     "cache_key_prefix": "mise-v2",
                     "cache_save": "false"
                 }),
@@ -2453,6 +2458,13 @@ mod tests {
 
     #[test]
     fn validate_job_rejects_unapproved_mise_cache_surface() {
+        let errors = violations(&job(
+            "jdx/mise-action",
+            Some("7e36c90d9ab29c415a2384db3006f3ec8a8cc654"),
+            serde_json::json!({"cache": "sometimes"}),
+        ));
+        assert_eq!(errors[0].field, "with.cache");
+
         let errors = violations(&job(
             "jdx/mise-action",
             Some("dad1bfd3df957f44999b559dd69dc1671cb4e9ea"),
