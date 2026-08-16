@@ -1932,11 +1932,28 @@ where
         if let (Some(context_host), Some(dockerfile_host)) =
             (&action.build_context_host, &action.dockerfile_host)
         {
-            self.run_docker(&container.build_docker_action_args(
-                &action.image,
-                dockerfile_host,
-                context_host,
-            ))?;
+            let docker_config = temp_host.join("_velnor/docker-client");
+            fs::create_dir_all(&docker_config).with_context(|| {
+                format!(
+                    "create isolated Docker client config {}",
+                    docker_config.display()
+                )
+            })?;
+            fs::set_permissions(&docker_config, fs::Permissions::from_mode(0o700)).with_context(
+                || {
+                    format!(
+                        "secure isolated Docker client config {}",
+                        docker_config.display()
+                    )
+                },
+            )?;
+            self.run_docker_with_env(
+                &container.build_docker_action_args(&action.image, dockerfile_host, context_host),
+                &[(
+                    "DOCKER_CONFIG".to_string(),
+                    docker_config.display().to_string(),
+                )],
+            )?;
         }
         let command_files = ScriptStepPlan::prepare(
             &ScriptStep {
@@ -3317,6 +3334,23 @@ where
 
     fn run_docker(&mut self, args: &[String]) -> Result<CommandResult> {
         let result = self.runner.run("docker", args)?;
+        if result.code != 0 {
+            bail!(
+                "docker {} failed with code {}: {}",
+                args.join(" "),
+                result.code,
+                result.stderr
+            );
+        }
+        Ok(result)
+    }
+
+    fn run_docker_with_env(
+        &mut self,
+        args: &[String],
+        env: &[(String, String)],
+    ) -> Result<CommandResult> {
+        let result = self.runner.run_with_env("docker", args, env)?;
         if result.code != 0 {
             bail!(
                 "docker {} failed with code {}: {}",
@@ -15816,6 +15850,21 @@ fi"#
         assert!(calls[2]
             .1
             .contains(&"velnor-action-acme-docker-v1-root".into()));
+        assert_eq!(
+            executor.runner().env[2],
+            vec![(
+                "DOCKER_CONFIG".into(),
+                temp.join("_velnor/docker-client").display().to_string()
+            )]
+        );
+        assert_eq!(
+            fs::metadata(temp.join("_velnor/docker-client"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
         assert_eq!(calls[3].1[0], "run");
         assert!(calls[3]
             .1
