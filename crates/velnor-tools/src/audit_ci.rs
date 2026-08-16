@@ -1731,10 +1731,12 @@ fn is_native_apple_job(job: &serde_yaml::Mapping) -> bool {
                                 "xcodebuild ",
                                 "codesign ",
                                 "xcrun notarytool ",
+                                "swiftc ",
                                 "swift test ",
                             ]
                             .iter()
                             .any(|marker| run.contains(marker))
+                                || (run.contains("cargo build") && run.contains("apple-darwin"))
                         })
                 })
             })
@@ -1997,6 +1999,35 @@ jobs:
         let findings = audit(yaml);
         assert!(!has_rule(&findings, "lanes"), "{findings:?}");
         assert!(!has_rule(&findings, "runner-os"), "{findings:?}");
+    }
+
+    #[test]
+    fn native_swift_template_parse_stays_on_macos() {
+        let yaml = r#"
+on:
+  push:
+concurrency:
+  group: swift-templates-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  templates-macos:
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - run: find templates -name '*.swift' -print0 | xargs -0 -n1 swiftc -parse
+"#;
+        assert!(!has_rule(&audit(yaml), "runner-os"));
+    }
+
+    #[test]
+    fn native_rust_apple_target_stays_on_macos() {
+        let yaml = BASE
+            .replace("${{ matrix.config.runner }}", "macos-26")
+            .replace(
+                "cargo nextest run --workspace --locked",
+                "cargo build --release --target aarch64-apple-darwin",
+            );
+        assert!(!has_rule(&audit(&yaml), "runner-os"));
     }
 
     #[test]
