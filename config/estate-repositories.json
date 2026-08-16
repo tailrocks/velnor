@@ -106,8 +106,8 @@
         "cargo-cache":{"classification":"required","evidence":"Every Velnor compiling job uses the canonical lane-scoped local compiler and Cargo registry cache contract.","implementations":[{"workflow":"ci.yml","job_ids":["rust","clippy"],"canonical_markers":["SCCACHE_GHA_ENABLED=false","mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9","cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-"]}]},
         "integration-services":{"classification":"repo-specific","evidence":"Runner protocol, fixture, and daemon integration tests are Velnor-specific.","implementations":[]},
         "docker-build":{"classification":"non-applicable","evidence":"Velnor releases native runner archives and Debian packages; the canonical job-image Dockerfile is packaged and validated but no repository workflow builds or publishes an OCI image.","implementations":[]},
-        "artifacts":{"classification":"applicable","evidence":"Release workflows transport Debian packages and release evidence.","implementations":[{"workflow":"release-deb.yml","canonical_markers":["actions/upload-artifact@"]}]},
-        "release":{"classification":"applicable","evidence":"release.yml and release-deb.yml publish Velnor releases through the signed apt path.","implementations":[{"workflow":"release.yml","job_ids":["release"]},{"workflow":"release-deb.yml"}]},
+        "artifacts":{"classification":"applicable","evidence":"The sole coherent release workflow transports native archives, Debian packages, image digests, and release evidence.","implementations":[{"workflow":"release.yml","canonical_markers":["actions/upload-artifact@","actions/download-artifact@"]}]},
+        "release":{"classification":"applicable","evidence":"release.yml is the sole release coordinator and publishes one source-bound record consumed independently by the signed APT path.","implementations":[{"workflow":"release.yml","job_ids":["release"]}]},
         "renovate":{"classification":"applicable","evidence":"renovate.yml runs repository-local Renovate.","implementations":[{"workflow":"renovate.yml"}]}
       }
     },

@@ -1842,9 +1842,9 @@ mod tests {
         let workflow: serde_yaml::Value =
             serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
                 .expect("release workflow must parse");
-        let steps = workflow["jobs"]["record"]["steps"]
+        let steps = workflow["jobs"]["release"]["steps"]
             .as_sequence()
-            .expect("record job steps");
+            .expect("release job steps");
         let download = steps
             .iter()
             .position(|step| {
@@ -1852,7 +1852,7 @@ mod tests {
                     .and_then(serde_yaml::Value::as_str)
                     .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
             })
-            .expect("record job must download the compiled release tool");
+            .expect("release job must download the compiled release tool");
         let verify = steps
             .iter()
             .position(|step| {
@@ -1860,7 +1860,7 @@ mod tests {
                     .and_then(serde_yaml::Value::as_str)
                     .is_some_and(|run| run.contains("release assemble"))
             })
-            .expect("record job must independently verify the release");
+            .expect("release job must independently verify the release");
         assert!(
             download < verify,
             "compiled release tool must be downloaded before record verification"
