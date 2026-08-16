@@ -385,6 +385,17 @@ pub static ACTIONS: &[ActionCapability] = &[
         ],
         notes: "pinned remote composite; expanded into strictly validated native adapters",
     },
+    ActionCapability {
+        repository: "fsfe/reuse-action",
+        adapter: NativeActionAdapter::ApprovedComposite,
+        allowed_refs: &[allowed(
+            "676e2d560c9a403aa252096d99fcab3e1132b0f5",
+            "pinned REUSE compliance Docker action",
+        )],
+        allowed_subpaths: &[],
+        inputs: &[],
+        notes: "pinned Docker action; generic Docker execution with a closed identity and input surface",
+    },
     capability!(
         "actions/checkout",
         Checkout,
@@ -2024,6 +2035,49 @@ mod tests {
             &BTreeMap::new(),
         )
         .is_err());
+    }
+
+    #[test]
+    fn reuse_docker_action_is_exactly_scoped() {
+        const REUSE_SHA: &str = "676e2d560c9a403aa252096d99fcab3e1132b0f5";
+
+        validate_resolved_action(
+            "reuse",
+            "fsfe/reuse-action",
+            REUSE_SHA,
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        for (action_ref, subpath, inputs, field) in [
+            (
+                "1111111111111111111111111111111111111111",
+                None,
+                BTreeMap::new(),
+                "ref",
+            ),
+            (REUSE_SHA, Some("nested"), BTreeMap::new(), "path"),
+            (
+                REUSE_SHA,
+                None,
+                BTreeMap::from([("unexpected".to_string(), "value".to_string())]),
+                "with.unexpected",
+            ),
+        ] {
+            let error = validate_resolved_action(
+                "reuse",
+                "fsfe/reuse-action",
+                action_ref,
+                subpath,
+                &inputs,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<CapabilityViolation>().unwrap().field,
+                field
+            );
+        }
     }
 
     #[test]
