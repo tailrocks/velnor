@@ -30,6 +30,8 @@ struct Consumer {
     signer_digest: String,
     channels: Vec<String>,
     assets: Vec<String>,
+    #[serde(default)]
+    preview_assets: Vec<String>,
 }
 
 impl PackagePolicy {
@@ -109,6 +111,23 @@ impl PackagePolicy {
                     row.slug
                 ));
             }
+            if row.slug == "jackin-project/homebrew-tap" {
+                if row.preview_assets.len() != 6
+                    || !row.channels.iter().any(|channel| channel == "preview")
+                {
+                    return Err("jackin preview policy must bind exactly six rolling assets".into());
+                }
+            } else if !row.preview_assets.is_empty() {
+                return Err(format!("{} has unsupported preview assets", row.slug));
+            }
+            if row.preview_assets.iter().any(|asset| {
+                asset.is_empty()
+                    || asset.contains('/')
+                    || asset.contains("..")
+                    || !valid_package_format(asset)
+            }) {
+                return Err(format!("{} has an unsafe preview asset", row.slug));
+            }
         }
         let expected: BTreeSet<_> = TAP_CONSUMERS.into_iter().chain(APT_CONSUMERS).collect();
         if seen != expected {
@@ -124,10 +143,11 @@ impl PackagePolicy {
         let mut source_cases = String::new();
         for row in &self.consumer {
             let patterns = row.assets.join("\\n");
+            let preview_patterns = row.preview_assets.join("\\n");
             let channels = row.channels.join("\\n");
             policy_cases.push_str(&format!(
-                "            {}) SOURCE_REPOSITORY={}; ASSET_PATTERNS=$'{}'; ALLOWED_CHANNELS=$'{}' ;;\n",
-                row.slug, row.source, patterns, channels
+                "            {}) SOURCE_REPOSITORY={}; ASSET_PATTERNS=$'{}'; PREVIEW_ASSET_PATTERNS=$'{}'; ALLOWED_CHANNELS=$'{}' ;;\n",
+                row.slug, row.source, patterns, preview_patterns, channels
             ));
             source_cases.push_str(&format!(
                 "            {}) SOURCE_REPOSITORY={} ;;\n",
@@ -196,7 +216,15 @@ impl PackagePolicy {
             .replace("@CURRENT_SIGNER_DIGEST@", &row.signer_digest)
             .replace("@OLD_SIGNER_DIGEST@", old_digest)
             .replace("@OLD_SIGNER_ACTIVATED_AT@", activated_at)
-            .replace("@OLD_SIGNER_EXPIRES_AT@", expires_at);
+            .replace("@OLD_SIGNER_EXPIRES_AT@", expires_at)
+            .replace(
+                "@PACKAGE_CHANNELS@",
+                if row.slug == "jackin-project/homebrew-tap" {
+                    "[stable, preview]"
+                } else {
+                    "[stable]"
+                },
+            );
         for placeholder in [
             "@JACKIN_FLEET_SHA@",
             "@TAILROCKS_FLEET_SHA@",
@@ -206,6 +234,7 @@ impl PackagePolicy {
             "@OLD_SIGNER_DIGEST@",
             "@OLD_SIGNER_ACTIVATED_AT@",
             "@OLD_SIGNER_EXPIRES_AT@",
+            "@PACKAGE_CHANNELS@",
         ] {
             if rendered.contains(placeholder) {
                 return Err(format!("package consumer rendering left {placeholder}"));

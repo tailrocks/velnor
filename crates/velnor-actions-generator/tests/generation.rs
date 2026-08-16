@@ -231,7 +231,7 @@ fn package_policy_and_workflows_are_closed_and_lane_selectable() {
     let package_policy = std::fs::read_to_string(common::repo_root().join("fleet/packages.toml"))
         .expect("package policy bytes");
     assert!(!package_policy.contains(".tar.xz"));
-    assert_eq!(package_policy.matches(".tar.gz").count(), 16);
+    assert_eq!(package_policy.matches(".tar.gz").count(), 22);
     assert_eq!(package_policy.matches(".zip").count(), 2);
     for producer_asset in [
         "velnor-runner-*-amd64.deb",
@@ -266,7 +266,10 @@ fn package_policy_and_workflows_are_closed_and_lane_selectable() {
         "verify and sole mutate writer must use the selected real lane"
     );
     assert!(UPDATER_WORKFLOW.contains("needs.verify.outputs.available == 'true' && inputs.writer"));
-    assert!(UPDATER_WORKFLOW.contains("name: verified-package-${{ inputs.lane }}"));
+    assert!(
+        UPDATER_WORKFLOW
+            .contains("name: verified-package-${{ inputs.channel }}-${{ inputs.lane }}")
+    );
     assert!(UPDATER_WORKFLOW.contains("sha256sum --check --strict"));
     assert!(
         UPDATER_WORKFLOW
@@ -281,13 +284,16 @@ fn package_policy_and_workflows_are_closed_and_lane_selectable() {
     assert!(UPDATER_WORKFLOW.contains("gh pr list --state open --head \"$BRANCH\" --base main"));
     assert!(!UPDATER_WORKFLOW.contains("gh pr view \"$BRANCH\""));
     assert!(UPDATER_WORKFLOW.contains("test \"$BRANCH\" != \"main\""));
-    assert!(UPDATER_WORKFLOW.contains("test \"$CHANNEL\" = stable"));
+    assert!(UPDATER_WORKFLOW.contains("elif test \"$CHANNEL\" = preview"));
+    assert!(UPDATER_WORKFLOW.contains("releases/tags/preview"));
+    assert!(UPDATER_WORKFLOW.contains("test \"${#matches[@]}\" -eq 6"));
+    assert!(UPDATER_WORKFLOW.contains("VELNOR_PACKAGE_CHANNEL: ${{ inputs.channel }}"));
     assert!(UPDATER_WORKFLOW.contains("available=false"));
     assert!(UPDATER_WORKFLOW.contains("updater is a verified no-op"));
     assert!(UPDATER_WORKFLOW.contains("needs.verify.outputs.available == 'true'"));
     assert!(!UPDATER_WORKFLOW.contains("releases/latest"));
-    assert!(TAP_TEMPLATE.matches("channel: stable").count() == 3);
-    assert!(APT_TEMPLATE.matches("channel: stable").count() == 3);
+    assert!(TAP_TEMPLATE.matches("channel: @PACKAGE_CHANNELS@").count() == 3);
+    assert!(APT_TEMPLATE.matches("channel: @PACKAGE_CHANNELS@").count() == 3);
     for template in [TAP_TEMPLATE, APT_TEMPLATE] {
         assert!(template.contains("permissions:\n  attestations: read\n  contents: read"));
         assert!(template.contains(
@@ -298,6 +304,7 @@ fn package_policy_and_workflows_are_closed_and_lane_selectable() {
             "{\"lane\":\"velnor\",\"writer\":true},{\"lane\":\"github\",\"writer\":false}"
         ));
         assert!(template.contains("lane: ${{ matrix.config.lane }}"));
+        assert!(template.contains("channel: ${{ matrix.channel }}"));
         assert!(template.contains("writer: ${{ matrix.config.writer }}"));
         assert!(template.contains("vars.VELNOR_AUTOMATIC_LANES == 'github'"));
         assert!(template.contains(
@@ -309,11 +316,11 @@ fn package_policy_and_workflows_are_closed_and_lane_selectable() {
         assert!(!template.contains("needs.jackin-project"));
         assert!(!template.contains("needs.ChainArgos"));
     }
-    assert!(
+    assert_eq!(
         TAP_TEMPLATE
-            .matches("package-update/verified/stable")
-            .count()
-            == 3
+            .matches("branch: package-update/verified/${{ matrix.channel }}")
+            .count(),
+        3
     );
 }
 
@@ -417,9 +424,12 @@ fn updater_executes_explicit_current_then_old_signer_alternatives() {
     assert!(body.contains("GH_TOKEN: ${{ github.token }}"));
     assert!(body.contains("accepted_digests+=(\"$OLD_SIGNER_DIGEST\")"));
     assert!(body.contains("30 * 24 * 60 * 60"));
-    assert!(body.contains("for signer_digest in \"${accepted_digests[@]}\""));
+    assert!(body.contains("candidate_digests=(\"${accepted_digests[@]}\")"));
+    assert!(body.contains("candidate_digests=(\"$source_digest\")"));
+    assert!(body.contains("for signer_digest in \"${candidate_digests[@]}\""));
     assert!(body.contains("--signer-digest \"$signer_digest\""));
     assert!(body.contains("$SOURCE_OWNER/velnor-actions/.github/workflows/package-signer.yml"));
+    assert!(body.contains("$SOURCE_REPOSITORY/.github/workflows/preview.yml"));
     assert!(body.contains("keys == [\"accepted_signer_digest\",\"verification\"]"));
     assert!(body.contains("if length > 0 and all(.[];"));
     assert!(body.contains("jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654"));

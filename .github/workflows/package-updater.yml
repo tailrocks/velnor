@@ -75,54 +75,93 @@ jobs:
           set -euo pipefail
           test "$CONSUMER_REPOSITORY" = "$GITHUB_REPOSITORY"
           case "$CONSUMER_REPOSITORY" in
-            jackin-project/homebrew-tap) SOURCE_REPOSITORY=jackin-project/jackin; ASSET_PATTERNS=$'jackin-*-aarch64-apple-darwin.tar.gz\njackin-*-x86_64-apple-darwin.tar.gz\njackin-*-aarch64-unknown-linux-gnu.tar.gz\njackin-*-x86_64-unknown-linux-gnu.tar.gz\njackin-desktop-*-aarch64-apple-darwin.zip'; ALLOWED_CHANNELS=$'stable\npreview\ndev' ;;
-            tailrocks/homebrew-tablerock) SOURCE_REPOSITORY=tailrocks/tablerock; ASSET_PATTERNS=$'tablerock-*-aarch64-apple-darwin.tar.gz\ntablerock-*-x86_64-apple-darwin.tar.gz\ntablerock-*-aarch64-unknown-linux-gnu.tar.gz\ntablerock-*-x86_64-unknown-linux-gnu.tar.gz\ntablerock-app-*-aarch64-apple-darwin.zip'; ALLOWED_CHANNELS=$'stable\npreview\ndev' ;;
-            tailrocks/homebrew-parallax) SOURCE_REPOSITORY=tailrocks/parallax; ASSET_PATTERNS=$'parallax-*-aarch64-apple-darwin.tar.gz\nparallax-*-x86_64-apple-darwin.tar.gz\nparallax-*-aarch64-unknown-linux-gnu.tar.gz\nparallax-*-x86_64-unknown-linux-gnu.tar.gz'; ALLOWED_CHANNELS=$'stable\npreview\ndev' ;;
-            tailrocks/homebrew-holla) SOURCE_REPOSITORY=tailrocks/holla; ASSET_PATTERNS=$'holla-*-aarch64-apple-darwin.tar.gz\nholla-*-x86_64-apple-darwin.tar.gz\nholla-*-aarch64-unknown-linux-gnu.tar.gz\nholla-*-x86_64-unknown-linux-gnu.tar.gz'; ALLOWED_CHANNELS=$'stable\npreview\ndev' ;;
-            tailrocks/velnor-apt) SOURCE_REPOSITORY=tailrocks/velnor; ASSET_PATTERNS=$'velnor-runner-*-amd64.deb\nvelnor-runner-*-arm64.deb'; ALLOWED_CHANNELS=$'stable' ;;
-            tailrocks/holla-apt) SOURCE_REPOSITORY=tailrocks/holla; ASSET_PATTERNS=$'holla-*-x86_64-unknown-linux-gnu.deb\nholla-*-aarch64-unknown-linux-gnu.deb'; ALLOWED_CHANNELS=$'stable' ;;
+            jackin-project/homebrew-tap) SOURCE_REPOSITORY=jackin-project/jackin; ASSET_PATTERNS=$'jackin-*-aarch64-apple-darwin.tar.gz\njackin-*-x86_64-apple-darwin.tar.gz\njackin-*-aarch64-unknown-linux-gnu.tar.gz\njackin-*-x86_64-unknown-linux-gnu.tar.gz\njackin-desktop-*-aarch64-apple-darwin.zip'; PREVIEW_ASSET_PATTERNS=$'jackin-aarch64-apple-darwin.tar.gz\njackin-x86_64-apple-darwin.tar.gz\njackin-aarch64-unknown-linux-gnu.tar.gz\njackin-x86_64-unknown-linux-gnu.tar.gz\njackin-capsule-aarch64-unknown-linux-gnu.tar.gz\njackin-capsule-x86_64-unknown-linux-gnu.tar.gz'; ALLOWED_CHANNELS=$'stable\npreview\ndev' ;;
+            tailrocks/homebrew-tablerock) SOURCE_REPOSITORY=tailrocks/tablerock; ASSET_PATTERNS=$'tablerock-*-aarch64-apple-darwin.tar.gz\ntablerock-*-x86_64-apple-darwin.tar.gz\ntablerock-*-aarch64-unknown-linux-gnu.tar.gz\ntablerock-*-x86_64-unknown-linux-gnu.tar.gz\ntablerock-app-*-aarch64-apple-darwin.zip'; PREVIEW_ASSET_PATTERNS=$''; ALLOWED_CHANNELS=$'stable\npreview\ndev' ;;
+            tailrocks/homebrew-parallax) SOURCE_REPOSITORY=tailrocks/parallax; ASSET_PATTERNS=$'parallax-*-aarch64-apple-darwin.tar.gz\nparallax-*-x86_64-apple-darwin.tar.gz\nparallax-*-aarch64-unknown-linux-gnu.tar.gz\nparallax-*-x86_64-unknown-linux-gnu.tar.gz'; PREVIEW_ASSET_PATTERNS=$''; ALLOWED_CHANNELS=$'stable\npreview\ndev' ;;
+            tailrocks/homebrew-holla) SOURCE_REPOSITORY=tailrocks/holla; ASSET_PATTERNS=$'holla-*-aarch64-apple-darwin.tar.gz\nholla-*-x86_64-apple-darwin.tar.gz\nholla-*-aarch64-unknown-linux-gnu.tar.gz\nholla-*-x86_64-unknown-linux-gnu.tar.gz'; PREVIEW_ASSET_PATTERNS=$''; ALLOWED_CHANNELS=$'stable\npreview\ndev' ;;
+            tailrocks/velnor-apt) SOURCE_REPOSITORY=tailrocks/velnor; ASSET_PATTERNS=$'velnor-runner-*-amd64.deb\nvelnor-runner-*-arm64.deb'; PREVIEW_ASSET_PATTERNS=$''; ALLOWED_CHANNELS=$'stable' ;;
+            tailrocks/holla-apt) SOURCE_REPOSITORY=tailrocks/holla; ASSET_PATTERNS=$'holla-*-x86_64-unknown-linux-gnu.deb\nholla-*-aarch64-unknown-linux-gnu.deb'; PREVIEW_ASSET_PATTERNS=$''; ALLOWED_CHANNELS=$'stable' ;;
             *) echo "unknown consumer" >&2; exit 1 ;;
           esac
-          test "$CHANNEL" = stable
           grep -Fx -- "$CHANNEL" <<<"$ALLOWED_CHANNELS" >/dev/null
           [[ "$SOURCE_REPOSITORY" =~ ^(jackin-project|tailrocks)/[a-z0-9][a-z0-9._-]*$ ]]
-          test -n "$ASSET_PATTERNS"
           mkdir -m 0700 verified
-          gh api --paginate "repos/$SOURCE_REPOSITORY/releases?per_page=100" \
-            | jq -cs '
-                add
-                | map(select(
-                    (.draft | not) and (.prerelease | not) and
-                    (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
-                  ))
-                | sort_by(.published_at)
-              ' > verified/releases.json
-          release_count=$(jq -e 'length' verified/releases.json)
-          if test "$release_count" -eq 0; then
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "No immutable stable release is available; updater is a verified no-op."
-            exit 0
+          printf '%s\n' "$CHANNEL" > verified/channel
+          if test "$CHANNEL" = stable; then
+            test -n "$ASSET_PATTERNS"
+            gh api --paginate "repos/$SOURCE_REPOSITORY/releases?per_page=100" \
+              | jq -cs '
+                  add
+                  | map(select(
+                      (.draft | not) and (.prerelease | not) and
+                      (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+                    ))
+                  | sort_by(.published_at)
+                ' > verified/releases.json
+            release_count=$(jq -e 'length' verified/releases.json)
+            if test "$release_count" -eq 0; then
+              echo "available=false" >> "$GITHUB_OUTPUT"
+              echo "No immutable stable release is available; updater is a verified no-op."
+              exit 0
+            fi
+            jq -e 'last' verified/releases.json > verified/release.json
+            jq -e 'type=="object" and (.draft|not) and (.prerelease|not) and (.tag_name|type=="string") and (.assets|type=="array")' verified/release.json >/dev/null
+            tag=$(jq -r .tag_name verified/release.json)
+            [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
+            gh release download "$tag" -R "$SOURCE_REPOSITORY" -p release-manifest.json -p SHA256SUMS -D verified
+            mapfile -t matches < <(jq -r '.assets[].name' verified/release.json | while IFS= read -r name; do
+              # shellcheck disable=SC2053 # Policy values are intentional glob patterns.
+              while IFS= read -r pattern; do [[ "$name" == $pattern ]] && printf '%s\n' "$name"; done <<<"$ASSET_PATTERNS"
+            done | sort -u)
+            test "${#matches[@]}" -ge 1
+            printf '%s\n' "${matches[@]}" > verified/artifacts.list
+            while IFS= read -r artifact; do
+              [[ "$artifact" != */* && "$artifact" != *..* ]]
+              gh release download "$tag" -R "$SOURCE_REPOSITORY" -p "$artifact" -D verified
+            done < verified/artifacts.list
+            source_ref="refs/tags/$tag"
+            source_digest=$(gh api "repos/$SOURCE_REPOSITORY/commits/$tag" --jq .sha)
+          elif test "$CHANNEL" = preview; then
+            test "$CONSUMER_REPOSITORY" = jackin-project/homebrew-tap
+            test "$SOURCE_REPOSITORY" = jackin-project/jackin
+            test -n "$PREVIEW_ASSET_PATTERNS"
+            gh api "repos/$SOURCE_REPOSITORY/releases/tags/preview" > verified/release.json
+            jq -e '
+              type=="object" and (.draft|not) and .prerelease == true and
+              .tag_name == "preview" and (.target_commitish|test("^[0-9a-f]{40}$")) and
+              (.name|test("^Preview [0-9]+[.][0-9]+[.][0-9]+-preview[.][0-9]+[+][0-9a-f]{7}$")) and
+              (.assets|type=="array")
+            ' verified/release.json >/dev/null
+            source_ref=refs/heads/main
+            source_digest=$(jq -r .target_commitish verified/release.json)
+            test "$(gh api "repos/$SOURCE_REPOSITORY/commits/main" --jq .sha)" = "$source_digest"
+            version=$(jq -r '.name|sub("^Preview ";"")' verified/release.json)
+            mapfile -t matches < <(jq -r '.assets[].name' verified/release.json | while IFS= read -r name; do
+              while IFS= read -r pattern; do [[ "$name" == "$pattern" ]] && printf '%s\n' "$name"; done <<<"$PREVIEW_ASSET_PATTERNS"
+            done | sort -u)
+            test "${#matches[@]}" -eq 6
+            test "$(printf '%s\n' "${matches[@]}" | sort -u | wc -l | tr -d ' ')" -eq 6
+            printf '%s\n' "${matches[@]}" > verified/artifacts.list
+            : > verified/assets.jsonl
+            : > verified/SHA256SUMS
+            while IFS= read -r artifact; do
+              [[ "$artifact" != */* && "$artifact" != *..* ]]
+              gh release download preview -R "$SOURCE_REPOSITORY" -p "$artifact" -p "$artifact.sha256" -D verified
+              checksum=$(sha256sum "verified/$artifact" | cut -d' ' -f1)
+              sidecar=$(awk 'NF {print $1; exit}' "verified/$artifact.sha256")
+              [[ "$checksum" =~ ^[0-9a-f]{64}$ && "$sidecar" = "$checksum" ]]
+              printf '%s  %s\n' "$checksum" "$artifact" >> verified/SHA256SUMS
+              jq -cn --arg name "$artifact" --arg sha256 "$checksum" '{name:$name,sha256:$sha256}' >> verified/assets.jsonl
+            done < verified/artifacts.list
+            jq -Sn --arg source_repository "$SOURCE_REPOSITORY" --arg source_ref "$source_ref" \
+              --arg source_commit "$source_digest" --arg version "$version" --slurpfile assets verified/assets.jsonl \
+              '{schema:"velnor.package-release.v1",source_repository:$source_repository,source_ref:$source_ref,source_commit:$source_commit,version:$version,assets:$assets}' \
+              > verified/release-manifest.json
+          else
+            echo "unsupported package channel: $CHANNEL" >&2
+            exit 1
           fi
           echo "available=true" >> "$GITHUB_OUTPUT"
-          jq -e 'last' verified/releases.json > verified/release.json
-          jq -e 'type=="object" and (.draft|not) and (.prerelease|not) and (.tag_name|type=="string") and (.assets|type=="array")' verified/release.json >/dev/null
-          tag=$(jq -r .tag_name verified/release.json)
-          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
-          gh release download "$tag" -R "$SOURCE_REPOSITORY" -p release-manifest.json -p SHA256SUMS -D verified
-          mapfile -t matches < <(jq -r '.assets[].name' verified/release.json | while IFS= read -r name; do
-            # shellcheck disable=SC2053 # Policy values are intentional glob patterns.
-            while IFS= read -r pattern; do [[ "$name" == $pattern ]] && printf '%s\n' "$name"; done <<<"$ASSET_PATTERNS"
-          done | sort -u)
-          test "${#matches[@]}" -ge 1
-          printf '%s\n' "${matches[@]}" > verified/artifacts.list
-          artifact=${matches[0]}
-          [[ "$artifact" != */* && "$artifact" != *..* ]]
-          while IFS= read -r artifact; do
-            [[ "$artifact" != */* && "$artifact" != *..* ]]
-            gh release download "$tag" -R "$SOURCE_REPOSITORY" -p "$artifact" -D verified
-          done < verified/artifacts.list
-          source_ref="refs/tags/$tag"
-          source_digest=$(gh api "repos/$SOURCE_REPOSITORY/commits/$tag" --jq .sha)
           [[ "$source_digest" =~ ^[0-9a-f]{40}$ ]]
           jq -e --arg repo "$SOURCE_REPOSITORY" --arg ref "$source_ref" --arg commit "$source_digest" '
             keys == ["assets","schema","source_commit","source_ref","source_repository","version"] and
@@ -151,6 +190,7 @@ jobs:
           OLD_SIGNER_DIGEST: ${{ inputs.old-signer-digest }}
           OLD_SIGNER_ACTIVATED_AT: ${{ inputs.old-signer-activated-at }}
           OLD_SIGNER_EXPIRES_AT: ${{ inputs.old-signer-expires-at }}
+          CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
           case "$CONSUMER_REPOSITORY" in
@@ -163,7 +203,6 @@ jobs:
             *) echo "unknown consumer" >&2; exit 1 ;;
           esac
           SOURCE_OWNER=${SOURCE_REPOSITORY%%/*}
-          SIGNER_WORKFLOW="$SOURCE_OWNER/velnor-actions/.github/workflows/package-signer.yml"
           [[ "$CURRENT_SIGNER_DIGEST" =~ ^[0-9a-f]{40}$ ]]
           accepted_digests=("$CURRENT_SIGNER_DIGEST")
           if [[ -n "$OLD_SIGNER_DIGEST$OLD_SIGNER_ACTIVATED_AT$OLD_SIGNER_EXPIRES_AT" ]]; then
@@ -184,17 +223,27 @@ jobs:
           : > verified/verification.jsonl
           while IFS= read -r artifact; do
             verified_digest=""
-            for signer_digest in "${accepted_digests[@]}"; do
+            if test "$CHANNEL" = preview; then
+              signer_workflow="$SOURCE_REPOSITORY/.github/workflows/preview.yml"
+              candidate_digests=("$source_digest")
+            else
+              signer_workflow="$SOURCE_OWNER/velnor-actions/.github/workflows/package-signer.yml"
+              candidate_digests=("${accepted_digests[@]}")
+            fi
+            for signer_digest in "${candidate_digests[@]}"; do
               report=$(mktemp)
-              if gh attestation verify "verified/$artifact" \
-                --repo "$SOURCE_REPOSITORY" \
-                --source-ref "$source_ref" \
-                --source-digest "$source_digest" \
-                --signer-workflow "$SIGNER_WORKFLOW" \
-                --signer-digest "$signer_digest" \
-                --predicate-type https://slsa.dev/provenance/v1 \
-                --deny-self-hosted-runners \
-                --format json > "$report"; then
+              verify_args=(
+                "verified/$artifact"
+                --repo "$SOURCE_REPOSITORY"
+                --source-ref "$source_ref"
+                --source-digest "$source_digest"
+                --signer-workflow "$signer_workflow"
+                --signer-digest "$signer_digest"
+                --predicate-type https://slsa.dev/provenance/v1
+                --format json
+              )
+              if test "$CHANNEL" = stable; then verify_args+=(--deny-self-hosted-runners); fi
+              if gh attestation verify "${verify_args[@]}" > "$report"; then
                 test -z "$verified_digest"
                 verified_digest="$signer_digest"
                 jq -c --arg accepted_signer_digest "$signer_digest" \
@@ -227,7 +276,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ steps.poll.outputs.available == 'true' }}
         with:
-          name: verified-package-${{ inputs.lane }}
+          name: verified-package-${{ inputs.channel }}-${{ inputs.lane }}
           path: verified
           if-no-files-found: error
           retention-days: 1
@@ -242,7 +291,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: verified-package-${{ inputs.lane }}
+          name: verified-package-${{ inputs.channel }}-${{ inputs.lane }}
           path: ${{ runner.temp }}/verified
       - name: Revalidate evidence before credential mint
         env:
@@ -278,6 +327,7 @@ jobs:
           BOT_LOGIN: ${{ vars.PACKAGE_UPDATER_BOT_LOGIN }}
           BOT_EMAIL: ${{ vars.PACKAGE_UPDATER_BOT_EMAIL }}
           VELNOR_VERIFIED_PACKAGE_DIR: ${{ runner.temp }}/verified
+          VELNOR_PACKAGE_CHANNEL: ${{ inputs.channel }}
         run: |
           set -euo pipefail
           test "$BRANCH" != "main"

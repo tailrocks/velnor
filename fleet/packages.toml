@@ -8,6 +8,7 @@ source_ref = "refs/tags/v*"
 signer_digest = "a1ff41d323ab0d87bcb6407e14aee406b32a6cb0"
 channels = ["stable", "preview", "dev"]
 assets = ["jackin-*-aarch64-apple-darwin.tar.gz", "jackin-*-x86_64-apple-darwin.tar.gz", "jackin-*-aarch64-unknown-linux-gnu.tar.gz", "jackin-*-x86_64-unknown-linux-gnu.tar.gz", "jackin-desktop-*-aarch64-apple-darwin.zip"]
+preview_assets = ["jackin-aarch64-apple-darwin.tar.gz", "jackin-x86_64-apple-darwin.tar.gz", "jackin-aarch64-unknown-linux-gnu.tar.gz", "jackin-x86_64-unknown-linux-gnu.tar.gz", "jackin-capsule-aarch64-unknown-linux-gnu.tar.gz", "jackin-capsule-x86_64-unknown-linux-gnu.tar.gz"]
 
 [[consumer]]
 slug = "tailrocks/homebrew-tablerock"

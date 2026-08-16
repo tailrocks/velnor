@@ -27,15 +27,16 @@ jobs:
       fail-fast: false
       matrix:
         config: ${{ fromJSON(((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') || (github.event_name != 'workflow_dispatch' && vars.VELNOR_AUTOMATIC_LANES == 'both')) && '[{"lane":"velnor","writer":true},{"lane":"github","writer":false}]' || ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || (github.event_name != 'workflow_dispatch' && vars.VELNOR_AUTOMATIC_LANES == 'github')) && '[{"lane":"github","writer":true}]' || '[{"lane":"velnor","writer":true}]') }}
+        channel: @PACKAGE_CHANNELS@
     uses: jackin-project/velnor-actions/.github/workflows/package-updater.yml@@JACKIN_FLEET_SHA@ # @CALVER@
     with:
       consumer-repository: ${{ github.repository }}
-      channel: stable
+      channel: ${{ matrix.channel }}
       current-signer-digest: "@CURRENT_SIGNER_DIGEST@"
       old-signer-digest: "@OLD_SIGNER_DIGEST@"
       old-signer-activated-at: "@OLD_SIGNER_ACTIVATED_AT@"
       old-signer-expires-at: "@OLD_SIGNER_EXPIRES_AT@"
-      branch: "package-update/verified/stable"
+      branch: package-update/verified/${{ matrix.channel }}
       lane: ${{ matrix.config.lane }}
       writer: ${{ matrix.config.writer }}
     secrets:
@@ -46,15 +47,16 @@ jobs:
       fail-fast: false
       matrix:
         config: ${{ fromJSON(((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') || (github.event_name != 'workflow_dispatch' && vars.VELNOR_AUTOMATIC_LANES == 'both')) && '[{"lane":"velnor","writer":true},{"lane":"github","writer":false}]' || ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || (github.event_name != 'workflow_dispatch' && vars.VELNOR_AUTOMATIC_LANES == 'github')) && '[{"lane":"github","writer":true}]' || '[{"lane":"velnor","writer":true}]') }}
+        channel: @PACKAGE_CHANNELS@
     uses: tailrocks/velnor-actions/.github/workflows/package-updater.yml@@TAILROCKS_FLEET_SHA@ # @CALVER@
     with:
       consumer-repository: ${{ github.repository }}
-      channel: stable
+      channel: ${{ matrix.channel }}
       current-signer-digest: "@CURRENT_SIGNER_DIGEST@"
       old-signer-digest: "@OLD_SIGNER_DIGEST@"
       old-signer-activated-at: "@OLD_SIGNER_ACTIVATED_AT@"
       old-signer-expires-at: "@OLD_SIGNER_EXPIRES_AT@"
-      branch: "package-update/verified/stable"
+      branch: package-update/verified/${{ matrix.channel }}
       lane: ${{ matrix.config.lane }}
       writer: ${{ matrix.config.writer }}
     secrets:
@@ -65,15 +67,16 @@ jobs:
       fail-fast: false
       matrix:
         config: ${{ fromJSON(((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') || (github.event_name != 'workflow_dispatch' && vars.VELNOR_AUTOMATIC_LANES == 'both')) && '[{"lane":"velnor","writer":true},{"lane":"github","writer":false}]' || ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || (github.event_name != 'workflow_dispatch' && vars.VELNOR_AUTOMATIC_LANES == 'github')) && '[{"lane":"github","writer":true}]' || '[{"lane":"velnor","writer":true}]') }}
+        channel: @PACKAGE_CHANNELS@
     uses: ChainArgos/velnor-actions/.github/workflows/package-updater.yml@@CHAINARGOS_FLEET_SHA@ # @CALVER@
     with:
       consumer-repository: ${{ github.repository }}
-      channel: stable
+      channel: ${{ matrix.channel }}
       current-signer-digest: "@CURRENT_SIGNER_DIGEST@"
       old-signer-digest: "@OLD_SIGNER_DIGEST@"
       old-signer-activated-at: "@OLD_SIGNER_ACTIVATED_AT@"
       old-signer-expires-at: "@OLD_SIGNER_EXPIRES_AT@"
-      branch: "package-update/verified/stable"
+      branch: package-update/verified/${{ matrix.channel }}
       lane: ${{ matrix.config.lane }}
       writer: ${{ matrix.config.writer }}
     secrets:
