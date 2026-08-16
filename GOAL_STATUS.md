@@ -35,13 +35,28 @@ Legacy repositories outside this list are excluded.
 - Added generated stable/preview package channels and verified Jackin preview
   formula mutation, including bare SHA-256 values and source-SHA binding.
 - Merged the related green pull requests completed before this checkpoint.
+- Published Velnor runner `v0.1.171` after a green release workflow.
+- Released canonical and owner-mirror Velnor Actions `2026.8.27` and rolled the
+  generated stable/preview caller into `jackin-project/homebrew-tap`.
+- Merged Jackin preview admission/build repairs (#883 and #888) and deployed
+  docs closure repair (#889), each after all pull-request checks were green.
+- Proved both fresh preview archive build jobs and the publish gate succeed on
+  Velnor. The remaining release mutation then failed with GitHub API `403` even
+  though the job reported `Contents: write`; this is recorded as an unresolved
+  Velnor job-token authorization defect, not hidden as success.
 
 ## Not completed
 
-- Runner 0.1.171 release deployment and live rejection-message proof.
+- Runner 0.1.171 package deployment and daemon restart proof. The release itself
+  is complete; the live detailed rejection evidence was observed in failed
+  Jackin jobs.
 - Release and mirror rollout of the new preview-channel generator.
 - End-to-end Jackin preview publish, rolling release, tap update, and docs-only
   negative proof on main.
+- Resolution of the Velnor release-mutation authorization mismatch: the job
+  advertises `Contents: write`, but `gh release edit preview` receives
+  `Resource not accessible by integration`. Do not weaken repository defaults;
+  repair Velnor token delivery or use a narrowly scoped installed App token.
 - Exhaustive current-state audit of every workflow in all 28 repositories.
 - Proof that generated duplicate workflow files are intentional or removed.
 - Repair and post-merge green verification for every remaining fleet defect.
