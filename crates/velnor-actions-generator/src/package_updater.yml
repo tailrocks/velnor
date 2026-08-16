@@ -130,9 +130,10 @@ jobs:
             [[ "$main_digest" =~ ^[0-9a-f]{40}$ ]]
             gh api "repos/$SOURCE_REPOSITORY/compare/$source_digest...$main_digest" > verified/source-to-main.json
             jq -e --arg source "$source_digest" --arg main "$main_digest" '
-              (.status == "identical" or .status == "ahead") and .behind_by == 0 and
               .base_commit.sha == $source and .merge_base_commit.sha == $source and
-              .head_commit.sha == $main
+              .behind_by == 0 and
+              ((.status == "identical" and .ahead_by == 0 and .total_commits == 0 and $source == $main) or
+               (.status == "ahead" and .ahead_by > 0 and .total_commits == .ahead_by and .commits[-1].sha == $main))
             ' verified/source-to-main.json >/dev/null
             version=$(jq -r '.name|sub("^Preview ";"")' verified/release.json)
             mapfile -t matches < <(jq -r '.assets[].name' verified/release.json | while IFS= read -r name; do
