@@ -36,7 +36,7 @@ permissions: {}
 
 jobs:
   verify:
-    runs-on: ubuntu-26.04
+    runs-on: ${{ 'ubuntu-26.04' }}
     timeout-minutes: 15
     permissions:
       attestations: read
@@ -219,7 +219,7 @@ jobs:
   mutate:
     needs: verify
     if: ${{ needs.verify.outputs.available == 'true' }}
-    runs-on: ubuntu-26.04
+    runs-on: ${{ 'ubuntu-26.04' }}
     timeout-minutes: 15
     permissions:
       contents: read
