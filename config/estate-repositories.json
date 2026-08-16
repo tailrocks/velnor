@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "defaults": {
     "lane-selection": {"classification":"required","evidence":"Every estate code repository must default automatic events to Velnor, run weekly schedules on both lanes, and expose github/both through the canonical ci.yml matrix.","implementations":[{"workflow":"ci.yml","canonical_markers":["github.event_name == 'schedule'","inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]}]},
     "checkout": {"classification":"required","evidence":"Every estate code repository consumes checked-out source in CI.","implementations":[{"workflow":"ci.yml","job_ids":["rust"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]}]},
@@ -19,7 +19,6 @@
   "repositories": [
     {
       "name":"ChainArgos/java-monorepo",
-      "path":"/Users/donbeave/Projects/ChainArgos/java-monorepo-velnor-estate",
       "concerns": {
         "rust-ci":{"classification":"repo-specific","evidence":"The production monorepo uses path-classified per-package Rust jobs and an aggregate required check; package identities are explicit repository parameters under the approved Class-A L2/L3 model.","implementations":[]},
         "checkout":{"classification":"required","evidence":"Every source-consuming Class-A workload job must use the canonical checkout pin and credential boundary.","implementations":[{"workflow":"ci.yml","job_ids":["changes","check","test-bitcoin-processor","test-eth-processor","test-coingecko-pricing","test-processor-monitor","test-tron-processor","test-blockchain-explorer","test-eth-grpc-server","test-tron-grpc-server","test-legacy-grpc-server"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]}]},
@@ -34,7 +33,6 @@
     },
     {
       "name":"ChainArgos/blockchain-nodes",
-      "path":"/Users/donbeave/Projects/ChainArgos/blockchain-nodes",
       "concerns": {
         "rust-ci":{"classification":"repo-specific","evidence":"Rust-script is the Docker factory control plane; build-publish sweep validates it instead of a library test job.","implementations":[]},
         "checkout":{"classification":"required","evidence":"Every Docker-factory workload consumes repository source through canonical checkout without persisted credentials.","implementations":[{"workflow":"ci.yml","job_ids":["sweep","base","build","packages"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]}]},
@@ -48,7 +46,6 @@
     },
     {
       "name":"jackin-project/jackin",
-      "path":"/Users/donbeave/Projects/tailrocks/jackin-project/jackin-velnor-estate",
       "concerns": {
         "checkout":{"classification":"required","evidence":"Jackin's canonical telemetry conformance compile job consumes repository source through pinned checkout.","implementations":[{"workflow":"ci.yml","job_ids":["telemetry-conformance"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]}]},
         "tool-setup":{"classification":"required","evidence":"Jackin's canonical telemetry conformance compile job installs its locked Rust toolchain through mise.","implementations":[{"workflow":"ci.yml","job_ids":["telemetry-conformance"],"canonical_markers":["jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d"]}]},
@@ -65,7 +62,6 @@
     },
     {
       "name":"tailrocks/parallax",
-      "path":"/Users/donbeave/Projects/tailrocks/parallax-project/parallax",
       "concerns": {
         "checkout":{"classification":"required","evidence":"The canonical Parallax check job consumes the workspace through pinned checkout without persisted credentials.","implementations":[{"workflow":"ci.yml","job_ids":["check"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]}]},
         "tool-setup":{"classification":"required","evidence":"The canonical Parallax check job installs Rust through the pinned mise action.","implementations":[{"workflow":"ci.yml","job_ids":["check"],"canonical_markers":["jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea"]}]},
@@ -80,14 +76,12 @@
     },
     {
       "name":"tailrocks/parallax-telemetry-playground",
-      "path":"/Users/donbeave/Projects/tailrocks/parallax-project/parallax-telemetry-playground",
       "concerns": {
         "integration-services":{"classification":"repo-specific","evidence":"The playground itself is a polyglot telemetry integration sample; its Java/Rust commands are repository parameters.","implementations":[]}
       }
     },
     {
       "name":"tailrocks/tablerock",
-      "path":"/Users/donbeave/Projects/tailrocks/tablerock-estate",
       "concerns": {
         "integration-services":{"classification":"repo-specific","evidence":"Native Swift/FFI parity is a TableRock product concern represented by native.yml; it is an all-macOS application gate and therefore cannot use the Linux Velnor lane matrix.","implementations":[]},
         "artifacts":{"classification":"repo-specific","evidence":"Generated Swift bindings and native evidence are repository-specific outputs.","implementations":[]},
@@ -96,7 +90,6 @@
     },
     {
       "name":"tailrocks/holla",
-      "path":"/Users/donbeave/Projects/tailrocks/holla-project/holla",
       "concerns": {
         "rust-ci":{"classification":"required","evidence":"Both primary tests and integration clippy compile Rust and must use the identical canonical setup stack.","implementations":[{"workflow":"ci.yml","job_ids":["rust","integration"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444","mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696","jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"]}]},
         "cargo-cache":{"classification":"required","evidence":"Every Holla compiling job uses the canonical lane-scoped local compiler and Cargo registry cache contract.","implementations":[{"workflow":"ci.yml","job_ids":["rust","integration"],"canonical_markers":["SCCACHE_GHA_ENABLED=false","mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9","cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-"]}]},
@@ -108,7 +101,6 @@
     },
     {
       "name":"tailrocks/velnor",
-      "path":"/Users/donbeave/Projects/tailrocks/velnor-project/velnor",
       "concerns": {
         "rust-ci":{"classification":"required","evidence":"Velnor test and clippy jobs compile the workspace and must use the identical canonical setup stack.","implementations":[{"workflow":"ci.yml","job_ids":["rust","clippy"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444","mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696","jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"]}]},
         "cargo-cache":{"classification":"required","evidence":"Every Velnor compiling job uses the canonical lane-scoped local compiler and Cargo registry cache contract.","implementations":[{"workflow":"ci.yml","job_ids":["rust","clippy"],"canonical_markers":["SCCACHE_GHA_ENABLED=false","mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9","cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-"]}]},
@@ -121,7 +113,6 @@
     },
     {
       "name":"tailrocks/ruxel",
-      "path":"/Users/donbeave/Projects/tailrocks/ruxel",
       "concerns": {
         "rust-ci":{"classification":"required","evidence":"Primary tests, clippy, and agent cross-build all compile Rust and use the canonical setup stack.","implementations":[{"workflow":"ci.yml","job_ids":["rust","clippy","agent-cross"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444","mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696","jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"]}]},
         "cargo-cache":{"classification":"required","evidence":"Every Ruxel compiling job uses the canonical lane-scoped local compiler and Cargo registry cache contract.","implementations":[{"workflow":"ci.yml","job_ids":["rust","clippy","agent-cross"],"canonical_markers":["SCCACHE_GHA_ENABLED=false","mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9","cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-"]}]},
@@ -131,7 +122,6 @@
     },
     {
       "name":"tailrocks/termrock",
-      "path":"/Users/donbeave/Projects/tailrocks/termrock",
       "concerns": {
         "rust-ci":{"classification":"required","evidence":"The primary, latest-toolchain, crossterm, and semver jobs comprise Termrock's Rust compile graph.","implementations":[{"workflow":"ci.yml","job_ids":["rust","latest-toolchain","crossterm-platform","semver-candidate"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444","mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696","jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"]}]},
         "cargo-cache":{"classification":"required","evidence":"Every Termrock compiling job uses the canonical lane-scoped local compiler and Cargo registry cache contract.","implementations":[{"workflow":"ci.yml","job_ids":["rust","latest-toolchain","crossterm-platform","semver-candidate"],"canonical_markers":["SCCACHE_GHA_ENABLED=false","mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9","cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-"]}]},
@@ -142,7 +132,6 @@
     },
     {
       "name":"tailrocks/schemalane",
-      "path":"/Users/donbeave/Projects/tailrocks/schemalane",
       "concerns": {
         "rust-ci":{"classification":"required","evidence":"Library validation and PostgreSQL integration both compile Rust through the canonical setup stack.","implementations":[{"workflow":"ci.yml","job_ids":["rust","integration"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444","mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696","jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9"]}]},
         "cargo-cache":{"classification":"required","evidence":"Every Schemalane compiling job uses the canonical lane-scoped local compiler and Cargo registry cache contract.","implementations":[{"workflow":"ci.yml","job_ids":["rust","integration"],"canonical_markers":["SCCACHE_GHA_ENABLED=false","mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696","actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9","cargo-registry-${{ matrix.config.lane }}-${{ runner.os }}-"]}]},
@@ -152,7 +141,6 @@
     },
     {
       "name":"tailrocks/pg-bigdecimal",
-      "path":"/Users/donbeave/Projects/tailrocks/pg-bigdecimal",
       "concerns": {
         "integration-services":{"classification":"repo-specific","evidence":"PostgreSQL compatibility tests are encoded as repository commands in canonical ci.yml without a separately managed service concern.","implementations":[]},
         "release":{"classification":"applicable","evidence":"release.yml publishes the library crate.","implementations":[{"workflow":"release.yml","job_ids":["release"]}]}
@@ -160,14 +148,12 @@
     },
     {
       "name":"tailrocks/tracing-request-level",
-      "path":"/Users/donbeave/Projects/tailrocks/tracing-request-level",
       "concerns": {
         "release":{"classification":"applicable","evidence":"release.yml publishes the library crate.","implementations":[{"workflow":"release.yml","job_ids":["release"]}]}
       }
     },
     {
       "name":"ChainArgos/jackin-agent-brown",
-      "path":"/Users/donbeave/Projects/ChainArgos/jackin-agent-brown",
       "concerns": {
         "lane-selection":{"classification":"required","evidence":"Validation, history scanning, image publication, pre-commit, and Renovate are executable Linux workflows and must use the canonical Velnor-default lane contract.","implementations":[{"workflow":"ci.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]},{"workflow":"gitleaks-history.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]},{"workflow":"precommit.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]},{"workflow":"publish-image.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.writer"]},{"workflow":"renovate.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]}]},
         "checkout":{"classification":"required","evidence":"All local validation and publication jobs consume repository source.","implementations":[{"workflow":"ci.yml","job_ids":["validate"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]},{"workflow":"gitleaks-history.yml","job_ids":["scan"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]},{"workflow":"precommit.yml","job_ids":["prek"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]},{"workflow":"renovate.yml","job_ids":["renovate"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]}]},
@@ -185,7 +171,6 @@
     },
     {
       "name":"tailrocks/velnor-actions-fixture",
-      "path":"/Users/donbeave/Projects/tailrocks/velnor-project/velnor-actions-fixture",
       "concerns": {
         "lane-selection":{"classification":"repo-specific","evidence":"Fixture workflows intentionally exercise canonical inline matrices plus isolated negative and reusable-workflow protocol shapes; their exact content is the Velnor compatibility contract.","implementations":[]},
         "checkout":{"classification":"applicable","evidence":"Fixture workload jobs consume source using the approved checkout adapter.","implementations":[{"workflow":"compat.yml","job_ids":["changes","compat"],"canonical_markers":["actions/checkout@"]}]},
@@ -205,7 +190,6 @@
     },
     {
       "name":"tailrocks/velnor-apt",
-      "path":"/Users/donbeave/Projects/tailrocks/velnor-project/velnor-apt",
       "concerns": {
         "lane-selection":{"classification":"required","evidence":"Signed repository publication and Renovate are executable Linux workflows; automatic publication must use Velnor and dispatch must expose github/both.","implementations":[{"workflow":"publish.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]},{"workflow":"renovate.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]}]},
         "checkout":{"classification":"required","evidence":"Repository assembly and Renovate consume checked-out configuration.","implementations":[{"workflow":"publish.yml","job_ids":["build"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]},{"workflow":"renovate.yml","job_ids":["renovate"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]}]},
@@ -224,7 +208,6 @@
     },
     {
       "name":"tailrocks/holla-apt",
-      "path":"/Users/donbeave/Projects/tailrocks/holla-project/holla-apt",
       "concerns": {
         "lane-selection":{"classification":"required","evidence":"Signed repository publication and Renovate are executable Linux workflows.","implementations":[{"workflow":"publish.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]},{"workflow":"renovate.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]}]},
         "checkout":{"classification":"required","evidence":"Repository assembly and Renovate consume checked-out configuration.","implementations":[{"workflow":"publish.yml","job_ids":["build"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]},{"workflow":"renovate.yml","job_ids":["renovate"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]}]},
@@ -243,7 +226,6 @@
     },
     {
       "name":"tailrocks/homebrew-tablerock",
-      "path":"/Users/donbeave/Projects/tailrocks/homebrew-tablerock",
       "concerns": {
         "lane-selection":{"classification":"required","evidence":"Scheduled preview metadata update is executable Linux automation and must use Velnor by default with explicit github/both dispatch.","implementations":[{"workflow":"update-preview.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]}]},
         "checkout":{"classification":"required","evidence":"The update job modifies checked-out cask metadata.","implementations":[{"workflow":"update-preview.yml","job_ids":["update"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]}]},
@@ -261,7 +243,6 @@
     },
     {
       "name":"tailrocks/homebrew-parallax",
-      "path":"/Users/donbeave/Projects/tailrocks/parallax-project/homebrew-parallax",
       "concerns": {
         "lane-selection":{"classification":"required","evidence":"Scheduled preview metadata update is executable Linux automation and must use Velnor by default with explicit github/both dispatch.","implementations":[{"workflow":"update-preview.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]}]},
         "checkout":{"classification":"required","evidence":"The update job modifies checked-out formula metadata.","implementations":[{"workflow":"update-preview.yml","job_ids":["update"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1","persist-credentials=false"]}]},
@@ -279,7 +260,6 @@
     },
     {
       "name":"tailrocks/homebrew-holla",
-      "path":"/Users/donbeave/Projects/tailrocks/holla-project/homebrew-holla",
       "concerns": {
         "lane-selection":{"classification":"required","evidence":"Repository-local Renovate is executable Linux automation and must use Velnor by default with explicit github/both dispatch.","implementations":[{"workflow":"renovate.yml","canonical_markers":["inputs.lanes == 'both'","ubuntu-26.04","matrix.config.runner"]}]},
         "checkout":{"classification":"required","evidence":"Renovate consumes repository configuration and tap metadata.","implementations":[{"workflow":"renovate.yml","job_ids":["renovate"],"canonical_markers":["actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"]}]},
@@ -294,6 +274,38 @@
         "required-aggregator":{"classification":"required","evidence":"Renovate dispatch parity needs a stable selected-lane terminal context.","implementations":[{"workflow":"renovate.yml","job_ids":["renovate-required"],"canonical_markers":["toJSON(needs)"]}]},
         "workflow-safety":{"classification":"required","evidence":"Repository mutation requires writer gating, bounded execution, least privilege, and immutable pins.","implementations":[{"workflow":"renovate.yml","canonical_markers":["concurrency:","timeout-minutes:"]}]}
       }
+    },
+    {
+      "name":"jackin-project/jackin-the-architect",
+      "concerns": {}
+    },
+    {
+      "name":"jackin-project/jackin-role-action",
+      "concerns": {}
+    },
+    {
+      "name":"jackin-project/jackin-agent-smith",
+      "concerns": {}
+    },
+    {
+      "name":"jackin-project/homebrew-tap",
+      "concerns": {}
+    },
+    {
+      "name":"jackin-project/jackin-sentinel",
+      "concerns": {}
+    },
+    {
+      "name":"jackin-project/jackin-dev",
+      "concerns": {}
+    },
+    {
+      "name":"tailrocks/homebrew-ruxel",
+      "concerns": {}
+    },
+    {
+      "name":"tailrocks/tailrocks-skills",
+      "concerns": {}
     }
   ]
 }
