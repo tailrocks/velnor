@@ -445,6 +445,7 @@ pub static ACTIONS: &[ActionCapability] = &[
             "v3.0.0"
         )],
         &[
+            InputRule::Any("client-id"),
             InputRule::Any("app-id"),
             InputRule::Any("private-key"),
             InputRule::Any("owner"),
@@ -1821,6 +1822,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn create_github_app_token_admits_current_client_id_input() {
+        let capability = ACTIONS
+            .iter()
+            .find(|candidate| candidate.repository == "actions/create-github-app-token")
+            .expect("create-github-app-token capability");
+        assert!(capability
+            .inputs
+            .iter()
+            .any(|rule| matches!(rule, InputRule::Any(name) if *name == "client-id")));
     }
 
     #[test]
