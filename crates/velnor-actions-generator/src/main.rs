@@ -2,8 +2,8 @@
 //!
 //! Subcommands:
 //! - `check --root PATH` — skeleton layout self-check (unchanged from plan 004).
-//! - `generate --root PATH` — render the four class templates (and, once the
-//!   block SHA is bound, the four callable workflows).
+//! - `generate --root PATH` — render the five class templates (and, once the
+//!   block SHA is bound, the five callable workflows).
 //! - `render-consumer --root PATH --repository OWNER/REPO` plus three
 //!   owner-local release SHA flags, `--calver VER --output DIR`.
 //! - `audit --root PATH` — full fleet audit; prints the exact fleet-valid line.

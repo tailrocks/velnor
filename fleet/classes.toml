@@ -23,11 +23,26 @@ test = { command = "mise run test", applicability = "both" }
 lint = { command = "mise run lint", applicability = "both" }
 format = { command = "mise run fmt", applicability = "both" }
 
+[native]
+# Native code keeps the portable code-class contract and adds one required
+# macOS-only repository-owned validation gate. The generated workflow remains
+# class-driven and never branches on repository slug.
+platform_only = true
+platform_runner = "macos-26"
+platform_name = "native-usage-menu-bar"
+install = { command = "mise install --locked", applicability = "both" }
+build = { command = "mise run ci", applicability = "both" }
+test = { command = "mise run desktop-ci", applicability = "github" }
+lint = { command = "mise run lint", applicability = "both" }
+format = { command = "mise run fmt", applicability = "both" }
+
 [tap]
 # Homebrew taps carry a genuinely platform-only gate: macOS cask/bottle
 # validation cannot run on the Linux Velnor lane, so `test` is declared
 # github-only and is legitimately not applicable on the Velnor lane.
 platform_only = true
+platform_runner = "macos-latest"
+platform_name = "GitHub platform lane"
 install = { command = "mise install --locked", applicability = "both" }
 build = { command = "mise run build", applicability = "both" }
 test = { command = "mise run test", applicability = "github" }

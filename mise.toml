@@ -54,7 +54,7 @@ depends = ["_toolchain"]
 run = "cargo deny check advisories"
 
 [tasks.generate]
-description = "Render the four class templates and callable workflows from fleet data"
+description = "Render the five class templates and callable workflows from fleet data"
 depends = ["_toolchain"]
 run = "cargo run --locked -p velnor-actions-generator -- generate --root ."
 

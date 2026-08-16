@@ -1,7 +1,7 @@
 //! Fleet data model and validation.
 //!
 //! This module owns the parsed, validated fleet: the 28-member repository
-//! manifest and the four class contracts. Parsing is fail-closed — an invalid
+//! manifest and the five class contracts. Parsing is fail-closed — an invalid
 //! slug, a non-40-hex SHA, a duplicate or unclassified member, a wrong per-class
 //! count, an empty gate command, or an implicit gate applicability all reject
 //! before any output is accepted.
@@ -22,9 +22,10 @@ pub const OWNERS: [&str; 3] = ["jackin-project", "tailrocks", "ChainArgos"];
 pub const CODE_STANDARD_COMMAND: &str = "mise run ci";
 
 /// Required member count per class, in canonical [`crate::ALL_CLASSES`] order:
-/// 20 code, 5 tap, 2 apt, 1 fixture (total 28).
-pub const REQUIRED_COUNTS: [(RepositoryClass, usize); 4] = [
-    (RepositoryClass::Code, 20),
+/// 19 code, 1 native, 5 tap, 2 apt, 1 fixture (total 28).
+pub const REQUIRED_COUNTS: [(RepositoryClass, usize); 5] = [
+    (RepositoryClass::Code, 19),
+    (RepositoryClass::Native, 1),
     (RepositoryClass::Tap, 5),
     (RepositoryClass::Apt, 2),
     (RepositoryClass::Fixture, 1),
@@ -133,6 +134,10 @@ pub struct ClassContract {
     pub gates: Vec<Gate>,
     /// Whether the class carries any genuinely platform-only gate.
     pub platform_only: bool,
+    /// GitHub-hosted runner for the platform lane, present iff one is required.
+    pub platform_runner: Option<String>,
+    /// Stable check name for the platform lane, present iff one is required.
+    pub platform_name: Option<String>,
 }
 
 impl ClassContract {
@@ -169,7 +174,7 @@ impl Repository {
     }
 }
 
-/// The fully validated fleet: 28 repositories and four class contracts.
+/// The fully validated fleet: 28 repositories and five class contracts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FleetManifest {
     repositories: Vec<Repository>,
@@ -200,7 +205,7 @@ impl FleetManifest {
         &self.repositories
     }
 
-    /// The four class contracts, in canonical [`crate::ALL_CLASSES`] order.
+    /// The five class contracts, in canonical [`crate::ALL_CLASSES`] order.
     #[must_use]
     pub fn classes(&self) -> &[ClassContract] {
         &self.classes
@@ -336,6 +341,7 @@ fn parse_class(token: &str) -> Option<RepositoryClass> {
 #[serde(deny_unknown_fields)]
 struct ClassesFile {
     code: ClassEntry,
+    native: ClassEntry,
     tap: ClassEntry,
     apt: ClassEntry,
     fixture: ClassEntry,
@@ -345,6 +351,10 @@ struct ClassesFile {
 #[serde(deny_unknown_fields)]
 struct ClassEntry {
     platform_only: bool,
+    #[serde(default)]
+    platform_runner: Option<String>,
+    #[serde(default)]
+    platform_name: Option<String>,
     install: GateEntry,
     build: GateEntry,
     test: GateEntry,
@@ -367,6 +377,7 @@ fn load_classes(path: &Path) -> Result<Vec<ClassContract>, String> {
 
     let entries = [
         (RepositoryClass::Code, file.code),
+        (RepositoryClass::Native, file.native),
         (RepositoryClass::Tap, file.tap),
         (RepositoryClass::Apt, file.apt),
         (RepositoryClass::Fixture, file.fixture),
@@ -409,10 +420,49 @@ fn load_classes(path: &Path) -> Result<Vec<ClassContract>, String> {
                 if platform_seen { "has" } else { "has no" }
             ));
         }
+        let (platform_runner, platform_name) = match (
+            entry.platform_only,
+            entry.platform_runner,
+            entry.platform_name,
+        ) {
+            (false, None, None) => (None, None),
+            (true, Some(runner), Some(name)) => {
+                let valid_runner = runner.starts_with("macos-")
+                    && runner.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                    });
+                if !valid_runner {
+                    return Err(format!(
+                        "class {} has invalid platform runner {runner:?}",
+                        class.code()
+                    ));
+                }
+                let valid_name = !name.is_empty()
+                    && name.len() <= 80
+                    && name.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || byte == b' ' || byte == b'-' || byte == b'_'
+                    });
+                if !valid_name {
+                    return Err(format!(
+                        "class {} has invalid platform name {name:?}",
+                        class.code()
+                    ));
+                }
+                (Some(runner), Some(name))
+            }
+            _ => {
+                return Err(format!(
+                    "class {} must declare platform_runner and platform_name iff platform_only is true",
+                    class.code()
+                ));
+            }
+        };
         classes.push(ClassContract {
             class,
             gates,
             platform_only: entry.platform_only,
+            platform_runner,
+            platform_name,
         });
     }
 

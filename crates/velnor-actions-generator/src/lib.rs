@@ -14,14 +14,16 @@ pub mod model;
 pub mod package;
 pub mod render;
 
-/// One of the four normalized repository classes the fleet generator maps every
+/// One of the five normalized repository classes the fleet generator maps every
 /// canonical repository onto exactly once.
 ///
-/// The variants are declared in canonical order: code, tap, apt, fixture.
+/// The variants are declared in canonical order: code, native, tap, apt, fixture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RepositoryClass {
     /// Rust library and binary code repositories.
     Code,
+    /// Code repositories with a required native macOS validation lane.
+    Native,
     /// Homebrew tap repositories.
     Tap,
     /// Debian/apt package repositories.
@@ -36,6 +38,7 @@ impl RepositoryClass {
     pub const fn code(self) -> &'static str {
         match self {
             RepositoryClass::Code => "code",
+            RepositoryClass::Native => "native",
             RepositoryClass::Tap => "tap",
             RepositoryClass::Apt => "apt",
             RepositoryClass::Fixture => "fixture",
@@ -43,9 +46,10 @@ impl RepositoryClass {
     }
 }
 
-/// The four repository classes in canonical order: code, tap, apt, fixture.
-pub const ALL_CLASSES: [RepositoryClass; 4] = [
+/// The five repository classes in canonical order: code, native, tap, apt, fixture.
+pub const ALL_CLASSES: [RepositoryClass; 5] = [
     RepositoryClass::Code,
+    RepositoryClass::Native,
     RepositoryClass::Tap,
     RepositoryClass::Apt,
     RepositoryClass::Fixture,
@@ -81,10 +85,10 @@ pub fn validate_layout(root: &Path) -> Result<(), String> {
 /// Generate every deterministic output from the declared fleet data under `root`.
 ///
 /// Always writes the two composite building-block actions to
-/// `actions/<name>/action.yml` (from their canonical bytes) and renders the four
+/// `actions/<name>/action.yml` (from their canonical bytes) and renders the five
 /// consumer class templates to
 /// `templates/<class>/ci.yml`. When `fleet/block-sha` is bound to a 40-hex commit
-/// SHA, also renders the four owner-local callable workflows to
+/// SHA, also renders the five owner-local callable workflows to
 /// `.github/workflows/ci-<class>.yml`, pinning their internal composite closure to
 /// that SHA. Returns the written paths in a stable order.
 ///

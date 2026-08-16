@@ -8,9 +8,9 @@ hand-edit these templates — change the shared class model or the declared repo
 data and regenerate. Every external Action reference is pinned to a full 40-hex commit
 SHA; mutable tags or branches are never used.
 
-## The four templates
+## The five templates
 
-`<class>/ci.yml` (code, tap, apt, fixture) is the consumer workflow every
+`<class>/ci.yml` (code, native, tap, apt, fixture) is the consumer workflow every
 repository of that class ships as `.github/workflows/ci.yml`. Each template:
 
 - declares three static owner-local reusable-workflow calls — one per owner

@@ -666,6 +666,30 @@ fn audit_callable_structure(
             return Err(format!("{what}: rendered gate has an empty command"));
         }
     }
+    if class == RepositoryClass::Native {
+        require_contains(
+            rendered,
+            "name: native-usage-menu-bar",
+            &what,
+            "native platform check name",
+        )?;
+        require_contains(
+            rendered,
+            "runs-on: macos-26",
+            &what,
+            "pinned native macOS runner",
+        )?;
+        require_contains(
+            rendered,
+            "command: mise run desktop-ci",
+            &what,
+            "repository-owned native gate",
+        )?;
+    } else if rendered.contains("mise run desktop-ci") {
+        return Err(format!(
+            "{what}: non-native class contains the native desktop gate"
+        ));
+    }
     Ok(())
 }
 

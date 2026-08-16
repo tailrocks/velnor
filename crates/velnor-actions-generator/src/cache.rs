@@ -370,8 +370,8 @@ fn validate_correctness_inputs(
     ];
     let required: &[&str] = match (class, id) {
         (_, "tools") => &TOOL_INPUTS,
-        (RepositoryClass::Code, "dependencies") => &DEPENDENCY_INPUTS,
-        (RepositoryClass::Code, "build-output") => &BUILD_INPUTS,
+        (RepositoryClass::Code | RepositoryClass::Native, "dependencies") => &DEPENDENCY_INPUTS,
+        (RepositoryClass::Code | RepositoryClass::Native, "build-output") => &BUILD_INPUTS,
         _ => return Ok(()),
     };
     for input in required {

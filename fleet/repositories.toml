@@ -1,9 +1,10 @@
-# Exhaustive canonical fleet: 28 repositories = 20 code + 5 tap + 2 apt + 1 fixture.
+# Exhaustive canonical fleet: 28 repositories = 19 code + 1 native + 5 tap +
+# 2 apt + 1 fixture.
 # Baselines are immutable default-branch heads captured by Plan 005.
 
 [[repository]]
 slug = "jackin-project/jackin"
-class = "code"
+class = "native"
 baseline_sha = "b234e078eeeb2d0798b8ac75530cc24e2ba2e620"
 [[repository]]
 slug = "jackin-project/jackin-the-architect"

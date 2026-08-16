@@ -75,6 +75,21 @@ fn tap_has_explicit_platform_only_gate() {
 }
 
 #[test]
+fn native_has_explicit_named_macos_gate() {
+    let m = FleetManifest::load(&common::repo_root()).unwrap();
+    let native = m.class(RepositoryClass::Native);
+    assert!(native.platform_only);
+    assert_eq!(native.platform_runner.as_deref(), Some("macos-26"));
+    assert_eq!(
+        native.platform_name.as_deref(),
+        Some("native-usage-menu-bar")
+    );
+    let test_gate = native.gates.iter().find(|g| g.name == "test").unwrap();
+    assert_eq!(test_gate.command, "mise run desktop-ci");
+    assert_eq!(test_gate.applicability, Applicability::Github);
+}
+
+#[test]
 fn code_standard_project_command_is_mise_run_ci() {
     assert_eq!(
         velnor_actions_generator::model::CODE_STANDARD_COMMAND,
@@ -184,6 +199,17 @@ fn tap_platform_gate_is_required_on_macos_independent_of_lane() {
     assert!(workflow.contains("PLATFORM_REQUIRED: true"));
     assert!(workflow.contains("- platform-lane"));
     assert_eq!(workflow.matches("command: mise run test").count(), 1);
+}
+
+#[test]
+fn native_platform_gate_is_required_on_pinned_macos() {
+    let workflow = callable(RepositoryClass::Native);
+    assert!(workflow.contains("platform-lane:"));
+    assert!(workflow.contains("name: native-usage-menu-bar"));
+    assert!(workflow.contains("runs-on: macos-26"));
+    assert!(workflow.contains("PLATFORM_REQUIRED: true"));
+    assert!(workflow.contains("- platform-lane"));
+    assert_eq!(workflow.matches("command: mise run desktop-ci").count(), 1);
 }
 
 fn run_request_validator(overrides: &[(&str, &str)]) -> bool {

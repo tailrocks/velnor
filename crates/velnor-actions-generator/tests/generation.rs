@@ -28,11 +28,12 @@ fn consumer_pushes_are_limited_to_default_branch_and_release_tags() {
 fn exact_membership_and_counts() {
     let m = load();
     assert_eq!(m.repositories().len(), 28, "28 members");
-    assert_eq!(m.members_of(RepositoryClass::Code).len(), 20);
+    assert_eq!(m.members_of(RepositoryClass::Code).len(), 19);
+    assert_eq!(m.members_of(RepositoryClass::Native).len(), 1);
     assert_eq!(m.members_of(RepositoryClass::Tap).len(), 5);
     assert_eq!(m.members_of(RepositoryClass::Apt).len(), 2);
     assert_eq!(m.members_of(RepositoryClass::Fixture).len(), 1);
-    assert_eq!(m.classes().len(), 4);
+    assert_eq!(m.classes().len(), 5);
     for r in m.repositories() {
         assert!(is_sha40(&r.baseline_sha), "{} sha is 40-hex", r.slug);
     }
@@ -43,7 +44,7 @@ fn repository_inventory_bytes_are_exactly_bound() {
     let bytes = std::fs::read(common::repo_root().join("fleet").join("repositories.toml")).unwrap();
     assert_eq!(
         hex::encode(Sha256::digest(bytes)),
-        "7c7d8bed7d95bb985bab68c64065260c494da20c233d6c97d05c3ea3b338c85c"
+        "a3bde20f6fa1a2e74d3ace94f4a39055c5f78a721d57a0ef0ed7a628bbb30655"
     );
 }
 
@@ -127,6 +128,41 @@ fn unknown_organization_rejected() {
 }
 
 #[test]
+fn platform_metadata_is_required_and_yaml_safe() {
+    for (tag, from, to, expected) in [
+        (
+            "platform-runner",
+            "platform_runner = \"macos-26\"",
+            "platform_runner = \"ubuntu-latest\"",
+            "invalid platform runner",
+        ),
+        (
+            "platform-name",
+            "platform_name = \"native-usage-menu-bar\"",
+            "platform_name = \"native: unquoted\"",
+            "invalid platform name",
+        ),
+        (
+            "platform-missing",
+            "platform_runner = \"macos-26\"\n",
+            "",
+            "must declare platform_runner and platform_name iff platform_only is true",
+        ),
+    ] {
+        let dir = common::bound_fixture(DUMMY_SHA);
+        let path = dir.join("fleet").join("classes.toml");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            body.contains(from),
+            "canonical fixture contains mutation target"
+        );
+        std::fs::write(&path, body.replacen(from, to, 1)).unwrap();
+        let err = FleetManifest::load(&dir).unwrap_err();
+        assert!(err.contains(expected), "{tag}: got {err}");
+    }
+}
+
+#[test]
 fn templates_are_deterministic() {
     for class in ALL_CLASSES {
         let a = render::consumer_template(class);
@@ -139,7 +175,7 @@ fn templates_are_deterministic() {
 }
 
 #[test]
-fn exactly_four_templates_render() {
+fn exactly_five_templates_render() {
     // One committed template per class, byte-equal to a fresh render.
     for class in ALL_CLASSES {
         let committed = std::fs::read_to_string(
@@ -156,7 +192,7 @@ fn exactly_four_templates_render() {
 #[test]
 fn audit_passes_on_repo() {
     let line = audit::audit(&common::repo_root()).expect("audit passes");
-    assert_eq!(line, "fleet valid: 28 repositories, 4 classes, 4 templates");
+    assert_eq!(line, "fleet valid: 28 repositories, 5 classes, 5 templates");
 }
 
 #[test]
@@ -340,7 +376,7 @@ fn updater_executes_explicit_current_then_old_signer_alternatives() {
 fn bound_fixture_audit_passes() {
     let dir = common::bound_fixture(DUMMY_SHA);
     let line = audit::audit(&dir).expect("bound audit passes");
-    assert_eq!(line, "fleet valid: 28 repositories, 4 classes, 4 templates");
+    assert_eq!(line, "fleet valid: 28 repositories, 5 classes, 5 templates");
 }
 
 #[test]
@@ -516,6 +552,10 @@ fn release_goldens_bind_consumer_interface_and_callable_metrics_schema() {
             "ef65d7fbbd265d09f76599603cfaf88b3465db43c7238c47141db4eff07ddee9",
         ),
         (
+            "templates/native/ci.yml",
+            "be588e1f1beecc3390275b6060925594a343bca43ddca29c89f94e8dd98b83fa",
+        ),
+        (
             "templates/tap/ci.yml",
             "04f2c650a0a2248057b3add49b819da723b072b51cca77dd7ddb0d20d615e25c",
         ),
@@ -529,19 +569,23 @@ fn release_goldens_bind_consumer_interface_and_callable_metrics_schema() {
         ),
         (
             ".github/workflows/ci-code.yml",
-            "71d3eb2c94ae1d35bdfdf23d3224fa7970644cb2101623760738f4aded1f7892",
+            "344b4a53fc95d37aa3975586c00af069581cd92f4c25a5a43b1adc8fc2866d3c",
+        ),
+        (
+            ".github/workflows/ci-native.yml",
+            "0cc0ae1c0839626087152fa8d6fb8df8a50513ebd6c4156c2bb6e1595f5accc4",
         ),
         (
             ".github/workflows/ci-tap.yml",
-            "fc6fadcfa9d04b5db896b4a011084a58ca7c27fd97659fff6e12efcf41b023c8",
+            "670e89d87e1db39125f92298a5388ceb4da96734f93406ec299334bc4021b55a",
         ),
         (
             ".github/workflows/ci-apt.yml",
-            "9c87f771e2bb0f137be2713c5e70edb80c61512c3cab8c441cd3d5e0666d3089",
+            "b94a1c0425f654a45635e38562788f1da42bc7cc1ee9ebd511dee3172956f34d",
         ),
         (
             ".github/workflows/ci-fixture.yml",
-            "73b12c059a9b0313d1a3ac22b9a9d4959eae3eb26c64ae9cbbf3aa8d3d716d77",
+            "b330e882d0565b1dd9eced01247cd70663379322923456c95cc5f930b3b9da3f",
         ),
     ] {
         let bytes = std::fs::read(root.join(path)).unwrap();

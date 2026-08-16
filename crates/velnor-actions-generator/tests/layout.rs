@@ -1,6 +1,6 @@
 //! Layout skeleton tests.
 //!
-//! Prove the four skeleton guarantees: four unique classes, layout validation
+//! Prove the four skeleton guarantees: five unique classes, layout validation
 //! success on the canonical repo root, missing-root failure, and the exact CLI
 //! success text.
 
@@ -21,10 +21,10 @@ fn repo_root() -> PathBuf {
 }
 
 #[test]
-fn four_unique_classes() {
-    assert_eq!(ALL_CLASSES.len(), 4, "exactly four classes");
+fn five_unique_classes() {
+    assert_eq!(ALL_CLASSES.len(), 5, "exactly five classes");
     let unique: HashSet<_> = ALL_CLASSES.iter().collect();
-    assert_eq!(unique.len(), 4, "all four classes are distinct");
+    assert_eq!(unique.len(), 5, "all five classes are distinct");
 }
 
 #[test]
@@ -58,6 +58,6 @@ fn cli_check_prints_exact_success_text() {
     assert!(output.status.success(), "check exits zero on a valid root");
     assert_eq!(
         String::from_utf8(output.stdout).expect("utf8 stdout"),
-        "skeleton valid: 4 classes, 2 roots\n"
+        "skeleton valid: 5 classes, 2 roots\n"
     );
 }

@@ -36,6 +36,39 @@ compatible_phase_prefix = true
 compatible_lock_prefix = false
 
 [[cache]]
+class = "native"
+id = "tools"
+artifact_class = "tool-download"
+paths = [".cache/mise", ".local/share/mise/installs"]
+lock_globs = ["mise.lock", "mise.toml", "rust-toolchain.toml"]
+phase = "install"
+peak_bytes = 2147483648
+compatible_phase_prefix = true
+compatible_lock_prefix = false
+
+[[cache]]
+class = "native"
+id = "dependencies"
+artifact_class = "dependency"
+paths = [".cargo/git", ".cargo/registry", ".gradle/caches", "**/node_modules"]
+lock_globs = ["**/.cargo/config.toml", "**/.npmrc", "**/.yarnrc.yml", "**/Cargo.lock", "**/Cargo.toml", "**/build.gradle", "**/build.gradle.kts", "**/bun.lock", "**/bun.lockb", "**/bunfig.toml", "**/gradle.lockfile", "**/gradle.properties", "**/gradle/libs.versions.toml", "**/gradle-wrapper.properties", "**/package-lock.json", "**/package.json", "**/pnpm-lock.yaml", "**/pnpm-workspace.yaml", "**/settings.gradle", "**/settings.gradle.kts", "**/yarn.lock", "mise.lock", "mise.toml"]
+phase = "build"
+peak_bytes = 5368709120
+compatible_phase_prefix = true
+compatible_lock_prefix = false
+
+[[cache]]
+class = "native"
+id = "build-output"
+artifact_class = "build-output"
+paths = ["target", "**/target"]
+lock_globs = ["**/.cargo/config.toml", "**/Cargo.lock", "**/Cargo.toml", "mise.lock", "mise.toml", "rust-toolchain.toml"]
+phase = "test"
+peak_bytes = 8589934592
+compatible_phase_prefix = true
+compatible_lock_prefix = false
+
+[[cache]]
 class = "tap"
 id = "tools"
 artifact_class = "tool-download"

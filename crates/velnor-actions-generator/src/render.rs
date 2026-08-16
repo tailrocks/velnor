@@ -441,10 +441,18 @@ pub fn callable_workflow(
     b.blank();
 
     if contract.platform_only {
+        let platform_name = contract
+            .platform_name
+            .as_deref()
+            .expect("validated platform class has a check name");
+        let platform_runner = contract
+            .platform_runner
+            .as_deref()
+            .expect("validated platform class has a runner");
         b.line(2, "platform-lane:");
-        b.line(4, "name: GitHub platform lane");
+        b.line(4, &format!("name: {platform_name}"));
         b.line(4, "needs: validate-request");
-        b.line(4, "runs-on: macos-latest");
+        b.line(4, &format!("runs-on: {platform_runner}"));
         b.line(4, "timeout-minutes: 30");
         b.line(4, "outputs:");
         b.line(6, "contract: ${{ steps.aggregate.outputs.contract }}");
