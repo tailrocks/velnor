@@ -10,6 +10,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const INLINE_MATRIX_MARKERS: [&str; 2] = ["inputs.lanes == 'both'", "inputs.lane == 'both'"];
+
+fn has_real_both_lane_expansion(text: &str) -> bool {
+    INLINE_MATRIX_MARKERS
+        .iter()
+        .any(|marker| text.contains(marker))
+        || (text.contains(
+            "LANES: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || 'velnor' }}",
+        ) && text.contains("case \"$LANES\" in")
+            && text.contains("both)")
+            && text.contains("configs=\"[$velnor,$github]\""))
+}
 const SHA_LEN: usize = 40;
 const EXPECTED_ESTATE: [&str; 28] = [
     "ChainArgos/blockchain-nodes",
@@ -990,10 +1001,7 @@ fn audit_workflow(
         && !is_native_apple_workflow(yaml)
         && !is_forced_public_unmerged_workflow(file_name, yaml)
         && (!has_lane_selector(yaml)
-            || (lane_selector_offers_both(yaml)
-                && !INLINE_MATRIX_MARKERS
-                    .iter()
-                    .any(|marker| text.contains(marker))))
+            || (lane_selector_offers_both(yaml) && !has_real_both_lane_expansion(text)))
     {
         findings.push(Finding::error(
             "lanes",
@@ -1375,6 +1383,10 @@ fn audit_steps(
             .collect::<Vec<_>>()
             .join("\n")
             .replace("--deny-self-hosted-runners", "");
+        let lane_selector_coordinator = job_id == "matrix-setup"
+            && object_get(step, "id").and_then(Value::as_str) == Some("set")
+            && run.contains("case \"$LANES\" in")
+            && run.contains("configs=\"[$velnor,$github]\"");
         let attestation_environment_verifier =
             Path::new(file).file_name().and_then(|name| name.to_str()) == Some("l2-provenance.yml")
                 && object_get(step, "name").and_then(Value::as_str)
@@ -1384,6 +1396,7 @@ fn audit_steps(
                 && run.contains("expected_environment=github-hosted")
                 && run.contains("expected_environment=self-hosted");
         if !attestation_environment_verifier
+            && !lane_selector_coordinator
             && (lane_identity_run.contains("self-hosted")
                 || lane_identity_run.contains("velnor-target-mvp")
                 || lane_identity_run.contains("ubuntu-26.04"))
@@ -1436,9 +1449,10 @@ fn audit_steps(
                     compact(value).lines().any(|line| line.contains("target"))
                 });
                 fuzz_target_cache |= object_get(with, "path").is_some_and(|value| {
-                    compact(value)
-                        .lines()
-                        .any(|line| line.trim() == "fuzz/target")
+                    compact(value).lines().any(|line| {
+                        let path = line.trim();
+                        path == "fuzz/target" || path.ends_with("/fuzz/target")
+                    })
                 });
                 target_cache |= caches_target;
                 if caches_target {
@@ -1798,19 +1812,18 @@ fn audit_lane_selector(file: &str, yaml: &Value, text: &str, findings: &mut Vec<
     // labels; `audit_generated_caller` closes the caller identity, ref, input,
     // and Velnor-default forwarding contract, while generator/release audits
     // prove the callable's real Velnor+GitHub expansion.
-    if options.contains(&"both") && !is_generated_caller(text) {
-        let marker = format!("inputs.{name} == 'both'");
-        if !text.contains(&marker)
+    if options.contains(&"both")
+        && !is_generated_caller(text)
+        && (!has_real_both_lane_expansion(text)
             || !text.contains("velnor-target-mvp")
-            || !text.contains("ubuntu-26.04")
-        {
-            findings.push(Finding::error(
-                "lane-selector",
-                file,
-                &path,
-                "both must select real Velnor and GitHub runner lanes",
-            ));
-        }
+            || !text.contains("ubuntu-26.04"))
+    {
+        findings.push(Finding::error(
+            "lane-selector",
+            file,
+            &path,
+            "both must select real Velnor and GitHub runner lanes",
+        ));
     }
 }
 
@@ -1825,6 +1838,18 @@ fn is_native_apple_workflow(yaml: &Value) -> bool {
 }
 
 fn is_native_apple_job(job: &serde_yaml::Mapping) -> bool {
+    let apple_target_matrix = mapping_get(job, "strategy")
+        .and_then(|strategy| object_get(strategy, "matrix"))
+        .and_then(|matrix| object_get(matrix, "target"))
+        .and_then(Value::as_sequence)
+        .is_some_and(|targets| {
+            !targets.is_empty()
+                && targets.iter().all(|target| {
+                    target
+                        .as_str()
+                        .is_some_and(|target| target.ends_with("-apple-darwin"))
+                })
+        });
     mapping_get(job, "runs-on").is_some_and(|runs_on| compact(runs_on).starts_with("macos-"))
         && mapping_get(job, "steps")
             .and_then(Value::as_sequence)
@@ -1844,7 +1869,8 @@ fn is_native_apple_job(job: &serde_yaml::Mapping) -> bool {
                             ]
                             .iter()
                             .any(|marker| run.contains(marker))
-                                || (run.contains("cargo build") && run.contains("apple-darwin"))
+                                || run.contains("cargo build")
+                                || (apple_target_matrix && run.contains("cargo rustc"))
                         })
                 })
             })
@@ -2046,6 +2072,12 @@ jobs:
             "          path: |\n            target\n            fuzz/target",
         );
         assert!(!has_rule(&audit(&yaml), "target-cache-path"));
+
+        let workspace_glob = yaml.replace(
+            "            fuzz/target",
+            "            crates/*/fuzz/target",
+        );
+        assert!(!has_rule(&audit(&workspace_glob), "target-cache-path"));
     }
 
     #[test]
@@ -2104,6 +2136,27 @@ jobs:
                 "      - run: ./scripts/build-native-app.sh",
             );
         assert!(!has_rule(&audit(&yaml), "runner-os"));
+    }
+
+    #[test]
+    fn allows_cargo_build_with_an_exclusively_apple_target_matrix_on_macos() {
+        let yaml = r#"
+on:
+  push:
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native:
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+"#;
+        assert!(!has_rule(&audit(yaml), "runner-os"));
     }
 
     #[test]
@@ -2211,6 +2264,39 @@ jobs:
             .replace(INLINE_MATRIX_MARKERS[0], "inputs.lanes == 'velnor'");
         assert!(!has_rule(&audit(&two_lanes), "lane-selector"));
         assert!(!has_rule(&audit(&two_lanes), "lanes"));
+    }
+
+    #[test]
+    fn output_based_lane_coordinator_proves_real_both_without_workload_branching() {
+        let yaml = r#"
+on:
+  workflow_dispatch:
+    inputs:
+      lanes: {type: choice, default: velnor, options: [velnor, github, both]}
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  matrix-setup:
+    runs-on: ${{ (inputs.lanes == 'github') && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
+    timeout-minutes: 5
+    steps:
+      - id: set
+        env:
+          LANES: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || 'velnor' }}
+        run: |
+          github='{"lane":"GitHub","runner":"ubuntu-26.04"}'
+          velnor='{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"]}'
+          case "$LANES" in
+            velnor) configs="[$velnor]" ;;
+            github) configs="[$github]" ;;
+            both) configs="[$velnor,$github]" ;;
+          esac
+"#;
+        let findings = audit(yaml);
+        assert!(!has_rule(&findings, "lane-selector"), "{findings:?}");
+        assert!(!has_rule(&findings, "lanes"), "{findings:?}");
+        assert!(!has_rule(&findings, "lane-conditional"), "{findings:?}");
     }
 
     #[test]
