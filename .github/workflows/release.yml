@@ -21,6 +21,11 @@ on:
       - 'v[0-9]*'
   workflow_dispatch:
     inputs:
+      lanes:
+        description: velnor (default) | github
+        type: choice
+        default: velnor
+        options: [velnor, github]
       tag:
         description: Existing release tag to (re)build coherently (e.g. v0.1.121).
         type: string
@@ -41,7 +46,7 @@ jobs:
   identity:
     name: Resolve + gate release identity
     timeout-minutes: 20
-    runs-on: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     outputs:
       version: ${{ steps.gate.outputs.version }}
       commit: ${{ steps.gate.outputs.commit }}
@@ -102,7 +107,7 @@ jobs:
     needs: identity
     name: Compile release metadata once
     timeout-minutes: 30
-    runs-on: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     outputs:
       manifest_sha256: ${{ steps.export.outputs.manifest_sha256 }}
     env:
@@ -187,7 +192,7 @@ jobs:
     needs: [identity, metadata]
     name: Build + push one multi-platform GHCR image
     timeout-minutes: 60
-    runs-on: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     permissions:
       contents: read
       packages: write
@@ -287,7 +292,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - arch: arm64
             target: aarch64-unknown-linux-gnu
-    runs-on: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     env:
       VERSION: ${{ needs.identity.outputs.version }}
       CARGO_INCREMENTAL: "0"
@@ -430,7 +435,7 @@ jobs:
     needs: [identity, metadata, image, build]
     name: Assemble, verify + publish one coherent release
     timeout-minutes: 30
-    runs-on: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     permissions:
       contents: write
     env:
