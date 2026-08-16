@@ -59,6 +59,10 @@ impl CheckoutPlan {
         self.version
             .as_deref()
             .is_some_and(contains_step_context_expression)
+            || self
+                .token
+                .as_deref()
+                .is_some_and(contains_step_context_expression)
     }
 }
 
@@ -892,6 +896,9 @@ fn checkout_token(step: &ActionStep, job: &AgentJobRequestMessage) -> Result<Opt
     else {
         return Ok(None);
     };
+    if contains_step_context_expression(&token) {
+        return Ok(Some(token));
+    }
     let Some(resolved) = resolve_token_expression(&token, job).filter(|value| !value.is_empty())
     else {
         bail!("explicit checkout token expression did not resolve");
@@ -1867,6 +1874,50 @@ mod tests {
             plans[0].requires_runtime_context(),
             "conditional checkout must stay in normal step order"
         );
+    }
+
+    #[test]
+    fn checkout_with_step_output_token_requires_runtime_context() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Package update",
+            "requestId": 1,
+            "variables": {
+                "github.repository": { "value": "acme/repo" },
+                "github.sha": { "value": "abc123" }
+            },
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "authorization": {
+                        "parameters": { "AccessToken": "service-token" }
+                    }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" },
+                "inputs": {
+                    "type": "map",
+                    "map": [{
+                        "Key": { "lit": "token", "type": 0 },
+                        "Value": { "expr": "steps.app-token.outputs.token", "type": 3 }
+                    }]
+                }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(
+            plans[0].token.as_deref(),
+            Some("${{ steps.app-token.outputs.token }}")
+        );
+        assert!(plans[0].requires_runtime_context());
+        assert_ne!(plans[0].token.as_deref(), Some("service-token"));
     }
 
     #[test]

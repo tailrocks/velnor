@@ -1886,10 +1886,7 @@ where
         plan: &CheckoutPlan,
         state: &JobExecutionState,
     ) -> Result<StepExecutionResult> {
-        let mut plan = plan.clone();
-        if let Some(version) = plan.version.as_mut() {
-            *version = state.resolve_expressions(version);
-        }
+        let plan = resolve_checkout_plan_expressions(plan, state)?;
         let mut trace = Vec::new();
         let mirror_store =
             crate::container::git_mirror_store_host(&container.temp_host, &self.trust_scope);
@@ -3414,6 +3411,23 @@ where
         }
         bail!("service container '{}' did not become ready", service.name)
     }
+}
+
+fn resolve_checkout_plan_expressions(
+    plan: &CheckoutPlan,
+    state: &JobExecutionState,
+) -> Result<CheckoutPlan> {
+    let mut plan = plan.clone();
+    if let Some(version) = plan.version.as_mut() {
+        *version = state.resolve_expressions(version);
+    }
+    if let Some(token) = plan.token.as_mut() {
+        *token = state.resolve_expressions(token);
+        if token.is_empty() || token.contains("${{") {
+            anyhow::bail!("explicit checkout token expression did not resolve");
+        }
+    }
+    Ok(plan)
 }
 
 fn emit_live_step_log(
@@ -13127,6 +13141,45 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             state.resolve_expressions("keep=${{ github.ref }}"),
             "keep=${{ github.ref }}"
         );
+    }
+
+    #[test]
+    fn checkout_uses_prior_step_output_token_instead_of_planning_fallback() {
+        let mut state = JobExecutionState::default();
+        state.apply(
+            "app-token",
+            &StepExecutionResult {
+                exit_code: 0,
+                skipped: false,
+                failure_ignored: false,
+                state: StepCommandState {
+                    outputs: [("token".to_string(), "installation-token".to_string())].into(),
+                    ..Default::default()
+                },
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        let plan = CheckoutPlan {
+            step_id: "checkout".into(),
+            display_name: "Checkout".into(),
+            clone_url: "https://github.com/acme/repo.git".into(),
+            version: Some("abc123".into()),
+            destination: PathBuf::from("/tmp/work"),
+            token: Some("${{ steps.app-token.outputs.token }}".into()),
+            fetch_depth: Some(1),
+            fetch_tags: false,
+            persist_credentials: true,
+            clean: true,
+            lfs: false,
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+
+        let resolved = resolve_checkout_plan_expressions(&plan, &state).unwrap();
+
+        assert_eq!(resolved.token.as_deref(), Some("installation-token"));
     }
 
     #[test]
