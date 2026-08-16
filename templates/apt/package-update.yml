@@ -10,6 +10,10 @@ permissions:
   attestations: read
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.repository }}
+  cancel-in-progress: false
+
 jobs:
   jackin_project:
     if: ${{ github.repository_owner == 'jackin-project' }}
@@ -54,6 +58,7 @@ jobs:
     if: ${{ always() }}
     needs: [jackin_project, tailrocks, chainargos]
     runs-on: ${{ 'ubuntu-26.04' }}
+    timeout-minutes: 5
     steps:
       - env:
           OWNER: ${{ github.repository_owner }}

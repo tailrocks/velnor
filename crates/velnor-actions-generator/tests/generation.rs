@@ -273,6 +273,10 @@ fn package_policy_and_workflows_are_closed_and_hosted_only() {
     assert!(APT_TEMPLATE.matches("channel: stable").count() == 3);
     for template in [TAP_TEMPLATE, APT_TEMPLATE] {
         assert!(template.contains("permissions:\n  attestations: read\n  contents: read"));
+        assert!(template.contains(
+            "concurrency:\n  group: ${{ github.workflow }}-${{ github.repository }}\n  cancel-in-progress: false"
+        ));
+        assert!(template.contains("runs-on: ${{ 'ubuntu-26.04' }}\n    timeout-minutes: 5"));
         assert!(template.contains("needs: [jackin_project, tailrocks, chainargos]"));
         assert!(template.contains("needs.jackin_project.result"));
         assert!(template.contains("needs.chainargos.result"));
