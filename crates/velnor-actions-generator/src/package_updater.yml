@@ -251,6 +251,7 @@ jobs:
           test "$BRANCH" != "main"
           git config user.name "$BOT_LOGIN"
           git config user.email "$BOT_EMAIL"
+          git fetch --no-tags origin "refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" || true
           git switch -C "$BRANCH"
           mise run package-update
           if test -z "$(git status --porcelain --untracked-files=all)"; then echo NO_CHANGE_VERIFIED; exit 0; fi

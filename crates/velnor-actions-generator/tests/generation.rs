@@ -244,6 +244,9 @@ fn package_policy_and_workflows_are_closed_and_hosted_only() {
             .contains("actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1")
     );
     assert!(UPDATER_WORKFLOW.contains("git commit --signoff"));
+    assert!(UPDATER_WORKFLOW.contains(
+        "git fetch --no-tags origin \"refs/heads/$BRANCH:refs/remotes/origin/$BRANCH\" || true"
+    ));
     assert!(UPDATER_WORKFLOW.contains("git status --porcelain --untracked-files=all"));
     assert!(!UPDATER_WORKFLOW.contains("if git diff --quiet"));
     assert!(UPDATER_WORKFLOW.contains("gh pr list --state open --head \"$BRANCH\" --base main"));
