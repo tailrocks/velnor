@@ -36,14 +36,19 @@ fn resolve_lanes_expands_both_independently() {
 }
 
 #[test]
-fn omitted_lane_uses_exact_organization_default() {
+fn omitted_lane_defaults_to_velnor_for_every_owner() {
     let t = render::consumer_template(RepositoryClass::Code);
-    assert!(t.contains("default: \"\""));
-    assert!(t.contains("github.repository_owner == 'jackin-project' && 'github'"));
-    assert!(t.contains("github.repository_owner == 'tailrocks'"));
-    assert!(t.contains("github.repository_owner == 'ChainArgos'"));
-    assert!(t.contains("&& 'velnor'"));
-    assert!(t.contains("|| 'invalid'"), "unknown owner fails closed");
+    assert!(t.contains("github.event_name == 'workflow_dispatch' && inputs.lane || 'velnor'"));
+    assert!(t.contains("type: choice"));
+    assert!(t.contains("default: velnor"));
+    assert_eq!(
+        t.matches(
+            "lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'velnor' }}"
+        )
+        .count(),
+        3,
+        "every owner-local caller uses the same Velnor default",
+    );
 }
 
 #[test]

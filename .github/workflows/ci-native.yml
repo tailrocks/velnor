@@ -13,10 +13,10 @@ on:
   workflow_call:
     inputs:
       lane:
-        description: "CI lane: github, velnor, or both; empty derives from owner."
+        description: "CI runner: Velnor (default), GitHub, or both."
         required: false
         type: string
-        default: ""
+        default: "velnor"
       recovery_proof_id:
         required: false
         type: string
@@ -114,7 +114,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
-          EXPECTED_CALLER_TEMPLATE_SHA256: 3c810ad12ffa75dca5f064d82aa1740c8afda12af20b8de657f62c3a7f954721
+          EXPECTED_CALLER_TEMPLATE_SHA256: ef379b217a5cdf9fc011bbe3954bf0d83ca5fccb5004b6b1f32841574e7a9305
           DECLARED_CACHE_IDS: tools,dependencies,build-output
         run: |
           set -euo pipefail
@@ -219,7 +219,7 @@ jobs:
   velnor-lane:
     name: velnor lane
     needs: validate-request
-    if: ${{ inputs.benchmark_campaign == '' && inputs.cache_proof_id == '' && (inputs.lane == 'velnor' || inputs.lane == 'both' || (inputs.lane == '' && (github.repository_owner == 'tailrocks' || github.repository_owner == 'ChainArgos'))) }}
+    if: ${{ inputs.benchmark_campaign == '' && inputs.cache_proof_id == '' && (inputs.lane == 'velnor' || inputs.lane == 'both') }}
     # Public unmerged-code events (pull_request, merge_group) route the Velnor lane
     # to GitHub-hosted execution until a live-proven lower-trust Velnor pool exists.
     # This is explicit policy routing, not silent failover.
@@ -630,7 +630,7 @@ jobs:
   github-lane:
     name: github lane
     needs: validate-request
-    if: ${{ inputs.benchmark_campaign == '' && inputs.cache_proof_id == '' && (inputs.lane == 'github' || inputs.lane == 'both' || (inputs.lane == '' && github.repository_owner == 'jackin-project')) }}
+    if: ${{ inputs.benchmark_campaign == '' && inputs.cache_proof_id == '' && (inputs.lane == 'github' || inputs.lane == 'both') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 30
     outputs:
@@ -4142,7 +4142,7 @@ jobs:
       - name: Aggregate lane verdict
         id: verdict
         env:
-          LANE: ${{ inputs.lane != '' && inputs.lane || (github.repository_owner == 'jackin-project' && 'github') || ((github.repository_owner == 'tailrocks' || github.repository_owner == 'ChainArgos') && 'velnor') || 'invalid' }}
+          LANE: ${{ inputs.lane }}
           VELNOR_RESULT: ${{ needs.velnor-lane.result }}
           VELNOR_CONTRACT: ${{ needs.velnor-lane.outputs.contract }}
           GITHUB_RESULT: ${{ needs.github-lane.result }}

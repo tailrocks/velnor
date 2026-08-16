@@ -142,10 +142,14 @@ pub fn consumer_template(class: RepositoryClass) -> String {
     b.line(2, "workflow_dispatch:");
     b.line(4, "inputs:");
     b.line(6, "lane:");
-    b.line(8, "description: \"Optional CI lane: github, velnor, or both. Empty uses organization default.\"");
+    b.line(8, "description: \"CI runner: Velnor (default), GitHub, or both. Public unmerged code remains GitHub-hosted.\"");
     b.line(8, "required: false");
-    b.line(8, "type: string");
-    b.line(8, "default: \"\"");
+    b.line(8, "type: choice");
+    b.line(8, "default: velnor");
+    b.line(8, "options:");
+    b.line(10, "- velnor");
+    b.line(10, "- github");
+    b.line(10, "- both");
     consumer_auxiliary_inputs(&mut b);
     b.blank();
     b.line(0, "permissions:");
@@ -182,7 +186,7 @@ pub fn consumer_template(class: RepositoryClass) -> String {
         b.line(4, "with:");
         b.line(
             6,
-            "lane: ${{ (github.event_name == 'schedule' && 'both') || (github.event_name == 'workflow_dispatch' && inputs.lane != '' && inputs.lane) || (github.repository_owner == 'jackin-project' && 'github') || ((github.repository_owner == 'tailrocks' || github.repository_owner == 'ChainArgos') && 'velnor') || 'invalid' }}",
+            "lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'velnor' }}",
         );
         for input in AUXILIARY_INPUTS {
             b.line(6, &format!("{input}: ${{{{ inputs.{input} || '' }}}}"));
@@ -288,11 +292,11 @@ pub fn callable_workflow(
     b.line(6, "lane:");
     b.line(
         8,
-        "description: \"CI lane: github, velnor, or both; empty derives from owner.\"",
+        "description: \"CI runner: Velnor (default), GitHub, or both.\"",
     );
     b.line(8, "required: false");
     b.line(8, "type: string");
-    b.line(8, "default: \"\"");
+    b.line(8, "default: \"velnor\"");
     callable_auxiliary_inputs(&mut b);
     b.line(4, "outputs:");
     b.line(6, "contract:");
@@ -392,7 +396,7 @@ pub fn callable_workflow(
     b.line(4, "needs: validate-request");
     b.line(
         4,
-        "if: ${{ inputs.benchmark_campaign == '' && inputs.cache_proof_id == '' && (inputs.lane == 'velnor' || inputs.lane == 'both' || (inputs.lane == '' && (github.repository_owner == 'tailrocks' || github.repository_owner == 'ChainArgos'))) }}",
+        "if: ${{ inputs.benchmark_campaign == '' && inputs.cache_proof_id == '' && (inputs.lane == 'velnor' || inputs.lane == 'both') }}",
     );
     b.line(
         4,
@@ -437,7 +441,7 @@ pub fn callable_workflow(
     b.line(4, "needs: validate-request");
     b.line(
         4,
-        "if: ${{ inputs.benchmark_campaign == '' && inputs.cache_proof_id == '' && (inputs.lane == 'github' || inputs.lane == 'both' || (inputs.lane == '' && github.repository_owner == 'jackin-project')) }}",
+        "if: ${{ inputs.benchmark_campaign == '' && inputs.cache_proof_id == '' && (inputs.lane == 'github' || inputs.lane == 'both') }}",
     );
     b.line(4, "runs-on: ubuntu-26.04");
     b.line(4, &format!("timeout-minutes: {lane_timeout}"));
@@ -513,7 +517,7 @@ pub fn callable_workflow(
     b.line(6, "- name: Aggregate lane verdict");
     b.line(8, "id: verdict");
     b.line(8, "env:");
-    b.line(10, "LANE: ${{ inputs.lane != '' && inputs.lane || (github.repository_owner == 'jackin-project' && 'github') || ((github.repository_owner == 'tailrocks' || github.repository_owner == 'ChainArgos') && 'velnor') || 'invalid' }}");
+    b.line(10, "LANE: ${{ inputs.lane }}");
     b.line(10, "VELNOR_RESULT: ${{ needs.velnor-lane.result }}");
     b.line(
         10,
