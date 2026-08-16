@@ -28,6 +28,12 @@ on:
       branch:
         required: true
         type: string
+      lane:
+        required: true
+        type: string
+      writer:
+        required: true
+        type: boolean
     secrets:
       app_private_key:
         required: true
@@ -36,7 +42,7 @@ permissions: {}
 
 jobs:
   verify:
-    runs-on: ${{ 'ubuntu-26.04' }}
+    runs-on: ${{ inputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
     timeout-minutes: 15
     permissions:
       attestations: read
@@ -46,6 +52,16 @@ jobs:
       evidence: ${{ steps.normalize.outputs.evidence }}
       identity: ${{ steps.normalize.outputs.identity }}
     steps:
+      - name: Validate lane contract
+        env:
+          LANE: ${{ inputs.lane }}
+          WRITER: ${{ inputs.writer }}
+        run: |
+          set -euo pipefail
+          case "$LANE:$WRITER" in
+            velnor:true|velnor:false|github:true|github:false) ;;
+            *) echo "invalid package updater lane contract: $LANE:$WRITER" >&2; exit 1 ;;
+          esac
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -211,22 +227,22 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: ${{ steps.poll.outputs.available == 'true' }}
         with:
-          name: verified-package
+          name: verified-package-${{ inputs.lane }}
           path: verified
           if-no-files-found: error
           retention-days: 1
 
   mutate:
     needs: verify
-    if: ${{ needs.verify.outputs.available == 'true' }}
-    runs-on: ${{ 'ubuntu-26.04' }}
+    if: ${{ needs.verify.outputs.available == 'true' && inputs.writer }}
+    runs-on: ${{ inputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
     timeout-minutes: 15
     permissions:
       contents: read
     steps:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: verified-package
+          name: verified-package-${{ inputs.lane }}
           path: ${{ runner.temp }}/verified
       - name: Revalidate evidence before credential mint
         env:

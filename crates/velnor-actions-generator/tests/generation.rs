@@ -223,7 +223,7 @@ fn audit_passes_on_repo() {
 }
 
 #[test]
-fn package_policy_and_workflows_are_closed_and_hosted_only() {
+fn package_policy_and_workflows_are_closed_and_lane_selectable() {
     use velnor_actions_generator::package::{
         APT_TEMPLATE, PackagePolicy, SIGNER_WORKFLOW, TAP_TEMPLATE, UPDATER_WORKFLOW,
     };
@@ -254,6 +254,19 @@ fn package_policy_and_workflows_are_closed_and_hosted_only() {
         assert!(!body.contains("runs-on: self-hosted"));
     }
     assert!(UPDATER_WORKFLOW.contains("--deny-self-hosted-runners"));
+    assert!(UPDATER_WORKFLOW.contains("      lane:\n        required: true\n        type: string"));
+    assert!(
+        UPDATER_WORKFLOW.contains("      writer:\n        required: true\n        type: boolean")
+    );
+    assert_eq!(
+        UPDATER_WORKFLOW
+            .matches("inputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]')")
+            .count(),
+        2,
+        "verify and sole mutate writer must use the selected real lane"
+    );
+    assert!(UPDATER_WORKFLOW.contains("needs.verify.outputs.available == 'true' && inputs.writer"));
+    assert!(UPDATER_WORKFLOW.contains("name: verified-package-${{ inputs.lane }}"));
     assert!(UPDATER_WORKFLOW.contains("sha256sum --check --strict"));
     assert!(
         UPDATER_WORKFLOW
@@ -280,7 +293,16 @@ fn package_policy_and_workflows_are_closed_and_hosted_only() {
         assert!(template.contains(
             "concurrency:\n  group: ${{ github.workflow }}-${{ github.repository }}\n  cancel-in-progress: false"
         ));
-        assert!(template.contains("runs-on: ${{ 'ubuntu-26.04' }}\n    timeout-minutes: 5"));
+        assert!(template.contains("options: [velnor, github, both]\n        default: velnor"));
+        assert!(template.contains(
+            "{\"lane\":\"velnor\",\"writer\":true},{\"lane\":\"github\",\"writer\":false}"
+        ));
+        assert!(template.contains("lane: ${{ matrix.config.lane }}"));
+        assert!(template.contains("writer: ${{ matrix.config.writer }}"));
+        assert!(template.contains("vars.VELNOR_AUTOMATIC_LANES == 'github'"));
+        assert!(template.contains(
+            "fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]') }}\n    timeout-minutes: 5"
+        ));
         assert!(template.contains("needs: [jackin_project, tailrocks, chainargos]"));
         assert!(template.contains("needs.jackin_project.result"));
         assert!(template.contains("needs.chainargos.result"));
