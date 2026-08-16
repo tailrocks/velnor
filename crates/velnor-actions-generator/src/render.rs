@@ -142,7 +142,10 @@ pub fn consumer_template(class: RepositoryClass) -> String {
     b.line(2, "workflow_dispatch:");
     b.line(4, "inputs:");
     b.line(6, "lane:");
-    b.line(8, "description: \"CI runner: Velnor (default), GitHub, or both. Public unmerged code remains GitHub-hosted.\"");
+    b.line(
+        8,
+        "description: \"CI runner: Velnor (default), GitHub, or both.\"",
+    );
     b.line(8, "required: false");
     b.line(8, "type: choice");
     b.line(8, "default: velnor");
@@ -398,33 +401,11 @@ pub fn callable_workflow(
         4,
         "if: ${{ inputs.benchmark_campaign == '' && inputs.cache_proof_id == '' && (inputs.lane == 'velnor' || inputs.lane == 'both') }}",
     );
-    b.line(
-        4,
-        "# Public unmerged-code events (pull_request, merge_group) route the Velnor lane",
-    );
-    b.line(
-        4,
-        "# to GitHub-hosted execution until a live-proven lower-trust Velnor pool exists.",
-    );
-    b.line(4, "# This is explicit policy routing, not silent failover.");
-    b.line(
-        4,
-        "runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'ubuntu-26.04' || 'velnor-trusted' }}",
-    );
+    b.line(4, "runs-on: ${{ 'velnor-trusted' }}");
     b.line(4, &format!("timeout-minutes: {lane_timeout}"));
     b.line(4, "outputs:");
     b.line(6, "contract: ${{ steps.aggregate.outputs.contract }}");
     b.line(4, "steps:");
-    b.line(6, "- name: Report Velnor lane routing policy");
-    b.line(
-        8,
-        "if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}",
-    );
-    b.line(8, "shell: bash");
-    b.run_block(
-        8,
-        "echo 'policy: public unmerged-code routes the Velnor lane to GitHub-hosted execution'",
-    );
     lane_steps(
         &mut b,
         contract,

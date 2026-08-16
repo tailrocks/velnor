@@ -114,7 +114,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
-          EXPECTED_CALLER_TEMPLATE_SHA256: ef379b217a5cdf9fc011bbe3954bf0d83ca5fccb5004b6b1f32841574e7a9305
+          EXPECTED_CALLER_TEMPLATE_SHA256: d257a9a05a7985bb2c0ed5d43d3d486f42fe475c94f453c5015b5158590569e4
           DECLARED_CACHE_IDS: tools,dependencies,build-output
         run: |
           set -euo pipefail
@@ -220,19 +220,11 @@ jobs:
     name: velnor lane
     needs: validate-request
     if: ${{ inputs.benchmark_campaign == '' && inputs.cache_proof_id == '' && (inputs.lane == 'velnor' || inputs.lane == 'both') }}
-    # Public unmerged-code events (pull_request, merge_group) route the Velnor lane
-    # to GitHub-hosted execution until a live-proven lower-trust Velnor pool exists.
-    # This is explicit policy routing, not silent failover.
-    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'ubuntu-26.04' || 'velnor-trusted' }}
+    runs-on: ${{ 'velnor-trusted' }}
     timeout-minutes: 30
     outputs:
       contract: ${{ steps.aggregate.outputs.contract }}
     steps:
-      - name: Report Velnor lane routing policy
-        if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
-        shell: bash
-        run: |
-          echo 'policy: public unmerged-code routes the Velnor lane to GitHub-hosted execution'
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Derive current-head cache digests

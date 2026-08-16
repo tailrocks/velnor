@@ -1,5 +1,5 @@
 //! Lane-mode tests: selector, independence, platform-only applicability, and
-//! public-PR routing.
+//! public-PR lane identity.
 
 mod common;
 
@@ -116,14 +116,14 @@ fn code_class_is_lane_portable() {
 }
 
 #[test]
-fn public_unmerged_routes_velnor_lane_to_github_hosted() {
+fn public_unmerged_never_substitutes_github_for_velnor() {
     let wf = callable(RepositoryClass::Code);
-    assert!(
-        wf.contains(
-            "runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'ubuntu-26.04' || 'velnor-trusted' }}"
-        ),
-        "velnor lane routes public unmerged code to GitHub-hosted"
-    );
+    assert!(wf.contains("velnor-lane:\n    name: velnor lane"));
+    assert!(wf.contains("runs-on: ${{ 'velnor-trusted' }}"));
+    assert!(!wf.contains("public unmerged-code routes the Velnor lane"));
+    assert!(!wf.contains(
+        "(github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'ubuntu-26.04' || 'velnor-trusted'"
+    ));
 }
 
 #[test]

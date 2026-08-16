@@ -639,14 +639,27 @@ fn audit_callable_structure(
     }
     audit_admitted_closure(rendered, block_sha, &what, remote_closure)?;
 
-    // Public unmerged-code events route the Velnor lane to GitHub-hosted; no
-    // public-unmerged Velnor route is allowed.
+    // A selected Velnor lane always means a real Velnor job. Event-dependent
+    // substitution would make the lane selector and its evidence dishonest.
     require_contains(
         rendered,
-        "(github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'ubuntu-26.04' || 'velnor-trusted'",
+        "velnor-lane:\n    name: velnor lane",
         &what,
-        "public-unmerged GitHub-hosted routing",
+        "Velnor lane job",
     )?;
+    require_contains(
+        rendered,
+        "runs-on: ${{ 'velnor-trusted' }}",
+        &what,
+        "real Velnor route",
+    )?;
+    if rendered.contains(
+        "(github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'ubuntu-26.04' || 'velnor-trusted'",
+    ) {
+        return Err(format!(
+            "{what}: selected Velnor lane must never substitute GitHub-hosted execution"
+        ));
+    }
 
     // Lane verdict is fail-closed and positive.
     require_contains(rendered, "if: ${{ always() }}", &what, "verdict always()")?;

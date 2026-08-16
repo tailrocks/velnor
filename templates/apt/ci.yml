@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
     inputs:
       lane:
-        description: "CI runner: Velnor (default), GitHub, or both. Public unmerged code remains GitHub-hosted."
+        description: "CI runner: Velnor (default), GitHub, or both."
         required: false
         type: choice
         default: velnor
