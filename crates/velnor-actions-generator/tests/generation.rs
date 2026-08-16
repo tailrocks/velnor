@@ -275,6 +275,8 @@ fn package_policy_and_workflows_are_closed_and_lane_selectable() {
         UPDATER_WORKFLOW
             .contains("actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1")
     );
+    assert!(UPDATER_WORKFLOW.contains("client-id: ${{ vars.PACKAGE_UPDATER_APP_CLIENT_ID }}"));
+    assert!(!UPDATER_WORKFLOW.contains("app-id: ${{ vars.PACKAGE_UPDATER_APP_ID }}"));
     assert!(UPDATER_WORKFLOW.contains("git commit --signoff"));
     assert!(UPDATER_WORKFLOW.contains(
         "git fetch --no-tags origin \"refs/heads/$BRANCH:refs/remotes/origin/$BRANCH\" || true"
