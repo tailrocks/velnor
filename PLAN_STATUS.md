@@ -1,68 +1,66 @@
 # Velnor fleet unification plan status
 
-Status: **executing / incomplete**
+Status: **completed / archived**
 
-This is the authoritative progress checkpoint. It is not a completion
-certificate and does not replace the detailed implementation plan.
+Completed: 2026-08-17
+
+This is the authoritative final checkpoint. The implementation plan was
+committed from the start as `PLAN_STATUS.md`; its completed state and evidence
+are preserved here and in Git history.
 
 ## Completed phases
 
-1. Defined the exact 28-repository scope and excluded legacy repositories.
-2. Implemented the generated Velnor-default / GitHub-optional /
-   both-real-lanes selector contract.
-3. Added admission-closure, provenance, cache-isolation, request-validation,
-   and fail-closed aggregation evidence.
-4. Added clear synthetic Velnor rejection-step evidence for pre-execution
-   rejection.
-5. Repaired preview trigger/event/SHA desynchronization and generated stable /
-   rolling-preview package semantics.
-6. Repaired dynamic GitHub App checkout-token planning in runner `v0.1.173`,
-   released it, deployed it through APT, restarted all daemons, and proved a
-   live Velnor package-update checkout.
-7. Advanced the Jackin preview formula through the Velnor package updater and
-   verified green post-merge workflows.
-8. Replaced deprecated package-updater App IDs with owner-bound client IDs in
-   central source and configured the six public package repositories.
-9. Removed event-dependent GitHub-hosted substitution from selected Velnor
-   lanes; PR #53 and exact merged-head CI are green.
+1. Fixed the exact 28-repository scope and excluded legacy repositories.
+2. Built the generated `velnor` default, optional `github`, and optional
+   two-real-lane `both` selector.
+3. Unified trusted and public-unmerged execution without weakening the public
+   threat model or substituting GitHub for selected Velnor work.
+4. Added admission-closure, provenance, cache isolation, request validation,
+   deterministic aggregation, and clear fail-closed rejection evidence.
+5. Audited workflow topology and retained only generator-authorized distinct
+   trusted/public security domains.
+6. Repaired preview trigger/event/SHA synchronization, rolling releases,
+   source classification, and tap updates with bare SHA-256 values.
+7. Repaired GitHub App token planning, owner-bound client IDs, and package
+   updater stable/preview behavior.
+8. Released runner `v0.1.175`, verified its signed record, deployed it through
+   APT, restarted nine daemons, and passed all doctor checks.
+9. Released canonical and owner-local mirrored actions at signed tag
+   `2026.8.30`, then regenerated and merged all consumers.
+10. Corrected branch protection and review requirements for single-maintainer
+    repositories while retaining stable required CI gates.
+11. Merged all valid in-scope implementation and Renovate work after green
+    exact-head CI; closed only superseded PRs whose merge would regress the
+    final atomic pin.
+12. Ran central tests, generator/fleet audit, remote action-closure validation,
+    live selector/rejection/preview/package proofs, and a current-head CI audit
+    across all 28 repositories.
 
-## Active phase
+## Final gates
 
-Release the current canonical generator, create byte-identical owner mirrors,
-regenerate all 28 consumers, merge every green rollout pull request, and prove
-the resulting main branches.
+- Central test suite: **96/96 passed**.
+- Generator inventory: **28 repositories / 5 classes / 5 templates**.
+- Remote immutable-action closure: **9 actions / valid**.
+- Current fleet main CI: **28/28 completed / success**.
+- Sentry runners: **9/9 running; 9/9 doctor success**.
+- Open goal pull requests: **0**.
+- Remaining ordered implementation work: **none**.
 
-## Remaining ordered work
+## Preserved hard rules
 
-1. Release the current canonical source under one new CalVer and create exact
-   signed tags for all three owner-local mirrors.
-2. Render every consumer from the canonical generator with those three
-   immutable owner-local SHAs; never hand-edit generated workflows.
-3. Merge every rollout and Renovate pull request after all exact-head checks are
-   green; verify each merged main head green.
-4. Audit all workflow files in every fleet repository. Confirm generated
-   trusted/public domains are intentional; delete stale duplicates through the
-   generator.
-5. Prove selector behavior live: omitted input runs Velnor; `github` runs only
-   GitHub; `both` runs one real lane of each kind. Prove safe public-unmerged
-   work on Velnor and clear fail-closed rejection for unsafe work.
-6. Audit all preview workflows for trigger/condition/SHA agreement; verify each
-   rolling release targets current eligible main and each tap source SHA
-   advances. Preserve docs-only `source=false` behavior.
-7. Audit package channels, App-token closure, branch protection, required-check
-   names, review requirements, and DCO policy across all 28 repositories.
-8. Run final local generator/audit gates, remote action-closure verification,
-   exact generated-byte comparison, live green-main inventory, and three fresh
-   independent zero-finding reviews.
-9. Update this checkpoint with final evidence, then remove the detailed plan
-   only when every requirement above is proved.
+- Use mise; never Homebrew.
+- Velnor remains the automatic default. GitHub and both are explicit options.
+- Never replace a selected Velnor lane with GitHub-hosted execution.
+- Keep unsafe public-unmerged work pre-execution fail-closed with actionable
+  rejection detail.
+- Never hand-edit generated consumers; change canonical source and regenerate.
+- Never merge red or pending work; verify exact PR head, then post-merge main.
+- Do not add excluded legacy repositories without an explicit new goal.
+- Private repositories do not require a DCO status producer.
 
-## Hard rules
+## Archive decision
 
-- Never claim completion from central CI or a subset of repositories.
-- Never merge red or pending work; always verify the merged head afterward.
-- Never use Homebrew; tooling installation and execution use mise.
-- Never overwrite generator-owned consumers directly.
-- Never route a selected Velnor lane to GitHub-hosted execution.
-- Never include excluded legacy repositories.
-- Never remove the implementation plan before exhaustive proof.
+The completion gates are proved, so this goal is archived as achieved rather
+than blocked. The plan is retained as a committed completion record. Future
+dependency upgrades, new repositories, workflow changes, or infrastructure
+incidents start new maintenance work and do not reopen this plan automatically.

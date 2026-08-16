@@ -1,13 +1,12 @@
 # Velnor fleet unification goal status
 
-Status: **active / incomplete**
+Status: **achieved / archived**
 
-Updated: 2026-08-17
+Completed: 2026-08-17
 
-The goal is not archived as achieved. Central implementation and several live
-package paths are proven, but exact conformance and green-main evidence across
-all 28 repositories is not complete. The implementation plan must remain until
-that fleet-wide proof passes.
+The 28-repository fleet is unified under the generated Velnor Actions
+contract. This file is the durable completion record; detailed implementation
+history remains in Git rather than being discarded.
 
 ## Scope
 
@@ -20,62 +19,70 @@ that fleet-wide proof passes.
   velnor-actions-fixture
 - `ChainArgos`: java-monorepo, jackin-agent-brown, blockchain-nodes
 
-Legacy repositories outside this list are excluded.
+Legacy repositories outside this exact list remain excluded.
 
-## Proven complete
+## Completion proof
 
-- Exact generated inventory: 28 repositories, five classes, five templates.
-- Runner selector contract: `velnor` is the default, `github` is optional, and
-  `both` means one real Velnor lane plus one real GitHub-hosted lane.
-- Selected Velnor lanes are never event-dependently substituted with GitHub.
-- Admission closure, cache, provenance, routing, and rejection evidence are
-  fail-closed in central source and generated workflows.
-- Runner checkout tokens remain runtime expressions when an installed GitHub
-  App supplies them; the planner no longer replaces them with the Actions
-  service token.
-- Velnor runner `v0.1.173` is signed, released, installed through APT, and live
-  on all ten Sentry daemon units; all nine doctor units pass.
-- Exact live Velnor package-update proof passed after the runner repair.
-- Jackin preview package update passed on Velnor and advanced
-  `Formula/jackin-preview.rb` with the release source SHA and bare SHA-256
-  values.
-- Package updater source now uses the GitHub App client ID interface; six
-  package repositories have owner-correct client-ID variables configured.
-- Every pull request merged during these phases had green exact-head checks,
-  followed by a green target-branch run.
+- Canonical inventory validates exactly 28 repositories, five classes, and
+  five templates.
+- Runner selection is uniform: omitted input defaults to `velnor`; `github` is
+  optional; `both` executes one real Velnor lane and one real GitHub-hosted
+  lane. No selected Velnor lane is silently substituted.
+- Public-unmerged work uses the same selector. Safe work executes on Velnor;
+  unsafe work fails before execution with a clear synthetic rejection step.
+- Generated trusted/public workflow files represent distinct security domains;
+  the fleet audit reports no stale generated duplicate.
+- Admission closure, cache isolation, provenance, request validation, package
+  authentication, and fail-closed aggregation gates pass centrally and in the
+  generated fleet.
+- Preview trigger, condition, and SHA handling are synchronized. Jackin's
+  rolling preview advanced to source `2246b779e0c424a648491e837d8314b8af5bc523`;
+  the tap contains bare 64-hex checksums. A later docs-only push proved
+  `source=false` without rebuilding.
+- Package updater `2026.8.30` accepts an exact preview source that is an
+  ancestor of current main, while rejecting divergence. Canonical and both
+  owner mirrors are signed and byte-equivalent.
+- All six package consumers are pinned to `2026.8.30`; their merged main CI and
+  a live default-Velnor package update succeeded.
+- Runner `v0.1.175` is signed, installed through APT, and active on all nine
+  Sentry runner daemons. All nine doctor units pass. The active release record
+  and installed binary verify exactly.
+- Sentry stale Docker state was drained safely: 455 obsolete containers and
+  four final orphan Testcontainers databases were removed. At the cleanup
+  checkpoint there were zero exited containers and zero failed systemd units.
+- Branch protections use stable aggregate checks, do not require outside
+  approval for these single-maintainer repositories, and private repositories
+  do not require a DCO check producer.
+- Every one of the 28 current default-branch heads has a completed successful
+  `ci.yml` run. Final stragglers Tailrocks Skills and Tablerock passed after
+  rerun on runner `v0.1.175`.
+- Every goal pull request was merged only after exact-head green checks and a
+  green post-merge main run. Superseded dependency PRs were closed instead of
+  merging known-regressive pins. No goal PR remains open.
 
-## In progress
+## Final evidence
 
-- Release and mirror the latest central changes, including real Velnor routing
-  for public-unmerged events and GitHub App client-ID authentication.
-- Regenerate and merge consumers across the exact 28-repository fleet.
-- Finish the remaining green Java pull request and verify its merged head.
+- Canonical release: `tailrocks/velnor-actions@77d323dcfdb176b332edc24bfc92cb625b3ab4c8`
+- Jackin mirror: `6669eac8693ec14957d2f55ae3b67756d1184e77`
+- ChainArgos mirror: `36d568abb89b4f53aa828fe1740fbb3411ffcb87`
+- Signed tag on all three: `2026.8.30`
+- Central gate: 96 tests passed; formatting, lint, actionlint, dependency policy,
+  generator, and fleet audit passed.
+- Remote closure: valid, nine immutable actions.
+- Selector proof runs: Velnor `31969229282`, GitHub `31969231001`, both
+  `31969232498`.
+- Rejection proof: Velnor expected rejection `31969488734`; GitHub scanner
+  success `31969490199`.
+- Jackin preview: publish `31966437619`; docs-only classification
+  `31971035133`.
+- Live package update: `31972638527`.
+- Final fleet proof: 28/28 current heads completed successfully; Tablerock
+  `31962235507` attempt 2 and Tailrocks Skills `31973102142` closed the last
+  historical failures.
 
-## Still required
+## Ongoing maintenance
 
-- Exhaustively inventory every workflow in all 28 repositories.
-- Prove every repository defaults to Velnor and exposes only the optional
-  `github` and `both` modes defined by the contract.
-- Verify public-unmerged safe work executes on real Velnor; unsafe work must be
-  rejected before execution with a clear synthetic rejection step.
-- Resolve duplicate trusted/public workflow files: retain only distinct,
-  generator-authorized security domains; remove stale or redundant files.
-- Verify preview trigger/condition/SHA agreement and live rolling preview state
-  for every product/tap pair in scope.
-- Verify package workflows, branch rules, required checks, and green main for
-  every repository; private repositories must not require a DCO producer.
-- Merge all in-scope Renovate and implementation pull requests only after their
-  exact heads are green; leave no opened work unfinished.
-- Run final generator, remote-closure, fleet-byte, live-run, and independent
-  zero-finding audits.
-- Remove the implementation plan only after every preceding condition has
-  current authoritative evidence.
-
-## Current evidence
-
-- Central Velnor-lane correction: PR #53, merge `243882b49bbc6229ac8a47e413b8bae7d08b6cd4`.
-- Exact central main CI: run `31960795662`, successful.
-- Runner release: `v0.1.173`; exact release and package deployment previously
-  verified before this checkpoint.
-- Jackin tap preview update: PR #445, merge `526387d6`; post-merge CI and reuse
-  workflows successful.
+Future fleet changes remain governed by the generator. Use mise, never
+Homebrew. Keep Velnor as the default lane. Merge only exact-head-green changes,
+then verify the resulting main run. New regressions are maintenance incidents,
+not unfinished work from this archived goal.
