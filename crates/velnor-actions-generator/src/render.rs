@@ -137,6 +137,8 @@ pub fn consumer_template(class: RepositoryClass) -> String {
     b.line(4, "tags:");
     b.line(6, "- \"**\"");
     b.line(2, "merge_group:");
+    b.line(2, "schedule:");
+    b.line(4, "- cron: \"23 3 * * 0\"");
     b.line(2, "workflow_dispatch:");
     b.line(4, "inputs:");
     b.line(6, "lane:");
@@ -180,7 +182,7 @@ pub fn consumer_template(class: RepositoryClass) -> String {
         b.line(4, "with:");
         b.line(
             6,
-            "lane: ${{ (github.event_name == 'workflow_dispatch' && inputs.lane != '' && inputs.lane) || (github.repository_owner == 'jackin-project' && 'github') || ((github.repository_owner == 'tailrocks' || github.repository_owner == 'ChainArgos') && 'velnor') || 'invalid' }}",
+            "lane: ${{ (github.event_name == 'schedule' && 'both') || (github.event_name == 'workflow_dispatch' && inputs.lane != '' && inputs.lane) || (github.repository_owner == 'jackin-project' && 'github') || ((github.repository_owner == 'tailrocks' || github.repository_owner == 'ChainArgos') && 'velnor') || 'invalid' }}",
         );
         for input in AUXILIARY_INPUTS {
             b.line(6, &format!("{input}: ${{{{ inputs.{input} || '' }}}}"));
@@ -196,7 +198,7 @@ pub fn consumer_template(class: RepositoryClass) -> String {
         b.line(6, &format!("- {owner}"));
     }
     b.line(4, "if: ${{ always() }}");
-    b.line(4, "runs-on: ubuntu-latest");
+    b.line(4, "runs-on: ubuntu-26.04");
     b.line(4, "timeout-minutes: 10");
     b.line(4, "permissions:");
     b.line(6, "contents: read");
@@ -318,7 +320,7 @@ pub fn callable_workflow(
     b.line(0, "jobs:");
     b.line(2, "validate-request:");
     b.line(4, "name: validate request");
-    b.line(4, "runs-on: ubuntu-latest");
+    b.line(4, "runs-on: ubuntu-26.04");
     b.line(4, "timeout-minutes: 5");
     b.line(4, "permissions:");
     b.line(6, "actions: read");
@@ -391,7 +393,7 @@ pub fn callable_workflow(
     b.line(4, "# This is explicit policy routing, not silent failover.");
     b.line(
         4,
-        "runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'ubuntu-latest' || 'velnor-trusted' }}",
+        "runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'ubuntu-26.04' || 'velnor-trusted' }}",
     );
     b.line(4, "timeout-minutes: 30");
     b.line(4, "outputs:");
@@ -425,7 +427,7 @@ pub fn callable_workflow(
         4,
         "if: ${{ inputs.benchmark_campaign == '' && inputs.cache_proof_id == '' && (inputs.lane == 'github' || inputs.lane == 'both' || (inputs.lane == '' && github.repository_owner == 'jackin-project')) }}",
     );
-    b.line(4, "runs-on: ubuntu-latest");
+    b.line(4, "runs-on: ubuntu-26.04");
     b.line(4, "timeout-minutes: 30");
     b.line(4, "outputs:");
     b.line(6, "contract: ${{ steps.aggregate.outputs.contract }}");
@@ -491,7 +493,7 @@ pub fn callable_workflow(
     }
     b.line(6, "- cache-proof-contract");
     b.line(4, "if: ${{ always() }}");
-    b.line(4, "runs-on: ubuntu-latest");
+    b.line(4, "runs-on: ubuntu-26.04");
     b.line(4, "timeout-minutes: 10");
     b.line(4, "outputs:");
     b.line(6, "contract: ${{ steps.verdict.outputs.contract }}");
@@ -607,7 +609,7 @@ fn render_cache_proof_jobs(
         .filter(|cache| cache.class == contract.class)
         .collect::<Vec<_>>();
     for (job, runner, lane) in [
-        ("github_restore", "ubuntu-latest", "github"),
+        ("github_restore", "ubuntu-26.04", "github"),
         ("velnor_restore", "${{ 'velnor-trusted' }}", "velnor"),
     ] {
         b.line(2, &format!("{job}:"));
@@ -797,7 +799,7 @@ fn render_cache_proof_jobs(
         4,
         "if: ${{ inputs.benchmark_campaign != '' || inputs.cache_proof_id != '' }}",
     );
-    b.line(4, "runs-on: ubuntu-latest");
+    b.line(4, "runs-on: ubuntu-26.04");
     b.line(4, "timeout-minutes: 10");
     b.line(4, "outputs:");
     b.line(
@@ -887,7 +889,7 @@ fn render_cache_proof_jobs(
     b.blank();
 
     for (job, runner, lane) in [
-        ("github_execute", "ubuntu-latest", "github"),
+        ("github_execute", "ubuntu-26.04", "github"),
         ("velnor_execute", "${{ 'velnor-trusted' }}", "velnor"),
     ] {
         b.line(2, &format!("{job}:"));
@@ -1024,7 +1026,7 @@ fn render_cache_proof_jobs(
     b.line(6, "- github_execute");
     b.line(6, "- velnor_execute");
     b.line(4, "if: ${{ always() && (inputs.cache_proof_id != '' || inputs.benchmark_campaign != '') && needs.github_execute.result == 'success' && needs.velnor_execute.result == 'success' }}");
-    b.line(4, "runs-on: ubuntu-latest");
+    b.line(4, "runs-on: ubuntu-26.04");
     b.line(4, "timeout-minutes: 20");
     b.line(4, "outputs:");
     b.line(6, "contract: ${{ steps.reconcile.outputs.contract }}");
@@ -1080,7 +1082,7 @@ fn render_cache_proof_jobs(
     b.line(6, "- velnor_execute");
     b.line(6, "- proof_reconcile");
     b.line(4, "if: ${{ always() && needs.restore_barrier.result == 'success' && needs.restore_barrier.outputs.publish_needed == 'true' && needs.github_execute.result == 'success' && needs.velnor_execute.result == 'success' && needs.proof_reconcile.result == 'success' && needs.proof_reconcile.outputs.contract == 'success' }}");
-    b.line(4, "runs-on: ubuntu-latest");
+    b.line(4, "runs-on: ubuntu-26.04");
     b.line(4, "timeout-minutes: 20");
     b.line(4, "concurrency:");
     b.line(
@@ -1252,7 +1254,7 @@ fn render_cache_proof_jobs(
         4,
         "if: ${{ always() && (inputs.benchmark_campaign != '' || inputs.cache_proof_id != '') }}",
     );
-    b.line(4, "runs-on: ubuntu-latest");
+    b.line(4, "runs-on: ubuntu-26.04");
     b.line(4, "timeout-minutes: 10");
     b.line(4, "outputs:");
     b.line(6, "contract: ${{ steps.contract.outputs.contract }}");

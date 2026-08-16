@@ -115,7 +115,7 @@ fn public_unmerged_routes_velnor_lane_to_github_hosted() {
     let wf = callable(RepositoryClass::Code);
     assert!(
         wf.contains(
-            "runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'ubuntu-latest' || 'velnor-trusted' }}"
+            "runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'ubuntu-26.04' || 'velnor-trusted' }}"
         ),
         "velnor lane routes public unmerged code to GitHub-hosted"
     );

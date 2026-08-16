@@ -643,7 +643,7 @@ fn audit_callable_structure(
     // public-unmerged Velnor route is allowed.
     require_contains(
         rendered,
-        "(github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'ubuntu-latest' || 'velnor-trusted'",
+        "(github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'ubuntu-26.04' || 'velnor-trusted'",
         &what,
         "public-unmerged GitHub-hosted routing",
     )?;

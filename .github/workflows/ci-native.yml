@@ -79,7 +79,7 @@ permissions:
 jobs:
   validate-request:
     name: validate request
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       actions: read
@@ -114,7 +114,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
-          EXPECTED_CALLER_TEMPLATE_SHA256: be588e1f1beecc3390275b6060925594a343bca43ddca29c89f94e8dd98b83fa
+          EXPECTED_CALLER_TEMPLATE_SHA256: 3a6e24fddcdfbe11cf9f7051480b19871ff90bfda29502b7572eb66ac4f24504
           DECLARED_CACHE_IDS: tools,dependencies,build-output
         run: |
           set -euo pipefail
@@ -223,7 +223,7 @@ jobs:
     # Public unmerged-code events (pull_request, merge_group) route the Velnor lane
     # to GitHub-hosted execution until a live-proven lower-trust Velnor pool exists.
     # This is explicit policy routing, not silent failover.
-    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'ubuntu-latest' || 'velnor-trusted' }}
+    runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'ubuntu-26.04' || 'velnor-trusted' }}
     timeout-minutes: 30
     outputs:
       contract: ${{ steps.aggregate.outputs.contract }}
@@ -631,7 +631,7 @@ jobs:
     name: github lane
     needs: validate-request
     if: ${{ inputs.benchmark_campaign == '' && inputs.cache_proof_id == '' && (inputs.lane == 'github' || inputs.lane == 'both' || (inputs.lane == '' && github.repository_owner == 'jackin-project')) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     outputs:
       contract: ${{ steps.aggregate.outputs.contract }}
@@ -881,7 +881,7 @@ jobs:
     name: github restore proof
     needs: validate-request
     if: ${{ inputs.benchmark_campaign != '' || inputs.cache_proof_id != '' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     permissions:
       contents: read
@@ -1705,7 +1705,7 @@ jobs:
       - github_restore
       - velnor_restore
     if: ${{ inputs.benchmark_campaign != '' || inputs.cache_proof_id != '' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     outputs:
       publish_needed: ${{ steps.barrier.outputs.publish_needed }}
@@ -1998,7 +1998,7 @@ jobs:
       fail-fast: false
       matrix:
         slot: ${{ fromJSON(inputs.benchmark_fanout == '8' && '[0,1,2,3,4,5,6,7]' || '[0]') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     steps:
       - name: Check out repository into fresh workspace
@@ -3171,7 +3171,7 @@ jobs:
       - github_execute
       - velnor_execute
     if: ${{ always() && (inputs.cache_proof_id != '' || inputs.benchmark_campaign != '') && needs.github_execute.result == 'success' && needs.velnor_execute.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     outputs:
       contract: ${{ steps.reconcile.outputs.contract }}
@@ -3363,7 +3363,7 @@ jobs:
       - velnor_execute
       - proof_reconcile
     if: ${{ always() && needs.restore_barrier.result == 'success' && needs.restore_barrier.outputs.publish_needed == 'true' && needs.github_execute.result == 'success' && needs.velnor_execute.result == 'success' && needs.proof_reconcile.result == 'success' && needs.proof_reconcile.outputs.contract == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     concurrency:
       group: velnor-cache-writer-github-${{ github.repository }}-${{ needs.validate-request.outputs.cache_namespace }}
@@ -4085,7 +4085,7 @@ jobs:
       - proof_reconcile
       - cache_publish
     if: ${{ always() && (inputs.benchmark_campaign != '' || inputs.cache_proof_id != '') }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     outputs:
       contract: ${{ steps.contract.outputs.contract }}
@@ -4134,7 +4134,7 @@ jobs:
       - platform-lane
       - cache-proof-contract
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     outputs:
       contract: ${{ steps.verdict.outputs.contract }}
