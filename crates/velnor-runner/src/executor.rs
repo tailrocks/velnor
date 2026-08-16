@@ -3139,15 +3139,39 @@ where
 
     pub(crate) fn start_job_environment(&mut self, container: &JobContainerSpec) -> Result<()> {
         let _span = tracing::info_span!("job-container-boot").entered();
-        if let Err(error) = self.start_job_environment_once(container) {
-            eprintln!("Docker job environment start failed, removing stale resources: {error:#}");
+        let mut attempt = 1_u32;
+        loop {
+            let Err(error) = self.start_job_environment_once(container) else {
+                return Ok(());
+            };
             self.cleanup_stale(container);
-            if let Err(retry_error) = self.start_job_environment_once(container) {
-                self.cleanup_stale(container);
-                return Err(retry_error);
+
+            // A daemon/containerd restart briefly returns transport and shim
+            // errors for every `docker run`. The historical single immediate
+            // retry always landed inside the same restart window, turning a
+            // healthy workflow into a permanent pre-execution rejection.
+            // Retry only this closed transient class with bounded backoff.
+            // Every other failure retains the one stale-resource retry.
+            let transient = docker_start_error_is_transient(&error);
+            let max_attempts = if transient { 5 } else { 2 };
+            if attempt >= max_attempts {
+                return Err(error);
             }
+            let delay = if transient {
+                docker_start_retry_delay(attempt)
+            } else {
+                Duration::ZERO
+            };
+            eprintln!(
+                "Docker job environment start failed (attempt {attempt}/{max_attempts}); \
+                 removed stale resources; retrying in {}ms: {error:#}",
+                delay.as_millis()
+            );
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
+            attempt += 1;
         }
-        Ok(())
     }
 
     fn start_job_environment_once(&mut self, container: &JobContainerSpec) -> Result<()> {
@@ -3428,6 +3452,25 @@ fn resolve_checkout_plan_expressions(
         }
     }
     Ok(plan)
+}
+
+fn docker_start_error_is_transient(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}").to_ascii_lowercase();
+    [
+        "failed to create ttrpc connection",
+        "error reading from server: eof",
+        "unexpected eof",
+        "connection reset by peer",
+        "cannot connect to the docker daemon",
+        "is the docker daemon running",
+        "transport is closing",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+fn docker_start_retry_delay(failed_attempt: u32) -> Duration {
+    Duration::from_secs(1_u64 << failed_attempt.saturating_sub(1).min(3))
 }
 
 fn emit_live_step_log(
@@ -19704,6 +19747,35 @@ bitcoin-processor-app.push=true")
             filtered.iter().any(|(k, _)| k == "PATH"),
             "PATH must be preserved: {filtered:?}"
         );
+    }
+
+    #[test]
+    fn docker_start_retry_classifies_only_transient_runtime_failures() {
+        for message in [
+            "failed to create TTRPC connection: unsupported protocol",
+            "error reading from server: EOF",
+            "Cannot connect to the Docker daemon. Is the docker daemon running?",
+            "rpc error: transport is closing",
+        ] {
+            assert!(docker_start_error_is_transient(&anyhow::anyhow!(message)));
+        }
+        for message in [
+            "pull access denied for private/image",
+            "invalid reference format",
+            "network with name job already exists",
+            "failed to create task for container: OCI runtime create failed: executable not found",
+        ] {
+            assert!(!docker_start_error_is_transient(&anyhow::anyhow!(message)));
+        }
+    }
+
+    #[test]
+    fn docker_start_retry_delay_is_bounded() {
+        assert_eq!(docker_start_retry_delay(1), Duration::from_secs(1));
+        assert_eq!(docker_start_retry_delay(2), Duration::from_secs(2));
+        assert_eq!(docker_start_retry_delay(3), Duration::from_secs(4));
+        assert_eq!(docker_start_retry_delay(4), Duration::from_secs(8));
+        assert_eq!(docker_start_retry_delay(40), Duration::from_secs(8));
     }
 
     #[test]
