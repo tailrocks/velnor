@@ -224,7 +224,7 @@ jobs:
     # to GitHub-hosted execution until a live-proven lower-trust Velnor pool exists.
     # This is explicit policy routing, not silent failover.
     runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'ubuntu-26.04' || 'velnor-trusted' }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     outputs:
       contract: ${{ steps.aggregate.outputs.contract }}
     steps:
@@ -637,7 +637,7 @@ jobs:
     needs: validate-request
     if: ${{ inputs.benchmark_campaign == '' && inputs.cache_proof_id == '' && (inputs.lane == 'github' || inputs.lane == 'both' || (inputs.lane == '' && github.repository_owner == 'jackin-project')) }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     outputs:
       contract: ${{ steps.aggregate.outputs.contract }}
     steps:

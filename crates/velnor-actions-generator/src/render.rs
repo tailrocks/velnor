@@ -379,6 +379,14 @@ pub fn callable_workflow(
     b.blank();
 
     // Velnor lane.
+    // The Java/Rust monorepo executes 1,400+ tests plus a full-workspace clippy
+    // pass. Keep its code-class bound above the proven cold 30-minute path;
+    // other classes retain the tighter default.
+    let lane_timeout = if class == RepositoryClass::Code {
+        60
+    } else {
+        30
+    };
     b.line(2, "velnor-lane:");
     b.line(4, "name: velnor lane");
     b.line(4, "needs: validate-request");
@@ -399,7 +407,7 @@ pub fn callable_workflow(
         4,
         "runs-on: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'ubuntu-26.04' || 'velnor-trusted' }}",
     );
-    b.line(4, "timeout-minutes: 30");
+    b.line(4, &format!("timeout-minutes: {lane_timeout}"));
     b.line(4, "outputs:");
     b.line(6, "contract: ${{ steps.aggregate.outputs.contract }}");
     b.line(4, "steps:");
@@ -432,7 +440,7 @@ pub fn callable_workflow(
         "if: ${{ inputs.benchmark_campaign == '' && inputs.cache_proof_id == '' && (inputs.lane == 'github' || inputs.lane == 'both' || (inputs.lane == '' && github.repository_owner == 'jackin-project')) }}",
     );
     b.line(4, "runs-on: ubuntu-26.04");
-    b.line(4, "timeout-minutes: 30");
+    b.line(4, &format!("timeout-minutes: {lane_timeout}"));
     b.line(4, "outputs:");
     b.line(6, "contract: ${{ steps.aggregate.outputs.contract }}");
     b.line(4, "steps:");

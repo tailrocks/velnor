@@ -36,6 +36,18 @@ fn consumer_weekly_schedule_runs_both_lanes_on_canonical_hosted_image() {
 }
 
 #[test]
+fn code_lane_timeout_covers_proven_cold_monorepo_runtime() {
+    let workflows = common::repo_root().join(".github/workflows");
+    let code = std::fs::read_to_string(workflows.join("ci-code.yml")).unwrap();
+    assert_eq!(code.matches("timeout-minutes: 60").count(), 2);
+
+    for class in ["native", "tap", "apt", "fixture"] {
+        let rendered = std::fs::read_to_string(workflows.join(format!("ci-{class}.yml"))).unwrap();
+        assert!(!rendered.contains("timeout-minutes: 60"));
+    }
+}
+
+#[test]
 fn exact_membership_and_counts() {
     let m = load();
     assert_eq!(m.repositories().len(), 28, "28 members");
@@ -583,7 +595,7 @@ fn release_goldens_bind_consumer_interface_and_callable_metrics_schema() {
         ),
         (
             ".github/workflows/ci-code.yml",
-            "f0c13dc286d4a373247e37b41dcc7280b11214bb069b4c1ad6172af1d582915b",
+            "54f56f87f98edc93272bd16884bdbd58191fa75ad6adcc155f09b17241981b37",
         ),
         (
             ".github/workflows/ci-native.yml",
