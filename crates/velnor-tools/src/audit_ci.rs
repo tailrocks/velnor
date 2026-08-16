@@ -11,6 +11,36 @@ use std::process::Command;
 
 const INLINE_MATRIX_MARKER: &str = "inputs.lanes == 'both'";
 const SHA_LEN: usize = 40;
+const EXPECTED_ESTATE: [&str; 28] = [
+    "ChainArgos/blockchain-nodes",
+    "ChainArgos/jackin-agent-brown",
+    "ChainArgos/java-monorepo",
+    "jackin-project/homebrew-tap",
+    "jackin-project/jackin",
+    "jackin-project/jackin-agent-smith",
+    "jackin-project/jackin-dev",
+    "jackin-project/jackin-role-action",
+    "jackin-project/jackin-sentinel",
+    "jackin-project/jackin-the-architect",
+    "tailrocks/holla",
+    "tailrocks/holla-apt",
+    "tailrocks/homebrew-holla",
+    "tailrocks/homebrew-parallax",
+    "tailrocks/homebrew-ruxel",
+    "tailrocks/homebrew-tablerock",
+    "tailrocks/parallax",
+    "tailrocks/parallax-telemetry-playground",
+    "tailrocks/pg-bigdecimal",
+    "tailrocks/ruxel",
+    "tailrocks/schemalane",
+    "tailrocks/tablerock",
+    "tailrocks/tailrocks-skills",
+    "tailrocks/termrock",
+    "tailrocks/tracing-request-level",
+    "tailrocks/velnor",
+    "tailrocks/velnor-actions-fixture",
+    "tailrocks/velnor-apt",
+];
 
 #[derive(Debug, Args)]
 pub struct AuditCiArgs {
@@ -32,6 +62,12 @@ pub struct AuditCiArgs {
     /// JSON array of repository paths to audit as one estate.
     #[arg(long)]
     pub estate: Option<PathBuf>,
+    /// Clone and audit each estate repository's live remote default head.
+    #[arg(long, requires = "estate")]
+    pub remote_defaults: bool,
+    /// Root containing local estate checkouts at <owner>/<repository>.
+    #[arg(long, requires = "estate", conflicts_with = "remote_defaults")]
+    pub estate_root: Option<PathBuf>,
     /// Skip latest-release lookups; floating refs remain errors.
     #[arg(long)]
     pub offline: bool,
@@ -112,8 +148,32 @@ struct EstateManifest {
 #[derive(Debug, Deserialize)]
 struct EstateRepository {
     name: String,
-    path: PathBuf,
+    #[serde(default)]
+    path: Option<PathBuf>,
     concerns: BTreeMap<String, ConcernContract>,
+}
+
+#[derive(Debug, Serialize)]
+struct EstateAuditResult {
+    default_branch: String,
+    head_sha: String,
+    findings: Vec<Finding>,
+}
+
+#[derive(Debug, Serialize)]
+struct EstateAuditOutput {
+    schema_version: &'static str,
+    repositories: BTreeMap<String, EstateAuditResult>,
+}
+
+struct RemoteCheckout {
+    path: PathBuf,
+}
+
+impl Drop for RemoteCheckout {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -159,20 +219,60 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
     } else {
         None
     };
+    let mut estate_results = BTreeMap::new();
     let mut all = BTreeMap::new();
     if let Some(estate) = &estate {
-        if estate.version != 1 {
+        if estate.version != 2 {
             bail!(
-                "unsupported estate manifest version {} (expected 1)",
+                "unsupported estate manifest version {} (expected 2)",
                 estate.version
             );
         }
+        validate_estate_scope(estate)?;
+        if args.offline {
+            bail!("estate audit cannot skip delivered-default freshness checks");
+        }
         for repo in &estate.repositories {
-            let canonical = repo.path.canonicalize().with_context(|| {
+            let (default_branch, head_sha) = remote_default_identity(&repo.name)?;
+            let remote_checkout = if args.remote_defaults {
+                Some(checkout_remote_default(
+                    &repo.name,
+                    &default_branch,
+                    &head_sha,
+                )?)
+            } else {
+                None
+            };
+            let configured = if remote_checkout.is_none() {
+                Some(
+                    args
+                    .estate_root
+                    .as_ref()
+                    .map(|root| root.join(&repo.name))
+                    .or_else(|| repo.path.clone())
+                    .with_context(|| {
+                        format!(
+                            "estate repository {} has no portable checkout; pass --estate-root or --remote-defaults",
+                            repo.name
+                        )
+                    })?,
+                )
+            } else {
+                None
+            };
+            if let Some(configured) = &configured {
+                verify_local_default(configured, &repo.name, &default_branch, &head_sha)?;
+            }
+            let root = remote_checkout
+                .as_ref()
+                .map(|checkout| checkout.path.as_path())
+                .or(configured.as_deref())
+                .context("estate checkout resolution produced no path")?;
+            let canonical = root.canonicalize().with_context(|| {
                 format!(
                     "estate repository {} path {} does not exist",
                     repo.name,
-                    repo.path.display()
+                    root.display()
                 )
             })?;
             let workload_files = concern_implementations(repo, &estate.defaults, "lane-selection")
@@ -190,7 +290,14 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
             findings.sort_by(|left, right| {
                 (&left.file, &left.path, left.rule).cmp(&(&right.file, &right.path, right.rule))
             });
-            all.insert(repo.name.clone(), findings);
+            estate_results.insert(
+                repo.name.clone(),
+                EstateAuditResult {
+                    default_branch,
+                    head_sha,
+                    findings,
+                },
+            );
         }
     } else {
         let root = &args.repo_path;
@@ -219,10 +326,40 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
         .values()
         .flatten()
         .filter(|finding| finding.severity == Severity::Error)
-        .count();
+        .count()
+        + estate_results
+            .values()
+            .flat_map(|result| &result.findings)
+            .filter(|finding| finding.severity == Severity::Error)
+            .count();
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&all)?);
+        if estate.is_some() {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&EstateAuditOutput {
+                    schema_version: "velnor.audit-ci.estate.v2",
+                    repositories: estate_results,
+                })?
+            );
+        } else {
+            println!("{}", serde_json::to_string_pretty(&all)?);
+        }
     } else {
+        for (repo, result) in &estate_results {
+            println!(
+                "audit-ci: {repo} ({} {})",
+                result.default_branch, result.head_sha
+            );
+            if result.findings.is_empty() {
+                println!("  PASS");
+            }
+            for finding in &result.findings {
+                println!(
+                    "  {:?} {} {} {} — {}",
+                    finding.severity, finding.rule, finding.file, finding.path, finding.message
+                );
+            }
+        }
         for (repo, findings) in &all {
             println!("audit-ci: {repo}");
             if findings.is_empty() {
@@ -238,6 +375,175 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
     }
     if errors > 0 {
         bail!("audit-ci found {errors} error(s)");
+    }
+    Ok(())
+}
+
+fn validate_estate_scope(estate: &EstateManifest) -> Result<()> {
+    let observed = estate
+        .repositories
+        .iter()
+        .map(|repo| repo.name.as_str())
+        .collect::<BTreeSet<_>>();
+    if observed.len() != estate.repositories.len() {
+        bail!("estate manifest contains duplicate repository names");
+    }
+    let expected = EXPECTED_ESTATE.into_iter().collect::<BTreeSet<_>>();
+    if observed != expected {
+        let missing = expected.difference(&observed).copied().collect::<Vec<_>>();
+        let extra = observed.difference(&expected).copied().collect::<Vec<_>>();
+        bail!(
+            "estate scope mismatch: expected exactly 28 repositories; missing={missing:?}; extra={extra:?}"
+        );
+    }
+    Ok(())
+}
+
+fn remote_default_identity(repository: &str) -> Result<(String, String)> {
+    let url = format!("https://github.com/{repository}.git");
+    let output = Command::new("git")
+        .args(["ls-remote", "--symref", &url, "HEAD"])
+        .output()
+        .with_context(|| format!("resolve remote default for {repository}"))?;
+    if !output.status.success() {
+        bail!(
+            "resolve remote default for {repository}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8(output.stdout).context("git ls-remote output is not UTF-8")?;
+    let branch = stdout
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("ref: refs/heads/")
+                .and_then(|rest| rest.strip_suffix("\tHEAD"))
+        })
+        .context("remote HEAD did not identify a default branch")?;
+    let sha = stdout
+        .lines()
+        .filter_map(|line| line.strip_suffix("\tHEAD"))
+        .find(|value| value.len() == SHA_LEN && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .with_context(|| {
+            format!("remote HEAD for {repository} did not identify a 40-hex commit")
+        })?;
+    Ok((branch.to_string(), sha.to_ascii_lowercase()))
+}
+
+fn checkout_remote_default(
+    repository: &str,
+    default_branch: &str,
+    head_sha: &str,
+) -> Result<RemoteCheckout> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock predates Unix epoch")?
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("velnor-estate-{}-{nonce}", std::process::id()));
+    let url = format!("https://github.com/{repository}.git");
+    let output = Command::new("git")
+        .args([
+            "clone",
+            "--quiet",
+            "--no-checkout",
+            "--filter=blob:none",
+            "--depth=1",
+            "--branch",
+            default_branch,
+            &url,
+        ])
+        .arg(&path)
+        .output()
+        .with_context(|| format!("clone delivered default for {repository}"))?;
+    if !output.status.success() {
+        let _ = fs::remove_dir_all(&path);
+        bail!(
+            "clone delivered default for {repository}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let sparse_input = b"/*\n!/*/\n/.github/\n";
+    let mut sparse = Command::new("git")
+        .current_dir(&path)
+        .args(["sparse-checkout", "set", "--no-cone", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("configure sparse checkout for {repository}"))?;
+    use std::io::Write as _;
+    sparse
+        .stdin
+        .as_mut()
+        .context("git sparse-checkout stdin unavailable")?
+        .write_all(sparse_input)
+        .context("write sparse-checkout patterns")?;
+    if !sparse
+        .wait()
+        .context("wait for git sparse-checkout")?
+        .success()
+    {
+        let _ = fs::remove_dir_all(&path);
+        bail!("configure sparse checkout for {repository}");
+    }
+    let checkout = Command::new("git")
+        .current_dir(&path)
+        .args(["checkout", "--quiet", "--detach", head_sha])
+        .status()
+        .with_context(|| format!("checkout delivered default for {repository}"))?;
+    if !checkout.success() {
+        let _ = fs::remove_dir_all(&path);
+        bail!("checkout delivered default for {repository}");
+    }
+    verify_checkout_identity(&path, repository, default_branch, head_sha, false)?;
+    Ok(RemoteCheckout { path })
+}
+
+fn verify_local_default(
+    path: &Path,
+    repository: &str,
+    default_branch: &str,
+    head_sha: &str,
+) -> Result<()> {
+    verify_checkout_identity(path, repository, default_branch, head_sha, true)
+}
+
+fn verify_checkout_identity(
+    path: &Path,
+    repository: &str,
+    default_branch: &str,
+    head_sha: &str,
+    require_branch: bool,
+) -> Result<()> {
+    let git = |args: &[&str]| -> Result<String> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .with_context(|| format!("inspect checkout for {repository}"))?;
+        if !output.status.success() {
+            bail!(
+                "inspect checkout for {repository}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8(output.stdout)
+            .context("git checkout output is not UTF-8")?
+            .trim()
+            .to_string())
+    };
+    let observed_head = git(&["rev-parse", "HEAD"])?;
+    if observed_head != head_sha {
+        bail!("estate checkout {repository} is stale: local {observed_head}, remote {head_sha}");
+    }
+    if require_branch {
+        let observed_branch = git(&["symbolic-ref", "--short", "HEAD"])?;
+        if observed_branch != default_branch {
+            bail!(
+                "estate checkout {repository} is on {observed_branch}, expected default branch {default_branch}"
+            );
+        }
+    }
+    if !git(&["status", "--porcelain=v1", "--untracked-files=all"])?.is_empty() {
+        bail!("estate checkout {repository} is dirty");
     }
     Ok(())
 }
@@ -680,6 +986,7 @@ fn audit_workflow(
     let Some(jobs) = object_get(yaml, "jobs").and_then(Value::as_mapping) else {
         return;
     };
+    audit_entry_job_event_coverage(file, yaml, jobs, findings);
     for (job_key, job_value) in jobs {
         let job_id = job_key.clone();
         let job_path = format!("$.jobs.{job_id}");
@@ -746,6 +1053,55 @@ fn audit_workflow(
         audit_steps(
             file, &job_id, &job_path, steps, text, offline, latest, findings,
         );
+    }
+}
+
+fn audit_entry_job_event_coverage(
+    file: &str,
+    yaml: &Value,
+    jobs: &serde_yaml::Mapping,
+    findings: &mut Vec<Finding>,
+) {
+    if Path::new(file).file_name().and_then(|name| name.to_str()) != Some("preview.yml") {
+        return;
+    }
+    const EVENTS: [&str; 5] = [
+        "push",
+        "pull_request",
+        "merge_group",
+        "workflow_dispatch",
+        "workflow_run",
+    ];
+    for (job_key, job_value) in jobs {
+        let Some(job) = job_value.as_mapping() else {
+            continue;
+        };
+        if mapping_get(job, "needs").is_some() {
+            continue;
+        }
+        let Some(condition) = mapping_get(job, "if").and_then(Value::as_str) else {
+            continue;
+        };
+        if !condition.contains("github.event_name")
+            && !condition.contains("github.event.workflow_run")
+        {
+            continue;
+        }
+        for event in EVENTS {
+            if has_trigger(yaml, event)
+                && !condition.contains(&format!("'{event}'"))
+                && !condition.contains(&format!("\"{event}\""))
+            {
+                findings.push(Finding::error(
+                    "trigger-if-desync",
+                    file,
+                    format!("$.jobs.{job_key}.if"),
+                    format!(
+                        "entry job condition excludes declared {event} event; synchronize on: and if: before delivery"
+                    ),
+                ));
+            }
+        }
     }
 }
 
@@ -1703,9 +2059,61 @@ jobs:
     }
 
     #[test]
+    fn entry_job_must_accept_every_declared_active_event() {
+        let workflow: Value = serde_yaml::from_str(
+            r#"on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  source:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-26.04
+    steps: []
+"#,
+        )
+        .unwrap();
+        let jobs = object_get(&workflow, "jobs").unwrap().as_mapping().unwrap();
+        let mut findings = Vec::new();
+        audit_entry_job_event_coverage(
+            ".github/workflows/preview.yml",
+            &workflow,
+            jobs,
+            &mut findings,
+        );
+        assert!(has_rule(&findings, "trigger-if-desync"));
+    }
+
+    #[test]
+    fn entry_job_accepting_push_and_dispatch_passes_event_coverage() {
+        let workflow: Value = serde_yaml::from_str(
+            r#"on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  source:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-26.04
+    steps: []
+"#,
+        )
+        .unwrap();
+        let jobs = object_get(&workflow, "jobs").unwrap().as_mapping().unwrap();
+        let mut findings = Vec::new();
+        audit_entry_job_event_coverage(
+            ".github/workflows/preview.yml",
+            &workflow,
+            jobs,
+            &mut findings,
+        );
+        assert!(!has_rule(&findings, "trigger-if-desync"));
+    }
+
+    #[test]
     fn estate_manifest_parses_classified_repository() {
         let manifest: EstateManifest = serde_json::from_str(
-            r#"{"version":1,"defaults":{},"repositories":[{"name":"one","path":"/one","concerns":{}}]}"#,
+            r#"{"version":2,"defaults":{},"repositories":[{"name":"one","path":"/one","concerns":{}}]}"#,
         )
         .unwrap();
         assert_eq!(manifest.repositories.len(), 1);
@@ -1717,7 +2125,7 @@ jobs:
         let root = TestRepo::new();
         let repo = EstateRepository {
             name: "example/repo".to_string(),
-            path: root.path.clone(),
+            path: Some(root.path.clone()),
             concerns: BTreeMap::new(),
         };
         let findings = audit_concern_contract(&repo, &BTreeMap::new(), &root.path).unwrap();
@@ -1729,7 +2137,7 @@ jobs:
         let root = TestRepo::new();
         let repo = EstateRepository {
             name: "example/repo".to_string(),
-            path: root.path.clone(),
+            path: Some(root.path.clone()),
             concerns: BTreeMap::new(),
         };
         let mut defaults = required_concern_defaults();
@@ -1747,7 +2155,7 @@ jobs:
         fs::write(root.path.join(".github/workflows/ci.yml"), BASE).unwrap();
         let repo = EstateRepository {
             name: "example/repo".to_string(),
-            path: root.path.clone(),
+            path: Some(root.path.clone()),
             concerns: BTreeMap::from([(
                 "rust-ci".to_string(),
                 ConcernContract {
@@ -1788,7 +2196,7 @@ jobs:
         );
         let repo = EstateRepository {
             name: "example/repo".to_string(),
-            path: root.path.clone(),
+            path: Some(root.path.clone()),
             concerns: BTreeMap::new(),
         };
         let findings = audit_concern_contract(&repo, &defaults, &root.path).unwrap();
