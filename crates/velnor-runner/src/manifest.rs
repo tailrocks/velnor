@@ -176,8 +176,10 @@ const RUNTIME_REFS: &[AllowedRef] = &[
     allowed("04d248b84655b509d8c44dc1d6f990c879747487", "v4"),
     allowed("v4", "fixture transition until plan 041"),
 ];
-const GITHUB_SCRIPT_REFS: &[AllowedRef] =
-    &[allowed("373c709c69115d41ff229c7e5df9f8788daa9553", "v9")];
+const GITHUB_SCRIPT_REFS: &[AllowedRef] = &[allowed(
+    "3a2844b7e9c422d3c10d287c895573f7108da1b3",
+    "v9.0.0",
+)];
 const GITHUB_SCRIPT_INPUTS: &[InputRule] = &[
     InputRule::Any("github-token"),
     InputRule::Literal(
@@ -2574,7 +2576,7 @@ mod tests {
             validate_job_with_context(
                 &job(
                     "actions/github-script",
-                    Some("373c709c69115d41ff229c7e5df9f8788daa9553"),
+                    Some("3a2844b7e9c422d3c10d287c895573f7108da1b3"),
                     serde_json::json!({"github-token": "masked", "script": script}),
                 ),
                 &[],
@@ -2583,10 +2585,19 @@ mod tests {
         }
         let errors = violations(&job(
             "actions/github-script",
-            Some("373c709c69115d41ff229c7e5df9f8788daa9553"),
+            Some("3a2844b7e9c422d3c10d287c895573f7108da1b3"),
             serde_json::json!({"script": "console.log('adjacent')"}),
         ));
         assert_eq!(errors[0].field, "with.script");
+
+        let errors = violations(&job(
+            "actions/github-script",
+            Some("373c709c69115d41ff229c7e5df9f8788daa9553"),
+            serde_json::json!({
+                "script": "core.setOutput('docs-xtask', process.env.CONTRACT)"
+            }),
+        ));
+        assert_eq!(errors[0].field, "ref");
     }
 
     #[test]

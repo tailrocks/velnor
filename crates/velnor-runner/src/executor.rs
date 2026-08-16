@@ -10541,7 +10541,7 @@ esac
     #[test]
     fn native_github_script_copies_exact_contract_output() {
         let action = NativeActionInvocation {
-            git_ref: "373c709c69115d41ff229c7e5df9f8788daa9553".into(),
+            git_ref: "3a2844b7e9c422d3c10d287c895573f7108da1b3".into(),
             adapter: NativeActionAdapter::GitHubScript,
             cache_kind: None,
             source_path: None,
