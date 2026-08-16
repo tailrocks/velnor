@@ -134,7 +134,14 @@ jobs:
             ' verified/release.json >/dev/null
             source_ref=refs/heads/main
             source_digest=$(jq -r .target_commitish verified/release.json)
-            test "$(gh api "repos/$SOURCE_REPOSITORY/commits/main" --jq .sha)" = "$source_digest"
+            main_digest=$(gh api "repos/$SOURCE_REPOSITORY/commits/main" --jq .sha)
+            [[ "$main_digest" =~ ^[0-9a-f]{40}$ ]]
+            gh api "repos/$SOURCE_REPOSITORY/compare/$source_digest...$main_digest" > verified/source-to-main.json
+            jq -e --arg source "$source_digest" --arg main "$main_digest" '
+              (.status == "identical" or .status == "ahead") and .behind_by == 0 and
+              .base_commit.sha == $source and .merge_base_commit.sha == $source and
+              .head_commit.sha == $main
+            ' verified/source-to-main.json >/dev/null
             version=$(jq -r '.name|sub("^Preview ";"")' verified/release.json)
             mapfile -t matches < <(jq -r '.assets[].name' verified/release.json | while IFS= read -r name; do
               while IFS= read -r pattern; do [[ "$name" == "$pattern" ]] && printf '%s\n' "$name"; done <<<"$PREVIEW_ASSET_PATTERNS"

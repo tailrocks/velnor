@@ -288,6 +288,9 @@ fn package_policy_and_workflows_are_closed_and_lane_selectable() {
     assert!(UPDATER_WORKFLOW.contains("test \"$BRANCH\" != \"main\""));
     assert!(UPDATER_WORKFLOW.contains("elif test \"$CHANNEL\" = preview"));
     assert!(UPDATER_WORKFLOW.contains("releases/tags/preview"));
+    assert!(UPDATER_WORKFLOW.contains("compare/$source_digest...$main_digest"));
+    assert!(UPDATER_WORKFLOW.contains(".merge_base_commit.sha == $source"));
+    assert!(!UPDATER_WORKFLOW.contains("commits/main\" --jq .sha)\" = \"$source_digest"));
     assert!(UPDATER_WORKFLOW.contains("test \"${#matches[@]}\" -eq 6"));
     assert!(UPDATER_WORKFLOW.contains("VELNOR_PACKAGE_CHANNEL: ${{ inputs.channel }}"));
     assert!(UPDATER_WORKFLOW.contains("available=false"));
