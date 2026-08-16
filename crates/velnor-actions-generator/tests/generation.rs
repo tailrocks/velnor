@@ -30,7 +30,7 @@ fn consumer_weekly_schedule_runs_both_lanes_on_canonical_hosted_image() {
         let rendered = render::consumer_template(class);
         assert!(rendered.contains("  schedule:\n    - cron: \"23 3 * * 0\"\n"));
         assert!(rendered.contains("github.event_name == 'schedule' && 'both'"));
-        assert!(rendered.contains("runs-on: ubuntu-26.04"));
+        assert!(rendered.contains("runs-on: ${{ 'ubuntu-26.04' }}"));
         assert!(!rendered.contains("ubuntu-latest"));
     }
 }
@@ -563,43 +563,43 @@ fn release_goldens_bind_consumer_interface_and_callable_metrics_schema() {
     for (path, expected) in [
         (
             "templates/code/ci.yml",
-            "e68e59a9b75e654212d4addc7b09909321cad5db6a04ee978e9f080c64852693",
+            "5dbcb59d5260f0b62773b5ed854717ffd01bb47dd948a0ca73f681d7cf44108a",
         ),
         (
             "templates/native/ci.yml",
-            "3a6e24fddcdfbe11cf9f7051480b19871ff90bfda29502b7572eb66ac4f24504",
+            "3c810ad12ffa75dca5f064d82aa1740c8afda12af20b8de657f62c3a7f954721",
         ),
         (
             "templates/tap/ci.yml",
-            "aa835d9986bc4c1f9fdadfd95e0586203bbcc7bd3f6e2fb1e8df8756f2f70252",
+            "7a0740582da511bedb401099f0ca2f60cbcef510e6c98375a6e0606e7872f0f4",
         ),
         (
             "templates/apt/ci.yml",
-            "9272044801e2f6d966d6baeaf9119d3c663c826aefd14fac466a5cac9f5686c9",
+            "92de9546a56ba0210a90bdbd96a56e63b41e6de8b85ec975f098947eb8521e6e",
         ),
         (
             "templates/fixture/ci.yml",
-            "68a11859d41f534981f4a270d7f41bb46b1bf291b4a8d229906a1381054e7c1c",
+            "ac644aee6268a00ef853e7c53bb8d0f307df6c6a96b7fe3a7fc05bec6dfee274",
         ),
         (
             ".github/workflows/ci-code.yml",
-            "b4c8486e952e723f1d8d91d6fa9a6bf7eff648a0cfdd4c0309c16ce76bc9ea53",
+            "f0c13dc286d4a373247e37b41dcc7280b11214bb069b4c1ad6172af1d582915b",
         ),
         (
             ".github/workflows/ci-native.yml",
-            "7af95ca9f7f74d7a600122f7b2184fc16d794df9dcee69d97ec23431601aef0e",
+            "e98ca0423cb9aed6869cc60358e5ab83639da8a347bc62aaf9d3037383c59b72",
         ),
         (
             ".github/workflows/ci-tap.yml",
-            "44ce1acd022e7de57867808fd520b9aaa1d208ddf10f5738a469e051c49e6d3b",
+            "eb1f551f0d67dd3932ce5d4d00ff0589de3842fb0e48e2a030845e02b0d0d400",
         ),
         (
             ".github/workflows/ci-apt.yml",
-            "c5e449eee49a70a1c7ccea83cf1509709a2f28d3bdb376e8cde2f135ec17b150",
+            "59aec442dbec49c939bb84e2dce685212f962a91486d19dd4e95b2e78f56c767",
         ),
         (
             ".github/workflows/ci-fixture.yml",
-            "f7761bede8f846c61106f1c0c0bc700a9c24206be8b5b4757e87b9e13b97e937",
+            "bdf5c5052de7c84470e636ce26f85138b5acbf07831e6ab537f5147f20444ff6",
         ),
     ] {
         let bytes = std::fs::read(root.join(path)).unwrap();

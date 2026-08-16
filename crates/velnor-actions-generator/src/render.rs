@@ -198,7 +198,11 @@ pub fn consumer_template(class: RepositoryClass) -> String {
         b.line(6, &format!("- {owner}"));
     }
     b.line(4, "if: ${{ always() }}");
-    b.line(4, "runs-on: ubuntu-26.04");
+    // actionlint v1.7.12 does not yet recognize the Ubuntu 26.04 hosted label
+    // when it is a literal. Keep the exact runtime binding while allowing
+    // every consumer repository to lint the generated caller without local
+    // actionlint configuration.
+    b.line(4, "runs-on: ${{ 'ubuntu-26.04' }}");
     b.line(4, "timeout-minutes: 10");
     b.line(4, "permissions:");
     b.line(6, "contents: read");
