@@ -5633,10 +5633,16 @@ fn native_create_github_app_token(
     )) {
         bail!("actions/create-github-app-token does not permit skip-token-revoke");
     }
-    let app_id = native_input(action, &action_state, "app-id");
+    // v3 recommends client-id and retains app-id as a legacy alias. Resolve
+    // the same pair here so admission and native execution cannot disagree.
+    let client_id = native_input(action, &action_state, "client-id");
+    let legacy_app_id = native_input(action, &action_state, "app-id");
+    let app_id = github_app_identifier(client_id, legacy_app_id);
     let private_key = native_input(action, &action_state, "private-key");
     if app_id.trim().is_empty() || private_key.trim().is_empty() {
-        bail!("actions/create-github-app-token requires app-id and private-key");
+        bail!(
+            "actions/create-github-app-token requires client-id (or legacy app-id) and private-key"
+        );
     }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5717,6 +5723,14 @@ fn native_create_github_app_token(
         masks: vec![token],
         ..StepCommandState::default()
     }))
+}
+
+fn github_app_identifier(client_id: String, legacy_app_id: String) -> String {
+    if client_id.trim().is_empty() {
+        legacy_app_id
+    } else {
+        client_id
+    }
 }
 
 fn github_app_response(
@@ -19776,6 +19790,18 @@ bitcoin-processor-app.push=true")
         assert_eq!(docker_start_retry_delay(3), Duration::from_secs(4));
         assert_eq!(docker_start_retry_delay(4), Duration::from_secs(8));
         assert_eq!(docker_start_retry_delay(40), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn github_app_client_id_is_preferred_with_legacy_fallback() {
+        assert_eq!(
+            github_app_identifier("Iv23client".to_string(), "12345".to_string()),
+            "Iv23client"
+        );
+        assert_eq!(
+            github_app_identifier(String::new(), "12345".to_string()),
+            "12345"
+        );
     }
 
     #[test]
