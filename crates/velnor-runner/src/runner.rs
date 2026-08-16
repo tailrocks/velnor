@@ -5059,9 +5059,12 @@ pub(crate) fn job_context_data(job: &AgentJobRequestMessage) -> Vec<(String, Val
     if let Some(token) = github_token {
         match expanded.get_mut("github") {
             Some(Value::Object(github)) => {
-                github
-                    .entry("token".to_string())
-                    .or_insert_with(|| Value::String(token));
+                // `system.github.token` is the repository-scoped workflow
+                // token whose permissions GitHub bound to this job. Compact
+                // broker context can also carry a `github.token` entry, but
+                // that value is not authoritative and may be a read-only
+                // service token. Never let it override the job variable.
+                github.insert("token".to_string(), Value::String(token));
             }
             Some(_) => {}
             None => {
@@ -8063,7 +8066,8 @@ jobs:
             "ContextData": {
                 "github": {
                     "d": [
-                        { "k": "workflow_sha", "v": "abc123" }
+                        { "k": "workflow_sha", "v": "abc123" },
+                        { "k": "token", "v": "read-only-broker-token" }
                     ],
                     "t": 2
                 }
