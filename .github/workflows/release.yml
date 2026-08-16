@@ -106,10 +106,11 @@ jobs:
     outputs:
       manifest_sha256: ${{ steps.export.outputs.manifest_sha256 }}
     env:
+      CACHE_LANE: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' && 'GitHub' || 'Velnor' }}
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-      SCCACHE_GHA_ENABLED: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' }}
+      SCCACHE_GHA_ENABLED: "false"
       SCCACHE_CACHE_SIZE: 20G
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -144,6 +145,24 @@ jobs:
           install_args: rust
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+          key: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-
+
+      - name: Cache Cargo target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: cargo-target-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock') }}-
+
       - name: Export metadata from one release-build binary
         id: export
         run: |
@@ -176,6 +195,7 @@ jobs:
       index_digest: ${{ steps.push.outputs.digest }}
       manifest_sha256: ${{ needs.metadata.outputs.manifest_sha256 }}
     env:
+      CACHE_LANE: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' && 'GitHub' || 'Velnor' }}
       VERSION: ${{ needs.identity.outputs.version }}
       COMMIT: ${{ needs.identity.outputs.commit }}
     steps:
@@ -273,7 +293,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
       RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
-      SCCACHE_GHA_ENABLED: ${{ vars.VELNOR_AUTOMATIC_LANES == 'github' }}
+      SCCACHE_GHA_ENABLED: "false"
       SCCACHE_CACHE_SIZE: 20G
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -307,6 +327,24 @@ jobs:
         with:
           install_args: "rust zig cargo-binstall cargo:cargo-zigbuild"
           github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache Cargo registry
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+          key: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-registry-${{ env.CACHE_LANE }}-${{ runner.os }}-
+
+      - name: Cache Cargo target
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: target
+          key: cargo-target-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ github.job }}-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: cargo-target-${{ env.CACHE_LANE }}-${{ runner.os }}-${{ github.job }}-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', '**/Cargo.toml', '**/Cargo.lock') }}-
 
       - name: Add Rust target
         run: rustup target add ${{ matrix.target }}
@@ -388,7 +426,7 @@ jobs:
             velnor-runner-*.deb.sha256
             velnor-runner-*.bin.sha256
 
-  record:
+  release:
     needs: [identity, metadata, image, build]
     name: Assemble, verify + publish one coherent release
     timeout-minutes: 30
@@ -564,7 +602,7 @@ jobs:
           # and verifies it before reprepro. No APT credential exists here.
 
   sign-amd64-tar:
-    needs: [identity, record]
+    needs: [identity, release]
     permissions:
       attestations: write
       contents: read
@@ -576,7 +614,7 @@ jobs:
       source-ref: refs/tags/v${{ needs.identity.outputs.version }}
 
   sign-arm64-tar:
-    needs: [identity, record]
+    needs: [identity, release]
     permissions:
       attestations: write
       contents: read
@@ -588,7 +626,7 @@ jobs:
       source-ref: refs/tags/v${{ needs.identity.outputs.version }}
 
   sign-amd64-deb:
-    needs: [identity, record]
+    needs: [identity, release]
     permissions:
       attestations: write
       contents: read
@@ -600,7 +638,7 @@ jobs:
       source-ref: refs/tags/v${{ needs.identity.outputs.version }}
 
   sign-arm64-deb:
-    needs: [identity, record]
+    needs: [identity, release]
     permissions:
       attestations: write
       contents: read
