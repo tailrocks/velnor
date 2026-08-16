@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const INLINE_MATRIX_MARKER: &str = "inputs.lanes == 'both'";
+const INLINE_MATRIX_MARKERS: [&str; 2] = ["inputs.lanes == 'both'", "inputs.lane == 'both'"];
 const SHA_LEN: usize = 40;
 const EXPECTED_ESTATE: [&str; 28] = [
     "ChainArgos/blockchain-nodes",
@@ -983,11 +983,17 @@ fn audit_workflow(
             ));
         }
     }
+    audit_lane_selector(file, yaml, text, findings);
     if workload
         && !generated_caller
+        && has_trigger(yaml, "workflow_dispatch")
         && !is_native_apple_workflow(yaml)
         && !is_forced_public_unmerged_workflow(file_name, yaml)
-        && (!has_lanes_input(yaml) || !text.contains(INLINE_MATRIX_MARKER))
+        && (!has_lane_selector(yaml)
+            || (lane_selector_offers_both(yaml)
+                && !INLINE_MATRIX_MARKERS
+                    .iter()
+                    .any(|marker| text.contains(marker))))
     {
         findings.push(Finding::error(
             "lanes",
@@ -1747,12 +1753,60 @@ fn has_trigger(yaml: &Value, name: &str) -> bool {
         .is_some_and(|on| mapping_get(on, name).is_some())
 }
 
-fn has_lanes_input(yaml: &Value) -> bool {
-    object_get(yaml, "on")
+fn lane_selector(yaml: &Value) -> Option<(&'static str, &Value)> {
+    let inputs = object_get(yaml, "on")
         .and_then(|on| object_get(on, "workflow_dispatch"))
-        .and_then(|dispatch| object_get(dispatch, "inputs"))
-        .and_then(|inputs| object_get(inputs, "lanes"))
-        .is_some()
+        .and_then(|dispatch| object_get(dispatch, "inputs"))?;
+    ["lanes", "lane"]
+        .into_iter()
+        .find_map(|name| object_get(inputs, name).map(|input| (name, input)))
+}
+
+fn has_lane_selector(yaml: &Value) -> bool {
+    lane_selector(yaml).is_some()
+}
+
+fn lane_selector_offers_both(yaml: &Value) -> bool {
+    lane_selector(yaml)
+        .and_then(|(_, input)| object_get(input, "options"))
+        .and_then(Value::as_sequence)
+        .is_some_and(|options| options.iter().any(|value| value.as_str() == Some("both")))
+}
+
+fn audit_lane_selector(file: &str, yaml: &Value, text: &str, findings: &mut Vec<Finding>) {
+    let Some((name, input)) = lane_selector(yaml) else {
+        return;
+    };
+    let path = format!("$.on.workflow_dispatch.inputs.{name}");
+    let input_type = object_get(input, "type").and_then(Value::as_str);
+    let default = object_get(input, "default").and_then(Value::as_str);
+    let options = object_get(input, "options")
+        .and_then(Value::as_sequence)
+        .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let options_valid = options == ["velnor", "github"] || options == ["velnor", "github", "both"];
+    if input_type != Some("choice") || default != Some("velnor") || !options_valid {
+        findings.push(Finding::error(
+            "lane-selector",
+            file,
+            &path,
+            "use a choice defaulting to velnor with ordered options velnor, github, and optional both",
+        ));
+    }
+    if options.contains(&"both") {
+        let marker = format!("inputs.{name} == 'both'");
+        if !text.contains(&marker)
+            || !text.contains("velnor-target-mvp")
+            || !text.contains("ubuntu-26.04")
+        {
+            findings.push(Finding::error(
+                "lane-selector",
+                file,
+                &path,
+                "both must select real Velnor and GitHub runner lanes",
+            ));
+        }
+    }
 }
 
 fn is_native_apple_workflow(yaml: &Value) -> bool {
@@ -1853,7 +1907,7 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
-      lanes: {type: choice, options: [velnor, github, both]}
+      lanes: {type: choice, default: velnor, options: [velnor, github, both]}
 concurrency:
   group: ci-${{ github.ref }}
 jobs:
@@ -1861,7 +1915,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       matrix:
-        config: ${{ fromJSON(inputs.lanes == 'both' && '[]' || '[]') }}
+        config: ${{ fromJSON(inputs.lanes == 'both' && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"]},{"lane":"GitHub","runner":"ubuntu-26.04"}]' || '[]') }}
     runs-on: ${{ matrix.config.runner }}
     steps:
       - uses: actions/checkout@0123456789012345678901234567890123456789
@@ -2121,22 +2175,60 @@ jobs:
     #[test]
     fn requires_lanes_matrix() {
         assert!(has_rule(
-            &audit(&BASE.replace(INLINE_MATRIX_MARKER, "inputs.lanes == 'github'")),
+            &audit(&BASE.replace(INLINE_MATRIX_MARKERS[0], "inputs.lanes == 'github'")),
             "lanes"
         ));
+    }
+
+    #[test]
+    fn lane_selector_defaults_to_velnor_and_rejects_fake_both() {
+        let github_default = BASE.replace("default: velnor", "default: github");
+        assert!(has_rule(&audit(&github_default), "lane-selector"));
+
+        let fake_both = BASE.replace("velnor-target-mvp", "github-only");
+        assert!(has_rule(&audit(&fake_both), "lane-selector"));
+    }
+
+    #[test]
+    fn singular_lane_selector_is_supported() {
+        let singular = BASE
+            .replace("lanes:", "lane:")
+            .replace("inputs.lanes", "inputs.lane");
+        assert!(!has_rule(&audit(&singular), "lane-selector"));
+        assert!(!has_rule(&audit(&singular), "lanes"));
+    }
+
+    #[test]
+    fn two_lane_selector_does_not_require_fake_both() {
+        let two_lanes = BASE
+            .replace(", both", "")
+            .replace(INLINE_MATRIX_MARKERS[0], "inputs.lanes == 'velnor'");
+        assert!(!has_rule(&audit(&two_lanes), "lane-selector"));
+        assert!(!has_rule(&audit(&two_lanes), "lanes"));
+    }
+
+    #[test]
+    fn pull_request_only_workflow_does_not_offer_trusted_lane_selection() {
+        let yaml = BASE
+            .replace(
+                "  workflow_dispatch:\n    inputs:\n      lanes: {type: choice, default: velnor, options: [velnor, github, both]}\n",
+                "",
+            )
+            .replace(INLINE_MATRIX_MARKERS[0], "github.event_name == 'pull_request'");
+        assert!(!has_rule(&audit(&yaml), "lanes"));
     }
 
     #[test]
     fn forced_public_unmerged_workflow_does_not_offer_trusted_lane_selection() {
         let yaml = BASE
             .replace("  push:\n", "")
-            .replace("  workflow_dispatch:\n    inputs:\n      lanes: {type: choice, options: [velnor, github, both]}\n", "  merge_group:\n")
-            .replace(INLINE_MATRIX_MARKER, "'[{\"lane\":\"GitHub\",\"runner\":\"ubuntu-26.04\",\"writer\":true}]'");
+            .replace("  workflow_dispatch:\n    inputs:\n      lanes: {type: choice, default: velnor, options: [velnor, github, both]}\n", "  merge_group:\n")
+            .replace(INLINE_MATRIX_MARKERS[0], "'[{\"lane\":\"GitHub\",\"runner\":\"ubuntu-26.04\",\"writer\":true}]'");
         let findings = audit_file(".github/workflows/compat-public-unmerged.yml", &yaml);
         assert!(!has_rule(&findings, "lanes"), "{findings:?}");
 
         let trusted_push = yaml.replace("on:\n", "on:\n  push:\n");
-        assert!(has_rule(
+        assert!(!has_rule(
             &audit_file(
                 ".github/workflows/compat-public-unmerged.yml",
                 &trusted_push,
