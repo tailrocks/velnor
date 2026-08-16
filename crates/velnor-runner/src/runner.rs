@@ -2666,6 +2666,7 @@ async fn handle_v2_message(
             complete_acquired_job_failure(
                 &fallback_run_service_job,
                 &acquired_identity,
+                None,
                 Some("job_parse".to_string()),
                 &format!("{error:#}"),
             )
@@ -2684,6 +2685,7 @@ async fn handle_v2_message(
             complete_acquired_job_failure(
                 &fallback_run_service_job,
                 &acquired_identity,
+                Some(&job),
                 Some("run_service_client".to_string()),
                 &format!("{error:#}"),
             )
@@ -2867,6 +2869,7 @@ async fn handle_job_request(
             complete_acquired_job_failure(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),
+                Some(&job),
                 Some("step_mapping".to_string()),
                 "cannot execute scripts because step mapping failed",
             )
@@ -2877,6 +2880,7 @@ async fn handle_job_request(
             complete_acquired_job_failure(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),
+                Some(&job),
                 Some("trust_policy".to_string()),
                 &format!("{error:#}"),
             )
@@ -2891,6 +2895,7 @@ async fn handle_job_request(
             complete_acquired_job_failure(
                 &run_service_job,
                 &AcquiredJobIdentity::from_job(&job),
+                Some(&job),
                 Some("capability_validation".to_string()),
                 &format!("{error:#}"),
             )
@@ -2903,6 +2908,7 @@ async fn handle_job_request(
                 complete_acquired_job_failure(
                     &run_service_job,
                     &AcquiredJobIdentity::from_job(&job),
+                    Some(&job),
                     Some("action_admission".to_string()),
                     &format!("{error:#}"),
                 )
@@ -2968,6 +2974,7 @@ async fn handle_job_request(
                 complete_acquired_job_failure(
                     &run_service_job,
                     &AcquiredJobIdentity::from_job(&job),
+                    Some(&job),
                     Some("storage_lease".to_string()),
                     &format!("{error:#}"),
                 )
@@ -3033,6 +3040,7 @@ async fn handle_job_request(
                 let completion = complete_acquired_job_failure(
                     &run_service_job,
                     &AcquiredJobIdentity::from_job(&job),
+                    Some(&job),
                     Some("executor_panic".to_string()),
                     &format!("{join_error:#}"),
                 )
@@ -3085,6 +3093,7 @@ async fn handle_job_request(
                     let completion = complete_acquired_job_failure(
                         &run_service_job,
                         &AcquiredJobIdentity::from_job(&job),
+                        Some(&job),
                         infrastructure_failure_category,
                         &format!("{error:#}"),
                     )
@@ -6568,7 +6577,7 @@ fn failed_acquired_job_completion(
         conclusion: TaskResult::Failed,
         started_at: Some(now.clone()),
         completed_at: Some(now),
-        completed_log_lines: 1,
+        completed_log_lines: rejection_log_lines(category, reason).len() as i64,
         annotations: vec![RunServiceAnnotation {
             level: RunServiceAnnotationLevel::Failure,
             message: message.clone(),
@@ -6607,12 +6616,69 @@ fn failed_acquired_job_completion(
     }
 }
 
+fn rejection_log_lines(category: &str, reason: &str) -> Vec<String> {
+    let mut lines = vec![
+        "##[error]Velnor rejected this job before workflow execution.".to_string(),
+        format!("phase: {category}"),
+    ];
+    if reason.trim().is_empty() {
+        lines.push("reason: no rejection detail was supplied".to_string());
+    } else {
+        lines.extend(reason.lines().map(|line| format!("reason: {line}")));
+    }
+    lines.extend([
+        "effect: no declared workflow command was executed".to_string(),
+        "remediation: correct the rejected workflow field/action/ref or add the exact reviewed capability to Velnor, publish and deploy that Velnor release, then rerun".to_string(),
+    ]);
+    lines
+}
+
+fn failed_acquired_job_step_log(category: &str, reason: &str) -> StepLog {
+    let now = unix_now_iso8601();
+    StepLog {
+        step_id: format!("velnor-pre-execution-{category}"),
+        display_name: format!("Velnor rejected job ({category})"),
+        order: 1,
+        started_at: now.clone(),
+        completed_at: now,
+        lines: rejection_log_lines(category, reason),
+        masks: Vec::new(),
+        annotations: Vec::new(),
+        telemetry: Vec::new(),
+        exit_code: 1,
+        skipped: false,
+        failure_ignored: false,
+        error_count: 1,
+        warning_count: 0,
+        notice_count: 0,
+        summary: String::new(),
+    }
+}
+
 async fn complete_acquired_job_failure(
     run_service_job: &RunServiceJobContext,
     identity: &AcquiredJobIdentity,
+    job: Option<&AgentJobRequestMessage>,
     infrastructure_failure_category: Option<String>,
     reason: &str,
 ) -> Result<()> {
+    let masked_reason = job.map_or_else(
+        || reason.to_string(),
+        |job| {
+            MaskPatterns::new(job_secret_mask_values(job))
+                .with_extra(&[])
+                .mask(reason)
+        },
+    );
+    let category = infrastructure_failure_category
+        .as_deref()
+        .unwrap_or("pre_execution");
+    if let Some(job) = job {
+        let log = failed_acquired_job_step_log(category, &masked_reason);
+        if let Err(error) = publish_timeline_step_log(job, &log).await {
+            eprintln!("Best-effort Velnor rejection step log upload failed: {error:#}");
+        }
+    }
     run_service_job
         .client
         .complete_job(
@@ -6621,7 +6687,7 @@ async fn complete_acquired_job_failure(
                 identity,
                 run_service_job.billing_owner_id.clone(),
                 infrastructure_failure_category,
-                reason,
+                &masked_reason,
             ),
         )
         .await
@@ -8875,6 +8941,25 @@ jobs:
         assert_eq!(completion.step_results.len(), 1);
         assert_eq!(completion.step_results[0].conclusion, TaskResult::Failed);
         assert_eq!(completion.step_results[0].number, Some(1));
+        let rejection_log =
+            failed_acquired_job_step_log("executor_panic", "join Docker job execution task");
+        assert_eq!(rejection_log.exit_code, 1);
+        assert!(rejection_log
+            .lines
+            .iter()
+            .any(|line| line == "phase: executor_panic"));
+        assert!(rejection_log
+            .lines
+            .iter()
+            .any(|line| line.contains("join Docker job execution task")));
+        assert!(rejection_log
+            .lines
+            .iter()
+            .any(|line| line.starts_with("remediation:")));
+        assert_eq!(
+            completion.step_results[0].completed_log_lines,
+            rejection_log.lines.len() as i64
+        );
         assert!(
             completion.step_results[0].name.contains("executor_panic"),
             "step name should carry category: {}",
