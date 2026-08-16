@@ -1793,7 +1793,12 @@ fn audit_lane_selector(file: &str, yaml: &Value, text: &str, findings: &mut Vec<
             "use a choice defaulting to velnor with ordered options velnor, github, and optional both",
         ));
     }
-    if options.contains(&"both") {
+    // Generated callers delegate the selected lane to an immutable owner-local
+    // reusable workflow. Their local YAML intentionally contains no runner
+    // labels; `audit_generated_caller` closes the caller identity, ref, input,
+    // and Velnor-default forwarding contract, while generator/release audits
+    // prove the callable's real Velnor+GitHub expansion.
+    if options.contains(&"both") && !is_generated_caller(text) {
         let marker = format!("inputs.{name} == 'both'");
         if !text.contains(&marker)
             || !text.contains("velnor-target-mvp")
@@ -1972,6 +1977,7 @@ jobs:
         let findings = audit(GENERATED_CALLER);
         assert!(!has_rule(&findings, "generated-caller"));
         assert!(!has_rule(&findings, "lanes"));
+        assert!(!has_rule(&findings, "lane-selector"));
 
         let tampered = GENERATED_CALLER.replace(
             "tailrocks/velnor-actions/.github/workflows/ci-code.yml@",
