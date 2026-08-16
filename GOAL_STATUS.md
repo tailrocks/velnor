@@ -1,13 +1,13 @@
 # Velnor fleet unification goal status
 
-Status: **stopped at an incomplete checkpoint**
+Status: **active / incomplete**
 
-Updated: 2026-08-16
+Updated: 2026-08-17
 
-The goal is not archived as achieved. The central Velnor-first model exists and
-important repairs are merged, but the final acceptance condition—verified
-conformance and green main branches across the exact 28-repository fleet—has
-not been proved.
+The goal is not archived as achieved. Central implementation and several live
+package paths are proven, but exact conformance and green-main evidence across
+all 28 repositories is not complete. The implementation plan must remain until
+that fleet-wide proof passes.
 
 ## Scope
 
@@ -22,47 +22,60 @@ not been proved.
 
 Legacy repositories outside this list are excluded.
 
-## Completed at this checkpoint
+## Proven complete
 
-- Established the generated fleet workflow model and exact 28-repository
-  inventory.
-- Made Velnor the default trusted lane; GitHub and both are optional modes.
-- Kept hostile public-unmerged code on GitHub-hosted isolation.
-- Added Velnor admission-closure, cache, provenance, runner-routing, and
-  negative-proof coverage.
-- Added detailed failed-step rejection evidence in Velnor runner 0.1.171.
-- Repaired preview trigger/event desynchronization in affected product work.
-- Added generated stable/preview package channels and verified Jackin preview
-  formula mutation, including bare SHA-256 values and source-SHA binding.
-- Merged the related green pull requests completed before this checkpoint.
-- Published Velnor runner `v0.1.171` after a green release workflow.
-- Released canonical and owner-mirror Velnor Actions `2026.8.27` and rolled the
-  generated stable/preview caller into `jackin-project/homebrew-tap`.
-- Merged Jackin preview admission/build repairs (#883 and #888) and deployed
-  docs closure repair (#889), each after all pull-request checks were green.
-- Proved both fresh preview archive build jobs and the publish gate succeed on
-  Velnor. The remaining release mutation then failed with GitHub API `403` even
-  though the job reported `Contents: write`; this is recorded as an unresolved
-  Velnor job-token authorization defect, not hidden as success.
+- Exact generated inventory: 28 repositories, five classes, five templates.
+- Runner selector contract: `velnor` is the default, `github` is optional, and
+  `both` means one real Velnor lane plus one real GitHub-hosted lane.
+- Selected Velnor lanes are never event-dependently substituted with GitHub.
+- Admission closure, cache, provenance, routing, and rejection evidence are
+  fail-closed in central source and generated workflows.
+- Runner checkout tokens remain runtime expressions when an installed GitHub
+  App supplies them; the planner no longer replaces them with the Actions
+  service token.
+- Velnor runner `v0.1.173` is signed, released, installed through APT, and live
+  on all ten Sentry daemon units; all nine doctor units pass.
+- Exact live Velnor package-update proof passed after the runner repair.
+- Jackin preview package update passed on Velnor and advanced
+  `Formula/jackin-preview.rb` with the release source SHA and bare SHA-256
+  values.
+- Package updater source now uses the GitHub App client ID interface; six
+  package repositories have owner-correct client-ID variables configured.
+- Every pull request merged during these phases had green exact-head checks,
+  followed by a green target-branch run.
 
-## Not completed
+## In progress
 
-- Runner 0.1.171 package deployment and daemon restart proof. The release itself
-  is complete; the live detailed rejection evidence was observed in failed
-  Jackin jobs.
-- Release and mirror rollout of the new preview-channel generator.
-- End-to-end Jackin preview publish, rolling release, tap update, and docs-only
-  negative proof on main.
-- Resolution of the Velnor release-mutation authorization mismatch: the job
-  advertises `Contents: write`, but `gh release edit preview` receives
-  `Resource not accessible by integration`. Do not weaken repository defaults;
-  repair Velnor token delivery or use a narrowly scoped installed App token.
-- Exhaustive current-state audit of every workflow in all 28 repositories.
-- Proof that generated duplicate workflow files are intentional or removed.
-- Repair and post-merge green verification for every remaining fleet defect.
-- Final three-way independent certification and plan removal.
+- Release and mirror the latest central changes, including real Velnor routing
+  for public-unmerged events and GitHub App client-ID authentication.
+- Regenerate and merge consumers across the exact 28-repository fleet.
+- Finish the remaining green Java pull request and verify its merged head.
 
-## Resume condition
+## Still required
 
-Resume only from `PLAN_STATUS.md`. Re-read live repository state and CI before
-acting; do not assume this checkpoint is still current.
+- Exhaustively inventory every workflow in all 28 repositories.
+- Prove every repository defaults to Velnor and exposes only the optional
+  `github` and `both` modes defined by the contract.
+- Verify public-unmerged safe work executes on real Velnor; unsafe work must be
+  rejected before execution with a clear synthetic rejection step.
+- Resolve duplicate trusted/public workflow files: retain only distinct,
+  generator-authorized security domains; remove stale or redundant files.
+- Verify preview trigger/condition/SHA agreement and live rolling preview state
+  for every product/tap pair in scope.
+- Verify package workflows, branch rules, required checks, and green main for
+  every repository; private repositories must not require a DCO producer.
+- Merge all in-scope Renovate and implementation pull requests only after their
+  exact heads are green; leave no opened work unfinished.
+- Run final generator, remote-closure, fleet-byte, live-run, and independent
+  zero-finding audits.
+- Remove the implementation plan only after every preceding condition has
+  current authoritative evidence.
+
+## Current evidence
+
+- Central Velnor-lane correction: PR #53, merge `243882b49bbc6229ac8a47e413b8bae7d08b6cd4`.
+- Exact central main CI: run `31960795662`, successful.
+- Runner release: `v0.1.173`; exact release and package deployment previously
+  verified before this checkpoint.
+- Jackin tap preview update: PR #445, merge `526387d6`; post-merge CI and reuse
+  workflows successful.
