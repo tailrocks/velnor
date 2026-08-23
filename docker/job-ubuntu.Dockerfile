@@ -167,7 +167,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     mkdir -p /opt/mise/bin && \
     # Baked bootstrap of the mise binary at the fleet-pinned version. This is
     # the read-only /opt/mise/bin bootstrap; runtime never rewrites it.
-    curl -fsSL https://mise.run | MISE_VERSION="v2026.8.3" MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
+    curl -fsSL https://mise.run | MISE_VERSION="v2026.8.11" MISE_INSTALL_PATH=/opt/mise/bin/mise sh && \
     mise trust /opt/mise/config/config.toml && \
     # Fail-closed, non-interactive install of the entire locked toolchain.
     MISE_GITHUB_TOKEN="$(cat /run/secrets/mise_github_token)" \
@@ -192,7 +192,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry \
     mise exec -- cosign version
 
 # hadolint: backs the native hadolint/hadolint-action adapter.
-RUN hadolint_ver="v2.15.0" && \
+RUN hadolint_ver="v2.15.1" && \
     case "$(uname -m)" in \
       x86_64) hl_arch="x86_64" ;; \
       aarch64|arm64) hl_arch="arm64" ;; \
