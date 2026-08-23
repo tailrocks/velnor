@@ -44,6 +44,46 @@ pub struct GitHubApiError {
     pub rate_limit_reset_epoch: Option<u64>,
 }
 
+/// GitHub DELETE `/actions/runners/{id}` while the runner still holds a job.
+///
+/// HTTP 422 here is not a missing registration. Hammering DELETE or dropping
+/// the local JIT identity churns new runner IDs and leaves GitHub `offline+busy`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "GitHub refused to delete runner: currently running a job (HTTP 422); quarantine until the job is terminal; local identity preserved: {0}"
+)]
+pub(crate) struct RunnerBusyConflict(pub(crate) String);
+
+/// Outcome of a runner DELETE that the supervisor can act on without another HTTP round-trip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunnerDeleteOutcome {
+    /// 204 or 404: registration is gone or never existed.
+    Gone,
+    /// 422: GitHub still believes a job is running on this runner.
+    BusyConflict,
+}
+
+pub(crate) fn runner_delete_is_busy_conflict(status: u16, body: &str) -> bool {
+    if status != 422 {
+        return false;
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("currently running a job")
+        || lower.contains("unable to delete")
+        || lower.contains("runner is busy")
+        || lower.contains("runner_is_busy")
+}
+
+pub(crate) fn classify_runner_delete(status: u16, body: &str) -> Option<RunnerDeleteOutcome> {
+    match status {
+        204 | 404 => Some(RunnerDeleteOutcome::Gone),
+        _ if runner_delete_is_busy_conflict(status, body) => {
+            Some(RunnerDeleteOutcome::BusyConflict)
+        }
+        _ => None,
+    }
+}
+
 fn github_api_error(
     action: impl Into<String>,
     status: u16,
@@ -947,15 +987,18 @@ impl RegistrationClient {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (body, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
         let status: u16 = status_str.trim().parse().unwrap_or(0);
-        if status == 204 || status == 404 {
-            return Ok(());
+        match classify_runner_delete(status, body) {
+            Some(RunnerDeleteOutcome::Gone) => Ok(()),
+            Some(RunnerDeleteOutcome::BusyConflict) => {
+                Err(RunnerBusyConflict(body.trim().to_string()).into())
+            }
+            None => Err(github_api_error_with_retry(
+                "delete runner request",
+                status,
+                body,
+                parse_github_retry_headers(&headers),
+            )),
         }
-        Err(github_api_error_with_retry(
-            "delete runner request",
-            status,
-            body,
-            parse_github_retry_headers(&headers),
-        ))
     }
 }
 
@@ -3883,6 +3926,43 @@ pub fn download_artifacts_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runner_delete_204_and_404_are_gone() {
+        assert_eq!(
+            classify_runner_delete(204, ""),
+            Some(RunnerDeleteOutcome::Gone)
+        );
+        assert_eq!(
+            classify_runner_delete(404, r#"{"message":"Not Found"}"#),
+            Some(RunnerDeleteOutcome::Gone)
+        );
+        assert!(!runner_delete_is_busy_conflict(204, ""));
+        assert!(!runner_delete_is_busy_conflict(
+            404,
+            "currently running a job"
+        ));
+    }
+
+    #[test]
+    fn runner_delete_422_busy_is_quarantine_not_gone() {
+        let body =
+            r#"{"message":"Sorry, the runner is currently running a job. Unable to delete."}"#;
+        assert!(runner_delete_is_busy_conflict(422, body));
+        assert_eq!(
+            classify_runner_delete(422, body),
+            Some(RunnerDeleteOutcome::BusyConflict)
+        );
+        assert_ne!(
+            classify_runner_delete(422, body),
+            Some(RunnerDeleteOutcome::Gone)
+        );
+        assert_eq!(classify_runner_delete(500, body), None);
+        assert!(!runner_delete_is_busy_conflict(
+            422,
+            r#"{"message":"validation failed"}"#
+        ));
+    }
 
     #[test]
     fn artifact_compression_level_zero_uses_zip_stored() {

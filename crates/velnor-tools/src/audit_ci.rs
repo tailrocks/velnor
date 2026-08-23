@@ -993,6 +993,14 @@ fn audit_workflow(
                 "include the workflow identity and github.ref, or set cancel-in-progress false for intentional global writer serialization",
             ));
         }
+        if !globally_serialized && !group.contains("github.event_name") {
+            findings.push(Finding::error(
+                "concurrency-event",
+                file,
+                "$.concurrency.group",
+                "include github.event_name in the concurrency group so a push, schedule, or workflow_dispatch run cannot cancel a live pull_request run that shares github.ref",
+            ));
+        }
     }
     audit_lane_selector(file, yaml, text, findings);
     if workload
@@ -1940,7 +1948,7 @@ on:
     inputs:
       lanes: {type: choice, default: velnor, options: [velnor, github, both]}
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ format('{0}-{1}-{2}', github.workflow, github.event_name, github.ref) }}
 jobs:
   rust:
     timeout-minutes: 20
@@ -1972,7 +1980,7 @@ on:
         default: velnor
         options: [velnor, github, both]
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ format('{0}-{1}-{2}', github.workflow, github.event_name, github.ref) }}
 jobs:
   jackin-project:
     uses: jackin-project/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
@@ -2385,7 +2393,10 @@ jobs:
     #[test]
     fn requires_concurrency_and_timeout() {
         let yaml = BASE
-            .replace("concurrency:\n  group: ci-${{ github.ref }}\n", "")
+            .replace(
+                "concurrency:\n  group: ${{ format('{0}-{1}-{2}', github.workflow, github.event_name, github.ref) }}\n",
+                "",
+            )
             .replace("    timeout-minutes: 20\n", "");
         let findings = audit(&yaml);
         assert!(has_rule(&findings, "concurrency"));
@@ -2393,21 +2404,40 @@ jobs:
     }
 
     #[test]
+    fn cancellable_concurrency_requires_event_name() {
+        let collapsed = BASE.replace(
+            "format('{0}-{1}-{2}', github.workflow, github.event_name, github.ref)",
+            "format('{0}-{1}', github.workflow, github.ref)",
+        );
+        let findings = audit(&collapsed);
+        assert!(has_rule(&findings, "concurrency-event"), "{findings:?}");
+        assert!(!has_rule(&audit(BASE), "concurrency-event"));
+        assert!(!has_rule(&audit(GENERATED_CALLER), "concurrency-event"));
+        let dispatch_cancels_pr = GENERATED_CALLER.replace(
+            "format('{0}-{1}-{2}', github.workflow, github.event_name, github.ref)",
+            "format('{0}-{1}', github.workflow, github.ref)",
+        );
+        assert!(has_rule(&audit(&dispatch_cancels_pr), "concurrency-event"));
+    }
+
+    #[test]
     fn allows_non_cancellable_global_writer_serialization() {
         let yaml = BASE.replace(
-            "  group: ci-${{ github.ref }}",
+            "  group: ${{ format('{0}-{1}-{2}', github.workflow, github.event_name, github.ref) }}",
             "  group: release\n  cancel-in-progress: false",
         );
         assert!(!has_rule(&audit(&yaml), "uniform-concurrency"));
+        assert!(!has_rule(&audit(&yaml), "concurrency-event"));
     }
 
     #[test]
     fn warns_for_cancellable_global_concurrency() {
         let yaml = BASE.replace(
-            "  group: ci-${{ github.ref }}",
+            "  group: ${{ format('{0}-{1}-{2}', github.workflow, github.event_name, github.ref) }}",
             "  group: release\n  cancel-in-progress: true",
         );
         assert!(has_rule(&audit(&yaml), "uniform-concurrency"));
+        assert!(has_rule(&audit(&yaml), "concurrency-event"));
     }
 
     #[test]

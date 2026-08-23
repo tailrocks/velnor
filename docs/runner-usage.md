@@ -65,7 +65,13 @@ that temporary mismatch until the operator activates the new signed record.
   only until `VELNOR_CAPACITY_WAIT_SECS` (default 120s, floor 15s). If the
   bound elapses with no reservation, Velnor completes the job **Failed**
   with a visible `host_capacity` step and reason — never Success, never an
-  indefinite zero-step `in_progress` hang. Leaked reservation files older
+  indefinite zero-step `in_progress` hang. If run-service lock renewal sees
+  `OAuthRegistrationNotFound` or HTTP 404 during that wait, the job is
+  fail-closed as `runner_registration` (Failed, visible step) instead of
+  hanging until GitHub's lane timeout. GitHub DELETE `422` ("runner is
+  currently running a job") and registry `offline+busy` quarantine the
+  slot: keep the local JIT identity, do not replace it, and wait until the
+  job is terminal. Do not hammer DELETE. Leaked reservation files older
   than `VELNOR_RESERVATION_TTL_SECS` (default 6h) are reaped even while the
   daemon PID is still alive (multi-slot daemons share one PID). Doctor
   reports free/reserved bytes, active leases, and cache accounting.

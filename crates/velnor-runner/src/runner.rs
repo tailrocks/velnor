@@ -57,9 +57,9 @@ use crate::{
         DistributedTaskClient, GitHubApiError, GitHubJitConfigRequest, GitHubScope, ListedRunner,
         OAuthAccessToken, OAuthClient, OAuthJwtCredentials, RegistrationClient,
         RunServiceAnnotation, RunServiceAnnotationLevel, RunServiceClient, RunServiceCompleteJob,
-        RunServiceStepResult, RunServiceTelemetry, RunServiceVariableValue, RunnerJobRequestRef,
-        RunnerStatus, TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines,
-        TimelineRecordState, RUNNER_JOB_REQUEST,
+        RunServiceStepResult, RunServiceTelemetry, RunServiceVariableValue, RunnerBusyConflict,
+        RunnerJobRequestRef, RunnerStatus, TaskAgentSession, TaskResult, TimelineRecord,
+        TimelineRecordFeedLines, TimelineRecordState, RUNNER_JOB_REQUEST,
     },
     runtime_env::job_runtime_env,
     script_step::{StepAnnotation, StepAnnotationLevel},
@@ -307,12 +307,18 @@ enum RegistryVerdict {
     RecycleMissing,
     /// Registration offline for enough consecutive checks: recycle.
     RecycleOffline(u32),
+    /// GitHub still marks the runner busy (often also `offline`). DELETE 422s.
+    /// Keep the local identity and wait; do not JIT-replace.
+    QuarantineBusy,
 }
 
 fn assess_registry_lookup(lookup: Option<&ListedRunner>, strikes_before: u32) -> RegistryVerdict {
     let Some(runner) = lookup else {
         return RegistryVerdict::RecycleMissing;
     };
+    if runner.busy == Some(true) {
+        return RegistryVerdict::QuarantineBusy;
+    }
     if runner.status.as_deref() == Some("online") {
         return RegistryVerdict::Healthy;
     }
@@ -513,8 +519,7 @@ async fn remove_existing_jit_config_for_replace(dir: &Path, pat: Option<&str>) -
                 )
             })?;
             let scope = GitHubScope::parse(&stored.settings.github_url)?;
-            RegistrationClient::new()?
-                .delete_runner(&scope, pat, agent_id)
+            delete_runner_keeping_busy_identity(&scope, pat, agent_id)
                 .await
                 .with_context(|| {
                     format!(
@@ -551,8 +556,7 @@ pub async fn delete_orphaned_jit_runner_by_name(
         let id = orphan
             .id
             .ok_or_else(|| anyhow::anyhow!("orphaned runner has no id"))?;
-        client
-            .delete_runner(scope, pat, id)
+        delete_runner_keeping_busy_identity(scope, pat, id)
             .await
             .with_context(|| format!("delete orphaned JIT runner '{agent_name}' id {id}"))?;
         println!("Deleted orphaned JIT runner '{agent_name}' id {id} before retry.");
@@ -1479,6 +1483,27 @@ async fn cleanup_configured_daemon_slots(
     }
 }
 
+/// DELETE a GitHub runner id. HTTP 422 (still busy) is a local quarantine:
+/// keep the JIT identity and back off instead of JIT-replacing into a new id.
+async fn delete_runner_keeping_busy_identity(
+    scope: &GitHubScope,
+    pat: &str,
+    agent_id: i64,
+) -> Result<()> {
+    match RegistrationClient::new()?
+        .delete_runner(scope, pat, agent_id)
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(error) if error.downcast_ref::<RunnerBusyConflict>().is_some() => {
+            Err(local_failure(error).context(format!(
+                "quarantine runner id {agent_id} until GitHub job is terminal; local identity preserved"
+            )))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 async fn delete_and_remove_daemon_slot_jit_config(
     args: &DaemonArgs,
     slot_dir: &Path,
@@ -1494,8 +1519,7 @@ async fn delete_and_remove_daemon_slot_jit_config(
             )
         })?;
         let scope = GitHubScope::parse(&stored.settings.github_url)?;
-        RegistrationClient::new()?
-            .delete_runner(&scope, pat, agent_id)
+        delete_runner_keeping_busy_identity(&scope, pat, agent_id)
             .await
             .with_context(|| {
                 format!("delete daemon JIT runner id {agent_id}; local identity preserved")
@@ -2292,6 +2316,19 @@ async fn check_runner_registry(
             ));
             None
         }
+        RegistryVerdict::QuarantineBusy => {
+            health.registry_offline_strikes = 0;
+            let status = lookup
+                .as_ref()
+                .and_then(|runner| runner.status.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            let note = format!(
+                "runner '{agent_name}' {status}+busy in GitHub registry — quarantine (no DELETE, no JIT replace) until the job is terminal"
+            );
+            eprintln!("{note}");
+            forensics.registry(&note);
+            None
+        }
         RegistryVerdict::OfflineStrike(strikes) => {
             health.registry_offline_strikes = strikes;
             let status = lookup
@@ -2928,15 +2965,17 @@ async fn handle_job_request(
         // step/reason. Never Success. Never leave GitHub without a terminal
         // conclusion.
         let stored_for_refresh = broker_cancellation.stored.clone();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let registration_lost = Arc::new(AtomicBool::new(false));
         let renewal = start_run_service_lock_renewal(
             run_service_job.client.clone(),
             run_service_job.run_service_url.clone(),
             job.plan.plan_id.clone(),
             job.job_id.clone(),
             stored_for_refresh.clone(),
+            registration_lost.clone(),
         )
         .await?;
-        let canceled = Arc::new(AtomicBool::new(false));
         let cancellation = start_broker_cancellation_poll(
             broker_cancellation.broker,
             broker_cancellation.session_id,
@@ -2955,6 +2994,29 @@ async fn handle_job_request(
         let capacity_wait_started = Instant::now();
         let capacity_wait_timeout = crate::capacity::capacity_wait_timeout();
         let job_peak_reservation = loop {
+            if registration_lost.load(Ordering::SeqCst) {
+                cancellation.abort();
+                let identity = AcquiredJobIdentity::from_job(&job);
+                let reason = "runner registration disappeared during pre-execution wait (OAuthRegistrationNotFound/404); job fail-closed before workflow steps";
+                let payload = fail_closed_pre_execution_completion(
+                    pre_execution_registration_lost_completion(
+                        &identity,
+                        run_service_job.billing_owner_id.clone(),
+                        reason,
+                    ),
+                )?;
+                let completion = complete_acquired_job_failure(
+                    &run_service_job,
+                    &identity,
+                    Some(&job),
+                    payload.infrastructure_failure_category.clone(),
+                    reason,
+                )
+                .await;
+                renewal.abort();
+                completion?;
+                bail!("{reason}");
+            }
             if canceled.load(Ordering::SeqCst) {
                 cancellation.abort();
                 let completion = complete_acquired_job_outcome(
@@ -3435,12 +3497,17 @@ fn object_field_mut<'a>(value: &'a mut Value, names: &[&str]) -> Option<&'a mut 
     object.get_mut(*key)
 }
 
+fn lock_renewal_refresh_is_terminal(error: &anyhow::Error) -> bool {
+    registration_was_deleted(error) || github_api_error_status(error) == Some(404)
+}
+
 async fn start_run_service_lock_renewal(
     client: RunServiceClient,
     run_service_url: String,
     plan_id: String,
     job_id: String,
     stored: StoredRunnerConfig,
+    registration_lost: Arc<AtomicBool>,
 ) -> Result<JoinHandle<()>> {
     let mut client = client;
     match client.renew_job(&run_service_url, &plan_id, &job_id).await {
@@ -3452,7 +3519,9 @@ async fn start_run_service_lock_renewal(
         }
         Err(error) => {
             eprintln!("Initial run-service job lock renewal failed: {error:#}");
-            if is_credential_poll_error(&error) {
+            if lock_renewal_refresh_is_terminal(&error) {
+                registration_lost.store(true, Ordering::SeqCst);
+            } else if is_credential_poll_error(&error) {
                 match refresh_run_service_client(&stored).await {
                     Ok(refreshed) => {
                         client = refreshed;
@@ -3462,6 +3531,9 @@ async fn start_run_service_lock_renewal(
                         eprintln!(
                             "Run-service lock renewal credential refresh failed: {refresh_error:#}"
                         );
+                        if lock_renewal_refresh_is_terminal(&refresh_error) {
+                            registration_lost.store(true, Ordering::SeqCst);
+                        }
                     }
                 }
             }
@@ -3471,6 +3543,9 @@ async fn start_run_service_lock_renewal(
     Ok(tokio::spawn(async move {
         let mut failure_streak = 0u32;
         loop {
+            if registration_lost.load(Ordering::SeqCst) {
+                break;
+            }
             // Renew every 25 seconds on success; after any failure, retry much
             // sooner so a single transient miss does not leave the ~30s lock
             // expired until the next steady cadence.
@@ -3485,15 +3560,25 @@ async fn start_run_service_lock_renewal(
                 }
                 Err(error) => {
                     eprintln!("Run-service job lock renewal failed: {error:#}");
+                    if lock_renewal_refresh_is_terminal(&error) {
+                        registration_lost.store(true, Ordering::SeqCst);
+                        break;
+                    }
                     if is_credential_poll_error(&error) {
                         match refresh_run_service_client(&stored).await {
                             Ok(refreshed) => {
                                 client = refreshed;
                                 println!("Run-service lock renewal refreshed credentials.");
                             }
-                            Err(refresh_error) => eprintln!(
-                                "Run-service lock renewal credential refresh failed: {refresh_error:#}"
-                            ),
+                            Err(refresh_error) => {
+                                eprintln!(
+                                    "Run-service lock renewal credential refresh failed: {refresh_error:#}"
+                                );
+                                if lock_renewal_refresh_is_terminal(&refresh_error) {
+                                    registration_lost.store(true, Ordering::SeqCst);
+                                    break;
+                                }
+                            }
                         }
                     }
                     failure_streak = failure_streak.saturating_add(1);
@@ -6627,6 +6712,19 @@ fn failed_acquired_job_completion(
     )
 }
 
+fn pre_execution_registration_lost_completion(
+    identity: &AcquiredJobIdentity,
+    billing_owner_id: Option<String>,
+    reason: &str,
+) -> RunServiceCompleteJob {
+    failed_acquired_job_completion(
+        identity,
+        billing_owner_id,
+        Some("runner_registration".to_string()),
+        reason,
+    )
+}
+
 fn pre_execution_capacity_timeout_completion(
     identity: &AcquiredJobIdentity,
     billing_owner_id: Option<String>,
@@ -7230,9 +7328,7 @@ async fn remove_one(args: &RemoveArgs, dir: &Path) -> Result<()> {
             .settings
             .agent_id
             .ok_or_else(|| anyhow::anyhow!("local runner config missing agent_id"))?;
-        RegistrationClient::new()?
-            .delete_runner(&scope, pat, agent_id)
-            .await?;
+        delete_runner_keeping_busy_identity(&scope, pat, agent_id).await?;
         println!("Deleted or confirmed absent remote JIT runner id {agent_id}.");
     } else if !args.local_only {
         println!(
@@ -8003,6 +8099,106 @@ mod tests {
             assess_registry_lookup(Some(&listed_runner("offline")), 1),
             RegistryVerdict::RecycleOffline(2)
         );
+    }
+
+    #[test]
+    fn registry_offline_busy_quarantines_instead_of_recycle() {
+        let mut runner = listed_runner("offline");
+        runner.busy = Some(true);
+        assert_eq!(
+            assess_registry_lookup(Some(&runner), 0),
+            RegistryVerdict::QuarantineBusy
+        );
+        assert_eq!(
+            assess_registry_lookup(Some(&runner), 1),
+            RegistryVerdict::QuarantineBusy
+        );
+        assert_ne!(
+            assess_registry_lookup(Some(&runner), 1),
+            RegistryVerdict::RecycleOffline(2)
+        );
+        assert_ne!(
+            assess_registry_lookup(Some(&runner), 1),
+            RegistryVerdict::RecycleMissing
+        );
+    }
+
+    #[test]
+    fn lock_renewal_refresh_is_terminal_on_missing_registration() {
+        let missing = anyhow::Error::from(GitHubApiError {
+            status: 404,
+            action: "renew job".into(),
+            body: r#"{"errorKind":"OAuthRegistrationNotFound"}"#.into(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: None,
+        });
+        let gone = anyhow::Error::new(crate::protocol::OAuthRegistrationNotFound(
+            "Registration deadbeef was not found.".to_string(),
+        ));
+        let expired = anyhow::Error::from(GitHubApiError {
+            status: 401,
+            action: "renew job".into(),
+            body: "token expired".into(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: None,
+        });
+        let server = anyhow::Error::from(GitHubApiError {
+            status: 500,
+            action: "renew job".into(),
+            body: "oops".into(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: None,
+        });
+        assert!(lock_renewal_refresh_is_terminal(&missing));
+        assert!(lock_renewal_refresh_is_terminal(&gone));
+        assert!(!lock_renewal_refresh_is_terminal(&expired));
+        assert!(!lock_renewal_refresh_is_terminal(&server));
+    }
+
+    #[test]
+    fn registration_lost_pre_execution_completes_failed_with_visible_step() {
+        let completion = fail_closed_pre_execution_completion(
+            pre_execution_registration_lost_completion(
+                &AcquiredJobIdentity {
+                    plan_id: "plan-reg".into(),
+                    job_id: "job-reg".into(),
+                },
+                Some("billing-owner".into()),
+                "runner registration disappeared during pre-execution wait (OAuthRegistrationNotFound/404); job fail-closed before workflow steps",
+            ),
+        )
+        .expect("registration-lost completion must be fail-closed");
+        assert_eq!(completion.conclusion, TaskResult::Failed);
+        assert_ne!(completion.conclusion, TaskResult::Succeeded);
+        assert_eq!(completion.step_results.len(), 1);
+        assert_eq!(
+            completion.infrastructure_failure_category.as_deref(),
+            Some("runner_registration")
+        );
+        assert!(
+            completion
+                .annotations
+                .iter()
+                .any(|annotation| annotation.message.contains("OAuthRegistrationNotFound/404")),
+            "{:?}",
+            completion.annotations
+        );
+        assert!(!completion.step_results[0].name.trim().is_empty());
+    }
+
+    #[test]
+    fn busy_delete_conflict_is_local_failure_not_recycle() {
+        let conflict = anyhow::Error::new(crate::protocol::RunnerBusyConflict(
+            "Sorry, the runner is currently running a job. Unable to delete.".into(),
+        ));
+        let wrapped = local_failure(conflict).context(
+            "quarantine runner id 6676 until GitHub job is terminal; local identity preserved",
+        );
+        assert!(wrapped.downcast_ref::<LocalRunnerFailure>().is_some());
+        assert!(wrapped
+            .chain()
+            .any(|cause| cause.is::<crate::protocol::RunnerBusyConflict>()));
+        assert!(!registration_was_deleted(&wrapped));
     }
 
     #[test]
