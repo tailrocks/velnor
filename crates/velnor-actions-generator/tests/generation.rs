@@ -29,12 +29,15 @@ fn consumer_weekly_schedule_defaults_to_velnor() {
     for class in ALL_CLASSES {
         let rendered = render::consumer_template(class);
         assert!(rendered.contains("  schedule:\n    - cron: \"23 3 * * 0\"\n"));
-        assert!(
-            rendered
-                .contains("github.event_name == 'workflow_dispatch' && inputs.lane || 'velnor'")
-        );
+        assert!(rendered.contains(
+            "github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor'"
+        ));
         assert!(!rendered.contains("github.event_name == 'schedule' && 'both'"));
-        assert!(rendered.contains("runs-on: ${{ 'ubuntu-26.04' }}"));
+        // ci-required defaults to the Velnor lane; post-merge push routes to
+        // the GitHub lane (fleet rejects it on velnor-trusted).
+        assert!(rendered.contains(
+            "runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'push') && 'ubuntu-26.04' || fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]') }}"
+        ));
         assert!(!rendered.contains("ubuntu-latest"));
     }
 }
@@ -306,7 +309,7 @@ fn package_policy_and_workflows_are_closed_and_lane_selectable() {
         assert!(template.contains(
             "concurrency:\n  group: ${{ github.workflow }}-${{ github.repository }}\n  cancel-in-progress: false"
         ));
-        assert!(template.contains("options: [velnor, github, both]\n        default: velnor"));
+        assert!(template.contains("default: velnor\n        options: [velnor, github, both]"));
         assert!(template.contains(
             "{\"lane\":\"velnor\",\"writer\":true},{\"lane\":\"github\",\"writer\":false}"
         ));
@@ -622,43 +625,43 @@ fn release_goldens_bind_consumer_interface_and_callable_metrics_schema() {
     for (path, expected) in [
         (
             "templates/code/ci.yml",
-            "b8f2548e8219e8a4ba34eb628eea07b3cc5e9150b8244dd408b1fe11dc908c3d",
+            "616ae97804738e33b61426f95e7f2d07f16bb6680bedc3e0e1436cc9672cebda",
         ),
         (
             "templates/native/ci.yml",
-            "21098f543ec6f227072d2827b77e9fa2015fc206a3d3594fc649b60e6f89ed4f",
+            "5a1f6386ea19662242df3546e13cddc0899541a583379d947e8aa34c87e8d539",
         ),
         (
             "templates/tap/ci.yml",
-            "9c4c4a82f091a8e659406f2908e2f04692c4012d08c4898d0ff5ac326183cc4a",
+            "0e0547a209ecb0efefd3ef431ad94d4f0a60898c12cc70bff15a97ae08db596d",
         ),
         (
             "templates/apt/ci.yml",
-            "cc34fd81cdafd5944943ec5df4f5124784e74fc120dc58f1bb9b63578a80a16d",
+            "f35bf7570f4d781f7399f8f1e4e5a6eeb572b16df641879ea9624cdd59f736fd",
         ),
         (
             "templates/fixture/ci.yml",
-            "e49e23525d6a5a420b5a35599bbfec6f75ce740da58f7b43d3d2b79f90cd208e",
+            "645779da14d9cd3b5cc7710983b2cb3c0ec8694768cd5d7c7d3636c1900903da",
         ),
         (
             ".github/workflows/ci-code.yml",
-            "1bb159d821275e4ef0629267da5cd2df2f8cb4f5f475311f8e3f0e7eb75f6437",
+            "1c04c989571190696ebf17e58638f3fe2ddf9c2faefda738054d18b731fb534a",
         ),
         (
             ".github/workflows/ci-native.yml",
-            "a9913d5782f3888063201cd841af1cf8205e3dd514378565a4b6ece1def1fe77",
+            "ebf614ea26a9d61bbef6b7d72c79b9e0708d6e9bec4644b048e29c5c759dc8d8",
         ),
         (
             ".github/workflows/ci-tap.yml",
-            "213fe967c0362cafed6fbfebda8d9b8fd1e59025d02a590353d6c287c1e4770c",
+            "b49eb015b1bfcf385f44595f7250b84d1833c364e58e943ced60a887074b2e32",
         ),
         (
             ".github/workflows/ci-apt.yml",
-            "111318ed1e787697eabe3c09f149468170a868f9e357581cb113c0964656b3bf",
+            "b48ba9c4adbde1c7a429d367712b63c345bc7ec46b19fec1eb5a0a9a6358a3ed",
         ),
         (
             ".github/workflows/ci-fixture.yml",
-            "378d1d0c579e5f57ff2823125d618268ca5919a59b51491dd31f0a67a2b3c545",
+            "24bb2041b8c58e2798f955c1200c5d5acc9753eb75085d6c5e0f6ce0b5ab5393",
         ),
     ] {
         let bytes = std::fs::read(root.join(path)).unwrap();

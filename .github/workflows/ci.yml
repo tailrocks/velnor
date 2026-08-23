@@ -3,6 +3,13 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: velnor (default) | github | both
+        type: choice
+        default: velnor
+        options: [velnor, github, both]
 
 permissions:
   contents: read
@@ -14,7 +21,29 @@ concurrency:
 jobs:
   ci:
     name: ci
-    runs-on: ubuntu-latest
+    # Fleet policy (tailrocks/velnor docs/runner-usage.md): post-merge push
+    # events are rejected on velnor-trusted (merged_push_occupancy), so push
+    # routes to the GitHub lane. Velnor stays the default for pull_request
+    # and default workflow_dispatch; lanes=github is the manual escape hatch.
+    runs-on: ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up mise toolchain
+        uses: jdx/mise-action@dad1bfd3df957f44999b559dd69dc1671cb4e9ea # v4.2.1
+      - name: Run repository CI gates
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: mise run ci
+
+  # Same steps, toolchain, and gates as the default lane; only runs-on differs.
+  # Runs only when the workflow is dispatched with lanes=both, proving
+  # GitHub-hosted fallback parity side by side with the Velnor lane.
+  ci-github:
+    name: ci (github)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes == 'both' }}
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - name: Check out repository

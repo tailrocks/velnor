@@ -7,10 +7,10 @@ on:
   workflow_dispatch:
     inputs:
       lanes:
-        description: "Which runner lane(s) to verify on. Velnor is the sole writer in both mode."
+        description: velnor (default) | github | both
         type: choice
-        options: [velnor, github, both]
         default: velnor
+        options: [velnor, github, both]
 
 permissions:
   attestations: read

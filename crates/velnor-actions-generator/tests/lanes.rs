@@ -38,12 +38,12 @@ fn resolve_lanes_expands_both_independently() {
 #[test]
 fn omitted_lane_defaults_to_velnor_for_every_owner() {
     let t = render::consumer_template(RepositoryClass::Code);
-    assert!(t.contains("github.event_name == 'workflow_dispatch' && inputs.lane || 'velnor'"));
+    assert!(t.contains("github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor'"));
     assert!(t.contains("type: choice"));
     assert!(t.contains("default: velnor"));
     assert_eq!(
         t.matches(
-            "lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'velnor' }}"
+            "lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor' }}"
         )
         .count(),
         3,
@@ -176,9 +176,14 @@ fn optional_operation_interface_is_complete_and_non_selector() {
         assert!(template.contains(&format!("{input}:")), "missing {input}");
     }
     assert_eq!(
+        template.matches("\n      lanes:").count(),
+        1,
+        "one root lanes input"
+    );
+    assert_eq!(
         template.matches("\n      lane:").count(),
-        4,
-        "one root input plus three forwarded lane values"
+        3,
+        "three forwarded lane values"
     );
     assert!(template.contains("cancel-in-progress: ${{ inputs.benchmark_campaign == '' }}"));
 }

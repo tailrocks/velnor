@@ -148,18 +148,12 @@ pub fn consumer_template(class: RepositoryClass) -> String {
     b.line(4, "- cron: \"23 3 * * 0\"");
     b.line(2, "workflow_dispatch:");
     b.line(4, "inputs:");
-    b.line(6, "lane:");
-    b.line(
-        8,
-        "description: \"CI runner: Velnor (default), GitHub, or both.\"",
-    );
-    b.line(8, "required: false");
+    // Canonical lane selector, byte-identical across all fleet workflows.
+    b.line(6, "lanes:");
+    b.line(8, "description: velnor (default) | github | both");
     b.line(8, "type: choice");
     b.line(8, "default: velnor");
-    b.line(8, "options:");
-    b.line(10, "- velnor");
-    b.line(10, "- github");
-    b.line(10, "- both");
+    b.line(8, "options: [velnor, github, both]");
     consumer_auxiliary_inputs(&mut b);
     b.blank();
     b.line(0, "permissions:");
@@ -194,9 +188,13 @@ pub fn consumer_template(class: RepositoryClass) -> String {
             ),
         );
         b.line(4, "with:");
+        // Fleet policy: post-merge push events are rejected on velnor-trusted
+        // (merged_push_occupancy), so generated callers route push to the
+        // GitHub lane. Velnor stays the default for every other event and for
+        // default workflow_dispatch; the lane input remains the escape hatch.
         b.line(
             6,
-            "lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'velnor' }}",
+            "lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor' }}",
         );
         for input in AUXILIARY_INPUTS {
             b.line(6, &format!("{input}: ${{{{ inputs.{input} || '' }}}}"));
@@ -212,11 +210,13 @@ pub fn consumer_template(class: RepositoryClass) -> String {
         b.line(6, &format!("- {owner}"));
     }
     b.line(4, "if: ${{ always() }}");
-    // actionlint v1.7.12 does not yet recognize the Ubuntu 26.04 hosted label
-    // when it is a literal. Keep the exact runtime binding while allowing
-    // every consumer repository to lint the generated caller without local
-    // actionlint configuration.
-    b.line(4, "runs-on: ${{ 'ubuntu-26.04' }}");
+    // Default to the Velnor lane. Post-merge push events are rejected on
+    // velnor-trusted (merged_push_occupancy), so push — and an explicit
+    // lanes=github dispatch — routes to the GitHub lane, matching the lane
+    // pass-through above. actionlint v1.7.12 does not yet recognize the
+    // Ubuntu 26.04 hosted label when it is a literal, so both bindings stay
+    // behind expressions.
+    b.line(4, "runs-on: ${{ ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'push') && 'ubuntu-26.04' || fromJSON('[\"self-hosted\",\"velnor-target-mvp\"]') }}");
     b.line(4, "timeout-minutes: 10");
     b.line(4, "permissions:");
     b.line(6, "contents: read");
@@ -338,7 +338,13 @@ pub fn callable_workflow(
     b.line(0, "jobs:");
     b.line(2, "validate-request:");
     b.line(4, "name: validate request");
-    b.line(4, "runs-on: ubuntu-26.04");
+    // Support jobs follow the selected lane: the Velnor lane must not keep
+    // GitHub-hosted evidence, and push (routed to the GitHub lane by the
+    // generated caller) must never land on velnor-trusted.
+    b.line(
+        4,
+        "runs-on: ${{ inputs.lane == 'github' && 'ubuntu-26.04' || 'velnor-trusted' }}",
+    );
     b.line(4, "timeout-minutes: 5");
     b.line(4, "permissions:");
     b.line(6, "actions: read");
@@ -497,7 +503,11 @@ pub fn callable_workflow(
     }
     b.line(6, "- cache-proof-contract");
     b.line(4, "if: ${{ always() }}");
-    b.line(4, "runs-on: ubuntu-26.04");
+    // Same lane-following rule as validate-request.
+    b.line(
+        4,
+        "runs-on: ${{ inputs.lane == 'github' && 'ubuntu-26.04' || 'velnor-trusted' }}",
+    );
     b.line(4, "timeout-minutes: 10");
     b.line(4, "outputs:");
     b.line(6, "contract: ${{ steps.verdict.outputs.contract }}");
