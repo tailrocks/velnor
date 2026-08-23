@@ -142,6 +142,106 @@ impl JobClaim {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InFlightJobRecord {
+    plan_id: String,
+    job_id: String,
+    run_service_url: String,
+    billing_owner_id: Option<String>,
+}
+
+fn in_flight_job_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("in-flight-job.json")
+}
+
+fn persist_in_flight_job(
+    config_dir: &Path,
+    run_service_job: &RunServiceJobContext,
+    job: &AgentJobRequestMessage,
+) -> Result<()> {
+    let record = InFlightJobRecord {
+        plan_id: job.plan.plan_id.clone(),
+        job_id: job.job_id.clone(),
+        run_service_url: run_service_job.run_service_url.clone(),
+        billing_owner_id: run_service_job.billing_owner_id.clone(),
+    };
+    fs::write(
+        in_flight_job_path(config_dir),
+        serde_json::to_vec_pretty(&record).context("serialize in-flight job")?,
+    )
+    .context("write in-flight job lease")
+}
+
+fn load_in_flight_job(config_dir: &Path) -> Result<Option<InFlightJobRecord>> {
+    let path = in_flight_job_path(config_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let record = serde_json::from_slice(&bytes).context("parse in-flight job")?;
+    Ok(Some(record))
+}
+
+fn clear_in_flight_job(config_dir: &Path) -> Result<()> {
+    let path = in_flight_job_path(config_dir);
+    if path.exists() {
+        fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn job_queued_for(job: &AgentJobRequestMessage, now: std::time::SystemTime) -> Duration {
+    let raw = job.queue_time.as_deref().or_else(|| {
+        job.variables
+            .get("system.queueTime")
+            .and_then(|value| value.value.as_deref())
+    });
+    let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
+        return Duration::ZERO;
+    };
+    let Ok(start) =
+        time::OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339)
+    else {
+        return Duration::ZERO;
+    };
+    let timestamp = start.unix_timestamp();
+    if timestamp <= 0 {
+        return Duration::ZERO;
+    }
+    let start = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(timestamp as u64);
+    now.duration_since(start).unwrap_or(Duration::ZERO)
+}
+
+async fn complete_recorded_in_flight_job(
+    slot_dir: &Path,
+    stored: &StoredRunnerConfig,
+) -> Result<bool> {
+    let Some(record) = load_in_flight_job(slot_dir)? else {
+        return Ok(false);
+    };
+    let token = oauth_access_token(stored).await?;
+    let client = RunServiceClient::new(token.token)?;
+    let ctx = RunServiceJobContext {
+        client,
+        run_service_url: record.run_service_url,
+        billing_owner_id: record.billing_owner_id,
+    };
+    let identity = AcquiredJobIdentity {
+        plan_id: record.plan_id,
+        job_id: record.job_id,
+    };
+    complete_acquired_job_failure(
+        &ctx,
+        &identity,
+        None,
+        Some("stale_busy".to_string()),
+        "GitHub DELETE 422 / offline+busy: fail-closed leftover job so the runner lease can be released",
+    )
+    .await?;
+    clear_in_flight_job(slot_dir)?;
+    Ok(true)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct JobTimingRecord {
     v: u8,
@@ -519,7 +619,7 @@ async fn remove_existing_jit_config_for_replace(dir: &Path, pat: Option<&str>) -
                 )
             })?;
             let scope = GitHubScope::parse(&stored.settings.github_url)?;
-            delete_runner_keeping_busy_identity(&scope, pat, agent_id)
+            delete_runner_keeping_busy_identity(&scope, pat, agent_id, Some(dir))
                 .await
                 .with_context(|| {
                     format!(
@@ -556,7 +656,7 @@ pub async fn delete_orphaned_jit_runner_by_name(
         let id = orphan
             .id
             .ok_or_else(|| anyhow::anyhow!("orphaned runner has no id"))?;
-        delete_runner_keeping_busy_identity(scope, pat, id)
+        delete_runner_keeping_busy_identity(scope, pat, id, None)
             .await
             .with_context(|| format!("delete orphaned JIT runner '{agent_name}' id {id}"))?;
         println!("Deleted orphaned JIT runner '{agent_name}' id {id} before retry.");
@@ -1483,19 +1583,47 @@ async fn cleanup_configured_daemon_slots(
     }
 }
 
-/// DELETE a GitHub runner id. HTTP 422 (still busy) is a local quarantine:
-/// keep the JIT identity and back off instead of JIT-replacing into a new id.
+/// DELETE a GitHub runner id. HTTP 422 (still busy): complete any recorded
+/// in-flight job so the lease can drop, then retry DELETE. If GitHub still
+/// holds the runner busy, quarantine (keep local identity) instead of JIT-churn.
 async fn delete_runner_keeping_busy_identity(
     scope: &GitHubScope,
     pat: &str,
     agent_id: i64,
+    slot_dir: Option<&Path>,
 ) -> Result<()> {
     match RegistrationClient::new()?
         .delete_runner(scope, pat, agent_id)
         .await
     {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            if let Some(dir) = slot_dir {
+                let _ = clear_in_flight_job(dir);
+            }
+            Ok(())
+        }
         Err(error) if error.downcast_ref::<RunnerBusyConflict>().is_some() => {
+            if let Some(dir) = slot_dir {
+                if let Ok(stored) = config::load(dir) {
+                    if complete_recorded_in_flight_job(dir, &stored)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        match RegistrationClient::new()?
+                            .delete_runner(scope, pat, agent_id)
+                            .await
+                        {
+                            Ok(()) => return Ok(()),
+                            Err(retry) if retry.downcast_ref::<RunnerBusyConflict>().is_some() => {
+                                return Err(local_failure(retry).context(format!(
+                                    "quarantine runner id {agent_id} after fail-closed leftover job; local identity preserved"
+                                )));
+                            }
+                            Err(retry) => return Err(retry),
+                        }
+                    }
+                }
+            }
             Err(local_failure(error).context(format!(
                 "quarantine runner id {agent_id} until GitHub job is terminal; local identity preserved"
             )))
@@ -1519,7 +1647,7 @@ async fn delete_and_remove_daemon_slot_jit_config(
             )
         })?;
         let scope = GitHubScope::parse(&stored.settings.github_url)?;
-        delete_runner_keeping_busy_identity(&scope, pat, agent_id)
+        delete_runner_keeping_busy_identity(&scope, pat, agent_id, Some(slot_dir))
             .await
             .with_context(|| {
                 format!("delete daemon JIT runner id {agent_id}; local identity preserved")
@@ -2318,16 +2446,19 @@ async fn check_runner_registry(
         }
         RegistryVerdict::QuarantineBusy => {
             health.registry_offline_strikes = 0;
-            let status = lookup
-                .as_ref()
-                .and_then(|runner| runner.status.clone())
-                .unwrap_or_else(|| "unknown".to_string());
+            let status = lookup.as_ref().and_then(|runner| runner.status.as_deref());
+            let busy = lookup.as_ref().and_then(|runner| runner.busy);
             let note = format!(
-                "runner '{agent_name}' {status}+busy in GitHub registry — quarantine (no DELETE, no JIT replace) until the job is terminal"
+                "runner '{agent_name}' {}+busy in GitHub registry",
+                status.unwrap_or("unknown")
             );
             eprintln!("{note}");
             forensics.registry(&note);
-            None
+            if crate::capacity::stale_busy_lease_should_complete_job(status, busy) {
+                Some("offline+busy stale registration (6676-class); complete leftover job then recycle".to_string())
+            } else {
+                None
+            }
         }
         RegistryVerdict::OfflineStrike(strikes) => {
             health.registry_offline_strikes = strikes;
@@ -2796,6 +2927,42 @@ async fn handle_job_request(
     let early_context = job_context_data(&job);
     let mut job = job;
     hydrate_github_variables_from_context(&mut job, &early_context);
+    persist_in_flight_job(config_dir, &run_service_job, &job)?;
+    let event_name = crate::github_adapter::job_variable(&job, "github.event_name").unwrap_or("");
+    if !crate::capacity::trusted_fleet_accepts_github_event(event_name) {
+        let identity = AcquiredJobIdentity::from_job(&job);
+        let reason = "post-merge push must not occupy velnor-trusted while open pull_request jobs wait; generated callers route push to the GitHub lane";
+        let completion = complete_acquired_job_failure(
+            &run_service_job,
+            &identity,
+            Some(&job),
+            Some("merged_push_occupancy".to_string()),
+            reason,
+        )
+        .await;
+        let _ = clear_in_flight_job(config_dir);
+        completion?;
+        bail!("{reason}");
+    }
+    let queued_for = job_queued_for(&job, std::time::SystemTime::now());
+    let queue_timeout = crate::capacity::queue_wait_timeout();
+    if crate::capacity::queued_unassigned_decision(queued_for, queue_timeout)
+        == crate::capacity::QueuedUnassignedDecision::FailClosed
+    {
+        let identity = AcquiredJobIdentity::from_job(&job);
+        let reason = crate::capacity::queue_timeout_reason(queued_for, queue_timeout);
+        let completion = complete_acquired_job_failure(
+            &run_service_job,
+            &identity,
+            Some(&job),
+            Some("queue_timeout".to_string()),
+            &reason,
+        )
+        .await;
+        let _ = clear_in_flight_job(config_dir);
+        completion?;
+        bail!("{reason}");
+    }
     apply_workflow_script_step_names(&mut job, &early_context).await;
     let acquire_storage_leases = || {
         crate::github_adapter::job_variable(&job, "github.repository")
@@ -2994,96 +3161,104 @@ async fn handle_job_request(
         let capacity_wait_started = Instant::now();
         let capacity_wait_timeout = crate::capacity::capacity_wait_timeout();
         let job_peak_reservation = loop {
-            if registration_lost.load(Ordering::SeqCst) {
-                cancellation.abort();
-                let identity = AcquiredJobIdentity::from_job(&job);
-                let reason = "runner registration disappeared during pre-execution wait (OAuthRegistrationNotFound/404); job fail-closed before workflow steps";
-                let payload = fail_closed_pre_execution_completion(
-                    pre_execution_registration_lost_completion(
-                        &identity,
-                        run_service_job.billing_owner_id.clone(),
-                        reason,
-                    ),
-                )?;
-                let completion = complete_acquired_job_failure(
-                    &run_service_job,
-                    &identity,
-                    Some(&job),
-                    payload.infrastructure_failure_category.clone(),
-                    reason,
-                )
-                .await;
-                renewal.abort();
-                completion?;
-                bail!("{reason}");
-            }
-            if canceled.load(Ordering::SeqCst) {
-                cancellation.abort();
-                let completion = complete_acquired_job_outcome(
-                    &run_service_job,
-                    &AcquiredJobIdentity::from_job(&job),
-                    Some(&job),
-                    crate::protocol::TaskResult::Canceled,
-                    Some("canceled".to_string()),
-                    "job canceled while waiting for host disk capacity",
-                )
-                .await;
-                renewal.abort();
-                completion?;
-                bail!("job canceled while waiting for host disk capacity");
-            }
-            match reserve_job_peak_capacity(config_dir, args) {
-                Ok(reservation) => {
+            let reserve_result = reserve_job_peak_capacity(config_dir, args);
+            let last_error = reserve_result
+                .as_ref()
+                .err()
+                .map(|error| format!("{error:#}"));
+            match crate::capacity::pre_execution_wait_decision(
+                registration_lost.load(Ordering::SeqCst),
+                canceled.load(Ordering::SeqCst),
+                reserve_result.is_ok(),
+                crate::capacity::pre_execution_capacity_wait_decision(
+                    capacity_wait_started.elapsed(),
+                    capacity_wait_timeout,
+                ),
+            ) {
+                crate::capacity::PreExecutionWaitDecision::Reserved => {
+                    let reservation = reserve_result.expect("reserve_ok");
                     println!(
                         "Reserved host disk peak {} bytes for active job {}.",
                         reservation.bytes, job.job_id
                     );
                     break reservation;
                 }
-                Err(error) => {
-                    match crate::capacity::pre_execution_capacity_wait_decision(
+                crate::capacity::PreExecutionWaitDecision::RetryReserve { sleep } => {
+                    eprintln!(
+                        "Job {} waiting for host capacity: {}. Retrying in {}s.",
+                        job.job_id,
+                        last_error.as_deref().unwrap_or("capacity backpressure"),
+                        sleep.as_secs()
+                    );
+                    tokio::time::sleep(sleep).await;
+                }
+                crate::capacity::PreExecutionWaitDecision::AbortRegistrationLost => {
+                    cancellation.abort();
+                    let identity = AcquiredJobIdentity::from_job(&job);
+                    let reason = "runner registration disappeared during pre-execution wait (OAuthRegistrationNotFound/404); job fail-closed before workflow steps";
+                    let payload = fail_closed_pre_execution_completion(
+                        pre_execution_registration_lost_completion(
+                            &identity,
+                            run_service_job.billing_owner_id.clone(),
+                            reason,
+                        ),
+                    )?;
+                    let completion = complete_acquired_job_failure(
+                        &run_service_job,
+                        &identity,
+                        Some(&job),
+                        payload.infrastructure_failure_category.clone(),
+                        reason,
+                    )
+                    .await;
+                    renewal.abort();
+                    completion?;
+                    bail!("{reason}");
+                }
+                crate::capacity::PreExecutionWaitDecision::AbortCanceled => {
+                    cancellation.abort();
+                    let completion = complete_acquired_job_outcome(
+                        &run_service_job,
+                        &AcquiredJobIdentity::from_job(&job),
+                        Some(&job),
+                        crate::protocol::TaskResult::Canceled,
+                        Some("canceled".to_string()),
+                        "job canceled while waiting for host disk capacity",
+                    )
+                    .await;
+                    renewal.abort();
+                    completion?;
+                    bail!("job canceled while waiting for host disk capacity");
+                }
+                crate::capacity::PreExecutionWaitDecision::AbortCapacityTimeout => {
+                    cancellation.abort();
+                    let identity = AcquiredJobIdentity::from_job(&job);
+                    let last_error = last_error.unwrap_or_else(|| "capacity backpressure".into());
+                    let payload = fail_closed_pre_execution_completion(
+                        pre_execution_capacity_timeout_completion(
+                            &identity,
+                            run_service_job.billing_owner_id.clone(),
+                            capacity_wait_started.elapsed(),
+                            capacity_wait_timeout,
+                            &last_error,
+                        ),
+                    )?;
+                    let reason = crate::capacity::host_capacity_timeout_reason(
                         capacity_wait_started.elapsed(),
                         capacity_wait_timeout,
-                    ) {
-                        crate::capacity::CapacityWaitDecision::Retry { sleep } => {
-                            eprintln!(
-                                "Job {} waiting for host capacity: {error:#}. Retrying in {}s.",
-                                job.job_id,
-                                sleep.as_secs()
-                            );
-                            tokio::time::sleep(sleep).await;
-                        }
-                        crate::capacity::CapacityWaitDecision::Timeout => {
-                            cancellation.abort();
-                            let identity = AcquiredJobIdentity::from_job(&job);
-                            let last_error = format!("{error:#}");
-                            let payload = fail_closed_pre_execution_completion(
-                                pre_execution_capacity_timeout_completion(
-                                    &identity,
-                                    run_service_job.billing_owner_id.clone(),
-                                    capacity_wait_started.elapsed(),
-                                    capacity_wait_timeout,
-                                    &last_error,
-                                ),
-                            )?;
-                            let reason = crate::capacity::host_capacity_timeout_reason(
-                                capacity_wait_started.elapsed(),
-                                capacity_wait_timeout,
-                                &last_error,
-                            );
-                            let completion = complete_acquired_job_failure(
-                                &run_service_job,
-                                &identity,
-                                Some(&job),
-                                payload.infrastructure_failure_category.clone(),
-                                &reason,
-                            )
-                            .await;
-                            renewal.abort();
-                            completion?;
-                            return Err(error).context(reason);
-                        }
-                    }
+                        &last_error,
+                    );
+                    let completion = complete_acquired_job_failure(
+                        &run_service_job,
+                        &identity,
+                        Some(&job),
+                        payload.infrastructure_failure_category.clone(),
+                        &reason,
+                    )
+                    .await;
+                    renewal.abort();
+                    completion?;
+                    bail!("{reason}");
                 }
             }
         };
@@ -3267,7 +3442,7 @@ async fn handle_job_request(
         };
         if let Some(teardown) = teardown {
             spawn_post_completion_teardown(
-                teardown_config_dir,
+                teardown_config_dir.clone(),
                 teardown,
                 forensics.clone(),
                 timing_record,
@@ -3280,6 +3455,7 @@ async fn handle_job_request(
             "Job completed with result {:?} and message acknowledged.",
             job_result.result
         );
+        let _ = clear_in_flight_job(&teardown_config_dir);
     } else if args.complete_noop {
         complete_run_service_job_refreshing(
             &run_service_job.client,
@@ -7328,7 +7504,7 @@ async fn remove_one(args: &RemoveArgs, dir: &Path) -> Result<()> {
             .settings
             .agent_id
             .ok_or_else(|| anyhow::anyhow!("local runner config missing agent_id"))?;
-        delete_runner_keeping_busy_identity(&scope, pat, agent_id).await?;
+        delete_runner_keeping_busy_identity(&scope, pat, agent_id, Some(dir)).await?;
         println!("Deleted or confirmed absent remote JIT runner id {agent_id}.");
     } else if !args.local_only {
         println!(
@@ -7496,7 +7672,7 @@ fn timing_slo_state(p95: u64, budget: u64) -> &'static str {
 }
 
 fn doctor_runner_is_healthy(runner: &ListedRunner) -> bool {
-    runner.status.as_deref() == Some("online") || runner.busy == Some(true)
+    runner.status.as_deref() == Some("online")
 }
 
 /// Fleet health probe: list this daemon's registered runners on GitHub and
@@ -7554,16 +7730,24 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         .iter()
         .filter(|runner| runner.busy == Some(true))
         .count();
-    // GitHub reports ephemeral JIT runners as `offline, busy` while they are
-    // executing a job. A busy registration is therefore positive liveness
-    // evidence, not an offline fleet member.
+    let stale_busy = mine
+        .iter()
+        .filter(|runner| {
+            crate::capacity::stale_busy_lease_should_complete_job(
+                runner.status.as_deref(),
+                runner.busy,
+            )
+        })
+        .count();
+    // Live jobs are `online+busy`. `offline+busy` is the 6676-class split
+    // (GitHub still holds a job after the slot died) and is not healthy.
     let healthy = mine
         .iter()
         .filter(|runner| doctor_runner_is_healthy(runner))
         .count();
 
     println!(
-        "doctor: {} — {healthy}/{} expected runner(s) healthy ({online} online, {} registered, {busy} busy) for prefix '{}'",
+        "doctor: {} — {healthy}/{} expected runner(s) healthy ({online} online, {} registered, {busy} busy, {stale_busy} offline+busy) for prefix '{}'",
         args.url, args.slots, mine.len(), args.name
     );
     println!(
@@ -7582,16 +7766,50 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
     let timing_records = recent_job_timings(&config_base, args.slots, sample_size);
     print_doctor_slos(&timing_records);
     for runner in &mine {
+        let stale = crate::capacity::stale_busy_lease_should_complete_job(
+            runner.status.as_deref(),
+            runner.busy,
+        );
         println!(
-            "  {} [{}{}]",
+            "  {} [{}{}{}]",
             runner.name.as_deref().unwrap_or("?"),
             runner.status.as_deref().unwrap_or("unknown"),
             if runner.busy == Some(true) {
                 ", busy"
             } else {
                 ""
-            }
+            },
+            if stale { ", UNHEALTHY-stale-busy" } else { "" }
         );
+    }
+
+    for slot_dir in daemon_slot_config_dirs(&config_base, args.slots)? {
+        let Ok(stored) = config::load(&slot_dir) else {
+            continue;
+        };
+        let Some(agent_id) = stored.settings.agent_id else {
+            continue;
+        };
+        let runner = mine.iter().find(|runner| runner.id == Some(agent_id));
+        let should_complete = match runner {
+            Some(runner) => crate::capacity::stale_busy_lease_should_complete_job(
+                runner.status.as_deref(),
+                runner.busy,
+            ),
+            None => load_in_flight_job(&slot_dir).ok().flatten().is_some(),
+        };
+        if !should_complete {
+            continue;
+        }
+        match complete_recorded_in_flight_job(&slot_dir, &stored).await {
+            Ok(true) => eprintln!(
+                "doctor: fail-closed leftover job for runner id {agent_id} so the lease can drop"
+            ),
+            Ok(false) => {}
+            Err(error) => eprintln!(
+                "doctor: leftover job complete failed for runner id {agent_id}: {error:#}"
+            ),
+        }
     }
 
     if healthy == 0 {
@@ -8062,15 +8280,98 @@ mod tests {
     }
 
     #[test]
-    fn doctor_treats_busy_jit_runner_as_healthy_when_github_reports_offline() {
+    fn doctor_treats_offline_busy_as_unhealthy_6676_class() {
         let mut runner = listed_runner("offline");
         runner.busy = Some(true);
+        assert!(!doctor_runner_is_healthy(&runner));
+        assert!(crate::capacity::stale_busy_lease_should_complete_job(
+            runner.status.as_deref(),
+            runner.busy
+        ));
+    }
+
+    #[test]
+    fn doctor_treats_online_busy_as_healthy() {
+        let mut runner = listed_runner("online");
+        runner.busy = Some(true);
         assert!(doctor_runner_is_healthy(&runner));
+        assert!(!crate::capacity::stale_busy_lease_should_complete_job(
+            runner.status.as_deref(),
+            runner.busy
+        ));
     }
 
     #[test]
     fn doctor_rejects_idle_offline_runner() {
         assert!(!doctor_runner_is_healthy(&listed_runner("offline")));
+    }
+
+    #[test]
+    fn job_queued_for_drives_shipped_unassigned_timeout() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanId": "plan" },
+            "Timeline": { "Id": "timeline" },
+            "JobId": "queued-job",
+            "JobDisplayName": "job",
+            "RequestId": 1,
+            "QueueTime": "2020-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        let queued_for = job_queued_for(&job, std::time::SystemTime::now());
+        assert!(queued_for > crate::capacity::queue_wait_timeout());
+        assert_eq!(
+            crate::capacity::queued_unassigned_decision(
+                queued_for,
+                crate::capacity::queue_wait_timeout()
+            ),
+            crate::capacity::QueuedUnassignedDecision::FailClosed
+        );
+        let fresh: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanId": "plan" },
+            "Timeline": { "Id": "timeline" },
+            "JobId": "fresh-job",
+            "JobDisplayName": "job",
+            "RequestId": 1
+        }))
+        .unwrap();
+        assert_eq!(
+            job_queued_for(&fresh, std::time::SystemTime::now()),
+            Duration::ZERO
+        );
+        assert_eq!(
+            crate::capacity::queued_unassigned_decision(
+                Duration::ZERO,
+                crate::capacity::queue_wait_timeout()
+            ),
+            crate::capacity::QueuedUnassignedDecision::Wait
+        );
+    }
+
+    #[test]
+    fn merged_push_occupancy_completion_is_failed_not_success() {
+        let completion = fail_closed_pre_execution_completion(failed_acquired_job_completion(
+            &AcquiredJobIdentity {
+                plan_id: "plan".into(),
+                job_id: "job".into(),
+            },
+            None,
+            Some("merged_push_occupancy".into()),
+            "post-merge push must not occupy velnor-trusted while open pull_request jobs wait; generated callers route push to the GitHub lane",
+        ))
+        .unwrap();
+        assert_eq!(completion.conclusion, TaskResult::Failed);
+        assert_ne!(completion.conclusion, TaskResult::Succeeded);
+        assert_eq!(
+            completion.infrastructure_failure_category.as_deref(),
+            Some("merged_push_occupancy")
+        );
+        assert!(!completion.step_results.is_empty());
+        assert!(crate::capacity::trusted_fleet_accepts_github_event(
+            "pull_request"
+        ));
+        assert!(!crate::capacity::trusted_fleet_accepts_github_event("push"));
     }
 
     #[test]

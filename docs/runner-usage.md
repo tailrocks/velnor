@@ -69,9 +69,15 @@ that temporary mismatch until the operator activates the new signed record.
   `OAuthRegistrationNotFound` or HTTP 404 during that wait, the job is
   fail-closed as `runner_registration` (Failed, visible step) instead of
   hanging until GitHub's lane timeout. GitHub DELETE `422` ("runner is
-  currently running a job") and registry `offline+busy` quarantine the
-  slot: keep the local JIT identity, do not replace it, and wait until the
-  job is terminal. Do not hammer DELETE. Leaked reservation files older
+  currently running a job") fail-closes any recorded leftover job
+  (`stale_busy`) so the lease can drop, then retries DELETE. Registry
+  `offline+busy` is **not** healthy (6676-class); doctor completes the
+  leftover job and the slot recycles. A GitHub job that sat `queued`
+  (unassigned) longer than `VELNOR_QUEUE_WAIT_SECS` (default 300s) is
+  fail-closed as `queue_timeout` on acquire. Post-merge `push` events are
+  not accepted on `velnor-trusted` (`merged_push_occupancy`); generated
+  callers route `push` to the GitHub lane so open PRs keep the fleet.
+  Do not hammer DELETE. Leaked reservation files older
   than `VELNOR_RESERVATION_TTL_SECS` (default 6h) are reaped even while the
   daemon PID is still alive (multi-slot daemons share one PID). Doctor
   reports free/reserved bytes, active leases, and cache accounting.

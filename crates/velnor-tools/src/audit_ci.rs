@@ -1136,7 +1136,7 @@ fn audit_generated_caller(file: &str, _text: &str, yaml: &Value, findings: &mut 
 
     let mut classes = BTreeSet::new();
     const DEFAULT_LANE_EXPRESSION: &str =
-        "${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'velnor' }}";
+        "${{ github.event_name == 'workflow_dispatch' && inputs.lane || github.event_name == 'push' && 'github' || 'velnor' }}";
     for owner in ["jackin-project", "tailrocks", "ChainArgos"] {
         let Some(job) = mapping_get(jobs, owner).and_then(Value::as_mapping) else {
             continue;
@@ -1985,15 +1985,15 @@ jobs:
   jackin-project:
     uses: jackin-project/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
     with:
-      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'velnor' }}
+      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || github.event_name == 'push' && 'github' || 'velnor' }}
   tailrocks:
     uses: tailrocks/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
     with:
-      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'velnor' }}
+      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || github.event_name == 'push' && 'github' || 'velnor' }}
   ChainArgos:
     uses: ChainArgos/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
     with:
-      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || 'velnor' }}
+      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || github.event_name == 'push' && 'github' || 'velnor' }}
   ci-required:
     timeout-minutes: 10
     runs-on: ${{ 'ubuntu-26.04' }}
@@ -2023,7 +2023,7 @@ jobs:
         assert!(has_rule(&audit(&github_default), "generated-caller"));
 
         let owner_default = GENERATED_CALLER.replacen(
-            "github.event_name == 'workflow_dispatch' && inputs.lane || 'velnor'",
+            "github.event_name == 'workflow_dispatch' && inputs.lane || github.event_name == 'push' && 'github' || 'velnor'",
             "github.repository_owner == 'jackin-project' && 'github' || 'velnor'",
             1,
         );

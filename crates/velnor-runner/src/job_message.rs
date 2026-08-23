@@ -25,6 +25,10 @@ pub struct AgentJobRequestMessage {
     pub request_id: i64,
     #[serde(default, rename = "LockedUntil", alias = "lockedUntil")]
     pub locked_until: Option<String>,
+    /// When GitHub first queued this job (unassigned). Used to fail-close
+    /// jobs that sat in the org queue past `VELNOR_QUEUE_WAIT_SECS`.
+    #[serde(default, rename = "QueueTime", alias = "queueTime")]
+    pub queue_time: Option<String>,
     #[serde(default, rename = "Variables", alias = "variables")]
     pub variables: BTreeMap<String, VariableValue>,
     #[serde(default, rename = "Mask", alias = "mask")]

@@ -81,6 +81,114 @@ pub fn pre_execution_capacity_wait_decision(
     }
 }
 
+/// Combined pre-execution wait: the acquire loop calls this every iteration.
+/// Tests that only build completion payloads do not prove the loop reads the
+/// flags; this function is the loop's decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreExecutionWaitDecision {
+    Reserved,
+    RetryReserve { sleep: Duration },
+    AbortRegistrationLost,
+    AbortCanceled,
+    AbortCapacityTimeout,
+}
+
+pub fn pre_execution_wait_decision(
+    registration_lost: bool,
+    canceled: bool,
+    reserve_ok: bool,
+    capacity: CapacityWaitDecision,
+) -> PreExecutionWaitDecision {
+    if registration_lost {
+        return PreExecutionWaitDecision::AbortRegistrationLost;
+    }
+    if canceled {
+        return PreExecutionWaitDecision::AbortCanceled;
+    }
+    if reserve_ok {
+        return PreExecutionWaitDecision::Reserved;
+    }
+    match capacity {
+        CapacityWaitDecision::Retry { sleep } => PreExecutionWaitDecision::RetryReserve { sleep },
+        CapacityWaitDecision::Timeout => PreExecutionWaitDecision::AbortCapacityTimeout,
+    }
+}
+
+/// Default bound on GitHub `queued` (unassigned) wait. Override with
+/// `VELNOR_QUEUE_WAIT_SECS`. Floor is 15s. This is not job `timeout-minutes`
+/// (that starts after assignment).
+pub const DEFAULT_QUEUE_WAIT_SECS: u64 = 300;
+
+pub fn queue_wait_timeout() -> Duration {
+    let secs = std::env::var("VELNOR_QUEUE_WAIT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_QUEUE_WAIT_SECS);
+    Duration::from_secs(secs.max(CAPACITY_WAIT_RETRY_SECS))
+}
+
+/// A GitHub Actions job that is still `queued` (no runner assigned).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // used by nextest + doctor-side listing of unassigned jobs
+pub struct QueuedUnassignedJob {
+    pub run_id: u64,
+    pub job_id: String,
+    pub queued_for: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueuedUnassignedDecision {
+    Wait,
+    FailClosed,
+}
+
+/// Fail-closed bound for unassigned jobs. There is no Success arm.
+pub fn queued_unassigned_decision(
+    queued_for: Duration,
+    timeout: Duration,
+) -> QueuedUnassignedDecision {
+    if queued_for >= timeout {
+        QueuedUnassignedDecision::FailClosed
+    } else {
+        QueuedUnassignedDecision::Wait
+    }
+}
+
+pub fn queue_timeout_reason(queued_for: Duration, timeout: Duration) -> String {
+    format!(
+        "timed out after {}s waiting for a healthy Velnor runner (queue limit {}s); job was never assigned to a ready slot",
+        queued_for.as_secs(),
+        timeout.as_secs()
+    )
+}
+
+/// Jobs that have been `queued` past the bound and must fail-closed.
+#[allow(dead_code)] // nextest drives this bulk filter; acquire path uses queued_unassigned_decision
+pub fn queued_unassigned_jobs_past_deadline(
+    jobs: &[QueuedUnassignedJob],
+    timeout: Duration,
+) -> Vec<&QueuedUnassignedJob> {
+    jobs.iter()
+        .filter(|job| {
+            queued_unassigned_decision(job.queued_for, timeout)
+                == QueuedUnassignedDecision::FailClosed
+        })
+        .collect()
+}
+
+/// Post-merge `push` must not occupy `velnor-trusted` while open PRs wait.
+/// `pull_request` / `merge_group` / `schedule` / `workflow_dispatch` still run
+/// on Velnor. `push` is routed to the GitHub lane in generated callers.
+pub fn trusted_fleet_accepts_github_event(event_name: &str) -> bool {
+    !event_name.eq_ignore_ascii_case("push")
+}
+
+/// GitHub DELETE 422 / registry `offline+busy` with no live online session:
+/// complete the leftover job so the lease can drop. `online+busy` is a live job.
+pub fn stale_busy_lease_should_complete_job(status: Option<&str>, busy: Option<bool>) -> bool {
+    busy == Some(true) && status != Some("online")
+}
+
 /// Operator-visible reason for a host-capacity timeout completion.
 ///
 /// Empty `last_error` still yields a non-empty reason so GitHub cannot hide
@@ -546,5 +654,106 @@ mod tests {
         assert!(!host_capacity_timeout_reason(timeout, timeout, "   ")
             .trim()
             .is_empty());
+    }
+
+    #[test]
+    fn pre_execution_wait_decision_reads_lost_cancel_and_capacity() {
+        let retry = CapacityWaitDecision::Retry {
+            sleep: Duration::from_secs(15),
+        };
+        assert_eq!(
+            pre_execution_wait_decision(true, false, false, retry),
+            PreExecutionWaitDecision::AbortRegistrationLost
+        );
+        assert_eq!(
+            pre_execution_wait_decision(false, true, true, retry),
+            PreExecutionWaitDecision::AbortCanceled
+        );
+        assert_eq!(
+            pre_execution_wait_decision(false, false, true, retry),
+            PreExecutionWaitDecision::Reserved
+        );
+        assert_eq!(
+            pre_execution_wait_decision(false, false, false, retry),
+            PreExecutionWaitDecision::RetryReserve {
+                sleep: Duration::from_secs(15)
+            }
+        );
+        assert_eq!(
+            pre_execution_wait_decision(false, false, false, CapacityWaitDecision::Timeout),
+            PreExecutionWaitDecision::AbortCapacityTimeout
+        );
+        assert_ne!(
+            pre_execution_wait_decision(true, false, false, retry),
+            PreExecutionWaitDecision::RetryReserve {
+                sleep: Duration::from_secs(15)
+            }
+        );
+    }
+
+    #[test]
+    fn queued_unassigned_jobs_fail_closed_after_bound_never_success() {
+        let timeout = Duration::from_secs(DEFAULT_QUEUE_WAIT_SECS);
+        assert_eq!(
+            queued_unassigned_decision(Duration::ZERO, timeout),
+            QueuedUnassignedDecision::Wait
+        );
+        assert_eq!(
+            queued_unassigned_decision(timeout, timeout),
+            QueuedUnassignedDecision::FailClosed
+        );
+        assert_eq!(
+            queued_unassigned_decision(timeout + Duration::from_secs(1), timeout),
+            QueuedUnassignedDecision::FailClosed
+        );
+        let jobs = [
+            QueuedUnassignedJob {
+                run_id: 1,
+                job_id: "fresh".into(),
+                queued_for: Duration::from_secs(10),
+            },
+            QueuedUnassignedJob {
+                run_id: 2,
+                job_id: "stale".into(),
+                queued_for: timeout,
+            },
+        ];
+        let expired = queued_unassigned_jobs_past_deadline(&jobs, timeout);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].job_id, "stale");
+        let reason = queue_timeout_reason(timeout, timeout);
+        assert!(reason.contains("never assigned"));
+        assert!(!reason.trim().is_empty());
+    }
+
+    #[test]
+    fn push_events_do_not_occupy_trusted_fleet() {
+        assert!(trusted_fleet_accepts_github_event("pull_request"));
+        assert!(trusted_fleet_accepts_github_event("merge_group"));
+        assert!(trusted_fleet_accepts_github_event("schedule"));
+        assert!(trusted_fleet_accepts_github_event("workflow_dispatch"));
+        assert!(!trusted_fleet_accepts_github_event("push"));
+        assert!(!trusted_fleet_accepts_github_event("PUSH"));
+    }
+
+    #[test]
+    fn stale_busy_offline_must_complete_job_online_busy_must_not() {
+        assert!(stale_busy_lease_should_complete_job(
+            Some("offline"),
+            Some(true)
+        ));
+        assert!(stale_busy_lease_should_complete_job(None, Some(true)));
+        assert!(!stale_busy_lease_should_complete_job(
+            Some("online"),
+            Some(true)
+        ));
+        assert!(!stale_busy_lease_should_complete_job(
+            Some("offline"),
+            Some(false)
+        ));
+        assert!(!stale_busy_lease_should_complete_job(
+            Some("online"),
+            Some(false)
+        ));
     }
 }
