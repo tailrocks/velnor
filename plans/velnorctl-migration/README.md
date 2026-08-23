@@ -105,6 +105,11 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED` with reason, or
 
 ## Execution sequence
 
+Use the durable leaf-goal controller in
+[`../goal-execution/README.md`](../goal-execution/README.md). It makes every
+dependency, verification, review, evidence, and status transition mandatory
+across Codex `/goal` and Claude Code execution.
+
 1. Plan 063 records direction and extends fixture with success, failure, hold,
    queue, cancellation, logs, artifacts, and controlled state scenarios.
 2. Plans 064–067 establish crates, resource/output contracts, durable history,
