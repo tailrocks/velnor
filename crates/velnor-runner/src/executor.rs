@@ -5218,31 +5218,17 @@ fn native_download_artifact(
             .context("download-artifact requires ACTIONS_RESULTS_URL")?;
         let (plan_id, job_id) = artifact_backend_ids_from_token(runtime_token)
             .context("download-artifact runtime token is missing workflow backend IDs")?;
-        let remote = crate::protocol::download_artifacts_blocking(
+        // Name/pattern filtering happens inside the daemon download: artifacts
+        // that were not requested are never signed or fetched (non-zip
+        // `.dockerbuild` build records must not fail unrelated downloads).
+        let selected = crate::protocol::download_artifacts_blocking(
             results_url,
             runtime_token,
             &plan_id,
             &job_id,
+            &name,
+            &pattern,
         )?;
-        let matcher = if pattern.is_empty() {
-            None
-        } else {
-            let mut builder = GlobSetBuilder::new();
-            builder.add(Glob::new(&pattern)?);
-            Some(builder.build().context("build artifact pattern")?)
-        };
-        let selected = remote
-            .into_iter()
-            .filter(|artifact| {
-                if !name.is_empty() {
-                    artifact.name == name
-                } else if let Some(matcher) = &matcher {
-                    matcher.is_match(&artifact.name)
-                } else {
-                    true
-                }
-            })
-            .collect::<Vec<_>>();
         for artifact in &selected {
             let target = if merge_multiple || !name.is_empty() {
                 destination.clone()
