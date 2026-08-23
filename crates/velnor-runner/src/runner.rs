@@ -2920,9 +2920,13 @@ async fn handle_job_request(
         // trust and strict-capability checks. Keep the guards through result
         // upload by binding them in the execution scope.
         //
-        // Start lease renewal before admission. A full host is infrastructure
-        // backpressure, not a repository failure: keep the acquired job alive
-        // until capacity becomes available instead of completing it red.
+        // Start lease renewal before peak reservation so GitHub does not steal
+        // the acquired job during a short bounded wait. A full host is
+        // infrastructure backpressure, not a repository test failure — but an
+        // unbounded wait holds the job `in_progress` with zero steps. After
+        // `capacity_wait_timeout` elapses, complete Failed with a visible
+        // step/reason. Never Success. Never leave GitHub without a terminal
+        // conclusion.
         let stored_for_refresh = broker_cancellation.stored.clone();
         let renewal = start_run_service_lock_renewal(
             run_service_job.client.clone(),
@@ -2946,8 +2950,26 @@ async fn handle_job_request(
         // Disk peak reservation is taken only for an acquired job (not while
         // the JIT slot is idle-polling). Hold until this scope ends so
         // concurrent daemons share a truthful host admission budget. Retry
-        // backpressure while the run-service renewal keeps the job lease live.
+        // backpressure while the run-service renewal keeps the job lease live,
+        // then fail-close instead of hanging GitHub with zero steps.
+        let capacity_wait_started = Instant::now();
+        let capacity_wait_timeout = crate::capacity::capacity_wait_timeout();
         let job_peak_reservation = loop {
+            if canceled.load(Ordering::SeqCst) {
+                cancellation.abort();
+                let completion = complete_acquired_job_outcome(
+                    &run_service_job,
+                    &AcquiredJobIdentity::from_job(&job),
+                    Some(&job),
+                    crate::protocol::TaskResult::Canceled,
+                    Some("canceled".to_string()),
+                    "job canceled while waiting for host disk capacity",
+                )
+                .await;
+                renewal.abort();
+                completion?;
+                bail!("job canceled while waiting for host disk capacity");
+            }
             match reserve_job_peak_capacity(config_dir, args) {
                 Ok(reservation) => {
                     println!(
@@ -2957,11 +2979,49 @@ async fn handle_job_request(
                     break reservation;
                 }
                 Err(error) => {
-                    eprintln!(
-                        "Job {} waiting for host capacity: {error:#}. Retrying in 15s.",
-                        job.job_id
-                    );
-                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    match crate::capacity::pre_execution_capacity_wait_decision(
+                        capacity_wait_started.elapsed(),
+                        capacity_wait_timeout,
+                    ) {
+                        crate::capacity::CapacityWaitDecision::Retry { sleep } => {
+                            eprintln!(
+                                "Job {} waiting for host capacity: {error:#}. Retrying in {}s.",
+                                job.job_id,
+                                sleep.as_secs()
+                            );
+                            tokio::time::sleep(sleep).await;
+                        }
+                        crate::capacity::CapacityWaitDecision::Timeout => {
+                            cancellation.abort();
+                            let identity = AcquiredJobIdentity::from_job(&job);
+                            let last_error = format!("{error:#}");
+                            let payload = fail_closed_pre_execution_completion(
+                                pre_execution_capacity_timeout_completion(
+                                    &identity,
+                                    run_service_job.billing_owner_id.clone(),
+                                    capacity_wait_started.elapsed(),
+                                    capacity_wait_timeout,
+                                    &last_error,
+                                ),
+                            )?;
+                            let reason = crate::capacity::host_capacity_timeout_reason(
+                                capacity_wait_started.elapsed(),
+                                capacity_wait_timeout,
+                                &last_error,
+                            );
+                            let completion = complete_acquired_job_failure(
+                                &run_service_job,
+                                &identity,
+                                Some(&job),
+                                payload.infrastructure_failure_category.clone(),
+                                &reason,
+                            )
+                            .await;
+                            renewal.abort();
+                            completion?;
+                            return Err(error).context(reason);
+                        }
+                    }
                 }
             }
         };
@@ -6558,10 +6618,41 @@ fn failed_acquired_job_completion(
     infrastructure_failure_category: Option<String>,
     reason: &str,
 ) -> RunServiceCompleteJob {
+    terminal_acquired_job_completion(
+        identity,
+        billing_owner_id,
+        TaskResult::Failed,
+        infrastructure_failure_category,
+        reason,
+    )
+}
+
+fn pre_execution_capacity_timeout_completion(
+    identity: &AcquiredJobIdentity,
+    billing_owner_id: Option<String>,
+    elapsed: Duration,
+    timeout: Duration,
+    last_error: &str,
+) -> RunServiceCompleteJob {
+    failed_acquired_job_completion(
+        identity,
+        billing_owner_id,
+        Some("host_capacity".to_string()),
+        &crate::capacity::host_capacity_timeout_reason(elapsed, timeout, last_error),
+    )
+}
+
+fn terminal_acquired_job_completion(
+    identity: &AcquiredJobIdentity,
+    billing_owner_id: Option<String>,
+    conclusion: TaskResult,
+    infrastructure_failure_category: Option<String>,
+    reason: &str,
+) -> RunServiceCompleteJob {
     // GitHub renders jobs with empty step_results as zero-step failures with
     // no operator-visible reason. Always emit one synthetic failed step plus
     // an annotation so the rejection category and message show up in the UI
-    // (capability validation, trust policy, step mapping, etc.).
+    // (capability validation, trust policy, step mapping, host capacity, etc.).
     let now = unix_now_iso8601();
     let category = infrastructure_failure_category
         .as_deref()
@@ -6572,17 +6663,21 @@ fn failed_acquired_job_completion(
     } else {
         format!("{title}: {reason}")
     };
+    let annotation_level = match conclusion {
+        TaskResult::Canceled => RunServiceAnnotationLevel::Warning,
+        _ => RunServiceAnnotationLevel::Failure,
+    };
     let step = RunServiceStepResult {
         external_id: Some(format!("velnor-pre-execution-{category}")),
         number: Some(1),
         name: title.clone(),
         status: TimelineRecordState::Completed,
-        conclusion: TaskResult::Failed,
+        conclusion,
         started_at: Some(now.clone()),
         completed_at: Some(now),
         completed_log_lines: rejection_log_lines(category, reason).len() as i64,
         annotations: vec![RunServiceAnnotation {
-            level: RunServiceAnnotationLevel::Failure,
+            level: annotation_level,
             message: message.clone(),
             title: Some(title),
             path: None,
@@ -6597,11 +6692,11 @@ fn failed_acquired_job_completion(
     RunServiceCompleteJob {
         plan_id: identity.plan_id.clone(),
         job_id: identity.job_id.clone(),
-        conclusion: TaskResult::Failed,
+        conclusion,
         outputs: BTreeMap::new(),
         step_results: vec![step],
         annotations: vec![RunServiceAnnotation {
-            level: RunServiceAnnotationLevel::Failure,
+            level: annotation_level,
             message,
             title: Some(format!("Velnor pre-execution ({category})")),
             path: None,
@@ -6665,6 +6760,25 @@ async fn complete_acquired_job_failure(
     infrastructure_failure_category: Option<String>,
     reason: &str,
 ) -> Result<()> {
+    complete_acquired_job_outcome(
+        run_service_job,
+        identity,
+        job,
+        TaskResult::Failed,
+        infrastructure_failure_category,
+        reason,
+    )
+    .await
+}
+
+async fn complete_acquired_job_outcome(
+    run_service_job: &RunServiceJobContext,
+    identity: &AcquiredJobIdentity,
+    job: Option<&AgentJobRequestMessage>,
+    conclusion: TaskResult,
+    infrastructure_failure_category: Option<String>,
+    reason: &str,
+) -> Result<()> {
     let masked_reason = job.map_or_else(
         || reason.to_string(),
         |job| {
@@ -6686,15 +6800,54 @@ async fn complete_acquired_job_failure(
         .client
         .complete_job(
             &run_service_job.run_service_url,
-            failed_acquired_job_completion(
+            fail_closed_pre_execution_completion(terminal_acquired_job_completion(
                 identity,
                 run_service_job.billing_owner_id.clone(),
+                conclusion,
                 infrastructure_failure_category,
                 &masked_reason,
-            ),
+            ))?,
         )
         .await
         .context("complete acquired run-service job after infrastructure failure")
+}
+
+/// Guard the pre-execution complete_job payload.
+///
+/// GitHub shows acquired jobs with empty `step_results` as zero-step
+/// `in_progress`/`failure` with no reason. Completing Success here would hide
+/// a hang. Call this on every path that terminalizes an acquired job before
+/// workflow steps run.
+fn fail_closed_pre_execution_completion(
+    payload: RunServiceCompleteJob,
+) -> Result<RunServiceCompleteJob> {
+    if payload.step_results.is_empty() {
+        bail!(
+            "refusing to complete acquired job {} with empty step_results",
+            payload.job_id
+        );
+    }
+    if matches!(payload.conclusion, TaskResult::Succeeded) {
+        bail!(
+            "refusing to complete acquired job {} as Success before workflow steps ran",
+            payload.job_id
+        );
+    }
+    let has_reason = payload
+        .annotations
+        .iter()
+        .any(|annotation| !annotation.message.trim().is_empty())
+        || payload
+            .step_results
+            .iter()
+            .any(|step| !step.name.trim().is_empty());
+    if !has_reason {
+        bail!(
+            "refusing to complete acquired job {} without a visible reason",
+            payload.job_id
+        );
+    }
+    Ok(payload)
 }
 
 fn run_service_telemetry(
@@ -8978,6 +9131,121 @@ jobs:
             completion.annotations[0].message
         );
         assert!(completion.telemetry.is_empty());
+    }
+
+    #[test]
+    fn capacity_timeout_completes_failed_with_visible_step_not_success() {
+        let elapsed = Duration::from_secs(crate::capacity::DEFAULT_CAPACITY_WAIT_SECS);
+        let timeout = Duration::from_secs(crate::capacity::DEFAULT_CAPACITY_WAIT_SECS);
+        assert_eq!(
+            crate::capacity::pre_execution_capacity_wait_decision(elapsed, timeout),
+            crate::capacity::CapacityWaitDecision::Timeout
+        );
+
+        let completion =
+            fail_closed_pre_execution_completion(pre_execution_capacity_timeout_completion(
+                &AcquiredJobIdentity {
+                    plan_id: "plan-capacity".into(),
+                    job_id: "08b94140-6688-511c-ba82-48daf63ffff5".into(),
+                },
+                Some("billing-owner".into()),
+                elapsed,
+                timeout,
+                "capacity backpressure: free=117548818432 required=134432476364",
+            ))
+            .expect("timeout completion must be fail-closed");
+
+        assert_eq!(completion.conclusion, TaskResult::Failed);
+        assert_ne!(completion.conclusion, TaskResult::Succeeded);
+        assert!(
+            !completion.step_results.is_empty(),
+            "empty step_results hide the rejection reason on GitHub"
+        );
+        assert_eq!(completion.step_results.len(), 1);
+        assert_eq!(completion.step_results[0].conclusion, TaskResult::Failed);
+        assert_eq!(completion.step_results[0].number, Some(1));
+        assert_eq!(
+            completion.infrastructure_failure_category.as_deref(),
+            Some("host_capacity")
+        );
+        assert!(
+            completion.annotations.iter().any(|annotation| annotation
+                .message
+                .contains("timed out")
+                && annotation
+                    .message
+                    .contains("capacity backpressure: free=117548818432")),
+            "annotation should carry timeout reason: {:?}",
+            completion.annotations
+        );
+        assert!(!completion.annotations[0].message.trim().is_empty());
+        let rejection_log = failed_acquired_job_step_log(
+            "host_capacity",
+            &crate::capacity::host_capacity_timeout_reason(
+                elapsed,
+                timeout,
+                "capacity backpressure: free=117548818432 required=134432476364",
+            ),
+        );
+        assert_eq!(rejection_log.exit_code, 1);
+        assert!(rejection_log
+            .lines
+            .iter()
+            .any(|line| line == "phase: host_capacity"));
+    }
+
+    #[test]
+    fn pre_execution_completion_rejects_success_and_empty_steps() {
+        let identity = AcquiredJobIdentity {
+            plan_id: "plan-1".into(),
+            job_id: "job-1".into(),
+        };
+        let mut success = failed_acquired_job_completion(
+            &identity,
+            None,
+            Some("host_capacity".into()),
+            "capacity wait timed out",
+        );
+        success.conclusion = TaskResult::Succeeded;
+        let success_error = fail_closed_pre_execution_completion(success)
+            .expect_err("Success must not terminalize a pre-execution hang");
+        assert!(
+            success_error.to_string().contains("Success"),
+            "{success_error:#}"
+        );
+
+        let mut empty = failed_acquired_job_completion(
+            &identity,
+            None,
+            Some("host_capacity".into()),
+            "capacity wait timed out",
+        );
+        empty.step_results.clear();
+        let empty_error = fail_closed_pre_execution_completion(empty)
+            .expect_err("empty step_results must not be posted");
+        assert!(
+            empty_error.to_string().contains("empty step_results"),
+            "{empty_error:#}"
+        );
+    }
+
+    #[test]
+    fn canceled_pre_execution_capacity_wait_is_not_success() {
+        let completion = fail_closed_pre_execution_completion(terminal_acquired_job_completion(
+            &AcquiredJobIdentity {
+                plan_id: "plan-1".into(),
+                job_id: "job-1".into(),
+            },
+            None,
+            TaskResult::Canceled,
+            Some("canceled".into()),
+            "job canceled while waiting for host disk capacity",
+        ))
+        .unwrap();
+        assert_eq!(completion.conclusion, TaskResult::Canceled);
+        assert_ne!(completion.conclusion, TaskResult::Succeeded);
+        assert_eq!(completion.step_results.len(), 1);
+        assert!(!completion.annotations[0].message.trim().is_empty());
     }
 
     #[test]

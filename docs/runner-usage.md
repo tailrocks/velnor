@@ -60,8 +60,13 @@ that temporary mismatch until the operator activates the new signed record.
   slot) and preserves a 10 GiB emergency floor. Idle slots poll without
   pinning peak budget so multi-daemon hosts do not over-reserve disk.
   Tune peak/floor with `VELNOR_JOB_PEAK_BYTES` and
-  `VELNOR_EMERGENCY_RESERVE_BYTES`. Leaked reservation files older than
-  `VELNOR_RESERVATION_TTL_SECS` (default 6h) are reaped even while the
+  `VELNOR_EMERGENCY_RESERVE_BYTES`. After GitHub acquire, peak reservation
+  may retry while run-service lock renewal keeps the job lease live, but
+  only until `VELNOR_CAPACITY_WAIT_SECS` (default 120s, floor 15s). If the
+  bound elapses with no reservation, Velnor completes the job **Failed**
+  with a visible `host_capacity` step and reason — never Success, never an
+  indefinite zero-step `in_progress` hang. Leaked reservation files older
+  than `VELNOR_RESERVATION_TTL_SECS` (default 6h) are reaped even while the
   daemon PID is still alive (multi-slot daemons share one PID). Doctor
   reports free/reserved bytes, active leases, and cache accounting.
 - Regenerable class ceilings default to targets 200 GiB, actions cache 50 GiB,

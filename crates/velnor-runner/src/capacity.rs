@@ -37,6 +37,75 @@ pub fn reservation_ttl() -> Duration {
     Duration::from_secs(secs.max(60))
 }
 
+/// Retry interval while an acquired job waits for host disk peak.
+pub const CAPACITY_WAIT_RETRY_SECS: u64 = 15;
+
+/// Default bound on the post-acquire disk-peak wait. Override with
+/// `VELNOR_CAPACITY_WAIT_SECS`. Floor is one retry interval so a single
+/// reclaim pass can finish. This is not an unbounded hang: once the bound
+/// elapses the runner must complete the GitHub job Failed.
+pub const DEFAULT_CAPACITY_WAIT_SECS: u64 = 120;
+
+/// How long an already-acquired job may retry disk-peak reservation before
+/// the runner fail-closes the GitHub job.
+pub fn capacity_wait_timeout() -> Duration {
+    let secs = std::env::var("VELNOR_CAPACITY_WAIT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_CAPACITY_WAIT_SECS);
+    Duration::from_secs(secs.max(CAPACITY_WAIT_RETRY_SECS))
+}
+
+/// Decision for the post-acquire, pre-step disk-peak wait.
+///
+/// There is no Success arm. The runner either retries while time remains or
+/// times out and must complete GitHub **Failed** with a visible step/reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapacityWaitDecision {
+    Retry { sleep: Duration },
+    Timeout,
+}
+
+/// Bound the wait that used to hold run-service lock renewal with zero steps.
+pub fn pre_execution_capacity_wait_decision(
+    elapsed: Duration,
+    timeout: Duration,
+) -> CapacityWaitDecision {
+    if elapsed >= timeout {
+        CapacityWaitDecision::Timeout
+    } else {
+        let remaining = timeout.saturating_sub(elapsed);
+        CapacityWaitDecision::Retry {
+            sleep: remaining.min(Duration::from_secs(CAPACITY_WAIT_RETRY_SECS)),
+        }
+    }
+}
+
+/// Operator-visible reason for a host-capacity timeout completion.
+///
+/// Empty `last_error` still yields a non-empty reason so GitHub cannot hide
+/// the failure behind a zero-step job.
+pub fn host_capacity_timeout_reason(
+    elapsed: Duration,
+    timeout: Duration,
+    last_error: &str,
+) -> String {
+    let detail = last_error.trim();
+    if detail.is_empty() {
+        format!(
+            "timed out after {}s waiting for host disk capacity (limit {}s)",
+            elapsed.as_secs(),
+            timeout.as_secs()
+        )
+    } else {
+        format!(
+            "timed out after {}s waiting for host disk capacity (limit {}s): {detail}",
+            elapsed.as_secs(),
+            timeout.as_secs()
+        )
+    }
+}
+
 #[derive(Debug)]
 pub struct ScopeLease {
     path: PathBuf,
@@ -401,5 +470,81 @@ mod tests {
         assert!(!path.exists());
         std::env::remove_var("VELNOR_RESERVATION_TTL_SECS");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn leaked_reservation_older_than_ttl_is_reaped_from_summary_bytes() {
+        let root = root("capacity-ttl-summary");
+        let dir = root.join("reservations");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("leaked.json");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        serde_json::to_writer(
+            &mut file,
+            &ReservationRecord {
+                bytes: 17179869184,
+                pid: std::process::id(),
+                created_unix: 1,
+            },
+        )
+        .unwrap();
+        file.flush().unwrap();
+        std::env::set_var("VELNOR_RESERVATION_TTL_SECS", "60");
+        let (count_before_reap, bytes) = reservation_summary(&root).unwrap();
+        assert_eq!(count_before_reap, 1, "summary counts the file before reap");
+        assert_eq!(bytes, 0, "stale reservation bytes must not block admission");
+        assert!(!path.exists(), "leaked reservation file must be removed");
+        assert_eq!(reservation_summary(&root).unwrap(), (0, 0));
+        std::env::remove_var("VELNOR_RESERVATION_TTL_SECS");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn capacity_wait_is_bounded_then_times_out_never_success() {
+        let timeout = Duration::from_secs(DEFAULT_CAPACITY_WAIT_SECS);
+        assert_eq!(
+            pre_execution_capacity_wait_decision(Duration::ZERO, timeout),
+            CapacityWaitDecision::Retry {
+                sleep: Duration::from_secs(CAPACITY_WAIT_RETRY_SECS)
+            }
+        );
+        assert_eq!(
+            pre_execution_capacity_wait_decision(
+                timeout.saturating_sub(Duration::from_secs(1)),
+                timeout
+            ),
+            CapacityWaitDecision::Retry {
+                sleep: Duration::from_secs(1)
+            }
+        );
+        assert_eq!(
+            pre_execution_capacity_wait_decision(timeout, timeout),
+            CapacityWaitDecision::Timeout
+        );
+        assert_eq!(
+            pre_execution_capacity_wait_decision(timeout + Duration::from_secs(30), timeout),
+            CapacityWaitDecision::Timeout
+        );
+        assert!(
+            !matches!(
+                pre_execution_capacity_wait_decision(timeout, timeout),
+                CapacityWaitDecision::Retry { .. }
+            ),
+            "elapsed >= timeout must not keep retrying"
+        );
+        let reason = host_capacity_timeout_reason(
+            timeout,
+            timeout,
+            "capacity backpressure: free=1 required=2",
+        );
+        assert!(!reason.trim().is_empty());
+        assert!(reason.contains("capacity backpressure: free=1 required=2"));
+        assert!(!host_capacity_timeout_reason(timeout, timeout, "   ")
+            .trim()
+            .is_empty());
     }
 }
