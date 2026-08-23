@@ -1,0 +1,65 @@
+# Command Task C041: Implement `velnorctl run dispatch <workflow>`
+
+> **Executor instructions**: Implement only `velnorctl run dispatch <workflow>`. Keep sibling
+> commands separate. Run every gate and update command index status.
+>
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-tools/src/main.rs crates/velnor-runner/src/protocol.rs crates/velnor-client crates/velnor-control crates/velnorctl`
+> Stop on incompatible drift; do not improvise around changed authority.
+
+## Status
+
+- **Priority**: P1
+- **Effort**: M
+- **Risk**: MED
+- **Depends on**: Plans 068, 074
+- **Category**: command migration
+- **Planned at**: commit `35d5bb7`, 2026-08-24
+
+## Why this matters
+
+Dispatch exact GitHub workflow/ref/typed fields and return new run ID.
+
+## Current state
+
+GitHub workflow reads/mutations currently require `gh` or maintainer helpers. Plan 074 provides GitHub-authoritative typed operations and local placement/timing correlation.
+
+## Scope
+
+Implement only `velnorctl run dispatch <workflow>`: typed parser/arguments, thin handler, versioned output, errors, help/completion metadata, and tests in `crates/velnorctl/src/commands/run_dispatch.rs` and `crates/velnorctl/tests/run_dispatch.rs`.
+Use shared services; never spawn old binary, parse sibling human output, or duplicate domain logic.
+Apply mutation rules: explicit authority, timeout/reason, dry-run/confirmation where specified, audit record, warnings on stderr.
+
+## Required behavior
+
+- Support `--ref` and repeated `-f key=value`; validate workflow/ref/field ambiguity.
+- Identify exact newly created run without racing concurrent dispatches.
+- Print run ID/URL as resource output and never expose auth data.
+
+## Steps
+
+1. Add exact typed Clap shape for `velnorctl run dispatch <workflow>`; reject unknown and sibling arguments.
+2. Call shared typed service/client and map invalid/auth/connectivity/rate-limit/timeout/domain errors to documented exits.
+3. Render versioned machine output and stable human output; redact authorization/credential data.
+4. Add parser, mock-service, transport, output, exit, and redaction tests under filter `command_c041`.
+5. Update command reference, completion/man metadata, and old-command migration mapping without aliases.
+
+**Verify**: `rtk cargo nextest run -p velnorctl --locked command_c041` passes; `rtk mise run check` exits 0.
+
+## Mandatory fixture integration
+
+Pin exact `tailrocks/velnor-actions-fixture` commit. Cancel all pending/in-progress old fixture runs, delete only stale validation-owned registrations, and prove clean before dispatch.
+Use command to dispatch fresh fixture success, hold, and failure inputs; prove returned IDs uniquely match requested ref/fields.
+Monitor only new run IDs every at most 60 seconds; diagnose unchanged/queued state before two minutes. Save sanitized non-HTML evidence only.
+
+## Done criteria
+
+- [ ] `velnorctl run dispatch --help` exits 0 with exact syntax.
+- [ ] Focused and repository gates pass.
+- [ ] Fresh fixture proof covers command behavior and authority.
+- [ ] No sibling command, alias, secret, or direct internal-layout dependency was added.
+
+## STOP conditions
+
+- Shared service lacks authoritative required behavior.
+- Work needs capability/trust expansion, protocol guessing, fixture weakening, or destructive scope beyond command.
+- Two-minute fixture stasis cannot be diagnosed.
