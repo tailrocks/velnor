@@ -198,6 +198,7 @@ const RENOVATE_REFS: &[AllowedRef] = &[
     allowed("693b9ef15eec82123529a37c782242f091365961", "v43"),
 ];
 const BUILDX_REFS: &[AllowedRef] = &[
+    allowed("37fe631027851001ddb9b187196cc803df7f5f0e", "v4.3.0"),
     allowed("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c", "v4"),
     allowed("v4", "fixture transition until plan 041"),
 ];
