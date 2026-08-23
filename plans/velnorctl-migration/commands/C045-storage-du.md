@@ -31,8 +31,12 @@ Apply inspection rules: standard output formats/filters where relevant, resource
 
 ## Required behavior
 
-- Support `--class`; include totals and source time.
-- Handle reflink, sparse, hardlink, missing, and concurrently changing paths truthfully.
+- Support `--class`; include logical/allocated bytes, inode counts, totals,
+  source time, and snapshot-consistency marker. Declare hardlink dedup scope and
+  device.
+- Handle reflink, sparse, hardlink, permission failure, missing, and concurrent
+  change truthfully as measured/unknown; never collapse unreadable to zero or
+  use atime as ownership/liveness truth.
 - Read-only; no touch/lease/GC side effect.
 
 ## Steps
@@ -63,4 +67,3 @@ Monitor only new run IDs every at most 60 seconds; diagnose unchanged/queued sta
 - Shared service lacks authoritative required behavior.
 - Work needs capability/trust expansion, protocol guessing, fixture weakening, or destructive scope beyond command.
 - Two-minute fixture stasis cannot be diagnosed.
-

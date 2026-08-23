@@ -3,7 +3,7 @@
 > **Executor instructions**: Implement only `velnorctl workflow check --repo <owner/repo> --ref <ref> --workflow <path-or-name>`. Do not combine
 > sibling commands. Run every gate; update task and command index status.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/admission.rs crates/velnor-runner/src/action.rs crates/velnor-runner/src/cli.rs crates/velnor-tools crates/velnor-control crates/velnorctl`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/manifest.rs crates/velnor-runner/src/admission.rs crates/velnor-runner/src/action.rs crates/velnor-runner/src/cli.rs crates/velnor-tools crates/velnor-control crates/velnorctl`
 > Compare current implementation and policy before editing; stop on drift.
 
 ## Status
@@ -35,6 +35,11 @@ Keep operation read-only, side-effect-free, redacted, and consistent with standa
 - Resolve exact repo/ref/workflow, all jobs, local composites, nested actions, cycles, and ancestry.
 - Report exact blocker field/value/alternatives/manifest version and unprovable GitHub-expanded aspects.
 - Never claim compatibility by approximation or execute/download unapproved action runtime.
+- Resolve the supplied ref once to a commit SHA and fetch all workflow/action
+  metadata at that SHA. Report the resolved SHA. Unresolved expressions,
+  matrices, reusable workflows, cycles, or unavailable metadata yield
+  `UNKNOWN` with nonzero exit; exact runtime parity applies only to fully
+  canonicalized graphs.
 
 ## Steps
 

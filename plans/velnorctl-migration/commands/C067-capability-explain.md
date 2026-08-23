@@ -3,7 +3,7 @@
 > **Executor instructions**: Implement only `velnorctl capability explain <feature-or-action>`. Do not combine
 > sibling commands. Run every gate; update task and command index status.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/admission.rs crates/velnor-runner/src/action.rs crates/velnor-runner/src/cli.rs crates/velnor-tools crates/velnor-control crates/velnorctl`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/manifest.rs crates/velnor-runner/src/admission.rs crates/velnor-runner/src/action.rs crates/velnor-runner/src/cli.rs crates/velnor-tools crates/velnor-control crates/velnorctl`
 > Compare current implementation and policy before editing; stop on drift.
 
 ## Status
@@ -32,7 +32,9 @@ Keep operation read-only, side-effect-free, redacted, and consistent with standa
 
 ## Required behavior
 
-- Show status, runtime/native adapter, reason, ancestry when provided, effect-before-side-effects, accepted alternatives, remediation, manifest version.
+- Show manifest-level status, runtime/native adapter, rationale/constraints,
+  effect-before-side-effects, accepted alternatives, remediation, and manifest
+  version. This command accepts no invocation graph; C068/C073 own ancestry.
 - Distinguish unknown from unsupported and never suggest unapproved fallback.
 - No checkout/download/container/cache/credential effect.
 

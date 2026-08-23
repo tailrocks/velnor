@@ -70,8 +70,11 @@ source inputs and assert secret markers/values are absent.
 
 Support `table`, `wide`, `json`, `yaml`, `jsonl`, and `name`. JSON/YAML emit
 versioned resources. JSONL emits exactly one object/event per line. Warnings go
-to stderr. Durations are human-readable only in tables and numeric in machine
-output. Color respects `--no-color` and non-TTY output.
+to stderr. `name` is an explicitly unversioned newline-delimited canonical
+identity projection; table/wide are human formats. Durations are human-readable
+only in tables. Machine durations use unsigned fields named `*_ms`; unavailable
+is `null`, never zero, and overflow is a typed serialization error rather than
+silent wrapping. Color respects `--no-color` and non-TTY output.
 
 **Verify**: golden tests cover every resource/output combination and verify
 stdout/stderr separation.
@@ -85,6 +88,31 @@ interfaces only. C002, C003, C004, and C005 own those leaf commands.
 
 **Verify**: parser matrix tests cover placement before/after subcommands,
 invalid values, stdout/stderr, and non-zero usage exit.
+
+Define one public `ExitClass` contract and numeric process mapping used by every
+leaf command and transport:
+
+| Code | Class | Meaning |
+|---:|---|---|
+| 0 | `Success` | Requested operation completed, or an idempotent target already matched. |
+| 1 | `Condition` | Inspection completed and authoritatively found a degraded/failed condition. |
+| 2 | `Usage` | CLI syntax, selector, field, or local input is invalid. |
+| 3 | `Authorization` | Authentication failed or the identity lacks required permission. |
+| 4 | `Unavailable` | An authoritative resource is absent, unavailable, or not found. |
+| 5 | `Timeout` | The requested deadline elapsed before a terminal result. |
+| 6 | `Conflict` | Version, state, plan, or safety precondition no longer matches. |
+| 7 | `Transport` | Connection, rate-limit, or ambiguous upstream transport outcome. |
+| 8 | `Operation` | An accepted domain operation reached a definite failure. |
+| 130 | `Interrupted` | Local user interruption (`SIGINT`) stopped observation. |
+
+Machine error envelopes carry the class, numeric code, stable reason, request
+ID, and safe remediation. Commands may refine reasons, never invent another
+numeric mapping. Workflow conclusions remain data unless an explicit
+`--exit-status` contract says otherwise.
+
+**Verify**: exhaustive tests prove every error variant maps once, all commands
+use the shared mapping, and transport/domain errors cannot collapse into usage
+or success.
 
 ### 5. Mandatory fixture integration
 
@@ -100,10 +128,12 @@ but no token, endpoint authorization, or raw secret variable.
 ## Done criteria
 
 - [ ] All approved resource nouns and slot phases are modeled.
-- [ ] Every machine format is versioned and deterministic.
+- [ ] JSON, YAML, and JSONL are versioned and deterministic; `name` is the
+      documented unversioned identity projection.
 - [ ] Redaction tests pass.
 - [ ] C002–C005 can consume schema/help/completion/man metadata without domain
       duplication.
+- [ ] Every command and API error uses the shared `ExitClass` mapping.
 - [ ] `rtk mise run check` and fresh fixture run pass.
 
 ## STOP conditions

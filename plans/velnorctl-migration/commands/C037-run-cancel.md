@@ -33,7 +33,10 @@ Apply mutation rules: explicit authority, timeout/reason, dry-run/confirmation w
 
 - Send cancellation only to GitHub; never treat local Docker kill as successful cancellation.
 - Wait/report GitHub terminal state and correlated local teardown within timeout.
-- Make repeat cancel idempotent and audit operator reason.
+- Repeat cancel is idempotent only when GitHub authoritatively reports
+  `cancelled`; already success/failure is Conflict, not cancel success. Never
+  blindly retry POST after ambiguous transport loss. No undocumented
+  force-cancel surface is authorized.
 
 ## Steps
 

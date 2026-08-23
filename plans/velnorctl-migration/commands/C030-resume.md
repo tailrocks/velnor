@@ -35,6 +35,10 @@ Apply global mutation conventions: dry-run where specified, explicit confirmatio
 - Wait for configured usable slots; report degraded partial startup.
 - Avoid duplicate registrations and preserve instance config.
 - Idempotent when already running/ready.
+- When the daemon socket is absent because the instance is stopped, use Plan
+  068's exact authorized systemd host adapter to start that instance, reconnect
+  to the new Plan 073 daemon generation, then honor optional `--wait` and global
+  timeout. Never use `sudo` or infer that socket absence means success.
 
 ## Steps
 
@@ -49,6 +53,8 @@ Apply global mutation conventions: dry-run where specified, explicit confirmatio
 ## Mandatory fixture integration
 
 Pin exact `tailrocks/velnor-actions-fixture` commit. Before dispatch, cancel every pending/in-progress old fixture run, delete only stale validation-owned runner registrations, and prove both sets clean.
+Test missing socket, systemd authorization/start failure, reconnect, partial slot
+registration, and already-ready idempotency before fresh success.
 Resume instance drained by fresh fixture sequence, wait Ready, dispatch success, and prove desired slot count plus registration uniqueness.
 Monitor only newly returned run IDs at intervals no longer than 60 seconds. Diagnose queued or unchanged state before two minutes. Save sanitized `.json`, `.jsonl`, `.log`, or `.md` only; never rendered GitHub HTML.
 

@@ -3,7 +3,7 @@
 > **Executor instructions**: Expose current manifest truth only. Tasks
 > C066–C073 own individual commands. No new capability is authorized.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/admission.rs crates/velnor-runner/src/action.rs crates/velnor-runner/src/cli.rs crates/velnor-tools crates/velnor-control crates/velnor-model`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/manifest.rs crates/velnor-runner/src/admission.rs crates/velnor-runner/src/action.rs crates/velnor-runner/src/cli.rs crates/velnor-runner/src/executor.rs crates/velnor-tools crates/velnor-control crates/velnor-model`
 
 ## Status
 
@@ -26,22 +26,30 @@ ancestry without becoming an execution fallback.
 - adapter list/describe/check services
 - transitive workflow/local-composite/nested-action compatibility analysis
 - exact field/value/alternatives/ancestry/manifest-version violations
+- canonical descriptive trust/storage/network/effect metadata only when encoded
+  in the compiled manifest and equality-tested with runtime admission
 
 No CLI handlers, manifest mutation, adapter generation, remote JavaScript
 fallback, newly accepted ref/input/value/combination/runtime, or side effect.
 
 ## Steps
 
-1. Extract manifest query and validation results so admission and inspection call
-   the same implementation.
+1. Extract one compiled manifest query and validation implementation so runtime
+   admission and inspection call identical code. Descriptive metadata is
+   canonical generated/signed manifest data, never inferred from git history,
+   fixtures, or tests; unavailable metadata remains explicitly unavailable.
 2. Add versioned capability, adapter, violation, ancestry, and compatibility
    resources.
 3. Extract transitive action-graph analysis from maintainer tooling where valid;
-   detect cycles, depth, ambiguous refs, and unavailable proof.
+   pin supplied refs once to a commit SHA and detect cycles, depth, ambiguous
+   refs, expressions/matrices/reusable workflows, and unavailable proof. Return
+   `UNKNOWN` with nonzero exit for an unprovable expansion. Exact static/runtime
+   equality applies only to fully resolved canonical graphs.
 4. Prove checking performs no checkout, container, cache, service, or credential
    side effect.
 5. Test exact positives/negatives and equality between static result and runtime
-   admission result.
+   admission result. Violation DTOs carry exact nonsensitive values or an
+   explicit redaction marker, never secrets.
 
 **Verify**: capability nextest suites and `rtk mise run check` pass.
 

@@ -3,7 +3,7 @@
 > **Executor instructions**: Implement only `velnorctl instance install <name>`. Do not combine
 > sibling commands. Run every gate; update this task and command index status.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/config.rs crates/velnor-runner/src/runner.rs systemd packaging crates/velnor-control crates/velnorctl`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/config.rs crates/velnor-runner/src/runner.rs crates/velnor-runner/Cargo.toml crates/velnor-runner/debian crates/velnor-control crates/velnorctl`
 > Compare live state before edits; stop on incompatible drift.
 
 ## Status
@@ -11,7 +11,7 @@
 - **Priority**: P1
 - **Effort**: L
 - **Risk**: HIGH
-- **Depends on**: Plans 068, 073, 076
+- **Depends on**: Plans 068, 076
 - **Category**: command migration
 - **Planned at**: commit `35d5bb7`, 2026-08-24
 
@@ -34,6 +34,10 @@ Mutation follows plan-first/idempotent rules, explicit authorization/confirmatio
 - Architecture correction: installs instance unit/environment links from already signed-apt-installed package; never installs Velnor package/binary.
 - Plan then mutate with authorization/confirmation; preserve unit hardening, user/group, watchdog, stop timeout, and protected credential paths.
 - Do not start/acquire work; `instance apply` owns activation.
+- Materialize exact `/etc/velnor/<name>.env` and the packaged instance-unit
+  enablement link, then daemon-reload without starting. Never invoke `sudo`;
+  use the authorized host adapter and fail `Authorization` when privilege is
+  absent.
 
 ## Steps
 

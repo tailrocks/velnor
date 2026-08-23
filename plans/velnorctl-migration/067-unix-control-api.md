@@ -37,7 +37,8 @@ monitoring, and remote control while allowing daemon internals to evolve.
 - `crates/velnor-client/src/**`
 - API DTOs in `velnor-model`
 - daemon composition seam needed to own server lifetime
-- Unix socket path `/run/velnor/<instance>/control.sock`
+- Unix read socket `/run/velnor/<instance>/control.sock` and mutation socket
+  `/run/velnor/<instance>/admin.sock`
 
 **Out of scope**: TCP/HTTPS, remote auth, CLI command families, lifecycle
 implementation beyond typed no-op/test ports.
@@ -73,14 +74,26 @@ unknown fields, timeout, load shed, panic, and safe internal error mapping.
 
 ### 3. Enforce Unix authorization
 
-Create per-instance socket directories with explicit owner/group/mode. Read
-access belongs to `velnor`; mutation requires `velnor-admin`; root has full
-access. Authorize using trusted Unix peer credentials plus socket permissions,
-not a caller-supplied header. Refuse startup if the boundary cannot be enforced.
+Accept only canonical instance names matching `[a-z0-9][a-z0-9_-]{0,63}`; reject
+separators and dot components. Create the path relative to an owned directory
+file descriptor with fixed umask/modes and no symlink following. `lstat` every
+existing component; unlink only an owned socket at the exact final path, never a
+symlink, non-socket, or foreign-owned object.
+
+Use two sockets so supplementary-group ambiguity cannot widen mutation access.
+Read routes exist on `control.sock`, owned by group `velnor`; mutation routes
+exist only on `admin.sock`, owned by `velnor-admin`; root has full access.
+Mutation requests on the read socket are absent/405, not header-upgraded.
+Authorize with trusted Unix peer credentials plus socket permissions, never a
+caller-supplied header or PID-only lookup. Plan 067's runtime/test setup verifies
+both groups exist and fails closed; Plan 076 owns their packaged sysusers/group
+creation. Refuse startup if any boundary cannot be enforced.
 
 **Verify**: real-socket tests under distinct test identities prove read allowed,
-mutation denied, admin mutation routed, and unauthorized requests leave no event
-or state change.
+mutation absent on the read socket, admin mutation routed only on the admin
+socket, and unauthorized requests leave no event or state change. Cover
+supplementary groups, PID reuse, symlink/non-socket/foreign-owner paths, restart,
+and bind/unlink races.
 
 ### 4. Own lifecycle and streaming
 
@@ -95,7 +108,11 @@ and no detached task after server exit.
 ### 5. Implement typed client
 
 Client negotiates `/v1/info`, validates API compatibility, propagates deadlines
-and request IDs, decodes stable errors, and supports streaming cancellation.
+and request IDs, decodes stable errors, and supports streaming cancellation. A
+canonical instance endpoint is the directory URI
+`unix:///run/velnor/<instance>`; read/stream calls select `control.sock` and
+mutation calls select `admin.sock`. Never retry a denied mutation against the
+read socket or silently downgrade admin to read behavior.
 
 **Verify**: client/server contract tests cover supported and unsupported API
 versions, reconnect, timeout, and stream closure.

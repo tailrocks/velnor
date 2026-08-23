@@ -33,7 +33,8 @@ Apply global mutation conventions: dry-run where specified, explicit confirmatio
 ## Required behavior
 
 - Operate idempotently; preserve desired slot count and current jobs.
-- Wait/report readiness when requested by global timeout behavior.
+- `--wait` observes Ready under global `--timeout`; timeout uses exit 5 and
+  leaves uncordoned desired state active. Already Ready is idempotent success.
 - Audit operator identity/reason without credentials.
 
 ## Steps
@@ -49,6 +50,8 @@ Apply global mutation conventions: dry-run where specified, explicit confirmatio
 ## Mandatory fixture integration
 
 Pin exact `tailrocks/velnor-actions-fixture` commit. Before dispatch, cancel every pending/in-progress old fixture run, delete only stale validation-owned runner registrations, and prove both sets clean.
+Release Plan 063's dedicated queued scenario with `--wait`; prove GitHub assigns
+it only after Ready and timeout/already-ready results are exact.
 After C027-style fresh queued fixture state, uncordon and prove queued job starts on same instance without duplicate registration.
 Monitor only newly returned run IDs at intervals no longer than 60 seconds. Diagnose queued or unchanged state before two minutes. Save sanitized `.json`, `.jsonl`, `.log`, or `.md` only; never rendered GitHub HTML.
 

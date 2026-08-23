@@ -49,8 +49,9 @@ two commands.
 ## Operator-directed removal
 
 The five supplied release status/verify/activate/rollback/history leaves have no
-command tasks and no replacement namespace. Plan 076 deletes their old runner
-handlers and custom domain machinery. Debian-native equivalents remain normal
+command tasks and no replacement namespace. Plan 076 separates package
+production and inventories the deletion set; Plan 079 deletes the old handlers
+and custom domain machinery during the sole final cutover. Debian-native equivalents remain normal
 host operations:
 
 | Need | Authoritative native surface |
@@ -126,8 +127,8 @@ view|validate` C051/C052.
 `events` C018; `wait` C020; `reconcile` C023–C026;
 `drain|resume|restart|recycle` C029–C032;
 `storage gc|reservations|leases` C046/C048/C049; and diagnostics bundle C074.
-Package transitions are deliberately outside `velnorctl` and follow Plan 076's
-signed apt/dpkg validation.
+Package transitions are deliberately outside `velnorctl`; Plan 076 prepares the
+signed apt/dpkg harness and Plan 079 performs the real transition/acceptance.
 
 ### Later control plane
 

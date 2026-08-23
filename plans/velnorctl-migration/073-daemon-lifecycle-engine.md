@@ -4,7 +4,7 @@
 > engine. Do not add lifecycle or daemon Clap handlers; C027–C033 and C075 own
 > those commands.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/runner.rs crates/velnor-runner/src/main.rs crates/velnor-control crates/velnor-model systemd`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/runner.rs crates/velnor-runner/src/main.rs crates/velnor-runner/debian crates/velnor-control crates/velnor-model`
 
 ## Status
 
@@ -39,12 +39,21 @@ normal-path job kill.
    process tests.
 2. Replace global drain flags with owned per-instance desired/observed state.
 3. Implement service operations for cordon/uncordon/drain/resume/restart,
-   stable-slot recycle, and dynamic desired slot count.
+   stable-slot recycle, and dynamic desired slot count. Every mutation carries
+   durable operation UUID/idempotency key, daemon generation, target resource
+   version, phase/ack ledger, and reconnectable status; replay after crash
+   resumes or returns the prior result instead of repeating an effect.
 4. Move worker startup and `--once` execution into `velnor-control` while old
    binary temporarily delegates to the same engine.
 5. Preserve strict admission before checkout/cache/service/container side
    effects, fail-close completion, graceful SIGTERM, watchdog, and JIT recycle.
-6. Test every phase, crash/restart, concurrent commands, partial JIT failure,
+   The engine owns and joins/cancels signal and watchdog tasks. Readiness may
+   degrade and recover; watchdog notification occurs only after observable
+   engine/slot progress and stops during shutdown.
+6. Force paths first request GitHub cancellation, then observe broker/terminal
+   transition before teardown. An unobserved local kill is an infrastructure
+   failure, never successful cancellation. Test every phase, crash/restart,
+   real child SIGTERM/SIGKILL, socket reconnect, readiness/watchdog, concurrent commands, partial JIT failure,
    scale up/down, deferred recycle, and normal drain with busy jobs.
 
 **Verify**: focused process/state tests and `rtk mise run check` pass.

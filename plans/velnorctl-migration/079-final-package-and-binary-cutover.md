@@ -2,7 +2,17 @@
 
 ## Status
 
-`P1 — pending; depends on Plans 063 through 078 and command tasks C001 through C075; starts only after every replacement command has fixture proof.`
+- **Priority**: P1
+- **Effort**: XL
+- **Risk**: HIGH
+- **Depends on**: Plans 063–078 and command tasks C001–C075
+- **Category**: migration, package cutover
+- **Planned at**: commit `35d5bb7`, 2026-08-24
+
+Starts only after every replacement command has fixture proof. This plan is the
+sole owner of live package rename, systemd/Docker entrypoint switch, old runtime
+deletion, and real signed-package A/B/A acceptance. Plan 076 prepares and tests
+the transition; it performs none of these live/final actions.
 
 ## Drift check at implementation start
 
@@ -63,7 +73,8 @@ verify this old-surface mapping:
 | `capabilities check-job` | `velnorctl capability check` |
 | old release status/verify/activate/rollback/history | removed; apt/dpkg are the native operator interface |
 | package build/sign/publish | maintainer CI/tooling only |
-| `configure/remove` | `velnorctl instance init/apply/delete` |
+| `configure` | `velnorctl instance init`, `instance install`, then `instance apply` |
+| `remove` | `velnorctl instance delete` |
 | `daemon` | `velnorctl daemon` |
 | single-job `run` | internal service operation `velnorctl daemon --once` |
 
@@ -97,8 +108,10 @@ No old spelling is kept as a hidden alias.
    justified) to remove the installed old package during the one-time apt
    transaction; install no compatibility binary.
 8. Update all executable workflow, script, fixture, test, documentation, and
-   example invocations. Permit old terminology only in immutable historical
-   evidence and this migration record; no current instruction may invoke it.
+   example invocations. Permit old terminology only in immutable Git history,
+   migration records, and signed predecessor repository metadata/artifacts
+   retained for rollback. Prohibit it in every newly produced, installed, or
+   active surface.
 9. Build and publish through the required supply chain: green signed commit,
    signed tag, immutable source evidence, signed Debian package/repository
    metadata, and exact apt candidate verification. Never use local `.deb`,
@@ -117,7 +130,7 @@ No old spelling is kept as a hidden alias.
 
 ## Tests
 
-- Run the complete Rust suite with `cargo nextest run`; never use `cargo test`.
+- Run `rtk cargo nextest run --workspace --locked`; never use `cargo test`.
 - Build all workspace targets and Debian/OCI artifacts from a clean tree.
 - Install, upgrade, downgrade/rollback, recover, and reinstall in disposable
   Debian environments using only signed apt repositories. Verify maintainer
@@ -175,7 +188,8 @@ No old spelling is kept as a hidden alias.
   production remains maintainer-only.
 - Signed apt install and predecessor downgrade are proven; dpkg is the sole
   installed-version/file authority; final runtime executes only `velnorctl`.
-- Full fixture cold/warm/unchanged and operator acceptance is green.
+- Full fixture cold/warm/unchanged, lifecycle/control, log/artifact, storage,
+  diagnostics, and signed-package A/B/A machine gates are green.
 
 ## Stop condition
 

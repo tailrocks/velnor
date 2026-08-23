@@ -3,7 +3,7 @@
 > **Executor instructions**: Implement only `velnorctl config validate`. Do not combine
 > sibling commands. Run every gate; update this task and command index status.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/config.rs crates/velnor-runner/src/runner.rs systemd crates/velnor-control crates/velnor-client crates/velnorctl`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/cli.rs crates/velnor-runner/src/config.rs crates/velnor-runner/src/runner.rs crates/velnor-runner/debian crates/velnor-control crates/velnor-client crates/velnorctl`
 > Compare live state before edits; stop on incompatible drift.
 
 ## Status
@@ -34,6 +34,10 @@ Inspection/check behavior is read-only, versioned, redacted, and uses standard o
 - Support selected instance and machine report.
 - Validate ownership/mode, required sources, labels/scope/architecture consistency, protected credentials, and control endpoint.
 - Do not register runner, write files, or duplicate execution preflight.
+- Validate structure, ownership/modes, references, and passive availability
+  only. Return `VALID`/success, `INVALID`/usage, or
+  `UNAVAILABLE`/unavailable-or-transport by the Plan 065 exit contract; never
+  run JIT, Docker, network execution preflight, or repair.
 
 ## Steps
 
@@ -63,4 +67,3 @@ Monitor only new run IDs every at most 60 seconds; diagnose stasis before two mi
 - Required service/authority is absent or config ownership is ambiguous.
 - Work needs capability/trust expansion, protocol guessing, unsafe credential handling, or fixture weakening.
 - Two-minute fixture stasis cannot be diagnosed.
-

@@ -3,7 +3,7 @@
 > **Executor instructions**: Implement only `velnorctl diagnostics bundle`. Do not combine
 > sibling commands. Run every gate; update task and command index status.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/slot_log.rs crates/velnor-runner/src/telemetry.rs crates/velnor-runner/src/job_message.rs crates/velnor-control crates/velnorctl`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/runner.rs crates/velnor-runner/src/slot_log.rs crates/velnor-runner/src/telemetry.rs crates/velnor-runner/src/job_message.rs crates/velnor-runner/src/storage.rs crates/velnor-runner/src/release.rs crates/velnor-runner/debian crates/velnor-control crates/velnorctl`
 > Compare current implementation and policy before editing; stop on drift.
 
 ## Status
@@ -47,6 +47,11 @@ Apply explicit authorization/reason/timeout, audit, safe rollback, and destructi
 - Exclude PATs, OAuth private keys, workflow secrets, endpoint authorization,
   raw job messages, signed URLs, live visitor/channel tokens, and rendered HTML;
   reuse production masking and self-scan archive.
+- Collect typed allowlisted projections only—never raw environment, Docker
+  inspect, unrestricted journald, or arbitrary paths. Enforce per-source/total
+  caps and timeouts; assemble in `0600` temp storage with canonical archive
+  metadata and no-clobber/no-follow output. Reopen, decompress, and scan every
+  member before atomic publish; clean temporary state on every failure.
 
 ## Steps
 

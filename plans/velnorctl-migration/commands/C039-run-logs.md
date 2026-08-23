@@ -32,7 +32,10 @@ Apply inspection rules: standard output formats/filters where relevant, resource
 ## Required behavior
 
 - Aggregate job logs by GitHub job/attempt while preserving boundaries and source.
-- Support follow/failed/step/tail/since/source/text/jsonl options applicable to run logs.
+- Support follow/failed/step/tail/since/source options. Structured records use
+  global `-o jsonl`; `--raw` is the sole raw-text mode and is mutually exclusive
+  with machine output. Preserve run/attempt/job/step/source and fallback labels,
+  plus bounded reconnect/cursor gap/dedup semantics.
 - Delegate all masking, active-local, completed-GitHub, and artifact fallback to Plan 070.
 
 ## Steps

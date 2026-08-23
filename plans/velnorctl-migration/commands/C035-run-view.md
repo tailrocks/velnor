@@ -11,7 +11,7 @@
 - **Priority**: P1
 - **Effort**: M
 - **Risk**: MED
-- **Depends on**: Plans 069, 070, 074
+- **Depends on**: Plans 069–071, 074
 - **Category**: command migration
 - **Planned at**: commit `35d5bb7`, 2026-08-24
 
@@ -34,6 +34,8 @@ Apply inspection rules: standard output formats/filters where relevant, resource
 - Support `--jobs`, `--log`, `--log-failed`, and global machine output.
 - Merge GitHub run/job/step truth with local timing, infrastructure category, events, and availability.
 - Handle attempts and unavailable local history explicitly.
+- `--log`/`--log-failed` are bounded projections from the same Plan 070 service
+  used by C039; they do not implement a second fetch/mask/follow path.
 
 ## Steps
 

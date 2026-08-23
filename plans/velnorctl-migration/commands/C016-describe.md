@@ -12,7 +12,7 @@
 - **Priority**: P1
 - **Effort**: M
 - **Risk**: MED
-- **Depends on**: Plans 065–069
+- **Depends on**: Plans 065–071, 074–075, 077
 - **Category**: command migration
 - **Planned at**: commit `35d5bb7`, 2026-08-24
 
@@ -39,7 +39,9 @@ Apply global inspection conventions: versioned table/wide/JSON/YAML/JSONL/name o
   step, conclusion, infrastructure category); timing (queue wait, pickup,
   pickup-to-first-step, checkout, container boot, workflow steps, finalize,
   teardown); resources (CPU, memory, disk reservation, active leases); and
-  diagnostics (warnings, registration state, GitHub URL, safe local log paths).
+  diagnostics (warnings, registration state, GitHub URL, typed log
+  source/stream identifiers, and a `velnorctl logs` hint). Never expose absolute
+  local filesystem paths as API/resource fields.
 - For other resources, render equivalent typed identity, placement, state,
   conditions, source evidence, related objects, and diagnostics sections.
 - Accept unambiguous canonical target syntax; return useful not-found/ambiguous errors.

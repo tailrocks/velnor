@@ -3,7 +3,7 @@
 > **Executor instructions**: Implement only `velnorctl capability export`. Do not combine
 > sibling commands. Run every gate; update task and command index status.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/admission.rs crates/velnor-runner/src/action.rs crates/velnor-runner/src/cli.rs crates/velnor-tools crates/velnor-control crates/velnorctl`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/manifest.rs crates/velnor-runner/src/admission.rs crates/velnor-runner/src/action.rs crates/velnor-runner/src/cli.rs crates/velnor-tools .github/workflows/release.yml crates/velnor-control crates/velnorctl`
 > Compare current implementation and policy before editing; stop on drift.
 
 ## Status
@@ -35,6 +35,9 @@ Keep operation read-only, side-effect-free, redacted, and consistent with standa
 - Support JSON/YAML through global output and deterministic ordering.
 - Include manifest/schema version and all accepted refs/inputs/values/combinations plus implications; no credentials/internal secrets.
 - Output is descriptive, not editable/importable policy.
+- Canonical deterministic serializer/hash lives in the shared manifest library.
+  This command and maintainer package production call that library directly;
+  release CI never executes the operator CLI to obtain manifest bytes.
 
 ## Steps
 

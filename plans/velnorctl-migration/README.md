@@ -67,14 +67,14 @@ Command granularity is normative:
 | [066](066-operational-history-and-events.md) | Persist sanitized operational history and events | P1 | L | 065 | TODO |
 | [067](067-unix-control-api.md) | Serve versioned Unix-socket control API | P1 | L | 066 | TODO |
 | [068](068-configuration-auth-instance-services.md) | Extract configuration, authentication, and instance services | P1 | L | 064–067 | TODO |
-| [069](069-resource-query-and-description-services.md) | Build resource query and description services | P1 | L | 065–068 | TODO |
-| [070](070-log-access-services.md) | Build active and completed log services | P1 | L | 065–069 | TODO |
-| [071](071-observation-metrics-and-wait-services.md) | Build event, metrics, and wait services | P2 | L | 066, 067, 069 | TODO |
-| [072](072-health-preflight-reconciliation-services.md) | Separate health, preflight, and reconciliation services | P1 | L | 066–071 | TODO |
+| [069](069-resource-query-and-description-services.md) | Build resource query and description services | P1 | L | 065–068, 074–075 | TODO |
+| [070](070-log-access-services.md) | Build active and completed log services | P1 | L | 065–069, 074 | TODO |
+| [071](071-observation-metrics-and-wait-services.md) | Build event, metrics, and wait services | P2 | L | 066, 067, 069, 075 | TODO |
+| [072](072-health-preflight-reconciliation-services.md) | Separate health, preflight, and reconciliation services | P1 | L | 066–071, 074–075 | TODO |
 | [073](073-daemon-lifecycle-engine.md) | Build daemon and lifecycle state engine | P1 | XL | 066–072 | TODO |
-| [074](074-github-workflow-run-client.md) | Build GitHub workflow-run client and merge service | P1 | L | 066–070 | TODO |
+| [074](074-github-workflow-run-client.md) | Build canonical GitHub Actions client and run merge service | P1 | L | 065, 066, 068 | TODO |
 | [075](075-storage-control-services.md) | Build storage control services | P1 | L | 066, 067 | TODO |
-| [076](076-debian-native-package-management.md) | Make Debian package management the only version-management path | P1 | L | 064, 068, 073 | TODO |
+| [076](076-debian-native-package-management.md) | Prepare the Debian-native package transition | P1 | L | 064, 068 | TODO |
 | [077](077-capability-adapter-workflow-services.md) | Build capability, adapter, and workflow-check services | P2 | L | 064–069 | TODO |
 | [078](078-diagnostics-collection-service.md) | Build sanitized diagnostics collection service | P2 | M | 066–077 | TODO |
 | [079](079-final-package-and-binary-cutover.md) | Cut over package and remove `velnor-runner` | P1 | XL | 063–078, C001–C075 | TODO |
@@ -109,11 +109,15 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED` with reason, or
    queue, cancellation, logs, artifacts, and controlled state scenarios.
 2. Plans 064–067 establish crates, resource/output contracts, durable history,
    and local API.
-3. Plans 068–078 extract shared services. No handler may duplicate their logic.
+3. Plans 068, 074, and 075 establish config/GitHub/storage authority; then 069–
+   073 build projections, logs, observation, reconciliation, and lifecycle.
+   Plans 076–078 prepare packaging and remaining capability/diagnostic services.
+   No handler may duplicate their logic.
 4. Execute command tasks by dependency and priority. Each task is independently
    reviewable, fixture-validated, and marked `DONE` in `commands/README.md`.
-5. Plan 079 runs complete cold/warm/unchanged acceptance and removes every old
-   product/package/runtime surface.
+5. C075 proves the source-built daemon. Plan 079 alone performs the live package/
+   systemd cutover, real signed-package A/B/A acceptance, and removal of every
+   old product/package/runtime surface.
 6. Plan 080 adds optional remote contexts and fleet aggregation without changing
    command semantics or creating a scheduler.
 
@@ -125,7 +129,7 @@ Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED` with reason, or
   needed.
 - Never weaken `tailrocks/velnor-actions-fixture`; extend it when coverage lacks
   a required observable state.
-- Run Rust tests only with `cargo nextest run`, normally via repository mise.
+- Run Rust tests only with `rtk cargo nextest run`, normally via repository mise.
 - Before fixture dispatch: cancel old pending/in-progress runs, delete only stale
   validation-owned registrations, prove clean, capture new run ID, and monitor
   only it. Check within 60 seconds; diagnose stasis before two minutes.

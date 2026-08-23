@@ -35,6 +35,9 @@ Apply global mutation conventions: dry-run where specified, explicit confirmatio
 - Scale up preflights, creates slots/JIT registrations, reports each readiness.
 - Scale down cordons highest-numbered excess slots, finishes jobs, deregisters, then commits desired count.
 - Never silently rewrite env and restart; expose desired/observed divergence and support wait.
+- Exact `--wait` uses global timeout. Validate manifest/configured min/max and
+  host capacity before committing a new durable desired generation; represent
+  each slot change as a replay-safe Plan 073 operation and recover after crash.
 
 ## Steps
 
@@ -49,6 +52,9 @@ Apply global mutation conventions: dry-run where specified, explicit confirmatio
 ## Mandatory fixture integration
 
 Pin exact `tailrocks/velnor-actions-fixture` commit. Before dispatch, cancel every pending/in-progress old fixture run, delete only stale validation-owned runner registrations, and prove both sets clean.
+Use Plan 063 concurrent scenario with two simultaneous held jobs. Prove scale up
+and 2→1 scale-down defer busy excess work, then converge after release without
+duplicate registration or lost desired generation.
 Scale dedicated fixture instance 1–2, run two concurrent jobs, scale 2–1 with one busy, and prove safe drain plus final desired/observed equality.
 Monitor only newly returned run IDs at intervals no longer than 60 seconds. Diagnose queued or unchanged state before two minutes. Save sanitized `.json`, `.jsonl`, `.log`, or `.md` only; never rendered GitHub HTML.
 

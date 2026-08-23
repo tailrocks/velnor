@@ -35,6 +35,10 @@ Apply global mutation conventions: dry-run where specified, explicit confirmatio
 - Idle recycles immediately; busy refuses by default; `--after-current-job` persists deferred recycle; force is emergency-only.
 - Create new JIT identity/broker session and wait Ready.
 - Targeting runner resolves exact owning slot and rejects ambiguity.
+- Resolve runner→slot under target resource-version precondition; reject an
+  already recycled/stale runner ID. Emergency force first requests and observes
+  GitHub cancellation; local teardown without that authority is infrastructure
+  failure, never success.
 
 ## Steps
 

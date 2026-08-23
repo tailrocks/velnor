@@ -33,7 +33,10 @@ Apply inspection rules: standard output formats/filters where relevant, resource
 
 - Support `--compact` and `--exit-status`.
 - Surface new failures immediately, reconnect safely, and follow attempt changes.
-- With `--exit-status`, return run conclusion; without it, transport/usage failures still non-zero.
+- Follow attempt rollover and cursor gap via explicit resnapshot; never skip or
+  duplicate events. With `--exit-status`, terminal success exits 0 and any
+  terminal non-success exits Condition 1. Without it, observed conclusions are
+  data. Timeout exits 5, transport/rate failure 7, and Ctrl-C 130.
 
 ## Steps
 

@@ -31,9 +31,14 @@ Apply mutation rules: explicit authority, timeout/reason, dry-run/confirmation w
 
 ## Required behavior
 
-- Default dry-run; support target-free, class, JSON, `--yes`, and reason.
-- Acquire GC leader/filesystem locks, honor active leases, revalidate ownership, show expected physical reclaim, and audit outcome.
-- Never expose lease bypass or call broad Docker prune.
+- Exact mutation surface is dry-run by default, `--target-free <bytes>`,
+  `--class <class>`, global `-o json`, and
+  `--yes --plan-id <id> --reason <text>` for execution.
+- Acquire GC leader/filesystem locks, honor active leases, revalidate ownership/
+  resource versions, show expected physical reclaim, and audit outcome. After
+  each deletion remeasure actual free blocks/inodes; owned builder cleanup uses
+  its dedicated builder path. Record history atomically.
+- Never expose force/lease bypass or call broad Docker prune.
 
 ## Steps
 
@@ -63,4 +68,3 @@ Monitor only new run IDs every at most 60 seconds; diagnose unchanged/queued sta
 - Shared service lacks authoritative required behavior.
 - Work needs capability/trust expansion, protocol guessing, fixture weakening, or destructive scope beyond command.
 - Two-minute fixture stasis cannot be diagnosed.
-

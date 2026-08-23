@@ -3,7 +3,7 @@
 > **Executor instructions**: Implement only `velnorctl instance init <name>`. Do not combine
 > sibling commands. Run every gate; update this task and command index status.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/config.rs crates/velnor-runner/src/runner.rs systemd packaging crates/velnor-control crates/velnorctl`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/config.rs crates/velnor-runner/src/runner.rs crates/velnor-runner/Cargo.toml crates/velnor-runner/debian crates/velnor-control crates/velnorctl`
 > Compare live state before edits; stop on incompatible drift.
 
 ## Status
@@ -11,7 +11,7 @@
 - **Priority**: P1
 - **Effort**: M
 - **Risk**: HIGH
-- **Depends on**: Plans 068, 073
+- **Depends on**: Plan 068
 - **Category**: command migration
 - **Planned at**: commit `35d5bb7`, 2026-08-24
 
@@ -32,6 +32,11 @@ Mutation follows plan-first/idempotent rules, explicit authorization/confirmatio
 ## Required behavior
 
 - Validate name/scope/labels/slots/trust/storage/resource policy and credential reference.
+- Exact inputs are `--github-scope <owner|owner/repo>`, `--runner-group <name>`,
+  repeatable `--label <label>`, `--slots <count>`, `--trust-scope <id>`,
+  `--storage-profile <id>`, `--resource-profile <id>`, and
+  `--credential-ref <id>`. Any context-derived default is shown in the plan;
+  no security/storage value is silently guessed.
 - Write desired config atomically with secure ownership/mode; refuse unsafe overwrite unless explicit force/reason.
 - No systemd start, JIT generation, Docker container, or GitHub mutation.
 
@@ -48,7 +53,9 @@ Mutation follows plan-first/idempotent rules, explicit authorization/confirmatio
 ## Mandatory fixture integration
 
 Pin exact `tailrocks/velnor-actions-fixture` commit. Cancel all old active runs, delete only stale validation-owned registrations, and prove clean before dispatch.
-Init dedicated fixture instance, prove no registration/work exists, then later apply and run fresh success using exact desired config.
+Init a dedicated inactive fixture instance and prove it creates no registration,
+service start, socket, container, or work while the baseline instance completes
+a fresh success unchanged. C064—not this task—owns later activation.
 Monitor only new run IDs every at most 60 seconds; diagnose stasis before two minutes. Save sanitized non-HTML evidence only.
 
 ## Done criteria

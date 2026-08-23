@@ -31,7 +31,10 @@ Apply inspection rules: standard output formats/filters where relevant, resource
 
 ## Required behavior
 
-- Show identity, class, owner, lifetime, budget, safe-delete rule, and existence.
+- Show identity, class, owner, lifetime, budget, safe-delete rule, configured
+  canonical root, resolved effective path, relocation source,
+  filesystem/device/mount, existence/writability, and symlink/outside-root
+  condition using no-follow inspection.
 - Do not expose secret files or follow paths outside canonical roots.
 - Replace old `velnor-runner storage paths`; no alias.
 
@@ -63,4 +66,3 @@ Monitor only new run IDs every at most 60 seconds; diagnose unchanged/queued sta
 - Shared service lacks authoritative required behavior.
 - Work needs capability/trust expansion, protocol guessing, fixture weakening, or destructive scope beyond command.
 - Two-minute fixture stasis cannot be diagnosed.
-

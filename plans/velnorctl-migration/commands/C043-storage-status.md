@@ -31,9 +31,11 @@ Apply inspection rules: standard output formats/filters where relevant, resource
 
 ## Required behavior
 
-- Render path/class/logical/physical/budget/pressure plus host summary.
+- Render path/class/logical/physical/budget/pressure plus host bytes/inodes,
+  percent and absolute thresholds, emergency reserve, active reservations and
+  leases, oldest use, last GC/history, unowned paths, source time, and staleness.
 - Distinguish unavailable/unknown accounting from zero.
-- Read-only and safe during active GC/jobs.
+- Read-only and safe during active GC/jobs; observation never reaps state.
 
 ## Steps
 
@@ -63,4 +65,3 @@ Monitor only new run IDs every at most 60 seconds; diagnose unchanged/queued sta
 - Shared service lacks authoritative required behavior.
 - Work needs capability/trust expansion, protocol guessing, fixture weakening, or destructive scope beyond command.
 - Two-minute fixture stasis cannot be diagnosed.
-

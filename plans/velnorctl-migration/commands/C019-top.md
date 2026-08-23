@@ -51,7 +51,9 @@ Apply global inspection conventions: versioned table/wide/JSON/YAML/JSONL/name o
 ## Mandatory fixture integration
 
 Pin exact `tailrocks/velnor-actions-fixture` commit. Before dispatch, cancel every pending/in-progress old fixture run, delete only stale validation-owned runner registrations, and prove both sets clean.
-During fresh CPU/memory/storage fixture hold, correlate top host/instance/slot/job/storage values with exact job and reservation.
+Use Plan 063's bounded `load` scenario and ready marker. Correlate CPU/memory/
+storage with exact job/slot/instance and reservation IDs within declared
+tolerance/safety ceilings; prove teardown and clean terminal stop.
 Monitor only newly returned run IDs at intervals no longer than 60 seconds. Diagnose queued or unchanged state before two minutes. Save sanitized `.json`, `.jsonl`, `.log`, or `.md` only; never rendered GitHub HTML.
 
 ## Done criteria

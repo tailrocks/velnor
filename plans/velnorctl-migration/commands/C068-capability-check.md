@@ -3,7 +3,7 @@
 > **Executor instructions**: Implement only `velnorctl capability check --job-dump <path>`. Do not combine
 > sibling commands. Run every gate; update task and command index status.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/admission.rs crates/velnor-runner/src/action.rs crates/velnor-runner/src/cli.rs crates/velnor-tools crates/velnor-control crates/velnorctl`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/manifest.rs crates/velnor-runner/src/admission.rs crates/velnor-runner/src/action.rs crates/velnor-runner/src/cli.rs crates/velnor-tools crates/velnor-control crates/velnorctl`
 > Compare current implementation and policy before editing; stop on drift.
 
 ## Status
@@ -35,6 +35,10 @@ Keep operation read-only, side-effect-free, redacted, and consistent with standa
 - Replace old plural `capabilities check-job`; no alias.
 - Report exact field/value, alternatives, ancestry, manifest version; protect any sensitive received value.
 - Perform complete validation before all execution side effects.
+- `--job-dump` accepts only a bounded regular file with explicit maximum bytes
+  and format/version, opened no-follow; reject symlink, device, FIFO, and
+  oversize input. Never log or echo contents. Sensitive received values are
+  dropped or represented by an explicit redaction marker.
 
 ## Steps
 

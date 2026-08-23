@@ -3,7 +3,7 @@
 > **Executor instructions**: Implement only `velnorctl config sources`. Do not combine
 > sibling commands. Run every gate; update this task and command index status.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/config.rs crates/velnor-runner/src/runner.rs systemd crates/velnor-control crates/velnor-client crates/velnorctl`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/cli.rs crates/velnor-runner/src/config.rs crates/velnor-runner/src/runner.rs crates/velnor-runner/debian crates/velnor-control crates/velnor-client crates/velnorctl`
 > Compare live state before edits; stop on incompatible drift.
 
 ## Status
@@ -31,7 +31,10 @@ Inspection/check behavior is read-only, versioned, redacted, and uses standard o
 
 ## Required behavior
 
-- Show built-ins, context file, instance config, systemd environment, process environment, and command overrides.
+- Show client-context sources separately from daemon startup-resolved sources.
+  Systemd/process environment is reported only from the daemon's captured
+  startup provenance; never inspect live process environment or pretend it is a
+  separately re-readable precedence layer.
 - Report path/type/mode/owner/precedence without values for secret-bearing sources.
 - Read-only and usable when daemon is down.
 
@@ -63,4 +66,3 @@ Monitor only new run IDs every at most 60 seconds; diagnose stasis before two mi
 - Required service/authority is absent or config ownership is ambiguous.
 - Work needs capability/trust expansion, protocol guessing, unsafe credential handling, or fixture weakening.
 - Two-minute fixture stasis cannot be diagnosed.
-

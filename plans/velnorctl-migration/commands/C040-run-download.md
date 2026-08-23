@@ -34,6 +34,10 @@ Apply inspection rules: standard output formats/filters where relevant, resource
 - List/select artifacts, preserve artifact boundaries, and validate destination/overwrite policy.
 - Reject traversal, absolute paths, unsafe symlinks, duplicate collisions, corrupt archives, and expired URLs.
 - Download is GitHub-sourced; local fallback is not product authority.
+- Inherit every Plan 074 digest, compressed/expanded/entry/ratio/nesting cap,
+  mode/type restriction, normalized and case-fold collision check, no-follow
+  ancestor check, temporary-file cleanup, overwrite rule, and atomic promotion.
+  An explicitly selected unsupported/non-ZIP artifact fails typed.
 
 ## Steps
 
@@ -48,6 +52,9 @@ Apply inspection rules: standard output formats/filters where relevant, resource
 ## Mandatory fixture integration
 
 Pin exact `tailrocks/velnor-actions-fixture` commit. Cancel all pending/in-progress old fixture runs, delete only stale validation-owned registrations, and prove clean before dispatch.
+Download Plan 063 multiple artifacts. Fake-API/local archive tests additionally
+cover ZIP bomb, too many entries, symlink ancestor, normalized/case collision,
+digest mismatch, interrupted transfer, unsupported type, and zero partial output.
 Produce multiple fixture artifacts, download exact new run, verify bytes/names/boundaries, and run hostile archive test through mock service.
 Monitor only new run IDs every at most 60 seconds; diagnose unchanged/queued state before two minutes. Save sanitized non-HTML evidence only.
 

@@ -5,7 +5,7 @@
 > existing fixture. If the fixture baseline cannot pass unchanged, diagnose and
 > fix Velnor first; do not hide the failure in the new workflow.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- AGENTS.md docs/vision.md docs/roadmap.md docs/prompt.md plans/README.md crates/velnor-tools/src/main.rs scripts`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- AGENTS.md .github/AGENTS.md README.md docs/vision.md docs/roadmap.md docs/prompt.md plans/README.md crates/velnor-tools/src/main.rs scripts`
 > Compare live text with the evidence below before editing.
 
 ## Status
@@ -35,13 +35,15 @@ plane inspection. Every later task needs one stable integration corpus.
   `tailrocks/velnor-actions-fixture`.
 - Fixture `compat.yml` covers real execution semantics. It lacks deterministic
   hold/fail/cancel phases needed by `logs`, `wait`, lifecycle, queue, and event
-  validation.
+  validation. Its current manual input is `lanes`, which conflicts with the
+  marked contract's sole selector `lane`.
 
 ## Scope
 
 **Velnor repository**:
 
-- `docs/vision.md`, `docs/roadmap.md`, `docs/prompt.md`, `AGENTS.md`
+- `docs/vision.md`, `docs/roadmap.md`, `docs/prompt.md`, `AGENTS.md`,
+  `.github/AGENTS.md`, and active root `README.md` references
 - `plans/README.md`
 - `crates/velnor-tools/src/main.rs` and its fixture-default tests
 - fixture validation scripts only when needed to enforce the cleanup sequence
@@ -73,7 +75,14 @@ symlink, previous-version pointer, duplicate version history, or package
 activation API. Package build/sign/publish remains CI/maintainer work, not an
 operator CLI surface.
 
-**Verify**: `rtk rg -n "velnorctl|velnor-runner" docs/vision.md docs/roadmap.md docs/prompt.md AGENTS.md plans/README.md` shows the new direction and no contradiction claiming `velnor-runner` remains final architecture.
+Reconcile `.github/AGENTS.md` and active root README text in the same reviewed
+direction change. They must name the sole `lane=github|velnor|both` selector,
+the class-derived default, runner group `velnor-trusted`, runner selection label
+`velnor-target-mvp`, and the final binary/package ownership. Do not leave
+a lower instruction file that reintroduces `lanes` or a universal Velnor
+default.
+
+**Verify**: `rtk rg -n "velnorctl|velnor-runner|lanes|lane" docs/vision.md docs/roadmap.md docs/prompt.md AGENTS.md .github/AGENTS.md README.md plans/README.md` shows the new direction, sole selector, and no contradiction claiming `velnor-runner` remains final architecture.
 
 ### 2. Correct fixture ownership in maintainer tooling
 
@@ -85,12 +94,25 @@ fixture reference points to `donbeave`.
 
 ### 3. Add a control-plane fixture without weakening compatibility coverage
 
+Before adding the control workflow, make the canonical fixture-class generator
+emit the sole `lane=github|velnor|both` input and apply its byte-identical output
+through the unified-CI rollout. Never hand-fork `compat.yml` inside this
+migration. Record the resulting exact fixture commit; every later plan pins
+that commit. If the canonical generator rollout has not landed, STOP here.
+
 Add a manual workflow using only already approved actions and bash. Required
-inputs: `scenario=success|failure|hold`, `hold_seconds` bounded to `0..300`, and
-`lane=velnor|github|both`. Jobs must expose distinct named steps, write a
-sanitized result artifact, emit output/summary lines, deliberately fail only for
-`failure`, and remain active long enough for `hold` inspection. Add a hosted
-aggregator that reports the requested terminal state. Do not alter `compat.yml`.
+inputs: `scenario=success|failure|hold|queue|concurrent|artifacts|cache|load`,
+`hold_seconds` bounded to `0..300`, `artifact_count` bounded to `1..8`, and
+`lane=github|velnor|both`. Each scenario has deterministic named steps and
+machine-readable markers. `queue` targets a dedicated validation instance so
+no other runner can claim it; `concurrent` holds two jobs; `artifacts` emits
+multiple bounded sanitized artifacts; `cache` exposes cold/warm/unchanged
+markers; `load` applies bounded CPU/memory/disk activity with ready marker,
+safety ceilings, declared measurement tolerance, and full teardown. Jobs
+deliberately fail only for `failure`. Add a hosted aggregator
+that reports the requested terminal state. Never synthesize hostile archives
+or disk pressure in GitHub; Plans 074/075 test those through isolated fake API
+and storage roots.
 
 **Verify**: fixture `mise run check` and `actionlint` pass; workflow audit proves
 full SHA pins, concurrency, timeouts, `cargo nextest` policy, and canonical lane
@@ -100,14 +122,15 @@ selection.
 
 Before dispatch, cancel all non-completed fixture runs. Delete only stale GitHub
 runner registrations with the dedicated validation-name prefix; confirm no such
-registration remains. Dispatch existing `compat.yml` with `lanes=both`, capture
+registration remains. Dispatch existing `compat.yml` with `lane=both`, capture
 the new run ID, and inspect only it every at most 60 seconds. If queued or
 unchanged for two minutes, inspect runner group/label, daemon registration, and
 broker/registry logs immediately.
 
-Then dispatch `control-plane.yml` for `success`, `failure`, and `hold`; cancel the
-hold run through GitHub and prove GitHub reports `cancelled`. Record run URLs and
-sanitized JSON only.
+Then dispatch every `control-plane.yml` scenario. Cancel the hold run through
+GitHub and prove GitHub reports `cancelled`. Prove the queue is isolated,
+concurrent jobs overlap, artifacts are distinct/bounded, and unchanged cache
+markers report expected reuse. Record run URLs and sanitized JSON only.
 
 **Verify**: `compat` lane comparison passes; control success succeeds, controlled
 failure fails at its named step with logs, and hold cancellation terminates with
@@ -117,11 +140,13 @@ no orphaned runner registration.
 
 - Unit tests for corrected default fixture slug and dispatch input validation.
 - Fixture static tests for every scenario and lane.
-- Live both-lane compatibility run plus three control scenarios.
+- Live both-lane compatibility run plus all eight control scenarios.
 
 ## Done criteria
 
 - [ ] Direction files and prompt agree on complete `velnor-runner` removal.
+- [ ] Root and `.github` instructions agree on sole `lane` selector, runner
+      group/label distinction, and class-derived defaults.
 - [ ] Direction files agree that apt/dpkg exclusively own installed-version
       management and no Velnor release command/resource/API remains.
 - [ ] Fixture tooling defaults to `tailrocks/velnor-actions-fixture`.
@@ -132,6 +157,8 @@ no orphaned runner registration.
 ## STOP conditions
 
 - Existing fixture is not green before the new workflow is added.
+- Canonical fixture-class generation still emits `lanes` or cannot produce the
+  byte-identical `lane` contract.
 - New fixture needs an unapproved capability or weakens an existing assertion.
 - Direction documents disagree about final binary/package ownership.
 

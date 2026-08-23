@@ -32,8 +32,11 @@ Apply inspection rules: standard output formats/filters where relevant, resource
 ## Required behavior
 
 - Resolve exact run/repository/context and canonical HTTPS URL.
-- Attempt browser only when environment supports it; otherwise print URL.
-- Browser launch failure must be explicit but never change GitHub run conclusion.
+- Machine output and non-TTY human mode print the canonical URL only. Interactive
+  human mode may launch through an argv-only platform API, never a shell.
+  Validate GitHub host/context; pass option-looking URLs as data, not launcher
+  flags. Launch failure returns Operation while safely emitting the URL and
+  never changes GitHub run conclusion.
 
 ## Steps
 

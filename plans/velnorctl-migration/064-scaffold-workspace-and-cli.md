@@ -36,11 +36,16 @@ Create `velnor-model`, `velnor-control`, `velnor-client`, `velnor-render`, and
 `velnorctl`. Dependency direction is:
 
 ```text
-velnor-model <- velnor-control <- velnor-client <- velnorctl
+velnor-model <- velnor-control <- velnorctl
+velnor-model <- velnor-client  <- velnorctl
 velnor-model <- velnor-render  <- velnorctl
 ```
 
-No shared crate depends on Clap. No domain crate depends on Axum. During the
+`velnor-client` never depends on `velnor-control`, Axum, daemon internals, or
+server application ports; both sides meet only through versioned model DTOs and
+an explicit transport contract. No shared crate depends on Clap. Core model and
+application modules do not depend on Axum; Plan 067 isolates Axum in the
+control crate's transport-adapter module. During the
 migration only, `velnorctl` may depend on a narrow public facade from
 `velnor-runner`; later tasks remove that dependency before Plan 079.
 
@@ -64,7 +69,8 @@ and library so integration tests can parse/dispatch without subprocess-only
 tests.
 
 **Verify**: `rtk cargo metadata --no-deps --format-version 1` lists seven
-workspace packages and the dependency graph has no cycle.
+workspace packages and the dependency graph has no cycle. A boundary test proves
+`velnor-client` does not depend on `velnor-control`, Axum, or runner internals.
 
 ### 2. Extract binary bootstrapping from old main
 
@@ -103,7 +109,7 @@ conclusion changes.
 
 - Parser-composition tests for rejected unimplemented/legacy commands.
 - Dependency-boundary test or `cargo metadata` assertion.
-- Existing 871 tests plus new crate tests.
+- All drift-snapshot baseline tests plus new crate tests.
 - One fresh fixture success run.
 
 ## Done criteria

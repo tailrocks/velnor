@@ -3,7 +3,7 @@
 > **Executor instructions**: Build bounded collectors and archive assembly only.
 > Task C074 owns `velnorctl diagnostics bundle`.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/slot_log.rs crates/velnor-runner/src/telemetry.rs crates/velnor-runner/src/job_message.rs crates/velnor-control crates/velnor-model`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/runner.rs crates/velnor-runner/src/slot_log.rs crates/velnor-runner/src/telemetry.rs crates/velnor-runner/src/job_message.rs crates/velnor-runner/src/storage.rs crates/velnor-runner/src/release.rs crates/velnor-runner/debian crates/velnor-control crates/velnor-model`
 
 ## Status
 
@@ -35,13 +35,18 @@ or raw job messages.
 
 ## Steps
 
-1. Inventory sensitive fields and extract the exact production masking engine.
-2. Implement typed collectors through services, with per-source bounds/timeouts
-   and partial-failure manifest entries.
-3. Implement safe temp/output paths, member allowlist, stable ordering/hashes,
-   permissions, compression, and cleanup.
-4. Add final archive scan for injected secrets, authorization canaries, and
-   prohibited member types.
+1. Inventory sensitive fields and extract the exact production masking engine
+   plus a known-secret registry and structured sensitive-key redaction.
+2. Implement typed allowlisted collectors through services, with per-source and
+   total byte/item/time bounds and partial-failure manifest entries. Prohibit raw
+   environment, Docker inspect, job messages, unrestricted journald, and
+   arbitrary filesystem reads even when a masker exists.
+3. Assemble in `0600` temporary storage with canonical member ordering/headers,
+   stable hashes, no-clobber/no-follow output checks, compression, and cleanup
+   on every error.
+4. Reopen and decompress the completed archive, scan every member and manifest
+   for injected secrets, authorization canaries, and prohibited member types,
+   then atomically publish only the clean archive.
 5. Test healthy/degraded sources, oversized logs, unavailable journald/GitHub,
    overwrite/symlink safety, permissions, redaction, and read-only behavior.
 

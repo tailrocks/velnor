@@ -31,7 +31,10 @@ Mutation follows plan-first/idempotent rules, explicit authorization/confirmatio
 
 ## Required behavior
 
-- Require explicit confirmation when deleting current context; report resulting no-current state.
+- Require `--yes` in noninteractive mode and interactive confirmation when
+  deleting the current context; otherwise refuse. Missing non-current context is
+  idempotent success; deleting current produces explicit no-current state and a
+  sanitized Plan 068 local journal entry.
 - Lock/atomically rewrite file and preserve all unrelated contexts.
 - Never unlink credential targets or contact endpoint.
 

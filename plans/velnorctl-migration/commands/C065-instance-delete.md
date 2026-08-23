@@ -3,7 +3,7 @@
 > **Executor instructions**: Implement only `velnorctl instance delete <name>`. Do not combine
 > sibling commands. Run every gate; update this task and command index status.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/config.rs crates/velnor-runner/src/runner.rs systemd packaging crates/velnor-control crates/velnorctl`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/config.rs crates/velnor-runner/src/runner.rs crates/velnor-runner/Cargo.toml crates/velnor-runner/debian crates/velnor-control crates/velnorctl`
 > Compare live state before edits; stop on incompatible drift.
 
 ## Status
@@ -35,6 +35,9 @@ Mutation follows plan-first/idempotent rules, explicit authorization/confirmatio
 - Remove exact unit/config/runtime state and idle registrations owned by instance; refuse active/ambiguous ownership.
 - Preserve credential files, shared caches, the installed Debian package, other
   instances, and GitHub runs.
+- Retain a sanitized instance tombstone and operation audit under Plan 066
+  retention. Refuse active jobs, active leases, foreign/ambiguous ownership, or
+  incomplete registration identity; repeated completed delete is idempotent.
 
 ## Steps
 
@@ -49,7 +52,10 @@ Mutation follows plan-first/idempotent rules, explicit authorization/confirmatio
 ## Mandatory fixture integration
 
 Pin exact `tailrocks/velnor-actions-fixture` commit. Cancel all old active runs, delete only stale validation-owned registrations, and prove clean before dispatch.
-After fresh fixture success, delete dedicated instance; prove exact registrations/unit/state gone and credentials/shared caches/other instance untouched.
+After fresh fixture success, prove active-job and ambiguous-ownership refusal,
+then delete the drained dedicated instance. Prove exact registrations/unit/live
+state gone, tombstone retained, credentials/shared caches/other instance
+untouched, and cleanup failure is recoverable/idempotent.
 Monitor only new run IDs every at most 60 seconds; diagnose stasis before two minutes. Save sanitized non-HTML evidence only.
 
 ## Done criteria

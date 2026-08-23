@@ -32,7 +32,8 @@ Apply global mutation conventions: dry-run where specified, explicit confirmatio
 
 ## Required behavior
 
-- Default dry-run; execution requires confirmation/reason.
+- Default dry-run; mutation requires `--yes --plan-id <id> --reason <text>` and
+  executes the exact immutable Plan 072/075 plan; no force/lease bypass exists.
 - Remove/expire only proven stale records, detect unowned paths, rebuild accounting, clear pressure only after recovery.
 - Never delete ambiguous data or bypass active leases.
 
@@ -49,7 +50,9 @@ Apply global mutation conventions: dry-run where specified, explicit confirmatio
 ## Mandatory fixture integration
 
 Pin exact `tailrocks/velnor-actions-fixture` commit. Before dispatch, cancel every pending/in-progress old fixture run, delete only stale validation-owned runner registrations, and prove both sets clean.
-Seed isolated stale reservation/lease/accounting beside fresh fixture cache use; prove active data preserved, stale state repaired, pressure truth restored.
+Seed isolated stale reservation/lease/accounting beside Plan 063's fresh held
+cache scope. Prove dry-run changes no files/DB rows, execution preserves active
+data, repairs only reviewed stale state, and restores pressure truth.
 Monitor only newly returned run IDs at intervals no longer than 60 seconds. Diagnose queued or unchanged state before two minutes. Save sanitized `.json`, `.jsonl`, `.log`, or `.md` only; never rendered GitHub HTML.
 
 ## Done criteria
@@ -64,4 +67,3 @@ Monitor only newly returned run IDs at intervals no longer than 60 seconds. Diag
 - Shared service cannot provide required authoritative data or behavior.
 - Implementation needs an unapproved capability, trust expansion, protocol guess, or destructive action outside exact command scope.
 - Fixture would need weakening, or two-minute stasis cannot be diagnosed.
-

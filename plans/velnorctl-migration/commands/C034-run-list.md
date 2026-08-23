@@ -34,6 +34,10 @@ Apply inspection rules: standard output formats/filters where relevant, resource
 - Support repo, workflow, branch, status, and runner filters plus pagination/time bounds.
 - Show GitHub status/conclusion, workflow/ref/SHA/event/attempt, Velnor jobs, instance/slot, and infrastructure category.
 - GitHub conclusions stay authoritative.
+- Push filters to Plan 074 server-side where GitHub supports them; bound per-run
+  job hydration concurrency and rate budget otherwise. Use stable attempt-aware
+  pagination tokens/status enums and surface partial enrichment failures instead
+  of silently dropping rows.
 
 ## Steps
 
@@ -63,4 +67,3 @@ Monitor only new run IDs every at most 60 seconds; diagnose unchanged/queued sta
 - Shared service lacks authoritative required behavior.
 - Work needs capability/trust expansion, protocol guessing, fixture weakening, or destructive scope beyond command.
 - Two-minute fixture stasis cannot be diagnosed.
-

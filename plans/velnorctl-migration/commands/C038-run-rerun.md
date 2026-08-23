@@ -31,9 +31,14 @@ Apply mutation rules: explicit authority, timeout/reason, dry-run/confirmation w
 
 ## Required behavior
 
-- Support `--failed`; select exact source run/attempt and return new attempt identity.
+- Support `--failed`; require exact source attempt and
+  `--expected-latest-attempt <n>` precondition, then prove the same run gains the
+  returned new attempt identity.
 - Do not synthesize rerun locally or reuse stale slot/job records.
-- Handle terminal eligibility and repeated requests explicitly.
+- Rerun is non-idempotent. Never blindly retry after ambiguous transport loss;
+  reconcile authoritative attempt state or return Transport/Ambiguous. Persist
+  operation correlation and prove repeated invocation increments only when
+  separately accepted.
 
 ## Steps
 

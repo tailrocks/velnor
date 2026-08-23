@@ -26,14 +26,20 @@ Every task must:
 - preserve sanitized non-HTML evidence only;
 - retain no backward-compatible alias after command migration.
 
+All commands use Plan 065's one numeric `ExitClass` mapping: 0 success, 1
+observed failed/degraded condition, 2 usage, 3 authorization, 4 unavailable/not
+found, 5 timeout, 6 conflict/precondition, 7 transport/rate-limit/ambiguous
+upstream, 8 definite operation failure, and 130 local SIGINT. A task may define
+stable reason codes, never another numeric taxonomy.
+
 ## Commands
 
 | Task | Command | Priority | Effort | Depends on | Status |
 |---|---|---:|---:|---|---|
-| [C001](C001-version.md) | `velnorctl version` | P1 | S | Plans 064–065 | TODO |
+| [C001](C001-version.md) | `velnorctl version` | P1 | S | Plans 064–065, 067 | TODO |
 | [C002](C002-api-resources.md) | `velnorctl api-resources` | P2 | S | Plans 065, 067 | TODO |
 | [C003](C003-explain.md) | `velnorctl explain <resource-or-field>` | P2 | S | Plans 065, 067 | TODO |
-| [C004](C004-completion.md) | `velnorctl completion <shell>` | P1 | S | Plans 064–065, 067 | TODO |
+| [C004](C004-completion.md) | `velnorctl completion <shell>` | P1 | S | Plans 064–069 | TODO |
 | [C005](C005-man.md) | `velnorctl man` | P2 | S | Plans 064–065 | TODO |
 | [C006](C006-get-hosts.md) | `velnorctl get hosts` | P3 | M | Plans 065, 067, 069 | TODO |
 | [C007](C007-get-instances.md) | `velnorctl get instances` | P1 | M | Plans 065–069 | TODO |
@@ -41,18 +47,18 @@ Every task must:
 | [C009](C009-get-runners.md) | `velnorctl get runners` | P1 | M | Plans 065–069 | TODO |
 | [C010](C010-get-jobs.md) | `velnorctl get jobs` | P1 | M | Plans 065–069 | TODO |
 | [C011](C011-get-runs.md) | `velnorctl get runs` | P2 | M | Plans 065–069, 074 | TODO |
-| [C012](C012-get-queue.md) | `velnorctl get queue` | P2 | M | Plans 065–069, 074 | TODO |
+| [C012](C012-get-queue.md) | `velnorctl get queue` | P2 | M | Plans 065–069, 073–074 | TODO |
 | [C013](C013-get-events.md) | `velnorctl get events` | P2 | S | Plans 065–071 | TODO |
 | [C014](C014-get-reservations.md) | `velnorctl get reservations` | P2 | S | Plans 065–069, 075 | TODO |
 | [C015](C015-get-leases.md) | `velnorctl get leases` | P2 | S | Plans 065–069, 075 | TODO |
-| [C016](C016-describe.md) | `velnorctl describe <resource>/<name>` | P1 | M | Plans 065–069 | TODO |
+| [C016](C016-describe.md) | `velnorctl describe <resource>/<name>` | P1 | M | Plans 065–071, 074–075, 077 | TODO |
 | [C017](C017-logs.md) | `velnorctl logs <resource>/<name>` | P1 | L | Plans 067, 069, 070 | TODO |
 | [C018](C018-events.md) | `velnorctl events` | P2 | M | Plans 066, 067, 071 | TODO |
 | [C019](C019-top.md) | `velnorctl top <host|instances|slots|jobs|storage>` | P2 | M | Plans 067, 069, 071 | TODO |
-| [C020](C020-wait.md) | `velnorctl wait <resource>/<name> --for <condition>` | P1 | M | Plans 067, 069, 071 | TODO |
+| [C020](C020-wait.md) | `velnorctl wait <resource>/<name> --for <condition>` | P1 | M | Plans 067, 069, 071, 073 | TODO |
 | [C021](C021-doctor.md) | `velnorctl doctor [<target>]` | P1 | L | Plans 067, 068, 069, 072 | TODO |
 | [C022](C022-preflight.md) | `velnorctl preflight` | P1 | M | Plans 067, 068, 072 | TODO |
-| [C023](C023-reconcile-runners.md) | `velnorctl reconcile runners` | P1 | L | Plans 067, 068, 072 | TODO |
+| [C023](C023-reconcile-runners.md) | `velnorctl reconcile runners` | P1 | L | Plans 067, 068, 072, 074 | TODO |
 | [C024](C024-reconcile-jobs.md) | `velnorctl reconcile jobs` | P1 | L | Plans 066, 067, 072, 074 | TODO |
 | [C025](C025-reconcile-docker.md) | `velnorctl reconcile docker` | P1 | L | Plans 067, 072 | TODO |
 | [C026](C026-reconcile-storage.md) | `velnorctl reconcile storage` | P1 | L | Plans 066, 067, 072, 075 | TODO |
@@ -60,11 +66,11 @@ Every task must:
 | [C028](C028-uncordon.md) | `velnorctl uncordon instance/<name>` | P2 | S | Plans 067, 073 | TODO |
 | [C029](C029-drain.md) | `velnorctl drain instance/<name>` | P1 | L | Plans 067, 073 | TODO |
 | [C030](C030-resume.md) | `velnorctl resume instance/<name>` | P1 | M | Plans 067, 068, 073 | TODO |
-| [C031](C031-restart.md) | `velnorctl restart instance/<name>` | P1 | M | Plans 067, 073 | TODO |
+| [C031](C031-restart.md) | `velnorctl restart instance/<name>` | P1 | M | Plans 067–068, 073 | TODO |
 | [C032](C032-recycle.md) | `velnorctl recycle <slot/...|runner/...>` | P1 | M | Plans 067, 073 | TODO |
 | [C033](C033-scale.md) | `velnorctl scale instance/<name> --slots <count>` | P2 | L | Plans 067, 068, 073 | TODO |
 | [C034](C034-run-list.md) | `velnorctl run list` | P1 | M | Plans 068, 069, 074 | TODO |
-| [C035](C035-run-view.md) | `velnorctl run view <run-id>` | P1 | M | Plans 069, 070, 074 | TODO |
+| [C035](C035-run-view.md) | `velnorctl run view <run-id>` | P1 | M | Plans 069–071, 074 | TODO |
 | [C036](C036-run-watch.md) | `velnorctl run watch <run-id>` | P1 | M | Plans 069–071, 074 | TODO |
 | [C037](C037-run-cancel.md) | `velnorctl run cancel <run-id>` | P1 | M | Plans 070, 073, 074 | TODO |
 | [C038](C038-run-rerun.md) | `velnorctl run rerun <run-id>` | P1 | M | Plan 074 | TODO |
@@ -89,10 +95,10 @@ Every task must:
 | [C057](C057-context-use.md) | `velnorctl context use <name>` | P1 | S | Plan 068 | TODO |
 | [C058](C058-context-set.md) | `velnorctl context set <name> --endpoint <uri>` | P1 | M | Plans 065, 068 | TODO |
 | [C059](C059-context-delete.md) | `velnorctl context delete <name>` | P2 | S | Plan 068 | TODO |
-| [C060](C060-auth-status.md) | `velnorctl auth status` | P1 | S | Plans 065, 068 | TODO |
+| [C060](C060-auth-status.md) | `velnorctl auth status` | P1 | S | Plans 065, 066, 068 | TODO |
 | [C061](C061-auth-check.md) | `velnorctl auth check` | P1 | M | Plans 067, 068, 074 | TODO |
-| [C062](C062-instance-init.md) | `velnorctl instance init <name>` | P1 | M | Plans 068, 073 | TODO |
-| [C063](C063-instance-install.md) | `velnorctl instance install <name>` | P1 | L | Plans 068, 073, 076 | TODO |
+| [C062](C062-instance-init.md) | `velnorctl instance init <name>` | P1 | M | Plan 068 | TODO |
+| [C063](C063-instance-install.md) | `velnorctl instance install <name>` | P1 | L | Plans 068, 076 | TODO |
 | [C064](C064-instance-apply.md) | `velnorctl instance apply <name>` | P1 | L | Plans 068, 072, 073 | TODO |
 | [C065](C065-instance-delete.md) | `velnorctl instance delete <name>` | P1 | L | Plans 068, 072, 073 | TODO |
 | [C066](C066-capability-list.md) | `velnorctl capability list` | P2 | M | Plans 065, 067, 077 | TODO |
@@ -104,7 +110,7 @@ Every task must:
 | [C072](C072-adapter-check.md) | `velnorctl adapter check <action@ref>` | P2 | M | Plans 065, 077 | TODO |
 | [C073](C073-workflow-check.md) | `velnorctl workflow check --repo <owner/repo> --ref <ref> --workflow <path-or-name>` | P2 | L | Plans 068, 074, 077 | TODO |
 | [C074](C074-diagnostics-bundle.md) | `velnorctl diagnostics bundle` | P2 | L | Plans 066–078 | TODO |
-| [C075](C075-daemon.md) | `velnorctl daemon` | P1 | XL | Plans 067, 068, 072, 073, 076 | TODO |
+| [C075](C075-daemon.md) | `velnorctl daemon` | P1 | XL | Plans 067, 068, 072, 073 | TODO |
 
 Status values: `TODO`, `IN PROGRESS`, `DONE`, `BLOCKED` with reason, or
 `REJECTED` with rationale.

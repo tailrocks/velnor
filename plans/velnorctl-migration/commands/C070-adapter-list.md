@@ -3,7 +3,7 @@
 > **Executor instructions**: Implement only `velnorctl adapter list`. Do not combine
 > sibling commands. Run every gate; update task and command index status.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/admission.rs crates/velnor-runner/src/action.rs crates/velnor-runner/src/cli.rs crates/velnor-tools crates/velnor-control crates/velnorctl`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/manifest.rs crates/velnor-runner/src/admission.rs crates/velnor-runner/src/action.rs crates/velnor-runner/src/cli.rs crates/velnor-tools crates/velnor-control crates/velnorctl`
 > Compare current implementation and policy before editing; stop on drift.
 
 ## Status
@@ -32,7 +32,10 @@ Keep operation read-only, side-effect-free, redacted, and consistent with standa
 
 ## Required behavior
 
-- Show action identity, supported refs, native implementation, introduced version, and fixture/test coverage.
+- Show action identity, supported refs, native implementation, and only
+  canonical manifest-backed descriptive evidence. Introduced version and
+  fixture/test coverage are omitted or explicitly unavailable unless Plan 077
+  makes them generated/signed canonical data.
 - Use runtime registry; no remote action discovery/execution.
 - Support standard output and selectors where modeled.
 

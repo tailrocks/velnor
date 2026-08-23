@@ -49,7 +49,9 @@ Apply global inspection conventions: versioned table/wide/JSON/YAML/JSONL/name o
 ## Mandatory fixture integration
 
 Pin exact `tailrocks/velnor-actions-fixture` commit. Before dispatch, cancel every pending/in-progress old fixture run, delete only stale validation-owned runner registrations, and prove both sets clean.
-During fresh cache-using hold run, prove active leases appear and prevent seeded GC; observe release after terminal teardown.
+Use Plan 063's cache scenario and ready marker proving the approved pinned cache
+adapter lease exists before hold. Prove active leases prevent seeded GC, then
+observe bounded release after terminal teardown without read-side refresh/reap.
 Monitor only newly returned run IDs at intervals no longer than 60 seconds. Diagnose queued or unchanged state before two minutes. Save sanitized `.json`, `.jsonl`, `.log`, or `.md` only; never rendered GitHub HTML.
 
 ## Done criteria
@@ -64,4 +66,3 @@ Monitor only newly returned run IDs at intervals no longer than 60 seconds. Diag
 - Shared service cannot provide required authoritative data or behavior.
 - Implementation needs an unapproved capability, trust expansion, protocol guess, or destructive action outside exact command scope.
 - Fixture would need weakening, or two-minute stasis cannot be diagnosed.
-

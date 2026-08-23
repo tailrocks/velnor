@@ -31,7 +31,12 @@ Mutation follows plan-first/idempotent rules, explicit authorization/confirmatio
 
 ## Required behavior
 
-- Accept Unix endpoint now and HTTPS endpoint schema for Plan 080; validate URI, defaults, output, timeout, scope/repo/instance, and credential reference.
+- Through Plan 079 accept only a canonical absolute Unix instance-directory
+  endpoint such as `unix:///run/velnor/<instance>`. Reject
+  HTTPS, userinfo, query, fragment, dot components, symlink-unsafe
+  normalization, and non-absolute paths with a stable unsupported/usage error.
+  Plan 080 extends this same command only after authenticated remote transport
+  and explicit security approval exist.
 - Store atomically at `~/.config/velnor/config.toml`; never accept inline PAT/private-key contents.
 - Do not switch current context unless explicitly requested by existing command contract.
 
@@ -48,7 +53,9 @@ Mutation follows plan-first/idempotent rules, explicit authorization/confirmatio
 ## Mandatory fixture integration
 
 Pin exact `tailrocks/velnor-actions-fixture` commit. Cancel all old active runs, delete only stale validation-owned registrations, and prove clean before dispatch.
-Set dedicated Unix fixture context, run fresh success through it, then store HTTPS test context and prove no credential value enters file/output.
+Set a dedicated Unix fixture context and run fresh success through it. Prove an
+HTTPS endpoint is rejected and leaves the context file byte-identical with no
+credential value in file/output.
 Monitor only new run IDs every at most 60 seconds; diagnose stasis before two minutes. Save sanitized non-HTML evidence only.
 
 ## Done criteria

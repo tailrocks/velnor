@@ -32,7 +32,10 @@ Apply mutation rules: explicit authority, timeout/reason, dry-run/confirmation w
 ## Required behavior
 
 - Support `--ref` and repeated `-f key=value`; validate workflow/ref/field ambiguity.
-- Identify exact newly created run without racing concurrent dispatches.
+- Use the current workflow-dispatch HTTP 200 response's exact run ID/API/HTML
+  URLs; prohibit before/after list inference. Validate `workflow_dispatch`
+  required/default/type/choice schema at the resolved ref and GitHub's current
+  input-count limit. Ambiguous POST is never automatically retried.
 - Print run ID/URL as resource output and never expose auth data.
 
 ## Steps

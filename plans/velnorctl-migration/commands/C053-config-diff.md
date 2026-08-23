@@ -3,7 +3,7 @@
 > **Executor instructions**: Implement only `velnorctl config diff`. Do not combine
 > sibling commands. Run every gate; update this task and command index status.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/config.rs crates/velnor-runner/src/runner.rs systemd crates/velnor-control crates/velnor-client crates/velnorctl`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/cli.rs crates/velnor-runner/src/config.rs crates/velnor-runner/src/runner.rs crates/velnor-runner/debian crates/velnor-control crates/velnor-client crates/velnorctl`
 > Compare live state before edits; stop on incompatible drift.
 
 ## Status
@@ -33,6 +33,9 @@ Inspection/check behavior is read-only, versioned, redacted, and uses standard o
 
 - Support selected instance and versioned diff output.
 - Classify additions/removals/changes, redacted values, restart/apply need, and unavailable source.
+- External/control/GitHub unavailability is `UNKNOWN`/`UNAVAILABLE`, never an
+  inferred add/change/remove. Correlate ephemeral runners only through stable
+  instance/slot and immutable GitHub identities.
 - Read-only; never apply drift.
 
 ## Steps
@@ -63,4 +66,3 @@ Monitor only new run IDs every at most 60 seconds; diagnose stasis before two mi
 - Required service/authority is absent or config ownership is ambiguous.
 - Work needs capability/trust expansion, protocol guessing, unsafe credential handling, or fixture weakening.
 - Two-minute fixture stasis cannot be diagnosed.
-

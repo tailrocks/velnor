@@ -27,7 +27,9 @@ No stable `velnorctl` context file or current-context selection exists. Plan 068
 
 Implement parser, typed arguments, thin handler, output/errors, help/completion, and tests for only `velnorctl context use <name>` in `crates/velnorctl/src/commands/context_use.rs` and `crates/velnorctl/tests/context_use.rs`.
 Use Plan 068 services and other declared dependencies. Never spawn old binary or expose source file formats as API.
-Mutation follows plan-first/idempotent rules, explicit authorization/confirmation/reason where destructive, atomic writes, audit event, and safe rollback.
+Mutation is an offline, idempotent atomic config write. Record a sanitized local
+context-change journal entry owned by Plan 068 with actor source, old/new context,
+timestamp, bounded retention, and no daemon operational event.
 
 ## Required behavior
 

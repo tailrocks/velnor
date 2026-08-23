@@ -32,8 +32,11 @@ Apply inspection rules: standard output formats/filters where relevant, resource
 ## Required behavior
 
 - Support limit, since, class, result, and standard output.
-- Show operator reason, selected/removed/refused objects, expected/actual physical bytes, and partial errors.
-- Read-only and ordered from authoritative catalog.
+- Show GC plans/results, pressure transitions/recovery, reconciliation action
+  outcomes, operator reason, selected/removed/refused objects, expected/actual
+  physical bytes, partial errors, and operation correlation IDs.
+- Read-only and ordered from authoritative catalog with stable cursor/pagination
+  and typed history-gap behavior; observation never repairs/reaps.
 
 ## Steps
 
@@ -63,4 +66,3 @@ Monitor only new run IDs every at most 60 seconds; diagnose unchanged/queued sta
 - Shared service lacks authoritative required behavior.
 - Work needs capability/trust expansion, protocol guessing, fixture weakening, or destructive scope beyond command.
 - Two-minute fixture stasis cannot be diagnosed.
-

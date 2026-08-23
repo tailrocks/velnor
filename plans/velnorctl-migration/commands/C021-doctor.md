@@ -46,7 +46,10 @@ Apply global inspection conventions: versioned table/wide/JSON/YAML/JSONL/name o
   fleet, and storage; `--all` runs every target through the same typed check
   graph. There is no release target and doctor never installs, upgrades,
   downgrades, activates, or rolls back a package.
-- Exit 0 healthy, 1 degraded/check failure, 2 invalid, 3 connectivity/auth, 4 repair required.
+- Use Plan 065 exits with precedence: usage 2; otherwise authorization 3 when a
+  requested check could not execute for auth; transport 7 for connectivity;
+  conflict 6 for repair-required; condition 1 for degraded checks; healthy 0.
+  Preserve partial machine output and test mixed-result precedence.
 - Never complete/cancel/delete/GC/restart/rewrite; remediation points to reconcile.
 
 ## Steps

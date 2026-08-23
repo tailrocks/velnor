@@ -32,9 +32,13 @@ Apply global mutation conventions: dry-run where specified, explicit confirmatio
 
 ## Required behavior
 
-- Default dry-run; execution requires confirmation/reason.
+- Default dry-run; execution requires `--yes --plan-id <id> --reason <text>`.
 - Own stale in-flight fail-close, GitHub-running/no-live-slot detection, and policy-defined overdue unassigned cancellation.
 - GitHub cancellation remains authority; record per-action audit outcome.
+- Immediately before cancellation, refetch the run and all jobs. Every selected
+  candidate must remain overdue, queued, unassigned, trusted-label-matching, and
+  at the reviewed plan version/threshold. Cancel at most once per run; refuse a
+  mixed/assigned run and record drift-skipped candidates.
 
 ## Steps
 
@@ -64,4 +68,3 @@ Monitor only newly returned run IDs at intervals no longer than 60 seconds. Diag
 - Shared service cannot provide required authoritative data or behavior.
 - Implementation needs an unapproved capability, trust expansion, protocol guess, or destructive action outside exact command scope.
 - Fixture would need weakening, or two-minute stasis cannot be diagnosed.
-

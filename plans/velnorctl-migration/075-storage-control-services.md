@@ -23,7 +23,8 @@ leases, pressure, history, and safe dry-run-first reclamation.
 ## Scope
 
 - storage path/class/scope/accounting/budget/pressure resources
-- authoritative storage catalog and GC history
+- authoritative `/var/lib/velnor/storage.db` catalog, schema migrations,
+  reconciliation, deletion ledger, and GC history
 - reservation and lease queries
 - pressure explanation
 - GC planning/execution with leader/filesystem locks and exact ownership
@@ -34,13 +35,21 @@ or manual host cleanup as product behavior.
 ## Steps
 
 1. Extract typed read services from current storage/cache/capacity modules.
-2. Implement or complete authoritative catalog records for objects, ownership,
-   budgets, lifetime, leases, reservations, pressure, and GC outcomes.
+   Pure observation never deletes/reaps stale lease, reservation, catalog, or
+   filesystem records; explicit reconciliation owns state repair.
+2. Implement/migrate authoritative catalog records for objects, ownership,
+   budgets, lifetime, leases, reservations, pressure, deletion phases, and GC
+   outcomes. Reconcile DB↔filesystem after crashes with explicit unknown and
+   foreign states.
 3. Implement truthful logical/physical accounting for sparse/reflink/hardlink
    cases and explicit unknown values.
-4. Implement pressure explanations and dry-run GC plans. Execution revalidates
-   ownership/leases under locks; remove lease bypass.
-5. Test crash recovery, concurrent GC, new/active lease races, partial deletion,
+4. Implement pressure explanations and immutable dry-run GC plans. Every active
+   scope holds a kernel-backed shared lease; GC must acquire the exclusive
+   lease and revalidate catalog ownership/resource version immediately before
+   deletion. PID/TTL is diagnostic only, never sole safety. Delete
+   `force_no_lease_check` and every equivalent bypass.
+5. Test schema migration, crash reconciliation, concurrent GC, shared/exclusive
+   lease behavior, new/active lease races, partial deletion,
    stale accounting, unowned paths, and idempotent repeat.
 
 **Verify**: storage nextest suites and `rtk mise run check` pass.
@@ -49,8 +58,9 @@ or manual host cleanup as product behavior.
 
 Use isolated roots with pinned `tailrocks/velnor-actions-fixture`. Clean old
 state, dispatch fresh hold, inspect active reservations/leases/pressure, prove
-GC refuses active data, complete run, collect safe candidate, and inspect audit
-history. Monitor only new ID every at most 60 seconds.
+GC refuses active data, complete run, collect a safe candidate, and prove actual
+allocated blocks/inodes reclaimed match the bounded plan before inspecting
+audit history. Monitor only new ID every at most 60 seconds.
 
 ## Done criteria
 
@@ -62,4 +72,3 @@ history. Monitor only new ID every at most 60 seconds.
 
 Stop when ownership or expected reclaim is unknowable. Report unknown; do not
 delete or invent a number.
-

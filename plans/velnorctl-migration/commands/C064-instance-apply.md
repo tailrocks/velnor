@@ -3,7 +3,7 @@
 > **Executor instructions**: Implement only `velnorctl instance apply <name>`. Do not combine
 > sibling commands. Run every gate; update this task and command index status.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/config.rs crates/velnor-runner/src/runner.rs systemd packaging crates/velnor-control crates/velnorctl`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/config.rs crates/velnor-runner/src/runner.rs crates/velnor-runner/Cargo.toml crates/velnor-runner/debian crates/velnor-control crates/velnorctl`
 > Compare live state before edits; stop on incompatible drift.
 
 ## Status
@@ -32,6 +32,10 @@ Mutation follows plan-first/idempotent rules, explicit authorization/confirmatio
 ## Required behavior
 
 - Compute/show plan first; perform safe drain when live changes require restart; preserve active jobs.
+- Default is immutable dry-run plan; mutation requires `--yes --plan-id <id>
+  --reason <text>`. Persist phase journal and preconditions, enforce drain
+  deadline without killing active work, reject drift, and define recovery or
+  rollback for every config/unit/GitHub partial-failure boundary.
 - Apply config/unit/live state idempotently, create desired JIT slots, wait readiness, and report partial failure/drift.
 - Never silently widen trusted admission, labels, secrets, or capabilities.
 
@@ -48,7 +52,9 @@ Mutation follows plan-first/idempotent rules, explicit authorization/confirmatio
 ## Mandatory fixture integration
 
 Pin exact `tailrocks/velnor-actions-fixture` commit. Cancel all old active runs, delete only stale validation-owned registrations, and prove clean before dispatch.
-Apply new fixture instance, run fresh success, reapply with empty plan, then change safe slot count during hold and prove drain/readiness semantics.
+Apply new fixture instance, run fresh success, reapply with empty plan, then
+change slots 1→2→1 during concurrent hold and prove held work survives,
+phase-journal recovery works, and readiness/drift converge.
 Monitor only new run IDs every at most 60 seconds; diagnose stasis before two minutes. Save sanitized non-HTML evidence only.
 
 ## Done criteria

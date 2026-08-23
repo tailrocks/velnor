@@ -3,7 +3,7 @@
 > **Executor instructions**: Implement only `velnorctl capability list`. Do not combine
 > sibling commands. Run every gate; update task and command index status.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/admission.rs crates/velnor-runner/src/action.rs crates/velnor-runner/src/cli.rs crates/velnor-tools crates/velnor-control crates/velnorctl`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/manifest.rs crates/velnor-runner/src/admission.rs crates/velnor-runner/src/action.rs crates/velnor-runner/src/cli.rs crates/velnor-tools crates/velnor-control crates/velnorctl`
 > Compare current implementation and policy before editing; stop on drift.
 
 ## Status
@@ -34,6 +34,8 @@ Keep operation read-only, side-effect-free, redacted, and consistent with standa
 
 - Show feature/action identity, supported refs/inputs/values/combinations, trust/storage/network class, status, and manifest version.
 - Use exact runtime admission manifest; no second static list.
+- Trust/storage/network class is emitted only from canonical compiled Plan 077
+  metadata; when absent it is explicitly unavailable, never inferred.
 - Read-only and usable live or offline from installed manifest.
 
 ## Steps

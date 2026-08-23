@@ -17,7 +17,7 @@
 
 ## Why this matters
 
-Actively verify GitHub/control authorization and required permissions without creating resources.
+Actively verify GitHub/control authorization through non-mutating operations.
 
 ## Current state
 
@@ -31,8 +31,12 @@ Inspection/check behavior is read-only, versioned, redacted, and uses standard o
 
 ## Required behavior
 
-- Support `--github-scope`; test GitHub API, runner-group read, JIT-generation permission, workflow run/log read, and rate limits.
-- Probe JIT generation without leaving registration; report token diagnosis/remediation safely.
+- Support `--github-scope`; test GitHub API, runner-group read, workflow run/log
+  read, and rate limits through Plan 074.
+- Report JIT-generation permission as `UNPROVEN` when GitHub exposes no
+  non-mutating permission endpoint. Do not create a JIT configuration or runner
+  registration. A future active canary requires a separately approved explicit
+  mutating flag and exact returned-ID cleanup contract.
 - Map connectivity/auth/permission/rate-limit failures distinctly.
 
 ## Steps
@@ -48,7 +52,9 @@ Inspection/check behavior is read-only, versioned, redacted, and uses standard o
 ## Mandatory fixture integration
 
 Pin exact `tailrocks/velnor-actions-fixture` commit. Cancel all old active runs, delete only stale validation-owned registrations, and prove clean before dispatch.
-Run check before fixture registration, prove no runner remains from probe, then fresh success/list/log checks work; test insufficient read-only credential.
+Run check before fixture registration and prove the runner-registration set is
+byte-for-byte unchanged, then fresh success/list/log checks work; test an
+insufficient read-only credential and the explicit `UNPROVEN` JIT result.
 Monitor only new run IDs every at most 60 seconds; diagnose stasis before two minutes. Save sanitized non-HTML evidence only.
 
 ## Done criteria
@@ -63,4 +69,3 @@ Monitor only new run IDs every at most 60 seconds; diagnose stasis before two mi
 - Required service/authority is absent or config ownership is ambiguous.
 - Work needs capability/trust expansion, protocol guessing, unsafe credential handling, or fixture weakening.
 - Two-minute fixture stasis cannot be diagnosed.
-

@@ -12,7 +12,7 @@
 - **Priority**: P1
 - **Effort**: L
 - **Risk**: HIGH
-- **Depends on**: Plans 067, 068, 072
+- **Depends on**: Plans 067, 068, 072, 074
 - **Category**: command migration
 - **Planned at**: commit `35d5bb7`, 2026-08-24
 
@@ -32,8 +32,14 @@ Apply global mutation conventions: dry-run where specified, explicit confirmatio
 
 ## Required behavior
 
-- Default dry-run; execution requires `--yes --reason`; support machine output.
-- Handle orphan idle, missing, offline+busy quarantine, stale local identity, duplicate, label, and group mismatch.
+- Default dry-run; execution requires `--yes --plan-id <id> --reason <text>`;
+  support machine output.
+- Handle orphan idle, missing, offline+busy fail-closed state, stale local
+  identity, duplicate, label, and group mismatch with one explicit divergence→
+  action/refusal table. Busy, foreign, or ambiguous registrations are never
+  deleted. Offline+busy first fail-closes the authoritative recorded job, waits
+  for terminal completion and lease release, then recycles exact owned identity;
+  idle owned orphan may delete only after locked revalidation.
 - Delete only exact Velnor-owned idle registrations; revalidate before mutation.
 
 ## Steps
@@ -64,4 +70,3 @@ Monitor only newly returned run IDs at intervals no longer than 60 seconds. Diag
 - Shared service cannot provide required authoritative data or behavior.
 - Implementation needs an unapproved capability, trust expansion, protocol guess, or destructive action outside exact command scope.
 - Fixture would need weakening, or two-minute stasis cannot be diagnosed.
-

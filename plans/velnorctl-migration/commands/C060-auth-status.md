@@ -11,7 +11,7 @@
 - **Priority**: P1
 - **Effort**: S
 - **Risk**: HIGH
-- **Depends on**: Plans 065, 068
+- **Depends on**: Plans 065, 066, 068
 - **Category**: command migration
 - **Planned at**: commit `35d5bb7`, 2026-08-24
 
@@ -32,6 +32,10 @@ Inspection/check behavior is read-only, versioned, redacted, and uses standard o
 ## Required behavior
 
 - Show source reference/type, last check, scopes/capabilities known, rate-limit snapshot, and remediation state.
+- Read a daemon-owned sanitized auth-status record with credential-reference
+  identity, checked-at/freshness, known scopes/capabilities, and rate-limit
+  snapshot. No record is `NOT_CHECKED`, never inferred valid/invalid. Bound its
+  retention under Plan 066 and never persist credential/token/header contents.
 - Never print credential value, private key, signed URL, or authorization header.
 - Distinguish unknown/not-checked from invalid.
 
@@ -63,4 +67,3 @@ Monitor only new run IDs every at most 60 seconds; diagnose stasis before two mi
 - Required service/authority is absent or config ownership is ambiguous.
 - Work needs capability/trust expansion, protocol guessing, unsafe credential handling, or fixture weakening.
 - Two-minute fixture stasis cannot be diagnosed.
-

@@ -1,19 +1,19 @@
-# Plan 076: Make Debian package management the only version-management path
+# Plan 076: Prepare the Debian-native package transition
 
-> **Executor instructions**: Remove Velnor-owned installed-version management.
-> Do not add a replacement command, resource, API, state table, activation
-> pointer, or rollback service. Debian package production may remain in
-> maintainer CI/tooling; signed apt and dpkg exclusively own installation and
-> installed-version transitions.
+> **Executor instructions**: Prepare and prove the Debian transition without
+> switching an installed daemon/package entrypoint. Separate maintainer package
+> production from Velnor-owned host version logic and record the exact deletion
+> set for Plan 079. Do not add a replacement command, resource, API, state table,
+> activation pointer, or rollback service.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/release.rs crates/velnor-tools .github/workflows/release-deb.yml systemd packaging debian crates/velnor-control crates/velnor-model crates/velnorctl`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- Cargo.toml Cargo.lock crates/velnor-runner/Cargo.toml crates/velnor-runner/src/release.rs crates/velnor-runner/debian crates/velnor-tools .github/workflows/release.yml Dockerfile docker crates/velnor-control crates/velnor-model crates/velnorctl`
 
 ## Status
 
 - **Priority**: P1
 - **Effort**: L
 - **Risk**: HIGH
-- **Depends on**: Plans 064, 068, 073
+- **Depends on**: Plans 064, 068
 - **Category**: migration, Debian packaging
 - **Planned at**: commit `35d5bb7`, 2026-08-24
 
@@ -37,23 +37,29 @@ rollback, recovery, integrity checks, and version history.
 - Rollback means installing the exact signed predecessor with apt, including
   explicit Debian downgrade authorization when required. It is an operational
   package transaction, not a Velnor command or domain object.
-- systemd executes `/usr/bin/velnorctl daemon` directly. Startup never resolves
-  an active-version symlink or calls Velnor-owned package verification.
+- Plan 079 will make systemd execute `/usr/bin/velnorctl daemon` directly after
+  C075 exists and is green. Startup then never resolves an active-version
+  symlink or calls Velnor-owned package verification.
 
 ## Scope
 
-- Debian control metadata, package names, file ownership, conffiles,
-  maintainer scripts, systemd integration, and signed apt publication
-- removal of old runner release subcommands and all custom active/previous
-  target, activation, rollback, and installed-version history code
+- transition-ready Debian control metadata, future package names, file
+  ownership, conffiles, maintainer scripts, systemd assets, and signed apt
+  publication harness; no installed entrypoint switch in this plan
+- inventory and separation of old runner release subcommands and all custom
+  active/previous target, activation, rollback, and installed-version history
+  code; Plan 079 owns final deletion after C075
 - retention or relocation of source-package assembly, provenance, signing, and
   repository publication only where needed by maintainer CI/tooling
-- package transition from `velnor-runner` to `velnorctl`
+- package transition design and disposable metadata proof from `velnor-runner`
+  to `velnorctl`
 
 **Out of scope**: any operator package/version command in `velnorctl`, a custom
 upgrade orchestrator, direct `.deb` installation, `dpkg -i`, copied binaries,
 local-path apt repositories, custom package state in `state.db`, or a second
-version selector beside dpkg.
+version selector beside dpkg. Also out of scope: changing the live/installed
+package name, switching systemd or Docker entrypoints, deleting the old runtime,
+or running live A/B/A Velnor acceptance; Plan 079 owns those atomic actions.
 
 ## Steps
 
@@ -68,30 +74,35 @@ obsolete Velnor-owned installed-version management.
 **Verify**: the inventory has one disposition per live symbol/path. No custom
 installed-version behavior is mislabeled as package production.
 
-### 2. Delete duplicate installed-version services
+### 2. Separate production code and freeze the deletion manifest
 
-Delete operator status/verify/activate/rollback/history handlers and their
-domain services, DTOs, routes, events, tables, migrations, active-target state,
-previous-target state, and startup dependency. Do not move this behavior into
-`velnor-control`, `velnor-tools`, or another command name. Preserve only generic
-binary version reporting and read-only Debian package observations needed by
-existing status/diagnostics tasks.
+Separate source-package assembly, provenance, signing, and publication from
+host activation/rollback/status logic. Produce a checked inventory of every
+operator handler, domain service, DTO, route, event, table/migration, active or
+previous target, and startup dependency that Plan 079 must delete. Do not move
+host behavior into `velnor-control`, `velnor-tools`, or another command name.
+Preserve generic binary version reporting and read-only Debian observations.
+This plan may delete already-unreferenced host-version code, but must not break
+the still-installed old daemon before its replacement exists.
 
-**Verify**: source, generated help/completion/man pages, API schemas, state DB
-migrations, and tests contain no Velnor version mutation or selection surface.
+**Verify**: maintainer package production has no dependency on host activation
+state; every remaining host-version symbol/path is in the Plan 079 deletion
+manifest and no new Velnor version surface exists.
 
-### 3. Make the Debian package self-contained
+### 3. Prepare self-contained Debian assets
 
-Package `/usr/bin/velnorctl`, required systemd units, tmpfiles/sysusers/config
-assets, and declared dependencies through standard Debian metadata. Ensure
+Prepare metadata for `/usr/bin/velnorctl`, required systemd units,
+tmpfiles/sysusers/config assets (including `velnor` and `velnor-admin` groups),
+and declared dependencies. Ensure
 maintainer scripts are idempotent, preserve operator configuration, respect
 graceful service stop/start ordering, and never create an alternate release
 tree or activation symlink. Express the one-time rename with tested Debian
 `Conflicts`, `Replaces`, and any required `Breaks` metadata; install no
-compatibility binary.
+compatibility binary. Use fixture/stub payloads in package-transition tests
+until C075 produces the real daemon; never publish them as product packages.
 
-**Verify**: package-content and ownership tests prove dpkg owns every installed
-runtime file and no old/custom activation payload exists.
+**Verify**: staged package-content/ownership tests prove the future dpkg mapping
+and group/file modes, without switching any installed product entrypoint.
 
 ### 4. Preserve signed package production without operator version logic
 
@@ -104,46 +115,45 @@ transactions. Do not make immutable build records an installed-version switch.
 whose signatures validate through apt's trust path; maintainer tooling cannot
 mutate a host's installed version.
 
-### 5. Prove native install, upgrade, downgrade, recovery, and history
+### 5. Prove the transition harness with disposable payloads
 
-In disposable Debian environments, configure only the signed repository and
+In disposable Debian environments, configure only a signed HTTP-served apt
+repository and
 exercise fresh install, exact-version upgrade, exact-version downgrade to the
 signed predecessor, failed-maintainer-script recovery, reinstall, and purge/
 reinstall as applicable. Verify candidate selection, package state, conffile
 behavior, unit lifecycle, file integrity, apt/dpkg history, and removal of the
-old package.
+old package. The signing key is ephemeral, test-only, and never committed. This
+proves Debian metadata/harness behavior, not the real daemon or final cutover.
 
 **Verify**: all transitions use apt; audit spies fail the test on direct
 `dpkg -i`, local `.deb`, copied binary, local-path repository, active-target
 write, or Velnor-owned rollback call.
 
-### 6. Mandatory fixture integration
+### 6. Mandatory non-regression integration
 
-Build and publish two test versions to a disposable signed apt repository. Pin
-the exact `tailrocks/velnor-actions-fixture` commit. Before each dispatch,
+Pin the exact `tailrocks/velnor-actions-fixture` commit. Before dispatch,
 cancel every pending/in-progress old run, delete only stale validation-owned
 registrations, prove clean, and capture only the new run ID.
 
-Install version A with exact apt selection, start the packaged service, and run
-the full required fixture surface. Gracefully drain, upgrade to version B with
-apt, restart/wait Ready, and rerun the same fixture. Then drain and install
-exact signed version A through apt's downgrade path, restart/wait Ready, and
-rerun again. Check progress within 60 seconds and diagnose stasis before two
-minutes. Preserve sanitized non-HTML evidence only.
+Run the full required fixture surface once through the unchanged installed
+daemon after package-production separation. Check progress within 60 seconds
+and diagnose stasis before two minutes. Preserve sanitized non-HTML evidence
+only. Plan 079 alone performs real signed-package A/B/A fixture acceptance.
 
-**Verify**: all three runs pass without workflow changes; dpkg reports the
-expected version after each transaction; apt/dpkg logs record each transition;
-no custom release state or command participates.
+**Verify**: behavior is unchanged and the disposable Debian harness separately
+proves exact candidate selection, upgrade, downgrade, recovery, file ownership,
+and old-package replacement without direct `dpkg -i` or local-path apt.
 
 ## Done criteria
 
-- [ ] No release command family exists in either product binary.
-- [ ] No release resource, API route, event, state table, activation pointer,
-      previous pointer, or Velnor rollback service exists.
-- [ ] dpkg exclusively owns installed runtime files and installed version.
-- [ ] Signed apt install, upgrade, downgrade/rollback, and recovery pass in
-      disposable Debian environments.
-- [ ] Fresh fixture proof passes on version A, version B, and apt-restored A.
+- [ ] Maintainer package production is separated from host version management;
+      Plan 079 has an exhaustive deletion manifest.
+- [ ] Transition metadata, sysusers/tmpfiles/conffiles, and maintainer scripts
+      pass signed HTTP-served disposable apt tests with fixture payloads.
+- [ ] No live/installed package, service, Docker entrypoint, or runtime binary
+      is switched in this plan.
+- [ ] Fresh fixture proof passes unchanged on the existing daemon.
 - [ ] `rtk mise run check` passes.
 
 ## STOP conditions

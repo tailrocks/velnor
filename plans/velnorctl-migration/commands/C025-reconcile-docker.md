@@ -32,9 +32,14 @@ Apply global mutation conventions: dry-run where specified, explicit confirmatio
 
 ## Required behavior
 
-- Default dry-run; execution requires confirmation/reason.
-- Handle exact orphaned Velnor containers/networks only.
+- Default dry-run; execution requires `--yes --plan-id <id> --reason <text>`.
+- Eligibility requires Velnor ownership labels plus daemon/job identity joined
+  to authoritative terminal/absent state; name prefix is never proof. Under one
+  coordinator lock, re-inspect container/network identity and leases immediately
+  before deleting exact orphaned Velnor resources.
 - Refuse active job/lease resources; never call unrestricted `docker system prune`.
+- Test forged-prefix foreign resources, partial labels, active leases, and
+  inspect/delete races.
 
 ## Steps
 
@@ -64,4 +69,3 @@ Monitor only newly returned run IDs at intervals no longer than 60 seconds. Diag
 - Shared service cannot provide required authoritative data or behavior.
 - Implementation needs an unapproved capability, trust expansion, protocol guess, or destructive action outside exact command scope.
 - Fixture would need weakening, or two-minute stasis cannot be diagnosed.
-

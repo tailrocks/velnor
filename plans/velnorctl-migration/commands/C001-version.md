@@ -12,7 +12,7 @@
 - **Priority**: P1
 - **Effort**: S
 - **Risk**: LOW
-- **Depends on**: Plans 064–065
+- **Depends on**: Plans 064–065, 067
 - **Category**: command migration
 - **Planned at**: commit `35d5bb7`, 2026-08-24
 
@@ -34,6 +34,10 @@ Apply global inspection conventions: versioned table/wide/JSON/YAML/JSONL/name o
 
 - Use global output formats; human output stays concise and machine output uses a versioned resource.
 - Report unavailable daemon information explicitly while still reporting local binary identity.
+- Plan 067 owns the versioned `/v1/info`/`VersionInfo` DTO. If the daemon is
+  unavailable, human and machine output still contain local binary/package
+  identity plus explicit daemon `UNAVAILABLE`; exit is Plan 065 `Unavailable`,
+  never false success.
 - Do not add legacy binary naming or compatibility aliases.
 
 ## Steps
@@ -64,4 +68,3 @@ Monitor only newly returned run IDs at intervals no longer than 60 seconds. Diag
 - Shared service cannot provide required authoritative data or behavior.
 - Implementation needs an unapproved capability, trust expansion, protocol guess, or destructive action outside exact command scope.
 - Fixture would need weakening, or two-minute stasis cannot be diagnosed.
-

@@ -12,7 +12,7 @@
 - **Priority**: P1
 - **Effort**: M
 - **Risk**: HIGH
-- **Depends on**: Plans 067, 069, 071
+- **Depends on**: Plans 067, 069, 071, 073
 - **Category**: command migration
 - **Planned at**: commit `35d5bb7`, 2026-08-24
 
@@ -37,6 +37,8 @@ Apply global inspection conventions: versioned table/wide/JSON/YAML/JSONL/name o
   resources; apt/dpkg own them.
 - Return non-zero on timeout, impossible/failed condition, disconnection, or missing object.
 - Use current-read plus versioned watch; do not blind poll.
+- Test deletion/recreation with the same display name, daemon generation
+  change, cursor gap/resnapshot, and terminal-before-subscribe races.
 
 ## Steps
 

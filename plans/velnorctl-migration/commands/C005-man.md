@@ -33,7 +33,10 @@ Apply global inspection conventions: versioned table/wide/JSON/YAML/JSONL/name o
 ## Required behavior
 
 - Generate from same Clap metadata as executable help; include every leaf command exactly once.
-- Write to requested/output stream without installing system files implicitly.
+- With no path option, write one combined `velnorctl.1` page to stdout.
+  `--directory <path>` atomically writes the complete deterministic page set
+  with mode `0644`. Reject symlink/non-directory destinations and existing
+  members unless explicit `--force`; never install system files implicitly.
 - Document exit statuses, output/source rules, safety flags, and stable-slot versus ephemeral-runner distinction.
 
 ## Steps
@@ -64,4 +67,3 @@ Monitor only newly returned run IDs at intervals no longer than 60 seconds. Diag
 - Shared service cannot provide required authoritative data or behavior.
 - Implementation needs an unapproved capability, trust expansion, protocol guess, or destructive action outside exact command scope.
 - Fixture would need weakening, or two-minute stasis cannot be diagnosed.
-

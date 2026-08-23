@@ -1,4 +1,4 @@
-# Plan 074: Build GitHub workflow-run client and merge service
+# Plan 074: Build the canonical GitHub Actions client and run merge service
 
 > **Executor instructions**: Build GitHub API/domain services only. Tasks
 > C034–C042 own individual `run` commands.
@@ -10,7 +10,7 @@
 - **Priority**: P1
 - **Effort**: L
 - **Risk**: MED
-- **Depends on**: Plans 066–070
+- **Depends on**: Plans 065, 066, 068
 - **Category**: migration, architecture
 - **Planned at**: commit `35d5bb7`, 2026-08-24
 
@@ -22,11 +22,13 @@ placement, timing, events, and infrastructure categories.
 
 ## Scope
 
-- paginated GitHub run/job/step/queue/artifact/log reads
+- paginated GitHub runner-group/registry, run/job/step/queue/artifact/log reads
+- read-only permissions/rate-limit checks and explicit JIT permission
+  `UNPROVEN` state when no non-mutating endpoint exists
 - watch/retry/rate-limit/version handling
 - cancel, rerun, dispatch, artifact download metadata, run URLs
 - correlation with Velnor job/slot history without authority inversion
-- safe artifact path validation and exact newly dispatched run-ID detection
+- safe bounded artifact extraction and exact workflow-dispatch response run ID
 
 No CLI handlers, scheduler, workflow execution/parser, local-kill cancellation,
 or movement of unrelated maintainer audits/comparisons.
@@ -35,13 +37,25 @@ or movement of unrelated maintainer audits/comparisons.
 
 1. Define GitHub-owned run/job/step/artifact/queue DTOs separately from local
    resources.
-2. Extract authenticated API operations from maintainer tooling where reusable;
-   add pagination, retry, API-version, permissions, and rate-limit errors.
+2. Extract authenticated API operations from maintainer tooling where reusable.
+   At implementation, verify and centralize the latest stable GitHub API version,
+   accepted media/content types, bounded redacted error bodies, pagination,
+   Actions read/write permission matrix, attempt-aware log endpoints, and rate
+   limits. GET/pagination retries are bounded; non-idempotent dispatch/rerun
+   requests are never blindly retried after ambiguous transport loss. Reconcile
+   authoritative state when possible or return typed `Transport/Ambiguous`.
 3. Implement deterministic local/GitHub correlation and attempt handling.
 4. Implement mutations with GitHub terminal confirmation and broker-driven
-   local cancellation observation.
-5. Harden artifact destinations against traversal, duplicate entries, symlinks,
-   corruption, and unintended overwrite.
+   local cancellation observation. Consume the workflow-dispatch HTTP 200 body
+   and its exact run ID/URLs; prohibit before/after list-difference inference.
+   Cancel is idempotent only after authoritative state inspection.
+5. Stream artifacts into mode-restricted temporary files with compressed,
+   expanded, entry-count, nesting, and expansion-ratio caps. Verify available
+   metadata digest; reject traversal, duplicate normalized or case-folded paths,
+   unsafe modes/types, symlinks, no-follow ancestor violations, corruption, and
+   unintended overwrite. Promote atomically only after full validation and
+   clean every failure. An explicitly selected unsupported/non-ZIP artifact
+   fails typed; it is never silently skipped.
 6. Test API fixtures for every read/mutation and partial local-control outage.
 
 **Verify**: client nextest suites and `rtk mise run check` pass.
@@ -63,4 +77,3 @@ and Velnor placement/timing is enrichment only.
 
 Stop if GitHub API lacks a claimed field or operation. Report it unavailable;
 never approximate from local Docker state.
-

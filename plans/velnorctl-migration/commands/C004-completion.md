@@ -12,7 +12,7 @@
 - **Priority**: P1
 - **Effort**: S
 - **Risk**: LOW
-- **Depends on**: Plans 064–065, 067
+- **Depends on**: Plans 064–069
 - **Category**: command migration
 - **Planned at**: commit `35d5bb7`, 2026-08-24
 
@@ -33,6 +33,10 @@ Apply global inspection conventions: versioned table/wide/JSON/YAML/JSONL/name o
 ## Required behavior
 
 - Use Clap-generated static completion and bounded dynamic lookup for contexts/instances/slots/resources.
+- Supported shells are Bash, Zsh, Fish, PowerShell, and Elvish. Dynamic lookup
+  uses only context/config and the local control/query API with a 100 ms budget;
+  it never calls GitHub directly. Timeout/unavailable falls back to static
+  completion without warning text in the completion stream.
 - Completion failure must not print credentials or hang when daemon/GitHub is unavailable.
 - Write completion to stdout only; shell choice is a typed enum.
 
@@ -49,7 +53,9 @@ Apply global inspection conventions: versioned table/wide/JSON/YAML/JSONL/name o
 ## Mandatory fixture integration
 
 Pin exact `tailrocks/velnor-actions-fixture` commit. Before dispatch, cancel every pending/in-progress old fixture run, delete only stale validation-owned runner registrations, and prove both sets clean.
-Generate completion into a temporary file, source it in a disposable shell, complete a live fixture instance/slot during fresh hold run, and prove no state mutation.
+Generate and syntax/source-test every supported shell script in a disposable
+environment; complete a live fixture instance/slot during fresh hold and prove
+bounded offline fallback and no state mutation.
 Monitor only newly returned run IDs at intervals no longer than 60 seconds. Diagnose queued or unchanged state before two minutes. Save sanitized `.json`, `.jsonl`, `.log`, or `.md` only; never rendered GitHub HTML.
 
 ## Done criteria

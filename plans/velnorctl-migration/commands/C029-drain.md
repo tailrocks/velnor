@@ -34,6 +34,10 @@ Apply global mutation conventions: dry-run where specified, explicit confirmatio
 
 - Support timeout, wait, progress, and explicit emergency `--force-after-timeout --reason`.
 - Normal drain never kills job container; systemd stop timeout remains outer bound.
+- On timeout, durable drain intent remains active and the command returns timeout
+  without killing work. `--force-after-timeout` requests GitHub cancellation and
+  observes broker/terminal transition before teardown; unobserved local
+  termination is recorded infrastructure failure, never successful drain.
 - Persist DrainRequested/DrainCompleted and per-slot progress.
 
 ## Steps

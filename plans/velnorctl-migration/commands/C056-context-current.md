@@ -33,7 +33,8 @@ Inspection/check behavior is read-only, versioned, redacted, and uses standard o
 
 - Honor explicit global `--context` override without rewriting persisted current context.
 - Return non-zero when no valid current context exists.
-- Never probe remote/GitHub unless output requests live validation; that belongs to auth check.
+- Never probe endpoint/GitHub in any output mode; C061 owns live validation.
+  Distinguish persisted current context from an effective global override.
 
 ## Steps
 
@@ -63,4 +64,3 @@ Monitor only new run IDs every at most 60 seconds; diagnose stasis before two mi
 - Required service/authority is absent or config ownership is ambiguous.
 - Work needs capability/trust expansion, protocol guessing, unsafe credential handling, or fixture weakening.
 - Two-minute fixture stasis cannot be diagnosed.
-

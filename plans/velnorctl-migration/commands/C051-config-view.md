@@ -3,7 +3,7 @@
 > **Executor instructions**: Implement only `velnorctl config view`. Do not combine
 > sibling commands. Run every gate; update this task and command index status.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/config.rs crates/velnor-runner/src/runner.rs systemd crates/velnor-control crates/velnor-client crates/velnorctl`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/cli.rs crates/velnor-runner/src/config.rs crates/velnor-runner/src/runner.rs crates/velnor-runner/debian crates/velnor-control crates/velnor-client crates/velnorctl`
 > Compare live state before edits; stop on incompatible drift.
 
 ## Status
@@ -32,7 +32,10 @@ Inspection/check behavior is read-only, versioned, redacted, and uses standard o
 ## Required behavior
 
 - Support instance, `--effective`, and global YAML/JSON/table output.
-- Effective order is built-in defaults, context, instance config, systemd environment, process environment, then command overrides.
+- Client context chooses endpoint/default instance; it is not daemon
+  configuration provenance. Effective daemon output comes from the
+  startup-captured resolved source map and exact Plan 068 precedence, never a
+  client reconstruction from context or `/proc`.
 - Always redact secret values and authorization-bearing URLs while showing source type.
 
 ## Steps
@@ -63,4 +66,3 @@ Monitor only new run IDs every at most 60 seconds; diagnose stasis before two mi
 - Required service/authority is absent or config ownership is ambiguous.
 - Work needs capability/trust expansion, protocol guessing, unsafe credential handling, or fixture weakening.
 - Two-minute fixture stasis cannot be diagnosed.
-

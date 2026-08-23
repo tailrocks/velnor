@@ -31,8 +31,12 @@ Apply inspection rules: standard output formats/filters where relevant, resource
 
 ## Required behavior
 
-- Report reserve request, free bytes, emergency reserve, active reservations/leases, reclaimable owned bytes, blockers, marker, and recovery condition.
-- Never infer ownership or reclaimability; show unknown/unowned explicitly.
+- Report reserve request, free bytes/inodes, percent and absolute thresholds,
+  hysteresis, emergency reserve, active reservations/leases, reclaimable owned
+  bytes, exact blockers, current alert/backpressure/capacity-advertisement state,
+  last reclaim attempt/result, source time, marker, and recovery predicate.
+- Never infer ownership or reclaimability; show unknown/unowned explicitly. Any
+  unknown required pressure input prevents a false `normal` result.
 - Read-only, with machine resource and concise human causal explanation.
 
 ## Steps
@@ -63,4 +67,3 @@ Monitor only new run IDs every at most 60 seconds; diagnose unchanged/queued sta
 - Shared service lacks authoritative required behavior.
 - Work needs capability/trust expansion, protocol guessing, fixture weakening, or destructive scope beyond command.
 - Two-minute fixture stasis cannot be diagnosed.
-

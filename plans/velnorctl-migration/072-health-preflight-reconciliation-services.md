@@ -10,7 +10,7 @@
 - **Priority**: P1
 - **Effort**: L
 - **Risk**: HIGH
-- **Depends on**: Plans 066–071
+- **Depends on**: Plans 066–071, 074–075
 - **Category**: migration, correctness
 - **Planned at**: commit `35d5bb7`, 2026-08-24
 
@@ -26,7 +26,8 @@ dry-run-first reconciliation plans.
   may report Debian package metadata, dpkg file integrity, and unit consistency
   without creating a Velnor package-version domain
 - existing Docker execution preflight without runner registration
-- runner, job, Docker, and storage reconciliation planners/executors
+- common immutable runner, job, Docker, and storage reconciliation planning and
+  execution ledger; target adapters remain owned by Plans 074/075
 - idempotency, ownership proof, audit records, and partial failure
 
 No CLI handlers, broad Docker prune, local kill presented as GitHub cancel, or
@@ -36,13 +37,19 @@ rollback service belongs in doctor or reconciliation.
 ## Steps
 
 1. Extract preflight checks and typed reports from current implementation.
-2. Build doctor checks behind read-only ports; add mutation spies proving zero
-   write/delete/cancel/restart calls.
+2. Build doctor/preflight/query checks behind pure read-only ports; add mutation
+   spies proving zero reap/write/delete/cancel/restart/repair calls, including
+   stale lease/reservation and leftover-job cases that currently mutate.
 3. Move stale-job completion and overdue-run cancellation out of doctor into
    job reconciliation.
-4. Build plan-first reconciliation for runners/jobs/Docker/storage. Execution
-   requires explicit confirmation/reason at command layer and revalidates
-   ownership/leases immediately before mutation.
+4. Build plan-first reconciliation for runners/jobs/Docker/storage. Persist a
+   plan UUID, canonical digest, expiry, exact target IDs/resource versions, and
+   per-action preconditions. Execution requires `--yes --plan-id <id> --reason
+   <text>`, executes exactly the reviewed plan, and rejects any drift rather
+   than recomputing. Revalidate ownership/leases immediately before mutation.
+   Record action-by-action started/succeeded/failed/skipped state plus an
+   idempotent retry key. Whole-run cancellation is forbidden when unrelated
+   active jobs share the run.
 5. Test idempotency, partial failure, active-job/lease refusal, foreign-resource
    preservation, and repeated dry runs.
 

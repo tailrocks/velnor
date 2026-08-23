@@ -35,6 +35,8 @@ Apply global mutation conventions: dry-run where specified, explicit confirmatio
 - Preserve active jobs and logs; persist explicit Cordoned state across daemon restart.
 - Idle slots stop acquiring without pretending drained/stopped.
 - Mutation requires authorization, timeout/reason conventions, and audit event.
+- Exact mutation flag is `--reason <text>`; repeated cordon returns the same
+  persisted desired generation without duplicate events/effects.
 
 ## Steps
 
@@ -49,6 +51,9 @@ Apply global mutation conventions: dry-run where specified, explicit confirmatio
 ## Mandatory fixture integration
 
 Pin exact `tailrocks/velnor-actions-fixture` commit. Before dispatch, cancel every pending/in-progress old fixture run, delete only stale validation-owned runner registrations, and prove both sets clean.
+Use Plan 063's dedicated queue scenario/instance and prove no alternate runner
+can claim the queued job; otherwise STOP. Cordon preserves active work, survives
+restart, and keeps the queued job GitHub-owned.
 Dispatch fresh hold plus queued fixture work, cordon instance, prove active finishes and queued stays queued, restart daemon, verify cordon persists.
 Monitor only newly returned run IDs at intervals no longer than 60 seconds. Diagnose queued or unchanged state before two minutes. Save sanitized `.json`, `.jsonl`, `.log`, or `.md` only; never rendered GitHub HTML.
 

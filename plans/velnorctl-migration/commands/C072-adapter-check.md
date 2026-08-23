@@ -3,7 +3,7 @@
 > **Executor instructions**: Implement only `velnorctl adapter check <action@ref>`. Do not combine
 > sibling commands. Run every gate; update task and command index status.
 >
-> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/admission.rs crates/velnor-runner/src/action.rs crates/velnor-runner/src/cli.rs crates/velnor-tools crates/velnor-control crates/velnorctl`
+> **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- crates/velnor-runner/src/manifest.rs crates/velnor-runner/src/admission.rs crates/velnor-runner/src/action.rs crates/velnor-runner/src/cli.rs crates/velnor-tools crates/velnor-control crates/velnorctl`
 > Compare current implementation and policy before editing; stop on drift.
 
 ## Status
@@ -33,7 +33,11 @@ Keep operation read-only, side-effect-free, redacted, and consistent with standa
 ## Required behavior
 
 - Return supported/unsupported with exact approved refs, input caveats, manifest version, and evidence.
-- Do not download/execute JavaScript or accept mutable/unknown refs.
+- Do not download/execute JavaScript or accept a ref the runtime manifest does
+  not accept. Truthfully report currently accepted tagged refs. If policy
+  requires contracting them to immutable SHAs, STOP for an explicitly approved
+  manifest change with fixture/runtime proof before this command; the CLI must
+  not silently enforce a different policy.
 - No capability expansion or fallback.
 
 ## Steps

@@ -31,7 +31,10 @@ Apply inspection rules: standard output formats/filters where relevant, resource
 
 ## Required behavior
 
-- Show requested/granted bytes/resources, job/slot/instance, timestamps, state, and pressure impact.
+- Consume Plan 075's migrated schema and show stable reservation/job/slot/
+  instance IDs, requested/granted bytes/resources, state, created/renewed/
+  expires timestamps, generation, and pressure impact. Stale is a condition;
+  this query never deletes it.
 - Support active, instance, job, since, and standard output filters.
 - Read-only; repair belongs to reconcile storage.
 
@@ -63,4 +66,3 @@ Monitor only new run IDs every at most 60 seconds; diagnose unchanged/queued sta
 - Shared service lacks authoritative required behavior.
 - Work needs capability/trust expansion, protocol guessing, fixture weakening, or destructive scope beyond command.
 - Two-minute fixture stasis cannot be diagnosed.
-

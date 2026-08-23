@@ -56,9 +56,13 @@ Create idempotent SQLite migrations for `instances`, `slots`,
 `runner_registrations`, `jobs`, `job_transitions`, `events`, and
 `reconciliations`. Use WAL and bounded busy timeout.
 Transactions must atomically update current resource state and append its event.
+Use one host-shared `/var/lib/velnor/state.db`: every key is instance-namespaced,
+schema migration is serialized by one explicit migration lock/owner, and all
+daemon instances may write concurrently. Never let an instance-local process
+silently create a divergent database.
 
 **Verify**: migration tests cover empty DB, reopen, repeated migration, rollback
-on failure, and concurrent readers during writes.
+on failure, and five concurrent daemon writers/readers across crash/restart.
 
 ### 2. Persist sanitized job summaries
 
@@ -93,7 +97,19 @@ accident. Define which writes are required before accepting a job.
 **Verify**: injected disk/full/locked failures cover startup and mid-job paths;
 no test leaves GitHub completion absent or reports false success.
 
-### 5. Mandatory fixture integration
+### 5. Enforce bounded retention and database accounting
+
+Define row, age, and database-byte budgets per event/history class. Pruning runs
+only in a terminal transaction and never removes active/nonterminal jobs,
+current instance/slot state, protected reconciliation operations, or their
+required ancestry. Publish current rows/bytes, oldest retained timestamp, last
+prune result, and WAL bytes. Bound WAL checkpoint/compaction work and prove it
+cannot block job completion or violate the host disk reserve.
+
+**Verify**: boundary, crash-during-prune, protected-row, byte-budget, WAL growth,
+and reopen tests prove deterministic retention and valid referential history.
+
+### 6. Mandatory fixture integration
 
 Use `tailrocks/velnor-actions-fixture` and the clean-run sequence: cancel old
 runs, delete only stale validation runner
@@ -112,6 +128,8 @@ registration remains.
 - [ ] Active and completed fixture jobs have sanitized summaries.
 - [ ] Required event reasons are emitted from real boundaries.
 - [ ] Store failure behavior is explicit and tested.
+- [ ] Row/time/byte retention and WAL accounting are bounded and preserve all
+      active/protected history.
 - [ ] `rtk mise run check` and fresh fixture hold/cancel run pass.
 
 ## STOP conditions

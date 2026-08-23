@@ -12,7 +12,7 @@
 - **Priority**: P1
 - **Effort**: M
 - **Risk**: HIGH
-- **Depends on**: Plans 067, 073
+- **Depends on**: Plans 067–068, 073
 - **Category**: command migration
 - **Planned at**: commit `35d5bb7`, 2026-08-24
 
@@ -35,6 +35,9 @@ Apply global mutation conventions: dry-run where specified, explicit confirmatio
 - Default drains then restarts; accept explicit `--drain` for script clarity;
   non-draining path requires explicit `--force --reason`.
 - Stream drain/start/readiness progress and preserve durable intent.
+- Return durable operation ID before the old socket closes; reconnect through
+  systemd to the new daemon generation and resume the Plan 073 phase ledger.
+  Force follows GitHub-cancel/observe semantics, never local-kill-as-success.
 - Do not report success until service and desired slots are ready/degraded explicitly.
 
 ## Steps
@@ -50,7 +53,9 @@ Apply global mutation conventions: dry-run where specified, explicit confirmatio
 ## Mandatory fixture integration
 
 Pin exact `tailrocks/velnor-actions-fixture` commit. Before dispatch, cancel every pending/in-progress old fixture run, delete only stale validation-owned runner registrations, and prove both sets clean.
-Restart during fresh hold; default path lets job finish and next job run. Exercise forced path only in disposable controlled case.
+Restart during fresh hold; default path lets job finish and next job run.
+Exercise forced path only in disposable controlled case, plus crashes between
+acceptance, systemd stop, start, reconnect, and final acknowledgement.
 Monitor only newly returned run IDs at intervals no longer than 60 seconds. Diagnose queued or unchanged state before two minutes. Save sanitized `.json`, `.jsonl`, `.log`, or `.md` only; never rendered GitHub HTML.
 
 ## Done criteria
