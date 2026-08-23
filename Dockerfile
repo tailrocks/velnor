@@ -1,4 +1,4 @@
-FROM rust:1.97-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS build
+FROM rust:1.98-bookworm@sha256:e70e2eec3d495fd5c8e0be74adda86507dfac7f51a724fbf9813ff59b2b247c7 AS build
 
 # sccache: object-level compiler cache in a BuildKit cache mount so source
 # changes rebuild from warm objects (estate instant-cache mandate).
