@@ -4009,8 +4009,16 @@ pub struct ResultsArtifactDownload {
     pub files: Vec<(std::path::PathBuf, Vec<u8>)>,
 }
 
-/// Download every artifact visible to this workflow run through the Results
+/// Download artifacts visible to this workflow run through the Results
 /// Service v4 protocol used by `actions/download-artifact`.
+///
+/// `name` (exact) or `pattern` (glob) filter the artifact list BEFORE anything
+/// is signed or downloaded: `docker/build-push-action` stores `.dockerbuild`
+/// build-record artifacts as gzip blobs rather than zips, so downloading every
+/// listed artifact unconditionally fails any download-artifact step in such a
+/// run with "invalid Zip archive: EOCD". Non-zip artifacts that still pass the
+/// filter (e.g. an unfiltered download-all in the same run) are skipped with a
+/// warning instead of failing the step.
 ///
 /// Flow: ListArtifacts -> GetSignedArtifactURL -> GET zip. Signed URLs and the
 /// runtime bearer token are supplied through mode-0600 curl config files so
@@ -4020,12 +4028,22 @@ pub fn download_artifacts_blocking(
     token: &str,
     plan_id: &str,
     job_id: &str,
+    name: &str,
+    pattern: &str,
 ) -> Result<Vec<ResultsArtifactDownload>> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
     let base = results_service_url.trim_end_matches('/');
     let tmp_dir = std::env::temp_dir();
+
+    let matcher = if !name.is_empty() || pattern.is_empty() {
+        None
+    } else {
+        let mut builder = globset::GlobSetBuilder::new();
+        builder.add(globset::Glob::new(pattern)?);
+        Some(builder.build().context("build artifact pattern")?)
+    };
 
     let write_secret_file = |suffix: &str, content: &[u8]| -> std::io::Result<std::path::PathBuf> {
         let path = tmp_dir.join(format!(
@@ -4089,13 +4107,25 @@ pub fn download_artifacts_blocking(
         .unwrap_or_default();
     let mut downloads = Vec::new();
     for artifact in artifacts {
-        let Some(name) = artifact
+        let Some(artifact_name) = artifact
             .get("name")
             .and_then(serde_json::Value::as_str)
             .filter(|name| !name.is_empty())
         else {
             continue;
         };
+        // Filter BEFORE signing/downloading: unrequested artifacts (notably
+        // non-zip `.dockerbuild` build records) must never be fetched.
+        let selected = if !name.is_empty() {
+            artifact_name == name
+        } else if let Some(matcher) = &matcher {
+            matcher.is_match(artifact_name)
+        } else {
+            true
+        };
+        if !selected {
+            continue;
+        }
         let artifact_plan = artifact
             .get("workflow_run_backend_id")
             .or_else(|| artifact.get("workflowRunBackendId"))
@@ -4111,7 +4141,7 @@ pub fn download_artifacts_blocking(
             &serde_json::json!({
                 "workflow_run_backend_id": artifact_plan,
                 "workflow_job_run_backend_id": artifact_job,
-                "name": name
+                "name": artifact_name
             }),
         )?;
         let signed_url = signed
@@ -4150,7 +4180,18 @@ pub fn download_artifacts_blocking(
             );
         }
         let archive_file = std::fs::File::open(&zip_path)?;
-        let mut archive = zip::ZipArchive::new(archive_file).context("open artifact zip")?;
+        let mut archive = match zip::ZipArchive::new(archive_file) {
+            Ok(archive) => archive,
+            Err(err) => {
+                // docker/build-push-action uploads `.dockerbuild` build-record
+                // artifacts as gzip blobs, not zips. A selected-but-non-zip
+                // artifact (only reachable on pattern/download-all requests) is
+                // skipped with a warning rather than failing the whole step.
+                let _ = std::fs::remove_file(&zip_path);
+                eprintln!("skipping artifact '{artifact_name}': not a zip archive ({err})");
+                continue;
+            }
+        };
         let mut files = Vec::new();
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index)?;
@@ -4159,7 +4200,7 @@ pub fn download_artifacts_blocking(
             }
             let Some(path) = entry.enclosed_name() else {
                 let _ = std::fs::remove_file(&zip_path);
-                bail!("artifact '{name}' contains an unsafe archive path");
+                bail!("artifact '{artifact_name}' contains an unsafe archive path");
             };
             let mut content = Vec::new();
             entry.read_to_end(&mut content)?;
@@ -4167,7 +4208,7 @@ pub fn download_artifacts_blocking(
         }
         let _ = std::fs::remove_file(&zip_path);
         downloads.push(ResultsArtifactDownload {
-            name: name.to_string(),
+            name: artifact_name.to_string(),
             files,
         });
     }
@@ -4317,8 +4358,15 @@ mod tests {
             requests
         });
 
-        let downloads =
-            download_artifacts_blocking(&base, "runtime-token", "plan", "consumer").unwrap();
+        let downloads = download_artifacts_blocking(
+            &base,
+            "runtime-token",
+            "plan",
+            "consumer",
+            "release-linux",
+            "",
+        )
+        .unwrap();
         assert_eq!(downloads.len(), 1);
         assert_eq!(downloads[0].name, "release-linux");
         assert_eq!(
@@ -4332,6 +4380,180 @@ mod tests {
         assert!(requests[0].contains("ArtifactService/ListArtifacts"));
         assert!(requests[1].contains("ArtifactService/GetSignedArtifactURL"));
         assert!(requests[2].starts_with("GET /signed.zip?credential=secret HTTP/1.1"));
+    }
+
+    #[test]
+    fn results_service_download_filters_before_signing_and_downloading() {
+        // Regression: a run containing a docker/build-push-action `.dockerbuild`
+        // build-record artifact (gzip, not zip) must not fail an unrelated
+        // download-artifact step. The name filter applies BEFORE any artifact
+        // is signed or downloaded, so the server must see exactly one
+        // ListArtifacts + one GetSignedArtifactURL + one GET.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("dist/output.txt", zip::write::FileOptions::<()>::default())
+            .unwrap();
+        zip.write_all(b"artifact-v4\n").unwrap();
+        let zip_bytes = zip.finish().unwrap().into_inner();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let signed_url = format!("{base}/signed.zip?credential=secret");
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                requests.push(String::from_utf8_lossy(&request).to_string());
+                let (content_type, body) = match index {
+                    0 => (
+                        "application/json",
+                        serde_json::to_vec(&serde_json::json!({
+                            "artifacts": [
+                                {
+                                    "name": "release-linux",
+                                    "workflow_run_backend_id": "plan",
+                                    "workflow_job_run_backend_id": "producer"
+                                },
+                                {
+                                    "name": ".dockerbuild",
+                                    "workflow_run_backend_id": "plan",
+                                    "workflow_job_run_backend_id": "image"
+                                }
+                            ]
+                        }))
+                        .unwrap(),
+                    ),
+                    1 => (
+                        "application/json",
+                        serde_json::to_vec(&serde_json::json!({"signed_url": signed_url})).unwrap(),
+                    ),
+                    _ => ("application/zip", zip_bytes.clone()),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+            requests
+        });
+
+        let downloads = download_artifacts_blocking(
+            &base,
+            "runtime-token",
+            "plan",
+            "consumer",
+            "release-linux",
+            "",
+        )
+        .unwrap();
+        assert_eq!(downloads.len(), 1);
+        assert_eq!(downloads[0].name, "release-linux");
+        let requests = server.join().unwrap();
+        // Exactly three requests: the .dockerbuild artifact was never signed
+        // or downloaded (pre-fix it was fetched and failed with EOCD).
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1].contains("ArtifactService/GetSignedArtifactURL"));
+        assert!(requests[2].starts_with("GET /signed.zip?credential=secret HTTP/1.1"));
+    }
+
+    #[test]
+    fn results_service_download_skips_non_zip_artifacts() {
+        // Regression: an unfiltered download-all (merge-multiple) in a run with
+        // a non-zip `.dockerbuild` build-record artifact skips that artifact
+        // with a warning instead of failing with "invalid Zip archive: EOCD".
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("dist/output.txt", zip::write::FileOptions::<()>::default())
+            .unwrap();
+        zip.write_all(b"artifact-v4\n").unwrap();
+        let zip_bytes = zip.finish().unwrap().into_inner();
+        // .dockerbuild build records are gzip blobs, not zips.
+        let gzip_bytes = b"\x1f\x8b\x08\x00dockerbuild-record-not-a-zip".to_vec();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let signed_url = format!("{base}/signed.bin?credential=secret");
+        let server = std::thread::spawn(move || {
+            for index in 0..5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let (content_type, body) = match index {
+                    0 => (
+                        "application/json",
+                        serde_json::to_vec(&serde_json::json!({
+                            "artifacts": [
+                                {
+                                    "name": "release-linux",
+                                    "workflow_run_backend_id": "plan",
+                                    "workflow_job_run_backend_id": "producer"
+                                },
+                                {
+                                    "name": ".dockerbuild",
+                                    "workflow_run_backend_id": "plan",
+                                    "workflow_job_run_backend_id": "image"
+                                }
+                            ]
+                        }))
+                        .unwrap(),
+                    ),
+                    1 | 3 => (
+                        "application/json",
+                        serde_json::to_vec(&serde_json::json!({"signed_url": signed_url})).unwrap(),
+                    ),
+                    2 => ("application/zip", zip_bytes.clone()),
+                    _ => ("application/gzip", gzip_bytes.clone()),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+
+        let downloads =
+            download_artifacts_blocking(&base, "runtime-token", "plan", "consumer", "", "")
+                .unwrap();
+        server.join().unwrap();
+        assert_eq!(downloads.len(), 1);
+        assert_eq!(downloads[0].name, "release-linux");
+        assert_eq!(
+            downloads[0].files,
+            vec![(
+                std::path::PathBuf::from("dist/output.txt"),
+                b"artifact-v4\n".to_vec()
+            )]
+        );
     }
 
     #[test]
