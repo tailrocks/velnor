@@ -40,6 +40,48 @@ pub struct GitHubApiError {
     pub status: u16,
     pub action: String,
     pub body: String,
+    pub retry_after_seconds: Option<u64>,
+    pub rate_limit_reset_epoch: Option<u64>,
+}
+
+/// GitHub DELETE `/actions/runners/{id}` while the runner still holds a job.
+///
+/// HTTP 422 here is not a missing registration. Hammering DELETE or dropping
+/// the local JIT identity churns new runner IDs and leaves GitHub `offline+busy`.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "GitHub refused to delete runner: currently running a job (HTTP 422); quarantine until the job is terminal; local identity preserved: {0}"
+)]
+pub(crate) struct RunnerBusyConflict(pub(crate) String);
+
+/// Outcome of a runner DELETE that the supervisor can act on without another HTTP round-trip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunnerDeleteOutcome {
+    /// 204 or 404: registration is gone or never existed.
+    Gone,
+    /// 422: GitHub still believes a job is running on this runner.
+    BusyConflict,
+}
+
+pub(crate) fn runner_delete_is_busy_conflict(status: u16, body: &str) -> bool {
+    if status != 422 {
+        return false;
+    }
+    let lower = body.to_ascii_lowercase();
+    lower.contains("currently running a job")
+        || lower.contains("unable to delete")
+        || lower.contains("runner is busy")
+        || lower.contains("runner_is_busy")
+}
+
+pub(crate) fn classify_runner_delete(status: u16, body: &str) -> Option<RunnerDeleteOutcome> {
+    match status {
+        204 | 404 => Some(RunnerDeleteOutcome::Gone),
+        _ if runner_delete_is_busy_conflict(status, body) => {
+            Some(RunnerDeleteOutcome::BusyConflict)
+        }
+        _ => None,
+    }
 }
 
 fn github_api_error(
@@ -51,8 +93,90 @@ fn github_api_error(
         status,
         action: action.into(),
         body: body.into(),
+        retry_after_seconds: None,
+        rate_limit_reset_epoch: None,
     }
     .into()
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct GitHubRetryHint {
+    retry_after_seconds: Option<u64>,
+    rate_limit_reset_epoch: Option<u64>,
+}
+
+impl GitHubRetryHint {
+    fn delay(self, now_epoch: u64) -> Option<std::time::Duration> {
+        let retry_after = self.retry_after_seconds.unwrap_or(0);
+        let until_reset = self
+            .rate_limit_reset_epoch
+            .map(|reset| reset.saturating_sub(now_epoch))
+            .unwrap_or(0);
+        let seconds = retry_after.max(until_reset);
+        (seconds > 0).then(|| std::time::Duration::from_secs(seconds))
+    }
+}
+
+fn parse_github_retry_headers(headers: &[u8]) -> GitHubRetryHint {
+    let mut hint = GitHubRetryHint::default();
+    for line in String::from_utf8_lossy(headers).lines() {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim();
+        if name.eq_ignore_ascii_case("retry-after") {
+            hint.retry_after_seconds = value.parse().ok();
+        } else if name.eq_ignore_ascii_case("x-ratelimit-reset") {
+            hint.rate_limit_reset_epoch = value.parse().ok();
+        }
+    }
+    hint
+}
+
+fn github_retry_hint_from_header_map(headers: &HeaderMap) -> GitHubRetryHint {
+    let parse = |name: &'static str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok())
+    };
+    GitHubRetryHint {
+        retry_after_seconds: parse("retry-after"),
+        rate_limit_reset_epoch: parse("x-ratelimit-reset"),
+    }
+}
+
+fn github_api_error_with_retry(
+    action: impl Into<String>,
+    status: u16,
+    body: impl Into<String>,
+    hint: GitHubRetryHint,
+) -> anyhow::Error {
+    GitHubApiError {
+        status,
+        action: action.into(),
+        body: body.into(),
+        retry_after_seconds: hint.retry_after_seconds,
+        rate_limit_reset_epoch: hint.rate_limit_reset_epoch,
+    }
+    .into()
+}
+
+pub fn github_api_retry_delay(error: &anyhow::Error) -> Option<std::time::Duration> {
+    let now_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<GitHubApiError>())
+        .and_then(|error| {
+            GitHubRetryHint {
+                retry_after_seconds: error.retry_after_seconds,
+                rate_limit_reset_epoch: error.rate_limit_reset_epoch,
+            }
+            .delay(now_epoch)
+        })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +251,66 @@ impl GitHubScope {
             "repository"
         }
     }
+
+    pub fn org_login(&self) -> Option<&str> {
+        self.runner_scope_path.strip_prefix("orgs/")
+    }
+
+    pub fn repo_full_name(&self) -> Option<(&str, &str)> {
+        self.runner_scope_path
+            .strip_prefix("repos/")
+            .and_then(|rest| rest.split_once('/'))
+    }
+
+    pub fn workflow_run_cancel_url(&self, repository: &str, run_id: u64) -> Result<Url> {
+        self.api_base_url
+            .join(&format!("repos/{repository}/actions/runs/{run_id}/cancel"))
+            .context("build GitHub workflow run cancel URL")
+    }
+
+    pub fn repo_queued_runs_url(&self, repository: &str) -> Result<Url> {
+        self.api_base_url
+            .join(&format!("repos/{repository}/actions/runs"))
+            .context("build GitHub queued workflow runs URL")
+    }
+
+    pub fn org_repos_url(&self) -> Result<Url> {
+        let org = self
+            .org_login()
+            .ok_or_else(|| anyhow::anyhow!("org repos URL requires organization scope"))?;
+        self.api_base_url
+            .join(&format!("orgs/{org}/repos"))
+            .context("build GitHub org repos URL")
+    }
+}
+
+/// GitHub REST job waiting in `queued` with no runner assigned.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ListedWorkflowJob {
+    pub id: u64,
+    pub run_id: u64,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    pub status: Option<String>,
+    pub runner_id: Option<i64>,
+    pub created_at: Option<String>,
+    pub run_url: Option<String>,
+}
+
+pub(crate) fn repository_from_actions_run_url(run_url: &str) -> Option<String> {
+    let rest = run_url.split("/repos/").nth(1)?;
+    let mut parts = rest.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+/// 202 accepted; 409/404 already terminal.
+pub(crate) fn classify_workflow_cancel(status: u16) -> bool {
+    matches!(status, 202 | 409 | 404)
 }
 
 fn is_hosted_github(host: &str) -> bool {
@@ -604,9 +788,12 @@ impl RegistrationClient {
         let ua = RUNNER_USER_AGENT.to_string();
 
         let mut last_err = anyhow::anyhow!("no attempts made");
+        let mut retry_delay = None;
         for attempt in 0..3u32 {
             if attempt > 0 {
-                let backoff = std::time::Duration::from_secs(u64::from(attempt) * 5);
+                let backoff = retry_delay
+                    .take()
+                    .unwrap_or_else(|| std::time::Duration::from_secs(u64::from(attempt) * 5));
                 eprintln!(
                     "JIT config error (attempt {}/3), retrying in {}s",
                     attempt,
@@ -623,6 +810,7 @@ impl RegistrationClient {
                 let tmp = std::env::temp_dir();
                 let cfg_path = tmp.join(format!("velnor-jit-{}.cfg", uuid::Uuid::new_v4()));
                 let body_path = tmp.join(format!("velnor-jit-{}.body", uuid::Uuid::new_v4()));
+                let headers_path = tmp.join(format!("velnor-jit-{}.headers", uuid::Uuid::new_v4()));
                 let cfg = format!(
                     "header = \"User-Agent: {ua2}\"\n\
                      header = \"Authorization: Bearer {pat2}\"\n\
@@ -652,13 +840,17 @@ impl RegistrationClient {
                 let out = std::process::Command::new("curl")
                     .arg("--config")
                     .arg(&cfg_path)
+                    .arg("--dump-header")
+                    .arg(&headers_path)
                     .arg("--data")
                     .arg(format!("@{}", body_path.display()))
                     .arg(&url2)
                     .output();
                 let _ = std::fs::remove_file(&cfg_path);
                 let _ = std::fs::remove_file(&body_path);
-                out
+                let headers = std::fs::read(&headers_path).unwrap_or_default();
+                let _ = std::fs::remove_file(&headers_path);
+                out.map(|output| (output, headers))
             })
             .await
             .context("spawn_blocking curl")?;
@@ -667,7 +859,7 @@ impl RegistrationClient {
                 Err(e) => {
                     last_err = anyhow::Error::from(e).context("send JIT runner config request");
                 }
-                Ok(output) => {
+                Ok((output, headers)) => {
                     let stdout = String::from_utf8_lossy(&output.stdout);
                     let (json_part, status_str) =
                         stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
@@ -677,14 +869,22 @@ impl RegistrationClient {
                             .context("parse JIT runner config response");
                     }
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    last_err = github_api_error(
+                    let hint = parse_github_retry_headers(&headers);
+                    last_err = github_api_error_with_retry(
                         "JIT runner config request",
                         status,
                         format!("{json_part}, stderr={stderr}"),
+                        hint,
                     );
                     if status == 409 {
                         return Err(last_err);
                     }
+                    retry_delay = hint.delay(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                    );
                 }
             }
         }
@@ -720,11 +920,13 @@ impl RegistrationClient {
                 .context("send list runners request")?;
             let status = response.status();
             if !status.is_success() {
+                let hint = github_retry_hint_from_header_map(response.headers());
                 let body = response.text().await.unwrap_or_default();
-                return Err(github_api_error(
+                return Err(github_api_error_with_retry(
                     "list runners request",
                     status.as_u16(),
                     body,
+                    hint,
                 ));
             }
             let page: Page = response
@@ -762,11 +964,13 @@ impl RegistrationClient {
             .context("send list runner groups request")?;
         let status = response.status();
         if !status.is_success() {
+            let hint = github_retry_hint_from_header_map(response.headers());
             let body = response.text().await.unwrap_or_default();
-            return Err(github_api_error(
+            return Err(github_api_error_with_retry(
                 "list runner groups request",
                 status.as_u16(),
                 body,
+                hint,
             ));
         }
         response
@@ -774,6 +978,197 @@ impl RegistrationClient {
             .await
             .map(|response| response.runner_groups)
             .context("parse list runner groups response")
+    }
+
+    /// Queued (unassigned) jobs in this org/repo whose labels wait on Velnor.
+    pub async fn list_queued_jobs(
+        &self,
+        scope: &GitHubScope,
+        pat: &str,
+    ) -> Result<Vec<ListedWorkflowJob>> {
+        let repositories = self.list_scope_repositories(scope, pat).await?;
+        let mut jobs = Vec::new();
+        for repository in repositories {
+            let runs = match self
+                .list_queued_workflow_runs(scope, pat, &repository)
+                .await
+            {
+                Ok(runs) => runs,
+                Err(error) => {
+                    eprintln!("list queued runs for {repository} failed: {error:#}");
+                    continue;
+                }
+            };
+            for run_id in runs {
+                match self
+                    .list_workflow_run_jobs(scope, pat, &repository, run_id)
+                    .await
+                {
+                    Ok(run_jobs) => jobs.extend(run_jobs),
+                    Err(error) => {
+                        eprintln!("list jobs for {repository} run {run_id} failed: {error:#}");
+                    }
+                }
+            }
+        }
+        Ok(jobs)
+    }
+
+    async fn list_scope_repositories(&self, scope: &GitHubScope, pat: &str) -> Result<Vec<String>> {
+        if let Some((owner, repo)) = scope.repo_full_name() {
+            return Ok(vec![format!("{owner}/{repo}")]);
+        }
+        let Some(org) = scope.org_login() else {
+            return Ok(Vec::new());
+        };
+        #[derive(Deserialize)]
+        struct Repo {
+            full_name: Option<String>,
+        }
+        let base = scope.org_repos_url()?;
+        let mut all = Vec::new();
+        let mut page_number = 1u32;
+        loop {
+            let mut url = base.clone();
+            url.query_pairs_mut()
+                .append_pair("per_page", "100")
+                .append_pair("page", &page_number.to_string())
+                .append_pair("type", "all");
+            let response = self
+                .http
+                .get(url)
+                .bearer_auth(pat)
+                .header(USER_AGENT, RUNNER_USER_AGENT)
+                .header(ACCEPT, "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .send()
+                .await
+                .with_context(|| format!("list repositories for org {org}"))?;
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                return Err(github_api_error(
+                    "list org repositories",
+                    status.as_u16(),
+                    body,
+                ));
+            }
+            let page: Vec<Repo> = response.json().await.context("parse org repositories")?;
+            let fetched = page.len();
+            all.extend(page.into_iter().filter_map(|repo| repo.full_name));
+            if fetched < 100 {
+                return Ok(all);
+            }
+            page_number += 1;
+        }
+    }
+
+    async fn list_queued_workflow_runs(
+        &self,
+        scope: &GitHubScope,
+        pat: &str,
+        repository: &str,
+    ) -> Result<Vec<u64>> {
+        #[derive(Deserialize)]
+        struct Runs {
+            workflow_runs: Vec<Run>,
+        }
+        #[derive(Deserialize)]
+        struct Run {
+            id: u64,
+        }
+        let mut url = scope.repo_queued_runs_url(repository)?;
+        url.query_pairs_mut()
+            .append_pair("status", "queued")
+            .append_pair("per_page", "100");
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(pat)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .header(ACCEPT, "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .with_context(|| format!("list queued runs for {repository}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(github_api_error(
+                "list queued workflow runs",
+                status.as_u16(),
+                body,
+            ));
+        }
+        let runs: Runs = response
+            .json()
+            .await
+            .context("parse queued workflow runs")?;
+        Ok(runs.workflow_runs.into_iter().map(|run| run.id).collect())
+    }
+
+    async fn list_workflow_run_jobs(
+        &self,
+        scope: &GitHubScope,
+        pat: &str,
+        repository: &str,
+        run_id: u64,
+    ) -> Result<Vec<ListedWorkflowJob>> {
+        #[derive(Deserialize)]
+        struct Jobs {
+            jobs: Vec<ListedWorkflowJob>,
+        }
+        let url = scope
+            .api_base_url
+            .join(&format!("repos/{repository}/actions/runs/{run_id}/jobs"))
+            .context("build workflow run jobs URL")?;
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(pat)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .header(ACCEPT, "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .with_context(|| format!("list jobs for {repository} run {run_id}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(github_api_error(
+                "list workflow run jobs",
+                status.as_u16(),
+                body,
+            ));
+        }
+        let jobs: Jobs = response.json().await.context("parse workflow run jobs")?;
+        Ok(jobs.jobs)
+    }
+
+    pub async fn cancel_workflow_run(
+        &self,
+        scope: &GitHubScope,
+        pat: &str,
+        repository: &str,
+        run_id: u64,
+    ) -> Result<()> {
+        let url = scope.workflow_run_cancel_url(repository, run_id)?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(pat)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .header(ACCEPT, "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .with_context(|| format!("cancel workflow run {repository}/{run_id}"))?;
+        let status = response.status().as_u16();
+        if classify_workflow_cancel(status) {
+            return Ok(());
+        }
+        let body = response.text().await.unwrap_or_default();
+        Err(github_api_error("cancel workflow run", status, body))
     }
 
     /// Look up one runner registration by id. `Ok(None)` means GitHub no
@@ -801,11 +1196,12 @@ impl RegistrationClient {
         let pat = pat.to_string();
         let ua = RUNNER_USER_AGENT.to_string();
 
-        let output = tokio::task::spawn_blocking(move || {
+        let (output, headers) = tokio::task::spawn_blocking(move || {
             use std::io::Write;
             use std::os::unix::fs::OpenOptionsExt;
             let tmp = std::env::temp_dir();
             let cfg_path = tmp.join(format!("velnor-del-{}.cfg", uuid::Uuid::new_v4()));
+            let headers_path = tmp.join(format!("velnor-del-{}.headers", uuid::Uuid::new_v4()));
             let cfg = format!(
                 "header = \"User-Agent: {ua}\"\n\
                  header = \"Authorization: Bearer {pat}\"\n\
@@ -826,10 +1222,14 @@ impl RegistrationClient {
             let out = std::process::Command::new("curl")
                 .arg("--config")
                 .arg(&cfg_path)
+                .arg("--dump-header")
+                .arg(&headers_path)
                 .arg(&url)
                 .output();
             let _ = std::fs::remove_file(&cfg_path);
-            out
+            let headers = std::fs::read(&headers_path).unwrap_or_default();
+            let _ = std::fs::remove_file(&headers_path);
+            out.map(|output| (output, headers))
         })
         .await
         .context("spawn_blocking curl delete")?
@@ -838,10 +1238,18 @@ impl RegistrationClient {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let (body, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
         let status: u16 = status_str.trim().parse().unwrap_or(0);
-        if status == 204 || status == 404 {
-            return Ok(());
+        match classify_runner_delete(status, body) {
+            Some(RunnerDeleteOutcome::Gone) => Ok(()),
+            Some(RunnerDeleteOutcome::BusyConflict) => {
+                Err(RunnerBusyConflict(body.trim().to_string()).into())
+            }
+            None => Err(github_api_error_with_retry(
+                "delete runner request",
+                status,
+                body,
+                parse_github_retry_headers(&headers),
+            )),
         }
-        Err(github_api_error("delete runner request", status, body))
     }
 }
 
@@ -3601,8 +4009,16 @@ pub struct ResultsArtifactDownload {
     pub files: Vec<(std::path::PathBuf, Vec<u8>)>,
 }
 
-/// Download every artifact visible to this workflow run through the Results
+/// Download artifacts visible to this workflow run through the Results
 /// Service v4 protocol used by `actions/download-artifact`.
+///
+/// `name` (exact) or `pattern` (glob) filter the artifact list BEFORE anything
+/// is signed or downloaded: `docker/build-push-action` stores `.dockerbuild`
+/// build-record artifacts as gzip blobs rather than zips, so downloading every
+/// listed artifact unconditionally fails any download-artifact step in such a
+/// run with "invalid Zip archive: EOCD". Non-zip artifacts that still pass the
+/// filter (e.g. an unfiltered download-all in the same run) are skipped with a
+/// warning instead of failing the step.
 ///
 /// Flow: ListArtifacts -> GetSignedArtifactURL -> GET zip. Signed URLs and the
 /// runtime bearer token are supplied through mode-0600 curl config files so
@@ -3612,12 +4028,22 @@ pub fn download_artifacts_blocking(
     token: &str,
     plan_id: &str,
     job_id: &str,
+    name: &str,
+    pattern: &str,
 ) -> Result<Vec<ResultsArtifactDownload>> {
     use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
     const SERVICE: &str = "twirp/github.actions.results.api.v1.ArtifactService";
     let base = results_service_url.trim_end_matches('/');
     let tmp_dir = std::env::temp_dir();
+
+    let matcher = if !name.is_empty() || pattern.is_empty() {
+        None
+    } else {
+        let mut builder = globset::GlobSetBuilder::new();
+        builder.add(globset::Glob::new(pattern)?);
+        Some(builder.build().context("build artifact pattern")?)
+    };
 
     let write_secret_file = |suffix: &str, content: &[u8]| -> std::io::Result<std::path::PathBuf> {
         let path = tmp_dir.join(format!(
@@ -3681,13 +4107,25 @@ pub fn download_artifacts_blocking(
         .unwrap_or_default();
     let mut downloads = Vec::new();
     for artifact in artifacts {
-        let Some(name) = artifact
+        let Some(artifact_name) = artifact
             .get("name")
             .and_then(serde_json::Value::as_str)
             .filter(|name| !name.is_empty())
         else {
             continue;
         };
+        // Filter BEFORE signing/downloading: unrequested artifacts (notably
+        // non-zip `.dockerbuild` build records) must never be fetched.
+        let selected = if !name.is_empty() {
+            artifact_name == name
+        } else if let Some(matcher) = &matcher {
+            matcher.is_match(artifact_name)
+        } else {
+            true
+        };
+        if !selected {
+            continue;
+        }
         let artifact_plan = artifact
             .get("workflow_run_backend_id")
             .or_else(|| artifact.get("workflowRunBackendId"))
@@ -3703,7 +4141,7 @@ pub fn download_artifacts_blocking(
             &serde_json::json!({
                 "workflow_run_backend_id": artifact_plan,
                 "workflow_job_run_backend_id": artifact_job,
-                "name": name
+                "name": artifact_name
             }),
         )?;
         let signed_url = signed
@@ -3742,7 +4180,18 @@ pub fn download_artifacts_blocking(
             );
         }
         let archive_file = std::fs::File::open(&zip_path)?;
-        let mut archive = zip::ZipArchive::new(archive_file).context("open artifact zip")?;
+        let mut archive = match zip::ZipArchive::new(archive_file) {
+            Ok(archive) => archive,
+            Err(err) => {
+                // docker/build-push-action uploads `.dockerbuild` build-record
+                // artifacts as gzip blobs, not zips. A selected-but-non-zip
+                // artifact (only reachable on pattern/download-all requests) is
+                // skipped with a warning rather than failing the whole step.
+                let _ = std::fs::remove_file(&zip_path);
+                eprintln!("skipping artifact '{artifact_name}': not a zip archive ({err})");
+                continue;
+            }
+        };
         let mut files = Vec::new();
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index)?;
@@ -3751,7 +4200,7 @@ pub fn download_artifacts_blocking(
             }
             let Some(path) = entry.enclosed_name() else {
                 let _ = std::fs::remove_file(&zip_path);
-                bail!("artifact '{name}' contains an unsafe archive path");
+                bail!("artifact '{artifact_name}' contains an unsafe archive path");
             };
             let mut content = Vec::new();
             entry.read_to_end(&mut content)?;
@@ -3759,7 +4208,7 @@ pub fn download_artifacts_blocking(
         }
         let _ = std::fs::remove_file(&zip_path);
         downloads.push(ResultsArtifactDownload {
-            name: name.to_string(),
+            name: artifact_name.to_string(),
             files,
         });
     }
@@ -3769,6 +4218,66 @@ pub fn download_artifacts_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runner_delete_204_and_404_are_gone() {
+        assert_eq!(
+            classify_runner_delete(204, ""),
+            Some(RunnerDeleteOutcome::Gone)
+        );
+        assert_eq!(
+            classify_runner_delete(404, r#"{"message":"Not Found"}"#),
+            Some(RunnerDeleteOutcome::Gone)
+        );
+        assert!(!runner_delete_is_busy_conflict(204, ""));
+        assert!(!runner_delete_is_busy_conflict(
+            404,
+            "currently running a job"
+        ));
+    }
+
+    #[test]
+    fn runner_delete_422_busy_is_quarantine_not_gone() {
+        let body =
+            r#"{"message":"Sorry, the runner is currently running a job. Unable to delete."}"#;
+        assert!(runner_delete_is_busy_conflict(422, body));
+        assert_eq!(
+            classify_runner_delete(422, body),
+            Some(RunnerDeleteOutcome::BusyConflict)
+        );
+        assert_ne!(
+            classify_runner_delete(422, body),
+            Some(RunnerDeleteOutcome::Gone)
+        );
+        assert_eq!(classify_runner_delete(500, body), None);
+        assert!(!runner_delete_is_busy_conflict(
+            422,
+            r#"{"message":"validation failed"}"#
+        ));
+    }
+
+    #[test]
+    fn workflow_cancel_url_and_statuses_are_fail_closed_rest() {
+        assert_eq!(
+            repository_from_actions_run_url(
+                "https://api.github.com/repos/jackin-project/jackin/actions/runs/10"
+            )
+            .as_deref(),
+            Some("jackin-project/jackin")
+        );
+        assert!(classify_workflow_cancel(202));
+        assert!(classify_workflow_cancel(409));
+        assert!(classify_workflow_cancel(404));
+        assert!(!classify_workflow_cancel(500));
+        let scope = GitHubScope::parse("https://github.com/jackin-project").unwrap();
+        assert_eq!(
+            scope
+                .workflow_run_cancel_url("jackin-project/jackin", 10)
+                .unwrap()
+                .as_str(),
+            "https://api.github.com/repos/jackin-project/jackin/actions/runs/10/cancel"
+        );
+    }
 
     #[test]
     fn artifact_compression_level_zero_uses_zip_stored() {
@@ -3849,8 +4358,15 @@ mod tests {
             requests
         });
 
-        let downloads =
-            download_artifacts_blocking(&base, "runtime-token", "plan", "consumer").unwrap();
+        let downloads = download_artifacts_blocking(
+            &base,
+            "runtime-token",
+            "plan",
+            "consumer",
+            "release-linux",
+            "",
+        )
+        .unwrap();
         assert_eq!(downloads.len(), 1);
         assert_eq!(downloads[0].name, "release-linux");
         assert_eq!(
@@ -3864,6 +4380,180 @@ mod tests {
         assert!(requests[0].contains("ArtifactService/ListArtifacts"));
         assert!(requests[1].contains("ArtifactService/GetSignedArtifactURL"));
         assert!(requests[2].starts_with("GET /signed.zip?credential=secret HTTP/1.1"));
+    }
+
+    #[test]
+    fn results_service_download_filters_before_signing_and_downloading() {
+        // Regression: a run containing a docker/build-push-action `.dockerbuild`
+        // build-record artifact (gzip, not zip) must not fail an unrelated
+        // download-artifact step. The name filter applies BEFORE any artifact
+        // is signed or downloaded, so the server must see exactly one
+        // ListArtifacts + one GetSignedArtifactURL + one GET.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("dist/output.txt", zip::write::FileOptions::<()>::default())
+            .unwrap();
+        zip.write_all(b"artifact-v4\n").unwrap();
+        let zip_bytes = zip.finish().unwrap().into_inner();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let signed_url = format!("{base}/signed.zip?credential=secret");
+        let server = std::thread::spawn(move || {
+            let mut requests = Vec::new();
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                requests.push(String::from_utf8_lossy(&request).to_string());
+                let (content_type, body) = match index {
+                    0 => (
+                        "application/json",
+                        serde_json::to_vec(&serde_json::json!({
+                            "artifacts": [
+                                {
+                                    "name": "release-linux",
+                                    "workflow_run_backend_id": "plan",
+                                    "workflow_job_run_backend_id": "producer"
+                                },
+                                {
+                                    "name": ".dockerbuild",
+                                    "workflow_run_backend_id": "plan",
+                                    "workflow_job_run_backend_id": "image"
+                                }
+                            ]
+                        }))
+                        .unwrap(),
+                    ),
+                    1 => (
+                        "application/json",
+                        serde_json::to_vec(&serde_json::json!({"signed_url": signed_url})).unwrap(),
+                    ),
+                    _ => ("application/zip", zip_bytes.clone()),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+            requests
+        });
+
+        let downloads = download_artifacts_blocking(
+            &base,
+            "runtime-token",
+            "plan",
+            "consumer",
+            "release-linux",
+            "",
+        )
+        .unwrap();
+        assert_eq!(downloads.len(), 1);
+        assert_eq!(downloads[0].name, "release-linux");
+        let requests = server.join().unwrap();
+        // Exactly three requests: the .dockerbuild artifact was never signed
+        // or downloaded (pre-fix it was fetched and failed with EOCD).
+        assert_eq!(requests.len(), 3);
+        assert!(requests[1].contains("ArtifactService/GetSignedArtifactURL"));
+        assert!(requests[2].starts_with("GET /signed.zip?credential=secret HTTP/1.1"));
+    }
+
+    #[test]
+    fn results_service_download_skips_non_zip_artifacts() {
+        // Regression: an unfiltered download-all (merge-multiple) in a run with
+        // a non-zip `.dockerbuild` build-record artifact skips that artifact
+        // with a warning instead of failing with "invalid Zip archive: EOCD".
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("dist/output.txt", zip::write::FileOptions::<()>::default())
+            .unwrap();
+        zip.write_all(b"artifact-v4\n").unwrap();
+        let zip_bytes = zip.finish().unwrap().into_inner();
+        // .dockerbuild build records are gzip blobs, not zips.
+        let gzip_bytes = b"\x1f\x8b\x08\x00dockerbuild-record-not-a-zip".to_vec();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let signed_url = format!("{base}/signed.bin?credential=secret");
+        let server = std::thread::spawn(move || {
+            for index in 0..5 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                loop {
+                    let count = stream.read(&mut buffer).unwrap();
+                    if count == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..count]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let (content_type, body) = match index {
+                    0 => (
+                        "application/json",
+                        serde_json::to_vec(&serde_json::json!({
+                            "artifacts": [
+                                {
+                                    "name": "release-linux",
+                                    "workflow_run_backend_id": "plan",
+                                    "workflow_job_run_backend_id": "producer"
+                                },
+                                {
+                                    "name": ".dockerbuild",
+                                    "workflow_run_backend_id": "plan",
+                                    "workflow_job_run_backend_id": "image"
+                                }
+                            ]
+                        }))
+                        .unwrap(),
+                    ),
+                    1 | 3 => (
+                        "application/json",
+                        serde_json::to_vec(&serde_json::json!({"signed_url": signed_url})).unwrap(),
+                    ),
+                    2 => ("application/zip", zip_bytes.clone()),
+                    _ => ("application/gzip", gzip_bytes.clone()),
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+
+        let downloads =
+            download_artifacts_blocking(&base, "runtime-token", "plan", "consumer", "", "")
+                .unwrap();
+        server.join().unwrap();
+        assert_eq!(downloads.len(), 1);
+        assert_eq!(downloads[0].name, "release-linux");
+        assert_eq!(
+            downloads[0].files,
+            vec![(
+                std::path::PathBuf::from("dist/output.txt"),
+                b"artifact-v4\n".to_vec()
+            )]
+        );
     }
 
     #[test]
@@ -4668,5 +5358,42 @@ mod tests {
         let settings: DecodedJitRunnerSettings = serde_json::from_str(json).unwrap();
         assert!(settings.use_v2_flow);
         assert!(!settings.ephemeral);
+    }
+
+    #[test]
+    fn github_retry_headers_drive_reset_aware_delay() {
+        let hint = parse_github_retry_headers(
+            b"HTTP/2 403\r\nRetry-After: 17\r\nX-RateLimit-Reset: 1060\r\n\r\n",
+        );
+        assert_eq!(hint.retry_after_seconds, Some(17));
+        assert_eq!(hint.rate_limit_reset_epoch, Some(1060));
+        assert_eq!(hint.delay(1000), Some(std::time::Duration::from_secs(60)));
+
+        let error = github_api_error_with_retry("quota", 403, "exhausted", hint);
+        assert!(github_api_retry_delay(&error).is_some());
+    }
+
+    #[test]
+    fn reqwest_header_map_preserves_github_retry_metadata() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("29"));
+        headers.insert("x-ratelimit-reset", HeaderValue::from_static("123456"));
+
+        assert_eq!(
+            github_retry_hint_from_header_map(&headers),
+            GitHubRetryHint {
+                retry_after_seconds: Some(29),
+                rate_limit_reset_epoch: Some(123456),
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_retry_headers_are_ignored_without_exposing_values() {
+        let hint = parse_github_retry_headers(
+            b"Retry-After: later\r\nX-RateLimit-Reset: invalid\r\nAuthorization: secret\r\n",
+        );
+        assert_eq!(hint, GitHubRetryHint::default());
+        assert_eq!(hint.delay(1000), None);
     }
 }

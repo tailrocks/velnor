@@ -15,6 +15,7 @@ use std::os::unix::fs::OpenOptionsExt;
 static EXEC_ENV_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const NODE_ACTION_BASE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const JOB_NOFILE_LIMIT: &str = "65536:65536";
 
 #[derive(Debug, Clone)]
 pub struct JobContainerSpec {
@@ -72,7 +73,15 @@ impl JobContainerSpec {
     }
 
     pub fn create_network_args(&self) -> Vec<String> {
-        vec!["network".into(), "create".into(), self.network.clone()]
+        vec![
+            "network".into(),
+            "create".into(),
+            "--label".into(),
+            format!("velnor.daemon-id={}", self.daemon_id),
+            "--label".into(),
+            format!("velnor.job-id={}", self.name),
+            self.network.clone(),
+        ]
     }
 
     pub fn start_args(&self) -> Vec<String> {
@@ -141,18 +150,20 @@ impl JobContainerSpec {
                 &self.cargo_executable_store_host(),
                 "/github/home/.cargo/bin",
             ),
-            // Host-persistent mise tool store: installed tools are executable,
-            // so `installs` is scoped by trust/repository. The mise binary,
-            // shims and global config stay baked in the image. `cache` is
-            // download data and remains daemon-shared for warmth; mise uses
-            // its own file locks.
+            // Host-persistent mise tool store: installed tools are executable
+            // and mutable (managed runtimes can receive global packages after
+            // setup), so `installs` is scoped by slot + trust/repository. One
+            // job owns a slot at a time, preventing cross-job npm/pip/cargo
+            // mutation races while keeping later jobs on that slot warm. The
+            // download-only cache remains daemon-shared.
             "-v".into(),
             self.mount_arg(&self.mise_executable_store_host(), "/opt/mise/installs"),
-            // mise's Rust backend stores compiler payloads and selection state
-            // in rustup, not in /opt/mise. Keep it in the same trust/repository
-            // scope or an ephemeral container loses the selected toolchain.
+            // Persistent per-version mise BINARY store (Plan 008 Step 2). Scoped
+            // by trust/repository like `installs`; the setup script publishes a
+            // verified `<os-arch>/<exact-version>/mise` here so a fresh job
+            // reuses it. `/opt/mise/bin` stays the read-only baked bootstrap.
             "-v".into(),
-            self.mount_arg(&self.rustup_executable_store_host(), "/root/.rustup"),
+            self.mount_arg(&self.mise_binary_store_host(), "/opt/velnor/mise-binaries"),
             "-v".into(),
             self.mount_arg(
                 &mise_store_host(&self.temp_host).join("cache"),
@@ -194,9 +205,17 @@ impl JobContainerSpec {
         args.extend([
             "--label".into(),
             format!("velnor.daemon-id={}", self.daemon_id),
+            "--label".into(),
+            format!("velnor.job-id={}", self.name),
         ]);
         args.extend(self.options.iter().cloned());
         args.extend(self.resource_options.iter().cloned());
+
+        // Docker Engine 29 inherits systemd's 1024-file descriptor default
+        // when no container limit is explicit. Large Rust/Zig links open one
+        // descriptor per object and fail with ProcessFdQuotaExceeded. Make the
+        // job contract deterministic and large enough for GitHub-scale builds.
+        args.extend(["--ulimit".into(), format!("nofile={JOB_NOFILE_LIMIT}")]);
 
         // GitHub-hosted Ubuntu jobs expose localhost over IPv4. Docker also
         // assigns localhost to ::1, which can split same-process servers and
@@ -250,16 +269,10 @@ impl JobContainerSpec {
             ),
             "-v".into(),
             self.mount_arg(&store.join("cache"), "/__velnor_seed/cache"),
-            "-v".into(),
-            self.mount_arg(
-                &self.rustup_executable_store_host(),
-                "/__velnor_seed/rustup",
-            ),
             self.image.clone(),
             "-c".into(),
             "cp -an /opt/mise/installs/. /__velnor_seed/installs/ 2>/dev/null || true; \
-             cp -an /opt/mise/cache/. /__velnor_seed/cache/ 2>/dev/null || true; \
-             cp -an /root/.rustup/. /__velnor_seed/rustup/ 2>/dev/null || true"
+             cp -an /opt/mise/cache/. /__velnor_seed/cache/ 2>/dev/null || true"
                 .into(),
         ]
     }
@@ -360,12 +373,13 @@ impl JobContainerSpec {
         for (name, value) in env {
             let is_secret = env_name_is_secret(name) || env_value_is_secret(value, secret_masks);
             if is_secret && value.contains('\n') {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("secret environment variable {name} contains a newline"),
-                ));
-            }
-            if is_secret {
+                // Docker env files are line-oriented and cannot represent an
+                // armored key or certificate. Ask Docker to forward this
+                // variable from its own process environment instead: the
+                // value stays out of argv, logs, and the env-file parser.
+                prepared.args.extend(["-e".into(), name.clone()]);
+                prepared.process_env.push((name.clone(), value.clone()));
+            } else if is_secret {
                 let env_file = write_exec_env_file(&self.temp_host, name, value)?;
                 prepared
                     .args
@@ -385,6 +399,9 @@ impl JobContainerSpec {
     /// persist on the host), the rustup toolchain store stays at the
     /// image-baked /root/.rustup, and cargo's registry/git live under the
     /// job home (backed by the host-persistent cargo store mounts).
+    /// PATH resolves the image-baked rustup proxy before mise shims. Otherwise
+    /// a shimmed tool such as `gh` can make mise probe shimmed `rustup`,
+    /// recursively forking until the job exhausts its cgroup.
     /// Re-asserted per exec because OrbStack (macOS dev hosts) injects the
     /// host user's HOME into exec'd processes; explicit -e wins. Step env
     /// (GITHUB_ENV and `env:` blocks) is appended after these, and docker
@@ -394,6 +411,7 @@ impl JobContainerSpec {
             "HOME=/github/home".to_string(),
             "RUSTUP_HOME=/root/.rustup".to_string(),
             "CARGO_HOME=/github/home/.cargo".to_string(),
+            "PATH=/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
             format!(
                 "VELNOR_DOCKER_HOST_TEMP={}",
                 self.docker_host_path(&self.temp_host).display()
@@ -703,26 +721,33 @@ impl JobContainerSpec {
     }
 
     pub(crate) fn mise_executable_store_host(&self) -> PathBuf {
-        self.repository_store_key().map_or_else(
-            || {
+        match (self.repository_store_key(), slot_store_key(&self.temp_host)) {
+            (Some(repository), Some(slot)) => {
+                mise_executable_store_host(&self.temp_host, &repository)
+                    .join("slots")
+                    .join(slot)
+            }
+            _ => {
                 eprintln!(
-                    "forensics.lifecycle: persistent mise install store refused: missing github.repository"
+                    "forensics.lifecycle: persistent mise install store refused: missing github.repository or runner slot identity"
                 );
                 self.temp_host.join("_velnor/ephemeral/mise-installs")
-            },
-            |repository| mise_executable_store_host(&self.temp_host, &repository),
-        )
+            }
+        }
     }
 
-    fn rustup_executable_store_host(&self) -> PathBuf {
+    /// Persistent per-version mise binary store for this job's trust/repository
+    /// scope. Without a repository identity the store stays job-ephemeral, so
+    /// persistence is never granted to an unidentified job.
+    pub(crate) fn mise_binary_store_host(&self) -> PathBuf {
         self.repository_store_key().map_or_else(
             || {
                 eprintln!(
-                    "forensics.lifecycle: persistent rustup store refused: missing github.repository"
+                    "forensics.lifecycle: persistent mise binary store refused: missing github.repository"
                 );
-                self.temp_host.join("_velnor/ephemeral/rustup")
+                self.temp_host.join("_velnor/ephemeral/mise-binaries")
             },
-            |repository| rustup_executable_store_host(&self.temp_host, &repository),
+            |repository| mise_binary_store_host(&self.temp_host, &repository),
         )
     }
 
@@ -760,6 +785,7 @@ impl JobContainerSpec {
 pub struct PreparedDockerArgs {
     pub args: Vec<String>,
     env_files: Vec<ExecEnvFile>,
+    process_env: Vec<(String, String)>,
 }
 
 impl PreparedDockerArgs {
@@ -767,11 +793,16 @@ impl PreparedDockerArgs {
         Self {
             args,
             env_files: Vec::new(),
+            process_env: Vec::new(),
         }
     }
 
     pub fn args(&self) -> &[String] {
         &self.args
+    }
+
+    pub fn process_env(&self) -> &[(String, String)] {
+        &self.process_env
     }
 }
 
@@ -1071,22 +1102,27 @@ fn mise_executable_store_host_for_scope(
         .join(sanitize_store_key(repository))
 }
 
-/// Host-persistent rustup state used by mise's Rust backend, scoped by the
-/// same trust/repository boundary as executable mise installs.
-pub(crate) fn rustup_executable_store_host(temp_host: &Path, repository: &str) -> PathBuf {
-    rustup_executable_store_host_for_scope(
+/// Host-persistent per-version mise BINARY store, scoped by trust + repository.
+///
+/// The setup script writes `<os-arch>/<exact-version>/mise` plus `metadata.json`
+/// inside this scope (Plan 008 Step 2), so a fresh job reuses a verified binary
+/// instead of mutating the read-only baked `/opt/mise/bin` bootstrap. Lives
+/// under the same `mise` cache class as `installs`/`rustup`, so the mise GC
+/// budget covers it and a per-scope lease protects it while a job holds it.
+pub(crate) fn mise_binary_store_host(temp_host: &Path, repository: &str) -> PathBuf {
+    mise_binary_store_host_for_scope(
         temp_host,
         &crate::github_adapter::cargo_target_trust_scope(),
         repository,
     )
 }
 
-fn rustup_executable_store_host_for_scope(
+fn mise_binary_store_host_for_scope(
     temp_host: &Path,
     trust_scope: &str,
     repository: &str,
 ) -> PathBuf {
-    crate::storage::child_with_legacy_trust(mise_store_host(temp_host), "rustup", trust_scope)
+    crate::storage::child_with_legacy_trust(mise_store_host(temp_host), "binaries", trust_scope)
         .join(sanitize_store_key(repository))
 }
 
@@ -1121,6 +1157,14 @@ fn daemon_store_root(temp_host: &Path) -> PathBuf {
         temp_host.to_path_buf()
     };
     daemon_shared_root(per_slot_root)
+}
+
+/// Resolve the stable runner slot from a production job temp path
+/// (`…/slot-N/<job>/temp`). Executable stores must not fall back to a shared
+/// scope when this identity is absent: that would recreate concurrent mutation.
+fn slot_store_key(temp_host: &Path) -> Option<String> {
+    let slot = temp_host.parent()?.parent()?.file_name()?.to_str()?;
+    slot.starts_with("slot-").then(|| sanitize_store_key(slot))
 }
 
 /// Sanitize a job/store key into a filesystem-safe directory name.
@@ -1216,6 +1260,22 @@ mod tests {
             cargo_target_host: None,
             compiler_cache_backend: CompilerCacheBackend::Sccache,
         }
+    }
+
+    #[test]
+    fn job_network_carries_daemon_and_job_ownership_labels() {
+        assert_eq!(
+            spec().create_network_args(),
+            vec![
+                "network",
+                "create",
+                "--label",
+                "velnor.daemon-id=test-daemon",
+                "--label",
+                "velnor.job-id=velnor-job-1",
+                "velnor-net-1",
+            ]
+        );
     }
 
     fn container_test_temp(name: &str) -> PathBuf {
@@ -1325,11 +1385,17 @@ mod tests {
                 "/var/lib/velnor/work/_velnor_mise/installs/trusted/ChainArgos_java-monorepo"
             )
         );
+        // Plan 008: the persistent mise binary store is a distinct `binaries`
+        // subdir under the same trust/repository boundary as `installs`.
         assert_eq!(
-            rustup_executable_store_host_for_scope(temp, "trusted", "ChainArgos/java-monorepo"),
+            mise_binary_store_host_for_scope(temp, "trusted", "ChainArgos/java-monorepo"),
             PathBuf::from(
-                "/var/lib/velnor/work/_velnor_mise/rustup/trusted/ChainArgos_java-monorepo"
+                "/var/lib/velnor/work/_velnor_mise/binaries/trusted/ChainArgos_java-monorepo"
             )
+        );
+        assert_ne!(
+            mise_binary_store_host_for_scope(temp, "trusted", "ChainArgos/java-monorepo"),
+            mise_executable_store_host_for_scope(temp, "trusted", "ChainArgos/java-monorepo"),
         );
     }
 
@@ -1344,10 +1410,6 @@ mod tests {
         assert_ne!(
             mise_executable_store_host_for_scope(temp, "trusted", "org/one"),
             mise_executable_store_host_for_scope(temp, "trusted", "org/two")
-        );
-        assert_ne!(
-            rustup_executable_store_host_for_scope(temp, "trusted", "org/one"),
-            rustup_executable_store_host_for_scope(temp, "trusted", "org/two")
         );
     }
 
@@ -1399,9 +1461,13 @@ mod tests {
         ));
         assert!(args
             .contains(&"/tmp/_velnor_cargo/bin/trusted/acme_repo:/github/home/.cargo/bin".into()));
-        assert!(args
-            .contains(&"/tmp/_velnor_mise/installs/trusted/acme_repo:/opt/mise/installs".into()));
-        assert!(args.contains(&"/tmp/_velnor_mise/rustup/trusted/acme_repo:/root/.rustup".into()));
+        assert!(
+            args.contains(&"/tmp/temp/_velnor/ephemeral/mise-installs:/opt/mise/installs".into())
+        );
+        assert!(args.contains(
+            &"/tmp/_velnor_mise/binaries/trusted/acme_repo:/opt/velnor/mise-binaries".into()
+        ));
+        assert!(!args.iter().any(|arg| arg.ends_with(":/root/.rustup")));
         assert!(args.contains(
             &"/tmp/_velnor_cargo/registry/cache:/github/home/.cargo/registry/cache".into()
         ));
@@ -1425,6 +1491,9 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["--cpus", "2"]));
         assert!(args
             .windows(2)
+            .any(|pair| pair == ["--ulimit", "nofile=65536:65536"]));
+        assert!(args
+            .windows(2)
             .any(|pair| { pair == ["--sysctl", "net.ipv6.conf.all.disable_ipv6=1"] }));
         assert!(args.windows(2).any(|pair| pair == ["--memory", "8g"]));
         let cpus_pos = args.iter().position(|arg| arg == "--cpus").unwrap();
@@ -1439,15 +1508,42 @@ mod tests {
     }
 
     #[test]
-    fn mise_seed_copies_repo_scoped_rustup_state() {
+    fn mise_seed_keeps_rustup_isolated_in_the_job_image() {
         let args = spec().seed_mise_store_args();
 
-        assert!(args
-            .contains(&"/tmp/_velnor_mise/rustup/trusted/acme_repo:/__velnor_seed/rustup".into()));
-        assert!(
-            args.last().is_some_and(
-                |script| script.contains("cp -an /root/.rustup/. /__velnor_seed/rustup/")
+        assert!(!args.iter().any(|arg| arg.contains("/__velnor_seed/rustup")));
+        assert!(!args
+            .last()
+            .is_some_and(|script| script.contains("/root/.rustup")));
+    }
+
+    #[test]
+    fn mise_installs_are_warm_per_slot_but_isolated_between_slots() {
+        let mut first = spec();
+        first.temp_host = "/var/lib/velnor/work/slot-3/job-a/temp".into();
+        let mut same_slot = spec();
+        same_slot.temp_host = "/var/lib/velnor/work/slot-3/job-b/temp".into();
+        let mut other_slot = spec();
+        other_slot.temp_host = "/var/lib/velnor/work/slot-4/job-c/temp".into();
+
+        let expected = PathBuf::from(
+            "/var/lib/velnor/work/_velnor_mise/installs/trusted/acme_repo/slots/slot-3",
+        );
+        assert_eq!(first.mise_executable_store_host(), expected);
+        assert_eq!(same_slot.mise_executable_store_host(), expected);
+        assert!(first.start_args().contains(
+            &"/var/lib/velnor/work/_velnor_mise/installs/trusted/acme_repo/slots/slot-3:/opt/mise/installs"
+                .into()
+        ));
+        assert_eq!(
+            other_slot.mise_executable_store_host(),
+            PathBuf::from(
+                "/var/lib/velnor/work/_velnor_mise/installs/trusted/acme_repo/slots/slot-4"
             )
+        );
+        assert_ne!(
+            first.mise_executable_store_host(),
+            other_slot.mise_executable_store_host()
         );
     }
 
@@ -1498,6 +1594,8 @@ mod tests {
                 "-e",
                 "CARGO_HOME=/github/home/.cargo",
                 "-e",
+                "PATH=/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "-e",
                 "VELNOR_DOCKER_HOST_TEMP=/tmp/temp",
                 "-e",
                 "VELNOR_DOCKER_HOST_WORKSPACE=/tmp/work",
@@ -1535,6 +1633,8 @@ mod tests {
                 "RUSTUP_HOME=/root/.rustup",
                 "-e",
                 "CARGO_HOME=/github/home/.cargo",
+                "-e",
+                "PATH=/root/.cargo/bin:/opt/mise/bin:/opt/mise/shims:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 "-e",
                 "VELNOR_DOCKER_HOST_TEMP=/tmp/temp",
                 "-e",
@@ -1594,17 +1694,23 @@ mod tests {
     }
 
     #[test]
-    fn multiline_secret_is_rejected_instead_of_exposed() {
-        let error = spec()
+    fn multiline_secret_uses_docker_process_env_without_argv_exposure() {
+        let prepared = spec()
             .prepare_exec_process_args(
                 "/__w",
                 &[("ACTIONS_RUNTIME_TOKEN".into(), "line-one\nline-two".into())],
                 &[],
                 &["printenv".into()],
             )
-            .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
-        assert!(!error.to_string().contains("line-one"));
+            .unwrap();
+
+        let joined = prepared.args().join("\0");
+        assert!(joined.contains("-e\0ACTIONS_RUNTIME_TOKEN"));
+        assert!(!joined.contains("line-one"));
+        assert_eq!(
+            prepared.process_env(),
+            &[("ACTIONS_RUNTIME_TOKEN".into(), "line-one\nline-two".into())]
+        );
     }
 
     #[test]

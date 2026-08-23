@@ -38,6 +38,7 @@ pub struct AttestationResult {
 
 pub struct AttestationRequest<'a> {
     pub workspace: &'a Path,
+    pub subject_path: &'a str,
     pub runner_temp: &'a Path,
     pub runner_temp_container: &'a str,
     pub oidc_url: &'a str,
@@ -50,7 +51,7 @@ pub struct AttestationRequest<'a> {
 }
 
 pub fn attest_build_provenance(request: AttestationRequest<'_>) -> Result<AttestationResult> {
-    let subjects = collect_subjects(request.workspace)?;
+    let subjects = collect_subjects(request.workspace, request.subject_path)?;
     let client = Client::builder()
         .user_agent("velnor-runner")
         .timeout(Duration::from_secs(30))
@@ -68,13 +69,20 @@ pub fn attest_build_provenance(request: AttestationRequest<'_>) -> Result<Attest
     let statement_bytes =
         serde_json::to_vec(&statement).context("serialize provenance statement")?;
 
+    let repository_visibility = resolve_repository_visibility(
+        &client,
+        request.api_url,
+        request.repository,
+        request.github_token,
+        request.repository_visibility,
+    )?;
     let signing_token = request_oidc_token(
         &client,
         request.oidc_url,
         request.oidc_request_token,
         "sigstore",
     )?;
-    let public_good = request.repository_visibility == Some("public");
+    let public_good = repository_visibility == "public";
     let bundle = sign_statement(
         &statement_bytes,
         &signing_token,
@@ -134,6 +142,50 @@ pub fn attest_build_provenance(request: AttestationRequest<'_>) -> Result<Attest
         subjects,
         public_good,
     })
+}
+
+fn resolve_repository_visibility(
+    client: &Client,
+    api_url: &str,
+    repository: &str,
+    token: &str,
+    context_visibility: Option<&str>,
+) -> Result<String> {
+    let response = client
+        .get(format!(
+            "{}/repos/{repository}",
+            api_url.trim_end_matches('/')
+        ))
+        .bearer_auth(token)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2026-03-10")
+        .send()
+        .context("resolve repository visibility")?
+        .error_for_status()
+        .context("resolve repository visibility")?;
+    let body: Value = response
+        .json()
+        .context("decode repository visibility response")?;
+    let visibility = parse_repository_visibility(&body)?;
+    if let Some(context_visibility) = context_visibility {
+        if context_visibility != visibility {
+            bail!(
+                "repository visibility disagrees between job context ({context_visibility}) and GitHub API ({visibility})"
+            );
+        }
+    }
+    Ok(visibility.to_owned())
+}
+
+fn parse_repository_visibility(body: &Value) -> Result<&str> {
+    let visibility = body
+        .get("visibility")
+        .and_then(Value::as_str)
+        .context("repository response is missing visibility")?;
+    match visibility {
+        "public" | "private" | "internal" => Ok(visibility),
+        _ => bail!("repository response has unknown visibility"),
+    }
 }
 
 fn upload_attestation(client: &Client, url: &str, token: &str, bundle: &Value) -> Result<Value> {
@@ -197,35 +249,37 @@ fn bounded_response_detail(body: &str) -> String {
     }
 }
 
-fn collect_subjects(workspace: &Path) -> Result<Vec<Subject>> {
+fn collect_subjects(workspace: &Path, subject_path: &str) -> Result<Vec<Subject>> {
     let dist = workspace.join("dist");
     let mut subjects = Vec::new();
-    for entry in fs::read_dir(&dist).with_context(|| format!("read {}", dist.display()))? {
-        let entry = entry.context("read dist entry")?;
-        let path = entry.path();
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.ends_with(".tar.gz") || !entry.file_type().context("read subject type")?.is_file()
-        {
-            continue;
-        }
-        let mut reader =
-            BufReader::new(File::open(&path).with_context(|| format!("open subject {name}"))?);
-        let mut hasher = Sha256::new();
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let count = reader
-                .read(&mut buffer)
-                .with_context(|| format!("read subject {name}"))?;
-            if count == 0 {
-                break;
+    match subject_path {
+        "dist/*.tar.gz" => {
+            for entry in fs::read_dir(&dist).with_context(|| format!("read {}", dist.display()))? {
+                let entry = entry.context("read dist entry")?;
+                let path = entry.path();
+                let name = entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("subject path is not valid UTF-8"))?;
+                if !name.ends_with(".tar.gz")
+                    || !entry.file_type().context("read subject type")?.is_file()
+                {
+                    continue;
+                }
+                subjects.push(hash_subject(&path, name)?);
             }
-            hasher.update(&buffer[..count]);
         }
-        let digest = hasher.finalize();
-        subjects.push(Subject {
-            name,
-            sha256: hex_lower(digest.as_ref()),
-        });
+        "dist/l2-subject.json" => {
+            let path = dist.join("l2-subject.json");
+            if fs::symlink_metadata(&path)
+                .with_context(|| format!("read subject type {}", path.display()))?
+                .file_type()
+                .is_file()
+            {
+                subjects.push(hash_subject(&path, "l2-subject.json".into())?);
+            }
+        }
+        _ => bail!("unsupported subject-path '{subject_path}'"),
     }
     subjects.sort_by(|left, right| {
         left.name
@@ -234,7 +288,7 @@ fn collect_subjects(workspace: &Path) -> Result<Vec<Subject>> {
     });
     subjects.dedup();
     if subjects.is_empty() {
-        bail!("subject-path 'dist/*.tar.gz' matched no regular files");
+        bail!("subject-path '{subject_path}' matched no regular files");
     }
     if subjects.len() > SUBJECT_LIMIT {
         bail!(
@@ -243,6 +297,27 @@ fn collect_subjects(workspace: &Path) -> Result<Vec<Subject>> {
         );
     }
     Ok(subjects)
+}
+
+fn hash_subject(path: &Path, name: String) -> Result<Subject> {
+    let mut reader =
+        BufReader::new(File::open(path).with_context(|| format!("open subject {name}"))?);
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .with_context(|| format!("read subject {name}"))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let digest = hasher.finalize();
+    Ok(Subject {
+        name,
+        sha256: hex_lower(digest.as_ref()),
+    })
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -421,14 +496,7 @@ fn sign_statement(
         runtime.block_on(async move {
             let identity = IdentityToken::from_jwt(&token).context("parse Sigstore OIDC token")?;
             if public_good {
-                let config = SigningConfig {
-                    fulcio_url: "https://fulcio.sigstore.dev".into(),
-                    rekor_url: RekorApiVersion::V2.default_url().into(),
-                    tsa_url: None,
-                    signing_scheme: sigstore_sign::crypto::SigningScheme::EcdsaP256Sha256,
-                    rekor_api_version: RekorApiVersion::V2,
-                    oidc_url: None,
-                };
+                let config = public_good_signing_config();
                 return SigningContext::with_config(config)
                     .signer(identity)
                     .sign_raw_statement(&statement)
@@ -440,6 +508,17 @@ fn sign_statement(
     })
     .join()
     .map_err(|_| anyhow::anyhow!("Sigstore signing thread panicked"))?
+}
+
+fn public_good_signing_config() -> SigningConfig {
+    SigningConfig {
+        fulcio_url: "https://fulcio.sigstore.dev".into(),
+        rekor_url: RekorApiVersion::V1.default_url().into(),
+        tsa_url: None,
+        signing_scheme: sigstore_sign::crypto::SigningScheme::EcdsaP256Sha256,
+        rekor_api_version: RekorApiVersion::V1,
+        oidc_url: None,
+    }
 }
 
 async fn sign_private_statement(
@@ -507,7 +586,7 @@ mod tests {
         fs::write(root.join("dist/b.tar.gz"), b"b").unwrap();
         fs::write(root.join("dist/a.tar.gz"), b"a").unwrap();
         fs::write(root.join("dist/ignored.zip"), b"z").unwrap();
-        let subjects = collect_subjects(&root).unwrap();
+        let subjects = collect_subjects(&root, "dist/*.tar.gz").unwrap();
         assert_eq!(
             subjects
                 .iter()
@@ -523,8 +602,20 @@ mod tests {
         let root = std::env::temp_dir().join(format!("velnor-attest-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(root.join("dist/not-a-file.tar.gz")).unwrap();
         fs::write(root.join("dist/ignored.zip"), b"z").unwrap();
-        let error = collect_subjects(&root).unwrap_err();
+        let error = collect_subjects(&root, "dist/*.tar.gz").unwrap_err();
         assert!(error.to_string().contains("matched no regular files"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn subject_collection_accepts_exact_l2_json_only() {
+        let root = std::env::temp_dir().join(format!("velnor-attest-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("dist")).unwrap();
+        fs::write(root.join("dist/l2-subject.json"), b"{}\n").unwrap();
+        fs::write(root.join("dist/ignored.tar.gz"), b"ignored").unwrap();
+        let subjects = collect_subjects(&root, "dist/l2-subject.json").unwrap();
+        assert_eq!(subjects.len(), 1);
+        assert_eq!(subjects[0].name, "l2-subject.json");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -562,5 +653,26 @@ mod tests {
         assert!(!detail.contains('\n'));
         assert!(detail.ends_with('…'));
         assert_eq!(detail.chars().count(), 4097);
+    }
+
+    #[test]
+    fn repository_visibility_is_closed_and_explicit() {
+        for visibility in ["public", "private", "internal"] {
+            assert_eq!(
+                parse_repository_visibility(&json!({"visibility": visibility})).unwrap(),
+                visibility
+            );
+        }
+        assert!(parse_repository_visibility(&json!({})).is_err());
+        assert!(parse_repository_visibility(&json!({"visibility": "unknown"})).is_err());
+    }
+
+    #[test]
+    fn public_good_signing_uses_github_compatible_rekor_v1_dsse() {
+        let config = public_good_signing_config();
+        assert_eq!(config.fulcio_url, "https://fulcio.sigstore.dev");
+        assert_eq!(config.rekor_url, "https://rekor.sigstore.dev");
+        assert_eq!(config.rekor_api_version, RekorApiVersion::V1);
+        assert_eq!(config.tsa_url, None);
     }
 }

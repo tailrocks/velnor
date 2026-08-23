@@ -1,13 +1,22 @@
 # Velnor runner — Debian package + apt-native repository
 
-**Status: implemented and fully automatic** since v0.1.4 (amd64) / v0.1.6
-(arm64): `git tag vX.Y.Z && git push origin vX.Y.Z` runs CI, builds both debs with a
-binary-presence + size guard, attaches tar.gz + deb assets to the GitHub
-release, uploads to `tailrocks/velnor-apt`, and triggers the signed reprepro
-publish to GitHub Pages — zero manual steps. The packaged daemon ships
+**Status: implemented; publication decoupled for coherence (plan 010).**
+`git tag vX.Y.Z && git push origin vX.Y.Z` runs the single `release.yml`
+coordinator (release-deb.yml is deleted; its binary-presence + size + arch guards
+are folded in). It builds both debs and the multi-platform GHCR job image once,
+then assembles ONE acyclic `release-record.json` binding source SHA -> crate
+version -> per-arch binary/deb digests -> OCI image digest -> compiled-manifest
+hash -> APT coordinate, and attaches the record + checksum + tar.gz + deb assets
+to the GitHub release. Assets are never clobbered (an existing tag succeeds only
+on an exact digest match). The source holds **no** APT credential and does **not**
+push to or dispatch `tailrocks/velnor-apt` (N6): the apt repo pulls the published
+record itself and verifies schema/source/tag/version/all-hashes/OCI before
+`reprepro` (see velnor-apt `verify-release.sh`). The packaged daemon ships
 never-exit supervision, sd_notify watchdog, `velnor-daemon@<name>` template
-instances, `/etc/velnor/secrets.env` (0600, operator-owned), and
-`velnor-doctor` timers. The design below documents the pieces.
+instances, `/etc/velnor/secrets.env` (0600, operator-owned), `velnor-doctor`
+timers, and — new in plan 010 — a transactional `preinst`/`postinst` that never
+builds/never restarts and a `release verify-installed` ExecStartPre coherence
+gate on both daemon units. The design below documents the pieces.
 
 Goal: install and upgrade the Velnor runner daemon with native apt:
 
@@ -63,7 +72,12 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
    - Private key and passphrase are stored securely by maintainers and manually copied into the GitHub repository secrets `APT_GPG_PRIVATE_KEY` / `APT_GPG_PASSPHRASE` (no loading from external secret managers happens inside GitHub Actions). Imported in CI for reprepro `SignWith`.
    - Public key published at `https://velnor-apt.tailrocks.com/velnor.gpg` (and in the repo) for users to install into `/etc/apt/keyrings`.
 
-4. **Host on GitHub Pages** — the reprepro output tree (`dists/`, `pool/`, `velnor.gpg`) is deployed via a GitHub Actions workflow (using the official `actions/deploy-pages`). The index on Pages is generated fresh each time with only current versions (no state branch; old versions forgotten from index per maintainer preference). GitHub Pages is deployed via GitHub Actions (recommended; never "Deploy from a branch"). Served at `https://velnor-apt.tailrocks.com/`.
+4. **Host on GitHub Pages** — the isolated signed tree (`dists/`, `pool/`,
+   `velnor.gpg`) is deployed through the official Pages actions. Every index
+   contains exactly the candidate and its signed rollback predecessor. The
+   publisher verifies prior `InRelease`, package hashes, and publication-record
+   signature before carrying that pair forward. No state branch is used. Served
+   at `https://velnor-apt.tailrocks.com/`.
 
 ### Where it lives (storage decision)
 
@@ -79,7 +93,9 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
   `Release` index on Pages pointing at the asset URLs. Use this only if the
   `pool/` ever gets large; for now velnor-runner `.deb` ≈ 12 MB and a few
   versions sit comfortably inside Pages' ~1 GB repo / ~100 GB-month limits.
-- **Keep it lean**: the index on Pages includes only current versions. Old .debs remain in historical Releases (for manual download if needed) but are not part of the current apt repo.
+- **Keep it lean**: the index exposes exactly two versions: current candidate
+  and its verified rollback predecessor. Older `.deb` files remain in immutable
+  historical Releases but are not indexed.
 
 ## CI (GitHub Actions, on tag `v*`)
 
@@ -90,12 +106,16 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
 2. Stages per-arch debs + shas as artifacts.
 3. Attaches the `.deb`(s) to the velnor source GitHub Release.
 4. If `GH_VELNOR_APT_TOKEN` is present, cross-uploads the .debs to the `velnor-apt` repository's Releases (same tag) and triggers `publish.yml` in the apt repo via `gh workflow run -f version=$TAG`.
-5. The apt-repo's `publish.yml` then downloads the .debs from *its own* Releases (default GITHUB_TOKEN is sufficient), runs reprepro (fresh index with only the current version's debs), and deploys to Pages.
+5. The apt-repo's `publish.yml` downloads candidate `.deb` files from its own
+   Release, recovers the exact prior pair from the signed live repository,
+   verifies its signed publication identity, builds a fresh two-version index,
+   and deploys it to Pages.
 
 The `.deb` build + attachment to the original release is the responsibility of
 the source project. The apt publisher consumes only the apt repository's own
-release assets. The Pages index is generated fresh with only the requested
-version; historical packages remain in Releases.
+release assets. The Pages index is generated fresh with the requested version
+plus its exact signed rollback predecessor; older historical packages remain
+in Releases.
 6. Also attach the raw `.deb`(s) to the GitHub Release for direct download.
 
 Each new tag → new `.deb` in the pool → regenerated signed `Release` → `apt
@@ -134,35 +154,46 @@ avoids the deprecated global `apt-key` / `trusted.gpg.d`).
 
 ## Maintainer release and Sentry deployment
 
-1. Ensure the release commit is signed off, pushed, and green. Create the next
+Sentry has one package-deployment path: the configured signed apt repository.
+This rule covers first install, upgrade, downgrade, rollback, and forward
+recovery.
+
+1. Ensure the release commit is signed off, pushed, and green. Create a signed
    `vX.Y.Z` tag on that exact commit and push only that tag.
-2. Monitor Velnor's `Release deb` workflow. It must build amd64 and arm64,
-   validate package contents/size, attach assets to both matching Releases, and
-   dispatch `tailrocks/velnor-apt`'s `Publish apt repo` workflow.
-3. Monitor the apt publish and Pages deployment. Verify the signed index and
-   candidate before touching a host. `apt-get update` performs the signature
-   verification using the repository-scoped key; it must complete without a
-   signature warning:
-   ```bash
-   curl -fsSL https://velnor-apt.tailrocks.com/dists/stable/InRelease | head
-   apt-cache policy velnor-runner
-   ```
-4. On Sentry, drain the daemons, then install only from the configured signed
+2. Monitor Velnor's `Release` workflow. It must build amd64 and arm64, validate
+   the packages, publish immutable assets and the release record, and dispatch
+   `tailrocks/velnor-apt`'s `Publish apt repo` workflow.
+3. Monitor apt publication and Pages deployment. Before touching Sentry, verify
+   the `InRelease` signature and signed publication record bind the requested
+   tag, source-record digest, exact candidate, and exact rollback predecessor.
+   On Sentry, `apt-get update` must complete without a signature warning and
+   policy must report the requested exact version from the configured HTTPS
    repository:
    ```bash
    sudo apt-get update
-   sudo apt-get install velnor-runner
-   dpkg-query -W velnor-runner
-   docker image inspect velnor/job-ubuntu:26.04 \
-     --format '{{ index .Config.Labels "org.opencontainers.image.version" }}'
-   sudo systemctl start velnor-daemon velnor-daemon@fixture # plus instances
+   apt-cache policy velnor-runner
    ```
-5. Run doctor and the fixture smoke. The Pages index intentionally contains
-   only the version selected by the latest publish. To roll back, dispatch
-   `tailrocks/velnor-apt`'s `Publish apt repo` with the previously released tag,
-   wait for its signed publish and Pages deployment, run `apt-get update`, and
-   verify that version is the candidate before
-   `apt-get install velnor-runner=<version>`. Never sideload a release asset.
+4. Drain all intended Velnor daemons. Confirm GitHub reports every managed
+   runner idle and no Velnor job container remains. Then install the verified
+   exact version, never an unpinned candidate:
+   ```bash
+   sudo apt-get install velnor-runner=X.Y.Z
+   dpkg-query -W velnor-runner
+   ```
+5. Activate the immutable release record, verify the installed package and
+   binary plus exact OCI digest and complete labels, inspect
+   atomic `active`/`previous` pointers, then start only the intended instance
+   units. Run doctor and the fixture smoke before restoring traffic.
+6. Rollback uses only the exact signed predecessor already retained in the
+   repository: drain, verify its signed identity, `apt-get update`, and
+   `apt-get install velnor-runner=<exact-predecessor>`. Prove rollback, then use
+   the same exact signed-APT procedure to move forward. Never republish an old
+   release merely to roll back.
+
+Never deploy a local or downloaded `.deb`, use direct `dpkg -i`, install an apt
+local path, copy a binary, or build/install from a checkout on Sentry. A
+checksummed immutable release-record download is activation metadata only; it
+does not install executable code and cannot replace any apt step.
 
 Verified 2026-07-18 against both repositories and the live host:
 `tailrocks/velnor-apt` publishes amd64+arm64 with a signed reprepro index
@@ -173,4 +204,4 @@ and its signed repository/Pages run is
 [`29638791029`](https://github.com/tailrocks/velnor-apt/actions/runs/29638791029).
 Those run URLs are historical proof of the chain, not a current version pin;
 every later deployment must follow this same tag-to-signed-apt chain and verify
-the candidate reported by `apt-cache policy` before changing a host.
+the exact version reported by `apt-cache policy` before changing a host.

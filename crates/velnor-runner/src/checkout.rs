@@ -59,6 +59,10 @@ impl CheckoutPlan {
         self.version
             .as_deref()
             .is_some_and(contains_step_context_expression)
+            || self
+                .token
+                .as_deref()
+                .is_some_and(contains_step_context_expression)
     }
 }
 
@@ -71,74 +75,82 @@ pub fn checkout_plans(
         if !step.enabled || !is_checkout_step(step) {
             continue;
         }
-
-        let self_repository = self_repository(job)?;
-        let checkout_repository = checkout_repository(step);
-        let clone_url = checkout_clone_url(checkout_repository.as_deref(), &self_repository)?;
-        let destination = workspace_host.join(checkout_path(step)?);
-        let reference_name = step
-            .reference
-            .as_ref()
-            .and_then(|r| r.name.as_deref())
-            .unwrap_or("");
-        let reference_ref = step
-            .reference
-            .as_ref()
-            .and_then(|r| r.git_ref.as_deref())
-            .unwrap_or("");
-        let display_name = step.display_name_template().unwrap_or_else(|| {
-            if reference_name.is_empty() {
-                String::new()
-            } else if reference_ref.is_empty() {
-                format!("Run {reference_name}")
-            } else {
-                format!("Run {reference_name}@{reference_ref}")
-            }
-        });
-        plans.push(CheckoutPlan {
-            step_id: checkout_step_id(step, index),
-            display_name,
-            clone_url,
-            version: checkout_ref(step).or_else(|| {
-                checkout_repository
-                    .as_deref()
-                    .filter(|repository| {
-                        self_repository
-                            .name
-                            .as_deref()
-                            .is_some_and(|self_name| repository.eq_ignore_ascii_case(self_name))
-                    })
-                    .and_then(|_| self_repository.version.clone())
-                    .or_else(|| {
-                        if checkout_repository.is_none() {
-                            self_repository.version.clone()
-                        } else {
-                            None
-                        }
-                    })
-            }),
-            destination,
-            token: checkout_token(step, job)
-                // Prefer system.github.token (the GITHUB_TOKEN with repo access) over
-                // SystemVssConnection's AccessToken (runner OAuth token, no repo scope).
-                .or_else(|| {
-                    job.variables
-                        .get("system.github.token")
-                        .and_then(|v| v.value.clone())
-                        .filter(|v| !v.is_empty())
-                })
-                .or_else(|| system_access_token(job.system_connection())),
-            fetch_depth: checkout_fetch_depth(step)?,
-            fetch_tags: checkout_fetch_tags(step),
-            persist_credentials: checkout_persist_credentials(step),
-            clean: checkout_clean(step),
-            lfs: checkout_lfs(step),
-            condition: step.condition.clone(),
-            continue_on_error: crate::script_step::step_continue_on_error(step),
-            timeout_minutes: crate::script_step::step_timeout_minutes(step),
-        });
+        plans.push(checkout_plan(job, workspace_host, step, index)?);
     }
     Ok(plans)
+}
+
+pub(crate) fn checkout_plan(
+    job: &AgentJobRequestMessage,
+    workspace_host: &Path,
+    step: &ActionStep,
+    index: usize,
+) -> Result<CheckoutPlan> {
+    let self_repository = self_repository(job)?;
+    let checkout_repository = checkout_repository(step);
+    let clone_url = checkout_clone_url(checkout_repository.as_deref(), &self_repository)?;
+    let destination = workspace_host.join(checkout_path(step)?);
+    let reference_name = step
+        .reference
+        .as_ref()
+        .and_then(|r| r.name.as_deref())
+        .unwrap_or("");
+    let reference_ref = step
+        .reference
+        .as_ref()
+        .and_then(|r| r.git_ref.as_deref())
+        .unwrap_or("");
+    let display_name = step.display_name_template().unwrap_or_else(|| {
+        if reference_name.is_empty() {
+            String::new()
+        } else if reference_ref.is_empty() {
+            format!("Run {reference_name}")
+        } else {
+            format!("Run {reference_name}@{reference_ref}")
+        }
+    });
+    let token = checkout_token(step, job)?.or_else(|| {
+        // Prefer system.github.token (the GITHUB_TOKEN with repo access) over
+        // SystemVssConnection's AccessToken (runner OAuth token, no repo scope).
+        job.variables
+            .get("system.github.token")
+            .and_then(|v| v.value.clone())
+            .filter(|v| !v.is_empty())
+            .or_else(|| system_access_token(job.system_connection()))
+    });
+    Ok(CheckoutPlan {
+        step_id: checkout_step_id(step, index),
+        display_name,
+        clone_url,
+        version: checkout_ref(step).or_else(|| {
+            checkout_repository
+                .as_deref()
+                .filter(|repository| {
+                    self_repository
+                        .name
+                        .as_deref()
+                        .is_some_and(|self_name| repository.eq_ignore_ascii_case(self_name))
+                })
+                .and_then(|_| self_repository.version.clone())
+                .or_else(|| {
+                    if checkout_repository.is_none() {
+                        self_repository.version.clone()
+                    } else {
+                        None
+                    }
+                })
+        }),
+        destination,
+        token,
+        fetch_depth: checkout_fetch_depth(step)?,
+        fetch_tags: checkout_fetch_tags(step),
+        persist_credentials: checkout_persist_credentials(step),
+        clean: checkout_clean(step),
+        lfs: checkout_lfs(step),
+        condition: step.condition.clone(),
+        continue_on_error: crate::script_step::step_continue_on_error(step),
+        timeout_minutes: crate::script_step::step_timeout_minutes(step),
+    })
 }
 
 #[cfg(test)]
@@ -430,9 +442,14 @@ where
             fetch.extend([
                 "--tags".to_string(),
                 "origin".to_string(),
+                // FETCH_HEAD is ordered by requested refspec. Keep the exact
+                // workflow ref first: checkout uses FETCH_HEAD below, while
+                // the remaining refspecs only populate full history/tags.
+                // Putting the wildcard first made FETCH_HEAD resolve to the
+                // lexicographically first branch (observed on v0.1.122).
+                git_ref.to_string(),
                 "+refs/heads/*:refs/remotes/origin/*".to_string(),
                 "+refs/tags/*:refs/tags/*".to_string(),
-                git_ref.to_string(),
             ]);
         }
     }
@@ -870,13 +887,23 @@ fn checkout_clean(step: &ActionStep) -> bool {
         .unwrap_or(true)
 }
 
-fn checkout_token(step: &ActionStep, job: &AgentJobRequestMessage) -> Option<String> {
-    let token = step
+fn checkout_token(step: &ActionStep, job: &AgentJobRequestMessage) -> Result<Option<String>> {
+    let Some(token) = step
         .inputs
         .as_ref()
-        .and_then(|inputs| input_string(inputs, &["token", "Token"]))
-        .filter(|value| !value.is_empty())?;
-    resolve_token_expression(token, job)
+        .and_then(|inputs| input_string_or_expression(inputs, &["token", "Token"]))
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    if contains_step_context_expression(&token) {
+        return Ok(Some(token));
+    }
+    let Some(resolved) = resolve_token_expression(&token, job).filter(|value| !value.is_empty())
+    else {
+        bail!("explicit checkout token expression did not resolve");
+    };
+    Ok(Some(resolved))
 }
 
 fn resolve_token_expression(token: &str, job: &AgentJobRequestMessage) -> Option<String> {
@@ -970,6 +997,45 @@ fn input_value_as_str(value: &Value) -> Option<&str> {
             .as_object()
             .and_then(|object| direct_input_string(object, &["value", "Value", "lit", "Lit"]))
     })
+}
+
+fn input_string_or_expression(value: &Value, names: &[&str]) -> Option<String> {
+    input_string(value, names)
+        .map(ToOwned::to_owned)
+        .or_else(|| input_expression(value, names).map(|expr| format!("${{{{ {expr} }}}}")))
+}
+
+fn input_expression<'a>(value: &'a Value, names: &[&str]) -> Option<&'a str> {
+    let object = value.as_object()?;
+    if let Some(expression) = names
+        .iter()
+        .filter_map(|name| object.get(*name))
+        .find_map(expression_value_as_str)
+    {
+        return Some(expression);
+    }
+    let map = object.get("map").or_else(|| object.get("Map"))?;
+    map.as_array()?.iter().find_map(|item| {
+        let item = item.as_object()?;
+        let name = input_name_field(item)?;
+        if !names
+            .iter()
+            .any(|expected| name.eq_ignore_ascii_case(expected))
+        {
+            return None;
+        }
+        item.get("value")
+            .or_else(|| item.get("Value"))
+            .and_then(expression_value_as_str)
+    })
+}
+
+fn expression_value_as_str(value: &Value) -> Option<&str> {
+    value
+        .as_object()?
+        .get("expr")
+        .or_else(|| value.as_object()?.get("Expr"))
+        .and_then(Value::as_str)
 }
 
 fn job_string<'a>(job: &'a AgentJobRequestMessage, name: &str) -> Option<&'a str> {
@@ -1075,7 +1141,7 @@ fn format_git_args(args: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::executor::CommandResult;
+    use crate::executor::{CommandResult, ProcessCommandRunner};
 
     #[derive(Default)]
     struct RecordingRunner {
@@ -1359,8 +1425,91 @@ mod tests {
             .contains(&"+refs/heads/*:refs/remotes/origin/*".to_string()));
         assert!(fetch.1.contains(&"+refs/tags/*:refs/tags/*".to_string()));
         assert!(fetch.1.contains(&"--tags".to_string()));
+        let origin = fetch.1.iter().position(|arg| arg == "origin").unwrap();
+        let requested = fetch.1.iter().position(|arg| arg == "main").unwrap();
+        let wildcard = fetch
+            .1
+            .iter()
+            .position(|arg| arg == "+refs/heads/*:refs/remotes/origin/*")
+            .unwrap();
+        assert_eq!(requested, origin + 1);
+        assert!(requested < wildcard, "requested ref must own FETCH_HEAD");
 
         std::fs::remove_dir_all(temp).ok();
+    }
+
+    #[test]
+    fn full_fetch_checkout_keeps_exact_requested_commit_in_fetch_head() {
+        let root = std::env::temp_dir().join(format!(
+            "velnor-checkout-fetch-head-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let source = root.join("source");
+        let destination = root.join("destination");
+        std::fs::create_dir_all(&source).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main", source.to_str().unwrap()]);
+        git(&[
+            "-C",
+            source.to_str().unwrap(),
+            "config",
+            "user.email",
+            "test@example.invalid",
+        ]);
+        git(&[
+            "-C",
+            source.to_str().unwrap(),
+            "config",
+            "user.name",
+            "Velnor Test",
+        ]);
+        std::fs::write(source.join("state"), "requested\n").unwrap();
+        git(&["-C", source.to_str().unwrap(), "add", "state"]);
+        git(&["-C", source.to_str().unwrap(), "commit", "-m", "requested"]);
+        let requested = git(&["-C", source.to_str().unwrap(), "rev-parse", "HEAD"]);
+        git(&[
+            "-C",
+            source.to_str().unwrap(),
+            "checkout",
+            "-b",
+            "aaa-unrelated",
+        ]);
+        std::fs::write(source.join("state"), "unrelated\n").unwrap();
+        git(&["-C", source.to_str().unwrap(), "commit", "-am", "unrelated"]);
+
+        fetch_git_ref(
+            &mut ProcessCommandRunner,
+            source.to_str().unwrap(),
+            &requested,
+            &destination,
+            None,
+            None,
+            true,
+            false,
+            true,
+            false,
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            git(&["-C", destination.to_str().unwrap(), "rev-parse", "HEAD"]),
+            requested
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]
@@ -1514,7 +1663,7 @@ mod tests {
                         { "Key": { "lit": "repository", "type": 0 }, "Value": { "lit": "acme/homebrew-tap", "type": 0 } },
                         { "Key": { "lit": "ref", "type": 0 }, "Value": { "lit": "main", "type": 0 } },
                         { "Key": { "lit": "path", "type": 0 }, "Value": { "lit": "homebrew-tap", "type": 0 } },
-                        { "Key": { "lit": "token", "type": 0 }, "Value": { "lit": "${{ secrets.HOMEBREW_TAP_TOKEN }}", "type": 0 } },
+                        { "Key": { "lit": "token", "type": 0 }, "Value": { "expr": "secrets.HOMEBREW_TAP_TOKEN", "type": 3 } },
                         { "Key": { "lit": "fetch-depth", "type": 0 }, "Value": { "lit": "0", "type": 0 } },
                         { "Key": { "lit": "persist-credentials", "type": 0 }, "Value": { "lit": "false", "type": 0 } },
                         { "Key": { "lit": "clean", "type": 0 }, "Value": { "lit": "false", "type": 0 } },
@@ -1538,6 +1687,43 @@ mod tests {
         assert!(plans[0].fetch_tags);
         assert!(!plans[0].persist_credentials);
         assert!(!plans[0].clean);
+    }
+
+    #[test]
+    fn explicit_unresolved_checkout_secret_does_not_fall_back_to_github_token() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "CI",
+            "requestId": 1,
+            "variables": {
+                "github.repository": { "value": "acme/repo" },
+                "github.sha": { "value": "abc123" },
+                "system.github.token": { "value": "repo-token", "isSecret": true }
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" },
+                "inputs": {
+                    "type": "map",
+                    "map": [
+                        { "Key": { "lit": "repository", "type": 0 }, "Value": { "lit": "acme/homebrew-tap", "type": 0 } },
+                        { "Key": { "lit": "token", "type": 0 }, "Value": { "expr": "secrets.MISSING_TOKEN", "type": 3 } }
+                    ]
+                }
+            }]
+        }))
+        .unwrap();
+
+        let error = checkout_plans(&job, Path::new("/tmp/work")).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "explicit checkout token expression did not resolve"
+        );
+        assert!(!error.to_string().contains("MISSING_TOKEN"));
+        assert!(!error.to_string().contains("repo-token"));
     }
 
     #[test]
@@ -1688,6 +1874,50 @@ mod tests {
             plans[0].requires_runtime_context(),
             "conditional checkout must stay in normal step order"
         );
+    }
+
+    #[test]
+    fn checkout_with_step_output_token_requires_runtime_context() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Package update",
+            "requestId": 1,
+            "variables": {
+                "github.repository": { "value": "acme/repo" },
+                "github.sha": { "value": "abc123" }
+            },
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "authorization": {
+                        "parameters": { "AccessToken": "service-token" }
+                    }
+                }]
+            },
+            "steps": [{
+                "reference": { "type": "Repository", "name": "actions/checkout" },
+                "inputs": {
+                    "type": "map",
+                    "map": [{
+                        "Key": { "lit": "token", "type": 0 },
+                        "Value": { "expr": "steps.app-token.outputs.token", "type": 3 }
+                    }]
+                }
+            }]
+        }))
+        .unwrap();
+
+        let plans = checkout_plans(&job, Path::new("/tmp/work")).unwrap();
+
+        assert_eq!(
+            plans[0].token.as_deref(),
+            Some("${{ steps.app-token.outputs.token }}")
+        );
+        assert!(plans[0].requires_runtime_context());
+        assert_ne!(plans[0].token.as_deref(), Some("service-token"));
     }
 
     #[test]

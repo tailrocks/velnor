@@ -9,8 +9,49 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const INLINE_MATRIX_MARKER: &str = "inputs.lanes == 'both'";
+const INLINE_MATRIX_MARKERS: [&str; 2] = ["inputs.lanes == 'both'", "inputs.lane == 'both'"];
+
+fn has_real_both_lane_expansion(text: &str) -> bool {
+    INLINE_MATRIX_MARKERS
+        .iter()
+        .any(|marker| text.contains(marker))
+        || (text.contains(
+            "LANES: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || 'velnor' }}",
+        ) && text.contains("case \"$LANES\" in")
+            && text.contains("both)")
+            && text.contains("configs=\"[$velnor,$github]\""))
+}
 const SHA_LEN: usize = 40;
+const EXPECTED_ESTATE: [&str; 28] = [
+    "ChainArgos/blockchain-nodes",
+    "ChainArgos/jackin-agent-brown",
+    "ChainArgos/java-monorepo",
+    "jackin-project/homebrew-tap",
+    "jackin-project/jackin",
+    "jackin-project/jackin-agent-smith",
+    "jackin-project/jackin-dev",
+    "jackin-project/jackin-role-action",
+    "jackin-project/jackin-sentinel",
+    "jackin-project/jackin-the-architect",
+    "tailrocks/holla",
+    "tailrocks/holla-apt",
+    "tailrocks/homebrew-holla",
+    "tailrocks/homebrew-parallax",
+    "tailrocks/homebrew-ruxel",
+    "tailrocks/homebrew-tablerock",
+    "tailrocks/parallax",
+    "tailrocks/parallax-telemetry-playground",
+    "tailrocks/pg-bigdecimal",
+    "tailrocks/ruxel",
+    "tailrocks/schemalane",
+    "tailrocks/tablerock",
+    "tailrocks/tailrocks-skills",
+    "tailrocks/termrock",
+    "tailrocks/tracing-request-level",
+    "tailrocks/velnor",
+    "tailrocks/velnor-actions-fixture",
+    "tailrocks/velnor-apt",
+];
 
 #[derive(Debug, Args)]
 pub struct AuditCiArgs {
@@ -32,6 +73,12 @@ pub struct AuditCiArgs {
     /// JSON array of repository paths to audit as one estate.
     #[arg(long)]
     pub estate: Option<PathBuf>,
+    /// Clone and audit each estate repository's live remote default head.
+    #[arg(long, requires = "estate")]
+    pub remote_defaults: bool,
+    /// Root containing local estate checkouts at <owner>/<repository>.
+    #[arg(long, requires = "estate", conflicts_with = "remote_defaults")]
+    pub estate_root: Option<PathBuf>,
     /// Skip latest-release lookups; floating refs remain errors.
     #[arg(long)]
     pub offline: bool,
@@ -112,8 +159,32 @@ struct EstateManifest {
 #[derive(Debug, Deserialize)]
 struct EstateRepository {
     name: String,
-    path: PathBuf,
+    #[serde(default)]
+    path: Option<PathBuf>,
     concerns: BTreeMap<String, ConcernContract>,
+}
+
+#[derive(Debug, Serialize)]
+struct EstateAuditResult {
+    default_branch: String,
+    head_sha: String,
+    findings: Vec<Finding>,
+}
+
+#[derive(Debug, Serialize)]
+struct EstateAuditOutput {
+    schema_version: &'static str,
+    repositories: BTreeMap<String, EstateAuditResult>,
+}
+
+struct RemoteCheckout {
+    path: PathBuf,
+}
+
+impl Drop for RemoteCheckout {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -159,20 +230,60 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
     } else {
         None
     };
+    let mut estate_results = BTreeMap::new();
     let mut all = BTreeMap::new();
     if let Some(estate) = &estate {
-        if estate.version != 1 {
+        if estate.version != 2 {
             bail!(
-                "unsupported estate manifest version {} (expected 1)",
+                "unsupported estate manifest version {} (expected 2)",
                 estate.version
             );
         }
+        validate_estate_scope(estate)?;
+        if args.offline {
+            bail!("estate audit cannot skip delivered-default freshness checks");
+        }
         for repo in &estate.repositories {
-            let canonical = repo.path.canonicalize().with_context(|| {
+            let (default_branch, head_sha) = remote_default_identity(&repo.name)?;
+            let remote_checkout = if args.remote_defaults {
+                Some(checkout_remote_default(
+                    &repo.name,
+                    &default_branch,
+                    &head_sha,
+                )?)
+            } else {
+                None
+            };
+            let configured = if remote_checkout.is_none() {
+                Some(
+                    args
+                    .estate_root
+                    .as_ref()
+                    .map(|root| root.join(&repo.name))
+                    .or_else(|| repo.path.clone())
+                    .with_context(|| {
+                        format!(
+                            "estate repository {} has no portable checkout; pass --estate-root or --remote-defaults",
+                            repo.name
+                        )
+                    })?,
+                )
+            } else {
+                None
+            };
+            if let Some(configured) = &configured {
+                verify_local_default(configured, &repo.name, &default_branch, &head_sha)?;
+            }
+            let root = remote_checkout
+                .as_ref()
+                .map(|checkout| checkout.path.as_path())
+                .or(configured.as_deref())
+                .context("estate checkout resolution produced no path")?;
+            let canonical = root.canonicalize().with_context(|| {
                 format!(
                     "estate repository {} path {} does not exist",
                     repo.name,
-                    repo.path.display()
+                    root.display()
                 )
             })?;
             let workload_files = concern_implementations(repo, &estate.defaults, "lane-selection")
@@ -190,7 +301,14 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
             findings.sort_by(|left, right| {
                 (&left.file, &left.path, left.rule).cmp(&(&right.file, &right.path, right.rule))
             });
-            all.insert(repo.name.clone(), findings);
+            estate_results.insert(
+                repo.name.clone(),
+                EstateAuditResult {
+                    default_branch,
+                    head_sha,
+                    findings,
+                },
+            );
         }
     } else {
         let root = &args.repo_path;
@@ -219,10 +337,40 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
         .values()
         .flatten()
         .filter(|finding| finding.severity == Severity::Error)
-        .count();
+        .count()
+        + estate_results
+            .values()
+            .flat_map(|result| &result.findings)
+            .filter(|finding| finding.severity == Severity::Error)
+            .count();
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&all)?);
+        if estate.is_some() {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&EstateAuditOutput {
+                    schema_version: "velnor.audit-ci.estate.v2",
+                    repositories: estate_results,
+                })?
+            );
+        } else {
+            println!("{}", serde_json::to_string_pretty(&all)?);
+        }
     } else {
+        for (repo, result) in &estate_results {
+            println!(
+                "audit-ci: {repo} ({} {})",
+                result.default_branch, result.head_sha
+            );
+            if result.findings.is_empty() {
+                println!("  PASS");
+            }
+            for finding in &result.findings {
+                println!(
+                    "  {:?} {} {} {} — {}",
+                    finding.severity, finding.rule, finding.file, finding.path, finding.message
+                );
+            }
+        }
         for (repo, findings) in &all {
             println!("audit-ci: {repo}");
             if findings.is_empty() {
@@ -238,6 +386,175 @@ pub fn audit_ci(args: AuditCiArgs) -> Result<()> {
     }
     if errors > 0 {
         bail!("audit-ci found {errors} error(s)");
+    }
+    Ok(())
+}
+
+fn validate_estate_scope(estate: &EstateManifest) -> Result<()> {
+    let observed = estate
+        .repositories
+        .iter()
+        .map(|repo| repo.name.as_str())
+        .collect::<BTreeSet<_>>();
+    if observed.len() != estate.repositories.len() {
+        bail!("estate manifest contains duplicate repository names");
+    }
+    let expected = EXPECTED_ESTATE.into_iter().collect::<BTreeSet<_>>();
+    if observed != expected {
+        let missing = expected.difference(&observed).copied().collect::<Vec<_>>();
+        let extra = observed.difference(&expected).copied().collect::<Vec<_>>();
+        bail!(
+            "estate scope mismatch: expected exactly 28 repositories; missing={missing:?}; extra={extra:?}"
+        );
+    }
+    Ok(())
+}
+
+fn remote_default_identity(repository: &str) -> Result<(String, String)> {
+    let url = format!("https://github.com/{repository}.git");
+    let output = Command::new("git")
+        .args(["ls-remote", "--symref", &url, "HEAD"])
+        .output()
+        .with_context(|| format!("resolve remote default for {repository}"))?;
+    if !output.status.success() {
+        bail!(
+            "resolve remote default for {repository}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8(output.stdout).context("git ls-remote output is not UTF-8")?;
+    let branch = stdout
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("ref: refs/heads/")
+                .and_then(|rest| rest.strip_suffix("\tHEAD"))
+        })
+        .context("remote HEAD did not identify a default branch")?;
+    let sha = stdout
+        .lines()
+        .filter_map(|line| line.strip_suffix("\tHEAD"))
+        .find(|value| value.len() == SHA_LEN && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .with_context(|| {
+            format!("remote HEAD for {repository} did not identify a 40-hex commit")
+        })?;
+    Ok((branch.to_string(), sha.to_ascii_lowercase()))
+}
+
+fn checkout_remote_default(
+    repository: &str,
+    default_branch: &str,
+    head_sha: &str,
+) -> Result<RemoteCheckout> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock predates Unix epoch")?
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("velnor-estate-{}-{nonce}", std::process::id()));
+    let url = format!("https://github.com/{repository}.git");
+    let output = Command::new("git")
+        .args([
+            "clone",
+            "--quiet",
+            "--no-checkout",
+            "--filter=blob:none",
+            "--depth=1",
+            "--branch",
+            default_branch,
+            &url,
+        ])
+        .arg(&path)
+        .output()
+        .with_context(|| format!("clone delivered default for {repository}"))?;
+    if !output.status.success() {
+        let _ = fs::remove_dir_all(&path);
+        bail!(
+            "clone delivered default for {repository}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let sparse_input = b"/*\n!/*/\n/.github/\n";
+    let mut sparse = Command::new("git")
+        .current_dir(&path)
+        .args(["sparse-checkout", "set", "--no-cone", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .with_context(|| format!("configure sparse checkout for {repository}"))?;
+    use std::io::Write as _;
+    sparse
+        .stdin
+        .as_mut()
+        .context("git sparse-checkout stdin unavailable")?
+        .write_all(sparse_input)
+        .context("write sparse-checkout patterns")?;
+    if !sparse
+        .wait()
+        .context("wait for git sparse-checkout")?
+        .success()
+    {
+        let _ = fs::remove_dir_all(&path);
+        bail!("configure sparse checkout for {repository}");
+    }
+    let checkout = Command::new("git")
+        .current_dir(&path)
+        .args(["checkout", "--quiet", "--detach", head_sha])
+        .status()
+        .with_context(|| format!("checkout delivered default for {repository}"))?;
+    if !checkout.success() {
+        let _ = fs::remove_dir_all(&path);
+        bail!("checkout delivered default for {repository}");
+    }
+    verify_checkout_identity(&path, repository, default_branch, head_sha, false)?;
+    Ok(RemoteCheckout { path })
+}
+
+fn verify_local_default(
+    path: &Path,
+    repository: &str,
+    default_branch: &str,
+    head_sha: &str,
+) -> Result<()> {
+    verify_checkout_identity(path, repository, default_branch, head_sha, true)
+}
+
+fn verify_checkout_identity(
+    path: &Path,
+    repository: &str,
+    default_branch: &str,
+    head_sha: &str,
+    require_branch: bool,
+) -> Result<()> {
+    let git = |args: &[&str]| -> Result<String> {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .with_context(|| format!("inspect checkout for {repository}"))?;
+        if !output.status.success() {
+            bail!(
+                "inspect checkout for {repository}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8(output.stdout)
+            .context("git checkout output is not UTF-8")?
+            .trim()
+            .to_string())
+    };
+    let observed_head = git(&["rev-parse", "HEAD"])?;
+    if observed_head != head_sha {
+        bail!("estate checkout {repository} is stale: local {observed_head}, remote {head_sha}");
+    }
+    if require_branch {
+        let observed_branch = git(&["symbolic-ref", "--short", "HEAD"])?;
+        if observed_branch != default_branch {
+            bail!(
+                "estate checkout {repository} is on {observed_branch}, expected default branch {default_branch}"
+            );
+        }
+    }
+    if !git(&["status", "--porcelain=v1", "--untracked-files=all"])?.is_empty() {
+        bail!("estate checkout {repository} is dirty");
     }
     Ok(())
 }
@@ -330,6 +647,13 @@ fn audit_concern_contract(
                     }
                     let text = fs::read_to_string(&path)
                         .with_context(|| format!("read concern workflow {}", path.display()))?;
+                    // Generated callers delegate these concerns to the immutable
+                    // owner-local callable. Their old inline job IDs and markers
+                    // are intentionally absent; `audit_generated_caller` validates
+                    // the closed delegation contract once for the whole file.
+                    if workflow == "ci.yml" && is_generated_caller(&text) {
+                        continue;
+                    }
                     let yaml: Value = serde_yaml::from_str(&text)
                         .with_context(|| format!("parse concern workflow {}", path.display()))?;
                     let jobs = object_get(&yaml, "jobs").and_then(Value::as_mapping);
@@ -612,13 +936,17 @@ fn audit_workflow(
     findings: &mut Vec<Finding>,
 ) {
     audit_prebuilt_tool_surface(file, text, findings);
-    let workload = profile
-        .workload_override
-        .unwrap_or_else(|| has_trigger(yaml, "push") || has_trigger(yaml, "pull_request"));
     let file_name = Path::new(file)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(file);
+    let generated_caller = file_name == "ci.yml" && is_generated_caller(text);
+    if generated_caller {
+        audit_generated_caller(file, text, yaml, findings);
+    }
+    let workload = profile
+        .workload_override
+        .unwrap_or_else(|| has_trigger(yaml, "push") || has_trigger(yaml, "pull_request"));
     let canonical_files = [
         "ci.yml",
         "release.yml",
@@ -665,10 +993,23 @@ fn audit_workflow(
                 "include the workflow identity and github.ref, or set cancel-in-progress false for intentional global writer serialization",
             ));
         }
+        if !globally_serialized && !group.contains("github.event_name") {
+            findings.push(Finding::error(
+                "concurrency-event",
+                file,
+                "$.concurrency.group",
+                "include github.event_name in the concurrency group so a push, schedule, or workflow_dispatch run cannot cancel a live pull_request run that shares github.ref",
+            ));
+        }
     }
+    audit_lane_selector(file, yaml, text, findings);
     if workload
+        && !generated_caller
+        && has_trigger(yaml, "workflow_dispatch")
         && !is_native_apple_workflow(yaml)
-        && (!has_lanes_input(yaml) || !text.contains(INLINE_MATRIX_MARKER))
+        && !is_forced_public_unmerged_workflow(file_name, yaml)
+        && (!has_lane_selector(yaml)
+            || (lane_selector_offers_both(yaml) && !has_real_both_lane_expansion(text)))
     {
         findings.push(Finding::error(
             "lanes",
@@ -680,6 +1021,7 @@ fn audit_workflow(
     let Some(jobs) = object_get(yaml, "jobs").and_then(Value::as_mapping) else {
         return;
     };
+    audit_entry_job_event_coverage(file, yaml, jobs, findings);
     for (job_key, job_value) in jobs {
         let job_id = job_key.clone();
         let job_path = format!("$.jobs.{job_id}");
@@ -746,6 +1088,192 @@ fn audit_workflow(
         audit_steps(
             file, &job_id, &job_path, steps, text, offline, latest, findings,
         );
+    }
+}
+
+fn is_forced_public_unmerged_workflow(file_name: &str, yaml: &Value) -> bool {
+    file_name.contains("public-unmerged")
+        && !has_trigger(yaml, "push")
+        && !has_trigger(yaml, "schedule")
+        && !has_trigger(yaml, "workflow_dispatch")
+        && (has_trigger(yaml, "pull_request") || has_trigger(yaml, "merge_group"))
+}
+
+fn is_generated_caller(text: &str) -> bool {
+    text.starts_with("# Generated by velnor-actions-generator. DO NOT EDIT.\n")
+}
+
+fn audit_generated_caller(file: &str, _text: &str, yaml: &Value, findings: &mut Vec<Finding>) {
+    if Path::new(file).file_name().and_then(|name| name.to_str()) != Some("ci.yml") {
+        findings.push(Finding::error(
+            "generated-caller",
+            file,
+            "$",
+            "generated fleet caller must be installed only as .github/workflows/ci.yml",
+        ));
+    }
+    let Some(jobs) = object_get(yaml, "jobs").and_then(Value::as_mapping) else {
+        findings.push(Finding::error(
+            "generated-caller",
+            file,
+            "$.jobs",
+            "generated caller must declare the closed owner-call and aggregator job set",
+        ));
+        return;
+    };
+    let observed = jobs.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    let expected = ["jackin-project", "tailrocks", "ChainArgos", "ci-required"]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if observed != expected {
+        findings.push(Finding::error(
+            "generated-caller",
+            file,
+            "$.jobs",
+            "generated caller job set must be exactly jackin-project, tailrocks, ChainArgos, ci-required",
+        ));
+    }
+
+    let mut classes = BTreeSet::new();
+    const DEFAULT_LANE_EXPRESSION: &str =
+        "${{ github.event_name == 'workflow_dispatch' && inputs.lane || github.event_name == 'push' && 'github' || 'velnor' }}";
+    for owner in ["jackin-project", "tailrocks", "ChainArgos"] {
+        let Some(job) = mapping_get(jobs, owner).and_then(Value::as_mapping) else {
+            continue;
+        };
+        let Some(uses) = mapping_get(job, "uses").and_then(Value::as_str) else {
+            findings.push(Finding::error(
+                "generated-caller",
+                file,
+                format!("$.jobs.{owner}.uses"),
+                "owner job must call its immutable owner-local reusable workflow",
+            ));
+            continue;
+        };
+        let prefix = format!("{owner}/velnor-actions/.github/workflows/ci-");
+        let Some(rest) = uses.strip_prefix(&prefix) else {
+            findings.push(Finding::error(
+                "generated-caller",
+                file,
+                format!("$.jobs.{owner}.uses"),
+                "owner job must call the matching owner-local velnor-actions workflow",
+            ));
+            continue;
+        };
+        let Some((class, sha)) = rest.split_once(".yml@") else {
+            findings.push(Finding::error(
+                "generated-caller",
+                file,
+                format!("$.jobs.{owner}.uses"),
+                "owner callable must use ci-<class>.yml@<full-sha>",
+            ));
+            continue;
+        };
+        if sha.len() != SHA_LEN || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            findings.push(Finding::error(
+                "generated-caller",
+                file,
+                format!("$.jobs.{owner}.uses"),
+                "owner callable ref must be an immutable 40-hex commit",
+            ));
+        }
+        classes.insert(class);
+
+        let lane = mapping_get(job, "with")
+            .and_then(Value::as_mapping)
+            .and_then(|with| mapping_get(with, "lane"))
+            .and_then(Value::as_str);
+        if lane != Some(DEFAULT_LANE_EXPRESSION) {
+            findings.push(Finding::error(
+                "generated-caller",
+                file,
+                format!("$.jobs.{owner}.with.lane"),
+                "trusted automatic events must default to Velnor and workflow dispatch must forward the closed lane choice",
+            ));
+        }
+    }
+    if classes.len() != 1 {
+        findings.push(Finding::error(
+            "generated-caller",
+            file,
+            "$.jobs",
+            "all three owner-local calls must select one identical repository class",
+        ));
+    }
+    let lane_input = object_get(yaml, "on")
+        .and_then(|on| object_get(on, "workflow_dispatch"))
+        .and_then(|dispatch| object_get(dispatch, "inputs"))
+        .and_then(|inputs| object_get(inputs, "lane"))
+        .and_then(Value::as_mapping);
+    let lane_options = lane_input
+        .and_then(|lane| mapping_get(lane, "options"))
+        .and_then(Value::as_sequence)
+        .map(|options| options.iter().filter_map(Value::as_str).collect::<Vec<_>>());
+    if lane_input
+        .and_then(|lane| mapping_get(lane, "type"))
+        .and_then(Value::as_str)
+        != Some("choice")
+        || lane_input
+            .and_then(|lane| mapping_get(lane, "default"))
+            .and_then(Value::as_str)
+            != Some("velnor")
+        || lane_options != Some(vec!["velnor", "github", "both"])
+    {
+        findings.push(Finding::error(
+            "generated-caller",
+            file,
+            "$.on.workflow_dispatch.inputs.lane",
+            "generated caller must expose the exact Velnor-default choice set: velnor, github, both",
+        ));
+    }
+}
+
+fn audit_entry_job_event_coverage(
+    file: &str,
+    yaml: &Value,
+    jobs: &serde_yaml::Mapping,
+    findings: &mut Vec<Finding>,
+) {
+    if Path::new(file).file_name().and_then(|name| name.to_str()) != Some("preview.yml") {
+        return;
+    }
+    const EVENTS: [&str; 5] = [
+        "push",
+        "pull_request",
+        "merge_group",
+        "workflow_dispatch",
+        "workflow_run",
+    ];
+    for (job_key, job_value) in jobs {
+        let Some(job) = job_value.as_mapping() else {
+            continue;
+        };
+        if mapping_get(job, "needs").is_some() {
+            continue;
+        }
+        let Some(condition) = mapping_get(job, "if").and_then(Value::as_str) else {
+            continue;
+        };
+        if !condition.contains("github.event_name")
+            && !condition.contains("github.event.workflow_run")
+        {
+            continue;
+        }
+        for event in EVENTS {
+            if has_trigger(yaml, event)
+                && !condition.contains(&format!("'{event}'"))
+                && !condition.contains(&format!("\"{event}\""))
+            {
+                findings.push(Finding::error(
+                    "trigger-if-desync",
+                    file,
+                    format!("$.jobs.{job_key}.if"),
+                    format!(
+                        "entry job condition excludes declared {event} event; synchronize on: and if: before delivery"
+                    ),
+                ));
+            }
+        }
     }
 }
 
@@ -863,9 +1391,23 @@ fn audit_steps(
             .collect::<Vec<_>>()
             .join("\n")
             .replace("--deny-self-hosted-runners", "");
-        if lane_identity_run.contains("self-hosted")
-            || lane_identity_run.contains("velnor-target-mvp")
-            || lane_identity_run.contains("ubuntu-26.04")
+        let lane_selector_coordinator = job_id == "matrix-setup"
+            && object_get(step, "id").and_then(Value::as_str) == Some("set")
+            && run.contains("case \"$LANES\" in")
+            && run.contains("configs=\"[$velnor,$github]\"");
+        let attestation_environment_verifier =
+            Path::new(file).file_name().and_then(|name| name.to_str()) == Some("l2-provenance.yml")
+                && object_get(step, "name").and_then(Value::as_str)
+                    == Some("Verify exact source and signer")
+                && run.contains("gh attestation verify")
+                && run.contains("certificate.runnerEnvironment == $environment")
+                && run.contains("expected_environment=github-hosted")
+                && run.contains("expected_environment=self-hosted");
+        if !attestation_environment_verifier
+            && !lane_selector_coordinator
+            && (lane_identity_run.contains("self-hosted")
+                || lane_identity_run.contains("velnor-target-mvp")
+                || lane_identity_run.contains("ubuntu-26.04"))
         {
             findings.push(Finding::error(
                 "lane-conditional",
@@ -915,9 +1457,10 @@ fn audit_steps(
                     compact(value).lines().any(|line| line.contains("target"))
                 });
                 fuzz_target_cache |= object_get(with, "path").is_some_and(|value| {
-                    compact(value)
-                        .lines()
-                        .any(|line| line.trim() == "fuzz/target")
+                    compact(value).lines().any(|line| {
+                        let path = line.trim();
+                        path == "fuzz/target" || path.ends_with("/fuzz/target")
+                    })
                 });
                 target_cache |= caches_target;
                 if caches_target {
@@ -974,7 +1517,14 @@ fn audit_steps(
             ));
         }
     }
-    if compile && !sccache && !matches!(job_id, "cache-off" | "cache-kache") {
+    let pre_execution_rejection = Path::new(file).file_name().and_then(|name| name.to_str())
+        == Some("l2-negative.yml")
+        && job_id.starts_with("velnor-");
+    if compile
+        && !sccache
+        && !matches!(job_id, "cache-off" | "cache-kache")
+        && !pre_execution_rejection
+    {
         findings.push(Finding::error(
             "compile-cache",
             file,
@@ -990,7 +1540,11 @@ fn audit_steps(
             "remove Swatinem/rust-cache from the sccache job",
         ));
     }
-    if compile && !target_cache && !matches!(job_id, "cache-off" | "cache-kache") {
+    if compile
+        && !target_cache
+        && !matches!(job_id, "cache-off" | "cache-kache")
+        && !pre_execution_rejection
+    {
         findings.push(Finding::error(
             "target-cache",
             file,
@@ -1221,12 +1775,64 @@ fn has_trigger(yaml: &Value, name: &str) -> bool {
         .is_some_and(|on| mapping_get(on, name).is_some())
 }
 
-fn has_lanes_input(yaml: &Value) -> bool {
-    object_get(yaml, "on")
+fn lane_selector(yaml: &Value) -> Option<(&'static str, &Value)> {
+    let inputs = object_get(yaml, "on")
         .and_then(|on| object_get(on, "workflow_dispatch"))
-        .and_then(|dispatch| object_get(dispatch, "inputs"))
-        .and_then(|inputs| object_get(inputs, "lanes"))
-        .is_some()
+        .and_then(|dispatch| object_get(dispatch, "inputs"))?;
+    ["lanes", "lane"]
+        .into_iter()
+        .find_map(|name| object_get(inputs, name).map(|input| (name, input)))
+}
+
+fn has_lane_selector(yaml: &Value) -> bool {
+    lane_selector(yaml).is_some()
+}
+
+fn lane_selector_offers_both(yaml: &Value) -> bool {
+    lane_selector(yaml)
+        .and_then(|(_, input)| object_get(input, "options"))
+        .and_then(Value::as_sequence)
+        .is_some_and(|options| options.iter().any(|value| value.as_str() == Some("both")))
+}
+
+fn audit_lane_selector(file: &str, yaml: &Value, text: &str, findings: &mut Vec<Finding>) {
+    let Some((name, input)) = lane_selector(yaml) else {
+        return;
+    };
+    let path = format!("$.on.workflow_dispatch.inputs.{name}");
+    let input_type = object_get(input, "type").and_then(Value::as_str);
+    let default = object_get(input, "default").and_then(Value::as_str);
+    let options = object_get(input, "options")
+        .and_then(Value::as_sequence)
+        .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let options_valid = options == ["velnor", "github"] || options == ["velnor", "github", "both"];
+    if input_type != Some("choice") || default != Some("velnor") || !options_valid {
+        findings.push(Finding::error(
+            "lane-selector",
+            file,
+            &path,
+            "use a choice defaulting to velnor with ordered options velnor, github, and optional both",
+        ));
+    }
+    // Generated callers delegate the selected lane to an immutable owner-local
+    // reusable workflow. Their local YAML intentionally contains no runner
+    // labels; `audit_generated_caller` closes the caller identity, ref, input,
+    // and Velnor-default forwarding contract, while generator/release audits
+    // prove the callable's real Velnor+GitHub expansion.
+    if options.contains(&"both")
+        && !is_generated_caller(text)
+        && (!has_real_both_lane_expansion(text)
+            || !text.contains("velnor-target-mvp")
+            || !text.contains("ubuntu-26.04"))
+    {
+        findings.push(Finding::error(
+            "lane-selector",
+            file,
+            &path,
+            "both must select real Velnor and GitHub runner lanes",
+        ));
+    }
 }
 
 fn is_native_apple_workflow(yaml: &Value) -> bool {
@@ -1240,6 +1846,18 @@ fn is_native_apple_workflow(yaml: &Value) -> bool {
 }
 
 fn is_native_apple_job(job: &serde_yaml::Mapping) -> bool {
+    let apple_target_matrix = mapping_get(job, "strategy")
+        .and_then(|strategy| object_get(strategy, "matrix"))
+        .and_then(|matrix| object_get(matrix, "target"))
+        .and_then(Value::as_sequence)
+        .is_some_and(|targets| {
+            !targets.is_empty()
+                && targets.iter().all(|target| {
+                    target
+                        .as_str()
+                        .is_some_and(|target| target.ends_with("-apple-darwin"))
+                })
+        });
     mapping_get(job, "runs-on").is_some_and(|runs_on| compact(runs_on).starts_with("macos-"))
         && mapping_get(job, "steps")
             .and_then(Value::as_sequence)
@@ -1254,10 +1872,13 @@ fn is_native_apple_job(job: &serde_yaml::Mapping) -> bool {
                                 "xcodebuild ",
                                 "codesign ",
                                 "xcrun notarytool ",
+                                "swiftc ",
                                 "swift test ",
                             ]
                             .iter()
                             .any(|marker| run.contains(marker))
+                                || run.contains("cargo build")
+                                || (apple_target_matrix && run.contains("cargo rustc"))
                         })
                 })
             })
@@ -1294,10 +1915,14 @@ mod tests {
     use super::*;
 
     fn audit(yaml: &str) -> Vec<Finding> {
+        audit_file(".github/workflows/ci.yml", yaml)
+    }
+
+    fn audit_file(file: &str, yaml: &str) -> Vec<Finding> {
         let value: Value = serde_yaml::from_str(yaml).unwrap();
         let mut findings = Vec::new();
         audit_workflow(
-            ".github/workflows/ci.yml",
+            file,
             yaml,
             &value,
             true,
@@ -1321,15 +1946,15 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
-      lanes: {type: choice, options: [velnor, github, both]}
+      lanes: {type: choice, default: velnor, options: [velnor, github, both]}
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ format('{0}-{1}-{2}', github.workflow, github.event_name, github.ref) }}
 jobs:
   rust:
     timeout-minutes: 20
     strategy:
       matrix:
-        config: ${{ fromJSON(inputs.lanes == 'both' && '[]' || '[]') }}
+        config: ${{ fromJSON(inputs.lanes == 'both' && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"]},{"lane":"GitHub","runner":"ubuntu-26.04"}]' || '[]') }}
     runs-on: ${{ matrix.config.runner }}
     steps:
       - uses: actions/checkout@0123456789012345678901234567890123456789
@@ -1343,9 +1968,66 @@ jobs:
       - run: cargo nextest run --workspace --locked
 "#;
 
+    const GENERATED_CALLER: &str = r#"# Generated by velnor-actions-generator. DO NOT EDIT.
+on:
+  push:
+  schedule:
+    - cron: "23 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      lane:
+        type: choice
+        default: velnor
+        options: [velnor, github, both]
+concurrency:
+  group: ${{ format('{0}-{1}-{2}', github.workflow, github.event_name, github.ref) }}
+jobs:
+  jackin-project:
+    uses: jackin-project/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
+    with:
+      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || github.event_name == 'push' && 'github' || 'velnor' }}
+  tailrocks:
+    uses: tailrocks/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
+    with:
+      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || github.event_name == 'push' && 'github' || 'velnor' }}
+  ChainArgos:
+    uses: ChainArgos/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
+    with:
+      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || github.event_name == 'push' && 'github' || 'velnor' }}
+  ci-required:
+    timeout-minutes: 10
+    runs-on: ${{ 'ubuntu-26.04' }}
+    steps:
+      - run: echo ok
+"#;
+
     #[test]
     fn canonical_workflow_passes_static_rules() {
         assert!(audit(BASE).is_empty());
+    }
+
+    #[test]
+    fn generated_caller_uses_closed_owner_local_delegation_contract() {
+        let findings = audit(GENERATED_CALLER);
+        assert!(!has_rule(&findings, "generated-caller"));
+        assert!(!has_rule(&findings, "lanes"));
+        assert!(!has_rule(&findings, "lane-selector"));
+
+        let tampered = GENERATED_CALLER.replace(
+            "tailrocks/velnor-actions/.github/workflows/ci-code.yml@",
+            "attacker/velnor-actions/.github/workflows/ci-code.yml@",
+        );
+        assert!(has_rule(&audit(&tampered), "generated-caller"));
+
+        let github_default = GENERATED_CALLER.replacen("default: velnor", "default: github", 1);
+        assert!(has_rule(&audit(&github_default), "generated-caller"));
+
+        let owner_default = GENERATED_CALLER.replacen(
+            "github.event_name == 'workflow_dispatch' && inputs.lane || github.event_name == 'push' && 'github' || 'velnor'",
+            "github.repository_owner == 'jackin-project' && 'github' || 'velnor'",
+            1,
+        );
+        assert!(has_rule(&audit(&owner_default), "generated-caller"));
     }
 
     #[test]
@@ -1398,6 +2080,12 @@ jobs:
             "          path: |\n            target\n            fuzz/target",
         );
         assert!(!has_rule(&audit(&yaml), "target-cache-path"));
+
+        let workspace_glob = yaml.replace(
+            "            fuzz/target",
+            "            crates/*/fuzz/target",
+        );
+        assert!(!has_rule(&audit(&workspace_glob), "target-cache-path"));
     }
 
     #[test]
@@ -1459,6 +2147,27 @@ jobs:
     }
 
     #[test]
+    fn allows_cargo_build_with_an_exclusively_apple_target_matrix_on_macos() {
+        let yaml = r#"
+on:
+  push:
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native:
+    strategy:
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+"#;
+        assert!(!has_rule(&audit(yaml), "runner-os"));
+    }
+
+    #[test]
     fn native_apple_workflow_does_not_require_fake_linux_lanes() {
         let yaml = r#"
 on:
@@ -1477,6 +2186,35 @@ jobs:
         let findings = audit(yaml);
         assert!(!has_rule(&findings, "lanes"), "{findings:?}");
         assert!(!has_rule(&findings, "runner-os"), "{findings:?}");
+    }
+
+    #[test]
+    fn native_swift_template_parse_stays_on_macos() {
+        let yaml = r#"
+on:
+  push:
+concurrency:
+  group: swift-templates-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  templates-macos:
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - run: find templates -name '*.swift' -print0 | xargs -0 -n1 swiftc -parse
+"#;
+        assert!(!has_rule(&audit(yaml), "runner-os"));
+    }
+
+    #[test]
+    fn native_rust_apple_target_stays_on_macos() {
+        let yaml = BASE
+            .replace("${{ matrix.config.runner }}", "macos-26")
+            .replace(
+                "cargo nextest run --workspace --locked",
+                "cargo build --release --target aarch64-apple-darwin",
+            );
+        assert!(!has_rule(&audit(&yaml), "runner-os"));
     }
 
     #[test]
@@ -1504,7 +2242,97 @@ jobs:
     #[test]
     fn requires_lanes_matrix() {
         assert!(has_rule(
-            &audit(&BASE.replace(INLINE_MATRIX_MARKER, "inputs.lanes == 'github'")),
+            &audit(&BASE.replace(INLINE_MATRIX_MARKERS[0], "inputs.lanes == 'github'")),
+            "lanes"
+        ));
+    }
+
+    #[test]
+    fn lane_selector_defaults_to_velnor_and_rejects_fake_both() {
+        let github_default = BASE.replace("default: velnor", "default: github");
+        assert!(has_rule(&audit(&github_default), "lane-selector"));
+
+        let fake_both = BASE.replace("velnor-target-mvp", "github-only");
+        assert!(has_rule(&audit(&fake_both), "lane-selector"));
+    }
+
+    #[test]
+    fn singular_lane_selector_is_supported() {
+        let singular = BASE
+            .replace("lanes:", "lane:")
+            .replace("inputs.lanes", "inputs.lane");
+        assert!(!has_rule(&audit(&singular), "lane-selector"));
+        assert!(!has_rule(&audit(&singular), "lanes"));
+    }
+
+    #[test]
+    fn two_lane_selector_does_not_require_fake_both() {
+        let two_lanes = BASE
+            .replace(", both", "")
+            .replace(INLINE_MATRIX_MARKERS[0], "inputs.lanes == 'velnor'");
+        assert!(!has_rule(&audit(&two_lanes), "lane-selector"));
+        assert!(!has_rule(&audit(&two_lanes), "lanes"));
+    }
+
+    #[test]
+    fn output_based_lane_coordinator_proves_real_both_without_workload_branching() {
+        let yaml = r#"
+on:
+  workflow_dispatch:
+    inputs:
+      lanes: {type: choice, default: velnor, options: [velnor, github, both]}
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  matrix-setup:
+    runs-on: ${{ (inputs.lanes == 'github') && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
+    timeout-minutes: 5
+    steps:
+      - id: set
+        env:
+          LANES: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || 'velnor' }}
+        run: |
+          github='{"lane":"GitHub","runner":"ubuntu-26.04"}'
+          velnor='{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"]}'
+          case "$LANES" in
+            velnor) configs="[$velnor]" ;;
+            github) configs="[$github]" ;;
+            both) configs="[$velnor,$github]" ;;
+          esac
+"#;
+        let findings = audit(yaml);
+        assert!(!has_rule(&findings, "lane-selector"), "{findings:?}");
+        assert!(!has_rule(&findings, "lanes"), "{findings:?}");
+        assert!(!has_rule(&findings, "lane-conditional"), "{findings:?}");
+    }
+
+    #[test]
+    fn pull_request_only_workflow_does_not_offer_trusted_lane_selection() {
+        let yaml = BASE
+            .replace(
+                "  workflow_dispatch:\n    inputs:\n      lanes: {type: choice, default: velnor, options: [velnor, github, both]}\n",
+                "",
+            )
+            .replace(INLINE_MATRIX_MARKERS[0], "github.event_name == 'pull_request'");
+        assert!(!has_rule(&audit(&yaml), "lanes"));
+    }
+
+    #[test]
+    fn forced_public_unmerged_workflow_does_not_offer_trusted_lane_selection() {
+        let yaml = BASE
+            .replace("  push:\n", "")
+            .replace("  workflow_dispatch:\n    inputs:\n      lanes: {type: choice, default: velnor, options: [velnor, github, both]}\n", "  merge_group:\n")
+            .replace(INLINE_MATRIX_MARKERS[0], "'[{\"lane\":\"GitHub\",\"runner\":\"ubuntu-26.04\",\"writer\":true}]'");
+        let findings = audit_file(".github/workflows/compat-public-unmerged.yml", &yaml);
+        assert!(!has_rule(&findings, "lanes"), "{findings:?}");
+
+        let trusted_push = yaml.replace("on:\n", "on:\n  push:\n");
+        assert!(!has_rule(
+            &audit_file(
+                ".github/workflows/compat-public-unmerged.yml",
+                &trusted_push,
+            ),
             "lanes"
         ));
     }
@@ -1565,7 +2393,10 @@ jobs:
     #[test]
     fn requires_concurrency_and_timeout() {
         let yaml = BASE
-            .replace("concurrency:\n  group: ci-${{ github.ref }}\n", "")
+            .replace(
+                "concurrency:\n  group: ${{ format('{0}-{1}-{2}', github.workflow, github.event_name, github.ref) }}\n",
+                "",
+            )
             .replace("    timeout-minutes: 20\n", "");
         let findings = audit(&yaml);
         assert!(has_rule(&findings, "concurrency"));
@@ -1573,21 +2404,40 @@ jobs:
     }
 
     #[test]
+    fn cancellable_concurrency_requires_event_name() {
+        let collapsed = BASE.replace(
+            "format('{0}-{1}-{2}', github.workflow, github.event_name, github.ref)",
+            "format('{0}-{1}', github.workflow, github.ref)",
+        );
+        let findings = audit(&collapsed);
+        assert!(has_rule(&findings, "concurrency-event"), "{findings:?}");
+        assert!(!has_rule(&audit(BASE), "concurrency-event"));
+        assert!(!has_rule(&audit(GENERATED_CALLER), "concurrency-event"));
+        let dispatch_cancels_pr = GENERATED_CALLER.replace(
+            "format('{0}-{1}-{2}', github.workflow, github.event_name, github.ref)",
+            "format('{0}-{1}', github.workflow, github.ref)",
+        );
+        assert!(has_rule(&audit(&dispatch_cancels_pr), "concurrency-event"));
+    }
+
+    #[test]
     fn allows_non_cancellable_global_writer_serialization() {
         let yaml = BASE.replace(
-            "  group: ci-${{ github.ref }}",
+            "  group: ${{ format('{0}-{1}-{2}', github.workflow, github.event_name, github.ref) }}",
             "  group: release\n  cancel-in-progress: false",
         );
         assert!(!has_rule(&audit(&yaml), "uniform-concurrency"));
+        assert!(!has_rule(&audit(&yaml), "concurrency-event"));
     }
 
     #[test]
     fn warns_for_cancellable_global_concurrency() {
         let yaml = BASE.replace(
-            "  group: ci-${{ github.ref }}",
+            "  group: ${{ format('{0}-{1}-{2}', github.workflow, github.event_name, github.ref) }}",
             "  group: release\n  cancel-in-progress: true",
         );
         assert!(has_rule(&audit(&yaml), "uniform-concurrency"));
+        assert!(has_rule(&audit(&yaml), "concurrency-event"));
     }
 
     #[test]
@@ -1652,6 +2502,29 @@ jobs:
     }
 
     #[test]
+    fn permits_exact_provenance_environment_evidence_verifier_only() {
+        let verifier = r#"      - name: Verify exact source and signer
+        run: |
+          expected_environment=github-hosted
+          expected_environment=self-hosted
+          gh attestation verify subject
+          jq '.[0].verificationResult.signature.certificate.runnerEnvironment == $environment' verification.json
+"#;
+        let yaml = BASE.replace(
+            "      - run: cargo nextest run --workspace --locked\n",
+            verifier,
+        );
+        assert!(!has_rule(
+            &audit_file(".github/workflows/l2-provenance.yml", &yaml),
+            "lane-conditional"
+        ));
+        assert!(has_rule(
+            &audit_file(".github/workflows/ci.yml", &yaml),
+            "lane-conditional"
+        ));
+    }
+
+    #[test]
     fn permits_self_hosted_words_in_package_description() {
         let yaml = BASE.replace(
             "      - run: cargo nextest run --workspace --locked",
@@ -1703,9 +2576,61 @@ jobs:
     }
 
     #[test]
+    fn entry_job_must_accept_every_declared_active_event() {
+        let workflow: Value = serde_yaml::from_str(
+            r#"on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  source:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-26.04
+    steps: []
+"#,
+        )
+        .unwrap();
+        let jobs = object_get(&workflow, "jobs").unwrap().as_mapping().unwrap();
+        let mut findings = Vec::new();
+        audit_entry_job_event_coverage(
+            ".github/workflows/preview.yml",
+            &workflow,
+            jobs,
+            &mut findings,
+        );
+        assert!(has_rule(&findings, "trigger-if-desync"));
+    }
+
+    #[test]
+    fn entry_job_accepting_push_and_dispatch_passes_event_coverage() {
+        let workflow: Value = serde_yaml::from_str(
+            r#"on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  source:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-26.04
+    steps: []
+"#,
+        )
+        .unwrap();
+        let jobs = object_get(&workflow, "jobs").unwrap().as_mapping().unwrap();
+        let mut findings = Vec::new();
+        audit_entry_job_event_coverage(
+            ".github/workflows/preview.yml",
+            &workflow,
+            jobs,
+            &mut findings,
+        );
+        assert!(!has_rule(&findings, "trigger-if-desync"));
+    }
+
+    #[test]
     fn estate_manifest_parses_classified_repository() {
         let manifest: EstateManifest = serde_json::from_str(
-            r#"{"version":1,"defaults":{},"repositories":[{"name":"one","path":"/one","concerns":{}}]}"#,
+            r#"{"version":2,"defaults":{},"repositories":[{"name":"one","path":"/one","concerns":{}}]}"#,
         )
         .unwrap();
         assert_eq!(manifest.repositories.len(), 1);
@@ -1717,7 +2642,7 @@ jobs:
         let root = TestRepo::new();
         let repo = EstateRepository {
             name: "example/repo".to_string(),
-            path: root.path.clone(),
+            path: Some(root.path.clone()),
             concerns: BTreeMap::new(),
         };
         let findings = audit_concern_contract(&repo, &BTreeMap::new(), &root.path).unwrap();
@@ -1729,7 +2654,7 @@ jobs:
         let root = TestRepo::new();
         let repo = EstateRepository {
             name: "example/repo".to_string(),
-            path: root.path.clone(),
+            path: Some(root.path.clone()),
             concerns: BTreeMap::new(),
         };
         let mut defaults = required_concern_defaults();
@@ -1747,7 +2672,7 @@ jobs:
         fs::write(root.path.join(".github/workflows/ci.yml"), BASE).unwrap();
         let repo = EstateRepository {
             name: "example/repo".to_string(),
-            path: root.path.clone(),
+            path: Some(root.path.clone()),
             concerns: BTreeMap::from([(
                 "rust-ci".to_string(),
                 ConcernContract {
@@ -1788,7 +2713,7 @@ jobs:
         );
         let repo = EstateRepository {
             name: "example/repo".to_string(),
-            path: root.path.clone(),
+            path: Some(root.path.clone()),
             concerns: BTreeMap::new(),
         };
         let findings = audit_concern_contract(&repo, &defaults, &root.path).unwrap();
