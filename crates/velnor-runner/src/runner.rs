@@ -57,9 +57,9 @@ use crate::{
         DistributedTaskClient, GitHubApiError, GitHubJitConfigRequest, GitHubScope, ListedRunner,
         OAuthAccessToken, OAuthClient, OAuthJwtCredentials, RegistrationClient,
         RunServiceAnnotation, RunServiceAnnotationLevel, RunServiceClient, RunServiceCompleteJob,
-        RunServiceStepResult, RunServiceTelemetry, RunServiceVariableValue, RunnerJobRequestRef,
-        RunnerStatus, TaskAgentSession, TaskResult, TimelineRecord, TimelineRecordFeedLines,
-        TimelineRecordState, RUNNER_JOB_REQUEST,
+        RunServiceStepResult, RunServiceTelemetry, RunServiceVariableValue, RunnerBusyConflict,
+        RunnerJobRequestRef, RunnerStatus, TaskAgentSession, TaskResult, TimelineRecord,
+        TimelineRecordFeedLines, TimelineRecordState, RUNNER_JOB_REQUEST,
     },
     runtime_env::job_runtime_env,
     script_step::{StepAnnotation, StepAnnotationLevel},
@@ -140,6 +140,106 @@ impl JobClaim {
             Err(error) => Err(error).context("lock host job claim"),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct InFlightJobRecord {
+    plan_id: String,
+    job_id: String,
+    run_service_url: String,
+    billing_owner_id: Option<String>,
+}
+
+fn in_flight_job_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("in-flight-job.json")
+}
+
+fn persist_in_flight_job(
+    config_dir: &Path,
+    run_service_job: &RunServiceJobContext,
+    job: &AgentJobRequestMessage,
+) -> Result<()> {
+    let record = InFlightJobRecord {
+        plan_id: job.plan.plan_id.clone(),
+        job_id: job.job_id.clone(),
+        run_service_url: run_service_job.run_service_url.clone(),
+        billing_owner_id: run_service_job.billing_owner_id.clone(),
+    };
+    fs::write(
+        in_flight_job_path(config_dir),
+        serde_json::to_vec_pretty(&record).context("serialize in-flight job")?,
+    )
+    .context("write in-flight job lease")
+}
+
+fn load_in_flight_job(config_dir: &Path) -> Result<Option<InFlightJobRecord>> {
+    let path = in_flight_job_path(config_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let record = serde_json::from_slice(&bytes).context("parse in-flight job")?;
+    Ok(Some(record))
+}
+
+fn clear_in_flight_job(config_dir: &Path) -> Result<()> {
+    let path = in_flight_job_path(config_dir);
+    if path.exists() {
+        fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn job_queued_for(job: &AgentJobRequestMessage, now: std::time::SystemTime) -> Duration {
+    let raw = job.queue_time.as_deref().or_else(|| {
+        job.variables
+            .get("system.queueTime")
+            .and_then(|value| value.value.as_deref())
+    });
+    let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
+        return Duration::ZERO;
+    };
+    let Ok(start) =
+        time::OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339)
+    else {
+        return Duration::ZERO;
+    };
+    let timestamp = start.unix_timestamp();
+    if timestamp <= 0 {
+        return Duration::ZERO;
+    }
+    let start = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(timestamp as u64);
+    now.duration_since(start).unwrap_or(Duration::ZERO)
+}
+
+async fn complete_recorded_in_flight_job(
+    slot_dir: &Path,
+    stored: &StoredRunnerConfig,
+) -> Result<bool> {
+    let Some(record) = load_in_flight_job(slot_dir)? else {
+        return Ok(false);
+    };
+    let token = oauth_access_token(stored).await?;
+    let client = RunServiceClient::new(token.token)?;
+    let ctx = RunServiceJobContext {
+        client,
+        run_service_url: record.run_service_url,
+        billing_owner_id: record.billing_owner_id,
+    };
+    let identity = AcquiredJobIdentity {
+        plan_id: record.plan_id,
+        job_id: record.job_id,
+    };
+    complete_acquired_job_failure(
+        &ctx,
+        &identity,
+        None,
+        Some("stale_busy".to_string()),
+        "GitHub DELETE 422 / offline+busy: fail-closed leftover job so the runner lease can be released",
+    )
+    .await?;
+    clear_in_flight_job(slot_dir)?;
+    Ok(true)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,12 +407,18 @@ enum RegistryVerdict {
     RecycleMissing,
     /// Registration offline for enough consecutive checks: recycle.
     RecycleOffline(u32),
+    /// GitHub still marks the runner busy (often also `offline`). DELETE 422s.
+    /// Keep the local identity and wait; do not JIT-replace.
+    QuarantineBusy,
 }
 
 fn assess_registry_lookup(lookup: Option<&ListedRunner>, strikes_before: u32) -> RegistryVerdict {
     let Some(runner) = lookup else {
         return RegistryVerdict::RecycleMissing;
     };
+    if runner.busy == Some(true) {
+        return RegistryVerdict::QuarantineBusy;
+    }
     if runner.status.as_deref() == Some("online") {
         return RegistryVerdict::Healthy;
     }
@@ -513,8 +619,7 @@ async fn remove_existing_jit_config_for_replace(dir: &Path, pat: Option<&str>) -
                 )
             })?;
             let scope = GitHubScope::parse(&stored.settings.github_url)?;
-            RegistrationClient::new()?
-                .delete_runner(&scope, pat, agent_id)
+            delete_runner_keeping_busy_identity(&scope, pat, agent_id, Some(dir))
                 .await
                 .with_context(|| {
                     format!(
@@ -551,8 +656,7 @@ pub async fn delete_orphaned_jit_runner_by_name(
         let id = orphan
             .id
             .ok_or_else(|| anyhow::anyhow!("orphaned runner has no id"))?;
-        client
-            .delete_runner(scope, pat, id)
+        delete_runner_keeping_busy_identity(scope, pat, id, None)
             .await
             .with_context(|| format!("delete orphaned JIT runner '{agent_name}' id {id}"))?;
         println!("Deleted orphaned JIT runner '{agent_name}' id {id} before retry.");
@@ -1479,6 +1583,55 @@ async fn cleanup_configured_daemon_slots(
     }
 }
 
+/// DELETE a GitHub runner id. HTTP 422 (still busy): complete any recorded
+/// in-flight job so the lease can drop, then retry DELETE. If GitHub still
+/// holds the runner busy, quarantine (keep local identity) instead of JIT-churn.
+async fn delete_runner_keeping_busy_identity(
+    scope: &GitHubScope,
+    pat: &str,
+    agent_id: i64,
+    slot_dir: Option<&Path>,
+) -> Result<()> {
+    match RegistrationClient::new()?
+        .delete_runner(scope, pat, agent_id)
+        .await
+    {
+        Ok(()) => {
+            if let Some(dir) = slot_dir {
+                let _ = clear_in_flight_job(dir);
+            }
+            Ok(())
+        }
+        Err(error) if error.downcast_ref::<RunnerBusyConflict>().is_some() => {
+            if let Some(dir) = slot_dir {
+                if let Ok(stored) = config::load(dir) {
+                    if complete_recorded_in_flight_job(dir, &stored)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        match RegistrationClient::new()?
+                            .delete_runner(scope, pat, agent_id)
+                            .await
+                        {
+                            Ok(()) => return Ok(()),
+                            Err(retry) if retry.downcast_ref::<RunnerBusyConflict>().is_some() => {
+                                return Err(local_failure(retry).context(format!(
+                                    "quarantine runner id {agent_id} after fail-closed leftover job; local identity preserved"
+                                )));
+                            }
+                            Err(retry) => return Err(retry),
+                        }
+                    }
+                }
+            }
+            Err(local_failure(error).context(format!(
+                "quarantine runner id {agent_id} until GitHub job is terminal; local identity preserved"
+            )))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 async fn delete_and_remove_daemon_slot_jit_config(
     args: &DaemonArgs,
     slot_dir: &Path,
@@ -1494,8 +1647,7 @@ async fn delete_and_remove_daemon_slot_jit_config(
             )
         })?;
         let scope = GitHubScope::parse(&stored.settings.github_url)?;
-        RegistrationClient::new()?
-            .delete_runner(&scope, pat, agent_id)
+        delete_runner_keeping_busy_identity(&scope, pat, agent_id, Some(slot_dir))
             .await
             .with_context(|| {
                 format!("delete daemon JIT runner id {agent_id}; local identity preserved")
@@ -2292,6 +2444,22 @@ async fn check_runner_registry(
             ));
             None
         }
+        RegistryVerdict::QuarantineBusy => {
+            health.registry_offline_strikes = 0;
+            let status = lookup.as_ref().and_then(|runner| runner.status.as_deref());
+            let busy = lookup.as_ref().and_then(|runner| runner.busy);
+            let note = format!(
+                "runner '{agent_name}' {}+busy in GitHub registry",
+                status.unwrap_or("unknown")
+            );
+            eprintln!("{note}");
+            forensics.registry(&note);
+            if crate::capacity::stale_busy_lease_should_complete_job(status, busy) {
+                Some("offline+busy stale registration (6676-class); complete leftover job then recycle".to_string())
+            } else {
+                None
+            }
+        }
         RegistryVerdict::OfflineStrike(strikes) => {
             health.registry_offline_strikes = strikes;
             let status = lookup
@@ -2759,6 +2927,42 @@ async fn handle_job_request(
     let early_context = job_context_data(&job);
     let mut job = job;
     hydrate_github_variables_from_context(&mut job, &early_context);
+    persist_in_flight_job(config_dir, &run_service_job, &job)?;
+    let event_name = crate::github_adapter::job_variable(&job, "github.event_name").unwrap_or("");
+    if !crate::capacity::trusted_fleet_accepts_github_event(event_name) {
+        let identity = AcquiredJobIdentity::from_job(&job);
+        let reason = "post-merge push must not occupy velnor-trusted while open pull_request jobs wait; generated callers route push to the GitHub lane";
+        let completion = complete_acquired_job_failure(
+            &run_service_job,
+            &identity,
+            Some(&job),
+            Some("merged_push_occupancy".to_string()),
+            reason,
+        )
+        .await;
+        let _ = clear_in_flight_job(config_dir);
+        completion?;
+        bail!("{reason}");
+    }
+    let queued_for = job_queued_for(&job, std::time::SystemTime::now());
+    let queue_timeout = crate::capacity::queue_wait_timeout();
+    if crate::capacity::queued_unassigned_decision(queued_for, queue_timeout)
+        == crate::capacity::QueuedUnassignedDecision::FailClosed
+    {
+        let identity = AcquiredJobIdentity::from_job(&job);
+        let reason = crate::capacity::queue_timeout_reason(queued_for, queue_timeout);
+        let completion = complete_acquired_job_failure(
+            &run_service_job,
+            &identity,
+            Some(&job),
+            Some("queue_timeout".to_string()),
+            &reason,
+        )
+        .await;
+        let _ = clear_in_flight_job(config_dir);
+        completion?;
+        bail!("{reason}");
+    }
     apply_workflow_script_step_names(&mut job, &early_context).await;
     let acquire_storage_leases = || {
         crate::github_adapter::job_variable(&job, "github.repository")
@@ -2920,19 +3124,25 @@ async fn handle_job_request(
         // trust and strict-capability checks. Keep the guards through result
         // upload by binding them in the execution scope.
         //
-        // Start lease renewal before admission. A full host is infrastructure
-        // backpressure, not a repository failure: keep the acquired job alive
-        // until capacity becomes available instead of completing it red.
+        // Start lease renewal before peak reservation so GitHub does not steal
+        // the acquired job during a short bounded wait. A full host is
+        // infrastructure backpressure, not a repository test failure — but an
+        // unbounded wait holds the job `in_progress` with zero steps. After
+        // `capacity_wait_timeout` elapses, complete Failed with a visible
+        // step/reason. Never Success. Never leave GitHub without a terminal
+        // conclusion.
         let stored_for_refresh = broker_cancellation.stored.clone();
+        let canceled = Arc::new(AtomicBool::new(false));
+        let registration_lost = Arc::new(AtomicBool::new(false));
         let renewal = start_run_service_lock_renewal(
             run_service_job.client.clone(),
             run_service_job.run_service_url.clone(),
             job.plan.plan_id.clone(),
             job.job_id.clone(),
             stored_for_refresh.clone(),
+            registration_lost.clone(),
         )
         .await?;
-        let canceled = Arc::new(AtomicBool::new(false));
         let cancellation = start_broker_cancellation_poll(
             broker_cancellation.broker,
             broker_cancellation.session_id,
@@ -2946,22 +3156,109 @@ async fn handle_job_request(
         // Disk peak reservation is taken only for an acquired job (not while
         // the JIT slot is idle-polling). Hold until this scope ends so
         // concurrent daemons share a truthful host admission budget. Retry
-        // backpressure while the run-service renewal keeps the job lease live.
+        // backpressure while the run-service renewal keeps the job lease live,
+        // then fail-close instead of hanging GitHub with zero steps.
+        let capacity_wait_started = Instant::now();
+        let capacity_wait_timeout = crate::capacity::capacity_wait_timeout();
         let job_peak_reservation = loop {
-            match reserve_job_peak_capacity(config_dir, args) {
-                Ok(reservation) => {
+            let reserve_result = reserve_job_peak_capacity(config_dir, args);
+            let last_error = reserve_result
+                .as_ref()
+                .err()
+                .map(|error| format!("{error:#}"));
+            match crate::capacity::pre_execution_wait_decision(
+                registration_lost.load(Ordering::SeqCst),
+                canceled.load(Ordering::SeqCst),
+                reserve_result.is_ok(),
+                crate::capacity::pre_execution_capacity_wait_decision(
+                    capacity_wait_started.elapsed(),
+                    capacity_wait_timeout,
+                ),
+            ) {
+                crate::capacity::PreExecutionWaitDecision::Reserved => {
+                    let reservation = reserve_result.expect("reserve_ok");
                     println!(
                         "Reserved host disk peak {} bytes for active job {}.",
                         reservation.bytes, job.job_id
                     );
                     break reservation;
                 }
-                Err(error) => {
+                crate::capacity::PreExecutionWaitDecision::RetryReserve { sleep } => {
                     eprintln!(
-                        "Job {} waiting for host capacity: {error:#}. Retrying in 15s.",
-                        job.job_id
+                        "Job {} waiting for host capacity: {}. Retrying in {}s.",
+                        job.job_id,
+                        last_error.as_deref().unwrap_or("capacity backpressure"),
+                        sleep.as_secs()
                     );
-                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    tokio::time::sleep(sleep).await;
+                }
+                crate::capacity::PreExecutionWaitDecision::AbortRegistrationLost => {
+                    cancellation.abort();
+                    let identity = AcquiredJobIdentity::from_job(&job);
+                    let reason = "runner registration disappeared during pre-execution wait (OAuthRegistrationNotFound/404); job fail-closed before workflow steps";
+                    let payload = fail_closed_pre_execution_completion(
+                        pre_execution_registration_lost_completion(
+                            &identity,
+                            run_service_job.billing_owner_id.clone(),
+                            reason,
+                        ),
+                    )?;
+                    let completion = complete_acquired_job_failure(
+                        &run_service_job,
+                        &identity,
+                        Some(&job),
+                        payload.infrastructure_failure_category.clone(),
+                        reason,
+                    )
+                    .await;
+                    renewal.abort();
+                    completion?;
+                    bail!("{reason}");
+                }
+                crate::capacity::PreExecutionWaitDecision::AbortCanceled => {
+                    cancellation.abort();
+                    let completion = complete_acquired_job_outcome(
+                        &run_service_job,
+                        &AcquiredJobIdentity::from_job(&job),
+                        Some(&job),
+                        crate::protocol::TaskResult::Canceled,
+                        Some("canceled".to_string()),
+                        "job canceled while waiting for host disk capacity",
+                    )
+                    .await;
+                    renewal.abort();
+                    completion?;
+                    bail!("job canceled while waiting for host disk capacity");
+                }
+                crate::capacity::PreExecutionWaitDecision::AbortCapacityTimeout => {
+                    cancellation.abort();
+                    let identity = AcquiredJobIdentity::from_job(&job);
+                    let last_error = last_error.unwrap_or_else(|| "capacity backpressure".into());
+                    let payload = fail_closed_pre_execution_completion(
+                        pre_execution_capacity_timeout_completion(
+                            &identity,
+                            run_service_job.billing_owner_id.clone(),
+                            capacity_wait_started.elapsed(),
+                            capacity_wait_timeout,
+                            &last_error,
+                        ),
+                    )?;
+                    let reason = crate::capacity::host_capacity_timeout_reason(
+                        capacity_wait_started.elapsed(),
+                        capacity_wait_timeout,
+                        &last_error,
+                    );
+                    let completion = complete_acquired_job_failure(
+                        &run_service_job,
+                        &identity,
+                        Some(&job),
+                        payload.infrastructure_failure_category.clone(),
+                        &reason,
+                    )
+                    .await;
+                    renewal.abort();
+                    completion?;
+                    bail!("{reason}");
                 }
             }
         };
@@ -3145,7 +3442,7 @@ async fn handle_job_request(
         };
         if let Some(teardown) = teardown {
             spawn_post_completion_teardown(
-                teardown_config_dir,
+                teardown_config_dir.clone(),
                 teardown,
                 forensics.clone(),
                 timing_record,
@@ -3158,6 +3455,7 @@ async fn handle_job_request(
             "Job completed with result {:?} and message acknowledged.",
             job_result.result
         );
+        let _ = clear_in_flight_job(&teardown_config_dir);
     } else if args.complete_noop {
         complete_run_service_job_refreshing(
             &run_service_job.client,
@@ -3375,12 +3673,17 @@ fn object_field_mut<'a>(value: &'a mut Value, names: &[&str]) -> Option<&'a mut 
     object.get_mut(*key)
 }
 
+fn lock_renewal_refresh_is_terminal(error: &anyhow::Error) -> bool {
+    registration_was_deleted(error) || github_api_error_status(error) == Some(404)
+}
+
 async fn start_run_service_lock_renewal(
     client: RunServiceClient,
     run_service_url: String,
     plan_id: String,
     job_id: String,
     stored: StoredRunnerConfig,
+    registration_lost: Arc<AtomicBool>,
 ) -> Result<JoinHandle<()>> {
     let mut client = client;
     match client.renew_job(&run_service_url, &plan_id, &job_id).await {
@@ -3392,7 +3695,9 @@ async fn start_run_service_lock_renewal(
         }
         Err(error) => {
             eprintln!("Initial run-service job lock renewal failed: {error:#}");
-            if is_credential_poll_error(&error) {
+            if lock_renewal_refresh_is_terminal(&error) {
+                registration_lost.store(true, Ordering::SeqCst);
+            } else if is_credential_poll_error(&error) {
                 match refresh_run_service_client(&stored).await {
                     Ok(refreshed) => {
                         client = refreshed;
@@ -3402,6 +3707,9 @@ async fn start_run_service_lock_renewal(
                         eprintln!(
                             "Run-service lock renewal credential refresh failed: {refresh_error:#}"
                         );
+                        if lock_renewal_refresh_is_terminal(&refresh_error) {
+                            registration_lost.store(true, Ordering::SeqCst);
+                        }
                     }
                 }
             }
@@ -3411,6 +3719,9 @@ async fn start_run_service_lock_renewal(
     Ok(tokio::spawn(async move {
         let mut failure_streak = 0u32;
         loop {
+            if registration_lost.load(Ordering::SeqCst) {
+                break;
+            }
             // Renew every 25 seconds on success; after any failure, retry much
             // sooner so a single transient miss does not leave the ~30s lock
             // expired until the next steady cadence.
@@ -3425,15 +3736,25 @@ async fn start_run_service_lock_renewal(
                 }
                 Err(error) => {
                     eprintln!("Run-service job lock renewal failed: {error:#}");
+                    if lock_renewal_refresh_is_terminal(&error) {
+                        registration_lost.store(true, Ordering::SeqCst);
+                        break;
+                    }
                     if is_credential_poll_error(&error) {
                         match refresh_run_service_client(&stored).await {
                             Ok(refreshed) => {
                                 client = refreshed;
                                 println!("Run-service lock renewal refreshed credentials.");
                             }
-                            Err(refresh_error) => eprintln!(
-                                "Run-service lock renewal credential refresh failed: {refresh_error:#}"
-                            ),
+                            Err(refresh_error) => {
+                                eprintln!(
+                                    "Run-service lock renewal credential refresh failed: {refresh_error:#}"
+                                );
+                                if lock_renewal_refresh_is_terminal(&refresh_error) {
+                                    registration_lost.store(true, Ordering::SeqCst);
+                                    break;
+                                }
+                            }
                         }
                     }
                     failure_streak = failure_streak.saturating_add(1);
@@ -6558,10 +6879,54 @@ fn failed_acquired_job_completion(
     infrastructure_failure_category: Option<String>,
     reason: &str,
 ) -> RunServiceCompleteJob {
+    terminal_acquired_job_completion(
+        identity,
+        billing_owner_id,
+        TaskResult::Failed,
+        infrastructure_failure_category,
+        reason,
+    )
+}
+
+fn pre_execution_registration_lost_completion(
+    identity: &AcquiredJobIdentity,
+    billing_owner_id: Option<String>,
+    reason: &str,
+) -> RunServiceCompleteJob {
+    failed_acquired_job_completion(
+        identity,
+        billing_owner_id,
+        Some("runner_registration".to_string()),
+        reason,
+    )
+}
+
+fn pre_execution_capacity_timeout_completion(
+    identity: &AcquiredJobIdentity,
+    billing_owner_id: Option<String>,
+    elapsed: Duration,
+    timeout: Duration,
+    last_error: &str,
+) -> RunServiceCompleteJob {
+    failed_acquired_job_completion(
+        identity,
+        billing_owner_id,
+        Some("host_capacity".to_string()),
+        &crate::capacity::host_capacity_timeout_reason(elapsed, timeout, last_error),
+    )
+}
+
+fn terminal_acquired_job_completion(
+    identity: &AcquiredJobIdentity,
+    billing_owner_id: Option<String>,
+    conclusion: TaskResult,
+    infrastructure_failure_category: Option<String>,
+    reason: &str,
+) -> RunServiceCompleteJob {
     // GitHub renders jobs with empty step_results as zero-step failures with
     // no operator-visible reason. Always emit one synthetic failed step plus
     // an annotation so the rejection category and message show up in the UI
-    // (capability validation, trust policy, step mapping, etc.).
+    // (capability validation, trust policy, step mapping, host capacity, etc.).
     let now = unix_now_iso8601();
     let category = infrastructure_failure_category
         .as_deref()
@@ -6572,17 +6937,21 @@ fn failed_acquired_job_completion(
     } else {
         format!("{title}: {reason}")
     };
+    let annotation_level = match conclusion {
+        TaskResult::Canceled => RunServiceAnnotationLevel::Warning,
+        _ => RunServiceAnnotationLevel::Failure,
+    };
     let step = RunServiceStepResult {
         external_id: Some(format!("velnor-pre-execution-{category}")),
         number: Some(1),
         name: title.clone(),
         status: TimelineRecordState::Completed,
-        conclusion: TaskResult::Failed,
+        conclusion,
         started_at: Some(now.clone()),
         completed_at: Some(now),
         completed_log_lines: rejection_log_lines(category, reason).len() as i64,
         annotations: vec![RunServiceAnnotation {
-            level: RunServiceAnnotationLevel::Failure,
+            level: annotation_level,
             message: message.clone(),
             title: Some(title),
             path: None,
@@ -6597,11 +6966,11 @@ fn failed_acquired_job_completion(
     RunServiceCompleteJob {
         plan_id: identity.plan_id.clone(),
         job_id: identity.job_id.clone(),
-        conclusion: TaskResult::Failed,
+        conclusion,
         outputs: BTreeMap::new(),
         step_results: vec![step],
         annotations: vec![RunServiceAnnotation {
-            level: RunServiceAnnotationLevel::Failure,
+            level: annotation_level,
             message,
             title: Some(format!("Velnor pre-execution ({category})")),
             path: None,
@@ -6665,6 +7034,25 @@ async fn complete_acquired_job_failure(
     infrastructure_failure_category: Option<String>,
     reason: &str,
 ) -> Result<()> {
+    complete_acquired_job_outcome(
+        run_service_job,
+        identity,
+        job,
+        TaskResult::Failed,
+        infrastructure_failure_category,
+        reason,
+    )
+    .await
+}
+
+async fn complete_acquired_job_outcome(
+    run_service_job: &RunServiceJobContext,
+    identity: &AcquiredJobIdentity,
+    job: Option<&AgentJobRequestMessage>,
+    conclusion: TaskResult,
+    infrastructure_failure_category: Option<String>,
+    reason: &str,
+) -> Result<()> {
     let masked_reason = job.map_or_else(
         || reason.to_string(),
         |job| {
@@ -6686,15 +7074,54 @@ async fn complete_acquired_job_failure(
         .client
         .complete_job(
             &run_service_job.run_service_url,
-            failed_acquired_job_completion(
+            fail_closed_pre_execution_completion(terminal_acquired_job_completion(
                 identity,
                 run_service_job.billing_owner_id.clone(),
+                conclusion,
                 infrastructure_failure_category,
                 &masked_reason,
-            ),
+            ))?,
         )
         .await
         .context("complete acquired run-service job after infrastructure failure")
+}
+
+/// Guard the pre-execution complete_job payload.
+///
+/// GitHub shows acquired jobs with empty `step_results` as zero-step
+/// `in_progress`/`failure` with no reason. Completing Success here would hide
+/// a hang. Call this on every path that terminalizes an acquired job before
+/// workflow steps run.
+fn fail_closed_pre_execution_completion(
+    payload: RunServiceCompleteJob,
+) -> Result<RunServiceCompleteJob> {
+    if payload.step_results.is_empty() {
+        bail!(
+            "refusing to complete acquired job {} with empty step_results",
+            payload.job_id
+        );
+    }
+    if matches!(payload.conclusion, TaskResult::Succeeded) {
+        bail!(
+            "refusing to complete acquired job {} as Success before workflow steps ran",
+            payload.job_id
+        );
+    }
+    let has_reason = payload
+        .annotations
+        .iter()
+        .any(|annotation| !annotation.message.trim().is_empty())
+        || payload
+            .step_results
+            .iter()
+            .any(|step| !step.name.trim().is_empty());
+    if !has_reason {
+        bail!(
+            "refusing to complete acquired job {} without a visible reason",
+            payload.job_id
+        );
+    }
+    Ok(payload)
 }
 
 fn run_service_telemetry(
@@ -7077,9 +7504,7 @@ async fn remove_one(args: &RemoveArgs, dir: &Path) -> Result<()> {
             .settings
             .agent_id
             .ok_or_else(|| anyhow::anyhow!("local runner config missing agent_id"))?;
-        RegistrationClient::new()?
-            .delete_runner(&scope, pat, agent_id)
-            .await?;
+        delete_runner_keeping_busy_identity(&scope, pat, agent_id, Some(dir)).await?;
         println!("Deleted or confirmed absent remote JIT runner id {agent_id}.");
     } else if !args.local_only {
         println!(
@@ -7247,7 +7672,7 @@ fn timing_slo_state(p95: u64, budget: u64) -> &'static str {
 }
 
 fn doctor_runner_is_healthy(runner: &ListedRunner) -> bool {
-    runner.status.as_deref() == Some("online") || runner.busy == Some(true)
+    runner.status.as_deref() == Some("online")
 }
 
 /// Fleet health probe: list this daemon's registered runners on GitHub and
@@ -7305,16 +7730,24 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         .iter()
         .filter(|runner| runner.busy == Some(true))
         .count();
-    // GitHub reports ephemeral JIT runners as `offline, busy` while they are
-    // executing a job. A busy registration is therefore positive liveness
-    // evidence, not an offline fleet member.
+    let stale_busy = mine
+        .iter()
+        .filter(|runner| {
+            crate::capacity::stale_busy_lease_should_complete_job(
+                runner.status.as_deref(),
+                runner.busy,
+            )
+        })
+        .count();
+    // Live jobs are `online+busy`. `offline+busy` is the 6676-class split
+    // (GitHub still holds a job after the slot died) and is not healthy.
     let healthy = mine
         .iter()
         .filter(|runner| doctor_runner_is_healthy(runner))
         .count();
 
     println!(
-        "doctor: {} — {healthy}/{} expected runner(s) healthy ({online} online, {} registered, {busy} busy) for prefix '{}'",
+        "doctor: {} — {healthy}/{} expected runner(s) healthy ({online} online, {} registered, {busy} busy, {stale_busy} offline+busy) for prefix '{}'",
         args.url, args.slots, mine.len(), args.name
     );
     println!(
@@ -7333,16 +7766,50 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
     let timing_records = recent_job_timings(&config_base, args.slots, sample_size);
     print_doctor_slos(&timing_records);
     for runner in &mine {
+        let stale = crate::capacity::stale_busy_lease_should_complete_job(
+            runner.status.as_deref(),
+            runner.busy,
+        );
         println!(
-            "  {} [{}{}]",
+            "  {} [{}{}{}]",
             runner.name.as_deref().unwrap_or("?"),
             runner.status.as_deref().unwrap_or("unknown"),
             if runner.busy == Some(true) {
                 ", busy"
             } else {
                 ""
-            }
+            },
+            if stale { ", UNHEALTHY-stale-busy" } else { "" }
         );
+    }
+
+    for slot_dir in daemon_slot_config_dirs(&config_base, args.slots)? {
+        let Ok(stored) = config::load(&slot_dir) else {
+            continue;
+        };
+        let Some(agent_id) = stored.settings.agent_id else {
+            continue;
+        };
+        let runner = mine.iter().find(|runner| runner.id == Some(agent_id));
+        let should_complete = match runner {
+            Some(runner) => crate::capacity::stale_busy_lease_should_complete_job(
+                runner.status.as_deref(),
+                runner.busy,
+            ),
+            None => load_in_flight_job(&slot_dir).ok().flatten().is_some(),
+        };
+        if !should_complete {
+            continue;
+        }
+        match complete_recorded_in_flight_job(&slot_dir, &stored).await {
+            Ok(true) => eprintln!(
+                "doctor: fail-closed leftover job for runner id {agent_id} so the lease can drop"
+            ),
+            Ok(false) => {}
+            Err(error) => eprintln!(
+                "doctor: leftover job complete failed for runner id {agent_id}: {error:#}"
+            ),
+        }
     }
 
     if healthy == 0 {
@@ -7813,15 +8280,98 @@ mod tests {
     }
 
     #[test]
-    fn doctor_treats_busy_jit_runner_as_healthy_when_github_reports_offline() {
+    fn doctor_treats_offline_busy_as_unhealthy_6676_class() {
         let mut runner = listed_runner("offline");
         runner.busy = Some(true);
+        assert!(!doctor_runner_is_healthy(&runner));
+        assert!(crate::capacity::stale_busy_lease_should_complete_job(
+            runner.status.as_deref(),
+            runner.busy
+        ));
+    }
+
+    #[test]
+    fn doctor_treats_online_busy_as_healthy() {
+        let mut runner = listed_runner("online");
+        runner.busy = Some(true);
         assert!(doctor_runner_is_healthy(&runner));
+        assert!(!crate::capacity::stale_busy_lease_should_complete_job(
+            runner.status.as_deref(),
+            runner.busy
+        ));
     }
 
     #[test]
     fn doctor_rejects_idle_offline_runner() {
         assert!(!doctor_runner_is_healthy(&listed_runner("offline")));
+    }
+
+    #[test]
+    fn job_queued_for_drives_shipped_unassigned_timeout() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanId": "plan" },
+            "Timeline": { "Id": "timeline" },
+            "JobId": "queued-job",
+            "JobDisplayName": "job",
+            "RequestId": 1,
+            "QueueTime": "2020-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        let queued_for = job_queued_for(&job, std::time::SystemTime::now());
+        assert!(queued_for > crate::capacity::queue_wait_timeout());
+        assert_eq!(
+            crate::capacity::queued_unassigned_decision(
+                queued_for,
+                crate::capacity::queue_wait_timeout()
+            ),
+            crate::capacity::QueuedUnassignedDecision::FailClosed
+        );
+        let fresh: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "MessageType": "PipelineAgentJobRequest",
+            "Plan": { "PlanId": "plan" },
+            "Timeline": { "Id": "timeline" },
+            "JobId": "fresh-job",
+            "JobDisplayName": "job",
+            "RequestId": 1
+        }))
+        .unwrap();
+        assert_eq!(
+            job_queued_for(&fresh, std::time::SystemTime::now()),
+            Duration::ZERO
+        );
+        assert_eq!(
+            crate::capacity::queued_unassigned_decision(
+                Duration::ZERO,
+                crate::capacity::queue_wait_timeout()
+            ),
+            crate::capacity::QueuedUnassignedDecision::Wait
+        );
+    }
+
+    #[test]
+    fn merged_push_occupancy_completion_is_failed_not_success() {
+        let completion = fail_closed_pre_execution_completion(failed_acquired_job_completion(
+            &AcquiredJobIdentity {
+                plan_id: "plan".into(),
+                job_id: "job".into(),
+            },
+            None,
+            Some("merged_push_occupancy".into()),
+            "post-merge push must not occupy velnor-trusted while open pull_request jobs wait; generated callers route push to the GitHub lane",
+        ))
+        .unwrap();
+        assert_eq!(completion.conclusion, TaskResult::Failed);
+        assert_ne!(completion.conclusion, TaskResult::Succeeded);
+        assert_eq!(
+            completion.infrastructure_failure_category.as_deref(),
+            Some("merged_push_occupancy")
+        );
+        assert!(!completion.step_results.is_empty());
+        assert!(crate::capacity::trusted_fleet_accepts_github_event(
+            "pull_request"
+        ));
+        assert!(!crate::capacity::trusted_fleet_accepts_github_event("push"));
     }
 
     #[test]
@@ -7850,6 +8400,106 @@ mod tests {
             assess_registry_lookup(Some(&listed_runner("offline")), 1),
             RegistryVerdict::RecycleOffline(2)
         );
+    }
+
+    #[test]
+    fn registry_offline_busy_quarantines_instead_of_recycle() {
+        let mut runner = listed_runner("offline");
+        runner.busy = Some(true);
+        assert_eq!(
+            assess_registry_lookup(Some(&runner), 0),
+            RegistryVerdict::QuarantineBusy
+        );
+        assert_eq!(
+            assess_registry_lookup(Some(&runner), 1),
+            RegistryVerdict::QuarantineBusy
+        );
+        assert_ne!(
+            assess_registry_lookup(Some(&runner), 1),
+            RegistryVerdict::RecycleOffline(2)
+        );
+        assert_ne!(
+            assess_registry_lookup(Some(&runner), 1),
+            RegistryVerdict::RecycleMissing
+        );
+    }
+
+    #[test]
+    fn lock_renewal_refresh_is_terminal_on_missing_registration() {
+        let missing = anyhow::Error::from(GitHubApiError {
+            status: 404,
+            action: "renew job".into(),
+            body: r#"{"errorKind":"OAuthRegistrationNotFound"}"#.into(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: None,
+        });
+        let gone = anyhow::Error::new(crate::protocol::OAuthRegistrationNotFound(
+            "Registration deadbeef was not found.".to_string(),
+        ));
+        let expired = anyhow::Error::from(GitHubApiError {
+            status: 401,
+            action: "renew job".into(),
+            body: "token expired".into(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: None,
+        });
+        let server = anyhow::Error::from(GitHubApiError {
+            status: 500,
+            action: "renew job".into(),
+            body: "oops".into(),
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: None,
+        });
+        assert!(lock_renewal_refresh_is_terminal(&missing));
+        assert!(lock_renewal_refresh_is_terminal(&gone));
+        assert!(!lock_renewal_refresh_is_terminal(&expired));
+        assert!(!lock_renewal_refresh_is_terminal(&server));
+    }
+
+    #[test]
+    fn registration_lost_pre_execution_completes_failed_with_visible_step() {
+        let completion = fail_closed_pre_execution_completion(
+            pre_execution_registration_lost_completion(
+                &AcquiredJobIdentity {
+                    plan_id: "plan-reg".into(),
+                    job_id: "job-reg".into(),
+                },
+                Some("billing-owner".into()),
+                "runner registration disappeared during pre-execution wait (OAuthRegistrationNotFound/404); job fail-closed before workflow steps",
+            ),
+        )
+        .expect("registration-lost completion must be fail-closed");
+        assert_eq!(completion.conclusion, TaskResult::Failed);
+        assert_ne!(completion.conclusion, TaskResult::Succeeded);
+        assert_eq!(completion.step_results.len(), 1);
+        assert_eq!(
+            completion.infrastructure_failure_category.as_deref(),
+            Some("runner_registration")
+        );
+        assert!(
+            completion
+                .annotations
+                .iter()
+                .any(|annotation| annotation.message.contains("OAuthRegistrationNotFound/404")),
+            "{:?}",
+            completion.annotations
+        );
+        assert!(!completion.step_results[0].name.trim().is_empty());
+    }
+
+    #[test]
+    fn busy_delete_conflict_is_local_failure_not_recycle() {
+        let conflict = anyhow::Error::new(crate::protocol::RunnerBusyConflict(
+            "Sorry, the runner is currently running a job. Unable to delete.".into(),
+        ));
+        let wrapped = local_failure(conflict).context(
+            "quarantine runner id 6676 until GitHub job is terminal; local identity preserved",
+        );
+        assert!(wrapped.downcast_ref::<LocalRunnerFailure>().is_some());
+        assert!(wrapped
+            .chain()
+            .any(|cause| cause.is::<crate::protocol::RunnerBusyConflict>()));
+        assert!(!registration_was_deleted(&wrapped));
     }
 
     #[test]
@@ -8978,6 +9628,121 @@ jobs:
             completion.annotations[0].message
         );
         assert!(completion.telemetry.is_empty());
+    }
+
+    #[test]
+    fn capacity_timeout_completes_failed_with_visible_step_not_success() {
+        let elapsed = Duration::from_secs(crate::capacity::DEFAULT_CAPACITY_WAIT_SECS);
+        let timeout = Duration::from_secs(crate::capacity::DEFAULT_CAPACITY_WAIT_SECS);
+        assert_eq!(
+            crate::capacity::pre_execution_capacity_wait_decision(elapsed, timeout),
+            crate::capacity::CapacityWaitDecision::Timeout
+        );
+
+        let completion =
+            fail_closed_pre_execution_completion(pre_execution_capacity_timeout_completion(
+                &AcquiredJobIdentity {
+                    plan_id: "plan-capacity".into(),
+                    job_id: "08b94140-6688-511c-ba82-48daf63ffff5".into(),
+                },
+                Some("billing-owner".into()),
+                elapsed,
+                timeout,
+                "capacity backpressure: free=117548818432 required=134432476364",
+            ))
+            .expect("timeout completion must be fail-closed");
+
+        assert_eq!(completion.conclusion, TaskResult::Failed);
+        assert_ne!(completion.conclusion, TaskResult::Succeeded);
+        assert!(
+            !completion.step_results.is_empty(),
+            "empty step_results hide the rejection reason on GitHub"
+        );
+        assert_eq!(completion.step_results.len(), 1);
+        assert_eq!(completion.step_results[0].conclusion, TaskResult::Failed);
+        assert_eq!(completion.step_results[0].number, Some(1));
+        assert_eq!(
+            completion.infrastructure_failure_category.as_deref(),
+            Some("host_capacity")
+        );
+        assert!(
+            completion.annotations.iter().any(|annotation| annotation
+                .message
+                .contains("timed out")
+                && annotation
+                    .message
+                    .contains("capacity backpressure: free=117548818432")),
+            "annotation should carry timeout reason: {:?}",
+            completion.annotations
+        );
+        assert!(!completion.annotations[0].message.trim().is_empty());
+        let rejection_log = failed_acquired_job_step_log(
+            "host_capacity",
+            &crate::capacity::host_capacity_timeout_reason(
+                elapsed,
+                timeout,
+                "capacity backpressure: free=117548818432 required=134432476364",
+            ),
+        );
+        assert_eq!(rejection_log.exit_code, 1);
+        assert!(rejection_log
+            .lines
+            .iter()
+            .any(|line| line == "phase: host_capacity"));
+    }
+
+    #[test]
+    fn pre_execution_completion_rejects_success_and_empty_steps() {
+        let identity = AcquiredJobIdentity {
+            plan_id: "plan-1".into(),
+            job_id: "job-1".into(),
+        };
+        let mut success = failed_acquired_job_completion(
+            &identity,
+            None,
+            Some("host_capacity".into()),
+            "capacity wait timed out",
+        );
+        success.conclusion = TaskResult::Succeeded;
+        let success_error = fail_closed_pre_execution_completion(success)
+            .expect_err("Success must not terminalize a pre-execution hang");
+        assert!(
+            success_error.to_string().contains("Success"),
+            "{success_error:#}"
+        );
+
+        let mut empty = failed_acquired_job_completion(
+            &identity,
+            None,
+            Some("host_capacity".into()),
+            "capacity wait timed out",
+        );
+        empty.step_results.clear();
+        let empty_error = fail_closed_pre_execution_completion(empty)
+            .expect_err("empty step_results must not be posted");
+        assert!(
+            empty_error.to_string().contains("empty step_results"),
+            "{empty_error:#}"
+        );
+    }
+
+    #[test]
+    fn canceled_pre_execution_capacity_wait_is_not_success() {
+        let completion = fail_closed_pre_execution_completion(terminal_acquired_job_completion(
+            &AcquiredJobIdentity {
+                plan_id: "plan-1".into(),
+                job_id: "job-1".into(),
+            },
+            None,
+            TaskResult::Canceled,
+            Some("canceled".into()),
+            "job canceled while waiting for host disk capacity",
+        ))
+        .unwrap();
+        assert_eq!(completion.conclusion, TaskResult::Canceled);
+        assert_ne!(completion.conclusion, TaskResult::Succeeded);
+        assert_eq!(completion.step_results.len(), 1);
+        assert!(!completion.annotations[0].message.trim().is_empty());
     }
 
     #[test]

@@ -37,6 +37,183 @@ pub fn reservation_ttl() -> Duration {
     Duration::from_secs(secs.max(60))
 }
 
+/// Retry interval while an acquired job waits for host disk peak.
+pub const CAPACITY_WAIT_RETRY_SECS: u64 = 15;
+
+/// Default bound on the post-acquire disk-peak wait. Override with
+/// `VELNOR_CAPACITY_WAIT_SECS`. Floor is one retry interval so a single
+/// reclaim pass can finish. This is not an unbounded hang: once the bound
+/// elapses the runner must complete the GitHub job Failed.
+pub const DEFAULT_CAPACITY_WAIT_SECS: u64 = 120;
+
+/// How long an already-acquired job may retry disk-peak reservation before
+/// the runner fail-closes the GitHub job.
+pub fn capacity_wait_timeout() -> Duration {
+    let secs = std::env::var("VELNOR_CAPACITY_WAIT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_CAPACITY_WAIT_SECS);
+    Duration::from_secs(secs.max(CAPACITY_WAIT_RETRY_SECS))
+}
+
+/// Decision for the post-acquire, pre-step disk-peak wait.
+///
+/// There is no Success arm. The runner either retries while time remains or
+/// times out and must complete GitHub **Failed** with a visible step/reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapacityWaitDecision {
+    Retry { sleep: Duration },
+    Timeout,
+}
+
+/// Bound the wait that used to hold run-service lock renewal with zero steps.
+pub fn pre_execution_capacity_wait_decision(
+    elapsed: Duration,
+    timeout: Duration,
+) -> CapacityWaitDecision {
+    if elapsed >= timeout {
+        CapacityWaitDecision::Timeout
+    } else {
+        let remaining = timeout.saturating_sub(elapsed);
+        CapacityWaitDecision::Retry {
+            sleep: remaining.min(Duration::from_secs(CAPACITY_WAIT_RETRY_SECS)),
+        }
+    }
+}
+
+/// Combined pre-execution wait: the acquire loop calls this every iteration.
+/// Tests that only build completion payloads do not prove the loop reads the
+/// flags; this function is the loop's decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreExecutionWaitDecision {
+    Reserved,
+    RetryReserve { sleep: Duration },
+    AbortRegistrationLost,
+    AbortCanceled,
+    AbortCapacityTimeout,
+}
+
+pub fn pre_execution_wait_decision(
+    registration_lost: bool,
+    canceled: bool,
+    reserve_ok: bool,
+    capacity: CapacityWaitDecision,
+) -> PreExecutionWaitDecision {
+    if registration_lost {
+        return PreExecutionWaitDecision::AbortRegistrationLost;
+    }
+    if canceled {
+        return PreExecutionWaitDecision::AbortCanceled;
+    }
+    if reserve_ok {
+        return PreExecutionWaitDecision::Reserved;
+    }
+    match capacity {
+        CapacityWaitDecision::Retry { sleep } => PreExecutionWaitDecision::RetryReserve { sleep },
+        CapacityWaitDecision::Timeout => PreExecutionWaitDecision::AbortCapacityTimeout,
+    }
+}
+
+/// Default bound on GitHub `queued` (unassigned) wait. Override with
+/// `VELNOR_QUEUE_WAIT_SECS`. Floor is 15s. This is not job `timeout-minutes`
+/// (that starts after assignment).
+pub const DEFAULT_QUEUE_WAIT_SECS: u64 = 300;
+
+pub fn queue_wait_timeout() -> Duration {
+    let secs = std::env::var("VELNOR_QUEUE_WAIT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_QUEUE_WAIT_SECS);
+    Duration::from_secs(secs.max(CAPACITY_WAIT_RETRY_SECS))
+}
+
+/// A GitHub Actions job that is still `queued` (no runner assigned).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // used by nextest + doctor-side listing of unassigned jobs
+pub struct QueuedUnassignedJob {
+    pub run_id: u64,
+    pub job_id: String,
+    pub queued_for: Duration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueuedUnassignedDecision {
+    Wait,
+    FailClosed,
+}
+
+/// Fail-closed bound for unassigned jobs. There is no Success arm.
+pub fn queued_unassigned_decision(
+    queued_for: Duration,
+    timeout: Duration,
+) -> QueuedUnassignedDecision {
+    if queued_for >= timeout {
+        QueuedUnassignedDecision::FailClosed
+    } else {
+        QueuedUnassignedDecision::Wait
+    }
+}
+
+pub fn queue_timeout_reason(queued_for: Duration, timeout: Duration) -> String {
+    format!(
+        "timed out after {}s waiting for a healthy Velnor runner (queue limit {}s); job was never assigned to a ready slot",
+        queued_for.as_secs(),
+        timeout.as_secs()
+    )
+}
+
+/// Jobs that have been `queued` past the bound and must fail-closed.
+#[allow(dead_code)] // nextest drives this bulk filter; acquire path uses queued_unassigned_decision
+pub fn queued_unassigned_jobs_past_deadline(
+    jobs: &[QueuedUnassignedJob],
+    timeout: Duration,
+) -> Vec<&QueuedUnassignedJob> {
+    jobs.iter()
+        .filter(|job| {
+            queued_unassigned_decision(job.queued_for, timeout)
+                == QueuedUnassignedDecision::FailClosed
+        })
+        .collect()
+}
+
+/// Post-merge `push` must not occupy `velnor-trusted` while open PRs wait.
+/// `pull_request` / `merge_group` / `schedule` / `workflow_dispatch` still run
+/// on Velnor. `push` is routed to the GitHub lane in generated callers.
+pub fn trusted_fleet_accepts_github_event(event_name: &str) -> bool {
+    !event_name.eq_ignore_ascii_case("push")
+}
+
+/// GitHub DELETE 422 / registry `offline+busy` with no live online session:
+/// complete the leftover job so the lease can drop. `online+busy` is a live job.
+pub fn stale_busy_lease_should_complete_job(status: Option<&str>, busy: Option<bool>) -> bool {
+    busy == Some(true) && status != Some("online")
+}
+
+/// Operator-visible reason for a host-capacity timeout completion.
+///
+/// Empty `last_error` still yields a non-empty reason so GitHub cannot hide
+/// the failure behind a zero-step job.
+pub fn host_capacity_timeout_reason(
+    elapsed: Duration,
+    timeout: Duration,
+    last_error: &str,
+) -> String {
+    let detail = last_error.trim();
+    if detail.is_empty() {
+        format!(
+            "timed out after {}s waiting for host disk capacity (limit {}s)",
+            elapsed.as_secs(),
+            timeout.as_secs()
+        )
+    } else {
+        format!(
+            "timed out after {}s waiting for host disk capacity (limit {}s): {detail}",
+            elapsed.as_secs(),
+            timeout.as_secs()
+        )
+    }
+}
+
 #[derive(Debug)]
 pub struct ScopeLease {
     path: PathBuf,
@@ -401,5 +578,182 @@ mod tests {
         assert!(!path.exists());
         std::env::remove_var("VELNOR_RESERVATION_TTL_SECS");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn leaked_reservation_older_than_ttl_is_reaped_from_summary_bytes() {
+        let root = root("capacity-ttl-summary");
+        let dir = root.join("reservations");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("leaked.json");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        serde_json::to_writer(
+            &mut file,
+            &ReservationRecord {
+                bytes: 17179869184,
+                pid: std::process::id(),
+                created_unix: 1,
+            },
+        )
+        .unwrap();
+        file.flush().unwrap();
+        std::env::set_var("VELNOR_RESERVATION_TTL_SECS", "60");
+        let (count_before_reap, bytes) = reservation_summary(&root).unwrap();
+        assert_eq!(count_before_reap, 1, "summary counts the file before reap");
+        assert_eq!(bytes, 0, "stale reservation bytes must not block admission");
+        assert!(!path.exists(), "leaked reservation file must be removed");
+        assert_eq!(reservation_summary(&root).unwrap(), (0, 0));
+        std::env::remove_var("VELNOR_RESERVATION_TTL_SECS");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn capacity_wait_is_bounded_then_times_out_never_success() {
+        let timeout = Duration::from_secs(DEFAULT_CAPACITY_WAIT_SECS);
+        assert_eq!(
+            pre_execution_capacity_wait_decision(Duration::ZERO, timeout),
+            CapacityWaitDecision::Retry {
+                sleep: Duration::from_secs(CAPACITY_WAIT_RETRY_SECS)
+            }
+        );
+        assert_eq!(
+            pre_execution_capacity_wait_decision(
+                timeout.saturating_sub(Duration::from_secs(1)),
+                timeout
+            ),
+            CapacityWaitDecision::Retry {
+                sleep: Duration::from_secs(1)
+            }
+        );
+        assert_eq!(
+            pre_execution_capacity_wait_decision(timeout, timeout),
+            CapacityWaitDecision::Timeout
+        );
+        assert_eq!(
+            pre_execution_capacity_wait_decision(timeout + Duration::from_secs(30), timeout),
+            CapacityWaitDecision::Timeout
+        );
+        assert!(
+            !matches!(
+                pre_execution_capacity_wait_decision(timeout, timeout),
+                CapacityWaitDecision::Retry { .. }
+            ),
+            "elapsed >= timeout must not keep retrying"
+        );
+        let reason = host_capacity_timeout_reason(
+            timeout,
+            timeout,
+            "capacity backpressure: free=1 required=2",
+        );
+        assert!(!reason.trim().is_empty());
+        assert!(reason.contains("capacity backpressure: free=1 required=2"));
+        assert!(!host_capacity_timeout_reason(timeout, timeout, "   ")
+            .trim()
+            .is_empty());
+    }
+
+    #[test]
+    fn pre_execution_wait_decision_reads_lost_cancel_and_capacity() {
+        let retry = CapacityWaitDecision::Retry {
+            sleep: Duration::from_secs(15),
+        };
+        assert_eq!(
+            pre_execution_wait_decision(true, false, false, retry),
+            PreExecutionWaitDecision::AbortRegistrationLost
+        );
+        assert_eq!(
+            pre_execution_wait_decision(false, true, true, retry),
+            PreExecutionWaitDecision::AbortCanceled
+        );
+        assert_eq!(
+            pre_execution_wait_decision(false, false, true, retry),
+            PreExecutionWaitDecision::Reserved
+        );
+        assert_eq!(
+            pre_execution_wait_decision(false, false, false, retry),
+            PreExecutionWaitDecision::RetryReserve {
+                sleep: Duration::from_secs(15)
+            }
+        );
+        assert_eq!(
+            pre_execution_wait_decision(false, false, false, CapacityWaitDecision::Timeout),
+            PreExecutionWaitDecision::AbortCapacityTimeout
+        );
+        assert_ne!(
+            pre_execution_wait_decision(true, false, false, retry),
+            PreExecutionWaitDecision::RetryReserve {
+                sleep: Duration::from_secs(15)
+            }
+        );
+    }
+
+    #[test]
+    fn queued_unassigned_jobs_fail_closed_after_bound_never_success() {
+        let timeout = Duration::from_secs(DEFAULT_QUEUE_WAIT_SECS);
+        assert_eq!(
+            queued_unassigned_decision(Duration::ZERO, timeout),
+            QueuedUnassignedDecision::Wait
+        );
+        assert_eq!(
+            queued_unassigned_decision(timeout, timeout),
+            QueuedUnassignedDecision::FailClosed
+        );
+        assert_eq!(
+            queued_unassigned_decision(timeout + Duration::from_secs(1), timeout),
+            QueuedUnassignedDecision::FailClosed
+        );
+        let jobs = [
+            QueuedUnassignedJob {
+                run_id: 1,
+                job_id: "fresh".into(),
+                queued_for: Duration::from_secs(10),
+            },
+            QueuedUnassignedJob {
+                run_id: 2,
+                job_id: "stale".into(),
+                queued_for: timeout,
+            },
+        ];
+        let expired = queued_unassigned_jobs_past_deadline(&jobs, timeout);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].job_id, "stale");
+        let reason = queue_timeout_reason(timeout, timeout);
+        assert!(reason.contains("never assigned"));
+        assert!(!reason.trim().is_empty());
+    }
+
+    #[test]
+    fn push_events_do_not_occupy_trusted_fleet() {
+        assert!(trusted_fleet_accepts_github_event("pull_request"));
+        assert!(trusted_fleet_accepts_github_event("merge_group"));
+        assert!(trusted_fleet_accepts_github_event("schedule"));
+        assert!(trusted_fleet_accepts_github_event("workflow_dispatch"));
+        assert!(!trusted_fleet_accepts_github_event("push"));
+        assert!(!trusted_fleet_accepts_github_event("PUSH"));
+    }
+
+    #[test]
+    fn stale_busy_offline_must_complete_job_online_busy_must_not() {
+        assert!(stale_busy_lease_should_complete_job(
+            Some("offline"),
+            Some(true)
+        ));
+        assert!(stale_busy_lease_should_complete_job(None, Some(true)));
+        assert!(!stale_busy_lease_should_complete_job(
+            Some("online"),
+            Some(true)
+        ));
+        assert!(!stale_busy_lease_should_complete_job(
+            Some("offline"),
+            Some(false)
+        ));
+        assert!(!stale_busy_lease_should_complete_job(
+            Some("online"),
+            Some(false)
+        ));
     }
 }
