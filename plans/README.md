@@ -18,4 +18,28 @@ Velnor unified CI contract (2026-08-09):
 
 Current execution follows the marked contract and the tracked active goal graph.
 
-Earlier numbered plans are historical and non-executable.
+Legacy plans 001–038 and 040–062 are historical and non-executable. Remaining
+stale working files were removed; Git history and `OPERATOR-REPORT.md` preserve
+delivery evidence. Plan 039 was refreshed because exact trusted-workflow
+admission remains unfinished.
+
+## Current categories
+
+| Category | Scope | Status |
+|---|---|---|
+| [`fleet-operations`](fleet-operations/README.md) | Organization runner-group admission, routing, and drift control | Current; Plan 039 TODO |
+| [`velnorctl-migration`](velnorctl-migration/README.md) | Replace every `velnor-runner` product, binary, package, and command surface with `velnorctl` | Planned; Plan 063 first |
+
+The migration category contains one shared-plan index plus
+[`commands/README.md`](velnorctl-migration/commands/README.md), with one task
+for each of 74 retained researched leaf commands and the required `velnorctl
+daemon` replacement. Plan 063 must land first because repository policy
+requires direction documents and the execution prompt to agree before product
+implementation.
+
+## Plan-library rules
+
+- Every executable plan belongs to one category directory with its own index.
+- Root contains only this index and historical `OPERATOR-REPORT.md` evidence.
+- Completed or fully superseded plans are removed; Git history is the archive.
+- Category indexes state ownership boundaries so work is not duplicated.
