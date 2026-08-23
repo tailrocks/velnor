@@ -22,10 +22,10 @@ on:
   workflow_dispatch:
     inputs:
       lanes:
-        description: velnor (default) | github
+        description: velnor (default) | github | both
         type: choice
         default: velnor
-        options: [velnor, github]
+        options: [velnor, github, both]
       tag:
         description: Existing release tag to (re)build coherently (e.g. v0.1.121).
         type: string
@@ -653,6 +653,51 @@ jobs:
       artifact-name: package-subjects
       subject-path: velnor-runner-${{ needs.identity.outputs.version }}-arm64.deb
       source-ref: refs/tags/v${{ needs.identity.outputs.version }}
+
+  parity-github:
+    # `both` on a single-writer pipeline: the lane-selected jobs above remain the
+    # sole writer (Velnor by default). This GitHub-hosted leg independently
+    # verifies the published release record against the release assets — both
+    # fleets execute from this same workflow definition, writes happen once.
+    needs: [identity, release]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes == 'both' }}
+    name: Verify published release (GitHub lane)
+    timeout-minutes: 15
+    runs-on: ${{ 'ubuntu-26.04' }}
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.identity.outputs.version }}
+      COMMIT: ${{ needs.identity.outputs.commit }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download published release and verify digests against the record
+        run: |
+          set -euo pipefail
+          tag="v${VERSION}"
+          mkdir verify
+          cd verify
+          gh release download "$tag" \
+            --pattern 'SHA256SUMS' \
+            --pattern 'release-record.json' \
+            --pattern 'velnor-runner-*.tar.gz' \
+            --pattern 'velnor-runner-*.deb'
+          # SHA256SUMS binds the four package subjects.
+          sha256sum --check --strict SHA256SUMS
+          # Cross-check the release record against the downloaded bytes.
+          for arch in amd64 arm64; do
+            deb="velnor-runner-${VERSION}-${arch}.deb"
+            tarball="velnor-runner-${VERSION}-${arch}.tar.gz"
+            record_deb="$(jq -r --arg arch "$arch" '.architectures[] | select(.arch == $arch) | .deb_sha256' release-record.json)"
+            record_bin="$(jq -r --arg arch "$arch" '.architectures[] | select(.arch == $arch) | .binary_sha256' release-record.json)"
+            [ "$(sha256sum "$deb" | awk '{print $1}')" = "$record_deb" ] || { echo "::error::record deb digest mismatch ($arch)" >&2; exit 1; }
+            mkdir -p "extract-$arch"
+            tar -xzf "$tarball" -C "extract-$arch"
+            [ "$(sha256sum "extract-$arch/velnor-runner" | awk '{print $1}')" = "$record_bin" ] || { echo "::error::record binary digest mismatch ($arch)" >&2; exit 1; }
+          done
+          # The record must name this exact source commit.
+          [ "$(jq -r '.build.commit' release-record.json)" = "$COMMIT" ] || { echo "::error::record commit mismatch" >&2; exit 1; }
+          echo "parity-github: published release $tag verified on the GitHub lane"
 
   # Homebrew: to be added modeled on holla's release.yml `homebrew` job once the
   # tailrocks/homebrew-velnor tap + push token exist (docs/master-plan.md P1.8).
