@@ -333,10 +333,16 @@ pub static ACTIONS: &[ActionCapability] = &[
     ActionCapability {
         repository: "tailrocks/velnor-actions",
         adapter: NativeActionAdapter::ApprovedComposite,
-        allowed_refs: &[allowed(
-            "3057391f93f3bfc0fe570ee08cfcea9533ea3f92",
-            "unified CI release 2026.8.18",
-        )],
+        allowed_refs: &[
+            allowed(
+                "77d323dcfdb176b332edc24bfc92cb625b3ab4c8",
+                "unified CI release 2026.8.30",
+            ),
+            allowed(
+                "3057391f93f3bfc0fe570ee08cfcea9533ea3f92",
+                "unified CI release 2026.8.18",
+            ),
+        ],
         allowed_subpaths: &[
             "actions/run-gate",
             "actions/cache-contract",
@@ -691,10 +697,16 @@ pub static REUSABLE_WORKFLOWS: &[ReusableWorkflow] = &[
     ReusableWorkflow {
         repository: "tailrocks/velnor-actions",
         path: ".github/workflows/package-signer.yml",
-        allowed_refs: &[allowed(
-            "643c5341b160be151a7fae19b89b6a4f8ab3b275",
-            "fleet 2026.8.5 hosted package signer",
-        )],
+        allowed_refs: &[
+            allowed(
+                "77d323dcfdb176b332edc24bfc92cb625b3ab4c8",
+                "fleet 2026.8.30 hosted package signer",
+            ),
+            allowed(
+                "643c5341b160be151a7fae19b89b6a4f8ab3b275",
+                "fleet 2026.8.5 hosted package signer",
+            ),
+        ],
         inputs: PACKAGE_SIGNER_WORKFLOW_INPUTS,
         notes: "hosted package signer; full-SHA and closed inputs admitted",
     },
