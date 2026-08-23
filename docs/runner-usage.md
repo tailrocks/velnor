@@ -73,8 +73,10 @@ that temporary mismatch until the operator activates the new signed record.
   (`stale_busy`) so the lease can drop, then retries DELETE. Registry
   `offline+busy` is **not** healthy (6676-class); doctor completes the
   leftover job and the slot recycles. A GitHub job that sat `queued`
-  (unassigned) longer than `VELNOR_QUEUE_WAIT_SECS` (default 300s) is
-  fail-closed as `queue_timeout` on acquire. Post-merge `push` events are
+  (unassigned, no runner id) on `velnor-trusted` longer than
+  `VELNOR_QUEUE_WAIT_SECS` (default 300s) is REST-cancelled by doctor
+  before acquire. An already-assigned job is never failed for queue wait.
+  Post-merge `push` events are
   not accepted on `velnor-trusted` (`merged_push_occupancy`); generated
   callers route `push` to the GitHub lane so open PRs keep the fleet.
   Do not hammer DELETE. Leaked reservation files older

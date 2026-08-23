@@ -251,6 +251,66 @@ impl GitHubScope {
             "repository"
         }
     }
+
+    pub fn org_login(&self) -> Option<&str> {
+        self.runner_scope_path.strip_prefix("orgs/")
+    }
+
+    pub fn repo_full_name(&self) -> Option<(&str, &str)> {
+        self.runner_scope_path
+            .strip_prefix("repos/")
+            .and_then(|rest| rest.split_once('/'))
+    }
+
+    pub fn workflow_run_cancel_url(&self, repository: &str, run_id: u64) -> Result<Url> {
+        self.api_base_url
+            .join(&format!("repos/{repository}/actions/runs/{run_id}/cancel"))
+            .context("build GitHub workflow run cancel URL")
+    }
+
+    pub fn repo_queued_runs_url(&self, repository: &str) -> Result<Url> {
+        self.api_base_url
+            .join(&format!("repos/{repository}/actions/runs"))
+            .context("build GitHub queued workflow runs URL")
+    }
+
+    pub fn org_repos_url(&self) -> Result<Url> {
+        let org = self
+            .org_login()
+            .ok_or_else(|| anyhow::anyhow!("org repos URL requires organization scope"))?;
+        self.api_base_url
+            .join(&format!("orgs/{org}/repos"))
+            .context("build GitHub org repos URL")
+    }
+}
+
+/// GitHub REST job waiting in `queued` with no runner assigned.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ListedWorkflowJob {
+    pub id: u64,
+    pub run_id: u64,
+    #[serde(default)]
+    pub labels: Vec<String>,
+    pub status: Option<String>,
+    pub runner_id: Option<i64>,
+    pub created_at: Option<String>,
+    pub run_url: Option<String>,
+}
+
+pub(crate) fn repository_from_actions_run_url(run_url: &str) -> Option<String> {
+    let rest = run_url.split("/repos/").nth(1)?;
+    let mut parts = rest.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+/// 202 accepted; 409/404 already terminal.
+pub(crate) fn classify_workflow_cancel(status: u16) -> bool {
+    matches!(status, 202 | 409 | 404)
 }
 
 fn is_hosted_github(host: &str) -> bool {
@@ -918,6 +978,197 @@ impl RegistrationClient {
             .await
             .map(|response| response.runner_groups)
             .context("parse list runner groups response")
+    }
+
+    /// Queued (unassigned) jobs in this org/repo whose labels wait on Velnor.
+    pub async fn list_queued_jobs(
+        &self,
+        scope: &GitHubScope,
+        pat: &str,
+    ) -> Result<Vec<ListedWorkflowJob>> {
+        let repositories = self.list_scope_repositories(scope, pat).await?;
+        let mut jobs = Vec::new();
+        for repository in repositories {
+            let runs = match self
+                .list_queued_workflow_runs(scope, pat, &repository)
+                .await
+            {
+                Ok(runs) => runs,
+                Err(error) => {
+                    eprintln!("list queued runs for {repository} failed: {error:#}");
+                    continue;
+                }
+            };
+            for run_id in runs {
+                match self
+                    .list_workflow_run_jobs(scope, pat, &repository, run_id)
+                    .await
+                {
+                    Ok(run_jobs) => jobs.extend(run_jobs),
+                    Err(error) => {
+                        eprintln!("list jobs for {repository} run {run_id} failed: {error:#}");
+                    }
+                }
+            }
+        }
+        Ok(jobs)
+    }
+
+    async fn list_scope_repositories(&self, scope: &GitHubScope, pat: &str) -> Result<Vec<String>> {
+        if let Some((owner, repo)) = scope.repo_full_name() {
+            return Ok(vec![format!("{owner}/{repo}")]);
+        }
+        let Some(org) = scope.org_login() else {
+            return Ok(Vec::new());
+        };
+        #[derive(Deserialize)]
+        struct Repo {
+            full_name: Option<String>,
+        }
+        let base = scope.org_repos_url()?;
+        let mut all = Vec::new();
+        let mut page_number = 1u32;
+        loop {
+            let mut url = base.clone();
+            url.query_pairs_mut()
+                .append_pair("per_page", "100")
+                .append_pair("page", &page_number.to_string())
+                .append_pair("type", "all");
+            let response = self
+                .http
+                .get(url)
+                .bearer_auth(pat)
+                .header(USER_AGENT, RUNNER_USER_AGENT)
+                .header(ACCEPT, "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2022-11-28")
+                .send()
+                .await
+                .with_context(|| format!("list repositories for org {org}"))?;
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                return Err(github_api_error(
+                    "list org repositories",
+                    status.as_u16(),
+                    body,
+                ));
+            }
+            let page: Vec<Repo> = response.json().await.context("parse org repositories")?;
+            let fetched = page.len();
+            all.extend(page.into_iter().filter_map(|repo| repo.full_name));
+            if fetched < 100 {
+                return Ok(all);
+            }
+            page_number += 1;
+        }
+    }
+
+    async fn list_queued_workflow_runs(
+        &self,
+        scope: &GitHubScope,
+        pat: &str,
+        repository: &str,
+    ) -> Result<Vec<u64>> {
+        #[derive(Deserialize)]
+        struct Runs {
+            workflow_runs: Vec<Run>,
+        }
+        #[derive(Deserialize)]
+        struct Run {
+            id: u64,
+        }
+        let mut url = scope.repo_queued_runs_url(repository)?;
+        url.query_pairs_mut()
+            .append_pair("status", "queued")
+            .append_pair("per_page", "100");
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(pat)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .header(ACCEPT, "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .with_context(|| format!("list queued runs for {repository}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(github_api_error(
+                "list queued workflow runs",
+                status.as_u16(),
+                body,
+            ));
+        }
+        let runs: Runs = response
+            .json()
+            .await
+            .context("parse queued workflow runs")?;
+        Ok(runs.workflow_runs.into_iter().map(|run| run.id).collect())
+    }
+
+    async fn list_workflow_run_jobs(
+        &self,
+        scope: &GitHubScope,
+        pat: &str,
+        repository: &str,
+        run_id: u64,
+    ) -> Result<Vec<ListedWorkflowJob>> {
+        #[derive(Deserialize)]
+        struct Jobs {
+            jobs: Vec<ListedWorkflowJob>,
+        }
+        let url = scope
+            .api_base_url
+            .join(&format!("repos/{repository}/actions/runs/{run_id}/jobs"))
+            .context("build workflow run jobs URL")?;
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(pat)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .header(ACCEPT, "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .with_context(|| format!("list jobs for {repository} run {run_id}"))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(github_api_error(
+                "list workflow run jobs",
+                status.as_u16(),
+                body,
+            ));
+        }
+        let jobs: Jobs = response.json().await.context("parse workflow run jobs")?;
+        Ok(jobs.jobs)
+    }
+
+    pub async fn cancel_workflow_run(
+        &self,
+        scope: &GitHubScope,
+        pat: &str,
+        repository: &str,
+        run_id: u64,
+    ) -> Result<()> {
+        let url = scope.workflow_run_cancel_url(repository, run_id)?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(pat)
+            .header(USER_AGENT, RUNNER_USER_AGENT)
+            .header(ACCEPT, "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .with_context(|| format!("cancel workflow run {repository}/{run_id}"))?;
+        let status = response.status().as_u16();
+        if classify_workflow_cancel(status) {
+            return Ok(());
+        }
+        let body = response.text().await.unwrap_or_default();
+        Err(github_api_error("cancel workflow run", status, body))
     }
 
     /// Look up one runner registration by id. `Ok(None)` means GitHub no
@@ -3962,6 +4213,29 @@ mod tests {
             422,
             r#"{"message":"validation failed"}"#
         ));
+    }
+
+    #[test]
+    fn workflow_cancel_url_and_statuses_are_fail_closed_rest() {
+        assert_eq!(
+            repository_from_actions_run_url(
+                "https://api.github.com/repos/jackin-project/jackin/actions/runs/10"
+            )
+            .as_deref(),
+            Some("jackin-project/jackin")
+        );
+        assert!(classify_workflow_cancel(202));
+        assert!(classify_workflow_cancel(409));
+        assert!(classify_workflow_cancel(404));
+        assert!(!classify_workflow_cancel(500));
+        let scope = GitHubScope::parse("https://github.com/jackin-project").unwrap();
+        assert_eq!(
+            scope
+                .workflow_run_cancel_url("jackin-project/jackin", 10)
+                .unwrap()
+                .as_str(),
+            "https://api.github.com/repos/jackin-project/jackin/actions/runs/10/cancel"
+        );
     }
 
     #[test]

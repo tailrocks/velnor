@@ -129,10 +129,10 @@ pub fn queue_wait_timeout() -> Duration {
 
 /// A GitHub Actions job that is still `queued` (no runner assigned).
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // used by nextest + doctor-side listing of unassigned jobs
 pub struct QueuedUnassignedJob {
     pub run_id: u64,
     pub job_id: String,
+    pub repository: String,
     pub queued_for: Duration,
 }
 
@@ -154,6 +154,27 @@ pub fn queued_unassigned_decision(
     }
 }
 
+/// Queue timeout applies only while GitHub has not assigned a runner.
+/// After assignment (`handle_job_request`) the job must execute (AC3).
+pub fn queue_wait_decision(
+    assigned: bool,
+    queued_for: Duration,
+    timeout: Duration,
+) -> QueuedUnassignedDecision {
+    if assigned {
+        QueuedUnassignedDecision::Wait
+    } else {
+        queued_unassigned_decision(queued_for, timeout)
+    }
+}
+
+/// Unassigned jobs waiting on `velnor-trusted` (not GitHub-hosted labels).
+pub fn job_waits_on_trusted_fleet(labels: &[String]) -> bool {
+    labels
+        .iter()
+        .any(|label| label.eq_ignore_ascii_case("velnor-trusted"))
+}
+
 pub fn queue_timeout_reason(queued_for: Duration, timeout: Duration) -> String {
     format!(
         "timed out after {}s waiting for a healthy Velnor runner (queue limit {}s); job was never assigned to a ready slot",
@@ -163,14 +184,13 @@ pub fn queue_timeout_reason(queued_for: Duration, timeout: Duration) -> String {
 }
 
 /// Jobs that have been `queued` past the bound and must fail-closed.
-#[allow(dead_code)] // nextest drives this bulk filter; acquire path uses queued_unassigned_decision
 pub fn queued_unassigned_jobs_past_deadline(
     jobs: &[QueuedUnassignedJob],
     timeout: Duration,
 ) -> Vec<&QueuedUnassignedJob> {
     jobs.iter()
         .filter(|job| {
-            queued_unassigned_decision(job.queued_for, timeout)
+            queue_wait_decision(false, job.queued_for, timeout)
                 == QueuedUnassignedDecision::FailClosed
         })
         .collect()
@@ -710,11 +730,13 @@ mod tests {
             QueuedUnassignedJob {
                 run_id: 1,
                 job_id: "fresh".into(),
+                repository: "jackin-project/jackin".into(),
                 queued_for: Duration::from_secs(10),
             },
             QueuedUnassignedJob {
                 run_id: 2,
                 job_id: "stale".into(),
+                repository: "jackin-project/jackin".into(),
                 queued_for: timeout,
             },
         ];
@@ -724,6 +746,19 @@ mod tests {
         let reason = queue_timeout_reason(timeout, timeout);
         assert!(reason.contains("never assigned"));
         assert!(!reason.trim().is_empty());
+        assert_eq!(
+            queue_wait_decision(true, timeout + Duration::from_secs(1), timeout),
+            QueuedUnassignedDecision::Wait
+        );
+        assert_eq!(
+            queue_wait_decision(false, timeout + Duration::from_secs(1), timeout),
+            QueuedUnassignedDecision::FailClosed
+        );
+        assert!(job_waits_on_trusted_fleet(&[
+            "self-hosted".into(),
+            "velnor-trusted".into()
+        ]));
+        assert!(!job_waits_on_trusted_fleet(&["ubuntu-26.04".into()]));
     }
 
     #[test]

@@ -15,7 +15,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{
@@ -190,12 +190,7 @@ fn clear_in_flight_job(config_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn job_queued_for(job: &AgentJobRequestMessage, now: std::time::SystemTime) -> Duration {
-    let raw = job.queue_time.as_deref().or_else(|| {
-        job.variables
-            .get("system.queueTime")
-            .and_then(|value| value.value.as_deref())
-    });
+fn queued_for_from_rfc3339(raw: Option<&str>, now: SystemTime) -> Duration {
     let Some(raw) = raw.filter(|value| !value.trim().is_empty()) else {
         return Duration::ZERO;
     };
@@ -208,8 +203,56 @@ fn job_queued_for(job: &AgentJobRequestMessage, now: std::time::SystemTime) -> D
     if timestamp <= 0 {
         return Duration::ZERO;
     }
-    let start = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(timestamp as u64);
+    let start = SystemTime::UNIX_EPOCH + Duration::from_secs(timestamp as u64);
     now.duration_since(start).unwrap_or(Duration::ZERO)
+}
+
+#[cfg(test)]
+fn job_queued_for(job: &AgentJobRequestMessage, now: SystemTime) -> Duration {
+    let raw = job.queue_time.as_deref().or_else(|| {
+        job.variables
+            .get("system.queueTime")
+            .and_then(|value| value.value.as_deref())
+    });
+    queued_for_from_rfc3339(raw, now)
+}
+
+fn select_unassigned_trusted_jobs(
+    jobs: &[crate::protocol::ListedWorkflowJob],
+) -> Vec<&crate::protocol::ListedWorkflowJob> {
+    jobs.iter()
+        .filter(|job| {
+            job.status.as_deref() == Some("queued")
+                && job.runner_id.is_none()
+                && crate::capacity::job_waits_on_trusted_fleet(&job.labels)
+        })
+        .collect()
+}
+
+fn queued_jobs_to_cancel(
+    jobs: &[crate::protocol::ListedWorkflowJob],
+    now: SystemTime,
+    timeout: Duration,
+) -> Vec<crate::capacity::QueuedUnassignedJob> {
+    let candidates: Vec<_> = select_unassigned_trusted_jobs(jobs)
+        .into_iter()
+        .filter_map(|job| {
+            let repository = job
+                .run_url
+                .as_deref()
+                .and_then(crate::protocol::repository_from_actions_run_url)?;
+            Some(crate::capacity::QueuedUnassignedJob {
+                run_id: job.run_id,
+                job_id: job.id.to_string(),
+                repository,
+                queued_for: queued_for_from_rfc3339(job.created_at.as_deref(), now),
+            })
+        })
+        .collect();
+    crate::capacity::queued_unassigned_jobs_past_deadline(&candidates, timeout)
+        .into_iter()
+        .cloned()
+        .collect()
 }
 
 async fn complete_recorded_in_flight_job(
@@ -2938,25 +2981,6 @@ async fn handle_job_request(
             Some(&job),
             Some("merged_push_occupancy".to_string()),
             reason,
-        )
-        .await;
-        let _ = clear_in_flight_job(config_dir);
-        completion?;
-        bail!("{reason}");
-    }
-    let queued_for = job_queued_for(&job, std::time::SystemTime::now());
-    let queue_timeout = crate::capacity::queue_wait_timeout();
-    if crate::capacity::queued_unassigned_decision(queued_for, queue_timeout)
-        == crate::capacity::QueuedUnassignedDecision::FailClosed
-    {
-        let identity = AcquiredJobIdentity::from_job(&job);
-        let reason = crate::capacity::queue_timeout_reason(queued_for, queue_timeout);
-        let completion = complete_acquired_job_failure(
-            &run_service_job,
-            &identity,
-            Some(&job),
-            Some("queue_timeout".to_string()),
-            &reason,
         )
         .await;
         let _ = clear_in_flight_job(config_dir);
@@ -7707,7 +7731,8 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         .unwrap_or(0);
     let (cache_logical, cache_physical) =
         crate::cache::accounting_summary(&cache_root).unwrap_or((0, 0));
-    let runners = RegistrationClient::new()?
+    let client = RegistrationClient::new()?;
+    let runners = client
         .list_runners(&scope, pat)
         .await
         .context("list runners for doctor probe")?;
@@ -7810,6 +7835,34 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
                 "doctor: leftover job complete failed for runner id {agent_id}: {error:#}"
             ),
         }
+    }
+
+    match client.list_queued_jobs(&scope, pat).await {
+        Ok(listed) => {
+            let timeout = crate::capacity::queue_wait_timeout();
+            let overdue = queued_jobs_to_cancel(&listed, SystemTime::now(), timeout);
+            let mut cancelled = BTreeSet::new();
+            for job in overdue {
+                if !cancelled.insert(job.run_id) {
+                    continue;
+                }
+                let reason = crate::capacity::queue_timeout_reason(job.queued_for, timeout);
+                match client
+                    .cancel_workflow_run(&scope, pat, &job.repository, job.run_id)
+                    .await
+                {
+                    Ok(()) => eprintln!(
+                        "doctor: fail-closed unassigned {} job {} run {} ({reason})",
+                        job.repository, job.job_id, job.run_id
+                    ),
+                    Err(error) => eprintln!(
+                        "doctor: cancel unassigned {} run {} failed: {error:#}",
+                        job.repository, job.run_id
+                    ),
+                }
+            }
+        }
+        Err(error) => eprintln!("doctor: list queued jobs failed: {error:#}"),
     }
 
     if healthy == 0 {
@@ -8308,6 +8361,7 @@ mod tests {
 
     #[test]
     fn job_queued_for_drives_shipped_unassigned_timeout() {
+        let timeout = crate::capacity::queue_wait_timeout();
         let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "MessageType": "PipelineAgentJobRequest",
             "Plan": { "PlanId": "plan" },
@@ -8318,15 +8372,43 @@ mod tests {
             "QueueTime": "2020-01-01T00:00:00Z"
         }))
         .unwrap();
-        let queued_for = job_queued_for(&job, std::time::SystemTime::now());
-        assert!(queued_for > crate::capacity::queue_wait_timeout());
+        let queued_for = job_queued_for(&job, SystemTime::now());
+        assert!(queued_for > timeout);
         assert_eq!(
-            crate::capacity::queued_unassigned_decision(
-                queued_for,
-                crate::capacity::queue_wait_timeout()
-            ),
+            crate::capacity::queue_wait_decision(false, queued_for, timeout),
             crate::capacity::QueuedUnassignedDecision::FailClosed
         );
+        assert_eq!(
+            crate::capacity::queue_wait_decision(true, queued_for, timeout),
+            crate::capacity::QueuedUnassignedDecision::Wait
+        );
+        let listed = [crate::protocol::ListedWorkflowJob {
+            id: 7,
+            run_id: 99,
+            labels: vec!["velnor-trusted".into()],
+            status: Some("queued".into()),
+            runner_id: None,
+            created_at: Some("2020-01-01T00:00:00Z".into()),
+            run_url: Some(
+                "https://api.github.com/repos/jackin-project/jackin/actions/runs/99".into(),
+            ),
+        }];
+        let cancel = queued_jobs_to_cancel(&listed, SystemTime::now(), timeout);
+        assert_eq!(cancel.len(), 1);
+        assert_eq!(cancel[0].run_id, 99);
+        assert_eq!(cancel[0].repository, "jackin-project/jackin");
+        let assigned = [crate::protocol::ListedWorkflowJob {
+            id: 8,
+            run_id: 100,
+            labels: vec!["velnor-trusted".into()],
+            status: Some("queued".into()),
+            runner_id: Some(1),
+            created_at: Some("2020-01-01T00:00:00Z".into()),
+            run_url: Some(
+                "https://api.github.com/repos/jackin-project/jackin/actions/runs/100".into(),
+            ),
+        }];
+        assert!(queued_jobs_to_cancel(&assigned, SystemTime::now(), timeout).is_empty());
         let fresh: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
             "MessageType": "PipelineAgentJobRequest",
             "Plan": { "PlanId": "plan" },
@@ -8336,15 +8418,9 @@ mod tests {
             "RequestId": 1
         }))
         .unwrap();
+        assert_eq!(job_queued_for(&fresh, SystemTime::now()), Duration::ZERO);
         assert_eq!(
-            job_queued_for(&fresh, std::time::SystemTime::now()),
-            Duration::ZERO
-        );
-        assert_eq!(
-            crate::capacity::queued_unassigned_decision(
-                Duration::ZERO,
-                crate::capacity::queue_wait_timeout()
-            ),
+            crate::capacity::queue_wait_decision(false, Duration::ZERO, timeout),
             crate::capacity::QueuedUnassignedDecision::Wait
         );
     }
