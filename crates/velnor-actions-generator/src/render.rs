@@ -29,6 +29,13 @@ pub const OWNER_SHA_PLACEHOLDERS: [&str; 3] = [
 /// The `@CALVER@` release-version-comment placeholder.
 pub const CALVER_PLACEHOLDER: &str = "@CALVER@";
 
+/// Consumer `concurrency.group`. GitHub groups are already per repository.
+/// The group must include `github.event_name` so a `push`/`schedule`/
+/// `workflow_dispatch` run cannot cancel a live `pull_request` (or each other)
+/// that shares `github.ref`. Benchmark waves stay isolated by campaign+wave
+/// and still carry the event.
+pub const CONSUMER_CONCURRENCY_GROUP: &str = "${{ inputs.benchmark_campaign != '' && format('{0}-{1}-{2}-{3}', github.workflow, github.event_name, inputs.benchmark_campaign, inputs.benchmark_wave) || format('{0}-{1}-{2}', github.workflow, github.event_name, github.ref) }}";
+
 /// Pinned checkout action (full 40-hex SHA) and its version comment.
 const CHECKOUT_REF: &str = "3d3c42e5aac5ba805825da76410c181273ba90b1";
 const CHECKOUT_VERSION: &str = "v7.0.1";
@@ -161,7 +168,7 @@ pub fn consumer_template(class: RepositoryClass) -> String {
     b.line(2, "pull-requests: read");
     b.blank();
     b.line(0, "concurrency:");
-    b.line(2, "group: ${{ inputs.benchmark_campaign != '' && format('{0}-{1}-{2}', github.workflow, inputs.benchmark_campaign, inputs.benchmark_wave) || format('{0}-{1}', github.workflow, github.ref) }}");
+    b.line(2, &format!("group: {CONSUMER_CONCURRENCY_GROUP}"));
     b.line(
         2,
         "cancel-in-progress: ${{ inputs.benchmark_campaign == '' }}",

@@ -193,7 +193,44 @@ fn benchmark_waves_on_same_ref_do_not_cancel_each_other() {
     assert!(group.contains("inputs.benchmark_campaign"));
     assert!(group.contains("inputs.benchmark_wave"));
     assert!(group.contains("github.workflow"));
+    assert!(group.contains("github.event_name"));
     assert_eq!(cancel, "${{ inputs.benchmark_campaign == '' }}");
+}
+
+#[test]
+fn consumer_concurrency_isolates_event_and_ref() {
+    assert_eq!(
+        render::CONSUMER_CONCURRENCY_GROUP,
+        "${{ inputs.benchmark_campaign != '' && format('{0}-{1}-{2}-{3}', github.workflow, github.event_name, inputs.benchmark_campaign, inputs.benchmark_wave) || format('{0}-{1}-{2}', github.workflow, github.event_name, github.ref) }}"
+    );
+    assert!(render::CONSUMER_CONCURRENCY_GROUP.contains("github.event_name"));
+    assert!(render::CONSUMER_CONCURRENCY_GROUP.contains("github.ref"));
+    assert!(render::CONSUMER_CONCURRENCY_GROUP.contains("github.workflow"));
+    assert!(
+        !render::CONSUMER_CONCURRENCY_GROUP
+            .contains("format('{0}-{1}', github.workflow, github.ref)"),
+        "push/dispatch/schedule must not share a group with pull_request on the same ref"
+    );
+    for class in [
+        RepositoryClass::Code,
+        RepositoryClass::Native,
+        RepositoryClass::Tap,
+        RepositoryClass::Apt,
+        RepositoryClass::Fixture,
+    ] {
+        let template = render::consumer_template(class);
+        assert!(
+            template.contains(&format!("group: {}", render::CONSUMER_CONCURRENCY_GROUP)),
+            "{} must emit the shipped concurrency group",
+            class.code()
+        );
+        let documents = yaml_rust2::YamlLoader::load_from_str(&template).unwrap();
+        let group = documents[0]["concurrency"]["group"].as_str().unwrap();
+        assert_eq!(group, render::CONSUMER_CONCURRENCY_GROUP);
+        assert!(group.contains("github.event_name"));
+        assert!(group.contains("github.ref"));
+        assert!(!group.contains("format('{0}-{1}', github.workflow, github.ref)"));
+    }
 }
 
 #[test]
