@@ -99,7 +99,7 @@ jobs:
       actions: read
       contents: read
       pull-requests: read
-    uses: jackin-project/velnor-actions/.github/workflows/ci-code.yml@052224913aa7c1b6750b8ed34131ae590dd961b1 # 2026.8.28
+    uses: jackin-project/velnor-actions/.github/workflows/ci-code.yml@6669eac8693ec14957d2f55ae3b67756d1184e77 # 2026.8.30
     with:
       lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor' }}
       recovery_proof_id: ${{ inputs.recovery_proof_id || '' }}
@@ -121,7 +121,7 @@ jobs:
       actions: read
       contents: read
       pull-requests: read
-    uses: tailrocks/velnor-actions/.github/workflows/ci-code.yml@43fc50c6940beac5a14de96f7e7d7ef3fcac568f # 2026.8.28
+    uses: tailrocks/velnor-actions/.github/workflows/ci-code.yml@77d323dcfdb176b332edc24bfc92cb625b3ab4c8 # 2026.8.30
     with:
       lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor' }}
       recovery_proof_id: ${{ inputs.recovery_proof_id || '' }}
@@ -143,7 +143,7 @@ jobs:
       actions: read
       contents: read
       pull-requests: read
-    uses: ChainArgos/velnor-actions/.github/workflows/ci-code.yml@034bb3dfca10f405c1f6b89707aa7bc616b7d4db # 2026.8.28
+    uses: ChainArgos/velnor-actions/.github/workflows/ci-code.yml@36d568abb89b4f53aa828fe1740fbb3411ffcb87 # 2026.8.30
     with:
       lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor' }}
       recovery_proof_id: ${{ inputs.recovery_proof_id || '' }}
