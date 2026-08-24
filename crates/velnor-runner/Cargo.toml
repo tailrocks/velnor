@@ -27,9 +27,10 @@ copyright = "2026, Tailrocks"
 license-file = []
 extended-description = """
 Velnor is a self-hosted GitHub Actions runner daemon. This package installs the
-velnor-runner binary, a systemd unit (velnor-daemon), and a config file at
-/etc/velnor/velnor.env. Set GITHUB_TOKEN + VELNOR_URL there, then start the
-service to register JIT runners and execute jobs in Docker."""
+velnor-runner daemon binary, the velnorctl operator CLI, systemd units
+(velnor-daemon), and a config file at /etc/velnor/velnor.env. Set
+GITHUB_TOKEN + VELNOR_URL there, then start the service to register JIT runners
+and execute jobs in Docker."""
 section = "devel"
 priority = "optional"
 # Explicit depends instead of $auto: dpkg-shlibdeps cannot resolve shared-lib
@@ -41,6 +42,12 @@ conf-files = ["/etc/velnor/velnor.env"]
 maintainer-scripts = "debian/"
 assets = [
   ["target/release/velnor-runner", "usr/bin/velnor-runner", "755"],
+  # Transitional (velnorctl-migration): ship the velnorctl operator CLI inside
+  # the interim velnor-runner package so apt upgrades expose /usr/bin/velnorctl
+  # before the Plan 079 package rename; Plan 076 owns the dedicated velnorctl
+  # package metadata. The release workflow builds -p velnorctl together with
+  # -p velnor-runner.
+  ["target/release/velnorctl", "usr/bin/velnorctl", "755"],
   ["debian/velnor-daemon.service", "lib/systemd/system/velnor-daemon.service", "644"],
   ["debian/velnor-daemon@.service", "lib/systemd/system/velnor-daemon@.service", "644"],
   ["debian/velnor-doctor.service", "lib/systemd/system/velnor-doctor.service", "644"],
