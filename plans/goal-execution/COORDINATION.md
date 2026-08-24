@@ -41,6 +41,7 @@ prevent exclusive-scope collisions.
 | 066 | orchestrating ox-alpha (validator session) | 2026-08-24 ~13:30Z | CLAIMED — Track B next-ready leaf; implementation via fresh writer subagent on this branch; other sessions read-only on 066 scope |
 | 065-defect-fix | Session C validator (ox-alpha) | 2026-08-24 ~13:45Z | CLOSED @f06d439 — fail-closed opaque rejection landed; verifier PASS 973/973; reviewer APPROVE-CLOSE; evidence addendum in 065 file |
 | C005-man | Session C validator (ox-alpha) | 2026-08-24 ~14:05Z | IMPLEMENTED+REVIEWED, pushed @b98801e+0630a98 (18/18 command_c005, full check 997/997, verifier PASS, reviewer APPROVE-FLIP findings closed). FIXTURE DISPATCH WINDOW OPENED ~15:20Z: pin `bd4be09375154e891052b5159801f613fa0b4f09`, cancel-clean-dispatch-monitor hygiene, single dispatch, sanitized evidence only. Other sessions: do NOT dispatch fixture runs until this row closes. DONE flip after fixture proof lands |
+| clap-cli-migration | third-peer session (074-078 pool owner) | 2026-08-24 ~15:45Z | CLAIMED — operator directive: rewrite `crates/velnorctl` CLI on idiomatic stable `clap` derive APIs (PR #286 surface); scope = crates/velnorctl/* + workspace Cargo.toml/Cargo.lock clap deps + its tests; deletes handwritten parser/metadata/man generation in favor of clap/clap_complete/clap_mangen; supersedes temporary 065 parser implementation per operator authority; divergence from landed 065/C005 evidence recorded in this row. Other sessions read-only on velnorctl until CLOSED | |
 
 ## Decisions
 
