@@ -16,9 +16,13 @@ and `ChainArgos/java-monorepo` unchanged, proving correctness against the public
 fixture first. No Velnor-native workflow language, no YAML scheduler, no macOS
 job execution.
 
-The product CLI is becoming `velnorctl`; the command-by-command migration away
-from `velnor-runner` (with no backward-compatible aliases) is tracked in
-[`plans/velnorctl-migration/`](plans/velnorctl-migration/README.md).
+The product CLI is `velnorctl` — the single command center for every operator
+surface (cache, capabilities, configure, daemon, doctor, preflight, release,
+remove, status, storage). The `velnor-runner` binary is the interim service
+entrypoint only (daemon/run plus the hooks systemd units and Debian maintainer
+scripts invoke); it and its remaining plumbing are deleted in
+[Plan 079](plans/velnorctl-migration/079-final-package-and-binary-cutover.md),
+tracked in [`plans/velnorctl-migration/`](plans/velnorctl-migration/README.md).
 
 ## Documentation (source of truth)
 

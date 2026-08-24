@@ -23,6 +23,11 @@ use velnor_render::{ColorPolicy, OutputFormat};
 pub mod completion;
 pub mod man;
 
+/// Interim execution facade over the legacy runner runtime (Plan 064).
+pub mod legacy {
+    pub use velnor_runner::scaffold::*;
+}
+
 /// Binary name used across generated surfaces.
 pub const BIN_NAME: &str = "velnorctl";
 
@@ -188,12 +193,41 @@ impl GlobalArgs {
 
 /// Every leaf command; the exhaustive match in `main` is the dispatch
 /// registry, so the compiler proves each command is wired.
+///
+/// The `legacy` groups are the migrated `velnor-runner` command trees
+/// (`crates/velnor-runner/src/cli.rs`): the operator CLI owns the complete
+/// surface while the interim facade executes the handlers with identical
+/// behavior. `run` is intentionally absent — that namespace belongs to the
+/// future GitHub workflow-run resource (research deviation 3), and the old
+/// single-worker mode becomes service-only `daemon --once` under C075.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Generate man pages for the current command tree.
     Man(man::ManArgs),
     /// Generate shell completion scripts.
     Completion(completion::CompletionArgs),
+    /// Inspect Velnor's daemon-shared host cache stores.
+    Cache(legacy::CacheArgs),
+    /// Inspect or validate against the compiled strict capability manifest.
+    Capabilities(legacy::CapabilitiesArgs),
+    /// Create and store a GitHub JIT runner configuration.
+    Configure(legacy::ConfigureArgs),
+    /// Run one daemon process that manages one or more internal runner slots.
+    Daemon(legacy::DaemonArgs),
+    /// Probe GitHub for this daemon's registered runners and fail loudly when
+    /// the fleet is gone (run from a systemd timer for alerting).
+    Doctor(legacy::DoctorArgs),
+    /// Validate local Docker prerequisites before polling GitHub for jobs.
+    Preflight(legacy::PreflightArgs),
+    /// Plan 010 release-coherence chain over the installed identity. Service
+    /// plumbing until Plan 079 replaces it with signed apt/dpkg operations.
+    Release(legacy::ReleaseArgs),
+    /// Remove local runner configuration.
+    Remove(legacy::RemoveArgs),
+    /// Print local runner configuration status.
+    Status(legacy::StatusArgs),
+    /// Inspect the canonical Velnor storage layout and catalog.
+    Storage(legacy::StorageArgs),
 }
 
 /// Error a command execution returns, carrying its exit class.
@@ -260,6 +294,27 @@ impl From<&str> for CommandError {
     fn from(message: &str) -> Self {
         Self::operation(message.to_owned())
     }
+}
+
+impl From<anyhow::Error> for CommandError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::operation(error.to_string())
+    }
+}
+
+/// Execute a migrated legacy command through the interim facade with the
+/// exact legacy bootstrap semantics: unconditional strict-capability
+/// admission, manifest integrity, and long-running telemetry selection.
+///
+/// Failures map to the documented [`ExitClass::Operation`] status class;
+/// per-command refinement (condition/timeout/transport) arrives with plans
+/// 069–072 and never changes this dispatch registry.
+pub async fn execute_legacy(command: legacy::Command) -> Result<(), CommandError> {
+    legacy::enforce_admission()?;
+    let telemetry_dir = legacy::telemetry_dir(&command);
+    legacy::init_telemetry(telemetry_dir.as_deref());
+    legacy::dispatch(command).await?;
+    Ok(())
 }
 
 impl std::fmt::Display for CommandError {

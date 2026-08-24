@@ -2,12 +2,36 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
+/// Service-only entrypoint surface of the `velnor-runner` binary.
+///
+/// Every operator-facing command migrated to the `velnorctl` command center;
+/// what remains is pure service plumbing consumed by systemd units and the
+/// Debian maintainer scripts: the daemon loop, the single-worker mode, and
+/// (via [`Command`]) the release/capability hooks that `ExecStartPre` and
+/// `postinst` invoke. Plan 079 deletes this binary entirely.
 #[derive(Debug, Parser)]
 #[command(name = "velnor-runner")]
-#[command(about = "Rust GitHub self-hosted runner compatibility agent")]
-pub struct Cli {
+#[command(about = "Velnor runner service entrypoint")]
+pub struct ServiceCli {
     #[command(subcommand)]
-    pub command: Command,
+    pub command: ServiceCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ServiceCommand {
+    /// Run one daemon process that manages one or more internal runner slots.
+    Daemon(DaemonArgs),
+    /// Start polling GitHub for jobs.
+    Run(RunArgs),
+}
+
+impl From<ServiceCommand> for Command {
+    fn from(command: ServiceCommand) -> Self {
+        match command {
+            ServiceCommand::Daemon(args) => Self::Daemon(args),
+            ServiceCommand::Run(args) => Self::Run(args),
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -733,11 +757,11 @@ mod tests {
         use clap::Parser;
         for flag in ["--skip-capability-validation", "--diagnostic-node-sidecar"] {
             assert!(
-                Cli::try_parse_from(["velnor-runner", "run", flag]).is_err(),
+                ServiceCli::try_parse_from(["velnor-runner", "run", flag]).is_err(),
                 "flag {flag} must not be accepted"
             );
             assert!(
-                Cli::try_parse_from(["velnor-runner", "daemon", flag]).is_err(),
+                ServiceCli::try_parse_from(["velnor-runner", "daemon", flag]).is_err(),
                 "flag {flag} must not be accepted on daemon"
             );
         }
@@ -746,7 +770,7 @@ mod tests {
     #[test]
     fn help_text_exposes_no_capability_bypass_path() {
         use clap::CommandFactory;
-        let mut command = Cli::command();
+        let mut command = ServiceCli::command();
         let mut help = Vec::new();
         command.write_long_help(&mut help).unwrap();
         let rendered = String::from_utf8(help).unwrap();
@@ -754,7 +778,7 @@ mod tests {
         assert!(!rendered.contains("diagnostic-node-sidecar"));
         // Per-subcommand help must also be clean.
         for name in ["run", "daemon"] {
-            let mut sub = Cli::command();
+            let mut sub = ServiceCli::command();
             let sub = sub.find_subcommand_mut(name).unwrap();
             let mut sub_help = Vec::new();
             sub.write_long_help(&mut sub_help).unwrap();
@@ -768,5 +792,15 @@ mod tests {
                 "{name} help exposes diagnostic-node-sidecar"
             );
         }
+    }
+
+    #[test]
+    fn service_surface_offers_only_daemon_and_run() {
+        use clap::CommandFactory;
+        let names: Vec<String> = ServiceCli::command()
+            .get_subcommands()
+            .map(|sub| sub.get_name().to_owned())
+            .collect();
+        assert_eq!(names, ["daemon", "run"]);
     }
 }

@@ -52,11 +52,11 @@ fi
 if [[ "$REQUIRE_DOCKER_SOCKET" == "true" ]]; then
   preflight_args+=(--require-docker-socket)
 fi
-cargo run --bin velnor-runner -- preflight "${preflight_args[@]}"
+cargo run --bin velnorctl -- preflight "${preflight_args[@]}"
 
 if [[ "$CHECK_TARGET_MVP_CONFIG" == "true" ]]; then
   echo "==> Checking target MVP runner config"
-  cargo run --bin velnor-runner -- status --check-target-mvp
+  cargo run --bin velnorctl -- status --check-target-mvp
 fi
 
 echo "Live host doctor passed."

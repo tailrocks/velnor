@@ -57,6 +57,22 @@ Command granularity is normative:
 - Plan 080: later authenticated remote transport and multi-host extension using
   the same command/API models.
 
+### Interim command-center state (2026-08-25)
+
+The complete `velnor-runner` operator surface already parses and dispatches
+exclusively through `velnorctl`: every command tree from
+`crates/velnor-runner/src/cli.rs` is a first-class `velnorctl` subcommand
+(`cache`, `capabilities`, `configure`, `daemon`, `doctor`, `preflight`,
+`release`, `remove`, `status`, `storage`; `run` stays reserved for the GitHub
+workflow-run namespace). Execution delegates through the Plan 064 interim
+facade (`velnor_runner::scaffold`), so behavior is byte-identical until each
+C-task replaces its handler with native services. The `velnor-runner` binary
+parses only its service surface (`daemon`, `run`) plus the release/capability
+hooks that systemd units and Debian maintainer scripts invoke; those hooks and
+the binary itself are deleted in Plan 079 exactly as scoped there. Per-command
+exit-class refinement (beyond the documented Operation class for legacy
+failures) lands with plans 069–072.
+
 ## Shared architecture plans
 
 | Plan | Title | Priority | Effort | Depends on | Status |
