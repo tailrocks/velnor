@@ -39,8 +39,17 @@ prevent exclusive-scope collisions.
 | 039 | ox-alpha session C (takeover) | 2026-08-24 ~12:00Z | ACTIVE — prior `parallel opencode actor` claim EXPIRED per rule 3 (last leaf-scoped commit eea87eb 10:39Z, >60 min idle; no uncommitted fleet files, no unpushed commits at takeover) |
 | 065 | Session B | 2026-08-24 ~10:40Z | DONE @8734b4b — reconciling-executor convergence complete (gates 943/943 at landing); verification chain closed 2026-08-24 |
 | 066 | orchestrating ox-alpha (validator session) | 2026-08-24 ~13:30Z | CLAIMED — Track B next-ready leaf; implementation via fresh writer subagent on this branch; other sessions read-only on 066 scope |
+| 065-defect-fix | Session C validator (ox-alpha) | 2026-08-24 ~13:45Z | CLAIMED — reopen slice on DONE 065: opaque-scheme URL sanitize bypass (`sanitized.rs:59` silent `let _` swallow; probe `mailto:octocat:ghp_…@example.com` round-trips verbatim) confirmed statically + compiled probe in `.velnor-compare/2026-08-24-065-seam-review/feedback-to-converging-session-round2.md`; plus unrecorded deferral item 4 (serde flatten vs deny_unknown_fields). Narrow scope: `crates/velnor-model/src/sanitized.rs` + its tests + 065 execution-evidence addendum. No index/status churn beyond evidence; 066 scope untouched |
 
 ## Decisions
+
+- **2026-08-24 leaf 065 defect-reopen** (Session C validator): DONE flip
+  `c27a83d` predates round-2 review findings; reviewer verdict was BLOCK on a
+  MAJOR (opaque/cannot-be-a-base URLs bypass redaction via silent
+  `set_username` failure) and deferral item 4 was unrecorded. Per "no DONE
+  item with unresolved finding", the 065 surface is reopened as a narrow
+  defect-fix slice by this session's subagents; status stays DONE only with
+  the fix landed, gates rerun, and an evidence addendum in the 065 file.
 
 - **2026-08-24 leaf 065 DONE**: verification chain complete (convergence
   ce98a27 → FIX-FIRST repairs 8734b4b → seam-review DBG fix 04321e9); minors
