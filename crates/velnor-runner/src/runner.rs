@@ -7779,6 +7779,16 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         "capacity: free={} reserved={} reservations={} active_leases={}; cache logical={} physical={}",
         free, reserved_bytes, reservation_count, active_leases, cache_logical, cache_physical
     );
+    if let Err(error) =
+        crate::docker_lease::reclaim_orphan_jobs(crate::docker_lease::run_host_docker)
+    {
+        eprintln!("Warning: leftover job Docker reclaim failed: {error:#}");
+    }
+    if let Err(error) =
+        crate::docker_lease::reclaim_unlabeled_testcontainers(crate::docker_lease::run_host_docker)
+    {
+        eprintln!("Warning: leftover guest Docker reclaim failed: {error:#}");
+    }
     let config_base = config::config_dir(None)?
         .join("daemons")
         .join(sanitize_daemon_config_component(&args.name));

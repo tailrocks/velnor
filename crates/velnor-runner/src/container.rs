@@ -223,12 +223,7 @@ impl JobContainerSpec {
         // Bun fetches 127.0.0.1). Keep loopback behavior lane-identical.
         args.extend(["--sysctl".into(), "net.ipv6.conf.all.disable_ipv6=1".into()]);
 
-        if self.mount_docker_socket {
-            args.extend([
-                "-v".into(),
-                "/var/run/docker.sock:/var/run/docker.sock".into(),
-            ]);
-        }
+        self.append_docker_socket_mount(&mut args);
         self.append_docker_cli_mounts(&mut args);
 
         // The per-job network is runner policy. Keep it after expanded job
@@ -474,12 +469,7 @@ impl JobContainerSpec {
             "node".into(),
         ];
         self.append_compiler_cache_mount(&mut args);
-        if self.mount_docker_socket {
-            args.extend([
-                "-v".into(),
-                "/var/run/docker.sock:/var/run/docker.sock".into(),
-            ]);
-        }
+        self.append_docker_socket_mount(&mut args);
         self.append_docker_cli_mounts(&mut args);
         for (name, value) in env {
             args.extend(["-e".into(), format!("{name}={value}")]);
@@ -582,12 +572,7 @@ impl JobContainerSpec {
             "AGENT_TOOLSDIRECTORY=/__tool".into(),
         ];
         self.append_compiler_cache_mount(&mut args);
-        if self.mount_docker_socket {
-            args.extend([
-                "-v".into(),
-                "/var/run/docker.sock:/var/run/docker.sock".into(),
-            ]);
-        }
+        self.append_docker_socket_mount(&mut args);
         self.append_docker_cli_mounts(&mut args);
         for (name, value) in env {
             args.extend(["-e".into(), format!("{name}={value}")]);
@@ -671,6 +656,23 @@ impl JobContainerSpec {
             "cat".into(),
             "/etc/resolv.conf".into(),
         ]
+    }
+
+    pub fn guest_docker_socket_host(&self) -> PathBuf {
+        crate::docker_lease::guest_docker_socket_host(&self.name, &self.temp_host)
+    }
+
+    fn append_docker_socket_mount(&self, args: &mut Vec<String>) {
+        if !self.mount_docker_socket {
+            return;
+        }
+        args.extend([
+            "-v".into(),
+            format!(
+                "{}:/var/run/docker.sock",
+                self.guest_docker_socket_host().display()
+            ),
+        ]);
     }
 
     fn append_docker_cli_mounts(&self, args: &mut Vec<String>) {
@@ -1499,7 +1501,20 @@ mod tests {
         let cpus_pos = args.iter().position(|arg| arg == "--cpus").unwrap();
         let memory_pos = args.iter().position(|arg| arg == "--memory").unwrap();
         assert!(cpus_pos < memory_pos);
-        assert!(args.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
+        let lease_mount = format!(
+            "{}:/var/run/docker.sock",
+            spec().guest_docker_socket_host().display()
+        );
+        assert!(
+            args.contains(&lease_mount),
+            "guest Docker must use the job lease socket {lease_mount}, got {args:?}"
+        );
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "/var/run/docker.sock:/var/run/docker.sock"),
+            "host engine socket must not be mounted into the job"
+        );
         // PID 1 tails the live console file (so `docker logs` mirrors the UI).
         assert_eq!(
             args.last().map(String::as_str),
