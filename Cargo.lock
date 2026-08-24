@@ -3412,12 +3412,11 @@ dependencies = [
 
 [[package]]
 name = "velnor-runner"
-version = "0.1.188"
+version = "0.1.189"
 dependencies = [
  "aho-corasick",
  "anyhow",
  "base64",
- "clap",
  "futures-util",
  "globset",
  "jsonwebtoken",

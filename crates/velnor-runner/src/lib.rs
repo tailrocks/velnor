@@ -1,20 +1,20 @@
 #![allow(async_fn_in_trait)]
 //! Velnor self-hosted GitHub Actions runner.
 //!
-//! The binary in this crate is the interim service entrypoint: the operator
-//! command surface migrated to the `velnorctl` command center, leaving the
-//! daemon/worker loop plus the release and capability hooks that systemd
-//! units and Debian maintainer scripts invoke. Reusable runtime setup and
-//! full-command dispatch are exposed behind [`scaffold`] until Plan 079
-//! deletes this crate.
+//! This crate is the runtime library behind the `velnorctl` command center:
+//! every operator-facing CLI surface lives in `velnorctl`, and the plain
+//! argument types in [`args`] are converted explicitly at that boundary
+//! (Plan 064 dependency law — domain crates never depend on `clap`). The
+//! interim [`scaffold`] facade exposes bootstrap and dispatch helpers until
+//! Plan 079 deletes the crate after its runtime modules move.
 
 mod action;
 mod admission;
+pub mod args;
 mod attestation;
 mod cache;
 mod capacity;
 mod checkout;
-pub mod cli;
 mod command_files;
 mod compiler_cache;
 mod config;
@@ -33,7 +33,7 @@ mod platform;
 mod preflight;
 pub mod protocol;
 mod release;
-mod runner;
+pub mod runner;
 mod runtime_env;
 mod script_step;
 mod sd_notify;
@@ -44,23 +44,13 @@ mod workflow_command;
 
 /// Temporary migration scaffold (Plan 064).
 ///
-/// Exposes the old binary's exact bootstrap sequence so `velnorctl` can reuse
-/// it without spawning or duplicating the old binary. Removed before Plan 079;
+/// Exposes the legacy binary's exact bootstrap sequence so `velnorctl` can
+/// reuse it without spawning or duplicating anything. Removed before Plan 079;
 /// not a compatibility promise.
 pub mod scaffold {
-    use crate::cli::ServiceCli;
+    use crate::args::{self, Command};
     use anyhow::Result;
-    use clap::Parser as _;
     use std::path::{Path, PathBuf};
-
-    /// Command and argument types re-exported for the interim `velnorctl`
-    /// facade (Plan 064 dependency law). The operator CLI owns all parsing;
-    /// these types are the single parsing source until Plan 079 deletes the
-    /// old surface.
-    pub use crate::cli::{
-        CacheArgs, CapabilitiesArgs, Command, ConfigureArgs, DaemonArgs, DoctorArgs, PreflightArgs,
-        ReleaseArgs, RemoveArgs, RunArgs, StatusArgs, StorageArgs,
-    };
 
     /// Initialize tracing exactly like the legacy binary bootstrap: long-running
     /// commands write spans to `<config-base>/logs/trace.jsonl`, one-shot
@@ -73,7 +63,7 @@ pub mod scaffold {
     /// unconditional strict-capability environment enforcement plus compiled
     /// manifest integrity. Runs before any command is dispatched.
     pub fn enforce_admission() -> Result<()> {
-        crate::cli::enforce_strict_capability_env()?;
+        args::enforce_strict_capability_env()?;
         crate::manifest::assert_manifest_integrity()?;
         Ok(())
     }
@@ -90,26 +80,6 @@ pub mod scaffold {
                 .map(|dir| dir.join("logs")),
             _ => None,
         }
-    }
-
-    /// Service entry point: unconditional strict-capability admission,
-    /// manifest integrity check, service-surface CLI parsing, telemetry
-    /// initialization, and dispatch. Behavior is identical to the previous
-    /// `main()` flow over the reduced daemon/run surface.
-    pub async fn execute() -> Result<()> {
-        // Production admission is unconditional and immutable. Refuse to start if a
-        // removed capability-bypass variable is present or a non-strict validation
-        // mode is requested, and fail fast if the compiled manifest is not
-        // structurally immutable. Both run before any command is dispatched.
-        enforce_admission()?;
-
-        let cli = ServiceCli::parse();
-        let command = Command::from(cli.command);
-
-        let telemetry_dir = telemetry_dir(&command);
-        init_telemetry(telemetry_dir.as_deref());
-
-        dispatch(command).await
     }
 
     pub async fn dispatch(command: Command) -> Result<()> {

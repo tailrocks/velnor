@@ -21,12 +21,8 @@ use velnor_model::{
 use velnor_render::{ColorPolicy, OutputFormat};
 
 pub mod completion;
+pub mod legacy;
 pub mod man;
-
-/// Interim execution facade over the legacy runner runtime (Plan 064).
-pub mod legacy {
-    pub use velnor_runner::scaffold::*;
-}
 
 /// Binary name used across generated surfaces.
 pub const BIN_NAME: &str = "velnorctl";
@@ -194,12 +190,13 @@ impl GlobalArgs {
 /// Every leaf command; the exhaustive match in `main` is the dispatch
 /// registry, so the compiler proves each command is wired.
 ///
-/// The `legacy` groups are the migrated `velnor-runner` command trees
-/// (`crates/velnor-runner/src/cli.rs`): the operator CLI owns the complete
-/// surface while the interim facade executes the handlers with identical
-/// behavior. `run` is intentionally absent — that namespace belongs to the
-/// future GitHub workflow-run resource (research deviation 3), and the old
-/// single-worker mode becomes service-only `daemon --once` under C075.
+/// The migrated groups are the complete former `velnor-runner` command trees
+/// (formerly `crates/velnor-runner/src/cli.rs`): the operator CLI owns the
+/// only Velnor command surface, while the interim facade executes the
+/// handlers with identical behavior. `run` is intentionally absent — that
+/// namespace belongs to the future GitHub workflow-run resource (research
+/// deviation 3), and the old single-worker mode is service-only internal
+/// plumbing (`daemon --once`), never a public CLI arm (C075).
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Generate man pages for the current command tree.
@@ -228,6 +225,24 @@ pub enum Command {
     Status(Box<legacy::StatusArgs>),
     /// Inspect the canonical Velnor storage layout and catalog.
     Storage(Box<legacy::StorageArgs>),
+}
+
+impl From<Command> for velnor_runner::args::Command {
+    fn from(command: Command) -> Self {
+        match command {
+            Command::Cache(args) => Self::Cache((*args).into()),
+            Command::Capabilities(args) => Self::Capabilities((*args).into()),
+            Command::Configure(args) => Self::Configure((*args).into()),
+            Command::Daemon(args) => Self::Daemon((*args).into()),
+            Command::Doctor(args) => Self::Doctor((*args).into()),
+            Command::Preflight(args) => Self::Preflight((*args).into()),
+            Command::Release(args) => Self::Release((*args).into()),
+            Command::Remove(args) => Self::Remove((*args).into()),
+            Command::Status(args) => Self::Status((*args).into()),
+            Command::Storage(args) => Self::Storage((*args).into()),
+            Command::Man(_) | Command::Completion(_) => unreachable!("CLI-only commands"),
+        }
+    }
 }
 
 /// Error a command execution returns, carrying its exit class.
@@ -302,21 +317,6 @@ impl From<anyhow::Error> for CommandError {
     }
 }
 
-/// Execute a migrated legacy command through the interim facade with the
-/// exact legacy bootstrap semantics: unconditional strict-capability
-/// admission, manifest integrity, and long-running telemetry selection.
-///
-/// Failures map to the documented [`ExitClass::Operation`] status class;
-/// per-command refinement (condition/timeout/transport) arrives with plans
-/// 069–072 and never changes this dispatch registry.
-pub async fn execute_legacy(command: legacy::Command) -> Result<(), CommandError> {
-    legacy::enforce_admission()?;
-    let telemetry_dir = legacy::telemetry_dir(&command);
-    legacy::init_telemetry(telemetry_dir.as_deref());
-    legacy::dispatch(command).await?;
-    Ok(())
-}
-
 impl std::fmt::Display for CommandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -333,6 +333,22 @@ impl std::fmt::Display for CommandError {
 #[must_use]
 pub fn exit_code_for(class: &ExitClass) -> u8 {
     u8::try_from(velnor_model::exit_code_for_class(*class)).unwrap_or(u8::MAX)
+}
+
+/// Execute a migrated command through the interim facade with the exact
+/// legacy bootstrap semantics: unconditional strict-capability admission,
+/// manifest integrity, and long-running telemetry selection.
+///
+/// Failures map to the documented [`ExitClass::Operation`] status class;
+/// per-command refinement (condition/timeout/transport) arrives with plans
+/// 069–072 and never changes this dispatch registry.
+pub async fn execute_legacy(command: Command) -> Result<(), CommandError> {
+    let runtime_command = velnor_runner::args::Command::from(command);
+    legacy::enforce_admission()?;
+    let log_dir = legacy::telemetry_dir(&runtime_command);
+    legacy::init_telemetry(log_dir.as_deref());
+    legacy::dispatch(runtime_command).await?;
+    Ok(())
 }
 
 /// Derive the machine-readable schema document from the live clap command

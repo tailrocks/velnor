@@ -7,7 +7,7 @@ use serde::Serialize;
 use crate::action::{
     string_inputs, unsupported_action_error, NativeActionAdapter, NATIVE_ACTION_REF,
 };
-use crate::cli::{CapabilitiesArgs, CapabilitiesCommand};
+use crate::args::{CapabilitiesArgs, CapabilitiesCommand};
 use crate::compiler_cache::CompilerCacheBackend;
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 
