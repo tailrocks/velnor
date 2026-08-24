@@ -77,6 +77,8 @@ const BROKER_POLL_MAX_CONSECUTIVE_ERRORS: u32 = 10;
 const BROKER_POLL_EMPTY_BACKOFF_THRESHOLD: u32 = 50;
 const BROKER_SESSION_CREATE_MAX_ATTEMPTS: u32 = 5;
 const BROKER_SESSION_CREATE_RETRY_SECONDS: u64 = 10;
+const STEP_TIMELINE_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const STEP_LOG_PUBLISH_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 // Idle-slot health (master-plan P1.9, 2026-06-11 zombie-fleet incident).
 // Broker poll success alone is NOT health: GitHub's runner registry can drop
@@ -3607,6 +3609,7 @@ async fn handle_job_request(
         let job_result = match job_result {
             Ok(job_result) => job_result,
             Err(join_error) => {
+                drain_step_publishers(step_timeline, step_logs_publisher, forensics.clone()).await;
                 let completion = complete_acquired_job_failure(
                     &run_service_job,
                     &AcquiredJobIdentity::from_job(&job),
@@ -3624,20 +3627,6 @@ async fn handle_job_request(
         // alive until GitHub has accepted the completion call (which is
         // retried) — otherwise a slow completion lets the server reassign or
         // fail a job whose side effects already happened.
-        match tokio::time::timeout(Duration::from_secs(5), step_timeline).await {
-            Ok(Err(error)) if !error.is_cancelled() => {
-                eprintln!("Step timeline publisher failed: {error:#}");
-            }
-            Ok(_) => {}
-            Err(_) => eprintln!("Timed out waiting for best-effort step timeline publisher."),
-        }
-        match tokio::time::timeout(Duration::from_secs(30), step_logs_publisher).await {
-            Ok(Err(error)) if !error.is_cancelled() => {
-                eprintln!("Step log publisher failed: {error:#}");
-            }
-            Ok(_) => {}
-            Err(_) => eprintln!("Timed out waiting for best-effort step log publisher."),
-        }
         let job_result = match job_result {
             Ok(mut job_result) => {
                 if canceled.load(Ordering::SeqCst) {
@@ -3660,6 +3649,8 @@ async fn handle_job_request(
                         infrastructure_failure_category(&error).map(ToOwned::to_owned);
                     // Same contract as complete_acquired_job_failure: never complete
                     // with zero steps, or GitHub hides the rejection reason.
+                    drain_step_publishers(step_timeline, step_logs_publisher, forensics.clone())
+                        .await;
                     let completion = complete_acquired_job_failure(
                         &run_service_job,
                         &AcquiredJobIdentity::from_job(&job),
@@ -3678,6 +3669,11 @@ async fn handle_job_request(
         let step_logs = job_result.step_logs;
         let teardown = job_result.teardown;
         let execution_timings = job_result.timings;
+        // Keep terminal completion ordered after best-effort Results Service
+        // step updates, matching the official runner. Drain both publishers
+        // concurrently so the old 5s + 30s sequential tail is capped at the
+        // slower publisher deadline; abort only a stalled publisher.
+        drain_step_publishers(step_timeline, step_logs_publisher, forensics.clone()).await;
         let finalize_started = Instant::now();
         let finalize_span = tracing::info_span!("job-finalize");
         let completion = complete_run_service_job_refreshing(
@@ -3751,6 +3747,44 @@ async fn handle_job_request(
         );
     }
     Ok(())
+}
+
+async fn drain_step_publisher(
+    label: &'static str,
+    mut publisher: JoinHandle<()>,
+    timeout: Duration,
+) {
+    match tokio::time::timeout(timeout, &mut publisher).await {
+        Ok(Err(error)) if !error.is_cancelled() => {
+            eprintln!("Step {label} publisher failed: {error:#}");
+        }
+        Ok(_) => {}
+        Err(_) => {
+            publisher.abort();
+            let _ = publisher.await;
+            eprintln!("Timed out waiting for best-effort step {label} publisher; aborted.");
+        }
+    }
+}
+
+async fn drain_step_publishers(
+    step_timeline: JoinHandle<()>,
+    step_logs_publisher: JoinHandle<()>,
+    forensics: SlotForensics,
+) {
+    let started = Instant::now();
+    tokio::join!(
+        drain_step_publisher(
+            "timeline",
+            step_timeline,
+            STEP_TIMELINE_PUBLISH_DRAIN_TIMEOUT,
+        ),
+        drain_step_publisher("log", step_logs_publisher, STEP_LOG_PUBLISH_DRAIN_TIMEOUT),
+    );
+    forensics.lifecycle(&format!(
+        "step-publishers-drained elapsed_ms={}",
+        duration_ms(started.elapsed())
+    ));
 }
 
 fn should_execute_job(args: &RunArgs) -> bool {
@@ -12506,6 +12540,36 @@ runs:
         .await
         .unwrap()
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_step_publisher_is_aborted_after_deadline() {
+        struct DropMarker(Arc<AtomicBool>);
+
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped_by_publisher = Arc::clone(&dropped);
+        let publisher = tokio::spawn(async move {
+            let _marker = DropMarker(dropped_by_publisher);
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let started = Instant::now();
+
+        drain_step_publisher("test", publisher, Duration::from_millis(10)).await;
+
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "timed-out publisher task was not aborted"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "publisher drain exceeded its bounded deadline"
+        );
     }
 
     #[test]
