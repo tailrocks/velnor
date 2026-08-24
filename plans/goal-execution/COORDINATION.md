@@ -1,69 +1,54 @@
-# Session coordination registry
+# Tri-agent campaign coordination ledger
 
-Binding for every agent session executing `plans/goal-execution/README.md`
-against branch `velnor-estate-standard`. Multiple concurrent sessions have been
-observed (2026-08-24). These rules prevent exclusive-scope collisions.
+Authority: operator directive 2026-08-24 — three concurrent OpenCode sessions
+execute this campaign together and must conclude ownership here. This file is
+campaign infrastructure, not plan content; `plans/goal-execution/README.md`
+remains the binding execution contract.
 
-## Rules
+## Protocol (binding on every session)
 
-1. **Claim before write.** Before any writer subagent touches leaf scope, its
-   session appends a row to the Active claims table in a commit on
-   `velnor-estate-standard` and pushes. A claim names exactly one leaf.
-2. **One writer per leaf.** A leaf with an unexpired claim must not receive a
-   second writer. Read-only investigation, verification, and review may run
-   concurrently.
-3. **Claim expiry.** A claim expires if no leaf-scoped commit lands within
-   60 minutes of its claimed-at timestamp, or its session records RELEASED.
-4. **Collision recovery.** If mixed uncommitted work from two writers exists,
-   the session that arrives second must STOP writing (record evidence under
-   `.velnor-compare/<date>-<leaf>-writer-conflict/`), then reconcile FORWARD
-   from the coherent design already on disk once ownership resolves. Never
-   silently overwrite another writer's uncommitted work.
-5. **Plan wins.** Reconciliation never weakens a leaf's done criteria or STOP
-   conditions; where a peer design conflicts with the leaf file, the leaf file
-   governs and the divergence is recorded in the leaf's execution-evidence
-   block.
-6. **Shared external resources.** Fixture dispatches, live mutations, and
-   status-index commits remain serialized across sessions regardless of leaf.
-7. **Commit and push everything (operator directive 2026-08-24).** Every
-   session commits and pushes its own outputs immediately: leaf code, plan and
-   index updates, and sanitized `.velnor-compare/` evidence included. Foreign
-   dirty files inside another session's active claim are the sole exception —
-   never staged or committed by anyone but their owning session.
+1. CLAIM BEFORE WRITE. Before any non-read-only work on a leaf (implementation,
+   gates that mutate state, fixture dispatches, status flips), append a row to
+   the live-claims table below and commit this file first. The commit IS the
+   lock. Re-check `git status` + latest commits immediately before editing;
+   another session's newer claim wins and you switch to read-only validation.
+2. ONE WRITER PER LEAF. All other sessions may run read-only investigation,
+   gate spot-checks, and adversarial review concurrently.
+3. VALIDATION DUTY. Every landing gets independently verified + reviewed by a
+   session that did not implement it. Findings go in
+   `.velnor-compare/<date>-<leaf>-seam-review/feedback-to-<session>.md`.
+4. STATUS FLIPS. Only after verifier AND reviewer pass, by the completing
+   session, atomically (item file + TASKS.md + category index).
+5. PUSH DISCIPLINE. Conventional Commits, `-s`, Co-authored-by trailer,
+   rebase-once retry on rejection. Never force-push the campaign branch.
+6. FIXTURE REPO (`tailrocks/velnor-actions-fixture`): PR-gated main; dispatches
+   follow cancel-clean-dispatch-monitor hygiene; no HTML evidence ever.
 
-## Active claims
+## Session roles (as observed / declared)
 
-| Leaf | Session | Claimed at (UTC) | Status |
+| Session | Role | Active lane |
+|---|---|---|
+| A (orchestrator) | Orchestration, dependency graph, adversarial validation, status flips, fixture-repo writes | this ledger |
+| B (fleet/implementer) | velnor-repo implementation bursts; Plan 039 fleet lane | release-ref ledger, snapshots |
+| C (unconfirmed) | Unknown — DECLARE YOURSELF by appending a row + claiming a lane below | — |
+
+## Leaf ownership log
+
+| Time (+07) | Session | Leaf | Action |
 |---|---|---|---|
-| 039 | ox-alpha session C (takeover) | 2026-08-24 ~12:00Z | ACTIVE — prior `parallel opencode actor` claim EXPIRED per rule 3 (last leaf-scoped commit eea87eb 10:39Z, >60 min idle; no uncommitted fleet files, no unpushed commits at takeover) |
-| 065 | Session B | 2026-08-24 ~10:40Z | ACTIVE — released to B per 40bd5e2 ownership map (B owns velnor-model/velnorctl WIP, observed writing 11:43Z); all sessions hands off |
+| 2026-08-24 ~15:40 | B | 063/039 | docs reconciliation, policy gen, client, fixtures |
+| 2026-08-24 ~16:20 | A | 064 closure | fix 7a63d72 + flip 017026e (validated B's 5ab7479) |
+| 2026-08-24 evening | B | 064 hardening | b211326 (validated SAFE-HARDENING by A) |
+| 2026-08-24 evening | B | 065 model modules | a9f017f, 34a6dad (7 modules + contracts) |
+| 2026-08-24 evening | A | 065 convergence | ce98a27 adopted B's surface, repaired compile defects, gates 943/943 |
+| 2026-08-24 night | A | 065 verify/review/flip | claimed |
 
-## Decisions
+## Next ready queue (dependency-ordered)
 
-- **2026-08-24 leaf 065**: two writers interleaved inside `crates/velnor-model`
-  (evidence: `.velnor-compare/2026-08-24-065-writer-conflict/`). Per operator
-  direction, sessions cooperate: the coherent on-disk design is the canonical
-  base; this session's conflicting files yield to it except where the leaf file
-  requires otherwise (fail-closed serde, schema-versioned envelope, Source
-  LOCAL\|GITHUB\|MERGED semantics). One reconciling executor finishes 065.
-- **2026-08-24 ownership map** (Plan 039 prerequisites-first session):
-  - **Session A** (this claim row for 039): Plan 039 Track A, fleet surface
-    (`fleet/release-refs.toml`, org policy drafts, `restricted_to_workflows`
-    prerequisites), fixture control-plane validation follow-ups.
-  - **Session B**: Track B sequence Plans 064–073 including 065 in flight;
-    owns current `crates/velnor-model/*` + `crates/velnorctl/*` WIP and
-    `Cargo.lock`.
-  - **Session C**: unassigned / C-command pool once Session B dependencies
-    close.
-  - Standing constraints restated: foreign dirty files are never touched or
-    staged by another session; leaf status flips are atomic commits by the
-    owning session only; fixture `main` changes go through PRs only.
-  - Evidence for this map: `.velnor-compare/2026-08-24-039-snapshots/`.
-- **2026-08-24 ~12:05Z third-peer registration** (ox-alpha, fresh OpenCode
-  session): takes the unassigned Plans 074–078 pool that the ownership map
-  leaves outside Session A (039) and Session B (064–073). Claim order follows
-  the execution graph: 076 first after 068 DONE; 074 after 065+066+068; 075
-  after 066+067; 077 after 069; 078 after its full range. Each claim lands as
-  an Active-claims row before any writer subagent starts. C-command pool claims
-  follow later per graph priority. No leaf is claimed by this session yet;
-  nothing dependency-ready and unclaimed exists at registration time.
+065 (in flight, A validating) -> 066 -> 068/074/075/076 -> ... per
+`plans/goal-execution/README.md` execution graph. Plan 039 runs independently
+(B lane) until live-mutation approval gates.
+
+If you are session C: stop editing until you have appended your row here and
+committed it. Uncoordinated writes caused three collisions on 2026-08-24
+already; this ledger exists to end them.
