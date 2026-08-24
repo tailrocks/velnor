@@ -202,12 +202,7 @@ impl JobContainerSpec {
         for (name, value) in &self.env {
             args.extend(["-e".into(), format!("{name}={value}")]);
         }
-        args.extend([
-            "--label".into(),
-            format!("velnor.daemon-id={}", self.daemon_id),
-            "--label".into(),
-            format!("velnor.job-id={}", self.name),
-        ]);
+        self.append_ownership_labels(&mut args);
         args.extend(self.options.iter().cloned());
         args.extend(self.resource_options.iter().cloned());
 
@@ -468,6 +463,7 @@ impl JobContainerSpec {
             "--entrypoint".into(),
             "node".into(),
         ];
+        self.append_ownership_labels(&mut args);
         self.append_compiler_cache_mount(&mut args);
         self.append_docker_socket_mount(&mut args);
         self.append_docker_cli_mounts(&mut args);
@@ -571,6 +567,7 @@ impl JobContainerSpec {
             "-e".into(),
             "AGENT_TOOLSDIRECTORY=/__tool".into(),
         ];
+        self.append_ownership_labels(&mut args);
         self.append_compiler_cache_mount(&mut args);
         self.append_docker_socket_mount(&mut args);
         self.append_docker_cli_mounts(&mut args);
@@ -780,6 +777,15 @@ impl JobContainerSpec {
 
     fn sidecar_container_name(&self, kind: &str) -> String {
         format!("velnor-{kind}-{}", self.name)
+    }
+
+    fn append_ownership_labels(&self, args: &mut Vec<String>) {
+        args.extend([
+            "--label".into(),
+            format!("velnor.daemon-id={}", self.daemon_id),
+            "--label".into(),
+            format!("velnor.job-id={}", self.name),
+        ]);
     }
 }
 
@@ -1855,6 +1861,12 @@ mod tests {
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"GITHUB_OUTPUT=/__t/out".into()));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair == ["--label", "velnor.job-id=velnor-job-1"] }));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair == ["--label", "velnor.daemon-id=test-daemon"] }));
         assert!(args.windows(2).any(|pair| pair == ["--entrypoint", "node"]));
         assert_eq!(
             &args[args.len() - 2..],
@@ -1992,6 +2004,12 @@ mod tests {
         assert!(args.contains(&"RUNNER_TOOL_CACHE=/__tool".into()));
         assert!(args.contains(&"AGENT_TOOLSDIRECTORY=/__tool".into()));
         assert!(args.contains(&"INPUT_NAME=value".into()));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair == ["--label", "velnor.job-id=velnor-job-1"] }));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair == ["--label", "velnor.daemon-id=test-daemon"] }));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--entrypoint", "/entrypoint.sh"]));

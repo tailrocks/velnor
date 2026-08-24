@@ -20,6 +20,11 @@ pub const JOB_ID_LABEL: &str = "velnor.job-id";
 pub const DAEMON_ID_LABEL: &str = "velnor.daemon-id";
 pub const TESTCONTAINERS_LABEL: &str = "org.testcontainers.managed-by=testcontainers";
 pub const HOST_DOCKER_SOCKET: &str = "/var/run/docker.sock";
+/// Host-visible runtime dir. systemd `PrivateTmp=yes` remaps daemon `/tmp`, so
+/// a lease socket there is invisible to host dockerd and the guest bind-mount
+/// of `/tmp/vdl-*.sock` is not the proxy.
+pub const LEASE_SOCKET_DIR: &str = "/run/velnor";
+pub const JOB_IMAGE_ANCESTOR: &str = "velnor/job-ubuntu";
 
 const MAX_PROXY_BODY: usize = 32 * 1024 * 1024;
 
@@ -30,7 +35,7 @@ pub fn guest_docker_socket_host(job_id: &str, unique: &Path) -> PathBuf {
     let digest = hasher.finalize();
     let mut short = [0_u8; 8];
     short.copy_from_slice(&digest[..8]);
-    PathBuf::from("/tmp").join(format!("vdl-{:016x}.sock", u64::from_be_bytes(short)))
+    PathBuf::from(LEASE_SOCKET_DIR).join(format!("vdl-{:016x}.sock", u64::from_be_bytes(short)))
 }
 
 pub fn list_owned_containers_args(job_id: &str) -> Vec<String> {
@@ -80,6 +85,17 @@ pub fn list_testcontainers_format_args() -> Vec<String> {
         "--all".into(),
         "--filter".into(),
         format!("label={TESTCONTAINERS_LABEL}"),
+        "--format".into(),
+        "{{.ID}}\t{{.Label \"velnor.job-id\"}}".into(),
+    ]
+}
+
+pub fn list_job_image_format_args() -> Vec<String> {
+    vec![
+        "ps".into(),
+        "--all".into(),
+        "--filter".into(),
+        format!("ancestor={JOB_IMAGE_ANCESTOR}"),
         "--format".into(),
         "{{.ID}}\t{{.Label \"velnor.job-id\"}}".into(),
     ]
@@ -136,6 +152,11 @@ pub fn orphan_job_ids(formatted: &str) -> Vec<String> {
         .into_iter()
         .filter(|job_id| !live_jobs.contains(job_id))
         .collect()
+}
+
+/// IDs of `velnor/job-ubuntu` siblings with no job label (docker-generated names).
+pub fn unlabeled_job_image_ids(formatted: &str) -> Vec<String> {
+    unlabeled_testcontainer_ids(formatted)
 }
 
 /// IDs of testcontainers that were created before the lease proxy (no job label).
@@ -291,6 +312,17 @@ pub fn reclaim_unlabeled_testcontainers(
 ) -> Result<()> {
     let formatted = docker(&list_testcontainers_format_args())?;
     let ids = unlabeled_testcontainer_ids(&formatted);
+    if ids.is_empty() {
+        return Ok(());
+    }
+    docker(&force_remove_container_args(&ids)).map(|_| ())
+}
+
+pub fn reclaim_unlabeled_job_image_siblings(
+    mut docker: impl FnMut(&[String]) -> Result<String>,
+) -> Result<()> {
+    let formatted = docker(&list_job_image_format_args())?;
+    let ids = unlabeled_job_image_ids(&formatted);
     if ids.is_empty() {
         return Ok(());
     }
@@ -554,7 +586,14 @@ mod tests {
             rendered.len() < 100,
             "unix socket path must fit sockaddr_un, got {rendered}"
         );
-        assert!(rendered.starts_with("/tmp/vdl-"), "got {rendered}");
+        assert!(
+            rendered.starts_with("/run/velnor/vdl-"),
+            "lease socket must be host-visible under RuntimeDirectory, not PrivateTmp /tmp; got {rendered}"
+        );
+        assert!(
+            !rendered.starts_with("/tmp/"),
+            "PrivateTmp remaps daemon /tmp; dockerd would not see {rendered}"
+        );
     }
 
     #[test]
@@ -695,6 +734,25 @@ velnor-job-dead\tvelnor-job-dead\texited
         assert_eq!(
             calls[1],
             force_remove_container_args(&["dead1".into(), "dead2".into()])
+        );
+    }
+
+    #[test]
+    fn reclaim_unlabeled_job_image_siblings_force_removes_orphans_only() {
+        let mut calls = Vec::new();
+        let mut outputs = vec![
+            "gagarin\t\nvelnor-job-live\tvelnor-job-live\nride\t\n".to_string(),
+            String::new(),
+        ];
+        reclaim_unlabeled_job_image_siblings(|args| {
+            calls.push(args.to_vec());
+            Ok(outputs.remove(0))
+        })
+        .unwrap();
+        assert_eq!(calls[0], list_job_image_format_args());
+        assert_eq!(
+            calls[1],
+            force_remove_container_args(&["gagarin".into(), "ride".into()])
         );
     }
 }

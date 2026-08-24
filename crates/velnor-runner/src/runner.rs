@@ -8100,6 +8100,11 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
     {
         eprintln!("Warning: leftover guest Docker reclaim failed: {error:#}");
     }
+    if let Err(error) = crate::docker_lease::reclaim_unlabeled_job_image_siblings(
+        crate::docker_lease::run_host_docker,
+    ) {
+        eprintln!("Warning: leftover job-image Docker reclaim failed: {error:#}");
+    }
     let config_base = config::config_dir(None)?
         .join("daemons")
         .join(sanitize_daemon_config_component(&args.name));
