@@ -13,7 +13,8 @@ Audited at Velnor commit `77b2b66` on 2026-08-24:
 - Plans 063–080: eighteen shared migration items
 - C001–C075: seventy-five command items
 - Total: ninety-four executable items
-- `plans/OPERATOR-REPORT.md`: historical evidence, not executable work
+- `plans/TASKS.md`: checkbox mirror of the ninety-four items below; the item
+  files and category indexes remain authoritative
 
 Every command file has status, rationale, current state, scope, required
 behavior, steps, a focused nextest gate, the repository gate, mandatory fixture
