@@ -669,7 +669,11 @@ impl CompositeFrame {
             order: self.order,
             started_at: self.started_at,
             completed_at: completed_at.to_string(),
-            lines: if self.skipped { Vec::new() } else { self.lines },
+            lines: if self.skipped {
+                skipped_step_log_lines()
+            } else {
+                self.lines
+            },
             masks: self.masks,
             annotations: self.annotations,
             telemetry: self.telemetry,
@@ -901,6 +905,20 @@ where
     pub fn with_job_environment_started(mut self, started: bool) -> Self {
         self.job_environment_started = started;
         self
+    }
+
+    /// Adopt the Docker lease guard bound by an earlier (pre-created)
+    /// environment start. The guard must live as long as the job container:
+    /// the container holds the proxy socket bind-mounted, and dropping the
+    /// guard deletes the socket inode, killing in-container docker clients
+    /// (0.1.185 precreate regression, tailrocks/velnor#311 follow-up).
+    pub fn with_docker_lease(mut self, lease: crate::docker_lease::DockerLeaseGuard) -> Self {
+        self.docker_lease = Some(lease);
+        self
+    }
+
+    pub(crate) fn take_docker_lease(&mut self) -> Option<crate::docker_lease::DockerLeaseGuard> {
+        self.docker_lease.take()
     }
 
     pub fn into_runner(self) -> R {
@@ -1205,6 +1223,11 @@ where
                         let resolved_display = frame_state.resolve_expressions(display_name);
                         let backend_step_id = github_backend_step_id(step_id);
                         let skipped = !frame_state.evaluate_condition(condition.as_deref());
+                        if skipped {
+                            eprintln!(
+                                "forensics.lifecycle event=step-skipped step={resolved_display}"
+                            );
+                        }
                         let started_at = self.emit_step_started(
                             backend_step_id.clone(),
                             &resolved_display,
@@ -1255,6 +1278,7 @@ where
             if !step_state.evaluate_condition(step.condition()) {
                 // Embedded composite steps never surface their own rows;
                 // a skipped one simply leaves no trace in the parent's log.
+                eprintln!("forensics.lifecycle event=step-skipped step={display_name}");
                 let reports = composite_frame.is_none() && step.reports_timeline_start();
                 let mut skipped_started_at = String::new();
                 if reports {
@@ -8674,6 +8698,17 @@ fn unix_now_rfc3339() -> String {
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
 }
 
+/// Log lines for a skipped step. A skipped step still posts a log record, and
+/// an EMPTY record is indistinguishable from a quiet successful step — that
+/// hid the tailrocks/velnor#311 cascade where a daemon restart killed a step
+/// mid-flight and every later (export/upload) step silently "succeeded"
+/// without running. One explicit, ungrouped line keeps the skip visible in
+/// the timeline feed. Skip semantics are unchanged (exit 0, skipped=true);
+/// only visibility changes.
+fn skipped_step_log_lines() -> Vec<String> {
+    vec!["Step skipped: condition evaluated to false (a previous step failed or the if-condition was not met)".to_string()]
+}
+
 fn step_log_lines(
     display_name: &str,
     stdout: &str,
@@ -8682,7 +8717,7 @@ fn step_log_lines(
     prelude: &[String],
 ) -> Vec<String> {
     if skipped {
-        return Vec::new();
+        return skipped_step_log_lines();
     }
     let step_name = if display_name.is_empty() {
         "step"
@@ -14918,7 +14953,14 @@ fi"#
         assert!(!summary.step_logs[0].skipped);
         assert_uuid(&summary.step_logs[1].step_id);
         assert_eq!(summary.step_logs[1].order, 2);
-        assert!(summary.step_logs[1].lines.is_empty());
+        assert!(
+            summary.step_logs[1]
+                .lines
+                .iter()
+                .any(|line| line.contains("Step skipped:")),
+            "skipped steps need a visible marker line, got {:?}",
+            summary.step_logs[1].lines
+        );
         assert!(summary.step_logs[1].skipped);
         fs::remove_dir_all(temp).unwrap();
     }
@@ -19342,9 +19384,13 @@ bitcoin-processor-app.push=true")
     }
 
     #[test]
-    fn step_log_lines_keeps_skipped_steps_empty() {
+    fn step_log_lines_marks_skipped_steps_visibly() {
         let lines = step_log_lines("Skipped action", "", "", true, &[]);
-        assert!(lines.is_empty());
+        assert_eq!(lines, skipped_step_log_lines());
+        assert!(
+            lines.iter().any(|line| line.contains("Step skipped:")),
+            "a skipped step must carry an explicit marker, got {lines:?}"
+        );
     }
 
     // ── hadolint_script ───────────────────────────────────────────────────
