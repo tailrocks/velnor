@@ -1276,7 +1276,7 @@ fn audit_generated_caller(file: &str, _text: &str, yaml: &Value, findings: &mut 
 
     let mut classes = BTreeSet::new();
     const DEFAULT_LANE_EXPRESSION: &str =
-        "${{ github.event_name == 'workflow_dispatch' && inputs.lane || github.event_name == 'push' && 'github' || 'velnor' }}";
+        "${{ github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor' }}";
     for owner in ["jackin-project", "tailrocks", "ChainArgos"] {
         let Some(job) = mapping_get(jobs, owner).and_then(Value::as_mapping) else {
             continue;
@@ -1340,30 +1340,30 @@ fn audit_generated_caller(file: &str, _text: &str, yaml: &Value, findings: &mut 
             "all three owner-local calls must select one identical repository class",
         ));
     }
-    let lane_input = object_get(yaml, "on")
+    let lanes_input = object_get(yaml, "on")
         .and_then(|on| object_get(on, "workflow_dispatch"))
         .and_then(|dispatch| object_get(dispatch, "inputs"))
-        .and_then(|inputs| object_get(inputs, "lane"))
+        .and_then(|inputs| object_get(inputs, "lanes"))
         .and_then(Value::as_mapping);
-    let lane_options = lane_input
+    let lanes_options = lanes_input
         .and_then(|lane| mapping_get(lane, "options"))
         .and_then(Value::as_sequence)
         .map(|options| options.iter().filter_map(Value::as_str).collect::<Vec<_>>());
-    if lane_input
+    if lanes_input
         .and_then(|lane| mapping_get(lane, "type"))
         .and_then(Value::as_str)
         != Some("choice")
-        || lane_input
+        || lanes_input
             .and_then(|lane| mapping_get(lane, "default"))
             .and_then(Value::as_str)
             != Some("velnor")
-        || lane_options != Some(vec!["velnor", "github", "both"])
+        || lanes_options != Some(vec!["velnor", "github", "both"])
     {
         findings.push(Finding::error(
             "generated-caller",
             file,
-            "$.on.workflow_dispatch.inputs.lane",
-            "generated caller must expose the exact Velnor-default choice set: velnor, github, both",
+            "$.on.workflow_dispatch.inputs.lanes",
+            "generated caller must expose the canonical plural lanes choice with the exact Velnor-default set: velnor, github, both",
         ));
     }
 }
@@ -2115,7 +2115,7 @@ on:
     - cron: "23 3 * * 0"
   workflow_dispatch:
     inputs:
-      lane:
+      lanes:
         type: choice
         default: velnor
         options: [velnor, github, both]
@@ -2125,15 +2125,15 @@ jobs:
   jackin-project:
     uses: jackin-project/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
     with:
-      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || github.event_name == 'push' && 'github' || 'velnor' }}
+      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor' }}
   tailrocks:
     uses: tailrocks/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
     with:
-      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || github.event_name == 'push' && 'github' || 'velnor' }}
+      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor' }}
   ChainArgos:
     uses: ChainArgos/velnor-actions/.github/workflows/ci-code.yml@0123456789012345678901234567890123456789
     with:
-      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lane || github.event_name == 'push' && 'github' || 'velnor' }}
+      lane: ${{ github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor' }}
   ci-required:
     timeout-minutes: 10
     runs-on: ${{ 'ubuntu-26.04' }}
@@ -2163,11 +2163,20 @@ jobs:
         assert!(has_rule(&audit(&github_default), "generated-caller"));
 
         let owner_default = GENERATED_CALLER.replacen(
-            "github.event_name == 'workflow_dispatch' && inputs.lane || github.event_name == 'push' && 'github' || 'velnor'",
+            "github.event_name == 'workflow_dispatch' && inputs.lanes || github.event_name == 'push' && 'github' || 'velnor'",
             "github.repository_owner == 'jackin-project' && 'github' || 'velnor'",
             1,
         );
         assert!(has_rule(&audit(&owner_default), "generated-caller"));
+    }
+
+    #[test]
+    fn generated_caller_rejects_singular_era_lane_selector() {
+        let singular = GENERATED_CALLER
+            .replace("    inputs:\n      lanes:", "    inputs:\n      lane:")
+            .replace("&& inputs.lanes ||", "&& inputs.lane ||");
+        let findings = audit(&singular);
+        assert!(has_rule(&findings, "generated-caller"), "{findings:?}");
     }
 
     #[test]
