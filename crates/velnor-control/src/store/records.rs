@@ -657,7 +657,24 @@ fn decode_summary_row(row: &rusqlite::Row<'_>) -> StoreResult<ModelJobSummary> {
         .rsplit_once('/')
         .ok_or_else(|| summary_decode("repository"))?;
     let phase_raw: String = row.get(15)?;
-    let phase = JobPhase::try_from(phase_raw.as_str()).map_err(|_| summary_decode("phase"))?;
+    // The column stores two coordinated vocabularies: the summary phase on
+    // insert and the store-side machine state after transitions. Map the
+    // machine spellings back onto the closed JobPhase taxonomy; anything
+    // else fails closed.
+    let phase = match JobPhase::try_from(phase_raw.as_str()) {
+        Ok(phase) => phase,
+        Err(_) => {
+            let machine =
+                JobState::try_from(phase_raw.as_str()).map_err(|_| summary_decode("phase"))?;
+            match machine {
+                JobState::Queued => JobPhase::Queued,
+                JobState::Acquired | JobState::Waiting | JobState::Started => JobPhase::Running,
+                JobState::Completed => JobPhase::Completed,
+                JobState::Canceled => JobPhase::Canceled,
+                JobState::Rejected => JobPhase::Rejected,
+            }
+        }
+    };
     let run_id: i64 = row.get(5)?;
     let attempt: i64 = row.get(6)?;
     ModelJobSummary::from_normalized(NormalizedJob {

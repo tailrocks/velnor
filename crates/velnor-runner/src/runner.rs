@@ -310,6 +310,30 @@ fn duration_ms(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Instance slug naming this daemon in the shared operational store:
+/// hostname when resolvable, sanitized to the store's slug charset.
+fn instance_slug_for_store() -> String {
+    let mut buffer = [0u8; 256];
+    let host = unsafe {
+        // POSIX gethostname: writes at most `buffer.len()` bytes, always
+        // NUL-terminated on glibc/musl/Darwin for this buffer size.
+        if libc::gethostname(buffer.as_mut_ptr() as *mut libc::c_char, buffer.len()) == 0 {
+            let end = buffer.iter().position(|byte| *byte == 0).unwrap_or(0);
+            String::from_utf8_lossy(&buffer[..end]).into_owned()
+        } else {
+            String::new()
+        }
+    };
+    crate::ops::sanitize_slug_for_instance(&host)
+}
+
+pub(crate) fn mask_all(raw: &str, masks: &[String]) -> String {
+    if masks.is_empty() {
+        return raw.to_owned();
+    }
+    MaskPatterns::new(masks.to_vec()).with_extra(&[]).mask(raw)
+}
+
 impl AcquiredJobIdentity {
     fn from_job(job: &AgentJobRequestMessage) -> Self {
         Self {
@@ -775,6 +799,17 @@ pub async fn run(args: RunArgs) -> Result<()> {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
     }
 
+    // Standalone/one-shot runs degrade observability only; the daemon uses
+    // strict init so store failures classify as readiness failures.
+    let _ = crate::ops::init(instance_slug_for_store(), false);
+    if let Some(sink) = crate::ops::global() {
+        sink.emit(
+            velnor_model::EventReason::ReadinessReady,
+            sink.instance_slug(),
+            Some(format!("run started pid={}", std::process::id())),
+        );
+    }
+
     let dir = config::config_dir(args.config_dir.clone())?;
     wait_for_prior_slot_teardown(&dir).await?;
     preflight_before_executable_run(&args, &dir).map_err(local_failure)?;
@@ -811,6 +846,23 @@ static DAEMON_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 
 pub(crate) fn draining() -> bool {
     DRAINING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Emit `drain.completed` exactly once per process, from whichever exit
+/// path observes the drain finishing.
+fn emit_drain_completed_once() {
+    static DRAIN_COMPLETED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if DRAIN_COMPLETED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if let Some(sink) = crate::ops::global() {
+        sink.emit(
+            velnor_model::EventReason::DrainCompleted,
+            sink.instance_slug(),
+            Some("all slots deregistered or finished; exiting".to_owned()),
+        );
+    }
 }
 
 fn notify_daemon_ready(usable_slots: usize, slots: usize) {
@@ -873,6 +925,13 @@ fn start_drain_listener(config_base: PathBuf) {
         let note =
             "drain requested (SIGTERM/SIGINT): finishing running jobs, idle slots deregister";
         println!("{note}");
+        if let Some(sink) = crate::ops::global() {
+            sink.emit(
+                velnor_model::EventReason::DrainStarted,
+                sink.instance_slug(),
+                Some(note.to_owned()),
+            );
+        }
         crate::sd_notify::notify("STOPPING=1");
         crate::sd_notify::status("draining: finishing running jobs before exit");
         daemon_forensic_log(&config_base, note);
@@ -905,6 +964,23 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     // errors. The packaged long-running daemon (url + not once + not dry-run)
     // must never give up — every failure is retried with backoff forever.
     let supervised = args.url.is_some() && !args.once && !args.dry_run_registration;
+
+    // Plan 066 step 4: open/migration failure of the operational store is a
+    // daemon readiness failure. Supervised mode surfaces it through the
+    // never-exit retry loop below; one-shot modes already fail fast.
+    crate::ops::init(instance_slug_for_store(), supervised)
+        .map_err(|error| anyhow::anyhow!("operational store not ready: {error:#}"))?;
+    if let Some(sink) = crate::ops::global() {
+        sink.emit(
+            velnor_model::EventReason::ReadinessReady,
+            sink.instance_slug(),
+            Some(format!(
+                "daemon ready pid={} supervised={supervised}",
+                std::process::id()
+            )),
+        );
+    }
+
     if supervised {
         if let Ok(config_base) = daemon_config_dir(&args) {
             start_drain_listener(config_base);
@@ -971,7 +1047,22 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
             .as_deref()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "default".to_string());
+        if let Some(sink) = crate::ops::global() {
+            sink.emit(
+                velnor_model::EventReason::GcStarted,
+                sink.instance_slug(),
+                Some(format!("daemon_id={daemon_id}")),
+            );
+        }
         prune_stale_velnor_docker_resources(&daemon_id);
+        if let Some(sink) = crate::ops::global() {
+            sink.emit(
+                velnor_model::EventReason::GcCompleted,
+                sink.instance_slug(),
+                Some(format!("daemon_id={daemon_id}")),
+            );
+            sink.prune_if_due();
+        }
     }
     let mut resolved_args = resolve_daemon_runner_group_once(args).await?;
     let usable_slots = configure_daemon_slots(&resolved_args, &config_base, slots).await?;
@@ -986,6 +1077,23 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         return Ok(());
     }
     notify_daemon_ready(usable_slots, slots);
+    if let Some(sink) = crate::ops::global() {
+        // Current instance state row: identity, version, and slot counts.
+        let _ = sink.upsert_instance(
+            &instance_slug_for_store(),
+            env!("CARGO_PKG_VERSION"),
+            usable_slots as u32,
+        );
+        // Time-gated retention passes continue while slots are supervised.
+        let retention_sink = std::sync::Arc::clone(sink);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                ticker.tick().await;
+                retention_sink.prune_if_due();
+            }
+        });
+    }
     let mut slot_tasks = JoinSet::new();
 
     println!(
@@ -1050,10 +1158,15 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
         match result {
             Ok((_, Ok(()))) => {}
             Ok((slot_index, Err(error))) => {
-                eprintln!("{error:#}");
+                let ops_state = match crate::ops::global() {
+                    Some(sink) if sink.degraded() => " ops-store=degraded",
+                    Some(_) => " ops-store=ok",
+                    None => " ops-store=absent",
+                };
+                eprintln!("{error:#}{ops_state}");
                 daemon_forensic_log(
                     &config_base,
-                    &format!("slot-{slot_index} task exited with error: {error:#}"),
+                    &format!("slot-{slot_index} task exited with error: {error:#}{ops_state}"),
                 );
                 if supervised && !draining() {
                     // A slot returning an error in supervised mode is a bug
@@ -1099,6 +1212,7 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
             let note = "drain complete: all slots deregistered, exiting";
             println!("{note}");
             daemon_forensic_log(&config_base, note);
+            emit_drain_completed_once();
             return Ok(());
         }
         bail!("all daemon slot tasks stopped");
@@ -1455,6 +1569,13 @@ async fn recycle_daemon_slot(
         "forensics.lifecycle event=next-jit-ready timestamp={}",
         unix_now_iso8601()
     );
+    if let Some(sink) = crate::ops::global() {
+        sink.emit(
+            velnor_model::EventReason::SlotStateChanged,
+            &daemon_slot_name(slot_index),
+            Some(format!("recycled jit config after cycle {cycle}")),
+        );
+    }
     Ok(())
 }
 
@@ -1480,6 +1601,13 @@ async fn cleanup_failed_daemon_slot(
         eprintln!(
             "daemon slot-{slot_index} cycle {cycle} cleanup failed for {}: {error:#}",
             slot_dir.display()
+        );
+    }
+    if let Some(sink) = crate::ops::global() {
+        sink.emit(
+            velnor_model::EventReason::SlotStateChanged,
+            &daemon_slot_name(slot_index),
+            Some(format!("cleaned failed slot after cycle {cycle}")),
         );
     }
 }
@@ -2497,6 +2625,13 @@ async fn check_runner_registry(
             );
             eprintln!("{note}");
             forensics.registry(&note);
+            if let Some(sink) = crate::ops::global() {
+                sink.emit(
+                    velnor_model::EventReason::RegistrationStaleBusy,
+                    agent_name,
+                    Some(note.clone()),
+                );
+            }
             if crate::capacity::stale_busy_lease_should_complete_job(status, busy) {
                 Some("offline+busy stale registration (6676-class); complete leftover job then recycle".to_string())
             } else {
@@ -2514,12 +2649,26 @@ async fn check_runner_registry(
             );
             eprintln!("{note}");
             forensics.registry(&note);
+            if let Some(sink) = crate::ops::global() {
+                sink.emit(
+                    velnor_model::EventReason::RegistrationOffline,
+                    agent_name,
+                    Some(note.clone()),
+                );
+            }
             None
         }
         RegistryVerdict::RecycleMissing => {
             let note = "runner registration MISSING from GitHub registry (404) while broker session polls fine — split-brain detected".to_string();
             eprintln!("{note}");
             forensics.registry(&note);
+            if let Some(sink) = crate::ops::global() {
+                sink.emit(
+                    velnor_model::EventReason::RegistrationMissing,
+                    agent_name,
+                    Some(note.clone()),
+                );
+            }
             Some("registration missing (404)".to_string())
         }
         RegistryVerdict::RecycleOffline(strikes) => {
@@ -2532,6 +2681,13 @@ async fn check_runner_registry(
             );
             eprintln!("{note}");
             forensics.registry(&note);
+            if let Some(sink) = crate::ops::global() {
+                sink.emit(
+                    velnor_model::EventReason::RegistrationOffline,
+                    agent_name,
+                    Some(note.clone()),
+                );
+            }
             Some(format!("registration {status} for {strikes} checks"))
         }
     }
@@ -2971,6 +3127,59 @@ async fn handle_job_request(
     let mut job = job;
     hydrate_github_variables_from_context(&mut job, &early_context);
     persist_in_flight_job(config_dir, &run_service_job, &job)?;
+
+    // Plan 066 required write: the sanitized admission row must persist
+    // before the job is accepted. When it cannot, fail this job closed
+    // explicitly as infrastructure rejection instead of executing
+    // unrecorded work.
+    if let Some(sink) = crate::ops::global() {
+        let admission = crate::ops::JobAdmission {
+            instance_slug: sink.instance_slug().to_owned(),
+            repository_full_name: crate::github_adapter::job_variable(&job, "github.repository")
+                .unwrap_or_default()
+                .to_owned(),
+            workflow: crate::github_adapter::job_variable(&job, "github.workflow")
+                .unwrap_or("workflow")
+                .to_owned(),
+            job_name: job
+                .job_name
+                .clone()
+                .unwrap_or_else(|| job.job_display_name.clone()),
+            run_id: crate::github_adapter::job_variable(&job, "github.run_id")
+                .and_then(|raw| raw.parse::<u64>().ok()),
+            attempt: crate::github_adapter::job_variable(&job, "github.run_attempt")
+                .and_then(|raw| raw.parse::<u32>().ok()),
+            head_ref: crate::github_adapter::job_variable(&job, "github.ref")
+                .map(ToOwned::to_owned),
+            head_sha: crate::github_adapter::job_variable(&job, "github.sha")
+                .map(ToOwned::to_owned),
+            trigger_event: crate::github_adapter::job_variable(&job, "github.event_name")
+                .map(ToOwned::to_owned),
+            queued_at_rfc3339: job.queue_time.clone().or_else(|| {
+                job.variables
+                    .get("system.queueTime")
+                    .and_then(|value| value.value.clone())
+            }),
+            runner_name: Some(runner_name.to_owned()),
+            trust_scope: Some(args.trust_scope.clone()),
+            masks: job_secret_mask_values(&job),
+        };
+        if !sink.record_admission(&admission) {
+            const REASON: &str = "operational store rejected the sanitized admission row; job failed closed before execution";
+            let completion = complete_acquired_job_failure(
+                &run_service_job,
+                &AcquiredJobIdentity::from_job(&job),
+                Some(&job),
+                Some("operational_store".to_string()),
+                REASON,
+            )
+            .await;
+            let _ = clear_in_flight_job(config_dir);
+            let _ = completion;
+            bail!("{REASON}");
+        }
+    }
+
     let event_name = crate::github_adapter::job_variable(&job, "github.event_name").unwrap_or("");
     if !crate::capacity::trusted_fleet_accepts_github_event(event_name) {
         let identity = AcquiredJobIdentity::from_job(&job);
@@ -3184,6 +3393,16 @@ async fn handle_job_request(
         // then fail-close instead of hanging GitHub with zero steps.
         let capacity_wait_started = Instant::now();
         let capacity_wait_timeout = crate::capacity::capacity_wait_timeout();
+        let ops_job_uid = crate::ops::global().and_then(|sink| {
+            let run_id = crate::github_adapter::job_variable(&job, "github.run_id")
+                .and_then(|raw| raw.parse::<u64>().ok())?;
+            let attempt = crate::github_adapter::job_variable(&job, "github.run_attempt")
+                .and_then(|raw| raw.parse::<u32>().ok())?;
+            let _ = sink;
+            Some(format!("summary-run-{run_id}-attempt-{attempt}"))
+        });
+        let mut emitted_waiting = false;
+        let mut emitted_pressure = false;
         let job_peak_reservation = loop {
             let reserve_result = reserve_job_peak_capacity(config_dir, args);
             let last_error = reserve_result
@@ -3208,6 +3427,29 @@ async fn handle_job_request(
                     break reservation;
                 }
                 crate::capacity::PreExecutionWaitDecision::RetryReserve { sleep } => {
+                    if let (Some(sink), Some(uid), false) =
+                        (&crate::ops::global(), &ops_job_uid, emitted_waiting)
+                    {
+                        sink.transition(
+                            uid,
+                            &format!("t-waiting-{uid}"),
+                            velnor_model::EventReason::JobWaiting,
+                            Some("waiting for host capacity before execution".to_owned()),
+                            None,
+                            None,
+                        );
+                        emitted_waiting = true;
+                    }
+                    if let (Some(sink), Some(uid), false) =
+                        (&crate::ops::global(), &ops_job_uid, emitted_pressure)
+                    {
+                        sink.emit(
+                            velnor_model::EventReason::CapacityPressure,
+                            uid,
+                            last_error.clone(),
+                        );
+                        emitted_pressure = true;
+                    }
                     eprintln!(
                         "Job {} waiting for host capacity: {}. Retrying in {}s.",
                         job.job_id,
@@ -3305,6 +3547,16 @@ async fn handle_job_request(
         };
         if let Err(error) = publish_timeline_job_started(&job, runner_name).await {
             eprintln!("Best-effort timeline job start update failed: {error:#}");
+        }
+        if let (Some(sink), Some(uid)) = (&crate::ops::global(), &ops_job_uid) {
+            sink.transition(
+                uid,
+                &format!("t-started-{uid}"),
+                velnor_model::EventReason::JobStarted,
+                Some("workflow execution began".to_owned()),
+                None,
+                None,
+            );
         }
         let (step_start_sender, step_start_receiver) = tokio::sync::mpsc::unbounded_channel();
         let step_timeline = start_step_timeline_publisher(job.clone(), step_start_receiver);
@@ -6808,6 +7060,42 @@ async fn complete_run_service_job(
         .iter()
         .flat_map(|log| log.annotations.iter().map(run_service_annotation))
         .collect();
+    // Plan 066 terminal transition for an executed job. Idempotent token
+    // keeps the refreshing-completion retry path from duplicating events.
+    if let Some(sink) = crate::ops::global() {
+        let run_id = crate::github_adapter::job_variable(job, "github.run_id")
+            .and_then(|raw| raw.parse::<u64>().ok());
+        let attempt = crate::github_adapter::job_variable(job, "github.run_attempt")
+            .and_then(|raw| raw.parse::<u32>().ok());
+        if let (Some(run_id), Some(attempt)) = (run_id, attempt) {
+            let uid = format!("summary-run-{run_id}-attempt-{attempt}");
+            let reason = match result {
+                crate::protocol::TaskResult::Canceled => velnor_model::EventReason::JobCanceled,
+                _ => velnor_model::EventReason::JobCompleted,
+            };
+            let conclusion = match result {
+                crate::protocol::TaskResult::Succeeded => "success",
+                crate::protocol::TaskResult::Failed => "failure",
+                crate::protocol::TaskResult::Canceled | crate::protocol::TaskResult::Abandoned => {
+                    "cancelled"
+                }
+                crate::protocol::TaskResult::Skipped => "skipped",
+            };
+            sink.transition(
+                &uid,
+                &format!("t-terminal-{}-{run_id}-{attempt}", reason.as_str()),
+                reason,
+                None,
+                Some(conclusion.to_owned()),
+                infrastructure_failure_category.clone().filter(|category| {
+                    matches!(
+                        category.as_str(),
+                        "docker_bind_mount" | "docker_environment"
+                    )
+                }),
+            );
+        }
+    }
     let completion = RunServiceCompleteJob {
         plan_id: job.plan.plan_id.clone(),
         job_id: job.job_id.clone(),
@@ -7092,6 +7380,32 @@ async fn complete_acquired_job_outcome(
         let log = failed_acquired_job_step_log(category, &masked_reason);
         if let Err(error) = publish_timeline_step_log(job, &log).await {
             eprintln!("Best-effort Velnor rejection step log upload failed: {error:#}");
+        }
+    }
+    // Plan 066 terminal transition for a job that never reached execution:
+    // rejections and pre-execution cancellations must still reach a terminal
+    // store row (pre-terminal fail-close edges).
+    if let Some(job) = job {
+        if let Some(sink) = crate::ops::global() {
+            let run_id = crate::github_adapter::job_variable(job, "github.run_id")
+                .and_then(|raw| raw.parse::<u64>().ok());
+            let attempt = crate::github_adapter::job_variable(job, "github.run_attempt")
+                .and_then(|raw| raw.parse::<u32>().ok());
+            if let (Some(run_id), Some(attempt)) = (run_id, attempt) {
+                let uid = format!("summary-run-{run_id}-attempt-{attempt}");
+                let reason = match conclusion {
+                    crate::protocol::TaskResult::Canceled => velnor_model::EventReason::JobCanceled,
+                    _ => velnor_model::EventReason::JobRejected,
+                };
+                sink.transition(
+                    &uid,
+                    &format!("t-terminal-{}-{run_id}-{attempt}", reason.as_str()),
+                    reason,
+                    Some(masked_reason.clone()),
+                    None,
+                    None,
+                );
+            }
         }
     }
     run_service_job

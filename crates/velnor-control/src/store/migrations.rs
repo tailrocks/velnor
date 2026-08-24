@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 2;
+pub const LATEST_SCHEMA_VERSION: u32 = 3;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -117,6 +117,18 @@ ON jobs (instance_slug, run_id, attempt)
 WHERE run_id IS NOT NULL AND attempt IS NOT NULL;
 ";
 
+/// Bounded retention state (Plan 066 step 5): the singleton row records the
+/// last completed prune so accounting can publish it without re-deriving.
+const SCHEMA_V3: &str = "
+CREATE TABLE IF NOT EXISTS retention_state (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 0),
+    last_prune_at TEXT,
+    deleted_events INTEGER NOT NULL DEFAULT 0,
+    deleted_jobs INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO retention_state (singleton) VALUES (0);
+";
+
 /// Every migration in order; appending is the only allowed change.
 pub static MIGRATIONS: &[Migration] = &[
     Migration {
@@ -128,6 +140,11 @@ pub static MIGRATIONS: &[Migration] = &[
         version: 2,
         name: "jobs-summary-run-attempt-identity",
         sql: SCHEMA_V2,
+    },
+    Migration {
+        version: 3,
+        name: "bounded-retention-state",
+        sql: SCHEMA_V3,
     },
 ];
 

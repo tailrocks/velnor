@@ -230,9 +230,14 @@ impl TryFrom<&str> for JobState {
 /// The happy path is exactly `queued --acquired--> acquired --waiting-->
 /// waiting --started--> started --> {completed | canceled | rejected}`.
 /// Plan 066 grants no infrastructure retry edges: an infra-failed job ends
-/// terminal via `job.rejected`; it never re-enters the graph. Every other
-/// `(from, reason)` pair — including any edge out of a terminal state and
-/// any non-job reason — is illegal.
+/// terminal via `job.rejected`; it never re-enters the graph. Because the
+/// real daemon also rejects or loses jobs before workflow execution begins,
+/// the pre-start states keep their explicit fail-close exits
+/// (`acquired|waiting --canceled/rejected--> terminal`); without them a
+/// pre-execution rejection could never reach a terminal row and the job
+/// would be stuck nonterminal forever. Every other `(from, reason)` pair —
+/// including any edge out of a terminal state and any non-job reason — is
+/// illegal.
 #[must_use]
 pub fn transition_target(from: JobState, reason: EventReason) -> Option<JobState> {
     match (from, reason) {
@@ -242,6 +247,14 @@ pub fn transition_target(from: JobState, reason: EventReason) -> Option<JobState
         (JobState::Started, EventReason::JobCompleted) => Some(JobState::Completed),
         (JobState::Started, EventReason::JobCanceled) => Some(JobState::Canceled),
         (JobState::Started, EventReason::JobRejected) => Some(JobState::Rejected),
+        // Pre-execution fail-close exits: the daemon can lose the
+        // registration, hit host-capacity backpressure, or reject the job on
+        // trust/capability/store grounds before any step runs. Those jobs
+        // must still reach a terminal row.
+        (JobState::Acquired, EventReason::JobCanceled) => Some(JobState::Canceled),
+        (JobState::Acquired, EventReason::JobRejected) => Some(JobState::Rejected),
+        (JobState::Waiting, EventReason::JobCanceled) => Some(JobState::Canceled),
+        (JobState::Waiting, EventReason::JobRejected) => Some(JobState::Rejected),
         _ => None,
     }
 }
@@ -435,10 +448,12 @@ mod tests {
             (JobState::Rejected, EventReason::JobStarted),
             (JobState::Queued, EventReason::JobStarted),
             (JobState::Queued, EventReason::JobCompleted),
-            (JobState::Acquired, EventReason::JobCompleted),
+            (JobState::Queued, EventReason::JobCanceled),
+            (JobState::Queued, EventReason::JobRejected),
             (JobState::Acquired, EventReason::JobStarted),
-            (JobState::Waiting, EventReason::JobCompleted),
+            (JobState::Acquired, EventReason::JobCompleted),
             (JobState::Waiting, EventReason::JobAcquired),
+            (JobState::Waiting, EventReason::JobCompleted),
             (JobState::Started, EventReason::JobStarted),
             (JobState::Started, EventReason::JobAcquired),
         ];
@@ -451,6 +466,32 @@ mod tests {
                 reason.as_str()
             );
         }
+    }
+
+    #[test]
+    fn pre_execution_fail_close_edges_reach_terminal_rows() {
+        // A job lost or rejected before workflow execution must still reach
+        // a terminal row; without these edges the row would stay
+        // nonterminal forever.
+        for from in [JobState::Acquired, JobState::Waiting] {
+            assert_eq!(
+                transition_target(from, EventReason::JobRejected),
+                Some(JobState::Rejected),
+                "{} must reject to terminal",
+                from.as_str()
+            );
+            assert_eq!(
+                transition_target(from, EventReason::JobCanceled),
+                Some(JobState::Canceled),
+                "{} must cancel to terminal",
+                from.as_str()
+            );
+        }
+        assert_eq!(
+            transition_target(JobState::Queued, EventReason::JobRejected),
+            None,
+            "the genesis row has no direct rejection edge"
+        );
     }
 
     #[test]

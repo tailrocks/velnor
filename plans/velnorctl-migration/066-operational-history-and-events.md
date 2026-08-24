@@ -15,6 +15,15 @@
 - **Depends on**: Plan 065
 - **Category**: architecture, migration
 - **Planned at**: commit `35d5bb7`, 2026-08-24
+- **Progress** (2026-08-25): steps 1–5 implemented on
+  `velnor-estate-standard` — store schema v3 with retention state,
+  sanitized admission persistence wired at the daemon acquisition boundary,
+  idempotent transitions/events emitted from real boundaries, required-write
+  fail-close semantics, bounded retention (age/row/byte budgets,
+  incremental vacuum, WAL accounting), and the Plan 064 dependency-boundary
+  test amended to allow the transitional runner→store edge that Plan 079
+  deletes. Step 6 (fixture hold/cancel proof) runs against the deployed apt
+  build.
 
 ## Why this matters
 
