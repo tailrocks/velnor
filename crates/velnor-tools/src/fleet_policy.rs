@@ -821,6 +821,33 @@ fn plan_policy_actions(
     policies: &[OrgPolicy],
     existing: &BTreeMap<String, Vec<u8>>,
 ) -> Result<BTreeMap<String, PlannedPolicyChange>> {
+    // Fail closed on ASCII-case-insensitive filename collisions (review G2):
+    // on case-insensitive filesystems (macOS APFS, Windows NTFS) a ledger org
+    // and an existing stem differing only by case map to one physical file,
+    // so two plan keys can make BTree order delete a just-written policy with
+    // exit 0. Bail with both spellings named BEFORE any write/remove is
+    // planned. Unreadable on-disk state aborts upstream for the same reason;
+    // refusing the run over partial mutation is intentional (review G4).
+    let mut planned_by_lowercase: BTreeMap<String, &str> = BTreeMap::new();
+    for policy in policies {
+        planned_by_lowercase
+            .entry(policy.organization.to_ascii_lowercase())
+            .or_insert(&policy.organization);
+    }
+    for stem in existing.keys() {
+        let lowercase_stem = stem.to_ascii_lowercase();
+        if let Some(org) = planned_by_lowercase.get(lowercase_stem.as_str()) {
+            if *org != stem.as_str() {
+                bail!(
+                    "fleet policy generation: case-insensitive filename collision between \
+                     ledger organization '{org}' and existing policy stem '{stem}'; both map \
+                     to '{stem}-desired-policy.json' on a case-insensitive filesystem. Rename \
+                     or remove the stale file before generating."
+                );
+            }
+        }
+    }
+
     let mut plan = BTreeMap::new();
     let mut ledger_orgs = BTreeSet::new();
     for policy in policies {
@@ -850,6 +877,15 @@ fn plan_policy_actions(
 /// Scan `out_dir` for files named exactly `<org>-desired-policy.json` and
 /// return stem → current bytes. Anything else in the directory (other names,
 /// subdirectories) is ignored entirely and never becomes a removal candidate.
+///
+/// Fail-closed symlink rule (review G1): any entry whose name matches
+/// `<org>-desired-policy.json` but is a symlink — dangling or not — is a hard
+/// error naming the path. Detection uses [`Path::symlink_metadata`], which
+/// never follows links, and the scan never unlinks or writes through them, so
+/// neither the write nor the removal classification can reach a target
+/// outside `out_dir`. A matched entry that cannot be inspected or read also
+/// aborts generation instead of being skipped; that fail-closed choice is
+/// intentional (review G4): partial mutation is worse than a refused run.
 fn read_existing_policy_files(out_dir: &Path) -> Result<BTreeMap<String, Vec<u8>>> {
     let mut existing = BTreeMap::new();
     for entry in fs::read_dir(out_dir).with_context(|| format!("reading {}", out_dir.display()))? {
@@ -863,6 +899,18 @@ fn read_existing_policy_files(out_dir: &Path) -> Result<BTreeMap<String, Vec<u8>
         let Some(stem) = name.strip_suffix("-desired-policy.json") else {
             continue;
         };
+        let is_symlink = path
+            .symlink_metadata()
+            .with_context(|| format!("inspecting {}", path.display()))?
+            .file_type()
+            .is_symlink();
+        if is_symlink {
+            bail!(
+                "refusing symlinked fleet policy entry {}; expected a regular file inside {}",
+                path.display(),
+                out_dir.display()
+            );
+        }
         if stem.is_empty() || !path.is_file() {
             continue;
         }
@@ -1682,6 +1730,10 @@ mod tests {
                 b"backup\n",
             ),
             (dir.path.join("desired-policy.json"), b"no org prefix\n"),
+            // A bare `-desired-policy.json` carries an empty org stem; it is
+            // seeded here so its survival proves the scanner never treats the
+            // empty stem as an org file (review G3).
+            (dir.path.join("-desired-policy.json"), b"empty stem\n"),
             (
                 dir.path
                     .join("subdir-desired-policy.json/tailrocks-desired-policy.json"),
@@ -1707,9 +1759,110 @@ mod tests {
                 path.display()
             );
         }
-        // A bare `-desired-policy.json` (empty org stem) is not an org file.
-        assert!(fs::read(dir.path.join("-desired-policy.json")).is_err());
+        // The empty-stem `-desired-policy.json` survived byte-identically
+        // (asserted by the loop above); state it explicitly for the record.
+        assert_eq!(
+            fs::read(dir.path.join("-desired-policy.json")).ok(),
+            Some(b"empty stem\n".to_vec()),
+            "empty-stem policy-named file must survive untouched"
+        );
         // The lookalike directory itself survives with its contents.
         assert!(dir.path.join("subdir-desired-policy.json").is_dir());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn generate_fails_closed_on_symlinked_policy_names() {
+        let dir = PolicyDir::new("symlink");
+        let outside = PolicyDir::new("symlink-targets");
+        let live_target = outside.path.join("live-target.json");
+        fs::write(&live_target, b"do not touch\n").expect("seed live symlink target");
+        let stale_target = outside.path.join("stale-target.json");
+        fs::write(&stale_target, b"do not remove\n").expect("seed stale symlink target");
+
+        // One link named like the LIVE org's policy file (would-be write
+        // path) and one named like an org absent from the ledger (would-be
+        // removal path); both must hard-fail the scan before any mutation.
+        std::os::unix::fs::symlink(&live_target, dir.path.join("tailrocks-desired-policy.json"))
+            .expect("seed live-org symlink");
+        std::os::unix::fs::symlink(
+            &stale_target,
+            dir.path.join("ghost-org-desired-policy.json"),
+        )
+        .expect("seed removed-org symlink");
+
+        let args = FleetGenerateArgs {
+            ledger: repo_root().join("fleet/release-refs.toml"),
+            out_dir: dir.path.clone(),
+        };
+        let err = fleet_generate(args)
+            .expect_err("symlinked policy-named entries must abort generation")
+            .to_string();
+        assert!(err.contains("symlink"), "{err}");
+        assert!(err.contains("-desired-policy.json"), "{err}");
+
+        for link_name in [
+            "tailrocks-desired-policy.json",
+            "ghost-org-desired-policy.json",
+        ] {
+            let link = dir.path.join(link_name);
+            assert!(
+                link.symlink_metadata()
+                    .unwrap_or_else(|_| panic!("{} must still exist", link.display()))
+                    .file_type()
+                    .is_symlink(),
+                "{} must not be replaced or followed",
+                link.display()
+            );
+        }
+        assert_eq!(
+            fs::read(&live_target).ok(),
+            Some(b"do not touch\n".to_vec()),
+            "write path must never follow the symlink"
+        );
+        assert_eq!(
+            fs::read(&stale_target).ok(),
+            Some(b"do not remove\n".to_vec()),
+            "removal path must never follow the symlink"
+        );
+    }
+
+    #[test]
+    fn plan_bails_on_case_insensitive_collision_with_existing_stem() {
+        let ledger = sample_ledger();
+        let policies = generate_policies_from_ledger(&ledger).expect("policies");
+        let org = policies[0].organization.as_str();
+        let mut existing = BTreeMap::new();
+        // Same org spelled with different ASCII case: on a case-insensitive
+        // filesystem both plan keys would address one physical file.
+        let stale_stem: String = {
+            let mut chars: Vec<char> = org.chars().collect();
+            if let Some(first) = chars.first_mut() {
+                if first.is_ascii_lowercase() {
+                    *first = first.to_ascii_uppercase();
+                } else if first.is_ascii_uppercase() {
+                    *first = first.to_ascii_lowercase();
+                }
+            }
+            chars.into_iter().collect()
+        };
+        assert_ne!(stale_stem, org, "fixture must flip exactly one case");
+        existing.insert(stale_stem.clone(), b"stale casing\n".to_vec());
+
+        let err = plan_policy_actions(&policies, &existing)
+            .expect_err("case-insensitive collision must abort planning")
+            .to_string();
+        assert!(err.contains("case-insensitive"), "{err}");
+        assert!(err.contains(org), "{err}");
+        assert!(err.contains(&stale_stem), "{err}");
+
+        // Exact-case match is still the normal skip path.
+        let mut exact = BTreeMap::new();
+        exact.insert(
+            org.to_owned(),
+            format!("{}\n", policies[0].canonical_json().expect("canonical")).into_bytes(),
+        );
+        let plan = plan_policy_actions(&policies, &exact).expect("exact case is not a collision");
+        assert_eq!(plan[org].0, PolicyFileAction::Skipped);
     }
 }
