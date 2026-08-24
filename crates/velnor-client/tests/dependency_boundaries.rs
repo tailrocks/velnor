@@ -5,7 +5,7 @@
 //! the five new crates form an acyclic graph, and no shared crate depends on
 //! Clap or Axum.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -43,6 +43,22 @@ fn cargo_metadata() -> Value {
     serde_json::from_slice(&output.stdout).expect("metadata JSON parses")
 }
 
+/// Full resolved graph (`resolve` is only present without `--no-deps`).
+fn cargo_metadata_resolved() -> Value {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let output = Command::new(cargo)
+        .args(["metadata", "--format-version", "1", "--locked"])
+        .current_dir(workspace_root())
+        .output()
+        .expect("cargo metadata runs");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("metadata JSON parses")
+}
+
 /// name -> direct dependency names, for workspace packages only.
 fn dependency_graph(metadata: &Value) -> BTreeMap<String, Vec<String>> {
     let mut graph = BTreeMap::new();
@@ -57,6 +73,42 @@ fn dependency_graph(metadata: &Value) -> BTreeMap<String, Vec<String>> {
         graph.insert(name, deps);
     }
     graph
+}
+
+/// Everything transitively reachable from `root` through the resolved graph.
+fn transitive_closure(metadata: &Value, root: &str) -> BTreeSet<String> {
+    let mut id_to_name = BTreeMap::new();
+    for package in metadata["packages"].as_array().expect("packages array") {
+        id_to_name.insert(
+            package["id"].as_str().expect("package id").to_owned(),
+            package["name"].as_str().expect("package name").to_owned(),
+        );
+    }
+    let mut edges = BTreeMap::new();
+    for node in metadata["resolve"]["nodes"].as_array().expect("nodes") {
+        let Some(name) = id_to_name.get(node["id"].as_str().expect("node id")) else {
+            continue;
+        };
+        let deps = node["deps"]
+            .as_array()
+            .expect("node deps")
+            .iter()
+            .filter_map(|dep| id_to_name.get(dep["pkg"].as_str().expect("dep pkg")))
+            .cloned()
+            .collect::<Vec<_>>();
+        edges.insert(name.clone(), deps);
+    }
+    let mut seen = BTreeSet::new();
+    let mut queue = vec![root.to_owned()];
+    while let Some(current) = queue.pop() {
+        for dep in edges.get(&current).into_iter().flatten() {
+            if seen.insert(dep.clone()) {
+                queue.push(dep.clone());
+            }
+        }
+    }
+    seen.remove(root);
+    seen
 }
 
 #[test]
@@ -76,7 +128,8 @@ fn workspace_has_exactly_the_seven_expected_packages() {
 
 #[test]
 fn velnor_client_depends_only_on_velnor_model() {
-    let graph = dependency_graph(&cargo_metadata());
+    let metadata = cargo_metadata();
+    let graph = dependency_graph(&metadata);
     let client = &graph["velnor-client"];
     assert!(
         client.iter().any(|d| d == "velnor-model"),
@@ -100,6 +153,24 @@ fn velnor_client_depends_only_on_velnor_model() {
 }
 
 #[test]
+fn velnor_client_transitively_never_reaches_daemon_internals() {
+    let metadata = cargo_metadata_resolved();
+    let closure = transitive_closure(&metadata, "velnor-client");
+    for forbidden in [
+        "velnor-control",
+        "velnor-runner",
+        "velnorctl",
+        "axum",
+        "clap",
+    ] {
+        assert!(
+            !closure.contains(forbidden),
+            "velnor-client must never reach {forbidden}; closure was {closure:?}"
+        );
+    }
+}
+
+#[test]
 fn crate_dependency_direction_matches_plan_064() {
     let graph = dependency_graph(&cargo_metadata());
     let members_only = |deps: &[String]| -> Vec<String> {
@@ -109,18 +180,31 @@ fn crate_dependency_direction_matches_plan_064() {
             .collect()
     };
 
-    assert!(members_only(&graph["velnor-model"]).is_empty(), "model is the root");
-    assert_eq!(
-        members_only(&graph["velnor-control"]),
-        vec!["velnor-model"]
+    assert!(
+        members_only(&graph["velnor-model"]).is_empty(),
+        "model is the root"
     );
+    assert_eq!(members_only(&graph["velnor-control"]), vec!["velnor-model"]);
     assert_eq!(members_only(&graph["velnor-render"]), vec!["velnor-model"]);
     let ctl = members_only(&graph["velnorctl"]);
-    for required in ["velnor-model", "velnor-control", "velnor-client", "velnor-render"] {
-        assert!(ctl.contains(&required.to_owned()), "velnorctl -> {required}");
+    for required in [
+        "velnor-model",
+        "velnor-control",
+        "velnor-client",
+        "velnor-render",
+    ] {
+        assert!(
+            ctl.contains(&required.to_owned()),
+            "velnorctl -> {required}"
+        );
     }
     for legacy in ["velnor-runner", "velnor-tools"] {
-        for new_crate in ["velnor-model", "velnor-control", "velnor-client", "velnor-render"] {
+        for new_crate in [
+            "velnor-model",
+            "velnor-control",
+            "velnor-client",
+            "velnor-render",
+        ] {
             assert!(
                 !graph[legacy].iter().any(|d| d == new_crate),
                 "legacy crate {legacy} must not depend on new crate {new_crate}"
@@ -132,13 +216,29 @@ fn crate_dependency_direction_matches_plan_064() {
 #[test]
 fn shared_crates_never_depend_on_clap_or_axum() {
     let graph = dependency_graph(&cargo_metadata());
-    for shared in ["velnor-model", "velnor-control", "velnor-client", "velnor-render"] {
+    for shared in [
+        "velnor-model",
+        "velnor-control",
+        "velnor-client",
+        "velnor-render",
+    ] {
         for forbidden in ["clap", "axum"] {
             assert!(
                 !graph[shared].iter().any(|d| d == forbidden),
                 "{shared} must not depend on {forbidden}"
             );
         }
+    }
+}
+
+#[test]
+fn axum_appears_nowhere_in_the_workspace_yet() {
+    let graph = dependency_graph(&cargo_metadata());
+    for member in WORKSPACE_PACKAGES {
+        assert!(
+            !graph[member].iter().any(|d| d == "axum"),
+            "Axum is isolated to a transport-adapter module by Plan 067; {member} must not depend on it yet"
+        );
     }
 }
 

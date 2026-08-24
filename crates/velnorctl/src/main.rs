@@ -10,7 +10,8 @@ fn main() -> ExitCode {
 
 fn report(outcome: &velnorctl::Outcome) {
     match outcome {
-        velnorctl::Outcome::Usage(text) => print!("{text}"),
+        velnorctl::Outcome::Help(text) => print!("{text}"),
+        velnorctl::Outcome::NoCommand(text) => eprint!("{text}"),
         velnorctl::Outcome::Handled { .. } => {}
         velnorctl::Outcome::CommandFailed { message, .. } => eprintln!("error: {message}"),
         velnorctl::Outcome::Unimplemented { name } => {

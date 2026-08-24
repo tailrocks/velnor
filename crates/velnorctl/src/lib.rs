@@ -43,42 +43,35 @@ pub type Handler = Arc<dyn Fn(&[String]) -> Result<(), String> + Send + Sync>;
 /// Result of parsing and dispatching one argv through [`dispatch`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// Global help request (`-h`/`--help`, or no arguments): print usage and
-    /// exit success. Not a leaf command.
-    Usage(String),
+    /// Explicit `-h`/`--help`: print usage and exit success. Not a leaf command.
+    Help(String),
+    /// No command name at all: print usage but exit failure, matching the
+    /// legacy binary's required-subcommand behavior.
+    NoCommand(String),
     /// A registered handler completed successfully.
-    Handled {
-        name: String,
-    },
+    Handled { name: String },
     /// The named command parsed but no implementation is registered in this
     /// build: always exit failure. No unimplemented placeholder ever succeeds.
-    Unimplemented {
-        name: String,
-    },
+    Unimplemented { name: String },
     /// A legacy `velnor-runner` command name was rejected: always exit failure.
-    LegacyRejected {
-        name: String,
-    },
+    LegacyRejected { name: String },
     /// A registered handler reported failure: always exit failure.
-    CommandFailed {
-        name: String,
-        message: String,
-    },
+    CommandFailed { name: String, message: String },
 }
 
 impl Outcome {
     /// True only for outcomes allowed to exit success.
     pub fn succeeded(&self) -> bool {
-        matches!(self, Outcome::Usage(_) | Outcome::Handled { .. })
+        matches!(self, Outcome::Help(_) | Outcome::Handled { .. })
     }
 
-    /// Process exit code for this outcome. Every variant except [`Self::Usage`]
+    /// Process exit code for this outcome. Every variant except [`Self::Help`]
     /// and [`Self::Handled`] is nonzero.
     pub fn exit_code(&self) -> u8 {
         match self {
-            Outcome::Usage(_) | Outcome::Handled { .. } => 0,
+            Outcome::Help(_) | Outcome::Handled { .. } => 0,
             Outcome::CommandFailed { .. } => 1,
-            Outcome::Unimplemented { .. } => 2,
+            Outcome::NoCommand(_) | Outcome::Unimplemented { .. } => 2,
             Outcome::LegacyRejected { .. } => 3,
         }
     }
@@ -132,29 +125,23 @@ pub fn compose() -> Registry {
 /// outcome requires either a registered handler or exits nonzero.
 pub fn dispatch(registry: &Registry, args: &[String]) -> Outcome {
     let Some(name) = args.first() else {
-        return Outcome::Usage(usage());
+        return Outcome::NoCommand(usage());
     };
     if name == "-h" || name == "--help" {
-        return Outcome::Usage(usage());
+        return Outcome::Help(usage());
     }
     if LEGACY_RUNNER_COMMANDS.contains(&name.as_str()) {
-        return Outcome::LegacyRejected {
-            name: name.clone(),
-        };
+        return Outcome::LegacyRejected { name: name.clone() };
     }
     match registry.handlers.get(name) {
         Some(handler) => match handler(&args[1..]) {
-            Ok(()) => Outcome::Handled {
-                name: name.clone(),
-            },
+            Ok(()) => Outcome::Handled { name: name.clone() },
             Err(message) => Outcome::CommandFailed {
                 name: name.clone(),
                 message,
             },
         },
-        None => Outcome::Unimplemented {
-            name: name.clone(),
-        },
+        None => Outcome::Unimplemented { name: name.clone() },
     }
 }
 
@@ -198,7 +185,13 @@ mod tests {
     fn no_unimplemented_command_exits_success() {
         let registry = compose();
         assert!(registry.handlers.is_empty());
-        for name in ["version", "fleet", "unknown-future-command", "--version", "-V"] {
+        for name in [
+            "version",
+            "fleet",
+            "unknown-future-command",
+            "--version",
+            "-V",
+        ] {
             let outcome = dispatch(&registry, &argv(&[name]));
             assert_eq!(
                 outcome,
@@ -212,28 +205,35 @@ mod tests {
     }
 
     #[test]
-    fn empty_argv_and_help_are_usage_success() {
+    fn help_succeeds_and_bare_invocation_fails() {
         let registry = compose();
-        for args in [vec![], vec!["-h".to_owned()], vec!["--help".to_owned()]] {
-            let outcome = dispatch(&registry, &args);
-            assert_eq!(outcome, Outcome::Usage(usage()));
-            assert!(outcome.succeeded());
-            assert_eq!(outcome.exit_code(), 0);
-            assert!(usage().contains(BIN_NAME));
-        }
+        let outcome = dispatch(&registry, &argv(&["-h"]));
+        assert_eq!(outcome, Outcome::Help(usage()));
+        assert!(outcome.succeeded());
+        assert_eq!(outcome.exit_code(), 0);
+        let outcome = dispatch(&registry, &argv(&["--help"]));
+        assert_eq!(outcome, Outcome::Help(usage()));
+        assert!(usage().contains(BIN_NAME));
+
+        let outcome = dispatch(&registry, &[]);
+        assert_eq!(outcome, Outcome::NoCommand(usage()));
+        assert!(!outcome.succeeded());
+        assert_eq!(outcome.exit_code(), 2);
     }
 
     #[test]
     fn later_command_modules_register_without_domain_internals() {
         let mut registry = compose();
-        let called = AtomicBool::new(false);
-        let captured = AtomicBool::new(false);
+        let called = Arc::new(AtomicBool::new(false));
+        let captured = Arc::new(AtomicBool::new(false));
+        let handler_called = called.clone();
+        let handler_captured = captured.clone();
         registry.register(
             "demo",
             Arc::new(move |args: &[String]| {
-                called.store(true, Ordering::SeqCst);
+                handler_called.store(true, Ordering::SeqCst);
                 if args.first().map(String::as_str) == Some("--flag") {
-                    captured.store(true, Ordering::SeqCst);
+                    handler_captured.store(true, Ordering::SeqCst);
                 }
                 Ok(())
             }),
