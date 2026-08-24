@@ -13,12 +13,23 @@ on:
       source-ref:
         required: true
         type: string
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: velnor (default) | github | both
+        type: choice
+        default: velnor
+        options: [velnor, github, both]
 
 permissions: {}
 
 jobs:
   attest:
-    runs-on: ${{ 'ubuntu-26.04' }}
+    # Callable-only contract: the attestation subject inputs exist only for
+    # workflow_call, so a standalone dispatch is a documented no-op instead of
+    # a run that can never satisfy the immutable-source admission.
+    if: ${{ github.event_name == 'workflow_call' }}
+    runs-on: ${{ inputs.lanes == 'github' && 'ubuntu-26.04' || 'velnor-trusted' }}
     timeout-minutes: 15
     permissions:
       id-token: write

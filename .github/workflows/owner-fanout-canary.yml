@@ -10,6 +10,12 @@ name: owner-fanout-canary
 
 on:
   workflow_dispatch:
+    inputs:
+      lanes:
+        description: velnor (default) | github | both
+        type: choice
+        default: velnor
+        options: [velnor, github, both]
 
 permissions:
   contents: read
@@ -43,7 +49,12 @@ jobs:
       - tailrocks
       - ChainArgos
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    # Velnor is the default lane for the aggregation gate; the lanes dispatch
+    # input selects the GitHub-hosted lane for parity. The three pinned smoke
+    # calls keep testing the immutable fleet CalVer release artifact itself,
+    # which carries its own (GitHub-hosted) smoke definition until the next
+    # release republishes this lane-aware fanout-smoke.
+    runs-on: ${{ inputs.lanes == 'github' && 'ubuntu-latest' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
     timeout-minutes: 10
     permissions:
       contents: read

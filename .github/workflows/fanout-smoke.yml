@@ -1,25 +1,60 @@
 # Owner-local fan-out smoke reusable workflow.
 #
-# workflow_call only, read-only, GitHub-hosted, no third-party actions and no
-# secret or environment inheritance. It emits an explicit contract=success output
-# so a caller's positive-truth-table aggregator can prove that exactly the local
-# owner's reusable workflow ran. This is the disposable Renovate/fan-out canary
-# target published at the immutable fleet CalVer.
+# workflow_call (lane input) or workflow_dispatch (lanes input), read-only, no
+# third-party actions and no secret or environment inheritance. Both lanes run
+# the SAME steps; only `runs-on` differs. It emits an explicit contract=success
+# output so a caller's positive-truth-table aggregator can prove that exactly
+# the local owner's reusable workflow ran. This is the disposable
+# Renovate/fan-out canary target published at the immutable fleet CalVer.
 name: fanout-smoke
 
 on:
   workflow_call:
+    inputs:
+      lane:
+        description: "CI runner: Velnor (default), GitHub, or both."
+        required: false
+        type: string
+        default: "velnor"
     outputs:
       contract:
-        description: "'success' only when the owner-local fan-out smoke ran to completion."
-        value: ${{ jobs.smoke.outputs.contract }}
+        description: "'success' only when every selected smoke lane ran to completion."
+        value: ${{ jobs.contract.outputs.contract }}
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: velnor (default) | github | both
+        type: choice
+        default: velnor
+        options: [velnor, github, both]
 
 permissions:
   contents: read
 
 jobs:
-  smoke:
-    name: smoke
+  smoke-velnor:
+    name: smoke (velnor)
+    if: ${{ (inputs.lane || inputs.lanes) != 'github' }}
+    runs-on: ${{ fromJSON('["self-hosted","velnor-target-mvp"]') }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      contract: ${{ steps.contract.outputs.contract }}
+    steps:
+      - name: Emit fan-out contract
+        id: contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Explicit positive contract: this reusable workflow does no work beyond
+          # proving owner-local reachability, and emits success only on completion.
+          echo "contract=success" >> "${GITHUB_OUTPUT}"
+          echo "fanout-smoke: owner-local reusable workflow reached for ${GITHUB_REPOSITORY}"
+
+  smoke-github:
+    name: smoke (github)
+    if: ${{ (inputs.lane || inputs.lanes) == 'github' || (inputs.lane || inputs.lanes) == 'both' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -36,3 +71,50 @@ jobs:
           # proving owner-local reachability, and emits success only on completion.
           echo "contract=success" >> "${GITHUB_OUTPUT}"
           echo "fanout-smoke: owner-local reusable workflow reached for ${GITHUB_REPOSITORY}"
+
+  contract:
+    name: smoke contract
+    needs:
+      - smoke-velnor
+      - smoke-github
+    if: ${{ always() }}
+    runs-on: ${{ inputs.lanes == 'github' && 'ubuntu-latest' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      contract: ${{ steps.verdict.outputs.contract }}
+    steps:
+      - name: Aggregate lane verdict
+        id: verdict
+        env:
+          LANE: ${{ inputs.lane || inputs.lanes || 'velnor' }}
+          VELNOR_RESULT: ${{ needs.smoke-velnor.result }}
+          VELNOR_CONTRACT: ${{ needs.smoke-velnor.outputs.contract }}
+          GITHUB_RESULT: ${{ needs.smoke-github.result }}
+          GITHUB_CONTRACT: ${{ needs.smoke-github.outputs.contract }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fail-closed positive truth table: every selected lane must have
+          # succeeded with contract=success; unselected lanes must be skipped
+          # with empty outputs. Nothing else is acceptance.
+          case "${LANE}" in
+            velnor)
+              [ "${VELNOR_RESULT}" = "success" ] && [ "${VELNOR_CONTRACT}" = "success" ] || { echo "contract: velnor lane did not pass" >&2; exit 1; }
+              [ "${GITHUB_RESULT}" = "skipped" ] && [ -z "${GITHUB_CONTRACT}" ] || { echo "contract: github lane must be skipped for lane=velnor" >&2; exit 1; }
+              ;;
+            github)
+              [ "${GITHUB_RESULT}" = "success" ] && [ "${GITHUB_CONTRACT}" = "success" ] || { echo "contract: github lane did not pass" >&2; exit 1; }
+              [ "${VELNOR_RESULT}" = "skipped" ] && [ -z "${VELNOR_CONTRACT}" ] || { echo "contract: velnor lane must be skipped for lane=github" >&2; exit 1; }
+              ;;
+            both)
+              [ "${VELNOR_RESULT}" = "success" ] && [ "${VELNOR_CONTRACT}" = "success" ] || { echo "contract: velnor lane did not pass" >&2; exit 1; }
+              [ "${GITHUB_RESULT}" = "success" ] && [ "${GITHUB_CONTRACT}" = "success" ] || { echo "contract: github lane did not pass" >&2; exit 1; }
+              ;;
+            *)
+              echo "contract: unrecognized lane '${LANE}'" >&2
+              exit 1
+              ;;
+          esac
+          echo "contract=success" >> "${GITHUB_OUTPUT}"

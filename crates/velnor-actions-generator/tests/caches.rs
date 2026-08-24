@@ -510,10 +510,10 @@ fn both_mode_has_one_cache_publisher_and_validated_nonempty_digests() {
         "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     );
     assert!(workflow.contains(
-        "if: ${{ inputs.lane == 'both' || github.event_name == 'pull_request' || github.event_name == 'merge_group' }}\n        uses: actions/cache/restore@"
+        "if: ${{ (inputs.lane || inputs.lanes) == 'both' || github.event_name == 'pull_request' || github.event_name == 'merge_group' }}\n        uses: actions/cache/restore@"
     ));
     assert!(workflow.contains(
-        "if: ${{ inputs.lane != 'both' && github.event_name != 'pull_request' && github.event_name != 'merge_group' }}\n        uses: actions/cache@"
+        "if: ${{ (inputs.lane || inputs.lanes) != 'both' && github.event_name != 'pull_request' && github.event_name != 'merge_group' }}\n        uses: actions/cache@"
     ));
     assert!(workflow.contains("actions/cache/save@"));
     assert!(!workflow.contains("github.event.pull_request.head.sha"));
@@ -523,7 +523,7 @@ fn both_mode_has_one_cache_publisher_and_validated_nonempty_digests() {
     assert!(workflow.contains("^[0-9a-f]{64}$"));
     assert_eq!(
         workflow
-            .matches("inputs.lane == 'both' || github.event_name")
+            .matches("(inputs.lane || inputs.lanes) == 'both' || github.event_name")
             .count(),
         3,
         "each Velnor cache becomes restore-only in both mode"

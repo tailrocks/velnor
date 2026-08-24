@@ -37,11 +37,22 @@ on:
     secrets:
       app_private_key:
         required: true
+  workflow_dispatch:
+    inputs:
+      lanes:
+        description: velnor (default) | github | both
+        type: choice
+        default: velnor
+        options: [velnor, github, both]
 
 permissions: {}
 
 jobs:
   verify:
+    # Callable-only contract: the app identity inputs and secret exist only
+    # for workflow_call, so a standalone dispatch is a documented no-op
+    # instead of a run that can never bind the release credential.
+    if: ${{ github.event_name == 'workflow_call' }}
     runs-on: ${{ inputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
     timeout-minutes: 15
     permissions:

@@ -609,14 +609,22 @@ fn audit_callable_structure(
 ) -> Result<(), String> {
     let what = callable_path_display(class);
 
-    // workflow_call only — no other trigger.
+    // workflow_call plus exactly the canonical fleet `lanes` dispatch escape
+    // hatch — no other trigger.
     require_contains(rendered, "workflow_call:", &what, "workflow_call trigger")?;
-    for forbidden in ["pull_request:", "push:", "schedule:", "workflow_dispatch:"] {
+    const CANONICAL_LANES_DISPATCH: &str = "\n  workflow_dispatch:\n    inputs:\n      lanes:\n        description: velnor (default) | github | both\n        type: choice\n        default: velnor\n        options: [velnor, github, both]\n";
+    for forbidden in ["pull_request:", "push:", "schedule:"] {
         if rendered.contains(&format!("\n  {forbidden}")) {
             return Err(format!(
                 "{what}: callable workflow must be workflow_call only, found {forbidden}"
             ));
         }
+    }
+    let dispatch_count = rendered.matches("\n  workflow_dispatch:").count();
+    if dispatch_count != 1 || !rendered.contains(CANONICAL_LANES_DISPATCH) {
+        return Err(format!(
+            "{what}: workflow_dispatch must be exactly the canonical lanes escape hatch"
+        ));
     }
     // No secret or environment inheritance.
     if rendered.contains("secrets:") || rendered.contains("environment:") {

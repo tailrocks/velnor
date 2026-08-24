@@ -330,6 +330,18 @@ pub fn callable_workflow(
         8,
         "value: ${{ jobs.validate-request.outputs.workflow_blob }}",
     );
+    // Canonical fleet escape hatch: every workflow exposes the exact `lanes`
+    // dispatch input (velnor default | github | both). `lane` stays the
+    // call-time selector for workflow_call consumers; a standalone dispatch of
+    // the callable drives the identical lane jobs through `inputs.lanes`
+    // (see the normalization at the end of this function).
+    b.line(2, "workflow_dispatch:");
+    b.line(4, "inputs:");
+    b.line(6, "lanes:");
+    b.line(8, "description: velnor (default) | github | both");
+    b.line(8, "type: choice");
+    b.line(8, "default: velnor");
+    b.line(8, "options: [velnor, github, both]");
     b.blank();
     b.line(0, "permissions:");
     b.line(2, "actions: read");
@@ -552,7 +564,13 @@ pub fn callable_workflow(
     b.line(8, "shell: bash");
     b.run_block(8, CONTRACT_VERDICT_SCRIPT);
 
+    // Unify the lane selector across both entry events: workflow_call carries
+    // `lane` (default velnor), a standalone workflow_dispatch carries `lanes`.
+    // Every reference resolves the call-time value first and falls back to the
+    // dispatch input, so both entry events drive identical lane jobs from one
+    // workflow definition — only `runs-on` differs per selected lane.
     b.finish()
+        .replace("inputs.lane", "(inputs.lane || inputs.lanes)")
 }
 
 const AUXILIARY_INPUTS: [&str; 11] = [
