@@ -174,6 +174,29 @@ but no token, endpoint authorization, or raw secret variable.
     validation, `metadata.rs` stale doc link `crate::globals::Cli`, undocumented
     public tuple fields on `DurationMs`/`RepositoryRef`/`SecretRef`/`IdentityRef`.
 
+### Reopen slice 2026-08-24 (defect-fix)
+
+- **Round-2 independent seam review**: verdict BLOCK — MAJOR: opaque /
+  cannot-be-a-base URLs bypassed redaction via a silent `set_username`
+  swallow (compiled probe round-tripped a `mailto:` token verbatim); filed at
+  `.velnor-compare/2026-08-24-065-seam-review/feedback-to-converging-session-round2.md`.
+- **Fix**: reopened under coordination claim `065-defect-fix` (`436df90`);
+  fixed fail-closed in `f06d439`: `sanitize()` rejects cannot-be-a-base URLs
+  (`url::ParseError::SetHostOnCannotBeABaseUrl`, no new public error type),
+  zero remaining silent swallows; `project()` degrades opaque input to empty.
+- **Verification**: verifier PASS — focused velnor-model 58/58, sanitized
+  filter 13/13 incl. 4 new regressions, full `rtk mise run check` 973/973
+  exit 0, secret scan clean, scope single file (+43/−7). Reviewer
+  APPROVE-CLOSE, no defects above NIT (two NITs noted non-blocking: reused
+  ParseError variant Display imprecise for the file:/empty-host arm; missing
+  `file:///` pin test).
+- **Deferral dispositions**: serde(flatten) neutralizing `ResourceMeta`
+  `deny_unknown_fields` on embedded resources is a documented known limit of
+  the envelope design (post-deserialize validation or flatten removal owned by
+  a later leaf that touches `resources.rs`); help/version `--` passthrough,
+  double argv parse, inline switch values remain deferred to the C002 metadata
+  task per the original DONE decision.
+
 ## STOP conditions
 
 - A resource requires persisting secret-bearing source data.
