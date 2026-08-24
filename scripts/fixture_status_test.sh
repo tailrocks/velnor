@@ -36,7 +36,7 @@ if [[ "$output" != *"https://example.test/run/456"* ]]; then
   exit 1
 fi
 
-if [[ "$calls" != *"run list --repo donbeave/velnor-actions-fixture --workflow compat.yml --limit 1 --json databaseId"* ]]; then
+if [[ "$calls" != *"run list --repo tailrocks/velnor-actions-fixture --workflow compat.yml --limit 1 --json databaseId"* ]]; then
   echo "fixture status did not query latest compat run: $calls" >&2
   exit 1
 fi
