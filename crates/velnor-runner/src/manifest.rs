@@ -170,6 +170,7 @@ const RUST_CACHE_REFS: &[AllowedRef] = &[
     allowed("v2", "fixture transition until plan 041"),
 ];
 const PATHS_REFS: &[AllowedRef] = &[
+    allowed("ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d", "v4.0.3"),
     allowed("7b450fff21473bca461d4b92ce414b9d0420d706", "v4"),
     allowed("v4", "fixture transition until plan 041"),
 ];
@@ -2556,7 +2557,7 @@ mod tests {
         validate_job_with_context(
             &job(
                 "dorny/paths-filter",
-                Some("7b450fff21473bca461d4b92ce414b9d0420d706"),
+                Some("ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d"),
                 serde_json::json!({"filters": "docs: docs/**", "token": ""}),
             ),
             &[],
