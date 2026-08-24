@@ -49,6 +49,12 @@ RestartSec=5
 # bounds the longest job we wait for (3h, matching the estate's largest
 # timeout-minutes); systemd escalates to SIGKILL after that.
 TimeoutStopSec=10800
+# KillMode=mixed: SIGTERM goes to the main PID only, so the graceful drain
+# above never kills in-flight step children (docker exec, upload curls) as a
+# side effect — that produced silently "successful" skipped steps and lost
+# artifact uploads (tailrocks/velnor#311). systemd SIGKILLs the whole cgroup
+# only after TimeoutStopSec expires.
+KillMode=mixed
 # Manages Docker containers + the daemon socket; runs as root (matches a typical
 # self-hosted CI runner host). Harden to a docker-group user later if desired.
 User=root

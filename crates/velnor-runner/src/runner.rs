@@ -1055,6 +1055,17 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
             );
         }
         prune_stale_velnor_docker_resources(&daemon_id);
+        // Reclaim job-id-labelled objects (precreated job environments and
+        // their guest siblings) orphaned by the previous drain/restart. Runs
+        // before any slot accepts a job, so nothing this boot created can be
+        // matched; scoped to THIS daemon id so co-located daemons are
+        // untouched. Best-effort — never blocks startup (velnor#311).
+        if let Err(error) = crate::docker_lease::reclaim_daemon_orphan_jobs(
+            &daemon_id,
+            crate::docker_lease::run_host_docker,
+        ) {
+            eprintln!("Warning: startup orphan job-environment reclaim failed: {error:#}");
+        }
         if let Some(sink) = crate::ops::global() {
             sink.emit(
                 velnor_model::EventReason::GcCompleted,
@@ -2015,18 +2026,7 @@ fn prune_stale_velnor_docker_resources(daemon_id: &str) {
 }
 
 fn daemon_owns_resource(owner: &str, daemon_id: &str) -> bool {
-    if owner == daemon_id {
-        return true;
-    }
-    Path::new(owner).parent() == Some(Path::new(daemon_id))
-        && Path::new(owner)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| {
-                name.strip_prefix("slot-").is_some_and(|slot| {
-                    !slot.is_empty() && slot.chars().all(|c| c.is_ascii_digit())
-                })
-            })
+    crate::docker_lease::daemon_owns_label(owner, daemon_id)
 }
 
 fn daemon_slot_configure_args(
@@ -5102,7 +5102,8 @@ fn execute_script_job_inner(
     // Keep clones for synthetic steps after executor (senders are moved into executor below).
     let post_step_start_sender = step_start_sender.clone();
     let post_step_log_sender = step_log_sender.clone();
-    let (environment_started, container_boot_duration) = precreated_environment.claim();
+    let (environment_started, container_boot_duration, environment_lease) =
+        precreated_environment.claim();
     let container_boot_ms = duration_ms(container_boot_duration);
     let initialize_containers_log = initialize_containers_step.map(|(step_id, started_at)| {
         let log = StepLog {
@@ -5138,6 +5139,11 @@ fn execute_script_job_inner(
         .with_workflow_env(crate::runtime_env::job_environment_variables(job))
         .with_trust_scope(trust_scope)
         .with_secret_masks(job_secret_mask_values(job));
+    // Adopt the pre-create thread's lease guard so the in-container docker
+    // socket stays proxied until THIS executor's job cleanup drops it.
+    if let Some(lease) = environment_lease {
+        executor = executor.with_docker_lease(lease);
+    }
     if let Some(sender) = step_start_sender {
         executor = executor.with_step_start_sender(sender);
     }
@@ -5546,23 +5552,53 @@ async fn wait_for_prior_slot_teardown(config_dir: &Path) -> Result<()> {
 
 struct PrecreatedJobEnvironment {
     container: crate::container::JobContainerSpec,
-    task: Option<std::thread::JoinHandle<(Result<()>, Duration)>>,
+    task: Option<
+        std::thread::JoinHandle<(
+            Result<Option<crate::docker_lease::DockerLeaseGuard>>,
+            Duration,
+        )>,
+    >,
+    /// Lease guard bound by the pre-create thread. It must outlive the job
+    /// container: the container holds the proxy socket bind-mounted, so
+    /// dropping the guard deletes the socket inode and every in-container
+    /// docker client dies with "Cannot connect to the Docker daemon"
+    /// (0.1.185 regression — the guard used to die with the pre-create
+    /// thread's thread-local executor).
+    lease: Option<crate::docker_lease::DockerLeaseGuard>,
     claimed: bool,
     boot_duration: Duration,
 }
 
 impl PrecreatedJobEnvironment {
     fn spawn(container: crate::container::JobContainerSpec) -> Self {
+        Self::spawn_with(container, |container| {
+            let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+            let result = executor.start_job_environment(container);
+            // Hand the guard out of the thread-local executor BEFORE it is
+            // dropped; the running container keeps using the proxied socket.
+            let lease = executor.take_docker_lease();
+            result.map(|()| lease)
+        })
+    }
+
+    fn spawn_with(
+        container: crate::container::JobContainerSpec,
+        starter: impl FnOnce(
+                &crate::container::JobContainerSpec,
+            ) -> Result<Option<crate::docker_lease::DockerLeaseGuard>>
+            + Send
+            + 'static,
+    ) -> Self {
         let task_container = container.clone();
         let task = std::thread::spawn(move || {
             let started = Instant::now();
-            let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
-            let result = executor.start_job_environment(&task_container);
+            let result = starter(&task_container);
             (result, started.elapsed())
         });
         Self {
             container,
             task: Some(task),
+            lease: None,
             claimed: false,
             boot_duration: Duration::ZERO,
         }
@@ -5573,8 +5609,9 @@ impl PrecreatedJobEnvironment {
             return self.claimed;
         };
         match task.join() {
-            Ok((Ok(()), duration)) => {
+            Ok((Ok(lease), duration)) => {
                 self.boot_duration = duration;
+                self.lease = lease;
                 true
             }
             Ok((Err(error), duration)) => {
@@ -5591,9 +5628,15 @@ impl PrecreatedJobEnvironment {
         }
     }
 
-    fn claim(mut self) -> (bool, Duration) {
+    fn claim(
+        mut self,
+    ) -> (
+        bool,
+        Duration,
+        Option<crate::docker_lease::DockerLeaseGuard>,
+    ) {
         self.claimed = self.join();
-        (self.claimed, self.boot_duration)
+        (self.claimed, self.boot_duration, self.lease.take())
     }
 }
 
@@ -5603,6 +5646,12 @@ impl Drop for PrecreatedJobEnvironment {
             return;
         }
         let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+        // Hand the pre-create thread's guard to the cleanup executor: its
+        // cleanup drops the guard only AFTER the abandoned environment's
+        // container is removed, so the proxy never dies under a live mount.
+        if let Some(lease) = self.lease.take() {
+            executor = executor.with_docker_lease(lease);
+        }
         if let Err(error) = executor.cleanup(&self.container) {
             eprintln!("Warning: abandoned pre-created environment cleanup failed: {error:#}");
         }
@@ -12508,6 +12557,130 @@ runs:
             record
         );
         assert!(json.contains("\"v\":1"));
+    }
+
+    #[cfg(unix)]
+    fn lease_test_container_spec(temp: &Path) -> crate::container::JobContainerSpec {
+        crate::container::JobContainerSpec {
+            name: "job".into(),
+            image: "ubuntu:24.04".into(),
+            network: "net".into(),
+            workspace_host: temp.join("work"),
+            temp_host: temp.to_path_buf(),
+            home_host: temp.join("home"),
+            actions_host: temp.join("actions"),
+            tools_host: temp.join("tools"),
+            mount_docker_socket: true,
+            env: Vec::new(),
+            resource_options: Vec::new(),
+            options: Vec::new(),
+            services: Vec::new(),
+            node_action_image: String::new(),
+            docker_cli_host_path: None,
+            docker_cli_plugin_host_dir: None,
+            docker_host_work_dir: None,
+            verify_bind_mounts: false,
+            daemon_id: "test-daemon".into(),
+            repository: Some("unknown-repository".into()),
+            cargo_target_host: None,
+            compiler_cache_backend: crate::compiler_cache::CompilerCacheBackend::Off,
+        }
+    }
+
+    #[cfg(unix)]
+    fn short_lease_socket(tag: &str) -> (PathBuf, PathBuf) {
+        // Unix socket paths must fit SUN_LEN (104 on macOS, where $TMPDIR is
+        // already ~50 chars), so the lease socket itself lives under /tmp.
+        let dir = PathBuf::from("/tmp").join(format!(
+            "vlc-{tag}-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("s.sock");
+        (dir, socket)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn precreated_environment_lease_survives_thread_exit_until_guard_drop() {
+        // Regression test for the 0.1.185 docker_lease regression: the lease
+        // proxy guard was bound into the pre-create thread's thread-local
+        // executor, so it dropped when that thread returned — deleting the
+        // socket the already-running job container had bind-mounted and
+        // killing every in-container docker client. The guard must now travel
+        // from the pre-create thread through claim() into the job executor.
+        let root =
+            std::env::temp_dir().join(format!("velnor-lease-claim-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let (socket_dir, listen) = short_lease_socket("claim");
+        let listen_for_starter = listen.clone();
+        let environment = PrecreatedJobEnvironment::spawn_with(
+            lease_test_container_spec(&root),
+            move |_container| {
+                Ok(Some(crate::docker_lease::DockerLeaseGuard::bind_to(
+                    listen_for_starter,
+                    PathBuf::from("/nonexistent-host-docker.sock"),
+                    "job".into(),
+                    "daemon".into(),
+                )?))
+            },
+        );
+
+        let (started, _duration, lease) = environment.claim();
+        assert!(started);
+        assert!(
+            lease.is_some(),
+            "claim must hand the live lease guard to the job executor"
+        );
+        // The pre-create thread has exited, yet the proxy is still alive: the
+        // socket file exists and accepts connections.
+        assert!(listen.exists(), "socket died with the pre-create thread");
+        std::os::unix::net::UnixStream::connect(&listen)
+            .expect("lease proxy must accept connections after claim");
+
+        drop(lease);
+        assert!(
+            !listen.exists(),
+            "dropping the guard must remove the lease socket"
+        );
+        fs::remove_dir_all(&socket_dir).ok();
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn abandoned_precreated_environment_cleanup_takes_lease() {
+        // An unclaimed pre-created environment is cleaned up by Drop; the
+        // pre-create thread's guard must be handed to that cleanup so the
+        // proxy outlives the container removal (and is gone afterwards).
+        let root = std::env::temp_dir().join(format!("velnor-lease-drop-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let (socket_dir, listen) = short_lease_socket("drop");
+        let listen_for_starter = listen.clone();
+        // Unique object names: Drop runs a real (best-effort, docker-CLI)
+        // cleanup, which must never target objects of anything else.
+        let mut spec = lease_test_container_spec(&root);
+        spec.name = format!("velnor-lease-drop-{}", uuid::Uuid::new_v4());
+        spec.network = format!("{}-net", spec.name);
+        {
+            let _environment = PrecreatedJobEnvironment::spawn_with(spec, move |_container| {
+                Ok(Some(crate::docker_lease::DockerLeaseGuard::bind_to(
+                    listen_for_starter,
+                    PathBuf::from("/nonexistent-host-docker.sock"),
+                    "job".into(),
+                    "daemon".into(),
+                )?))
+            });
+            // Dropped without claim: Drop runs cleanup with a real docker CLI
+            // (absent in tests — the cleanup failure is logged and ignored),
+            // and takes the guard.
+        }
+        assert!(
+            !listen.exists(),
+            "abandoned pre-created environment must drop its lease guard"
+        );
+        fs::remove_dir_all(&socket_dir).ok();
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

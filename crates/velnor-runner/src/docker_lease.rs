@@ -93,6 +93,21 @@ pub fn list_owned_job_format_args() -> Vec<String> {
     ]
 }
 
+/// List every container carrying a daemon ownership label, with the owning
+/// daemon id in the third column so callers can scope reclamation to ONE
+/// daemon (a host can run several daemons with different work roots).
+pub fn list_daemon_owned_job_format_args() -> Vec<String> {
+    vec![
+        "ps".into(),
+        "--all".into(),
+        "--filter".into(),
+        format!("label={DAEMON_ID_LABEL}"),
+        "--format".into(),
+        "{{.Names}}\t{{.Label \"velnor.job-id\"}}\t{{.Label \"velnor.daemon-id\"}}\t{{.State}}"
+            .into(),
+    ]
+}
+
 pub fn list_testcontainers_format_args() -> Vec<String> {
     vec![
         "ps".into(),
@@ -155,6 +170,52 @@ pub fn orphan_job_ids(formatted: &str) -> Vec<String> {
         let job_id = parts.next().unwrap_or("").trim();
         let state = parts.next().unwrap_or("").trim();
         if job_id.is_empty() {
+            continue;
+        }
+        seen_jobs.insert(job_id.to_string());
+        if name == job_id && state.eq_ignore_ascii_case("running") {
+            live_jobs.insert(job_id.to_string());
+        }
+    }
+    seen_jobs
+        .into_iter()
+        .filter(|job_id| !live_jobs.contains(job_id))
+        .collect()
+}
+
+/// True when a `velnor.daemon-id` label value belongs to `daemon_id`: either
+/// the shared work root itself or one of its direct `slot-N` children (job
+/// containers are labelled with the slot work directory, while daemon
+/// startup knows only the shared root).
+pub fn daemon_owns_label(owner: &str, daemon_id: &str) -> bool {
+    if owner == daemon_id {
+        return true;
+    }
+    Path::new(owner).parent() == Some(Path::new(daemon_id))
+        && Path::new(owner)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.strip_prefix("slot-").is_some_and(|slot| {
+                    !slot.is_empty() && slot.chars().all(|c| c.is_ascii_digit())
+                })
+            })
+}
+
+/// Orphan job ids restricted to containers owned by `daemon_id` (see
+/// [`daemon_owns_label`]). Input is the
+/// `name \t job-id \t daemon-id \t state` row format from
+/// [`list_daemon_owned_job_format_args`].
+pub fn daemon_orphan_job_ids(formatted: &str, daemon_id: &str) -> Vec<String> {
+    let mut live_jobs = std::collections::BTreeSet::new();
+    let mut seen_jobs = std::collections::BTreeSet::new();
+    for line in formatted.lines() {
+        let mut parts = line.split('\t');
+        let name = parts.next().unwrap_or("").trim();
+        let job_id = parts.next().unwrap_or("").trim();
+        let owner = parts.next().unwrap_or("").trim();
+        let state = parts.next().unwrap_or("").trim();
+        if job_id.is_empty() || !daemon_owns_label(owner, daemon_id) {
             continue;
         }
         seen_jobs.insert(job_id.to_string());
@@ -321,6 +382,23 @@ pub fn reclaim_orphan_jobs(mut docker: impl FnMut(&[String]) -> Result<String>) 
     Ok(())
 }
 
+/// Daemon-scoped variant of [`reclaim_orphan_jobs`] for daemon startup: only
+/// containers whose `velnor.daemon-id` label belongs to THIS daemon are
+/// considered, so co-located daemons never reclaim each other's jobs. Used at
+/// boot to reclaim precreated job-environment containers (and their guest
+/// siblings) orphaned by a drain/restart — previously only manual `doctor`
+/// runs reclaimed them (tailrocks/velnor#311).
+pub fn reclaim_daemon_orphan_jobs(
+    daemon_id: &str,
+    mut docker: impl FnMut(&[String]) -> Result<String>,
+) -> Result<()> {
+    let formatted = docker(&list_daemon_owned_job_format_args())?;
+    for job_id in daemon_orphan_job_ids(&formatted, daemon_id) {
+        reclaim_job_owned(&job_id, &mut docker)?;
+    }
+    Ok(())
+}
+
 pub fn reclaim_unlabeled_testcontainers(
     mut docker: impl FnMut(&[String]) -> Result<String>,
 ) -> Result<()> {
@@ -416,6 +494,10 @@ impl Drop for DockerLeaseGuard {
             let _ = thread.join();
         }
         let _ = std::fs::remove_file(&self.listen_path);
+        // dockerd auto-creates an empty DIRECTORY at a missing bind-mount
+        // source; if this path ever became one, drop it too (remove_dir only
+        // succeeds on empty dirs, so a real socket file tree is untouched).
+        let _ = std::fs::remove_dir(&self.listen_path);
     }
 }
 
@@ -773,6 +855,76 @@ velnor-job-dead\tvelnor-job-dead\texited
         assert_eq!(
             calls[1],
             force_remove_container_args(&["gagarin".into(), "ride".into()])
+        );
+    }
+
+    #[test]
+    fn daemon_owns_label_accepts_root_and_direct_slot_children_only() {
+        let daemon = "/var/lib/velnor-fleet/work";
+        assert!(daemon_owns_label(daemon, daemon));
+        assert!(daemon_owns_label(
+            "/var/lib/velnor-fleet/work/slot-3",
+            daemon
+        ));
+        assert!(!daemon_owns_label("/var/lib/velnor-other/work", daemon));
+        assert!(!daemon_owns_label(
+            "/var/lib/velnor-fleet/work/slot-3/nested",
+            daemon
+        ));
+        assert!(!daemon_owns_label(
+            "/var/lib/velnor-fleet/work/slots",
+            daemon
+        ));
+        assert!(!daemon_owns_label("", daemon));
+    }
+
+    #[test]
+    fn daemon_orphan_job_ids_scopes_to_owning_daemon() {
+        let daemon = "/var/lib/velnor-fleet/work";
+        let formatted = "\
+velnor-job-live\tvelnor-job-live\t/var/lib/velnor-fleet/work/slot-1\trunning
+guest-pg\tvelnor-job-live\t/var/lib/velnor-fleet/work/slot-1\trunning
+guest-old\tvelnor-job-dead\t/var/lib/velnor-fleet/work/slot-2\trunning
+velnor-job-dead\tvelnor-job-dead\t/var/lib/velnor-fleet/work/slot-2\texited
+other-dead\tother-dead\t/var/lib/velnor-other/work\texited
+";
+        assert_eq!(
+            daemon_orphan_job_ids(formatted, daemon),
+            vec!["velnor-job-dead".to_string()]
+        );
+    }
+
+    #[test]
+    fn reclaim_daemon_orphan_jobs_reclaims_only_this_daemons_orphans() {
+        let daemon = "/var/lib/velnor-fleet/work";
+        let mut calls = Vec::new();
+        let mut outputs = vec![
+            "velnor-job-live\tvelnor-job-live\t/var/lib/velnor-fleet/work/slot-1\trunning\nguest-old\tvelnor-job-dead\t/var/lib/velnor-fleet/work/slot-1\trunning\nother\tother\t/var/lib/velnor-other/work\texited\n"
+                .to_string(),
+            "guest-old\n".to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ];
+        reclaim_daemon_orphan_jobs(daemon, |args| {
+            calls.push(args.to_vec());
+            if outputs.is_empty() {
+                return Err(anyhow!("unexpected docker call {args:?}"));
+            }
+            Ok(outputs.remove(0))
+        })
+        .unwrap();
+        assert_eq!(calls[0], list_daemon_owned_job_format_args());
+        assert_eq!(calls[1], list_owned_containers_args("velnor-job-dead"));
+        assert_eq!(calls[2], force_remove_container_args(&["guest-old".into()]));
+        // The other daemon's exited job is never looked up or reclaimed.
+        assert!(
+            calls
+                .iter()
+                .all(|call| !call.iter().any(|arg| arg == "other")),
+            "foreign daemon job leaked into reclaim calls: {calls:?}"
         );
     }
 }
