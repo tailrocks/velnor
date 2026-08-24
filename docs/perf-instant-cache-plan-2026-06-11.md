@@ -147,6 +147,22 @@ image-baked shims, observed as `gh is not a valid shim` on brown).
 5. **Bind-mount verify cache** (per-daemon, not per-job).
 6. Native HTTP client (P3.1), zero-copy log pipeline (P3.2) — unchanged.
 
+### 2026-08-25 implementation update
+
+The publisher portion of the async job-finalization item is now implemented in
+`velnor-runner`:
+
+- best-effort step timeline and log publishers drain before terminal completion,
+  in parallel, with their existing 5s/30s deadlines and explicit task abort;
+- terminal completion keeps the official Results Service ordering, while the
+  old sequential 5s + 30s publisher tail is capped at the slower deadline;
+- the completion payload remains unchanged, and publisher-drain duration is
+  emitted as `step-publishers-drained` forensic evidence.
+
+Local proof is focused timeout coverage plus the full workspace gate. Runtime
+wall-time acceptance remains pending a fresh fixture dual-lane run; no
+production speedup percentage is claimed yet.
+
 ## Deploy + verification gates
 
 1. velnor v0.1.18 tag → deb → apt; Sentry upgraded (all three daemons);
