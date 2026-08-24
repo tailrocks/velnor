@@ -119,6 +119,43 @@ The authenticated operator token now carries `admin:org`, `repo`, and
    and group assignment within two minutes. Then run `velnor-runner doctor`
    and the warm rerun proof before declaring migration complete.
 
+## Allowlist drift incident (2026-08-24)
+
+The `velnor-trusted` group (id 3) silently dropped to 3 allowlisted
+repositories (`cloudflare-tofu`, `holla`, `velnor`) while the estate had grown
+to 21 velnor-lane repositories. All 8 runners stayed online and idle, but every
+velnor-lane job in an unlisted repository queued indefinitely (e.g.
+tailrocks/velnor-actions run 32678489660, tailrocks/holla-apt run 32678491924).
+The org audit log was not readable with the operator token, so the actor behind
+the removal is unrecorded.
+
+Membership was restored by re-adding every repository whose default-branch
+workflows reference `velnor-target-mvp`. Standing rule: **every repository
+onboarded to the Velnor lane must be added to the group allowlist in the same
+change**, and `scripts/runner_group_doctor.sh` must be run after onboarding
+batches — it fails loudly listing the exact remediation `PUT` per missing
+repository:
+
+```sh
+scripts/runner_group_doctor.sh            # defaults: --org tailrocks --group velnor-trusted
+```
+
+Current full allowlist (21 repositories; stable GitHub ids):
+
+| Repository | Id | Repository | Id |
+|---|---:|---|---:|
+| velnor | 1255367013 | parallax | 1235761953 |
+| parallax-telemetry-playground | 1277301638 | tablerock | 1301508644 |
+| holla | 1262209244 | ruxel | 1265722009 |
+| termrock | 1302045151 | schemalane | 1168023899 |
+| pg-bigdecimal | 1247026498 | tracing-request-level | 1247026496 |
+| velnor-actions-fixture | 1256201624 | cloudflare-tofu | 1331336420 |
+| github-terraform | 1269732081 | holla-apt | 1262993132 |
+| homebrew-holla | 1262212487 | homebrew-parallax | 1269643904 |
+| homebrew-ruxel | 1328281709 | homebrew-tablerock | 1307223747 |
+| tailrocks-skills | 1287598760 | velnor-actions | 1310641212 |
+| velnor-apt | 1259812770 | | |
+
 ## Rollback
 
 Drain the organization daemon, remove only its registrations, and restart the
