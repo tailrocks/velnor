@@ -7,7 +7,9 @@ case "$1" in
       for unit in $(systemctl list-units --all --no-legend --plain 'velnor-doctor*.timer' 'velnor-doctor*.service' 2>/dev/null | awk '{print $1}'); do
         systemctl stop "$unit" || true
       done
-      systemctl stop velnor-daemon.service || true
+      for unit in $(systemctl list-units --all --no-legend --plain 'velnor-daemon.service' 'velnor-daemon@*.service' 2>/dev/null | awk '{print $1}'); do
+        systemctl stop "$unit" || true
+      done
     fi
     ;;
 esac

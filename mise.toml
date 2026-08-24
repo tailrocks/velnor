@@ -1,13 +1,16 @@
 [tools]
 actionlint = "1.7.12"
-cargo-binstall = "1.21.0"
+cargo-binstall = "1.22.0"
 "aqua:EmbarkStudios/cargo-deny" = "0.20.2"
-"cargo:cargo-nextest" = "0.9.140"
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.140"
 "cargo:cargo-zigbuild" = "0.23.0"
 "cargo:cargo-deb" = "3.7.0"
 zig = "0.16.0"
 
 [settings]
+# Plan 008: mandatory committed lockfile. `mise` reads pinned URLs/checksums
+# from mise.lock and (under MISE_LOCKED in CI/jobs) refuses unlocked artifacts.
+lockfile = true
 idiomatic_version_file_enable_tools = ["rust"]
 cargo.binstall_only = true
 cargo.binstall_quickinstall = true
@@ -29,3 +32,6 @@ run = "cargo deny check advisories"
 
 [tasks.check]
 depends = ["fmt", "actionlint", "deny", "lint", "test"]
+
+[tasks.ci]
+depends = ["check"]

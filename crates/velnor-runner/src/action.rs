@@ -110,6 +110,8 @@ pub enum ActionRuntime {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeActionAdapter {
+    /// Strictly approved remote composite expanded from its pinned metadata.
+    ApprovedComposite,
     Checkout,
     Cache,
     UploadArtifact,
@@ -117,6 +119,8 @@ pub enum NativeActionAdapter {
     UploadPagesArtifact,
     ConfigurePages,
     DeployPages,
+    AttestBuildProvenance,
+    CreateGitHubAppToken,
     PathsFilter,
     Mise,
     Sccache,
@@ -137,6 +141,35 @@ pub enum NativeActionAdapter {
     CosignInstaller,
 }
 
+/// GitHub cache lifecycle carried by an `actions/cache` invocation. The root
+/// action restores in main and saves in post; `/restore` only restores; `/save`
+/// only saves. Velnor must preserve the distinction the action subpath encodes
+/// instead of collapsing every form into the root behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheActionKind {
+    Root,
+    Restore,
+    Save,
+}
+
+/// Classify an `actions/cache` invocation from its action subpath. Absent or
+/// empty = root; exact `restore`/`save` = the matching subaction. Any other
+/// subpath is rejected rather than silently treated as root, so an unknown cache
+/// form fails closed before it can restore/save with the wrong lifecycle.
+pub fn cache_action_kind(source_path: Option<&str>) -> Result<CacheActionKind> {
+    match source_path
+        .map(|value| value.trim().trim_matches('/'))
+        .filter(|value| !value.is_empty())
+    {
+        None => Ok(CacheActionKind::Root),
+        Some(path) if path.eq_ignore_ascii_case("restore") => Ok(CacheActionKind::Restore),
+        Some(path) if path.eq_ignore_ascii_case("save") => Ok(CacheActionKind::Save),
+        Some(other) => bail!(
+            "unsupported actions/cache subpath '{other}': only the root action, 'restore', and 'save' are recognized"
+        ),
+    }
+}
+
 pub fn native_action_adapter(repository: &str) -> Option<NativeActionAdapter> {
     match repository.to_ascii_lowercase().as_str() {
         "actions/checkout" => Some(NativeActionAdapter::Checkout),
@@ -146,6 +179,8 @@ pub fn native_action_adapter(repository: &str) -> Option<NativeActionAdapter> {
         "actions/upload-pages-artifact" => Some(NativeActionAdapter::UploadPagesArtifact),
         "actions/configure-pages" => Some(NativeActionAdapter::ConfigurePages),
         "actions/deploy-pages" => Some(NativeActionAdapter::DeployPages),
+        "actions/attest-build-provenance" => Some(NativeActionAdapter::AttestBuildProvenance),
+        "actions/create-github-app-token" => Some(NativeActionAdapter::CreateGitHubAppToken),
         "dorny/paths-filter" => Some(NativeActionAdapter::PathsFilter),
         "jdx/mise-action" => Some(NativeActionAdapter::Mise),
         "mozilla-actions/sccache-action" => Some(NativeActionAdapter::Sccache),
@@ -189,12 +224,6 @@ pub fn unsupported_action_error(repository: &str) -> Option<&'static str> {
         "embarkstudios/cargo-deny-action" => Some(
             "EmbarkStudios/cargo-deny-action is not supported on Velnor: use jdx/mise-action \
              with a pinned 'cargo:cargo-deny' tool and invoke cargo deny from a run step instead.",
-        ),
-        "actions/attest-build-provenance" => Some(
-            "actions/attest-build-provenance is not available on the Velnor product lane: its \
-             actions/attest v4 flow requires Sigstore bundle generation plus the GitHub \
-             attestation API. Keep this step gated to the GitHub writer lane until a native \
-             Rust attestation client is fixture-proven; JavaScript sidecar fallback is forbidden.",
         ),
         _ => None,
     }
@@ -519,12 +548,19 @@ pub struct DockerActionInvocation {
 pub struct NativeActionInvocation {
     pub git_ref: String,
     pub adapter: NativeActionAdapter,
+    /// Cache lifecycle for the `actions/cache` adapter (`None` for every other
+    /// adapter). Preserving this through invocation is what keeps root/restore/
+    /// save from collapsing into a single behavior.
+    pub cache_kind: Option<CacheActionKind>,
+    /// Action subpath retained from the plan (e.g. `restore`, `save`), so the
+    /// invocation no longer drops the GitHub lifecycle identity.
+    pub source_path: Option<String>,
     pub inputs: BTreeMap<String, String>,
     pub env: Vec<(String, String)>,
 }
 
 impl ResolvedAction {
-    pub fn native_invocation(&self) -> Option<NativeActionInvocation> {
+    pub fn native_invocation(&self) -> Result<Option<NativeActionInvocation>> {
         native_invocation_from_plan(&self.plan)
     }
 
@@ -678,18 +714,36 @@ impl ResolvedAction {
             &self.metadata,
             workspace_container,
             actions_host,
+            &self.plan.repository_dir,
             &action_path,
+            &mut BTreeSet::new(),
+            0,
         )
     }
 }
 
-pub fn native_invocation_from_plan(plan: &RepositoryActionPlan) -> Option<NativeActionInvocation> {
-    native_action_adapter(&plan.repository).map(|adapter| NativeActionInvocation {
+pub fn native_invocation_from_plan(
+    plan: &RepositoryActionPlan,
+) -> Result<Option<NativeActionInvocation>> {
+    let Some(adapter) = native_action_adapter(&plan.repository) else {
+        return Ok(None);
+    };
+    // Only the cache adapter carries a lifecycle; deriving it here (and failing
+    // on an unknown subpath) keeps the classification at the single point where
+    // the plan's `source_path` is turned into an invocation.
+    let cache_kind = if adapter == NativeActionAdapter::Cache {
+        Some(cache_action_kind(plan.source_path.as_deref())?)
+    } else {
+        None
+    };
+    Ok(Some(NativeActionInvocation {
         git_ref: plan.git_ref.clone(),
         adapter,
+        cache_kind,
+        source_path: plan.source_path.clone(),
         inputs: plan.inputs.clone(),
         env: plan.env.clone(),
-    })
+    }))
 }
 
 pub fn composite_script_steps(
@@ -726,18 +780,42 @@ pub fn composite_action_invocations(
         metadata,
         workspace_container,
         actions_host,
+        local_workspace_root(&plan.action_dir)?,
         &action_path,
+        &mut BTreeSet::new(),
+        0,
     )
 }
 
+fn local_workspace_root(action_dir: &Path) -> Result<&Path> {
+    action_dir
+        .ancestors()
+        .find(|path| path.file_name().is_some_and(|name| name == ".github"))
+        .and_then(Path::parent)
+        .with_context(|| {
+            format!(
+                "local action path {} is outside .github/actions",
+                action_dir.display()
+            )
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn composite_action_invocations_with_path(
     step_id_prefix: &str,
     inputs: &BTreeMap<String, String>,
     metadata: &ActionMetadata,
     workspace_container: &str,
     actions_host: &Path,
+    local_root_host: &Path,
     action_path: &str,
+    local_stack: &mut BTreeSet<PathBuf>,
+    depth: usize,
 ) -> Result<Vec<CompositeActionInvocation>> {
+    const MAX_LOCAL_COMPOSITE_DEPTH: usize = 16;
+    if depth > MAX_LOCAL_COMPOSITE_DEPTH {
+        bail!("nested local composite depth exceeds {MAX_LOCAL_COMPOSITE_DEPTH}")
+    }
     let action_inputs = effective_inputs(metadata, inputs);
     let mut invocations = Vec::new();
     let mut step_ids = BTreeMap::new();
@@ -747,6 +825,54 @@ fn composite_action_invocations_with_path(
             step_ids.insert(id.to_string(), step_id.clone());
         }
         if let Some(uses) = step.uses.as_deref() {
+            if uses.starts_with('.') {
+                let nested_dir = local_action_dir(local_root_host, uses)?;
+                if !local_stack.insert(nested_dir.clone()) {
+                    bail!("nested local composite cycle at '{}'", nested_dir.display())
+                }
+                let metadata_path = action_metadata_path(&nested_dir)?;
+                let nested_metadata = parse_action_metadata(
+                    &fs::read_to_string(&metadata_path)
+                        .with_context(|| format!("read {}", metadata_path.display()))?,
+                )?;
+                if nested_metadata.runtime()? != ActionRuntime::Composite {
+                    bail!("nested local action '{uses}' is not a composite action")
+                }
+                let nested_inputs = step
+                    .with
+                    .iter()
+                    .map(|(name, value)| {
+                        (
+                            name.clone(),
+                            render_composite_scoped_value(
+                                value,
+                                &action_inputs,
+                                action_path,
+                                workspace_container,
+                                &step_ids,
+                            ),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let nested_action_path = if nested_dir.starts_with(actions_host) {
+                    container_path(actions_host, &nested_dir)?
+                } else {
+                    workspace_container_path(workspace_container, &nested_dir)?
+                };
+                invocations.extend(composite_action_invocations_with_path(
+                    &step_id,
+                    &nested_inputs,
+                    &nested_metadata,
+                    workspace_container,
+                    actions_host,
+                    local_root_host,
+                    &nested_action_path,
+                    local_stack,
+                    depth + 1,
+                )?);
+                local_stack.remove(&nested_dir);
+                continue;
+            }
             let reference = parse_repository_uses(uses)?;
             let inputs = step
                 .with
@@ -2115,6 +2241,68 @@ runs:
     }
 
     #[test]
+    fn expands_nested_local_composite_before_execution() {
+        let workspace = std::env::temp_dir().join(format!(
+            "velnor-nested-local-composite-{}",
+            std::process::id()
+        ));
+        let root = workspace.join(".github/actions/root");
+        let nested = workspace.join(".github/actions/nested");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(
+            nested.join("action.yml"),
+            r#"
+runs:
+  using: composite
+  steps:
+    - id: prove
+      shell: bash
+      run: echo "closure=nested" >> "$GITHUB_OUTPUT"
+outputs:
+  closure:
+    value: ${{ steps.prove.outputs.closure }}
+"#,
+        )
+        .unwrap();
+        let metadata = parse_action_metadata(
+            r#"
+runs:
+  using: composite
+  steps:
+    - id: nested
+      uses: ./.github/actions/nested
+outputs:
+  closure:
+    value: ${{ steps.nested.outputs.closure }}
+"#,
+        )
+        .unwrap();
+        let plan = LocalActionPlan {
+            step_id: "root".into(),
+            action_dir: root,
+            inputs: BTreeMap::new(),
+        };
+
+        let invocations =
+            composite_action_invocations(&plan, &metadata, "/__w", Path::new("/__a")).unwrap();
+
+        assert!(matches!(
+            invocations[0],
+            CompositeActionInvocation::Script(_)
+        ));
+        assert!(matches!(
+            &invocations[1],
+            CompositeActionInvocation::Outputs(outputs) if outputs.step_id == "root-nested"
+        ));
+        assert!(matches!(
+            &invocations[2],
+            CompositeActionInvocation::Outputs(outputs) if outputs.step_id == "root"
+        ));
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
     fn expands_repository_composite_run_steps() {
         let actions_host = Path::new("/tmp/actions");
         let plan = RepositoryActionPlan {
@@ -2417,6 +2605,93 @@ runs:
         assert_eq!(resolved.len(), 2);
         assert_eq!(fetches, 1);
         std::fs::remove_dir_all(actions_host).ok();
+    }
+
+    fn cache_plan(step_id: &str, source_path: Option<&str>) -> RepositoryActionPlan {
+        RepositoryActionPlan {
+            step_id: step_id.into(),
+            repository: "actions/cache".into(),
+            git_ref: "v4".into(),
+            source_path: source_path.map(str::to_string),
+            repository_dir: PathBuf::from("/tmp/_actions/actions_cache/v4"),
+            action_dir: PathBuf::from("/tmp/_actions/actions_cache/v4"),
+            inputs: BTreeMap::new(),
+            env: Vec::new(),
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }
+    }
+
+    #[test]
+    fn native_invocation_preserves_cache_lifecycle() {
+        let root = native_invocation_from_plan(&cache_plan("cache", None))
+            .unwrap()
+            .unwrap();
+        assert_eq!(root.adapter, NativeActionAdapter::Cache);
+        assert_eq!(root.cache_kind, Some(CacheActionKind::Root));
+        assert_eq!(root.source_path, None);
+
+        // An empty subpath is the root form, not an error.
+        let empty = native_invocation_from_plan(&cache_plan("cache", Some("")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(empty.cache_kind, Some(CacheActionKind::Root));
+
+        let restore = native_invocation_from_plan(&cache_plan("cache-restore", Some("restore")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(restore.cache_kind, Some(CacheActionKind::Restore));
+        assert_eq!(restore.source_path.as_deref(), Some("restore"));
+
+        let save = native_invocation_from_plan(&cache_plan("cache-save", Some("save")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(save.cache_kind, Some(CacheActionKind::Save));
+        assert_eq!(save.source_path.as_deref(), Some("save"));
+    }
+
+    #[test]
+    fn native_invocation_survives_nested_composite_cache_plan() {
+        // A composite action expands each nested step into a
+        // `RepositoryActionPlan`; the subpath it carries must classify the same
+        // way through `native_invocation_from_plan` as a top-level reference.
+        let mut nested = cache_plan("composite__cache-save", Some("save"));
+        nested.env = vec![("GITHUB_ACTION".into(), "outer-composite".into())];
+        let invocation = native_invocation_from_plan(&nested).unwrap().unwrap();
+        assert_eq!(invocation.cache_kind, Some(CacheActionKind::Save));
+        assert_eq!(invocation.source_path.as_deref(), Some("save"));
+    }
+
+    #[test]
+    fn native_invocation_rejects_unknown_cache_subpath() {
+        let error = native_invocation_from_plan(&cache_plan("cache", Some("delete"))).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported actions/cache subpath"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn native_invocation_leaves_non_cache_adapters_without_cache_kind() {
+        let mut plan = cache_plan("upload", None);
+        plan.repository = "actions/upload-artifact".into();
+        plan.source_path = Some("ignored".into());
+        let invocation = native_invocation_from_plan(&plan).unwrap().unwrap();
+        assert_eq!(invocation.adapter, NativeActionAdapter::UploadArtifact);
+        // Non-cache adapters keep their prior behavior: no lifecycle, and a
+        // non-cache subpath is never rejected here.
+        assert_eq!(invocation.cache_kind, None);
+        assert_eq!(invocation.source_path.as_deref(), Some("ignored"));
+    }
+
+    #[test]
+    fn native_invocation_is_none_for_unknown_repository() {
+        let mut plan = cache_plan("setup", None);
+        plan.repository = "owner/unknown-action".into();
+        assert!(native_invocation_from_plan(&plan).unwrap().is_none());
     }
 
     #[test]
@@ -3003,6 +3278,14 @@ runs:
                 NativeActionAdapter::UploadPagesArtifact,
             ),
             ("actions/deploy-pages", NativeActionAdapter::DeployPages),
+            (
+                "actions/attest-build-provenance",
+                NativeActionAdapter::AttestBuildProvenance,
+            ),
+            (
+                "actions/create-github-app-token",
+                NativeActionAdapter::CreateGitHubAppToken,
+            ),
             ("dorny/paths-filter", NativeActionAdapter::PathsFilter),
             ("jdx/mise-action", NativeActionAdapter::Mise),
             (
@@ -3052,7 +3335,7 @@ runs:
         assert!(unsupported_action_error("baptiste0928/cargo-install").is_some());
         assert!(unsupported_action_error("Baptiste0928/Cargo-Install").is_some());
         assert!(unsupported_action_error("EmbarkStudios/cargo-deny-action").is_some());
-        assert!(unsupported_action_error("actions/attest-build-provenance").is_some());
+        assert!(unsupported_action_error("actions/attest-build-provenance").is_none());
         assert!(unsupported_action_error("jdx/mise-action").is_none());
         assert!(unsupported_action_error("owner/unknown-action").is_none());
         assert!(unsupported_action_error("dtolnay/rust-toolchain")
@@ -3064,9 +3347,6 @@ runs:
         assert!(unsupported_action_error("EmbarkStudios/cargo-deny-action")
             .unwrap()
             .contains("cargo:cargo-deny"));
-        assert!(unsupported_action_error("actions/attest-build-provenance")
-            .unwrap()
-            .contains("GitHub writer lane"));
     }
 
     fn action_metadata_files(root: &Path) -> Vec<PathBuf> {

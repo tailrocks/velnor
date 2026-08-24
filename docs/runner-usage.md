@@ -6,10 +6,14 @@ in [master-plan.md](master-plan.md), [mission.md](mission.md), and
 
 ## Production operation (Debian package)
 
-The runner installs and upgrades via apt (repo: `velnor-apt.tailrocks.com`):
+The runner installs, upgrades, downgrades, and rolls back only via the signed
+apt repository (`velnor-apt.tailrocks.com`), always pinned to a verified exact
+version:
 
 ```sh
-sudo apt-get update && sudo apt-get install velnor-runner   # or upgrade
+sudo apt-get update
+apt-cache policy velnor-runner
+sudo apt-get install velnor-runner=X.Y.Z
 ```
 
 For first-install repository/keyring setup and the maintainer's complete
@@ -19,17 +23,21 @@ servers never install a local release asset.
 
 Configuration (one daemon per target scope):
 
-Production upgrades on Sentry come only from that signed repository. Commit and
-push the source, tag the new version, wait for `release-deb.yml` and
-`tailrocks/velnor-apt`'s `publish.yml` to pass, verify the signed repository
-offers the new version, then run the apt command above. Do not deploy with
-`dpkg -i` or install a local `.deb` path with apt.
+Production changes on Sentry come only from that signed repository. Commit and
+push the source, create the signed tag, wait for Velnor's immutable source
+release/record and `tailrocks/velnor-apt`'s signed publication, verify the
+signature, publication record, exact candidate and predecessor, drain the
+fleet, then run the exact-version apt commands above. Do not use a local or
+downloaded `.deb`, `dpkg -i`, a local apt path, a copied binary, or a local
+build. A verified release record is activation metadata, not an installation
+path.
 
-The package ships the canonical job-image Dockerfile. During configuration,
-`postinst` compares the image's OCI version label with the Debian package
-version and rebuilds `velnor/job-ubuntu:26.04` before restarting any daemon when
-they differ. An apt upgrade therefore cannot leave native adapters paired with
-a stale tool image; image-build failure fails the package transaction.
+The package ships the canonical job-image Dockerfile and acyclic build identity.
+During configuration, `postinst` verifies the installed binary and compiled
+manifest against that package-owned identity. It performs no network work,
+image build, activation, or restart. During a drained upgrade the active pointer
+continues to name the exact rollback predecessor; daemon `ExecStartPre` rejects
+that temporary mismatch until the operator activates the new signed record.
 
 - Default instance: `/etc/velnor/velnor.env` (URL, name, labels, slots,
   work dir) + `/etc/velnor/secrets.env` (0600, `GITHUB_TOKEN=...` — never
@@ -48,26 +56,54 @@ a stale tool image; image-build failure fails the package transaction.
   override the incremental setting and cache size. The path-normalization
   roots are runner-owned and cannot be overridden. Set
   `VELNOR_SCCACHE_CACHE_SIZE` on the daemon to change the default store bound.
-- Capacity admission reserves 30 GiB per advertised slot and preserves a 10
-  GiB emergency floor. Tune them per host with `VELNOR_JOB_PEAK_BYTES` and
-  `VELNOR_EMERGENCY_RESERVE_BYTES`; doctor reports free/reserved bytes, active
-  leases, and cache accounting.
+- Capacity admission reserves 30 GiB **per active job** (not per idle JIT
+  slot) and preserves a 10 GiB emergency floor. Idle slots poll without
+  pinning peak budget so multi-daemon hosts do not over-reserve disk.
+  Tune peak/floor with `VELNOR_JOB_PEAK_BYTES` and
+  `VELNOR_EMERGENCY_RESERVE_BYTES`. After GitHub acquire, peak reservation
+  may retry while run-service lock renewal keeps the job lease live, but
+  only until `VELNOR_CAPACITY_WAIT_SECS` (default 120s, floor 15s). If the
+  bound elapses with no reservation, Velnor completes the job **Failed**
+  with a visible `host_capacity` step and reason — never Success, never an
+  indefinite zero-step `in_progress` hang. If run-service lock renewal sees
+  `OAuthRegistrationNotFound` or HTTP 404 during that wait, the job is
+  fail-closed as `runner_registration` (Failed, visible step) instead of
+  hanging until GitHub's lane timeout. GitHub DELETE `422` ("runner is
+  currently running a job") fail-closes any recorded leftover job
+  (`stale_busy`) so the lease can drop, then retries DELETE. Registry
+  `offline+busy` is **not** healthy (6676-class); doctor completes the
+  leftover job and the slot recycles. A GitHub job that sat `queued`
+  (unassigned, no runner id) on `velnor-trusted` longer than
+  `VELNOR_QUEUE_WAIT_SECS` (default 300s) is REST-cancelled by doctor
+  before acquire. An already-assigned job is never failed for queue wait.
+  Post-merge `push` events are
+  not accepted on `velnor-trusted` (`merged_push_occupancy`); generated
+  callers route `push` to the GitHub lane so open PRs keep the fleet.
+  Do not hammer DELETE. Leaked reservation files older
+  than `VELNOR_RESERVATION_TTL_SECS` (default 6h) are reaped even while the
+  daemon PID is still alive (multi-slot daemons share one PID). Doctor
+  reports free/reserved bytes, active leases, and cache accounting.
 - Regenerable class ceilings default to targets 200 GiB, actions cache 50 GiB,
   and artifacts/Cargo/mise 20 GiB each. Override with the corresponding
   `VELNOR_BUDGET_{TARGETS,CACHES,ARTIFACTS,CARGO,MISE}_BYTES` variables.
-  The mise class includes repo-scoped `/opt/mise/installs` and the matching
-  `/root/.rustup` payload; they are one executable-tool lifetime and budget.
+  The mise class includes repo-scoped `/opt/mise/installs`, the persistent
+  per-version mise binary store mounted at `/opt/velnor/mise-binaries`, and the
+  matching `/root/.rustup` payload; they are one executable-tool lifetime and
+  budget. mise runs fail-closed against committed lockfiles: a job's tools
+  install only with `mise install --locked` (recorded checksums/provenance) and
+  each exact mise binary version is verified and persisted for reuse instead of
+  re-fetched — the baked `/opt/mise/bin` bootstrap is never mutated.
 - Optional Rust target persistence: set `VELNOR_CARGO_TARGET_PERSIST=true` in
   the daemon env only for trusted target scopes. Velnor stores targets under
   `_velnor_targets/<trust-scope>/<generation>/<repo>/<workflow>/<job-bucket>`
-  so warm state
-  is shared only across matching trust scope, repository, workflow, and job
-  classes, then mounts that bucket at the normal `/__w/target` workspace path.
-  It does not set `CARGO_TARGET_DIR`, so workflow-visible Cargo paths remain
-  identical to GitHub-hosted execution. Native checkout preserves only this
-  runner-owned `target/` mount while applying `git clean -ffdx` to every other
-  ignored or untracked workspace path; otherwise checkout would empty the
-  durable bucket before every job. Set `VELNOR_TRUST_SCOPE` per
+  so warm state is shared only across matching trust scope, repository,
+  workflow, and job classes. After checkout, Velnor reflink/copies a complete
+  generation into the job-local workspace `target/`; after the job it publishes
+  the completed tree atomically. It never adds a nested `/__w/target` bind
+  mount: nested mounts make an ordinary rename between `target/` and another
+  workspace directory fail with `EXDEV`. Velnor does not set
+  `CARGO_TARGET_DIR`, so paths and same-filesystem semantics remain identical
+  to GitHub-hosted execution. Set `VELNOR_TRUST_SCOPE` per
   daemon/pool (`trusted` by default;
   use a distinct value such as `public-forks` for untrusted lanes) before
   enabling target persistence.
@@ -80,6 +116,9 @@ a stale tool image; image-build failure fails the package transaction.
   pool by accident.
 - Organization fleets: use `--url https://github.com/<org>` with
   `--pool-name <runner-group>` to resolve the current group id through GitHub.
+  The daemon validates that name/id pair once per daemon pass; all slots and
+  later JIT recycles reuse the resolved id so fleet width and retry storms do
+  not multiply GitHub REST quota consumption.
   Follow the drain, trust-lane, label-continuity, and rollback procedure in
   [org-fleet-migration.md](org-fleet-migration.md).
 
@@ -107,6 +146,25 @@ legacy `/var/lib/velnor*/work/_velnor_*` class into its matching canonical
 trust/class path. Velnor reads an existing legacy class only while its
 canonical destination is absent, so migration is explicit and reversible.
 Use `velnor-runner storage paths` and `storage status` to inspect resolution.
+
+Release coherence (plan 010): the `velnor-runner release` command group owns the
+acyclic release-record chain. `release verify-installed` (run automatically as
+`ExecStartPre` on both daemon units) proves the installed binary, package
+version, and compiled manifest match the atomically activated
+`/var/lib/velnor/release/active/record.json`; a missing or mismatched tuple fails
+the start closed so a mixed old/new tuple never runs. Deployment stages a record
+with `release activate --record <release-record.json>`. Activation first pulls
+and verifies the exact OCI digest and labels, stores immutable
+`records/<tag>/{record,deployed}.json`, then atomically replaces the `active`
+relative symlink. The prior complete tuple remains behind the `previous`
+symlink for `release rollback`; `release verify-record`
+checks a record against its independent checksum and internal coherence, and
+`release export` prints this binary's embedded source SHA + crate version. The
+package `postinst` never builds an image and never restarts — activation and
+restart are explicit. Only a `release-build` binary (built from a tagged commit
+whose tag == crate version == `Cargo.lock`) can emit a publishable record; a
+normal build reports `development` and refuses.
+
 Primary-repository bare mirrors live in the regenerable `git-mirrors` cache
 class (`/var/cache/velnor/v1/<trust-scope>/git-mirrors`). Each mirror is keyed
 by owner/repository, locked across slots during delta fetch, and never stores a
@@ -204,7 +262,7 @@ handled job, while normal daemon mode keeps polling.
 
 ```sh
 scripts/target_verify.sh
-cargo test -q
+cargo nextest run --workspace --locked
 cargo run -q -p velnor-tools -- target-audit --check-target-mvp /tmp/velnor-jackin /tmp/velnor-chainargos
 cargo run -q -p velnor-tools -- target-verify
 ```
@@ -414,6 +472,9 @@ For target jobs, Velnor runs the job in a Docker container and mounts
 default `velnor/job-ubuntu:26.04` image is built from official `ubuntu:26.04` and
 contains the Docker CLI and Buildx plugin, so workflow steps inside the job
 container can run `docker`/`docker buildx` without relying on host binary mounts.
+It also contains `sudo`, matching GitHub-hosted Ubuntu workflow semantics even
+though Velnor currently executes the job container as root. Preflight rejects
+an image missing this contract tool before the runner advertises capacity.
 Service containers share the per-job Docker network with GitHub-style aliases.
 
 To force reuse of an existing run, set `VELNOR_FIXTURE_DISPATCH=false` together

@@ -1,0 +1,6 @@
+# Plan 010 release staging area. The release workflow and the host activation
+# scripts assemble the release record, per-arch digests, and the atomically
+# activated `active`/`previous` pointers here. Nothing under this directory is
+# committed — it is derived, immutable-once-written build output.
+*
+!.gitignore

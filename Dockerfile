@@ -1,4 +1,4 @@
-FROM rust:1.97-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa AS build
+FROM rust:1.98-bookworm@sha256:e70e2eec3d495fd5c8e0be74adda86507dfac7f51a724fbf9813ff59b2b247c7 AS build
 
 # sccache: object-level compiler cache in a BuildKit cache mount so source
 # changes rebuild from warm objects (estate instant-cache mandate).
@@ -26,7 +26,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --bin velnor-runner --bin velnor-tools \
     && sccache --show-stats
 
-FROM ubuntu:26.04@sha256:3131b4cc82a783df6c9df078f86e01819a13594b865c2cad47bd1bca2b7063bb
+FROM ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b
 
 USER root
 RUN apt-get update \

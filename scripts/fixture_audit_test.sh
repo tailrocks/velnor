@@ -80,7 +80,6 @@ jobs:
       - run: sccache --show-stats >> "$GITHUB_STEP_SUMMARY"
       - run: just fmt-check
       - run: just clippy "$PACKAGE"
-      - run: just test "$PACKAGE"
       - run: just nextest "$PACKAGE"
       - name: Check MSRV
         env:

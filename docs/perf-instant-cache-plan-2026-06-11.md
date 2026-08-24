@@ -85,10 +85,11 @@ B. **Host-persistent stores mounted into every job container** (under the
    - `_velnor_mise`           → `/opt/mise` (seeded from the job image's
      baked `/opt/mise` once per image digest, then accretes job-installed
      tools: GraalVM installs once per fleet, not per job)
-   - `_velnor_targets/<trust-scope>/<repo>/<workflow>/<job-bucket>` →
-     `/__w/target` (the normal workspace target path; per-trust-scope,
-     per-job-class persistent incremental state; cargo's own build-dir lock
-     serializes the rare same-bucket concurrency). Velnor does not export a
+   - `_velnor_targets/<trust-scope>/<generation>/<repo>/<workflow>/<job-bucket>`
+     is the durable source for the ordinary job-local `/__w/target`. Velnor
+     reflink/copies a complete generation after checkout and atomically
+     publishes the completed tree after the job. It does not nest a bind mount
+     at `target` (which breaks same-filesystem rename with `EXDEV`) or export a
      synthetic `CARGO_TARGET_DIR`.
    Immutable Cargo downloads, indexes, and bare git databases are shared.
    Extracted `registry/src` and `git/checkouts` trees are job-local: Cargo's

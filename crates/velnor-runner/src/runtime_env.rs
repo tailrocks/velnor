@@ -1,5 +1,7 @@
 use crate::job_message::AgentJobRequestMessage;
+use anyhow::{bail, Context, Result};
 use serde_json::{Map, Value};
+use std::collections::BTreeSet;
 
 pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
     let mut env = vec![
@@ -194,6 +196,117 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
     }
 
     env
+}
+
+/// Derive the cache-authority handshake declared by admitted generated CI.
+///
+/// The generated `cache-contract` steps are the closed declaration surface.
+/// Admission has already authenticated their repository/ref/input schema before
+/// this function runs. Bind those declarations to the host reservation that is
+/// held for the complete job; never accept workflow-provided `VELNOR_CACHE_*`
+/// overrides as runtime authority.
+pub(crate) fn cache_authority_env(
+    job: &AgentJobRequestMessage,
+    reserved_bytes: u64,
+) -> Result<Vec<(String, String)>> {
+    let base_env = job_runtime_env(job);
+    let context_data = crate::runner::job_context_data(job);
+    let mut env = Vec::new();
+    let mut ids = BTreeSet::new();
+    let mut total_peak = 0_u64;
+
+    for step in &job.steps {
+        if !step.enabled || !is_cache_contract_step(step) {
+            continue;
+        }
+        let inputs = crate::action::string_inputs(step).context("read cache-contract inputs")?;
+        let value = |name: &str| -> Result<String> {
+            let raw = inputs
+                .get(name)
+                .with_context(|| format!("cache-contract missing input {name}"))?;
+            Ok(crate::executor::render_expressions_with_context(
+                raw,
+                &base_env,
+                &context_data,
+            ))
+        };
+        let declaration = value("expected-declaration-sha256")?;
+        if declaration.len() != 64
+            || !declaration
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            bail!("cache-contract declaration identity is not lowercase SHA-256");
+        }
+        let id = value("expected-cache-id")?;
+        if id.is_empty()
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            || !ids.insert(id.clone())
+        {
+            bail!("cache-contract cache identity is invalid or duplicated: {id}");
+        }
+        let peak = value("required-peak-bytes")?
+            .parse::<u64>()
+            .with_context(|| format!("cache-contract peak is not an integer for {id}"))?;
+        if peak == 0 {
+            bail!("cache-contract peak is zero for {id}");
+        }
+        total_peak = total_peak
+            .checked_add(peak)
+            .context("cache-contract total peak overflow")?;
+
+        let prefix = id.replace('-', "_").to_ascii_uppercase();
+        let repository = job
+            .variable("github.repository")
+            .context("cache-contract requires github.repository")?;
+        let declared_scope = value("expected-scope")?;
+        if declared_scope != "trusted" {
+            bail!("cache-contract runtime authority requires trusted scope");
+        }
+        let declared_owner = value("expected-cache-owner")?;
+        if declared_owner != repository {
+            bail!("cache-contract owner does not match github.repository");
+        }
+        let reservation_id = value("expected-reservation-id")?;
+        let materialization_id = value("expected-materialization-id")?;
+        for (field, value) in [
+            ("DECLARATION_SHA256", declaration),
+            ("ID", id),
+            ("SCOPE", declared_scope),
+            ("OWNER", repository.to_string()),
+            ("RESERVATION_ID", reservation_id),
+            ("RESERVED_BYTES", peak.to_string()),
+            ("ATTRIBUTED_BYTES", "0".to_string()),
+            ("CLEANUP_STATE", "clean".to_string()),
+            ("MATERIALIZATION_ID", materialization_id),
+            ("LOCK_WAIT_MS", "0".to_string()),
+        ] {
+            env.push((format!("VELNOR_CACHE_{prefix}_{field}"), value));
+        }
+    }
+
+    if total_peak > reserved_bytes {
+        bail!(
+            "cache-contract total peak {total_peak} exceeds held job reservation {reserved_bytes}"
+        );
+    }
+    Ok(env)
+}
+
+fn is_cache_contract_step(step: &crate::job_message::ActionStep) -> bool {
+    let Some(reference) = step.reference.as_ref() else {
+        return false;
+    };
+    reference
+        .name
+        .as_deref()
+        .is_some_and(|name| name.ends_with("/velnor-actions"))
+        && reference
+            .path
+            .as_deref()
+            .is_some_and(|path| path.trim_matches('/') == "actions/cache-contract")
 }
 
 pub(crate) fn job_environment_variables(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
@@ -612,6 +725,105 @@ mod tests {
         assert!(env.contains(&("ACTIONS_CACHE_SERVICE_V2".into(), "True".into())));
         assert!(!env.contains(&("ACTIONS_CACHE_SERVICE_V2".into(), "false".into())));
         assert!(env.contains(&("ACTIONS_ORCHESTRATION_ID".into(), "orch-123".into())));
+    }
+
+    #[test]
+    fn derives_cache_authority_from_admitted_contract_and_held_reservation() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "velnor lane",
+            "jobName": "velnor-lane",
+            "requestId": 1,
+            "variables": {
+                "github.repository": { "value": "tailrocks/example" },
+                "github.run_id": { "value": "123" }
+            },
+            "contextData": {
+                "github": {
+                    "repository": "tailrocks/example",
+                    "run_id": "123",
+                    "job": "velnor-lane"
+                }
+            },
+            "steps": [{
+                "enabled": true,
+                "reference": {
+                    "type": "Repository",
+                    "name": "tailrocks/velnor-actions",
+                    "ref": "3057391f93f3bfc0fe570ee08cfcea9533ea3f92",
+                    "path": "actions/cache-contract"
+                },
+                "inputs": {
+                    "expected-declaration-sha256": "4847dfb9b9b3197b7ee91dd917084b2448157a7aa41d9cb12b486a9e8e1493c6",
+                    "expected-cache-id": "tools",
+                    "expected-scope": "trusted",
+                    "expected-cache-owner": "${{ github.repository }}",
+                    "expected-reservation-id": "${{ github.run_id }}:${{ github.job }}:tools",
+                    "expected-materialization-id": "${{ github.run_id }}-${{ github.job }}-tools",
+                    "required-peak-bytes": "2147483648"
+                }
+            }]
+        }))
+        .unwrap();
+
+        let env = cache_authority_env(&job, 32_212_254_720).unwrap();
+        assert!(env.contains(&(
+            "VELNOR_CACHE_TOOLS_DECLARATION_SHA256".into(),
+            "4847dfb9b9b3197b7ee91dd917084b2448157a7aa41d9cb12b486a9e8e1493c6".into()
+        )));
+        assert!(env.contains(&(
+            "VELNOR_CACHE_TOOLS_RESERVATION_ID".into(),
+            "123:velnor-lane:tools".into()
+        )));
+        assert!(env.contains(&(
+            "VELNOR_CACHE_TOOLS_MATERIALIZATION_ID".into(),
+            "123-velnor-lane-tools".into()
+        )));
+        assert!(env.contains(&(
+            "VELNOR_CACHE_TOOLS_RESERVED_BYTES".into(),
+            "2147483648".into()
+        )));
+        assert!(env.contains(&(
+            "VELNOR_CACHE_TOOLS_OWNER".into(),
+            "tailrocks/example".into()
+        )));
+    }
+
+    #[test]
+    fn rejects_cache_authority_exceeding_held_reservation() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "velnor lane",
+            "requestId": 1,
+            "variables": { "github.repository": { "value": "tailrocks/example" } },
+            "steps": [{
+                "enabled": true,
+                "reference": {
+                    "type": "Repository",
+                    "name": "tailrocks/velnor-actions",
+                    "path": "actions/cache-contract"
+                },
+                "inputs": {
+                    "expected-declaration-sha256": "4847dfb9b9b3197b7ee91dd917084b2448157a7aa41d9cb12b486a9e8e1493c6",
+                    "expected-cache-id": "tools",
+                    "expected-scope": "trusted",
+                    "expected-cache-owner": "${{ github.repository }}",
+                    "expected-reservation-id": "123:velnor-lane:tools",
+                    "expected-materialization-id": "123-velnor-lane-tools",
+                    "required-peak-bytes": "2147483648"
+                }
+            }]
+        }))
+        .unwrap();
+
+        let error = cache_authority_env(&job, 1024).unwrap_err().to_string();
+        assert!(error.contains("exceeds held job reservation"));
     }
 
     #[test]

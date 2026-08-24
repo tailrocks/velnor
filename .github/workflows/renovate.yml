@@ -1,21 +1,25 @@
 name: Renovate
 
 on:
-  merge_group:
   schedule:
     - cron: "0 6 * * *"
   push:
     branches:
       - main
+    paths:
+      - renovate.json
+      - .github/renovate.json
+      - .github/workflows/renovate.yml
   workflow_dispatch:
     inputs:
       lanes:
+        description: velnor (default) | github | both
         type: choice
         default: velnor
         options: [velnor, github, both]
 
 concurrency:
-  group: renovate-${{ github.workflow }}-${{ github.ref }}
+  group: renovate-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -25,17 +29,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || (github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
+        config: ${{ fromJSON((github.event_name == 'workflow_dispatch' && inputs.lanes == 'both') && '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true},{"lane":"GitHub","runner":"ubuntu-26.04","writer":false}]' || ((github.event_name == 'workflow_dispatch' && inputs.lanes == 'github') || github.event_name == 'push') && '[{"lane":"GitHub","runner":"ubuntu-26.04","writer":true}]' || '[{"lane":"Velnor","runner":["self-hosted","velnor-target-mvp"],"writer":true}]') }}
     runs-on: ${{ matrix.config.runner }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
 
       - name: Self-hosted Renovate
         # The PAT named "tailrocks-renovate" (fine-grained, not classic) must be
         # stored in the repo secret GH_RENOVATE_TOKEN.
-        uses: renovatebot/github-action@22e0a16091fc706b04affe6ae53d5e3358ac4023 # v46.1.19
+        uses: renovatebot/github-action@e09d604f8f803bb527bd8321ed5be06c460b8682 # v46.2.2
         with:
           token: ${{ secrets.GH_RENOVATE_TOKEN }}
         env:

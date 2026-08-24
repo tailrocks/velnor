@@ -5,6 +5,8 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+Environment=HOME=/root
+Environment=VELNOR_STORAGE_ROOT=/var
 EnvironmentFile=/etc/velnor/%i.env
 EnvironmentFile=-/etc/velnor/%i.secrets.env
 ExecStart=/usr/bin/velnor-runner doctor \

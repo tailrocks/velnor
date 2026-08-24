@@ -16,6 +16,46 @@ use crate::{
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Serializes one actions/cache generation across save, restore, and GC.
+///
+/// Repository-scope leases prevent normal eviction while a job is active.
+/// This entry lock is the final integrity boundary: even if a reclaim pass
+/// selected the generation before the job published its lease, it cannot
+/// delete files while restore verification is reading them.
+pub(crate) struct CacheEntryLock {
+    _file: File,
+}
+
+impl CacheEntryLock {
+    pub(crate) fn shared(cache_dir: &Path) -> Result<Self> {
+        Self::acquire(cache_dir, rustix::fs::FlockOperation::LockShared)
+    }
+
+    pub(crate) fn exclusive(cache_dir: &Path) -> Result<Self> {
+        Self::acquire(cache_dir, rustix::fs::FlockOperation::LockExclusive)
+    }
+
+    fn acquire(cache_dir: &Path, operation: rustix::fs::FlockOperation) -> Result<Self> {
+        let store = cache_dir
+            .parent()
+            .context("cache entry has no store parent")?;
+        let locks = store.join(".velnor-locks");
+        fs::create_dir_all(&locks)
+            .with_context(|| format!("create cache lock directory {}", locks.display()))?;
+        let name = cache_dir.file_name().context("cache entry has no name")?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(locks.join(name))
+            .with_context(|| format!("open cache entry lock for {}", cache_dir.display()))?;
+        rustix::fs::flock(&file, operation)
+            .with_context(|| format!("lock cache entry {}", cache_dir.display()))?;
+        Ok(Self { _file: file })
+    }
+}
+
 pub(crate) fn run(args: CacheArgs) -> Result<()> {
     let budgets = BTreeMap::from([
         (CacheStore::Targets, args.budget_targets_bytes),
@@ -146,7 +186,7 @@ fn run_gc(
         .map(|layout| layout.log_root)
         .unwrap_or_else(|| work_root.join("_velnor_logs"));
     for candidate in candidates {
-        let result = fs::remove_dir_all(&candidate.path);
+        let result = remove_candidate(&candidate);
         let outcome = if result.is_ok() { "deleted" } else { "failed" };
         append_gc_history(&log_root, &candidate, Some(&policy), outcome)?;
         println!(
@@ -283,6 +323,16 @@ fn store_roots(work_root: &Path) -> Vec<StoreRoot> {
             kind: CacheStore::Mise,
             path: mise.join("installs"),
             scope_prefix: vec!["installs".into()],
+            scope_depth: if mise_legacy { 2 } else { 1 },
+            candidate_depth: if mise_legacy { 2 } else { 1 },
+            gc_managed: true,
+        },
+        // Plan 008: persistent per-version mise binaries, same trust/repository
+        // boundary and mise budget as installs.
+        StoreRoot {
+            kind: CacheStore::Mise,
+            path: mise.join("binaries"),
+            scope_prefix: vec!["binaries".into()],
             scope_depth: if mise_legacy { 2 } else { 1 },
             candidate_depth: if mise_legacy { 2 } else { 1 },
             gc_managed: true,
@@ -454,7 +504,7 @@ pub(crate) fn reclaim_work_root(
             bytes: entry.bytes,
             reason: "reclaim-target".into(),
         };
-        match fs::remove_dir_all(&candidate.path) {
+        match remove_candidate(&candidate) {
             Ok(()) => {
                 report.freed_bytes = report.freed_bytes.saturating_add(candidate.bytes);
                 report.deleted.push(candidate.path.clone());
@@ -472,6 +522,14 @@ pub(crate) fn reclaim_work_root(
         let _ = prune_owned_builder(0)?;
     }
     Ok(report)
+}
+
+fn remove_candidate(candidate: &EvictionCandidate) -> Result<()> {
+    let _entry_lock = (candidate.store == CacheStore::ActionsCache)
+        .then(|| CacheEntryLock::exclusive(&candidate.path))
+        .transpose()?;
+    fs::remove_dir_all(&candidate.path)
+        .with_context(|| format!("remove cache candidate {}", candidate.path.display()))
 }
 
 pub fn prune_owned_builder(max_used_space_bytes: u64) -> Result<bool> {
@@ -1011,6 +1069,36 @@ mod tests {
     }
 
     #[test]
+    fn actions_cache_gc_waits_for_active_restore_lock() {
+        let root = std::env::temp_dir().join(format!("velnor-entry-lock-{}", uuid::Uuid::new_v4()));
+        let entry = root.join("repo/cache-key");
+        fs::create_dir_all(&entry).unwrap();
+        fs::write(entry.join("payload"), b"cache").unwrap();
+        let restore_lock = CacheEntryLock::shared(&entry).unwrap();
+        let candidate = EvictionCandidate {
+            path: entry.clone(),
+            store: CacheStore::ActionsCache,
+            scope: vec!["repo".into()],
+            bytes: 5,
+            reason: "test".into(),
+        };
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let remover =
+            std::thread::spawn(move || sender.send(remove_candidate(&candidate)).unwrap());
+
+        assert!(receiver.recv_timeout(Duration::from_millis(50)).is_err());
+        assert!(entry.join("payload").is_file());
+        drop(restore_lock);
+        receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        remover.join().unwrap();
+        assert!(!entry.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn gc_without_yes_refuses() {
         let args = CacheGcArgs {
             dry_run: false,
@@ -1126,6 +1214,7 @@ mod tests {
             ("cargo", "bin/tailrocks_playground"),
             ("mise", "cache"),
             ("mise", "installs/tailrocks_playground"),
+            ("mise", "binaries/tailrocks_playground"),
             ("mise", "rustup/tailrocks_playground"),
         ];
         let mut leases = Vec::new();
@@ -1154,6 +1243,7 @@ mod tests {
             ("cargo", "bin/tailrocks_other"),
             ("mise", "cache"),
             ("mise", "installs/tailrocks_other"),
+            ("mise", "binaries/tailrocks_other"),
             ("mise", "rustup/tailrocks_other"),
         ] {
             leases.push(
@@ -1224,6 +1314,20 @@ mod tests {
                 "/mise/installs/other",
                 CacheStore::Mise,
                 &["installs", "tailrocks_other"],
+                90,
+                10,
+            ),
+            entry(
+                "/mise/binaries/playground",
+                CacheStore::Mise,
+                &["binaries", "tailrocks_playground"],
+                90,
+                10,
+            ),
+            entry(
+                "/mise/binaries/other",
+                CacheStore::Mise,
+                &["binaries", "tailrocks_other"],
                 90,
                 10,
             ),

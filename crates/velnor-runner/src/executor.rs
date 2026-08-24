@@ -2,9 +2,10 @@
 
 use crate::{
     action::{
-        DockerActionInvocation, JavaScriptActionInvocation, NativeActionAdapter,
+        CacheActionKind, DockerActionInvocation, JavaScriptActionInvocation, NativeActionAdapter,
         NativeActionInvocation,
     },
+    cache::CacheEntryLock,
     checkout::{configure_safe_directory, execute_checkout_with_mirror, CheckoutPlan},
     container::{kache_host, sccache_host, JobContainerSpec, Shell},
     script_step::{ScriptStep, ScriptStepPlan, StepAnnotation, StepCommandState},
@@ -12,14 +13,15 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use globset::{Glob, GlobBuilder, GlobSetBuilder};
+use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use rayon::prelude::*;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fs::{self, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
@@ -67,6 +69,19 @@ pub trait CommandRunner {
         self.run(program, args)
     }
 
+    fn run_timeout_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout: Duration,
+    ) -> Result<CommandResult> {
+        if !env.is_empty() {
+            bail!("command runner does not support process environment forwarding");
+        }
+        self.run_timeout(program, args, timeout)
+    }
+
     fn run_streaming_timeout(
         &mut self,
         program: &str,
@@ -76,6 +91,20 @@ pub trait CommandRunner {
     ) -> Result<CommandResult> {
         let _ = timeout;
         self.run_streaming(program, args, on_output)
+    }
+
+    fn run_streaming_timeout_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout: Duration,
+        on_output: &mut dyn FnMut(CommandStream, &str),
+    ) -> Result<CommandResult> {
+        if !env.is_empty() {
+            bail!("command runner does not support streaming process environment forwarding");
+        }
+        self.run_streaming_timeout(program, args, timeout, on_output)
     }
 
     fn run_streaming(
@@ -106,6 +135,20 @@ pub trait CommandRunner {
     ) -> Result<CommandResult> {
         let _ = timeout;
         self.run_with_stdin(program, args, stdin)
+    }
+
+    fn run_with_stdin_timeout_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        stdin: &str,
+        timeout: Duration,
+    ) -> Result<CommandResult> {
+        if !env.is_empty() {
+            bail!("command runner does not support stdin process environment forwarding");
+        }
+        self.run_with_stdin_timeout(program, args, stdin, timeout)
     }
 
     fn run_with_stdin(
@@ -165,11 +208,24 @@ impl CommandRunner for ProcessCommandRunner {
         args: &[String],
         timeout: Duration,
     ) -> Result<CommandResult> {
+        self.run_timeout_with_env(program, args, &[], timeout)
+    }
+
+    fn run_timeout_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout: Duration,
+    ) -> Result<CommandResult> {
         // Called from spawn_blocking context — synchronous blocking is fine here.
-        let child = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .args(args)
+            .envs(env.iter().map(|(name, value)| (name, value)))
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = command
             .spawn()
             .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
         let (timed_out, watchdog_cancel, watchdog) =
@@ -210,10 +266,24 @@ impl CommandRunner for ProcessCommandRunner {
         timeout: Duration,
         on_output: &mut dyn FnMut(CommandStream, &str),
     ) -> Result<CommandResult> {
-        let mut child = Command::new(program)
+        self.run_streaming_timeout_with_env(program, args, &[], timeout, on_output)
+    }
+
+    fn run_streaming_timeout_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        timeout: Duration,
+        on_output: &mut dyn FnMut(CommandStream, &str),
+    ) -> Result<CommandResult> {
+        let mut command = Command::new(program);
+        command
             .args(args)
+            .envs(env.iter().map(|(name, value)| (name, value)))
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
             .spawn()
             .with_context(|| format!("run {program} {}", args.join(" ")))?;
         let stdout = child
@@ -302,11 +372,25 @@ impl CommandRunner for ProcessCommandRunner {
         stdin: &str,
         timeout: Duration,
     ) -> Result<CommandResult> {
-        let mut child = Command::new(program)
+        self.run_with_stdin_timeout_with_env(program, args, &[], stdin, timeout)
+    }
+
+    fn run_with_stdin_timeout_with_env(
+        &mut self,
+        program: &str,
+        args: &[String],
+        env: &[(String, String)],
+        stdin: &str,
+        timeout: Duration,
+    ) -> Result<CommandResult> {
+        let mut command = Command::new(program);
+        command
             .args(args)
+            .envs(env.iter().map(|(name, value)| (name, value)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
             .spawn()
             .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
         let (timed_out, watchdog_cancel, watchdog) =
@@ -1071,7 +1155,10 @@ where
             temp_host,
         );
         state.persistent_workspace_target = container.cargo_target_host.is_some();
-        state.cargo_target_host = container.cargo_target_host.clone();
+        state.cargo_target_host = container
+            .cargo_target_host
+            .as_ref()
+            .map(|_| container.workspace_host.join("target"));
         state.workflow_env = self
             .workflow_env
             .iter()
@@ -1082,7 +1169,24 @@ where
         let mut native_post_actions = Vec::new();
         let mut timeline_order = self.initial_order;
         let mut composite_frame: Option<CompositeFrame> = None;
+        let mut target_materialized = false;
         for step in steps {
+            if !target_materialized
+                && container.cargo_target_host.is_some()
+                && !matches!(
+                    step,
+                    ExecutableStep::Native {
+                        invocation,
+                        ..
+                    } if invocation.adapter == NativeActionAdapter::Checkout
+                )
+            {
+                materialize_persistent_target(
+                    container,
+                    state.env.get("GITHUB_SHA").map(String::as_str),
+                )?;
+                target_materialized = true;
+            }
             match step {
                 ExecutableStep::CompositeStart {
                     step_id,
@@ -1324,9 +1428,10 @@ where
                             &live_masks,
                         );
                     };
-                    let step_result = self.runner.run_streaming_timeout(
+                    let step_result = self.runner.run_streaming_timeout_with_env(
                         "docker",
                         exec_args.args(),
+                        exec_args.process_env(),
                         effective_step_timeout(step.timeout_minutes, self.job_timeout_minutes),
                         &mut on_output,
                     )?;
@@ -1428,7 +1533,9 @@ where
                         ..
                     } = step
                     {
-                        if let Some(condition) = native_post_condition(invocation.adapter) {
+                        if let Some(condition) =
+                            native_post_condition(invocation.adapter, invocation.cache_kind)
+                        {
                             native_post_actions.push(PostNativeAction {
                                 step_id: step_context_id.clone(),
                                 display_name: display_name.clone(),
@@ -1659,6 +1766,20 @@ where
                 }
             }
         }
+        if target_materialized
+            && step_error.is_none()
+            && persistent_target_results_publishable(&results)
+        {
+            if let Err(error) = publish_persistent_target(
+                container,
+                state.env.get("GITHUB_SHA").map(String::as_str),
+            ) {
+                eprintln!(
+                    "forensics.lifecycle: persistent target publish skipped for '{}': {error:#}",
+                    container.name
+                );
+            }
+        }
         if let Some(error) = step_error {
             return Err(error);
         }
@@ -1738,9 +1859,12 @@ where
             &node_image,
             entrypoint_container_path,
         )?;
-        let step_result = self
-            .runner
-            .run_timeout("docker", exec_args.args(), timeout)?;
+        let step_result = self.runner.run_timeout_with_env(
+            "docker",
+            exec_args.args(),
+            exec_args.process_env(),
+            timeout,
+        )?;
         let mut state = command_files.collect_state()?;
         state.merge(parse_workflow_commands_from_output(
             &step_result.stdout,
@@ -1762,10 +1886,7 @@ where
         plan: &CheckoutPlan,
         state: &JobExecutionState,
     ) -> Result<StepExecutionResult> {
-        let mut plan = plan.clone();
-        if let Some(version) = plan.version.as_mut() {
-            *version = state.resolve_expressions(version);
-        }
+        let plan = resolve_checkout_plan_expressions(plan, state)?;
         let mut trace = Vec::new();
         let mirror_store =
             crate::container::git_mirror_store_host(&container.temp_host, &self.trust_scope);
@@ -1808,11 +1929,28 @@ where
         if let (Some(context_host), Some(dockerfile_host)) =
             (&action.build_context_host, &action.dockerfile_host)
         {
-            self.run_docker(&container.build_docker_action_args(
-                &action.image,
-                dockerfile_host,
-                context_host,
-            ))?;
+            let docker_config = temp_host.join("_velnor/docker-client");
+            fs::create_dir_all(&docker_config).with_context(|| {
+                format!(
+                    "create isolated Docker client config {}",
+                    docker_config.display()
+                )
+            })?;
+            fs::set_permissions(&docker_config, fs::Permissions::from_mode(0o700)).with_context(
+                || {
+                    format!(
+                        "secure isolated Docker client config {}",
+                        docker_config.display()
+                    )
+                },
+            )?;
+            self.run_docker_with_env(
+                &container.build_docker_action_args(&action.image, dockerfile_host, context_host),
+                &[(
+                    "DOCKER_CONFIG".to_string(),
+                    docker_config.display().to_string(),
+                )],
+            )?;
         }
         let command_files = ScriptStepPlan::prepare(
             &ScriptStep {
@@ -1853,9 +1991,12 @@ where
             entrypoint.as_deref(),
             &args,
         )?;
-        let step_result = self
-            .runner
-            .run_timeout("docker", exec_args.args(), timeout)?;
+        let step_result = self.runner.run_timeout_with_env(
+            "docker",
+            exec_args.args(),
+            exec_args.process_env(),
+            timeout,
+        )?;
         let mut state = command_files.collect_state()?;
         state.merge(parse_workflow_commands_from_output(
             &step_result.stdout,
@@ -1886,6 +2027,12 @@ where
             NativeActionAdapter::UploadPagesArtifact => native_upload_pages_artifact(action, state),
             NativeActionAdapter::ConfigurePages => native_configure_pages(action, state),
             NativeActionAdapter::DeployPages => native_deploy_pages(action, state),
+            NativeActionAdapter::AttestBuildProvenance => {
+                native_attest_build_provenance(action, state)
+            }
+            NativeActionAdapter::CreateGitHubAppToken => {
+                native_create_github_app_token(action, state)
+            }
             NativeActionAdapter::Mise => self.native_mise(_container, action, state, timeout),
             NativeActionAdapter::Sccache => self.native_sccache(_container, action, state, timeout),
             NativeActionAdapter::Kache => self.native_kache(_container, action, state, timeout),
@@ -1966,9 +2113,28 @@ where
             }
             NativeActionAdapter::DockerSetupBuildx => {
                 let action_state = state.with_env(state.resolve_env(&action.env));
-                let name = native_input_or(&action_state, action, "name", "velnor-builder");
+                let requested_name =
+                    native_input_or(&action_state, action, "name", "velnor-builder");
+                let name = job_scoped_buildx_builder_name(&requested_name, state);
+                if !input_truthy(&native_input_or(&action_state, action, "cleanup", "true")) {
+                    return Ok(StepExecutionResult {
+                        exit_code: 0,
+                        state: StepCommandState::default(),
+                        skipped: false,
+                        failure_ignored: false,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    });
+                }
+                let keep_state = input_truthy(&native_input_or(
+                    &action_state,
+                    action,
+                    "keep-state",
+                    "false",
+                ));
+                let keep_state_arg = if keep_state { " --keep-state" } else { "" };
                 let script = format!(
-                    "docker buildx rm --keep-state {name} 2>/dev/null || true; echo \"Removing builder {name}\""
+                    "docker buildx rm{keep_state_arg} {name} 2>/dev/null || true; echo \"Removing builder {name}\""
                 );
                 let result = self.native_shell(_container, state, &script, timeout)?;
                 Ok(native_command_result(result, StepCommandState::default()))
@@ -1984,6 +2150,7 @@ where
                 let result = self.native_shell(_container, state, &script, timeout)?;
                 Ok(native_command_result(result, StepCommandState::default()))
             }
+            NativeActionAdapter::CreateGitHubAppToken => native_revoke_github_app_token(state),
             _ => bail!(
                 "native action adapter {:?} for step '{}' does not have a post action",
                 action.adapter,
@@ -2012,9 +2179,32 @@ where
             "cache_save",
             "true",
         ));
+        // 008-R5: resolve the exact mise binary version now (an omitted version
+        // becomes the fleet pin — never a live "latest" lookup) so it is
+        // auditable and keys the persistent binary store.
+        let exact_version = crate::mise::resolve_effective_mise_version(&version)
+            .context("resolve exact mise binary version")?;
+        eprintln!(
+            "mise: resolved binary version {exact_version} (requested {:?})",
+            version.trim()
+        );
+        // Fail closed before any install: the effective config must have a
+        // tracked, clean, adjacent lock with lockfile=true, and every
+        // install_args token must be committed in that lock.
+        if install {
+            let checkout_root = container.workspace_host.as_path();
+            let workdir_host = mise_working_directory_host(checkout_root, &working_directory);
+            crate::mise::enforce_locked_mise_policy(
+                checkout_root,
+                &workdir_host,
+                &install_args,
+                &crate::mise::GitCli,
+            )
+            .context("mise locked-install policy rejected this job before running any command")?;
+        }
         let script = setup_mise_script(
             install,
-            &version,
+            &exact_version,
             &install_args,
             &working_directory,
             &cache_key_prefix,
@@ -2045,37 +2235,16 @@ where
         let (mut env, masks) = parse_mise_environment(&exported_env, &redacted_env)?;
         let _ = fs::remove_file(&env_path);
         let _ = fs::remove_file(&redacted_path);
-        let mut path = vec![
-            // Mise binary dir so subsequent steps can call `mise run ...` directly.
-            "/opt/mise/bin".to_string(),
-            // Match mise-action: the repository-selected toolchain must win over
-            // anything baked into the job image. setup_mise_script keeps the
-            // rustup proxy ahead only while mise installs cargo-backed tools.
-            "/opt/mise/shims".to_string(),
-        ];
-        // Add the active mise tool install bin dirs (emitted by setup_mise_script)
-        // so executables installed into a mise-managed tool (e.g. ansible-galaxy
-        // from `pip install ansible-core` into mise's python, cargo-deny from
-        // mise's GitHub backend, or cargo-audit from mise's cargo backend) are on
-        // PATH for subsequent steps. Strip the marker lines from the logged output
-        // so the step log stays clean (UI parity with the GitHub-hosted lane).
-        for line in result.stdout.lines() {
-            if let Some(dir) = line.strip_prefix("__VELNOR_MISE_BIN__") {
-                let dir = dir.trim();
-                if !dir.is_empty() && !path.iter().any(|p| p == dir) {
-                    path.push(dir.to_string());
-                }
-            }
-        }
-        // Keep the image-baked rustup proxies as a final fallback for projects
-        // that do not select Rust through mise. They must never shadow an exact
-        // rust-toolchain.toml version resolved above.
-        path.push("/root/.cargo/bin".to_string());
-        if result.stdout.contains("__VELNOR_MISE_BIN__") {
+        let path = mise_step_path(&result.stdout);
+        if result.stdout.contains("__VELNOR_MISE_BIN__")
+            || result.stdout.contains("__VELNOR_MISE_SELF__")
+        {
             let filtered: Vec<&str> = result
                 .stdout
                 .lines()
-                .filter(|l| !l.starts_with("__VELNOR_MISE_BIN__"))
+                .filter(|l| {
+                    !l.starts_with("__VELNOR_MISE_BIN__") && !l.starts_with("__VELNOR_MISE_SELF__")
+                })
                 .collect();
             result.stdout = filtered.join("\n");
             if !result.stdout.is_empty() {
@@ -2198,7 +2367,8 @@ where
         Ok(native_command_result(
             result,
             StepCommandState {
-                path: vec!["/root/.cargo/bin".to_string()],
+                // just is now a locked mise tool; expose the mise shims dir.
+                path: vec!["/opt/mise/shims".to_string()],
                 ..StepCommandState::default()
             },
         ))
@@ -2261,10 +2431,10 @@ where
         ))
     }
 
-    /// Native `sigstore/cosign-installer`: the job image preinstalls a pinned
-    /// cosign at /usr/local/bin; when the requested release matches (or is the
-    /// action default) it is used directly, otherwise the requested version is
-    /// downloaded from the official GitHub release into install-dir.
+    /// Native `sigstore/cosign-installer`: install the admitted locked `cosign`
+    /// mise key fail-closed, link it into install-dir (added to PATH like the
+    /// action), and verify the version. A requested release differing from the
+    /// committed lock fails closed — Velnor never downloads cosign outside mise.
     fn native_cosign_installer(
         &mut self,
         container: &JobContainerSpec,
@@ -2336,9 +2506,13 @@ where
                 &secret_masks,
                 &["sh".to_string(), "-c".to_string(), cmd],
             )?;
-            return self
-                .runner
-                .run_with_stdin_timeout("docker", exec_args.args(), stdin, timeout);
+            return self.runner.run_with_stdin_timeout_with_env(
+                "docker",
+                exec_args.args(),
+                exec_args.process_env(),
+                stdin,
+                timeout,
+            );
         }
         self.native_shell(container, state, &cmd, timeout)
     }
@@ -2415,8 +2589,13 @@ where
                 );
             }
         };
-        self.runner
-            .run_streaming_timeout("docker", args.args(), timeout, &mut on_output)
+        self.runner.run_streaming_timeout_with_env(
+            "docker",
+            args.args(),
+            args.process_env(),
+            timeout,
+            &mut on_output,
+        )
     }
 
     fn native_renovate(
@@ -2456,7 +2635,8 @@ where
             &[],
         )?;
         Ok(native_command_result(
-            self.runner.run_timeout("docker", args.args(), timeout)?,
+            self.runner
+                .run_timeout_with_env("docker", args.args(), args.process_env(), timeout)?,
             StepCommandState::default(),
         ))
     }
@@ -2469,7 +2649,8 @@ where
         timeout: Duration,
     ) -> Result<StepExecutionResult> {
         let action_state = state.with_env(state.resolve_env(&action.env));
-        let name = native_input_or(&action_state, action, "name", "velnor-builder");
+        let requested_name = native_input_or(&action_state, action, "name", "velnor-builder");
+        let name = job_scoped_buildx_builder_name(&requested_name, state);
         let driver = native_input_or(&action_state, action, "driver", "docker-container");
         let buildkitd_config_inline =
             native_input(action, &action_state, "buildkitd-config-inline");
@@ -2502,6 +2683,10 @@ where
                 driver,
                 "--use".to_string(),
             ];
+            let resource_options = buildx_driver_resource_options(&container.resource_options)?;
+            if !resource_options.is_empty() {
+                args.extend(["--driver-opt".to_string(), resource_options.join(",")]);
+            }
             if let Some(config) = buildkitd_config_container {
                 args.extend(["--config".to_string(), config]);
             }
@@ -2578,20 +2763,13 @@ where
         let action_state = state.with_env(state.resolve_env(&action.env));
         let context = native_input_or(&action_state, action, "context", ".");
         let mut args = vec!["buildx".to_string(), "build".to_string()];
-        // The command runs inside the job container with CWD /__w (the
-        // workspace), so context-relative Dockerfile paths resolve naturally;
-        // join relative files to the context like the upstream action does.
+        // build-push-action resolves an explicit `file` from the workspace,
+        // independently from `context`. Passing context/file twice here turned
+        // `context: docker`, `file: docker/Dockerfile` into
+        // `docker/docker/Dockerfile`.
         let file_input = native_input(action, &action_state, "file");
         if !file_input.trim().is_empty() {
-            let file_path = if std::path::Path::new(&file_input).is_absolute()
-                || context.trim().is_empty()
-                || context.trim() == "."
-            {
-                file_input.clone()
-            } else {
-                format!("{}/{}", context.trim_end_matches('/'), file_input)
-            };
-            push_arg(&mut args, "--file", &file_path);
+            push_arg(&mut args, "--file", &file_input);
         }
         push_arg(
             &mut args,
@@ -2607,19 +2785,38 @@ where
         for build_arg in input_values(&native_input(action, &action_state, "build-args")) {
             push_arg(&mut args, "--build-arg", &build_arg);
         }
-        let mut dropped_gha_cache = 0usize;
+        let secret_input = native_input(action, &action_state, "secrets");
+        if !secret_input.trim().is_empty() && self.trust_scope != "trusted" {
+            bail!(
+                "docker/build-push-action refuses BuildKit secrets in trust scope '{}'; accepted trust scope: trusted",
+                self.trust_scope
+            );
+        }
+        let mut secret_files = Vec::new();
+        for secret in secret_input.lines().filter(|line| !line.trim().is_empty()) {
+            let (id, value) = secret
+                .split_once('=')
+                .filter(|(id, value)| !id.is_empty() && !value.is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("docker/build-push-action received an invalid secret entry")
+                })?;
+            let secret_file = BuildSecretFile::create(
+                action_state.temp_host.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("docker/build-push-action requires a runner temp directory")
+                })?,
+                value,
+            )?;
+            push_arg(
+                &mut args,
+                "--secret",
+                &format!("id={id},src={}", secret_file.container_path()),
+            );
+            secret_files.push(secret_file);
+        }
         for cache in input_values(&native_input(action, &action_state, "cache-from")) {
-            if is_gha_cache_value(&cache) {
-                dropped_gha_cache += 1;
-                continue;
-            }
             push_arg(&mut args, "--cache-from", &cache);
         }
         for cache in input_values(&native_input(action, &action_state, "cache-to")) {
-            if is_gha_cache_value(&cache) {
-                dropped_gha_cache += 1;
-                continue;
-            }
             push_arg(&mut args, "--cache-to", &cache);
         }
         // The `outputs` input maps to buildx --output (e.g. the publish
@@ -2648,13 +2845,7 @@ where
             &format!("/tmp/{metadata_name}"),
         );
         args.push(container_context_path(&context));
-        let mut result = self.container_docker(container, &action_state, &args, None, timeout)?;
-        if dropped_gha_cache > 0 {
-            result.stdout = format!(
-                "[velnor] dropped {dropped_gha_cache} type=gha cache option(s): the persistent local builder cache covers them on the Velnor lane\n{}",
-                result.stdout
-            );
-        }
+        let result = self.container_docker(container, &action_state, &args, None, timeout)?;
         let metadata_path = action_state
             .temp_host
             .clone()
@@ -2702,12 +2893,7 @@ where
         for file in input_values(&native_input(action, &action_state, "files")) {
             push_arg(&mut args, "--file", &file);
         }
-        let mut dropped_gha_cache = 0usize;
         for set in input_values(&native_input(action, &action_state, "set")) {
-            if is_gha_bake_set_entry(&set) {
-                dropped_gha_cache += 1;
-                continue;
-            }
             push_arg(&mut args, "--set", &set);
         }
         if input_truthy(&native_input(action, &action_state, "push")) {
@@ -2718,13 +2904,7 @@ where
             &action_state,
             "targets",
         )));
-        let mut result = self.container_docker(container, &action_state, &args, None, timeout)?;
-        if dropped_gha_cache > 0 {
-            result.stdout = format!(
-                "[velnor] dropped {dropped_gha_cache} type=gha cache option(s): the persistent local builder cache covers them on the Velnor lane\n{}",
-                result.stdout
-            );
-        }
+        let result = self.container_docker(container, &action_state, &args, None, timeout)?;
         Ok(native_command_result(result, StepCommandState::default()))
     }
 
@@ -2866,10 +3046,12 @@ where
 
     pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
+        let buildkit_result = self.cleanup_job_buildkit(container);
         let service_result = self.cleanup_services(container);
         let network_result = self.run_docker(&container.remove_network_args());
 
         container_result?;
+        buildkit_result?;
         service_result?;
         network_result?;
         Ok(())
@@ -2889,22 +3071,107 @@ where
     }
 
     pub(crate) fn cleanup_job_and_network(&mut self, container: &JobContainerSpec) -> Result<()> {
-        self.run_docker_remove_container(&container.remove_container_args())?;
-        self.run_docker(&container.remove_network_args())?;
+        let container_result = self.run_docker_remove_container(&container.remove_container_args());
+        let buildkit_result = self.cleanup_job_buildkit(container);
+        let network_result = self.run_docker(&container.remove_network_args());
+        container_result?;
+        buildkit_result?;
+        network_result?;
+        Ok(())
+    }
+
+    /// Remove every BuildKit daemon whose buildx builder belongs to this job.
+    ///
+    /// A cancelled job can skip setup-buildx's post action. The buildx client
+    /// configuration lives inside the disposable job container, so host-side
+    /// teardown cannot use `docker buildx rm`. Buildx names its daemon and
+    /// state volume from the builder name; every native builder is suffixed
+    /// with the job's unique scope. Match that exact suffix, then remove the
+    /// daemon together with its anonymous/named state volume.
+    fn cleanup_job_buildkit(&mut self, container: &JobContainerSpec) -> Result<()> {
+        let scope = job_scope_from_temp(Some(&container.temp_host));
+        let filter = format!("name=-{scope}0$");
+        let listed = self.run_docker(&[
+            "ps".into(),
+            "--all".into(),
+            "--quiet".into(),
+            "--filter".into(),
+            filter,
+        ])?;
+        let ids = listed
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if !ids.is_empty() {
+            let mut args = vec!["rm".into(), "--force".into()];
+            args.extend(ids);
+            self.run_docker_remove_container(&args)?;
+        }
+
+        // Buildx creates a named `<container>_state` volume. Docker's
+        // `rm --volumes` deliberately removes only anonymous volumes, so the
+        // state volume requires a separate exact-suffix query and removal.
+        let volume_filter = format!("name=-{scope}0_state$");
+        let listed_volumes = self.run_docker(&[
+            "volume".into(),
+            "ls".into(),
+            "--quiet".into(),
+            "--filter".into(),
+            volume_filter,
+        ])?;
+        let volumes = listed_volumes
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if !volumes.is_empty() {
+            let mut args = vec!["volume".into(), "rm".into()];
+            args.extend(volumes);
+            self.run_docker(&args)?;
+        }
         Ok(())
     }
 
     pub(crate) fn start_job_environment(&mut self, container: &JobContainerSpec) -> Result<()> {
         let _span = tracing::info_span!("job-container-boot").entered();
-        if let Err(error) = self.start_job_environment_once(container) {
-            eprintln!("Docker job environment start failed, removing stale resources: {error:#}");
+        let mut attempt = 1_u32;
+        loop {
+            let Err(error) = self.start_job_environment_once(container) else {
+                return Ok(());
+            };
             self.cleanup_stale(container);
-            if let Err(retry_error) = self.start_job_environment_once(container) {
-                self.cleanup_stale(container);
-                return Err(retry_error);
+
+            // A daemon/containerd restart briefly returns transport and shim
+            // errors for every `docker run`. The historical single immediate
+            // retry always landed inside the same restart window, turning a
+            // healthy workflow into a permanent pre-execution rejection.
+            // Retry only this closed transient class with bounded backoff.
+            // Every other failure retains the one stale-resource retry.
+            let transient = docker_start_error_is_transient(&error);
+            let max_attempts = if transient { 5 } else { 2 };
+            if attempt >= max_attempts {
+                return Err(error);
             }
+            let delay = if transient {
+                docker_start_retry_delay(attempt)
+            } else {
+                Duration::ZERO
+            };
+            eprintln!(
+                "Docker job environment start failed (attempt {attempt}/{max_attempts}); \
+                 removed stale resources; retrying in {}ms: {error:#}",
+                delay.as_millis()
+            );
+            if !delay.is_zero() {
+                thread::sleep(delay);
+            }
+            attempt += 1;
         }
-        Ok(())
     }
 
     fn start_job_environment_once(&mut self, container: &JobContainerSpec) -> Result<()> {
@@ -3079,6 +3346,7 @@ where
 
     fn cleanup_stale(&mut self, container: &JobContainerSpec) {
         self.run_docker(&container.remove_container_args()).ok();
+        self.cleanup_job_buildkit(container).ok();
         for service in container.services.iter().rev() {
             self.run_docker(&service.remove_args()).ok();
         }
@@ -3087,6 +3355,23 @@ where
 
     fn run_docker(&mut self, args: &[String]) -> Result<CommandResult> {
         let result = self.runner.run("docker", args)?;
+        if result.code != 0 {
+            bail!(
+                "docker {} failed with code {}: {}",
+                args.join(" "),
+                result.code,
+                result.stderr
+            );
+        }
+        Ok(result)
+    }
+
+    fn run_docker_with_env(
+        &mut self,
+        args: &[String],
+        env: &[(String, String)],
+    ) -> Result<CommandResult> {
+        let result = self.runner.run_with_env("docker", args, env)?;
         if result.code != 0 {
             bail!(
                 "docker {} failed with code {}: {}",
@@ -3150,6 +3435,42 @@ where
         }
         bail!("service container '{}' did not become ready", service.name)
     }
+}
+
+fn resolve_checkout_plan_expressions(
+    plan: &CheckoutPlan,
+    state: &JobExecutionState,
+) -> Result<CheckoutPlan> {
+    let mut plan = plan.clone();
+    if let Some(version) = plan.version.as_mut() {
+        *version = state.resolve_expressions(version);
+    }
+    if let Some(token) = plan.token.as_mut() {
+        *token = state.resolve_expressions(token);
+        if token.is_empty() || token.contains("${{") {
+            anyhow::bail!("explicit checkout token expression did not resolve");
+        }
+    }
+    Ok(plan)
+}
+
+fn docker_start_error_is_transient(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}").to_ascii_lowercase();
+    [
+        "failed to create ttrpc connection",
+        "error reading from server: eof",
+        "unexpected eof",
+        "connection reset by peer",
+        "cannot connect to the docker daemon",
+        "is the docker daemon running",
+        "transport is closing",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
+fn docker_start_retry_delay(failed_attempt: u32) -> Duration {
+    Duration::from_secs(1_u64 << failed_attempt.saturating_sub(1).min(3))
 }
 
 fn emit_live_step_log(
@@ -3232,117 +3553,297 @@ fn rewrite_command_file_env_for_action_container(env: &mut [(String, String)]) {
     }
 }
 
+/// Setup script for the native mise adapter (Plan 008).
+///
+/// `exact_version` is already resolved by the caller (an explicit exact version,
+/// or the fleet pin for an omitted one — 008-R5). The script never bootstraps
+/// mise over the network: it publishes a verified per-version binary into the
+/// repository-scoped persistent store (`/opt/velnor/mise-binaries`) by copying
+/// the read-only baked `/opt/mise/bin` bootstrap to same-filesystem staging,
+/// self-updating it to the exact version with project config disabled, verifying
+/// the reported version + SHA-256, then atomically publishing it. A fresh job
+/// reuses that binary when version/hash match; corruption fails closed. Tool
+/// installs are strictly `mise install --locked` under the fail-closed
+/// `MISE_LOCKED`/`MISE_LOCKED_VERIFY_PROVENANCE` contract.
+///
+/// The bootstrap and store paths are env-overridable (`VELNOR_MISE_BOOTSTRAP`,
+/// `VELNOR_MISE_BINARY_STORE`) so the reuse/integrity behavior is exercised by
+/// tests with isolated stores and a controlled fake updater.
 fn setup_mise_script(
     install: bool,
-    version: &str,
+    exact_version: &str,
     install_args: &str,
     working_directory: &str,
     cache_key_prefix: &str,
     cache_save: bool,
 ) -> String {
-    let version = shell_single_quote(version);
-    let install_args = shell_single_quote(install_args);
-    let working_directory = shell_single_quote(working_directory);
-    let cache_key_prefix = shell_single_quote(cache_key_prefix);
     let install_flag = if install { "1" } else { "" };
     let cache_save_flag = if cache_save { "1" } else { "" };
-    format!(
-        r#"set -e
+    MISE_SETUP_TEMPLATE
+        .replace("@@EXACT_VERSION@@", &shell_single_quote(exact_version))
+        .replace("@@INSTALL_FLAG@@", install_flag)
+        .replace("@@INSTALL_ARGS@@", &shell_single_quote(install_args))
+        .replace(
+            "@@WORKING_DIRECTORY@@",
+            &shell_single_quote(working_directory),
+        )
+        .replace(
+            "@@CACHE_KEY_PREFIX@@",
+            &shell_single_quote(cache_key_prefix),
+        )
+        .replace("@@CACHE_SAVE_FLAG@@", cache_save_flag)
+}
+
+const MISE_SETUP_TEMPLATE: &str = r#"set -e
 # Use the euid's home (/root) so rustup-init doesn't fail the $HOME vs euid check.
 export HOME=/root
-bin="/opt/mise/bin"
-mise_home="/opt/mise"
-mkdir -p "$bin" "$mise_home/shims" "$mise_home/cache" "$mise_home/config" "/root/.cargo/bin"
-# Set PATH before the mise check so the pre-installed image binary is found and
-# curl re-download is skipped. /root/.cargo/bin precedes /opt/mise/shims so that
-# the real cargo binary (from rustup) shadows any mise cargo shim, avoiding
-# "cargo is not a valid shim" failures when mise calls cargo internally.
-export PATH="$bin:/root/.cargo/bin:$mise_home/shims:$PATH"
-if ! command -v mise >/dev/null 2>&1; then
-  curl -fsSL https://mise.run | MISE_INSTALL_PATH="$bin/mise" sh
-fi
+# mise_home and the env-export dir default to the production mounts; tests point
+# them at isolated dirs (no /opt or /__t write on the test host).
+mise_home="${VELNOR_MISE_HOME:-/opt/mise}"
+: "${VELNOR_MISE_ENV_DIR:=/__t/_velnor}"
+mkdir -p "$mise_home/shims" "$mise_home/cache" "$mise_home/config"
 export MISE_DATA_DIR="$mise_home"
 export MISE_CACHE_DIR="$mise_home/cache"
 export MISE_CONFIG_DIR="$mise_home/config"
 export MISE_TRUSTED_CONFIG_PATHS="/__w"
-# Match mise-action's process environment: do not override CARGO_HOME or
-# RUSTUP_HOME while mise resolves tools. Those overrides make mise's Rust
-# backend publish the image-baked rustup proxy directory as its active bin
-# path, silently selecting the baked toolchain instead of rust-toolchain.toml.
-# Cargo remains discoverable through PATH for cargo-backed mise tools.
-requested_version={version}
-install_requested="{install_flag}"
-cache_key_prefix={cache_key_prefix}
-cache_save_requested="{cache_save_flag}"
+# The read-only baked bootstrap and the repository-scoped persistent binary
+# store. Overridable so tests can point them at isolated directories.
+: "${VELNOR_MISE_BOOTSTRAP:=/opt/mise/bin/mise}"
+: "${VELNOR_MISE_BINARY_STORE:=/opt/velnor/mise-binaries}"
+_velnor_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+exact_version=@@EXACT_VERSION@@
+install_requested="@@INSTALL_FLAG@@"
+install_args=@@INSTALL_ARGS@@
+working_directory=@@WORKING_DIRECTORY@@
+cache_key_prefix=@@CACHE_KEY_PREFIX@@
+cache_save_requested="@@CACHE_SAVE_FLAG@@"
 # Upstream cache_save controls archive publication after installation, not
 # mutation of the action's local mise directory. Velnor replaces that remote
-# archive transport with its repository-scoped persistent mount, so both
-# policies use the local store and neither enables a remote backend.
+# archive transport with its repository-scoped persistent mount.
 echo "Velnor local mise cache: generation=$cache_key_prefix cache_save=$cache_save_requested"
-if [ -n "$requested_version" ] || [ -n "$install_requested" ]; then
-  # All slots share the mounted mise binary and tool store. One lock covers
-  # the version transition, tool installation, and environment export so a
-  # concurrent job cannot observe a mixed generation.
-  exec 9>"$mise_home/cache/.velnor-install.lock"
+if [ -z "$exact_version" ]; then
+  echo "mise: no exact version resolved; refusing a network 'latest' lookup under MISE_LOCKED" >&2
+  exit 1
+fi
+case "$(uname -m)" in
+  x86_64|amd64) os_arch="linux-x64" ;;
+  aarch64|arm64) os_arch="linux-arm64" ;;
+  *) os_arch="$(uname -s)-$(uname -m)" ;;
+esac
+store_dir="$VELNOR_MISE_BINARY_STORE/$os_arch/$exact_version"
+mise_bin="$store_dir/mise"
+meta="$store_dir/metadata.json"
+mkdir -p "$VELNOR_MISE_BINARY_STORE"
+# All slots share the repository-scoped store. One exclusive lock covers the
+# binary publish, tool install, and environment export so a concurrent job
+# never observes a mixed generation. flock is always present in the Linux job
+# image (util-linux); the guard only matters on non-Linux test hosts.
+exec 9>"$VELNOR_MISE_BINARY_STORE/.velnor-mise.lock"
+if command -v flock >/dev/null 2>&1; then
   flock -x 9
 fi
-if [ -n "$requested_version" ]; then
-  # mise-action v4 makes an explicit version observable even when a different
-  # binary already exists. This is the same exact self-update command used by
-  # upstream v4 when the installed and requested versions differ.
-  installed_version=$(mise --version | awk '{{print $1}}' | sed 's/^v//')
-  if [ "$installed_version" != "$requested_version" ]; then
-    mise self-update "$requested_version" -y
+publish_needed=1
+if [ -x "$mise_bin" ] && [ -f "$meta" ]; then
+  recorded_hash=$(sed -n 's/.*"sha256":[ ]*"\([0-9a-f]*\)".*/\1/p' "$meta")
+  recorded_version=$(sed -n 's/.*"version":[ ]*"\([^"]*\)".*/\1/p' "$meta")
+  actual_hash=$(_velnor_sha256 "$mise_bin")
+  if [ -n "$recorded_hash" ] && [ "$recorded_hash" = "$actual_hash" ] && [ "$recorded_version" = "$exact_version" ]; then
+    publish_needed=0
+    echo "mise: reusing persisted $exact_version ($os_arch) sha256=$actual_hash"
+  else
+    echo "mise: persisted binary failed integrity check (version/hash mismatch); failing closed" >&2
+    exit 1
   fi
 fi
-install_args={install_args}
-working_directory={working_directory}
+if [ "$publish_needed" = "1" ]; then
+  if [ ! -x "$VELNOR_MISE_BOOTSTRAP" ]; then
+    echo "mise: baked bootstrap $VELNOR_MISE_BOOTSTRAP is missing; cannot publish persistent binary" >&2
+    exit 1
+  fi
+  mkdir -p "$store_dir"
+  # mise dispatches by argv[0]: an executable named `.mise.staging.*` is
+  # interpreted as a shim instead of the mise CLI. Keep the executable's
+  # basename exactly `mise` inside a private staging directory, and clean the
+  # directory on every exit so interrupted publication cannot poison PATH.
+  staging_dir="$store_dir/.staging.$$"
+  staging="$staging_dir/mise"
+  rm -rf "$staging_dir"
+  mkdir -p "$staging_dir"
+  trap 'rm -rf "$staging_dir"' EXIT HUP INT TERM
+  # Copy the read-only baked bootstrap onto the same filesystem as the final
+  # path so publication is an atomic rename. /opt/mise/bin is never written.
+  cp "$VELNOR_MISE_BOOTSTRAP" "$staging"
+  chmod 0755 "$staging"
+  # Self-update to the exact version with project config disabled so no
+  # workspace mise.toml can influence the binary update.
+  ( cd / && MISE_CONFIG_FILE="" MISE_TRUSTED_CONFIG_PATHS="" "$staging" self-update "$exact_version" -y )
+  reported=$("$staging" --version 2>/dev/null | awk '{print $1}' | sed 's/^v//')
+  if [ "$reported" != "$exact_version" ]; then
+    echo "mise: self-update produced '$reported', expected '$exact_version'; failing closed" >&2
+    rm -f "$staging"
+    exit 1
+  fi
+  staged_hash=$(_velnor_sha256 "$staging")
+  sync 2>/dev/null || true
+  chmod 0555 "$staging"
+  mv -f "$staging" "$mise_bin"
+  rmdir "$staging_dir"
+  trap - EXIT HUP INT TERM
+  printf '{"version":"%s","sha256":"%s","os_arch":"%s"}\n' "$exact_version" "$staged_hash" "$os_arch" > "$meta"
+  sync 2>/dev/null || true
+  echo "mise: published persistent $exact_version ($os_arch) sha256=$staged_hash"
+fi
+mise_bin_dir=$(dirname "$mise_bin")
+# native_mise reads this marker and prepends the persisted binary dir to the
+# PATH of subsequent steps (in place of the baked /opt/mise/bin).
+echo "__VELNOR_MISE_SELF__$mise_bin_dir"
+export PATH="$mise_bin_dir:/root/.cargo/bin:$mise_home/shims:$PATH"
 if [ -n "$working_directory" ]; then
   cd "$working_directory"
 fi
 if [ -n "$install_requested" ]; then
-  # Trust the workspace config so mise actually reads mise.toml from the checkout.
+  # Trust the workspace config so mise reads mise.toml from the checkout.
   for f in "/__w/mise.toml" "/__w/.mise.toml" "/__w/.mise/config.toml"; do
-    [ -f "$f" ] && mise trust "$f" 2>/dev/null || true
+    [ -f "$f" ] && "$mise_bin" trust "$f" 2>/dev/null || true
   done
-  mise trust --all 2>/dev/null || true
-  # Velnor shares the mise store across jobs. If a previous interrupted install
-  # left an empty version dir, mise can treat it as installed and skip the real
-  # download. Drop those poisoned entries before installing.
-  find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d -empty -exec rm -rf {{}} + 2>/dev/null || true
-  echo "::group::mise install"
+  "$mise_bin" trust --all 2>/dev/null || true
+  # Drop poisoned version dirs a previous interrupted install may have left.
+  # An interrupted cargo-backend install leaves a non-empty version dir without
+  # its bin/ output; mise treats any existing version dir as installed, so the
+  # partial entry would persist ("all tools are installed" while the binary is
+  # missing) and fail every later job on this store. Treat a cargo-* version
+  # dir as valid only when bin/ exists and is non-empty; dropping the dir makes
+  # the locked install below perform a real reinstall.
+  find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d -empty -exec rm -rf {} + 2>/dev/null || true
+  for tool_dir in "$mise_home/installs"/cargo-*; do
+    [ -d "$tool_dir" ] || continue
+    for version_dir in "$tool_dir"/*; do
+      [ -d "$version_dir" ] || continue
+      if [ ! -d "$version_dir/bin" ] || [ -z "$(ls -A "$version_dir/bin" 2>/dev/null)" ]; then
+        echo "mise: dropping incomplete install $version_dir (missing bin/); will reinstall"
+        rm -rf "$version_dir"
+      fi
+    done
+  done
+  echo "::group::mise install (locked)"
+  # Fail closed: enforce the committed lockfile, refuse unlocked artifacts, and
+  # treat a provenance-API failure as fatal.
+  export MISE_LOCKFILE=1 MISE_LOCKED=1 MISE_LOCKED_VERIFY_PROVENANCE=1
   if [ -n "$install_args" ]; then
-    mise install $install_args
+    "$mise_bin" install --locked --yes $install_args
   else
-    mise install
+    "$mise_bin" install --locked --yes
+  fi
+  # A job image may already contain the exact rustup toolchain with a minimal
+  # component profile. mise correctly treats that version as installed, but a
+  # missing mandatory `cargo` component makes every Rust project command fail.
+  # Repair and validate through the repository-selected mise environment; this
+  # never chooses an unpinned toolchain or bypasses the committed lockfile.
+  if "$mise_bin" current rust >/dev/null 2>&1; then
+    "$mise_bin" exec -- rustup component add cargo clippy rustfmt
+    if ! "$mise_bin" exec -- cargo --version >/dev/null 2>&1 \
+      || ! "$mise_bin" exec -- cargo clippy --version >/dev/null 2>&1 \
+      || ! "$mise_bin" exec -- cargo fmt --version >/dev/null 2>&1; then
+      # rustup can report a component "up to date" while its proxy says the
+      # component is not applicable when a persisted minimal/incomplete
+      # toolchain predates the locked mise install.  That state is not usable
+      # and must not be accepted merely because the version directory exists.
+      # Rebuild the exact committed Rust pin through mise, then add and prove
+      # the mandatory components again.  No live version selection occurs.
+      rust_toolchain=$("$mise_bin" current rust)
+      echo "mise: Rust $rust_toolchain component probes failed; rebuilding locked toolchain" >&2
+      "$mise_bin" exec -- rustup toolchain uninstall "$rust_toolchain"
+      "$mise_bin" install --locked --yes --force rust
+      "$mise_bin" exec -- rustup component add cargo clippy rustfmt
+    fi
+    "$mise_bin" exec -- cargo --version
+    "$mise_bin" exec -- cargo clippy --version
+    "$mise_bin" exec -- cargo fmt --version
   fi
   echo "::endgroup::"
 else
-  command -v mise >/dev/null 2>&1
+  "$mise_bin" --version >/dev/null 2>&1
 fi
 # Emit active mise tool bin dirs as markers. native_mise parses these and adds
-# them to PATH for subsequent steps. Velnor only puts the shims dir on the step
-# PATH, but executables installed INTO a mise-managed tool (python/cargo
-# and GitHub backends, etc.) live in the tool's install root or bin, not always
-# in shims. This makes ansible-galaxy, cargo-audit, cargo-shear, cargo-deny, and
-# similar tools findable in later steps, matching jdx/mise-action.
-{{
-  mise bin-paths 2>/dev/null || true
-  find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d 2>/dev/null || true
+# them to PATH. `mise bin-paths` is authoritative; nested `bin` dirs cover
+# executables installed into managed runtimes (pipx version roots also contain a
+# same-named virtualenv dir that would shadow the real executable).
+{
+  "$mise_bin" bin-paths 2>/dev/null || true
   find "$mise_home/installs" -mindepth 3 -maxdepth 3 -type d -name bin 2>/dev/null || true
-}} | awk 'NF && !seen[$0]++ {{ print "__VELNOR_MISE_BIN__" $0 }}'
-# Match mise-action's environment export. Write through the job temp mount so
-# values never enter the streamed action log; native_mise reads and deletes
-# these files, exports every non-PATH string, and registers redacted values as
-# masks before subsequent steps can emit them.
+} | awk 'NF && !seen[$0]++ { print "__VELNOR_MISE_BIN__" $0 }'
+# Match mise-action's environment export through the job temp mount so values
+# never enter the streamed action log; native_mise reads/deletes these files.
 umask 077
-mkdir -p /__t/_velnor
-mise env --redacted --json > /__t/_velnor/mise-env-redacted.json
-mise env --json > /__t/_velnor/mise-env.json
+mkdir -p "$VELNOR_MISE_ENV_DIR"
+"$mise_bin" env --redacted --json > "$VELNOR_MISE_ENV_DIR/mise-env-redacted.json"
+"$mise_bin" env --json > "$VELNOR_MISE_ENV_DIR/mise-env.json"
 echo "mise install completed, cargo: $(command -v cargo 2>/dev/null || echo 'not found')"
-mise --version
-"#,
-    )
+"$mise_bin" --version
+"#;
+
+/// Map the mise action `working_directory` input (a container path under `/__w`,
+/// or a workspace-relative path) to its host path inside the checkout mount so
+/// the fail-closed lock policy can inspect the real files.
+fn mise_working_directory_host(checkout_root: &Path, working_directory: &str) -> PathBuf {
+    let working_directory = working_directory.trim();
+    if working_directory.is_empty() || working_directory == "/__w" {
+        return checkout_root.to_path_buf();
+    }
+    if let Some(rel) = working_directory.strip_prefix("/__w/") {
+        return checkout_root.join(rel);
+    }
+    let path = Path::new(working_directory);
+    if path.is_absolute() {
+        // Passed through so the policy's inside-checkout check rejects it.
+        path.to_path_buf()
+    } else {
+        checkout_root.join(path)
+    }
+}
+
+fn mise_step_path(output: &str) -> Vec<String> {
+    let mut path = Vec::new();
+    // Prefer the persisted per-version mise binary dir the setup step published;
+    // fall back to the baked bootstrap when no marker is present.
+    for line in output.lines() {
+        if let Some(dir) = line.strip_prefix("__VELNOR_MISE_SELF__") {
+            let dir = dir.trim();
+            if !dir.is_empty() && !path.iter().any(|entry| entry == dir) {
+                path.push(dir.to_string());
+            }
+        }
+    }
+    if path.is_empty() {
+        path.push("/opt/mise/bin".to_string());
+    }
+    // Add the active mise tool install bin dirs before shims. A pipx install
+    // has both `<version>/reuse/` (the virtualenv directory) and
+    // `<version>/bin/reuse` (the executable); a stale/shared shim can resolve
+    // the former and fail with EACCES. `mise bin-paths` is authoritative for
+    // the repository-selected versions.
+    for line in output.lines() {
+        if let Some(dir) = line.strip_prefix("__VELNOR_MISE_BIN__") {
+            let dir = dir.trim();
+            if !dir.is_empty() && !path.iter().any(|path| path == dir) {
+                path.push(dir.to_string());
+            }
+        }
+    }
+    // Rust installed by mise is backed by rustup under /root/.cargo/bin. Keep
+    // those real, root-owned proxies ahead of mise's generic shims: rustfmt
+    // asks `rustup component list`, and resolving that command back to the
+    // mise shim recursively re-enters the same probe until the host exhausts
+    // its process table. Direct pinned tool bins above still take precedence.
+    path.push("/root/.cargo/bin".to_string());
+    path.push("/opt/mise/shims".to_string());
+    path
 }
 
 fn parse_mise_environment(
@@ -3496,57 +3997,73 @@ fn hadolint_script(inputs: &HadolintInputs) -> String {
     script
 }
 
-/// POSIX-sh script for the native cosign-installer adapter. The preinstalled
-/// /usr/local/bin/cosign satisfies any request whose version matches; a
-/// different requested release is downloaded from sigstore's GitHub release.
-fn cosign_installer_script(release: &str, install_dir: &str) -> String {
-    let release = release.trim();
-    let want = shell_single_quote(release.trim_start_matches('v'));
-    // install_dir may contain $HOME by contract (the action default) — expand
-    // in-shell, so single-quoting must not apply to the whole value.
-    let dir = install_dir.trim().replace('\'', "'\"'\"'");
+// Exact versions of the admitted locked mise keys backing the mold/just/cosign
+// adapters. These MUST match docker/job-mise.lock (Plan 008 Step 3); the job
+// image bakes these versions, so a job-time `mise install --locked` is an
+// integrity re-check, never a download over an unlocked path.
+const MOLD_LOCKED_VERSION: &str = "2.41.0";
+const JUST_LOCKED_VERSION: &str = "1.58.0";
+const COSIGN_LOCKED_VERSION: &str = "3.1.3";
+
+/// Shared prologue for the project-tool adapters (Plan 008 N8): point mise at
+/// the baked global locked config and install one admitted tool key in
+/// fail-closed mode. There is deliberately no apt/Cargo/curl fallback.
+fn locked_mise_install(key: &str) -> String {
     format!(
-        r#"set -u
-WANT={want}
-DIR="{dir}"
-mkdir -p "$DIR"
-have=""
-if command -v cosign >/dev/null 2>&1; then
-  have=$(cosign version 2>/dev/null | sed -n 's/^GitVersion:[[:space:]]*v\{{0,1\}}//p' | head -1)
-fi
-if [ -n "$have" ] && {{ [ -z "$WANT" ] || [ "$have" = "$WANT" ]; }}; then
-  ln -sf "$(command -v cosign)" "$DIR/cosign"
-  echo "cosign $have (preinstalled)"
-else
-  ver="${{WANT:-$have}}"
-  if [ -z "$ver" ]; then echo "no cosign available and no version requested" >&2; exit 1; fi
-  case "$(uname -m)" in
-    x86_64) arch="amd64" ;;
-    aarch64|arm64) arch="arm64" ;;
-    *) echo "unsupported arch $(uname -m) for cosign" >&2; exit 1 ;;
-  esac
-  curl -fsSL -o "$DIR/cosign" "https://github.com/sigstore/cosign/releases/download/v${{ver}}/cosign-linux-${{arch}}"
-  chmod 0755 "$DIR/cosign"
-  echo "cosign v${{ver}} installed to $DIR"
-fi
-echo "__VELNOR_COSIGN_DIR__$DIR"
-"#
+        "set -e\n\
+         export MISE_DATA_DIR=/opt/mise MISE_CACHE_DIR=/opt/mise/cache MISE_CONFIG_DIR=/opt/mise/config\n\
+         export MISE_LOCKFILE=1 MISE_LOCKED=1 MISE_LOCKED_VERIFY_PROVENANCE=1\n\
+         export PATH=\"/opt/mise/bin:/opt/mise/shims:$PATH\"\n\
+         mise install --locked --yes {}\n",
+        shell_single_quote(key)
     )
 }
 
-fn setup_mold_script() -> String {
-    r#"set -e
-if ! command -v mold >/dev/null 2>&1; then
-  if command -v apt-get >/dev/null 2>&1; then
-    apt-get update
-    apt-get install -y --no-install-recommends mold
-  else
-    echo "mold is not installed and apt-get is unavailable" >&2
-    exit 1
-  fi
+/// Native `sigstore/cosign-installer`: install the admitted locked `cosign`
+/// mise key, verify the version, and expose install-dir on PATH (matching the
+/// action). A requested release that differs from the committed lock fails
+/// closed — Velnor never downloads cosign outside mise.
+fn cosign_installer_script(release: &str, install_dir: &str) -> String {
+    let want = shell_single_quote(release.trim().trim_start_matches('v'));
+    // install_dir may contain $HOME by contract (the action default) — expand
+    // in-shell, so single-quoting must not apply to the whole value.
+    let dir = install_dir.trim().replace('\'', "'\"'\"'");
+    let mut script = locked_mise_install("cosign");
+    script.push_str(&format!(
+        r#"WANT={want}
+DIR="{dir}"
+LOCKED='{ver}'
+if [ -n "$WANT" ] && [ "$WANT" != "$LOCKED" ]; then
+  echo "cosign release '$WANT' requested but the committed locked version is '$LOCKED'; refusing a non-mise download" >&2
+  exit 1
 fi
-mold --version
-# Wire mold as the Cargo linker (mirrors rui314/setup-mold upstream behavior).
+mkdir -p "$DIR"
+resolved="$(command -v cosign)"
+ln -sf "$resolved" "$DIR/cosign"
+cosign version 2>&1 | grep -F "$LOCKED"
+echo "cosign $LOCKED (locked mise) linked into $DIR"
+echo "__VELNOR_COSIGN_DIR__$DIR"
+"#,
+        want = want,
+        dir = dir,
+        ver = COSIGN_LOCKED_VERSION,
+    ));
+    script
+}
+
+/// Native `rui314/setup-mold`: install the admitted locked `mold` mise key,
+/// verify the version, then wire it as the Cargo linker (mirrors upstream).
+fn setup_mold_script() -> String {
+    let mut script = locked_mise_install("mold");
+    script.push_str(&format!(
+        "mold --version | grep -F '{MOLD_LOCKED_VERSION}'\n"
+    ));
+    script.push_str(MOLD_LINKER_SNIPPET);
+    script
+}
+
+// Cargo linker wiring for mold. No interpolation, so it stays a plain literal.
+const MOLD_LINKER_SNIPPET: &str = r#"# Wire mold as the Cargo linker (mirrors rui314/setup-mold upstream behavior).
 # Use cc (gcc) with -fuse-ld=mold rather than requiring clang, so this works on
 # systems without clang installed. mold supports being invoked via gcc's linker
 # flag on both x86_64 and aarch64 Linux.
@@ -3564,39 +4081,33 @@ if ! grep -qF '[target.aarch64-unknown-linux-gnu]' "$CARGO_CFG" 2>/dev/null; the
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 MOLDEOF
 fi
-"#
-    .to_string()
-}
+"#;
 
+/// Native `extractions/setup-just` (and equivalents): install the admitted
+/// locked `just` mise key and verify the version. No apt/Cargo fallback.
 fn setup_just_script() -> String {
-    r#"set -e
-if command -v just >/dev/null 2>&1; then
-  just --version
-  exit 0
-fi
-if command -v apt-get >/dev/null 2>&1; then
-  apt-get update
-  apt-get install -y --no-install-recommends just
-elif command -v cargo >/dev/null 2>&1; then
-  export CARGO_HOME="${CARGO_HOME:-/github/home/.cargo}"
-  mkdir -p "$CARGO_HOME/bin"
-  cargo install just --locked
-else
-  echo "just is not installed and neither apt-get nor cargo is available" >&2
-  exit 1
-fi
-just --version
-"#
-    .to_string()
+    let mut script = locked_mise_install("just");
+    script.push_str(&format!(
+        "just --version | grep -F '{JUST_LOCKED_VERSION}'\n"
+    ));
+    script
 }
 
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
-fn native_post_condition(adapter: NativeActionAdapter) -> Option<&'static str> {
+fn native_post_condition(
+    adapter: NativeActionAdapter,
+    cache_kind: Option<CacheActionKind>,
+) -> Option<&'static str> {
     match adapter {
-        NativeActionAdapter::Cache => Some("success()"),
+        // Only the root cache action saves in post; `/restore` and `/save` do
+        // not register a post step. Absent kind defaults to root.
+        NativeActionAdapter::Cache => match cache_kind {
+            Some(CacheActionKind::Restore) | Some(CacheActionKind::Save) => None,
+            Some(CacheActionKind::Root) | None => Some("success()"),
+        },
         NativeActionAdapter::RustCache => Some("success() || env.CACHE_ON_FAILURE == 'true'"),
         // Sccache post step stops the server (always run, matches GitHub's behavior).
         NativeActionAdapter::Sccache => Some("always()"),
@@ -3605,13 +4116,36 @@ fn native_post_condition(adapter: NativeActionAdapter) -> Option<&'static str> {
         NativeActionAdapter::DockerSetupBuildx => Some("always()"),
         // GitHub's login-action post logs out (drops registry credentials).
         NativeActionAdapter::DockerLogin => Some("always()"),
+        NativeActionAdapter::CreateGitHubAppToken => Some("always()"),
         _ => None,
     }
 }
 
+/// Dispatch an `actions/cache` main step by lifecycle. Root and `/restore`
+/// restore in main; `/save` saves in main with no prior lookup. Root and
+/// `/restore` differ only in the outputs they expose (see below); `/save`
+/// exposes none, matching upstream.
 fn native_cache(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    match action.cache_kind.unwrap_or(CacheActionKind::Root) {
+        CacheActionKind::Root => native_cache_restore_main(action, state, CacheActionKind::Root),
+        CacheActionKind::Restore => {
+            native_cache_restore_main(action, state, CacheActionKind::Restore)
+        }
+        CacheActionKind::Save => native_cache_save_main(action, state),
+    }
+}
+
+/// `actions/cache` root/`restore` main phase: look up the key (with restore-key
+/// prefix fallback) and restore unless `lookup-only`. Output exposure is gated
+/// by kind — root emits only `cache-hit`; `/restore` also emits
+/// `cache-primary-key` and `cache-matched-key`.
+fn native_cache_restore_main(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+    kind: CacheActionKind,
 ) -> Result<StepExecutionResult> {
     let action_state = state.with_env(state.resolve_env(&action.env));
     let key = native_cache_key(action, &action_state, "key");
@@ -3620,11 +4154,12 @@ fn native_cache(
     let fail_on_cache_miss =
         input_truthy(&native_input(action, &action_state, "fail-on-cache-miss"));
     let lookup_only = input_truthy(&native_input(action, &action_state, "lookup-only"));
+    let version = cache_scope_version_for(action, &action_state, &path);
     let t0 = Instant::now();
-    let matched_key = find_cache_match(&action_state, &key, &restore_keys)?;
+    let matched_key = find_cache_match(&action_state, &key, &restore_keys, &version)?;
     if let Some(matched_key) = &matched_key {
         if !lookup_only {
-            restore_cache_paths(&action_state, matched_key, &path)?;
+            restore_cache_paths(&action_state, matched_key, &path, &version)?;
         }
     }
     let restore_ms = t0.elapsed().as_millis();
@@ -3632,11 +4167,14 @@ fn native_cache(
 
     let mut outputs = BTreeMap::new();
     outputs.insert("cache-hit".to_string(), exact_hit.to_string());
-    outputs.insert("cache-primary-key".to_string(), key.clone());
-    outputs.insert(
-        "cache-matched-key".to_string(),
-        matched_key.clone().unwrap_or_default(),
-    );
+    // Upstream root emits only `cache-hit`; `/restore` emits all three.
+    if kind == CacheActionKind::Restore {
+        outputs.insert("cache-primary-key".to_string(), key.clone());
+        outputs.insert(
+            "cache-matched-key".to_string(),
+            matched_key.clone().unwrap_or_default(),
+        );
+    }
 
     let mut state_values = BTreeMap::new();
     if !key.is_empty() {
@@ -3648,7 +4186,7 @@ fn native_cache(
 
     let persistent_paths = cache_paths(&path)
         .iter()
-        .filter(|path| velnor_persistent_cache_path(path))
+        .filter(|path| velnor_persistent_cache_path(&action_state, path))
         .count();
     let mut stdout = String::new();
     if let Some(matched_key) = &matched_key {
@@ -3705,6 +4243,20 @@ fn native_cache(
     })
 }
 
+/// `actions/cache/save` main phase: persist directly with no prior lookup or
+/// restore, and expose no outputs. Never materializes an existing entry before
+/// saving; an already-present key is reported as `AlreadyExists`.
+fn native_cache_save_main(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let key = native_cache_key(action, &action_state, "key");
+    let path = native_input(action, &action_state, "path");
+    let version = cache_scope_version_for(action, &action_state, &path);
+    save_cache_result(&action_state, &key, &path, false, &version)
+}
+
 fn native_rust_cache(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
@@ -3713,10 +4265,11 @@ fn native_rust_cache(
     let shared_key = native_cache_key(action, &action_state, "shared-key");
     let cache_directories = native_input(action, &action_state, "cache-directories");
     let cache_on_failure = native_input_or(&action_state, action, "cache-on-failure", "false");
+    let version = cache_scope_version_for(action, &action_state, &cache_directories);
     let t0 = Instant::now();
-    let matched = find_cache_match(&action_state, &shared_key, "")?;
+    let matched = find_cache_match(&action_state, &shared_key, "", &version)?;
     if let Some(matched_key) = &matched {
-        restore_cache_paths(&action_state, matched_key, &cache_directories)?;
+        restore_cache_paths(&action_state, matched_key, &cache_directories, &version)?;
     }
     let restore_ms = t0.elapsed().as_millis();
     let persistent_target =
@@ -3769,12 +4322,13 @@ fn native_cache_save(
     let action_state = state.with_env(state.resolve_env(&action.env));
     let key = native_cache_key(action, &action_state, "key");
     let path = native_input(action, &action_state, "path");
+    let version = cache_scope_version_for(action, &action_state, &path);
     let exact_hit = state
         .outputs
         .get(step_id)
         .and_then(|outputs| outputs.get("cache-hit"))
         .is_some_and(|value| value == "true");
-    save_cache_result(&action_state, &key, &path, exact_hit)
+    save_cache_result(&action_state, &key, &path, exact_hit, &version)
 }
 
 fn native_rust_cache_save(
@@ -3785,37 +4339,18 @@ fn native_rust_cache_save(
     let action_state = state.with_env(state.resolve_env(&action.env));
     let key = native_cache_key(action, &action_state, "shared-key");
     let path = native_input(action, &action_state, "cache-directories");
+    let version = cache_scope_version_for(action, &action_state, &path);
     let exact_hit = state
         .outputs
         .get(step_id)
         .and_then(|outputs| outputs.get("cache-hit"))
         .is_some_and(|value| value == "true");
-    let mut result = save_cache_result(&action_state, &key, &path, exact_hit)?;
+    let mut result = save_cache_result(&action_state, &key, &path, exact_hit, &version)?;
     result.state.summary = result
         .state
         .summary
         .replace("actions/cache (native post)", "rust-cache (native post)");
     Ok(result)
-}
-
-/// `type=gha` buildx cache options pay GitHub's cache API latency from the
-/// self-hosted host while the persistent named builder already keeps a local
-/// layer cache — pure overhead on the Velnor lane (master-plan P3.7). The
-/// docker adapters drop them; all other cache types pass through.
-fn is_gha_cache_value(value: &str) -> bool {
-    value
-        .trim()
-        .split(',')
-        .any(|part| part.trim().eq_ignore_ascii_case("type=gha"))
-}
-
-/// Bake `--set` form: `<target-pattern>.cache-from=type=gha,...`.
-fn is_gha_bake_set_entry(entry: &str) -> bool {
-    let Some((key, value)) = entry.split_once('=') else {
-        return false;
-    };
-    (key.trim().ends_with(".cache-from") || key.trim().ends_with(".cache-to"))
-        && is_gha_cache_value(value)
 }
 
 fn cache_lookup_keys(key: &str, restore_keys: &str) -> Vec<String> {
@@ -3834,17 +4369,64 @@ fn native_cache_key(
     native_input(action, state, name).trim().to_string()
 }
 
+/// Deterministic cache-version segment that isolates entries by runtime
+/// compatibility boundary: the action pin (`git_ref`/SHA), `RUNNER_OS`,
+/// `RUNNER_ARCH`, and the normalized declared paths. It sits below
+/// `<trust>/caches/<repo>` so the same visible key never restores across an
+/// incompatible variant. The user key (with evaluated lock hashes) remains the
+/// toolchain/input identity inside this version.
+fn cache_scope_version_for(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+    paths: &str,
+) -> String {
+    cache_scope_version(
+        &action.git_ref,
+        &cache_scope_runner_field(state, "RUNNER_OS"),
+        &cache_scope_runner_field(state, "RUNNER_ARCH"),
+        paths,
+    )
+}
+
+fn cache_scope_runner_field(state: &JobExecutionState, name: &str) -> String {
+    state.env.get(name).cloned().unwrap_or_default()
+}
+
+fn cache_scope_version(git_ref: &str, runner_os: &str, runner_arch: &str, paths: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(git_ref.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(runner_os.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(runner_arch.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(normalize_cache_scope_paths(paths).as_bytes());
+    let digest = hasher.finalize();
+    format!("cv1-{}", hex_digest(&digest[..16]))
+}
+
+fn normalize_cache_scope_paths(paths: &str) -> String {
+    let mut items: Vec<String> = cache_paths(paths)
+        .into_iter()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .collect();
+    items.sort();
+    items.join("\n")
+}
+
 fn find_cache_match(
     state: &JobExecutionState,
     key: &str,
     restore_keys: &str,
+    version: &str,
 ) -> Result<Option<String>> {
-    let store = cache_store_dir(state)?;
+    let store = cache_store_dir(state, version)?;
     if key.is_empty() || !store.exists() {
         return Ok(None);
     }
     let exact = store.join(sanitize_artifact_name(key));
-    if exact.exists() {
+    if cache_entry_complete(&exact) {
         return Ok(Some(key.to_string()));
     }
     for restore_key in restore_keys
@@ -3877,7 +4459,7 @@ fn cache_entries_with_prefix(store: &Path, prefix: &str) -> Result<Vec<CacheEntr
     let mut matches = Vec::new();
     for entry in fs::read_dir(store).with_context(|| format!("read {}", store.display()))? {
         let entry = entry?;
-        if !entry.file_type()?.is_dir() {
+        if !entry.file_type()?.is_dir() || !cache_entry_complete(&entry.path()) {
             continue;
         }
         let sanitized_key = entry.file_name().to_string_lossy().to_string();
@@ -3917,13 +4499,22 @@ fn system_time_nanos(time: SystemTime) -> Option<u128> {
         .map(|duration| duration.as_nanos())
 }
 
-fn restore_cache_paths(state: &JobExecutionState, key: &str, paths: &str) -> Result<()> {
-    let cache_dir = cache_store_dir(state)?.join(sanitize_artifact_name(key));
+fn restore_cache_paths(
+    state: &JobExecutionState,
+    key: &str,
+    paths: &str,
+    version: &str,
+) -> Result<()> {
+    let cache_dir = cache_store_dir(state, version)?.join(sanitize_artifact_name(key));
+    let _lock = CacheEntryLock::shared(&cache_dir)?;
+    if !cache_entry_complete(&cache_dir) {
+        bail!("cache entry '{key}' is incomplete");
+    }
     for (index, path) in cache_paths(paths).into_iter().enumerate() {
         // Paths that live on Velnor's host-persistent mounts (cargo
         // registry/git, mise installs, sccache) are always warm — copying
         // store bytes over them would be pure waste.
-        if velnor_persistent_cache_path(&path) {
+        if velnor_persistent_cache_path(state, &path) {
             continue;
         }
         let source = cache_dir.join(index.to_string());
@@ -3936,6 +4527,7 @@ fn restore_cache_paths(state: &JobExecutionState, key: &str, paths: &str) -> Res
         fs::create_dir_all(&destination)
             .with_context(|| format!("create cache restore path {}", destination.display()))?;
         copy_dir_contents(&source, &destination)?;
+        verify_cache_copy(&source, &destination)?;
     }
     Ok(())
 }
@@ -3946,7 +4538,22 @@ fn restore_cache_paths(state: &JobExecutionState, key: &str, paths: &str) -> Res
 /// toolchain store, and the shared sccache dir. These are always warm; the
 /// actions/cache adapter neither tars them into the store nor copies store bytes
 /// back over them.
-fn velnor_persistent_cache_path(path: &str) -> bool {
+fn velnor_persistent_cache_path(state: &JobExecutionState, path: &str) -> bool {
+    if state.persistent_workspace_target && workspace_target_cache_path(path) {
+        return true;
+    }
+    velnor_static_persistent_cache_path(path)
+}
+
+fn workspace_target_cache_path(path: &str) -> bool {
+    let path = path.trim();
+    matches!(path, "target" | "./target" | "/__w/target")
+        || path.starts_with("target/")
+        || path.starts_with("./target/")
+        || path.starts_with("/__w/target/")
+}
+
+fn velnor_static_persistent_cache_path(path: &str) -> bool {
     let path = path.trim();
     let home_relative = path
         .strip_prefix("~/")
@@ -3962,8 +4569,6 @@ fn velnor_persistent_cache_path(path: &str) -> bool {
     }
     path == "/opt/mise"
         || path.starts_with("/opt/mise/")
-        || path == "/__w/target"
-        || path.starts_with("/__w/target/")
         || path == "/root/.rustup"
         || path.starts_with("/root/.rustup/")
         || path == "/var/cache/sccache"
@@ -3976,7 +4581,9 @@ fn rust_cache_covered_by_persistent_storage(
 ) -> bool {
     let paths = cache_paths(cache_directories);
     if !paths.is_empty() {
-        return paths.iter().all(|path| velnor_persistent_cache_path(path));
+        return paths
+            .iter()
+            .all(|path| velnor_persistent_cache_path(state, path));
     }
     state.persistent_workspace_target
 }
@@ -3985,28 +4592,88 @@ fn container_runtime_env(container: &JobContainerSpec) -> Vec<(String, String)> 
     container.env.clone()
 }
 
+/// Structural phase of a save that lost a race for the shared store, so the
+/// summary/stderr can name where contention happened instead of a generic skip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveContentionPhase {
+    Copy,
+    Publish,
+}
+
+impl SaveContentionPhase {
+    fn label(self) -> &'static str {
+        match self {
+            SaveContentionPhase::Copy => "copy",
+            SaveContentionPhase::Publish => "publish",
+        }
+    }
+}
+
+/// Explicit result of a cache save. Replaces the previous string-sniffing on
+/// stdout/stderr so a non-persisting outcome (exact hit, already-exists, empty
+/// key, no paths, contention) can never be reported as "completed".
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SaveOutcome {
+    Persisted {
+        paths: usize,
+    },
+    ExactHit,
+    AlreadyExists,
+    HostPersistent,
+    NoPaths,
+    EmptyKey,
+    Contended {
+        phase: SaveContentionPhase,
+        detail: String,
+    },
+}
+
+/// Lock-wait, copy, and total durations captured while saving, surfaced in the
+/// step summary for observability.
+#[derive(Debug, Clone, Copy, Default)]
+struct SaveTiming {
+    lock_wait_ms: u128,
+    copy_ms: u128,
+    total_ms: u128,
+}
+
 fn save_cache_result(
     state: &JobExecutionState,
     key: &str,
     paths: &str,
     exact_hit: bool,
+    version: &str,
 ) -> Result<StepExecutionResult> {
+    let t0 = Instant::now();
     if key.is_empty() {
         return Ok(cache_save_step_result(
-            0,
-            "Cache save skipped because key is empty\n",
-            "",
+            key,
+            SaveOutcome::EmptyKey,
+            SaveTiming::default(),
         ));
     }
     if exact_hit {
         return Ok(cache_save_step_result(
-            0,
-            &format!("Cache hit occurred on primary key '{key}', not saving cache\n"),
-            "",
+            key,
+            SaveOutcome::ExactHit,
+            SaveTiming::default(),
         ));
     }
-    let t0 = Instant::now();
-    let cache_dir = cache_store_dir(state)?.join(sanitize_artifact_name(key));
+    let cache_dir = cache_store_dir(state, version)?.join(sanitize_artifact_name(key));
+    let lock_start = Instant::now();
+    let _lock = CacheEntryLock::exclusive(&cache_dir)?;
+    let lock_wait_ms = lock_start.elapsed().as_millis();
+    if cache_entry_complete(&cache_dir) {
+        return Ok(cache_save_step_result(
+            key,
+            SaveOutcome::AlreadyExists,
+            SaveTiming {
+                lock_wait_ms,
+                total_ms: t0.elapsed().as_millis(),
+                ..SaveTiming::default()
+            },
+        ));
+    }
     // The store is shared across daemon slots: stage the whole entry next to
     // its final location and swap with a rename, so a sibling slot restoring
     // this key never reads a half-written tree.
@@ -4025,10 +4692,11 @@ fn save_cache_result(
     fs::write(staging_dir.join(".velnor-created"), cache_timestamp())
         .with_context(|| format!("write cache timestamp {}", staging_dir.display()))?;
 
+    let copy_start = Instant::now();
     let mut saved = 0usize;
     let mut persistent = 0usize;
     for (index, path) in cache_paths(paths).into_iter().enumerate() {
-        if velnor_persistent_cache_path(&path) {
+        if velnor_persistent_cache_path(state, &path) {
             persistent += 1;
             continue;
         }
@@ -4044,49 +4712,257 @@ fn save_cache_result(
         if let Err(error) = copy_cache_source(&source, &target) {
             fs::remove_dir_all(&staging_dir).ok();
             return Ok(cache_save_step_result(
-                0,
-                "",
-                &format!("Cache save skipped after copy contention for key '{key}': {error:#}\n"),
+                key,
+                SaveOutcome::Contended {
+                    phase: SaveContentionPhase::Copy,
+                    detail: format!("{error:#}"),
+                },
+                SaveTiming {
+                    lock_wait_ms,
+                    copy_ms: copy_start.elapsed().as_millis(),
+                    total_ms: t0.elapsed().as_millis(),
+                },
             ));
         }
         saved += 1;
     }
-    let save_ms = t0.elapsed().as_millis();
+    let copy_ms = copy_start.elapsed().as_millis();
     if saved == 0 {
         fs::remove_dir_all(&staging_dir).ok();
-        if persistent > 0 {
-            return Ok(cache_save_step_result(
-                0,
-                &format!(
-                    "{ANSI_GREEN}Cache paths live on Velnor host-persistent storage (always warm); nothing to save for key '{key}'{ANSI_RESET}\n"
-                ),
-                "",
-            ));
-        }
+        let outcome = if persistent > 0 {
+            SaveOutcome::HostPersistent
+        } else {
+            SaveOutcome::NoPaths
+        };
         return Ok(cache_save_step_result(
-            0,
-            "",
-            &format!("Cache not saved because no paths exist for key '{key}'\n"),
+            key,
+            outcome,
+            SaveTiming {
+                lock_wait_ms,
+                copy_ms,
+                total_ms: t0.elapsed().as_millis(),
+            },
         ));
     }
+    // Completion marker is written only after every source was copied and
+    // verified. Legacy or interrupted entries have no marker and are misses.
+    // This prevents rustup and similar mutable trees from being restored from
+    // a structurally incomplete cache generation.
+    fs::write(staging_dir.join(".velnor-complete-v1"), b"complete\n")
+        .with_context(|| format!("write cache completion marker {}", staging_dir.display()))?;
     fs::remove_dir_all(&cache_dir).ok();
     if let Err(error) = fs::rename(&staging_dir, &cache_dir)
         .with_context(|| format!("publish cache entry {}", cache_dir.display()))
     {
         fs::remove_dir_all(&staging_dir).ok();
         return Ok(cache_save_step_result(
-            0,
-            "",
-            &format!("Cache save skipped after publish contention for key '{key}': {error:#}\n"),
+            key,
+            SaveOutcome::Contended {
+                phase: SaveContentionPhase::Publish,
+                detail: format!("{error:#}"),
+            },
+            SaveTiming {
+                lock_wait_ms,
+                copy_ms,
+                total_ms: t0.elapsed().as_millis(),
+            },
         ));
     }
     Ok(cache_save_step_result(
-        0,
-        &format!(
-            "{ANSI_GREEN}Saved cache '{key}' with {saved} path(s){ANSI_RESET} ({save_ms}ms)\n"
-        ),
-        "",
+        key,
+        SaveOutcome::Persisted { paths: saved },
+        SaveTiming {
+            lock_wait_ms,
+            copy_ms,
+            total_ms: t0.elapsed().as_millis(),
+        },
     ))
+}
+
+fn cache_entry_complete(path: &Path) -> bool {
+    path.is_dir() && path.join(".velnor-complete-v1").is_file()
+}
+
+fn verify_cache_copy(source: &Path, destination: &Path) -> Result<()> {
+    for entry in fs::read_dir(source).with_context(|| format!("verify {}", source.display()))? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let source_type = entry.file_type()?;
+        let destination_metadata = fs::symlink_metadata(&destination_path).with_context(|| {
+            format!(
+                "cache restore omitted {} while materializing {}",
+                source_path.display(),
+                destination.display()
+            )
+        })?;
+        if source_type.is_dir() {
+            if !destination_metadata.is_dir() {
+                bail!(
+                    "cache restore changed directory {} into another file type",
+                    source_path.display()
+                );
+            }
+            verify_cache_copy(&source_path, &destination_path)?;
+        } else if source_type.is_file() {
+            let source_metadata = entry.metadata()?;
+            if !destination_metadata.is_file()
+                || source_metadata.len() != destination_metadata.len()
+                || source_metadata.permissions().mode() != destination_metadata.permissions().mode()
+            {
+                bail!(
+                    "cache restore did not preserve file metadata for {}",
+                    source_path.display()
+                );
+            }
+        } else {
+            bail!(
+                "cache entry contains unsupported file type at {}",
+                source_path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+const TARGET_SOURCE_REVISION_MARKER: &str = ".velnor-source-revision-v1";
+
+fn materialize_persistent_target(
+    container: &JobContainerSpec,
+    source_revision: Option<&str>,
+) -> Result<()> {
+    let Some(store) = container.cargo_target_host.as_deref() else {
+        return Ok(());
+    };
+    let _lock = CacheEntryLock::shared(store)?;
+    let payload = store.join("data");
+    if !store.join(".velnor-target-complete-v1").is_file() || !payload.is_dir() {
+        return Ok(());
+    }
+    let target = container.workspace_host.join("target");
+    if target.exists() {
+        fs::remove_dir_all(&target)
+            .with_context(|| format!("clear job-local target {}", target.display()))?;
+    }
+    fs::create_dir_all(&target)
+        .with_context(|| format!("create job-local target {}", target.display()))?;
+    copy_dir_contents(&payload, &target)?;
+    verify_cache_copy(&payload, &target)
+        .with_context(|| format!("verify persistent target restore from {}", store.display()))?;
+
+    let stored_revision = fs::read_to_string(store.join(TARGET_SOURCE_REVISION_MARKER))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let source_revision = workspace_source_revision(&container.workspace_host, source_revision);
+    if source_revision
+        .as_deref()
+        .is_some_and(|revision| stored_revision.as_deref() != Some(revision))
+    {
+        eprintln!(
+            "forensics.lifecycle: persistent target source revision changed (stored={}, current={}); refreshing workspace mtimes",
+            stored_revision.as_deref().unwrap_or("unknown"),
+            source_revision.as_deref().unwrap_or("unknown")
+        );
+        refresh_workspace_source_mtimes(&container.workspace_host)?;
+    }
+    Ok(())
+}
+
+fn workspace_source_revision(workspace: &Path, fallback: Option<&str>) -> Option<String> {
+    std::process::Command::new("git")
+        .args(["-C"])
+        .arg(workspace)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|revision| revision.trim().to_owned())
+        .filter(|revision| !revision.is_empty())
+        .or_else(|| fallback.map(str::to_owned))
+}
+
+fn refresh_workspace_source_mtimes(workspace: &Path) -> Result<()> {
+    let modified = std::time::SystemTime::now();
+    let mut pending = vec![workspace.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory)
+            .with_context(|| format!("read workspace directory {}", directory.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if directory == workspace
+                && matches!(entry.file_name().to_str(), Some(".git" | "target"))
+            {
+                continue;
+            }
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                pending.push(path);
+            } else if file_type.is_file() {
+                fs::File::options()
+                    .append(true)
+                    .open(&path)?
+                    .set_modified(modified)?;
+            }
+        }
+        fs::File::open(&directory)?.set_modified(modified)?;
+    }
+    Ok(())
+}
+
+fn publish_persistent_target(
+    container: &JobContainerSpec,
+    source_revision: Option<&str>,
+) -> Result<()> {
+    let Some(store) = container.cargo_target_host.as_deref() else {
+        return Ok(());
+    };
+    let target = container.workspace_host.join("target");
+    if !target.is_dir() {
+        return Ok(());
+    }
+    let name = store
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("target");
+    let staging = store.with_file_name(cache_staging_name(name));
+    fs::remove_dir_all(&staging).ok();
+    let payload = staging.join("data");
+    fs::create_dir_all(&payload)
+        .with_context(|| format!("create target staging directory {}", payload.display()))?;
+    if let Err(error) =
+        copy_dir_contents(&target, &payload).and_then(|()| verify_cache_copy(&target, &payload))
+    {
+        fs::remove_dir_all(&staging).ok();
+        return Err(error).context("stage persistent target generation");
+    }
+    fs::write(staging.join(".velnor-target-complete-v1"), b"complete\n")
+        .with_context(|| format!("write target completion marker {}", staging.display()))?;
+    if let Some(revision) = workspace_source_revision(&container.workspace_host, source_revision) {
+        fs::write(
+            staging.join(TARGET_SOURCE_REVISION_MARKER),
+            format!("{revision}\n"),
+        )
+        .with_context(|| format!("write target source revision {}", staging.display()))?;
+    }
+
+    let _lock = CacheEntryLock::exclusive(store)?;
+    fs::remove_dir_all(store).ok();
+    if let Err(error) = fs::rename(&staging, store)
+        .with_context(|| format!("publish persistent target {}", store.display()))
+    {
+        fs::remove_dir_all(&staging).ok();
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn persistent_target_results_publishable(results: &[StepExecutionResult]) -> bool {
+    results
+        .iter()
+        .all(|result| result.skipped || result.exit_code == 0)
 }
 
 fn cache_staging_name(cache_file_name: &str) -> String {
@@ -4099,26 +4975,73 @@ fn cache_staging_name(cache_file_name: &str) -> String {
     )
 }
 
-fn cache_save_step_result(exit_code: i32, stdout: &str, stderr: &str) -> StepExecutionResult {
-    let result = if stdout.contains("host-persistent storage") {
-        "host-persistent store — restore/save skipped"
-    } else if stderr.is_empty() {
-        "save completed"
-    } else {
-        "save skipped"
-    };
-    StepExecutionResult {
-        exit_code,
-        state: StepCommandState {
-            summary: format!(
-                "## Velnor cache report\n- Backend: actions/cache (native post)\n- Result: {result}\n"
+/// Render a save outcome. Contention stays non-fatal (exit 0) like upstream,
+/// but only a real `Persisted` outcome prints "saved"; every non-persisting
+/// outcome (including contention, which names its phase) says so explicitly.
+fn cache_save_step_result(
+    key: &str,
+    outcome: SaveOutcome,
+    timing: SaveTiming,
+) -> StepExecutionResult {
+    let (result, stdout, stderr) = match &outcome {
+        SaveOutcome::Persisted { paths } => (
+            "saved".to_string(),
+            format!(
+                "{ANSI_GREEN}Saved cache '{key}' with {paths} path(s){ANSI_RESET} ({}ms)\n",
+                timing.total_ms
             ),
+            String::new(),
+        ),
+        SaveOutcome::ExactHit => (
+            "exact hit — not saved".to_string(),
+            format!("Cache hit occurred on primary key '{key}', not saving cache\n"),
+            String::new(),
+        ),
+        SaveOutcome::AlreadyExists => (
+            "already exists — not saved".to_string(),
+            format!("Cache entry already exists for primary key '{key}', not saving cache\n"),
+            String::new(),
+        ),
+        SaveOutcome::HostPersistent => (
+            "host-persistent store — restore/save skipped".to_string(),
+            format!(
+                "{ANSI_GREEN}Cache paths live on Velnor host-persistent storage (always warm); nothing to save for key '{key}'{ANSI_RESET}\n"
+            ),
+            String::new(),
+        ),
+        SaveOutcome::NoPaths => (
+            "no paths — not saved".to_string(),
+            String::new(),
+            format!("Cache not saved because no paths exist for key '{key}'\n"),
+        ),
+        SaveOutcome::EmptyKey => (
+            "empty key — not saved".to_string(),
+            String::new(),
+            "Cache save skipped because key is empty\n".to_string(),
+        ),
+        SaveOutcome::Contended { phase, detail } => (
+            format!("contention ({}) — not saved", phase.label()),
+            String::new(),
+            format!(
+                "Cache save skipped after {} contention for key '{key}': {detail}\n",
+                phase.label()
+            ),
+        ),
+    };
+    let summary = format!(
+        "## Velnor cache report\n- Backend: actions/cache (native post)\n- Result: {result}\n- Lock wait: {} ms\n- Copy: {} ms\n- Total: {} ms\n",
+        timing.lock_wait_ms, timing.copy_ms, timing.total_ms
+    );
+    StepExecutionResult {
+        exit_code: 0,
+        state: StepCommandState {
+            summary,
             ..StepCommandState::default()
         },
         skipped: false,
         failure_ignored: false,
-        stdout: stdout.to_string(),
-        stderr: stderr.to_string(),
+        stdout,
+        stderr,
     }
 }
 
@@ -4311,31 +5234,17 @@ fn native_download_artifact(
             .context("download-artifact requires ACTIONS_RESULTS_URL")?;
         let (plan_id, job_id) = artifact_backend_ids_from_token(runtime_token)
             .context("download-artifact runtime token is missing workflow backend IDs")?;
-        let remote = crate::protocol::download_artifacts_blocking(
+        // Name/pattern filtering happens inside the daemon download: artifacts
+        // that were not requested are never signed or fetched (non-zip
+        // `.dockerbuild` build records must not fail unrelated downloads).
+        let selected = crate::protocol::download_artifacts_blocking(
             results_url,
             runtime_token,
             &plan_id,
             &job_id,
+            &name,
+            &pattern,
         )?;
-        let matcher = if pattern.is_empty() {
-            None
-        } else {
-            let mut builder = GlobSetBuilder::new();
-            builder.add(Glob::new(&pattern)?);
-            Some(builder.build().context("build artifact pattern")?)
-        };
-        let selected = remote
-            .into_iter()
-            .filter(|artifact| {
-                if !name.is_empty() {
-                    artifact.name == name
-                } else if let Some(matcher) = &matcher {
-                    matcher.is_match(&artifact.name)
-                } else {
-                    true
-                }
-            })
-            .collect::<Vec<_>>();
         for artifact in &selected {
             let target = if merge_multiple || !name.is_empty() {
                 destination.clone()
@@ -4398,11 +5307,40 @@ fn native_upload_pages_artifact(
     action: &NativeActionInvocation,
     state: &JobExecutionState,
 ) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let source_input = native_input_or(&action_state, action, "path", "_site/");
+    let source = resolve_host_path(state, &source_input)
+        .context("actions/upload-pages-artifact requires a workspace path")?;
+    if !source.is_dir() {
+        bail!(
+            "actions/upload-pages-artifact path '{}' is not a directory",
+            source_input
+        );
+    }
+    let runner_temp = action_state
+        .env
+        .get("RUNNER_TEMP")
+        .filter(|value| !value.is_empty())
+        .map(String::as_str)
+        .unwrap_or("/__t");
+    let temp_host = state
+        .temp_host
+        .as_deref()
+        .context("actions/upload-pages-artifact requires RUNNER_TEMP")?;
+    let archive = temp_host.join("artifact.tar");
+    create_pages_archive(&source, &archive)?;
+
     let mut page_action = action.clone();
+    page_action.inputs.insert(
+        "name".to_string(),
+        native_input_or(&action_state, action, "name", "github-pages"),
+    );
     page_action
         .inputs
-        .entry("name".to_string())
-        .or_insert_with(|| "github-pages".to_string());
+        .insert("path".to_string(), format!("{runner_temp}/artifact.tar"));
+    page_action
+        .inputs
+        .insert("if-no-files-found".to_string(), "error".to_string());
     let result = native_upload_artifact(&page_action, state)?;
     let mut outputs = result.state.outputs.clone();
     if let Some(artifact_id) = outputs.get("artifact-id").cloned() {
@@ -4414,6 +5352,180 @@ fn native_upload_pages_artifact(
             ..result.state
         },
         ..result
+    })
+}
+
+fn create_pages_archive(source: &Path, archive: &Path) -> Result<()> {
+    if let Some(parent) = archive.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create Pages archive directory {}", parent.display()))?;
+    }
+    let file = fs::File::create(archive)
+        .with_context(|| format!("create Pages archive {}", archive.display()))?;
+    let mut builder = tar::Builder::new(file);
+    // Latest actions/upload-pages-artifact uses GNU tar --dereference and
+    // --hard-dereference because Pages rejects links in deployment content.
+    builder.follow_symlinks(true);
+    builder
+        .append_dir(".", source)
+        .with_context(|| format!("archive Pages root {}", source.display()))?;
+    append_pages_archive_dir(&mut builder, source, Path::new(""), &mut BTreeSet::new())?;
+    builder
+        .finish()
+        .with_context(|| format!("finish Pages archive {}", archive.display()))?;
+    Ok(())
+}
+
+fn append_pages_archive_dir<W: Write>(
+    builder: &mut tar::Builder<W>,
+    source: &Path,
+    relative: &Path,
+    active_directories: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    let directory = source.join(relative);
+    let canonical = fs::canonicalize(&directory)
+        .with_context(|| format!("resolve Pages artifact directory {}", directory.display()))?;
+    if !active_directories.insert(canonical.clone()) {
+        bail!(
+            "Pages artifact directory contains a symlink cycle at {}",
+            directory.display()
+        );
+    }
+
+    let mut entries = fs::read_dir(&directory)
+        .with_context(|| format!("read Pages artifact directory {}", directory.display()))?
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let name = entry.file_name();
+        let name_text = name.to_string_lossy();
+        if name_text.starts_with('.') {
+            continue;
+        }
+        let child_relative = relative.join(&name);
+        let child = entry.path();
+        let metadata = fs::metadata(&child)
+            .with_context(|| format!("read Pages artifact path {}", child.display()))?;
+        let archive_path = Path::new(".").join(&child_relative);
+        if metadata.is_dir() {
+            builder
+                .append_dir(&archive_path, &child)
+                .with_context(|| format!("archive Pages directory {}", child.display()))?;
+            append_pages_archive_dir(builder, source, &child_relative, active_directories)?;
+        } else if metadata.is_file() {
+            builder
+                .append_path_with_name(&child, &archive_path)
+                .with_context(|| format!("archive Pages file {}", child.display()))?;
+        } else {
+            bail!("unsupported Pages artifact path {}", child.display());
+        }
+    }
+    active_directories.remove(&canonical);
+    Ok(())
+}
+
+fn native_attest_build_provenance(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let workspace = action_state
+        .workspace_host
+        .as_deref()
+        .context("actions/attest-build-provenance requires a host workspace mapping")?;
+    let runner_temp = action_state
+        .temp_host
+        .as_deref()
+        .context("actions/attest-build-provenance requires RUNNER_TEMP")?;
+    let oidc_url = action_state
+        .env
+        .get("ACTIONS_ID_TOKEN_REQUEST_URL")
+        .filter(|value| !value.is_empty())
+        .context("missing id-token permission: ACTIONS_ID_TOKEN_REQUEST_URL is absent")?;
+    let oidc_request_token = action_state
+        .env
+        .get("ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+        .filter(|value| !value.is_empty())
+        .context("missing id-token permission: ACTIONS_ID_TOKEN_REQUEST_TOKEN is absent")?;
+    let github_token = action_state
+        .env
+        .get("GITHUB_TOKEN")
+        .filter(|value| !value.is_empty())
+        .cloned()
+        .or_else(|| action_state.resolve_context_data_expression("github.token"))
+        .unwrap_or_else(|| oidc_request_token.clone());
+    let repository = action_state
+        .env
+        .get("GITHUB_REPOSITORY")
+        .filter(|value| !value.is_empty())
+        .context("actions/attest-build-provenance requires GITHUB_REPOSITORY")?;
+    let api_url = action_state
+        .env
+        .get("GITHUB_API_URL")
+        .map(String::as_str)
+        .unwrap_or("https://api.github.com");
+    let server_url = action_state
+        .env
+        .get("GITHUB_SERVER_URL")
+        .map(String::as_str)
+        .unwrap_or("https://github.com");
+    let visibility = action_state
+        .resolve_context_data_expression("github.event.repository.visibility")
+        .or_else(|| {
+            action_state
+                .env
+                .get("GITHUB_REPOSITORY_VISIBILITY")
+                .cloned()
+        });
+    let subject_path = action
+        .inputs
+        .get("subject-path")
+        .context("actions/attest-build-provenance requires subject-path")?;
+
+    let result =
+        crate::attestation::attest_build_provenance(crate::attestation::AttestationRequest {
+            workspace,
+            subject_path,
+            runner_temp,
+            runner_temp_container: "/__t",
+            oidc_url,
+            oidc_request_token,
+            github_token: &github_token,
+            api_url,
+            server_url,
+            repository,
+            repository_visibility: visibility.as_deref(),
+        })?;
+    let mut outputs = BTreeMap::new();
+    outputs.insert("bundle-path".to_string(), result.bundle_path.clone());
+    outputs.insert("attestation-id".to_string(), result.attestation_id.clone());
+    outputs.insert(
+        "attestation-url".to_string(),
+        result.attestation_url.clone(),
+    );
+    let summary = format!(
+        "### Attestation Created\n\n- <a href=\"{}\">{}</a>\n",
+        result.attestation_url, result.attestation_url
+    );
+    let instance = if result.public_good {
+        "Public Good"
+    } else {
+        "GitHub"
+    };
+    Ok(StepExecutionResult {
+        exit_code: 0,
+        state: StepCommandState {
+            outputs,
+            summary,
+            ..StepCommandState::default()
+        },
+        skipped: false,
+        failure_ignored: false,
+        stdout: format!(
+            "Attestation created for {} subject(s)\nAttestation signed using {instance} Sigstore instance\nAttestation uploaded to repository\n{}\n",
+            result.subjects.len(), result.attestation_url
+        ),
+        stderr: String::new(),
     })
 }
 
@@ -4486,6 +5598,187 @@ fn native_configure_pages(
         failure_ignored: false,
         stdout: format!("Configured GitHub Pages at {base_url}\n"),
         stderr: String::new(),
+    })
+}
+
+fn native_create_github_app_token(
+    action: &NativeActionInvocation,
+    state: &JobExecutionState,
+) -> Result<StepExecutionResult> {
+    let action_state = state.with_env(state.resolve_env(&action.env));
+    let repository = action_state
+        .env
+        .get("GITHUB_REPOSITORY")
+        .context("actions/create-github-app-token requires GITHUB_REPOSITORY")?;
+    let (repository_owner, repository_name) = repository
+        .split_once('/')
+        .context("GITHUB_REPOSITORY must be owner/name")?;
+    let owner = native_input_or(&action_state, action, "owner", repository_owner);
+    let repositories = native_input_or(&action_state, action, "repositories", repository_name);
+    if owner != repository_owner || repositories != repository_name {
+        bail!("actions/create-github-app-token is restricted to current repository {repository}");
+    }
+    let api_url = native_input_or(
+        &action_state,
+        action,
+        "github-api-url",
+        "https://api.github.com",
+    );
+    if api_url.trim_end_matches('/') != "https://api.github.com" {
+        bail!("actions/create-github-app-token requires github-api-url=https://api.github.com");
+    }
+    if input_truthy(&native_input_or(
+        &action_state,
+        action,
+        "skip-token-revoke",
+        "false",
+    )) {
+        bail!("actions/create-github-app-token does not permit skip-token-revoke");
+    }
+    // v3 recommends client-id and retains app-id as a legacy alias. Resolve
+    // the same pair here so admission and native execution cannot disagree.
+    let client_id = native_input(action, &action_state, "client-id");
+    let legacy_app_id = native_input(action, &action_state, "app-id");
+    let app_id = github_app_identifier(client_id, legacy_app_id);
+    let private_key = native_input(action, &action_state, "private-key");
+    if app_id.trim().is_empty() || private_key.trim().is_empty() {
+        bail!(
+            "actions/create-github-app-token requires client-id (or legacy app-id) and private-key"
+        );
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_secs();
+    let claims = serde_json::json!({
+        "iat": now.saturating_sub(60),
+        "exp": now.saturating_add(540),
+        "iss": app_id,
+    });
+    let jwt = jsonwebtoken::encode(
+        &Header::new(Algorithm::RS256),
+        &claims,
+        &EncodingKey::from_rsa_pem(private_key.as_bytes())
+            .context("parse GitHub App private key")?,
+    )
+    .context("sign GitHub App JWT")?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("build GitHub App API client")?;
+    let installation_endpoint =
+        format!("https://api.github.com/repos/{repository_owner}/{repository_name}/installation");
+    let installation: Value = github_app_response(
+        client
+            .get(&installation_endpoint)
+            .bearer_auth(&jwt)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "velnor-runner")
+            .send(),
+        "resolve GitHub App installation",
+    )?;
+    let installation_id = installation
+        .get("id")
+        .and_then(Value::as_u64)
+        .context("GitHub App installation response is missing id")?;
+    let app_slug = installation
+        .get("app_slug")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let token_endpoint =
+        format!("https://api.github.com/app/installations/{installation_id}/access_tokens");
+    let token_response: Value = github_app_response(
+        client
+            .post(&token_endpoint)
+            .bearer_auth(&jwt)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "velnor-runner")
+            .json(&serde_json::json!({"repositories": [repository_name]}))
+            .send(),
+        "create GitHub App installation token",
+    )?;
+    let token = token_response
+        .get("token")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("GitHub App token response is missing token")?
+        .to_string();
+    let expires_at = token_response
+        .get("expires_at")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    Ok(native_success_with_state(StepCommandState {
+        outputs: [
+            ("token".to_string(), token.clone()),
+            ("installation-id".to_string(), installation_id.to_string()),
+            ("app-slug".to_string(), app_slug.to_string()),
+        ]
+        .into(),
+        state: [
+            ("token".to_string(), token.clone()),
+            ("expiresAt".to_string(), expires_at),
+        ]
+        .into(),
+        masks: vec![token],
+        ..StepCommandState::default()
+    }))
+}
+
+fn github_app_identifier(client_id: String, legacy_app_id: String) -> String {
+    if client_id.trim().is_empty() {
+        legacy_app_id
+    } else {
+        client_id
+    }
+}
+
+fn github_app_response(
+    response: std::result::Result<reqwest::blocking::Response, reqwest::Error>,
+    operation: &str,
+) -> Result<Value> {
+    let response = response.with_context(|| operation.to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        bail!("{operation} failed with HTTP {status}");
+    }
+    response
+        .json()
+        .with_context(|| format!("decode response for {operation}"))
+}
+
+fn native_revoke_github_app_token(state: &JobExecutionState) -> Result<StepExecutionResult> {
+    let token = state.env.get("STATE_token").cloned().unwrap_or_default();
+    if token.is_empty() {
+        return Ok(native_success_with_state(StepCommandState::default()));
+    }
+    let response = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("build GitHub App revoke client")?
+        .delete("https://api.github.com/installation/token")
+        .bearer_auth(&token)
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "velnor-runner")
+        .send();
+    let stderr = match response {
+        Ok(response) if response.status().is_success() => String::new(),
+        Ok(response) => format!(
+            "Warning: failed to revoke GitHub App token: HTTP {}\n",
+            response.status()
+        ),
+        Err(error) => format!("Warning: failed to revoke GitHub App token: {error}\n"),
+    };
+    Ok(StepExecutionResult {
+        exit_code: 0,
+        state: StepCommandState::default(),
+        skipped: false,
+        failure_ignored: false,
+        stdout: "GitHub App token revoked\n".to_string(),
+        stderr,
     })
 }
 
@@ -4582,8 +5875,7 @@ fn native_deploy_pages(
             .bearer_auth(runtime_token)
             .json(&serde_json::json!({
                 "workflow_run_backend_id": plan_id,
-                "workflow_job_run_backend_id": job_id,
-                "name_filter": {"value": artifact_name}
+                "workflow_job_run_backend_id": job_id
             }))
             .send()
             .context("list Pages artifacts")?,
@@ -4606,9 +5898,12 @@ fn native_deploy_pages(
         .get("database_id")
         .or_else(|| matching[0].get("databaseId"))
         .or_else(|| matching[0].get("id"))
-        .filter(|value| value.is_string() || value.is_number())
-        .cloned()
-        .context("Pages artifact is missing database_id")?;
+        .and_then(|value| match value {
+            Value::Number(value) => value.as_u64(),
+            Value::String(value) => value.parse().ok(),
+            _ => None,
+        })
+        .context("Pages artifact is missing numeric database_id")?;
 
     let oidc: Value = pages_json_response(
         client
@@ -5226,7 +6521,12 @@ fn artifact_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
     Ok(run_root.join("_velnor_artifacts").join(run_key))
 }
 
-fn cache_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
+/// Resolve the store directory for a cache entry. Trust and repository remain
+/// the outer boundary; `version` (a runtime-compatibility segment — see
+/// `cache_scope_version`) is appended below `<trust>/caches/<repo>` so the same
+/// visible key cannot cross an OS/arch/action-SHA/path boundary. The
+/// restore-key prefix scan therefore runs inside the versioned directory.
+fn cache_store_dir(state: &JobExecutionState, version: &str) -> Result<PathBuf> {
     let temp = state
         .temp_host
         .as_deref()
@@ -5240,7 +6540,7 @@ fn cache_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
         eprintln!(
             "forensics.lifecycle: persistent actions cache refused: missing github.repository"
         );
-        return Ok(temp.join("_velnor/ephemeral/caches"));
+        return Ok(temp.join("_velnor/ephemeral/caches").join(version));
     };
     let root = crate::storage::cache_class_path(
         &crate::container::daemon_shared_root(shared_work_root(temp)),
@@ -5251,7 +6551,8 @@ fn cache_store_dir(state: &JobExecutionState) -> Result<PathBuf> {
         root,
         &crate::github_adapter::cargo_target_trust_scope(),
     )
-    .join(crate::container::sanitize_store_key(&repository)))
+    .join(crate::container::sanitize_store_key(&repository))
+    .join(version))
 }
 
 fn shared_work_root(temp: &Path) -> PathBuf {
@@ -5814,6 +7115,55 @@ fn sanitize_artifact_name(name: &str) -> String {
     }
 }
 
+fn job_scoped_buildx_builder_name(requested: &str, state: &JobExecutionState) -> String {
+    format!(
+        "{}-{}",
+        sanitize_artifact_name(requested),
+        job_scope_from_temp(state.temp_host.as_deref())
+    )
+}
+
+fn buildx_driver_resource_options(resource_options: &[String]) -> Result<Vec<String>> {
+    let mut options = Vec::new();
+    let (chunks, remainder) = resource_options.as_chunks::<2>();
+    for [flag, value] in chunks {
+        match flag.as_str() {
+            "--memory" => options.push(format!("memory={value}")),
+            "--cpus" => {
+                let cpus = value
+                    .parse::<f64>()
+                    .with_context(|| format!("invalid job CPU limit '{value}'"))?;
+                if !cpus.is_finite() || cpus <= 0.0 {
+                    bail!("invalid job CPU limit '{value}'");
+                }
+                let quota = (cpus * 100_000.0).round();
+                if quota > u64::MAX as f64 {
+                    bail!("job CPU limit '{value}' is too large");
+                }
+                options.push("cpu-period=100000".to_string());
+                options.push(format!("cpu-quota={quota:.0}"));
+            }
+            option => bail!("unsupported BuildKit resource option '{option}'"),
+        }
+    }
+    if !remainder.is_empty() {
+        bail!("job resource options must be flag/value pairs");
+    }
+    Ok(options)
+}
+
+fn job_scope_from_temp(temp: Option<&Path>) -> String {
+    let scope_path = temp
+        .filter(|path| path.file_name().is_some_and(|name| name == "temp"))
+        .and_then(Path::parent)
+        .or(temp);
+    scope_path
+        .and_then(Path::file_name)
+        .and_then(|name| name.to_str())
+        .map(sanitize_artifact_name)
+        .unwrap_or_else(|| "job".to_string())
+}
+
 fn pages_url_for_repository(repository: &str) -> String {
     let Some((owner, repo)) = repository.split_once('/') else {
         return String::new();
@@ -5847,6 +7197,46 @@ fn push_arg(args: &mut Vec<String>, name: &str, value: &str) {
     if !value.trim().is_empty() {
         args.push(name.to_string());
         args.push(value.to_string());
+    }
+}
+
+#[derive(Debug)]
+struct BuildSecretFile {
+    host_path: PathBuf,
+    container_path: String,
+}
+
+impl BuildSecretFile {
+    fn create(temp_host: &Path, value: &str) -> Result<Self> {
+        let relative = PathBuf::from("_velnor")
+            .join("build-secrets")
+            .join(uuid::Uuid::new_v4().to_string());
+        let host_path = temp_host.join(&relative);
+        fs::create_dir_all(host_path.parent().expect("secret file has parent"))
+            .context("create BuildKit secret directory")?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(&host_path)
+            .context("create BuildKit secret file")?;
+        file.write_all(value.as_bytes())
+            .context("write BuildKit secret file")?;
+        Ok(Self {
+            host_path,
+            container_path: format!("/__t/{}", relative.to_string_lossy()),
+        })
+    }
+
+    fn container_path(&self) -> &str {
+        &self.container_path
+    }
+}
+
+impl Drop for BuildSecretFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.host_path);
     }
 }
 
@@ -6081,7 +7471,7 @@ struct JobExecutionState {
     temp_host: Option<PathBuf>,
     /// Runner-internal storage fact; deliberately not exported to step env.
     persistent_workspace_target: bool,
-    /// Host side of the dedicated `/__w/target` bind mount, when enabled.
+    /// Job-local workspace target materialized from a persistent generation.
     cargo_target_host: Option<PathBuf>,
     outputs: BTreeMap<String, BTreeMap<String, String>>,
     action_states: BTreeMap<String, BTreeMap<String, String>>,
@@ -6404,10 +7794,15 @@ impl JobExecutionState {
 
     fn resolve_step_output_expression(&self, expression: &str) -> Option<&str> {
         let expression = expression.strip_prefix("steps.")?;
-        let (step_id, expression) = expression.split_once(".outputs.")?;
+        let (step_id, output) = expression.split_once(".outputs")?;
+        let output = if let Some(output) = output.strip_prefix('.') {
+            output
+        } else {
+            output.strip_prefix("['")?.strip_suffix("']")?
+        };
         self.outputs
             .get(step_id)
-            .and_then(|outputs| outputs.get(expression))
+            .and_then(|outputs| outputs.get(output))
             .map(String::as_str)
     }
 
@@ -7773,6 +9168,48 @@ fn docker_run_container_name(args: &[String]) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn process_runner_forwards_multiline_env_on_all_timed_paths() {
+        let env = &[(
+            "VELNOR_MULTILINE".to_string(),
+            "line-one\nline-two".to_string(),
+        )];
+        let args = &[
+            "-c".to_string(),
+            "printf %s \"$VELNOR_MULTILINE\"".to_string(),
+        ];
+        let mut runner = ProcessCommandRunner;
+
+        let regular = runner
+            .run_timeout_with_env("sh", args, env, Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(regular.stdout, "line-one\nline-two");
+
+        let mut streamed = String::new();
+        let mut on_output = |_: CommandStream, line: &str| streamed.push_str(line);
+        let streaming = runner
+            .run_streaming_timeout_with_env("sh", args, env, Duration::from_secs(5), &mut on_output)
+            .unwrap();
+        assert_eq!(streaming.stdout, "line-one\nline-two\n");
+        assert_eq!(streamed, "line-oneline-two");
+
+        let stdin_args = &[
+            "-c".to_string(),
+            "read input; printf '%s|%s' \"$VELNOR_MULTILINE\" \"$input\"".to_string(),
+        ];
+        let with_stdin = runner
+            .run_with_stdin_timeout_with_env(
+                "sh",
+                stdin_args,
+                env,
+                "payload\n",
+                Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(with_stdin.stdout, "line-one\nline-two|payload");
+    }
+
     #[test]
     fn compiler_cache_setup_scripts_never_download_tools() {
         let sccache = sccache_setup_script();
@@ -7788,11 +9225,11 @@ mod tests {
     #[test]
     fn compiler_cache_post_actions_always_run() {
         assert_eq!(
-            native_post_condition(NativeActionAdapter::Sccache),
+            native_post_condition(NativeActionAdapter::Sccache, None),
             Some("always()")
         );
         assert_eq!(
-            native_post_condition(NativeActionAdapter::Kache),
+            native_post_condition(NativeActionAdapter::Kache, None),
             Some("always()")
         );
     }
@@ -8026,6 +9463,29 @@ mod tests {
             Ok(CommandResult {
                 code,
                 stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct BuildkitCleanupRunner {
+        calls: Vec<Vec<String>>,
+    }
+
+    impl CommandRunner for BuildkitCleanupRunner {
+        fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+            self.calls.push(args.to_vec());
+            let stdout = match args.first().map(String::as_str) {
+                Some("ps") => "buildkit-one\nbuildkit-two\n",
+                Some("volume") if args.get(1).is_some_and(|arg| arg == "ls") => {
+                    "buildkit-one_state\nbuildkit-two_state\n"
+                }
+                _ => "",
+            };
+            Ok(CommandResult {
+                code: 0,
+                stdout: stdout.to_string(),
                 stderr: String::new(),
             })
         }
@@ -8399,7 +9859,10 @@ mod tests {
             .unwrap()
             .as_nanos();
         let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("velnor-executor-test-{nonce}-{sequence}"))
+        std::env::temp_dir().join(format!(
+            "velnor-executor-test-{}-{nonce}-{sequence}",
+            std::process::id()
+        ))
     }
 
     #[test]
@@ -8424,29 +9887,282 @@ mod tests {
     }
 
     #[test]
-    fn mise_setup_exports_cargo_backend_tool_bins() {
+    fn mise_setup_persists_binary_and_installs_locked() {
         let script = setup_mise_script(true, "2026.7.7", "", "", "mise-v2", false);
 
+        // Persistent per-version binary store, not a mutation of /opt/mise/bin.
+        assert!(script.contains("exact_version='2026.7.7'"));
+        assert!(script.contains(r#"store_dir="$VELNOR_MISE_BINARY_STORE/$os_arch/$exact_version""#));
+        assert!(script.contains("VELNOR_MISE_BINARY_STORE:=/opt/velnor/mise-binaries"));
+        assert!(script.contains("VELNOR_MISE_BOOTSTRAP:=/opt/mise/bin/mise"));
+        assert!(script.contains(r#""$staging" self-update "$exact_version" -y"#));
+        assert!(script.contains(r#"staging="$staging_dir/mise""#));
+        assert!(script.contains("trap 'rm -rf \"$staging_dir\"' EXIT HUP INT TERM"));
+        assert!(!script.contains(r#"staging="$store_dir/.mise.staging"#));
+        assert!(script.contains(r#"mv -f "$staging" "$mise_bin""#));
+        assert!(script.contains("chmod 0555"));
+        assert!(script.contains("__VELNOR_MISE_SELF__"));
+        // Exactly one exclusive lock covers publish + install + export.
+        assert_eq!(script.matches("flock -x 9").count(), 1);
+        assert!(script.contains(".velnor-mise.lock"));
+        // Integrity: reuse checks recorded version + sha256, fails closed.
+        assert!(script.contains("_velnor_sha256"));
+        assert!(script.contains("failing closed"));
+
+        // Locked, fail-closed install — never plain `mise install`, never a
+        // network mise.run bootstrap or self-update of /opt/mise/bin.
+        assert!(script.contains(r#""$mise_bin" install --locked --yes"#));
+        assert!(script.contains(r#""$mise_bin" exec -- rustup component add cargo clippy rustfmt"#));
+        assert!(script.contains(r#""$mise_bin" install --locked --yes --force rust"#));
+        assert!(script.contains(r#"rustup toolchain uninstall "$rust_toolchain""#));
+        assert!(script.contains(r#""$mise_bin" exec -- cargo --version"#));
+        assert!(script.contains(r#""$mise_bin" exec -- cargo clippy --version"#));
+        assert!(script.contains(r#""$mise_bin" exec -- cargo fmt --version"#));
+        assert!(script.contains("MISE_LOCKED=1"));
+        assert!(script.contains("MISE_LOCKED_VERIFY_PROVENANCE=1"));
+        assert!(!script.contains("https://mise.run"));
+        assert!(!script.contains("curl"));
+        assert!(!script.contains(r#"bin="/opt/mise/bin""#));
+
+        // Existing invariants preserved.
         assert!(script.contains("mise bin-paths"));
-        assert!(script.contains(r#"flock -x 9"#));
-        assert_eq!(script.matches(r#"flock -x 9"#).count(), 1);
-        assert!(!script.contains(r#"flock -x 8"#));
-        assert!(script.contains(r#".velnor-install.lock"#));
-        assert!(script.contains(r#"mise self-update "$requested_version" -y"#));
-        assert!(script.contains("requested_version='2026.7.7'"));
         assert!(script.contains("cache_key_prefix='mise-v2'"));
         assert!(script.contains("cache_save_requested=\"\""));
-        assert!(script.contains("-type d -empty -exec rm -rf"));
-        assert!(script.contains(r#"find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d"#));
         assert!(script.contains(r#"find "$mise_home/installs" -mindepth 3 -maxdepth 3"#));
+        // A cargo-backend version dir is valid only with a non-empty bin/ — an
+        // interrupted source compile must never be treated as installed.
+        assert!(script.contains(r#"for tool_dir in "$mise_home/installs"/cargo-*; do"#));
+        assert!(script.contains(r#"[ ! -d "$version_dir/bin" ]"#));
+        assert!(script.contains("dropping incomplete install"));
         assert!(script.contains("__VELNOR_MISE_BIN__"));
-        assert!(script.contains("cargo-audit"));
-        assert!(script.contains("cargo-deny"));
-        assert!(script.contains("cargo-shear"));
         assert!(!script.contains("export CARGO_HOME="));
         assert!(!script.contains("export RUSTUP_HOME="));
-        assert!(script.contains("mise env --redacted --json"));
-        assert!(script.contains("mise env --json"));
+        assert!(script.contains("env --redacted --json"));
+        assert!(script.contains("env --json"));
+    }
+
+    // Fake `mise` binary: `self-update <v>` rewrites itself to deterministically
+    // report `<v>` (stable content → stable hash); `install` and `self-update`
+    // append markers to $VELNOR_FAKE_LOG so the test can count them.
+    #[cfg(unix)]
+    const FAKE_MISE: &str = r#"#!/bin/sh
+log="$VELNOR_FAKE_LOG"
+case "$1" in
+  self-update)
+    printf 'self-update %s\n' "$2" >> "$log"
+    cat > "$0" <<INNER
+#!/bin/sh
+log="\$VELNOR_FAKE_LOG"
+case "\$1" in
+  --version) echo "$2 linux-x64 (fake)" ;;
+  install) printf 'install %s\n' "\$*" >> "\$log"; echo installed ;;
+  self-update) printf 'self-update %s\n' "\$2" >> "\$log" ;;
+  bin-paths) : ;;
+  trust) : ;;
+  env) echo '{}' ;;
+  *) : ;;
+esac
+INNER
+    chmod 0755 "$0"
+    ;;
+  --version) echo "0.0.0 linux-x64 (bootstrap)" ;;
+  install) printf 'install %s\n' "$*" >> "$log"; echo installed ;;
+  bin-paths) : ;;
+  trust) : ;;
+  env) echo '{}' ;;
+  *) : ;;
+esac
+"#;
+
+    #[cfg(unix)]
+    #[test]
+    fn mise_persistent_binary_is_published_once_and_reused_across_jobs() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::Command;
+
+        let base = temp_dir().join(format!("mise-reuse-{}", uuid::Uuid::new_v4()));
+        let bootstrap = base.join("baked/mise");
+        let store = base.join("persistent-store");
+        let log = base.join("fake.log");
+        fs::create_dir_all(bootstrap.parent().unwrap()).unwrap();
+        fs::create_dir_all(&store).unwrap();
+        fs::write(&bootstrap, FAKE_MISE).unwrap();
+        fs::set_permissions(&bootstrap, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(&log, "").unwrap();
+        let bootstrap_before = fs::read(&bootstrap).unwrap();
+
+        // Requested exact version differs from the fake bootstrap (0.0.0).
+        let script = setup_mise_script(true, "2026.7.8", "", "", "mise-v2", false);
+
+        let run_job = |job: &str| -> std::process::Output {
+            let mise_home = base.join(format!("{job}/mise-home"));
+            let env_dir = base.join(format!("{job}/env"));
+            fs::create_dir_all(&mise_home).unwrap();
+            fs::create_dir_all(&env_dir).unwrap();
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&script)
+                .stdin(std::process::Stdio::null()) // closed stdin: zero prompts
+                .env("VELNOR_MISE_BOOTSTRAP", &bootstrap)
+                .env("VELNOR_MISE_BINARY_STORE", &store)
+                .env("VELNOR_MISE_HOME", &mise_home)
+                .env("VELNOR_MISE_ENV_DIR", &env_dir)
+                .env("VELNOR_FAKE_LOG", &log)
+                .output()
+                .expect("run mise setup script")
+        };
+
+        // Job 1: fresh store → one publish (self-update), one locked install.
+        let out1 = run_job("job-1");
+        assert!(
+            out1.status.success(),
+            "job 1 failed: {}",
+            String::from_utf8_lossy(&out1.stderr)
+        );
+        let stdout1 = String::from_utf8_lossy(&out1.stdout);
+        assert!(
+            stdout1.contains("published persistent 2026.7.8"),
+            "{stdout1}"
+        );
+        assert!(stdout1.contains("__VELNOR_MISE_SELF__"));
+
+        let published = store.join("linux-x64/2026.7.8/mise");
+        let published_alt = store.join("linux-arm64/2026.7.8/mise");
+        let bin_path = if published.exists() {
+            published
+        } else {
+            published_alt
+        };
+        assert!(bin_path.exists(), "persistent binary not published");
+        let hash1 = fs::read(&bin_path).unwrap();
+        let meta = fs::read_to_string(bin_path.parent().unwrap().join("metadata.json")).unwrap();
+        assert!(meta.contains("\"version\":\"2026.7.8\""));
+        assert!(meta.contains("\"sha256\":\""));
+        // chmod 0555 on the published binary.
+        let mode = fs::metadata(&bin_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o555, "published binary must be 0555");
+
+        // Job 2: new job dirs, SAME persistent store → reuse, no second update.
+        let out2 = run_job("job-2");
+        assert!(
+            out2.status.success(),
+            "job 2 failed: {}",
+            String::from_utf8_lossy(&out2.stderr)
+        );
+        let stdout2 = String::from_utf8_lossy(&out2.stdout);
+        assert!(stdout2.contains("reusing persisted 2026.7.8"), "{stdout2}");
+        assert!(!stdout2.contains("published persistent"));
+
+        // Identical binary path + hash across both jobs.
+        let hash2 = fs::read(&bin_path).unwrap();
+        assert_eq!(hash1, hash2, "reused binary content must be identical");
+
+        // Exactly one self-update total, two locked installs total.
+        let log_text = fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            log_text.matches("self-update 2026.7.8").count(),
+            1,
+            "binary must be updated exactly once across two jobs: {log_text}"
+        );
+        assert_eq!(
+            log_text.matches("install --locked --yes").count(),
+            2,
+            "each job runs one locked install: {log_text}"
+        );
+
+        // No fallback installer or network marker anywhere.
+        for text in [&stdout1, &stdout2] {
+            assert!(!text.contains("mise.run"));
+            assert!(!text.contains("apt-get"));
+            assert!(!text.contains("cargo install"));
+        }
+
+        // The read-only baked bootstrap was never mutated.
+        assert_eq!(
+            fs::read(&bootstrap).unwrap(),
+            bootstrap_before,
+            "the baked bootstrap must not be written"
+        );
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mise_persistent_store_fails_closed_on_corruption() {
+        use std::process::Command;
+
+        let base = temp_dir().join(format!("mise-corrupt-{}", uuid::Uuid::new_v4()));
+        let bootstrap = base.join("baked/mise");
+        let store = base.join("persistent-store");
+        let log = base.join("fake.log");
+        fs::create_dir_all(bootstrap.parent().unwrap()).unwrap();
+        fs::create_dir_all(&store).unwrap();
+        fs::write(&bootstrap, FAKE_MISE).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&bootstrap, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(&log, "").unwrap();
+        let script = setup_mise_script(true, "2026.7.8", "", "", "mise-v2", false);
+
+        let mise_home = base.join("mise-home");
+        let env_dir = base.join("env");
+        fs::create_dir_all(&mise_home).unwrap();
+        fs::create_dir_all(&env_dir).unwrap();
+        let run = || {
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&script)
+                .stdin(std::process::Stdio::null())
+                .env("VELNOR_MISE_BOOTSTRAP", &bootstrap)
+                .env("VELNOR_MISE_BINARY_STORE", &store)
+                .env("VELNOR_MISE_HOME", &mise_home)
+                .env("VELNOR_MISE_ENV_DIR", &env_dir)
+                .env("VELNOR_FAKE_LOG", &log)
+                .output()
+                .expect("run mise setup script")
+        };
+
+        assert!(run().status.success(), "initial publish must succeed");
+        let bin_path = if store.join("linux-x64/2026.7.8/mise").exists() {
+            store.join("linux-x64/2026.7.8/mise")
+        } else {
+            store.join("linux-arm64/2026.7.8/mise")
+        };
+        // Tamper with the persisted binary; the hash no longer matches metadata.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&bin_path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::write(&bin_path, "tampered\n").unwrap();
+
+        let out = run();
+        assert!(
+            !out.status.success(),
+            "a corrupt persisted binary must fail closed"
+        );
+        assert!(String::from_utf8_lossy(&out.stderr).contains("integrity check"));
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn mise_direct_bin_paths_precede_shims_and_ignore_duplicates() {
+        let pipx_bin = "/opt/mise/installs/pipx-reuse/6.2.0/bin";
+        let path = mise_step_path(&format!(
+            "__VELNOR_MISE_BIN__{pipx_bin}\n__VELNOR_MISE_BIN__{pipx_bin}\n"
+        ));
+
+        assert_eq!(path.iter().filter(|entry| *entry == pipx_bin).count(), 1);
+        assert!(
+            path.iter().position(|entry| entry == pipx_bin)
+                < path.iter().position(|entry| entry == "/opt/mise/shims")
+        );
+        assert!(
+            path.iter().position(|entry| entry == "/root/.cargo/bin")
+                < path.iter().position(|entry| entry == "/opt/mise/shims")
+        );
     }
 
     #[test]
@@ -8513,6 +10229,21 @@ mod tests {
         }
     }
 
+    fn expected_network_create_args() -> Vec<String> {
+        [
+            "network",
+            "create",
+            "--label",
+            "velnor.daemon-id=test-daemon",
+            "--label",
+            "velnor.job-id=job",
+            "net",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    }
+
     #[test]
     fn verifies_docker_bind_mount_visibility_when_enabled() {
         let temp = temp_dir();
@@ -8554,12 +10285,80 @@ mod tests {
         assert!(calls
             .iter()
             .any(|(_, args)| { args.starts_with(&["rm".into(), "--force".into(), "job".into()]) }));
+        assert!(calls.iter().any(|(_, args)| args
+            == &[
+                "ps".into(),
+                "--all".into(),
+                "--quiet".into(),
+                "--filter".into(),
+                format!(
+                    "name=-{}0$",
+                    sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap())
+                ),
+            ]));
         assert!(calls.iter().any(|(_, args)| args.starts_with(&[
             "network".into(),
             "rm".into(),
             "net".into()
         ])));
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn cleanup_removes_job_scoped_buildkit_daemons_and_state_volumes() {
+        let root = temp_dir();
+        let temp = root.join("job-scope").join("temp");
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        let mut executor = DockerScriptExecutor::new(BuildkitCleanupRunner::default());
+
+        executor.cleanup_job_buildkit(&spec).unwrap();
+
+        assert_eq!(
+            executor.runner().calls,
+            vec![
+                vec!["ps", "--all", "--quiet", "--filter", "name=-job-scope0$"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect::<Vec<_>>(),
+                vec!["rm", "--force", "buildkit-one", "buildkit-two"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect::<Vec<_>>(),
+                vec![
+                    "volume",
+                    "ls",
+                    "--quiet",
+                    "--filter",
+                    "name=-job-scope0_state$",
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>(),
+                vec!["volume", "rm", "buildkit-one_state", "buildkit-two_state"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect::<Vec<_>>(),
+            ]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn buildkit_resource_limits_are_derived_and_fail_closed() {
+        assert_eq!(
+            buildx_driver_resource_options(&[
+                "--cpus".into(),
+                "2.5".into(),
+                "--memory".into(),
+                "12g".into(),
+            ])
+            .unwrap(),
+            ["cpu-period=100000", "cpu-quota=250000", "memory=12g"]
+        );
+        assert!(buildx_driver_resource_options(&["--cpus".into(), "0".into()]).is_err());
+        assert!(buildx_driver_resource_options(&["--pids-limit".into(), "512".into()]).is_err());
+        assert!(buildx_driver_resource_options(&["--memory".into()]).is_err());
     }
 
     #[test]
@@ -8579,7 +10378,7 @@ mod tests {
                 .runner()
                 .calls
                 .iter()
-                .any(|(_, args)| args == &["network", "create", "net"]),
+                .any(|(_, args)| args == &expected_network_create_args()),
             "lazy startup unexpectedly recreated the network: {:?}",
             executor.runner().calls
         );
@@ -8642,16 +10441,7 @@ mod tests {
         assert_eq!(result.exit_code, 0);
         let runner = executor.runner();
         let calls = &runner.calls;
-        assert_eq!(
-            calls[0],
-            (
-                "docker".into(),
-                vec!["network", "create", "net"]
-                    .into_iter()
-                    .map(String::from)
-                    .collect()
-            )
-        );
+        assert_eq!(calls[0], ("docker".into(), expected_network_create_args()));
         assert_eq!(calls[1].1[0], "run");
         assert_eq!(calls[2].1[0], "exec");
         assert!(calls[2]
@@ -8666,6 +10456,38 @@ mod tests {
         );
         assert_eq!(
             calls[4].1,
+            vec![
+                "ps",
+                "--all",
+                "--quiet",
+                "--filter",
+                &format!(
+                    "name=-{}0$",
+                    sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap())
+                )
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            calls[5].1,
+            vec![
+                "volume",
+                "ls",
+                "--quiet",
+                "--filter",
+                &format!(
+                    "name=-{}0_state$",
+                    sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap())
+                )
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            calls[6].1,
             vec!["network", "rm", "net"]
                 .into_iter()
                 .map(String::from)
@@ -8694,7 +10516,7 @@ mod tests {
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
-            codes: vec![0, 0, 7, 0, 0],
+            codes: vec![0, 0, 7, 0, 0, 0, 0],
         });
 
         let result = executor
@@ -8702,9 +10524,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.exit_code, 7);
-        assert_eq!(executor.runner().calls.len(), 5);
+        assert_eq!(executor.runner().calls.len(), 7);
         assert_eq!(executor.runner().calls[3].1[0], "rm");
-        assert_eq!(executor.runner().calls[4].1[0], "network");
+        assert_eq!(executor.runner().calls[4].1[0], "ps");
+        assert_eq!(executor.runner().calls[5].1[0], "volume");
+        assert_eq!(executor.runner().calls[6].1[0], "network");
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -8746,13 +10570,15 @@ mod tests {
         assert_eq!(results.len(), 2);
         let runner = executor.runner();
         let calls = &runner.calls;
-        assert_eq!(calls.len(), 6);
+        assert_eq!(calls.len(), 8);
         assert_eq!(calls[0].1[0], "network");
         assert_eq!(calls[1].1[0], "run");
         assert_eq!(calls[2].1[0], "exec");
         assert_eq!(calls[3].1[0], "exec");
         assert_eq!(calls[4].1[0], "rm");
-        assert_eq!(calls[5].1[0], "network");
+        assert_eq!(calls[5].1[0], "ps");
+        assert_eq!(calls[6].1[0], "volume");
+        assert_eq!(calls[7].1[0], "network");
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -8767,6 +10593,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::GitHubRuntimeExport,
+                cache_kind: None,
+                source_path: None,
                 inputs: [("github-token".into(), "ghs_token".into())].into(),
                 env: vec![("ACTIONS_CUSTOM".into(), "${{ env.CUSTOM_RUNTIME }}".into())],
             },
@@ -8825,8 +10653,10 @@ mod tests {
     #[test]
     fn native_github_script_copies_exact_contract_output() {
         let action = NativeActionInvocation {
-            git_ref: "373c709c69115d41ff229c7e5df9f8788daa9553".into(),
+            git_ref: "3a2844b7e9c422d3c10d287c895573f7108da1b3".into(),
             adapter: NativeActionAdapter::GitHubScript,
+            cache_kind: None,
+            source_path: None,
             inputs: [(
                 "script".into(),
                 "core.setOutput('docs-xtask', process.env.CONTRACT)".into(),
@@ -8877,6 +10707,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::PathsFilter,
+                cache_kind: None,
+                source_path: None,
                 inputs: [(
                     "filters".into(),
                     "construct:\n  - 'docker/construct/**'\n  - '.github/workflows/construct.yml'\ndocs:\n  - 'docs/**'\n".into(),
@@ -8986,6 +10818,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     (
@@ -9022,10 +10856,9 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].exit_code, 0);
         assert_eq!(results[0].state.outputs["cache-hit"], "false");
-        assert_eq!(
-            results[0].state.outputs["cache-primary-key"],
-            format!("rust-script-Linux-{expected_hash}")
-        );
+        // Root exposes only `cache-hit`; the primary key stays internal state.
+        assert!(!results[0].state.outputs.contains_key("cache-primary-key"));
+        assert!(!results[0].state.outputs.contains_key("cache-matched-key"));
         assert_eq!(
             results[0].state.state["primaryKey"],
             format!("rust-script-Linux-{expected_hash}")
@@ -9061,8 +10894,18 @@ mod tests {
         assert_eq!(sanitize_artifact_name("normal-key.v2"), "normal-key.v2");
     }
 
+    /// Versioned store directory a cache test uses to pre-seed or assert
+    /// entries, mirroring `cache_store_dir` + `cache_scope_version` for the
+    /// common case of an empty action ref and no runner os/arch in the env.
+    fn cache_scope_store_dir(root: &Path, repo_key: &str, path: &str) -> PathBuf {
+        root.join("_velnor_caches")
+            .join("trusted")
+            .join(repo_key)
+            .join(cache_scope_version("", "", "", path))
+    }
+
     #[test]
-    fn cache_store_dir_is_scoped_by_trust_and_repo() {
+    fn cache_store_dir_is_scoped_by_trust_repo_and_version() {
         let root = temp_dir();
         let temp = root.join("job/temp");
         fs::create_dir_all(&temp).unwrap();
@@ -9073,10 +10916,16 @@ mod tests {
             Some(temp.clone()),
         );
 
-        let store = cache_store_dir(&state).unwrap();
+        let version = "cv1-abc123";
+        let store = cache_store_dir(&state, version).unwrap();
 
-        assert!(store.ends_with("_velnor_caches/trusted/Org_Repo.Name"));
+        // Trust/repo remain the outer boundary; the version segment sits below.
+        assert!(store.ends_with("_velnor_caches/trusted/Org_Repo.Name/cv1-abc123"));
         assert!(store.starts_with(root.join("_velnor_caches")));
+        assert_eq!(
+            store.parent().unwrap().file_name().unwrap(),
+            "Org_Repo.Name"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -9087,8 +10936,8 @@ mod tests {
         fs::create_dir_all(&temp).unwrap();
         let state = JobExecutionState::new_internal(&[], &[], None, Some(temp.clone()));
         assert_eq!(
-            cache_store_dir(&state).unwrap(),
-            temp.join("_velnor/ephemeral/caches")
+            cache_store_dir(&state, "cv1-abc123").unwrap(),
+            temp.join("_velnor/ephemeral/caches/cv1-abc123")
         );
         fs::remove_dir_all(root).unwrap();
     }
@@ -9096,7 +10945,7 @@ mod tests {
     #[test]
     fn cache_hit_output_matches_actions_cache() {
         let root = temp_dir();
-        let store = root.join("_velnor_caches/trusted/Test_Repo");
+        let store = cache_scope_store_dir(&root, "Test_Repo", "~/.cache/rust-script");
         let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
         let exact_cache = store.join("linux-rust-exact");
         let partial_cache = store.join("linux-rust-prefix-new");
@@ -9104,9 +10953,11 @@ mod tests {
         fs::create_dir_all(partial_cache.join("0")).unwrap();
         fs::write(exact_cache.join(".velnor-key"), "linux-rust-exact").unwrap();
         fs::write(exact_cache.join(".velnor-created"), "1").unwrap();
+        fs::write(exact_cache.join(".velnor-complete-v1"), "complete\n").unwrap();
         fs::write(exact_cache.join("0/state.bin"), "exact\n").unwrap();
         fs::write(partial_cache.join(".velnor-key"), "linux-rust-prefix-new").unwrap();
         fs::write(partial_cache.join(".velnor-created"), "2").unwrap();
+        fs::write(partial_cache.join(".velnor-complete-v1"), "complete\n").unwrap();
         fs::write(partial_cache.join("0/state.bin"), "partial\n").unwrap();
 
         let cache_step = |key: &str, restore_keys: &str| {
@@ -9116,6 +10967,8 @@ mod tests {
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::Cache,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("path".into(), "~/.cache/rust-script".into()),
                         ("key".into(), key.into()),
@@ -9178,6 +11031,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     (
                         "path".into(),
@@ -9220,8 +11075,58 @@ mod tests {
 
     #[test]
     fn native_cache_treats_root_rustup_path_as_velnor_provided() {
-        assert!(velnor_persistent_cache_path("/root/.rustup/toolchains"));
-        assert!(velnor_persistent_cache_path("/root/.rustup/update-hashes"));
+        assert!(velnor_static_persistent_cache_path(
+            "/root/.rustup/toolchains"
+        ));
+        assert!(velnor_static_persistent_cache_path(
+            "/root/.rustup/update-hashes"
+        ));
+    }
+
+    #[test]
+    fn workspace_target_cache_paths_include_relative_workflow_inputs() {
+        assert!(workspace_target_cache_path("target"));
+        assert!(workspace_target_cache_path("./target/debug"));
+        assert!(workspace_target_cache_path("/__w/target/release"));
+        assert!(!workspace_target_cache_path("nested/target"));
+    }
+
+    #[test]
+    fn native_cache_skips_relative_target_when_native_target_is_persistent() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        spec.cargo_target_host = Some(temp.join("target-store"));
+        let steps = vec![ExecutableStep::Native {
+            step_id: "cache".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
+                inputs: [
+                    ("path".into(), "target".into()),
+                    ("key".into(), "build-output-Linux-X64-lock".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&spec, &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| result
+            .state
+            .summary
+            .contains("host-persistent store — restore/save skipped")));
+        fs::remove_dir_all(temp).unwrap();
     }
 
     #[test]
@@ -9236,6 +11141,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::RustCache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [("shared-key".into(), "ci-default-dev-workspace-v2".into())].into(),
                 env: Vec::new(),
             },
@@ -9275,6 +11182,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::RustCache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [("shared-key".into(), "ci-default-dev-workspace-v2".into())].into(),
                 env: Vec::new(),
             },
@@ -9305,6 +11214,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::RustCache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("shared-key".into(), "ci-custom-dir".into()),
                     (
@@ -9320,15 +11231,16 @@ mod tests {
             timeout_minutes: None,
         }];
 
+        let mut spec = container(&temp);
+        spec.cargo_target_host = Some(temp.join("target-store"));
         let results = DockerScriptExecutor::new(RecordingRunner::default())
-            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .execute_ordered_steps(&spec, &steps, &[], &temp)
             .unwrap();
 
         assert_eq!(results[0].state.outputs["cache-hit"], "true");
         assert!(results[0]
             .stdout
             .contains("Rust cache paths live on Velnor host-persistent storage"));
-        assert!(velnor_persistent_cache_path("/__w/target/debug"));
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -9342,6 +11254,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "target".into()),
                     ("key".into(), "linux-cache".into()),
@@ -9386,6 +11300,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     ("key".into(), "linux-rust-script-strict".into()),
@@ -9407,6 +11323,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     ("key".into(), "linux-rust-script-strict".into()),
@@ -9449,6 +11367,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     ("key".into(), folded_key.into()),
@@ -9465,13 +11385,21 @@ mod tests {
             .execute_ordered_steps(&container(&save_temp), &save, &env, &save_temp)
             .unwrap();
 
+        // Root exposes only `cache-hit`; the trimmed key is proven by the
+        // internal primaryKey state and the store entry name below.
+        assert!(!save_results[0]
+            .state
+            .outputs
+            .contains_key("cache-primary-key"));
         assert_eq!(
-            save_results[0].state.outputs["cache-primary-key"],
+            save_results[0].state.state["primaryKey"],
             "rust-script-Linux-deadbeef"
         );
-        assert!(root
-            .join("_velnor_caches/trusted/Test_Repo/rust-script-Linux-deadbeef/0/state.bin")
-            .exists());
+        assert!(
+            cache_scope_store_dir(&root, "Test_Repo", "~/.cache/rust-script")
+                .join("rust-script-Linux-deadbeef/0/state.bin")
+                .exists()
+        );
 
         let restore = vec![ExecutableStep::Native {
             step_id: "cache".into(),
@@ -9479,6 +11407,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     ("key".into(), "rust-script-Linux-deadbeef".into()),
@@ -9513,6 +11443,148 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_cache_generation_is_never_a_hit() {
+        let root = temp_dir();
+        let restore_temp = root.join("restore-job/temp");
+        let version = "cv1-testscope";
+        let entry = root.join(format!(
+            "_velnor_caches/trusted/Test_Repo/{version}/rustup-v2-linux-key"
+        ));
+        fs::create_dir_all(entry.join("0/toolchains/1.97.0/bin")).unwrap();
+        fs::create_dir_all(root.join("restore-job/home")).unwrap();
+        fs::write(entry.join(".velnor-key"), "rustup-v2-linux-key").unwrap();
+        fs::write(entry.join("0/toolchains/1.97.0/bin/cargo"), "partial").unwrap();
+        let state = JobExecutionState::default()
+            .with_env(vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())]);
+        let mut state = state;
+        state.temp_host = Some(restore_temp);
+
+        assert_eq!(
+            find_cache_match(&state, "rustup-v2-linux-key", "rustup-v2-linux-", version).unwrap(),
+            None
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cache_copy_verification_rejects_omitted_files() {
+        let root = temp_dir();
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(source.join("manifest-rustc"), "required").unwrap();
+
+        let error = verify_cache_copy(&source, &destination).unwrap_err();
+        assert!(error.to_string().contains("cache restore omitted"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn persistent_target_is_job_local_and_published_as_complete_generation() {
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        fs::create_dir_all(&temp).unwrap();
+        let mut spec = container(&temp);
+        let store = root.join("target-store");
+        fs::create_dir_all(store.join("data/debug")).unwrap();
+        fs::write(store.join(".velnor-target-complete-v1"), "complete\n").unwrap();
+        fs::write(store.join(TARGET_SOURCE_REVISION_MARKER), "old-revision\n").unwrap();
+        fs::write(store.join("data/debug/seed"), "warm\n").unwrap();
+        fs::create_dir_all(&spec.workspace_host).unwrap();
+        fs::write(spec.workspace_host.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let stale_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        fs::File::options()
+            .append(true)
+            .open(spec.workspace_host.join("Cargo.toml"))
+            .unwrap()
+            .set_modified(stale_time)
+            .unwrap();
+        spec.cargo_target_host = Some(store.clone());
+        assert!(!spec
+            .start_args()
+            .iter()
+            .any(|arg| arg.contains(":/__w/target")));
+
+        materialize_persistent_target(&spec, Some("new-revision")).unwrap();
+        let target = spec.workspace_host.join("target");
+        assert_eq!(
+            fs::read_to_string(target.join("debug/seed")).unwrap(),
+            "warm\n"
+        );
+        assert!(
+            fs::metadata(spec.workspace_host.join("Cargo.toml"))
+                .unwrap()
+                .modified()
+                .unwrap()
+                > stale_time
+        );
+
+        // Both paths remain inside the workspace mount, so the workflow's
+        // ordinary atomic promotion cannot fail with EXDEV.
+        fs::create_dir_all(spec.workspace_host.join(".ci-target-cache")).unwrap();
+        fs::rename(
+            target.join("debug/seed"),
+            spec.workspace_host.join(".ci-target-cache/target.tar.zst"),
+        )
+        .unwrap();
+        fs::write(target.join("new-output"), "compiled\n").unwrap();
+        publish_persistent_target(&spec, Some("new-revision")).unwrap();
+
+        assert!(store.join(".velnor-target-complete-v1").is_file());
+        assert_eq!(
+            fs::read_to_string(store.join(TARGET_SOURCE_REVISION_MARKER)).unwrap(),
+            "new-revision\n"
+        );
+        assert_eq!(
+            fs::read_to_string(store.join("data/new-output")).unwrap(),
+            "compiled\n"
+        );
+        fs::File::options()
+            .append(true)
+            .open(spec.workspace_host.join("Cargo.toml"))
+            .unwrap()
+            .set_modified(stale_time)
+            .unwrap();
+        materialize_persistent_target(&spec, Some("new-revision")).unwrap();
+        assert_eq!(
+            fs::metadata(spec.workspace_host.join("Cargo.toml"))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            stale_time
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn persistent_target_publishes_only_after_successful_steps() {
+        let result = |exit_code, skipped| StepExecutionResult {
+            exit_code,
+            state: StepCommandState::default(),
+            skipped,
+            failure_ignored: false,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+
+        assert!(persistent_target_results_publishable(&[
+            result(0, false),
+            result(0, true),
+        ]));
+        assert!(!persistent_target_results_publishable(&[
+            result(0, false),
+            result(1, false),
+        ]));
+        assert!(!persistent_target_results_publishable(&[
+            StepExecutionResult {
+                failure_ignored: true,
+                ..result(1, false)
+            },
+        ]));
+    }
+
+    #[test]
     fn native_cache_saves_and_restores_from_shared_workdir() {
         let root = temp_dir();
         let save_temp = root.join("save-job/temp");
@@ -9534,6 +11606,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     ("key".into(), "linux-rust-script-abc".into()),
@@ -9554,9 +11628,11 @@ mod tests {
         assert!(save_results[1]
             .stdout
             .contains("Saved cache 'linux-rust-script-abc'"));
-        assert!(root
-            .join("_velnor_caches/trusted/Test_Repo/linux-rust-script-abc/0/state.bin")
-            .exists());
+        assert!(
+            cache_scope_store_dir(&root, "Test_Repo", "~/.cache/rust-script")
+                .join("linux-rust-script-abc/0/state.bin")
+                .exists()
+        );
 
         let restore = vec![ExecutableStep::Native {
             step_id: "cache".into(),
@@ -9564,6 +11640,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     ("key".into(), "linux-rust-script-abc".into()),
@@ -9580,10 +11658,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(restore_results[0].state.outputs["cache-hit"], "true");
-        assert_eq!(
-            restore_results[0].state.outputs["cache-matched-key"],
-            "linux-rust-script-abc"
-        );
+        // Root exposes only `cache-hit`, not `cache-matched-key`.
+        assert!(!restore_results[0]
+            .state
+            .outputs
+            .contains_key("cache-matched-key"));
         assert_eq!(
             fs::read_to_string(root.join("restore-job/home/.cache/rust-script/state.bin")).unwrap(),
             "cached\n"
@@ -9613,6 +11692,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     ("key".into(), "linux-rust-script-lookup".into()),
@@ -9635,6 +11716,8 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     ("key".into(), "linux-rust-script-lookup".into()),
@@ -9664,7 +11747,7 @@ mod tests {
     fn native_cache_restore_key_uses_newest_prefix_match() {
         let root = temp_dir();
         let restore_temp = root.join("restore-job/temp");
-        let store = root.join("_velnor_caches/trusted/Test_Repo");
+        let store = cache_scope_store_dir(&root, "Test_Repo", "~/.cache/rust-script");
         let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
         let old_cache = store.join("rust-linux-a-old");
         let new_cache = store.join("rust-linux-z-new");
@@ -9673,9 +11756,11 @@ mod tests {
         fs::create_dir_all(root.join("restore-job/home")).unwrap();
         fs::write(old_cache.join(".velnor-key"), "rust-linux-a-old").unwrap();
         fs::write(old_cache.join(".velnor-created"), "1").unwrap();
+        fs::write(old_cache.join(".velnor-complete-v1"), "complete\n").unwrap();
         fs::write(old_cache.join("0/state.bin"), "old\n").unwrap();
         fs::write(new_cache.join(".velnor-key"), "rust-linux-z-new").unwrap();
         fs::write(new_cache.join(".velnor-created"), "2").unwrap();
+        fs::write(new_cache.join(".velnor-complete-v1"), "complete\n").unwrap();
         fs::write(new_cache.join("0/state.bin"), "new\n").unwrap();
 
         let restore = vec![ExecutableStep::Native {
@@ -9684,6 +11769,9 @@ mod tests {
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Cache,
+                // `/restore` exposes cache-matched-key, which this test asserts.
+                cache_kind: Some(CacheActionKind::Restore),
+                source_path: Some("restore".into()),
                 inputs: [
                     ("path".into(), "~/.cache/rust-script".into()),
                     ("key".into(), "rust-linux-exact-miss".into()),
@@ -9706,10 +11794,343 @@ mod tests {
             restore_results[0].state.outputs["cache-matched-key"],
             "rust-linux-z-new"
         );
+        // `/restore` performs no post save.
+        assert_eq!(restore_results.len(), 1);
         assert_eq!(
             fs::read_to_string(root.join("restore-job/home/.cache/rust-script/state.bin")).unwrap(),
             "new\n"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn native_cache_step(
+        cache_kind: Option<CacheActionKind>,
+        source_path: Option<&str>,
+        inputs: &[(&str, &str)],
+    ) -> ExecutableStep {
+        ExecutableStep::Native {
+            step_id: "cache".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::Cache,
+                cache_kind,
+                source_path: source_path.map(str::to_string),
+                inputs: inputs
+                    .iter()
+                    .map(|(name, value)| (name.to_string(), value.to_string()))
+                    .collect(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }
+    }
+
+    #[test]
+    fn native_cache_restore_only_produces_one_result_and_never_saves() {
+        let root = temp_dir();
+        let temp = root.join("restore-job/temp");
+        fs::create_dir_all(root.join("restore-job/home/.cache/rust-script")).unwrap();
+        fs::write(
+            root.join("restore-job/home/.cache/rust-script/state.bin"),
+            "local\n",
+        )
+        .unwrap();
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
+        let steps = vec![native_cache_step(
+            Some(CacheActionKind::Restore),
+            Some("restore"),
+            &[("path", "~/.cache/rust-script"), ("key", "linux-miss")],
+        )];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
+            .unwrap();
+
+        // `/restore` registers no post action.
+        assert_eq!(results.len(), 1);
+        // `/restore` exposes all three outputs.
+        assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        assert!(results[0].state.outputs.contains_key("cache-primary-key"));
+        assert!(results[0].state.outputs.contains_key("cache-matched-key"));
+        // A restore never writes an entry, even when the workspace path exists.
+        let store = cache_scope_store_dir(&root, "Test_Repo", "~/.cache/rust-script");
+        assert!(!store.join("linux-miss").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_cache_save_only_persists_without_prior_restore_and_reports_timing() {
+        let root = temp_dir();
+        let temp = root.join("save-job/temp");
+        let home = root.join("save-job/home/.cache/rust-script");
+        fs::create_dir_all(&home).unwrap();
+        fs::write(home.join("state.bin"), "fresh\n").unwrap();
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
+        let steps = vec![native_cache_step(
+            Some(CacheActionKind::Save),
+            Some("save"),
+            &[("path", "~/.cache/rust-script"), ("key", "linux-save-only")],
+        )];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
+            .unwrap();
+
+        // `/save` registers no post action and exposes no outputs.
+        assert_eq!(results.len(), 1);
+        assert!(results[0].state.outputs.is_empty());
+        assert!(results[0].stdout.contains("Saved cache 'linux-save-only'"));
+        // Timing fields are recorded in the summary.
+        assert!(results[0].state.summary.contains("Lock wait:"));
+        assert!(results[0].state.summary.contains("Copy:"));
+        assert!(results[0].state.summary.contains("Total:"));
+        assert!(results[0].state.summary.contains("Result: saved"));
+        let store = cache_scope_store_dir(&root, "Test_Repo", "~/.cache/rust-script");
+        assert!(store.join("linux-save-only/.velnor-complete-v1").is_file());
+        assert_eq!(
+            fs::read_to_string(store.join("linux-save-only/0/state.bin")).unwrap(),
+            "fresh\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_cache_save_only_does_not_materialize_existing_entry() {
+        let root = temp_dir();
+        let temp = root.join("save-job/temp");
+        let home = root.join("save-job/home/.cache/rust-script");
+        fs::create_dir_all(&home).unwrap();
+        fs::write(home.join("state.bin"), "new\n").unwrap();
+        // Pre-seed a complete entry with different (old) content.
+        let store = cache_scope_store_dir(&root, "Test_Repo", "~/.cache/rust-script");
+        let entry = store.join("linux-existing");
+        fs::create_dir_all(entry.join("0")).unwrap();
+        fs::write(entry.join(".velnor-key"), "linux-existing").unwrap();
+        fs::write(entry.join(".velnor-created"), "1").unwrap();
+        fs::write(entry.join(".velnor-complete-v1"), "complete\n").unwrap();
+        fs::write(entry.join("0/state.bin"), "old\n").unwrap();
+        let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
+        let steps = vec![native_cache_step(
+            Some(CacheActionKind::Save),
+            Some("save"),
+            &[("path", "~/.cache/rust-script"), ("key", "linux-existing")],
+        )];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        // Existing key → already exists; never restored into the workspace and
+        // the stored generation is left untouched.
+        assert!(results[0].state.summary.contains("already exists"));
+        assert!(!results[0].state.summary.contains("completed"));
+        assert_eq!(fs::read_to_string(home.join("state.bin")).unwrap(), "new\n");
+        assert_eq!(
+            fs::read_to_string(entry.join("0/state.bin")).unwrap(),
+            "old\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cache_output_sets_match_upstream_by_kind() {
+        let output_keys = |cache_kind, source_path| {
+            let root = temp_dir();
+            let temp = root.join("job/temp");
+            fs::create_dir_all(root.join("job/home")).unwrap();
+            let env = vec![("GITHUB_REPOSITORY".into(), "Test/Repo".into())];
+            let steps = vec![native_cache_step(
+                cache_kind,
+                source_path,
+                &[("path", "~/.cache/rust-script"), ("key", "some-key")],
+            )];
+            let results = DockerScriptExecutor::new(RecordingRunner::default())
+                .execute_ordered_steps(&container(&temp), &steps, &env, &temp)
+                .unwrap();
+            let keys: std::collections::BTreeSet<String> =
+                results[0].state.outputs.keys().cloned().collect();
+            fs::remove_dir_all(&root).ok();
+            keys
+        };
+
+        let expect = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<std::collections::BTreeSet<String>>()
+        };
+
+        assert_eq!(
+            output_keys(Some(CacheActionKind::Root), None),
+            expect(&["cache-hit"])
+        );
+        assert_eq!(
+            output_keys(Some(CacheActionKind::Restore), Some("restore")),
+            expect(&["cache-hit", "cache-primary-key", "cache-matched-key"])
+        );
+        assert!(output_keys(Some(CacheActionKind::Save), Some("save")).is_empty());
+    }
+
+    #[test]
+    fn cache_scope_version_isolates_each_compatibility_dimension() {
+        let base = cache_scope_version("sha1", "Linux", "X64", "~/.cache/a");
+        // Stable for identical inputs.
+        assert_eq!(
+            base,
+            cache_scope_version("sha1", "Linux", "X64", "~/.cache/a")
+        );
+        // Distinct across every runtime-compatibility dimension.
+        assert_ne!(
+            base,
+            cache_scope_version("sha2", "Linux", "X64", "~/.cache/a")
+        );
+        assert_ne!(
+            base,
+            cache_scope_version("sha1", "Windows", "X64", "~/.cache/a")
+        );
+        assert_ne!(
+            base,
+            cache_scope_version("sha1", "Linux", "ARM64", "~/.cache/a")
+        );
+        assert_ne!(
+            base,
+            cache_scope_version("sha1", "Linux", "X64", "~/.cache/b")
+        );
+        // Paths are normalized (order/whitespace insensitive).
+        assert_eq!(
+            cache_scope_version("sha1", "Linux", "X64", "a\nb"),
+            cache_scope_version("sha1", "Linux", "X64", " b \n a ")
+        );
+        assert!(base.starts_with("cv1-"));
+    }
+
+    #[test]
+    fn native_cache_scope_does_not_cross_runner_os() {
+        let root = temp_dir();
+        let repo = ("GITHUB_REPOSITORY".to_string(), "Test/Repo".to_string());
+        let save_temp = root.join("save/temp");
+        fs::create_dir_all(root.join("save/home/.cache/rust-script")).unwrap();
+        fs::write(
+            root.join("save/home/.cache/rust-script/state.bin"),
+            "linux\n",
+        )
+        .unwrap();
+        let save_env = vec![repo.clone(), ("RUNNER_OS".into(), "Linux".into())];
+        let save = vec![native_cache_step(
+            Some(CacheActionKind::Save),
+            Some("save"),
+            &[("path", "~/.cache/rust-script"), ("key", "shared-key")],
+        )];
+        DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&save_temp), &save, &save_env, &save_temp)
+            .unwrap();
+
+        let restore = vec![native_cache_step(
+            Some(CacheActionKind::Restore),
+            Some("restore"),
+            &[("path", "~/.cache/rust-script"), ("key", "shared-key")],
+        )];
+
+        // A different RUNNER_OS lands in a different version namespace → miss.
+        let win_temp = root.join("win/temp");
+        fs::create_dir_all(root.join("win/home")).unwrap();
+        let win_env = vec![repo.clone(), ("RUNNER_OS".into(), "Windows".into())];
+        let win_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&win_temp), &restore, &win_env, &win_temp)
+            .unwrap();
+        assert_eq!(win_results[0].state.outputs["cache-hit"], "false");
+        assert!(!root.join("win/home/.cache/rust-script/state.bin").exists());
+
+        // Same RUNNER_OS restores the entry.
+        let lin_temp = root.join("lin/temp");
+        fs::create_dir_all(root.join("lin/home")).unwrap();
+        let lin_env = vec![repo, ("RUNNER_OS".into(), "Linux".into())];
+        let lin_results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&lin_temp), &restore, &lin_env, &lin_temp)
+            .unwrap();
+        assert_eq!(lin_results[0].state.outputs["cache-hit"], "true");
+        assert_eq!(
+            fs::read_to_string(root.join("lin/home/.cache/rust-script/state.bin")).unwrap(),
+            "linux\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn native_cache_save_two_writers_yield_single_generation() {
+        use std::sync::{Arc, Barrier};
+        let root = temp_dir();
+        let temp = root.join("job/temp");
+        fs::create_dir_all(root.join("job/home/.cache/rust-script")).unwrap();
+        fs::write(
+            root.join("job/home/.cache/rust-script/state.bin"),
+            "payload\n",
+        )
+        .unwrap();
+        let env = vec![("GITHUB_REPOSITORY".to_string(), "Test/Repo".to_string())];
+        let version = cache_scope_version("", "", "", "~/.cache/rust-script");
+
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let env = env.clone();
+                let temp = temp.clone();
+                let version = version.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let state = JobExecutionState::new_internal(&env, &[], None, Some(temp));
+                    barrier.wait();
+                    save_cache_result(
+                        &state,
+                        "contended-key",
+                        "~/.cache/rust-script",
+                        false,
+                        &version,
+                    )
+                    .unwrap()
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        // Exactly one writer persists; the loser reports a non-persisting
+        // outcome (already-exists or declared contention), never "completed".
+        let saved = results
+            .iter()
+            .filter(|result| result.stdout.contains("Saved cache 'contended-key'"))
+            .count();
+        let not_saved = results
+            .iter()
+            .filter(|result| {
+                result.state.summary.contains("already exists")
+                    || result.state.summary.contains("contention")
+            })
+            .count();
+        assert_eq!(saved, 1, "exactly one writer persists");
+        assert_eq!(
+            not_saved, 1,
+            "the loser reports already-exists or contention"
+        );
+        assert!(results
+            .iter()
+            .all(|result| !result.state.summary.contains("completed")));
+
+        // Both observe exactly one complete generation.
+        let store = cache_scope_store_dir(&root, "Test_Repo", "~/.cache/rust-script");
+        let entries: Vec<String> = fs::read_dir(&store)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|name| name != ".velnor-locks")
+            .collect();
+        assert_eq!(entries, vec!["contended-key".to_string()]);
+        assert!(store.join("contended-key/.velnor-complete-v1").is_file());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -9734,6 +12155,8 @@ mod tests {
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerSetupBuildx,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("name".into(), "velnor-builder".into()),
                         ("driver".into(), "docker-container".into()),
@@ -9756,6 +12179,8 @@ mod tests {
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerLogin,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("username".into(), "docker-user".into()),
                         ("password".into(), "${{ secrets.DOCKER_TOKEN }}".into()),
@@ -9773,6 +12198,8 @@ mod tests {
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerMetadata,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("images".into(), "chainargos/rust-bitcoin-processor".into()),
                         (
@@ -9795,6 +12222,8 @@ type=sha,format=long,prefix=,enable=true"
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerBuildPush,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("context".into(), ".".into()),
                         (
@@ -9805,6 +12234,10 @@ type=sha,format=long,prefix=,enable=true"
                         ("push".into(), "false".into()),
                         ("tags".into(), "${{ steps.meta.outputs.tags }}".into()),
                         ("labels".into(), "${{ steps.meta.outputs.labels }}".into()),
+                        (
+                            "secrets".into(),
+                            "github_token=${{ secrets.DOCKER_TOKEN }}".into(),
+                        ),
                         (
                             "cache-from".into(),
                             "type=gha,scope=bitcoin-processor-app-pr".into(),
@@ -9827,6 +12260,8 @@ type=sha,format=long,prefix=,enable=true"
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerBake,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("files".into(), "backend-rust/docker-bake.hcl".into()),
                         ("targets".into(), "bitcoin-processor-app".into()),
@@ -9863,10 +12298,12 @@ type=sha,format=long,prefix=,enable=true"
             env: Vec::new(),
             codes: vec![0, 0, 1],
         });
+        let mut spec = container(&temp);
+        spec.resource_options = vec!["--cpus".into(), "4".into(), "--memory".into(), "12g".into()];
 
         let results = executor
             .execute_ordered_steps_with_context(
-                &container(&temp),
+                &spec,
                 &steps,
                 &[
                     (
@@ -9904,12 +12341,18 @@ type=sha,format=long,prefix=,enable=true"
         ));
         let runner = executor.runner();
         let calls = docker_call_strings(&runner.calls);
-        assert!(calls.iter().any(
-            |c| c.contains("'buildx' 'create' '--name' 'velnor-builder'")
-                && c.contains("'--config' '/__t/buildkitd-config-velnor-builder.toml'")
-        ));
+        let builder = format!(
+            "velnor-builder-{}",
+            sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap())
+        );
+        assert!(calls.iter().any(|c| c
+            .contains(&format!("'buildx' 'create' '--name' '{builder}'"))
+            && c.contains("'--driver-opt' 'cpu-period=100000,cpu-quota=400000,memory=12g'")
+            && c.contains(&format!(
+                "'--config' '/__t/buildkitd-config-{builder}.toml'"
+            ))));
         assert_eq!(
-            fs::read_to_string(temp.join("buildkitd-config-velnor-builder.toml")).unwrap(),
+            fs::read_to_string(temp.join(format!("buildkitd-config-{builder}.toml"))).unwrap(),
             "[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]\n"
         );
         let login_call = runner.calls.iter().position(|(program, args)| {
@@ -9927,21 +12370,35 @@ type=sha,format=long,prefix=,enable=true"
                 && c.contains("'--tag' 'chainargos/rust-bitcoin-processor:abcdef1234567890'")
         });
         assert!(build_call.is_some());
-        // type=gha cache options are dropped on the Velnor lane (persistent
-        // local builder cache); the step output records the substitution.
-        assert!(!calls[build_call.unwrap()].contains("type=gha"));
-        assert!(results[3].stdout.contains("[velnor] dropped"));
+        // The builder is job-scoped and removed after completion, so external
+        // cache import/export must survive to make the next isolated job hot.
+        assert!(calls[build_call.unwrap()]
+            .contains("'--cache-from' 'type=gha,scope=bitcoin-processor-app-pr'"));
+        assert!(calls[build_call.unwrap()]
+            .contains("'--cache-to' 'type=gha,scope=bitcoin-processor-app-pr,mode=max'"));
         // Non-secret runtime env remains inline, while credentials use a
         // mode-0600 env file and never occur in the process argument vector.
         let build_invocation = &calls[build_call.unwrap()];
         assert!(!build_invocation.contains("ACTIONS_RUNTIME_TOKEN=runtime-token"));
+        assert!(!build_invocation.contains("docker-token"));
+        assert!(build_invocation
+            .contains("'--secret' 'id=github_token,src=/__t/_velnor/build-secrets/"));
         assert!(build_invocation.contains("--env-file"));
         assert!(build_invocation.contains("ACTIONS_CACHE_URL=https://cache.actions"));
+        assert_eq!(
+            fs::read_dir(temp.join("_velnor/build-secrets"))
+                .unwrap()
+                .count(),
+            0
+        );
         let bake_call = calls
             .iter()
             .position(|c| c.contains("'buildx' 'bake'") && c.contains("'bitcoin-processor-app'"));
         assert!(bake_call.is_some());
-        assert!(!calls[bake_call.unwrap()].contains("type=gha"));
+        assert!(calls[bake_call.unwrap()]
+            .contains("'--set' '*.cache-from=type=gha,scope=rust-workspace'"));
+        assert!(calls[bake_call.unwrap()]
+            .contains("'--set' '*.cache-to=type=gha,scope=rust-workspace,mode=max'"));
         let bake_invocation = &calls[bake_call.unwrap()];
         assert!(bake_invocation.contains("PUSH=false"));
         assert!(bake_invocation.contains("SHA=abcdef1234567890"));
@@ -9970,6 +12427,8 @@ type=sha,format=long,prefix=,enable=true"
                 &NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::DockerLogin,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("username".into(), "docker-user".into()),
                         ("password".into(), "registry-secret".into()),
@@ -10029,6 +12488,8 @@ type=sha,format=long,prefix=,enable=true"
             &NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::ConfigurePages,
+                cache_kind: None,
+                source_path: None,
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
             },
@@ -10060,7 +12521,7 @@ type=sha,format=long,prefix=,enable=true"
         let requests = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&requests);
         let responses = [
-            r#"{"artifacts":[{"name":"github-pages","database_id":42,"size":123}]}"#,
+            r#"{"artifacts":[{"name":"github-pages","database_id":"42","size":123}]}"#,
             r#"{"value":"oidc-token"}"#,
             r#"{"id":7,"status_url":"status/7","page_url":"https://initial.example/"}"#,
             r#"{"status":"queued"}"#,
@@ -10126,6 +12587,8 @@ type=sha,format=long,prefix=,enable=true"
             &NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::DeployPages,
+                cache_kind: None,
+                source_path: None,
                 inputs: [("reporting_interval".into(), "0".into())].into(),
                 env: Vec::new(),
             },
@@ -10143,6 +12606,7 @@ type=sha,format=long,prefix=,enable=true"
             "POST /twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts HTTP/1.1"
         ));
         assert!(requests[0].contains("\"workflow_run_backend_id\":\"plan-1\""));
+        assert!(!requests[0].contains("name_filter"));
         assert!(requests[1].starts_with("GET /oidc HTTP/1.1"));
         assert!(requests[2].starts_with("POST /repos/octocat/example/pages/deployments HTTP/1.1"));
         assert!(requests[2].contains("\"artifact_id\":42"));
@@ -10161,6 +12625,8 @@ type=sha,format=long,prefix=,enable=true"
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::DockerBuildPush,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("context".into(), ".".into()),
                     ("push".into(), "false".into()),
@@ -10188,6 +12654,28 @@ type=sha,format=long,prefix=,enable=true"
     }
 
     #[test]
+    fn build_secret_file_is_private_and_ephemeral() {
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+
+        let secret = BuildSecretFile::create(&temp, "runtime-token").unwrap();
+        let host_path = secret.host_path.clone();
+        assert_eq!(fs::read_to_string(&host_path).unwrap(), "runtime-token");
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&host_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(secret
+            .container_path()
+            .starts_with("/__t/_velnor/build-secrets/"));
+
+        drop(secret);
+        assert!(!host_path.exists());
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn native_docker_metadata_matches_target_pr_and_publish_tags() {
         let temp = temp_dir();
         fs::create_dir_all(temp.join("work")).unwrap();
@@ -10200,6 +12688,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::DockerMetadata,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("images".into(), "${{ inputs.image }}".into()),
                     ("tags".into(), tags_input.into()),
@@ -10267,6 +12757,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         let publish_action = NativeActionInvocation {
             git_ref: String::new(),
             adapter: NativeActionAdapter::DockerMetadata,
+            cache_kind: None,
+            source_path: None,
             inputs: [
                 ("images".into(), "${{ inputs.image }}".into()),
                 ("tags".into(), tags_input.into()),
@@ -10295,6 +12787,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         let action = NativeActionInvocation {
             git_ref: String::new(),
             adapter: NativeActionAdapter::DockerMetadata,
+            cache_kind: None,
+            source_path: None,
             inputs: [
                 ("images".into(), "ghcr.io/org/repo/fixture".into()),
                 (
@@ -10325,6 +12819,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         let action = NativeActionInvocation {
             git_ref: String::new(),
             adapter: NativeActionAdapter::DockerMetadata,
+            cache_kind: None,
+            source_path: None,
             inputs: [
                 ("images".into(), "ghcr.io/org/repo/fixture".into()),
                 ("tags".into(), "type=ref,event=branch".into()),
@@ -10355,6 +12851,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::Mise,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [("install".into(), "false".into())].into(),
                     env: Vec::new(),
                 },
@@ -10368,6 +12866,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::SetupMold,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
                 },
@@ -10381,6 +12881,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::Sccache,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
                 },
@@ -10394,6 +12896,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::SetupJust,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: BTreeMap::new(),
                     env: Vec::new(),
                 },
@@ -10407,6 +12911,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::RustCache,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("shared-key".into(), "kestra-rust-build-cache".into()),
                         ("cache-on-failure".into(), "true".into()),
@@ -10451,9 +12957,10 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .iter()
             .position(|path| path == "/root/.cargo/bin")
             .unwrap();
-        assert!(mise_shims < baked_rustup);
+        assert!(baked_rustup < mise_shims);
         assert_eq!(results[0].state.env["RUSTUP_TOOLCHAIN"], "1.97.1");
-        assert!(results[3].state.path.contains(&"/root/.cargo/bin".into()));
+        // just is now a locked mise tool exposed via the mise shims dir.
+        assert!(results[3].state.path.contains(&"/opt/mise/shims".into()));
         assert_eq!(results[4].state.outputs["cache-hit"], "false");
         assert_eq!(results[4].state.env["CACHE_ON_FAILURE"], "true");
         let docker_exec_calls = executor
@@ -10467,15 +12974,23 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             .collect::<Vec<_>>();
         // mise, mold, just (main steps) + sccache start + sccache post (show-stats + stop)
         assert_eq!(docker_exec_calls.len(), 5);
-        assert!(docker_exec_calls
+        // Plan 008: no runtime mise.run bootstrap, no apt/Cargo installers —
+        // mold and just are locked mise installs, one toolchain contract (N8).
+        assert!(!docker_exec_calls
             .iter()
             .any(|args| args.iter().any(|arg| arg.contains("https://mise.run"))));
+        assert!(!docker_exec_calls
+            .iter()
+            .any(|args| args.iter().any(|arg| arg.contains("apt-get"))));
+        assert!(!docker_exec_calls
+            .iter()
+            .any(|args| args.iter().any(|arg| arg.contains("cargo install"))));
         assert!(docker_exec_calls.iter().any(|args| args
             .iter()
-            .any(|arg| arg.contains("apt-get install -y --no-install-recommends mold"))));
+            .any(|arg| arg.contains("mise install --locked --yes 'mold'"))));
         assert!(docker_exec_calls.iter().any(|args| args
             .iter()
-            .any(|arg| arg.contains("apt-get install -y --no-install-recommends just"))));
+            .any(|arg| arg.contains("mise install --locked --yes 'just'"))));
         assert!(docker_exec_calls
             .iter()
             .any(|args| args.iter().any(|arg| arg.contains("sccache --show-stats"))));
@@ -10503,6 +13018,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Kache,
+                cache_kind: None,
+                source_path: None,
                 inputs: BTreeMap::new(),
                 env: Vec::new(),
             },
@@ -10551,7 +13068,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         executor.execute_step(&container, &step, &temp).unwrap();
 
         let calls = &executor.runner().calls;
-        assert_eq!(calls[0].1, vec!["network", "create", "net"]);
+        assert_eq!(calls[0].1, expected_network_create_args());
         assert_eq!(calls[1].1[0], "run");
         assert!(calls[1].1.windows(2).any(|pair| pair == ["--name", "svc"]));
         assert_eq!(calls[2].1[0], "inspect");
@@ -10608,10 +13125,12 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
 
         assert_eq!(results.len(), 1);
         let calls = &executor.runner().calls;
-        assert_eq!(calls[0].1, vec!["network", "create", "net"]);
+        assert_eq!(calls[0].1, expected_network_create_args());
         assert_eq!(calls[1].1, vec!["rm", "--force", "job"]);
-        assert_eq!(calls[2].1, vec!["network", "rm", "net"]);
-        assert_eq!(calls[3].1, vec!["network", "create", "net"]);
+        assert_eq!(calls[2].1[0], "ps");
+        assert_eq!(calls[3].1[0], "volume");
+        assert_eq!(calls[4].1, vec!["network", "rm", "net"]);
+        assert_eq!(calls[5].1, expected_network_create_args());
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -10623,7 +13142,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 1, 0, 0],
+            codes: vec![1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
         });
 
         let error = executor
@@ -10632,13 +13151,17 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
 
         assert!(error.to_string().contains("docker run"));
         let calls = &executor.runner().calls;
-        assert_eq!(calls[0].1, vec!["network", "create", "net"]);
+        assert_eq!(calls[0].1, expected_network_create_args());
         assert_eq!(calls[1].1, vec!["rm", "--force", "job"]);
-        assert_eq!(calls[2].1, vec!["network", "rm", "net"]);
-        assert_eq!(calls[3].1, vec!["network", "create", "net"]);
-        assert_eq!(calls[4].1[0], "run");
-        assert_eq!(calls[5].1, vec!["rm", "--force", "job"]);
-        assert_eq!(calls[6].1, vec!["network", "rm", "net"]);
+        assert_eq!(calls[2].1[0], "ps");
+        assert_eq!(calls[3].1[0], "volume");
+        assert_eq!(calls[4].1, vec!["network", "rm", "net"]);
+        assert_eq!(calls[5].1, expected_network_create_args());
+        assert_eq!(calls[6].1[0], "run");
+        assert_eq!(calls[7].1, vec!["rm", "--force", "job"]);
+        assert_eq!(calls[8].1[0], "ps");
+        assert_eq!(calls[9].1[0], "volume");
+        assert_eq!(calls[10].1, vec!["network", "rm", "net"]);
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -10675,9 +13198,52 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             "value=42"
         );
         assert_eq!(
+            state.resolve_expressions("value=${{ steps.producer.outputs['answer'] }}"),
+            "value=42"
+        );
+        assert_eq!(
             state.resolve_expressions("keep=${{ github.ref }}"),
             "keep=${{ github.ref }}"
         );
+    }
+
+    #[test]
+    fn checkout_uses_prior_step_output_token_instead_of_planning_fallback() {
+        let mut state = JobExecutionState::default();
+        state.apply(
+            "app-token",
+            &StepExecutionResult {
+                exit_code: 0,
+                skipped: false,
+                failure_ignored: false,
+                state: StepCommandState {
+                    outputs: [("token".to_string(), "installation-token".to_string())].into(),
+                    ..Default::default()
+                },
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        );
+        let plan = CheckoutPlan {
+            step_id: "checkout".into(),
+            display_name: "Checkout".into(),
+            clone_url: "https://github.com/acme/repo.git".into(),
+            version: Some("abc123".into()),
+            destination: PathBuf::from("/tmp/work"),
+            token: Some("${{ steps.app-token.outputs.token }}".into()),
+            fetch_depth: Some(1),
+            fetch_tags: false,
+            persist_credentials: true,
+            clean: true,
+            lfs: false,
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        };
+
+        let resolved = resolve_checkout_plan_expressions(&plan, &state).unwrap();
+
+        assert_eq!(resolved.token.as_deref(), Some("installation-token"));
     }
 
     #[test]
@@ -12898,6 +15464,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("path".into(), "missing-file".into()),
                         ("if-no-files-found".into(), "error".into()),
@@ -13399,6 +15967,21 @@ fi"#
         assert!(calls[2]
             .1
             .contains(&"velnor-action-acme-docker-v1-root".into()));
+        assert_eq!(
+            executor.runner().env[2],
+            vec![(
+                "DOCKER_CONFIG".into(),
+                temp.join("_velnor/docker-client").display().to_string()
+            )]
+        );
+        assert_eq!(
+            fs::metadata(temp.join("_velnor/docker-client"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
         assert_eq!(calls[3].1[0], "run");
         assert!(calls[3]
             .1
@@ -13472,14 +16055,16 @@ fi"#
 
         assert_eq!(results.len(), 3);
         let calls = &executor.runner().calls;
-        assert_eq!(calls.len(), 7);
+        assert_eq!(calls.len(), 9);
         assert_eq!(calls[0].1[0], "network");
         assert_eq!(calls[1].1[0], "run");
         assert_eq!(calls[2].1[0], "exec");
         assert_eq!(calls[3].1[0], "run");
         assert_eq!(calls[4].1[0], "exec");
         assert_eq!(calls[5].1[0], "rm");
-        assert_eq!(calls[6].1[0], "network");
+        assert_eq!(calls[6].1[0], "ps");
+        assert_eq!(calls[7].1[0], "volume");
+        assert_eq!(calls[8].1[0], "network");
         assert!(calls[3].1.contains(&"INPUT_NAME=value".into()));
         assert!(calls[3].1.contains(&"GITHUB_REPOSITORY=acme/repo".into()));
         assert!(calls[3].1.contains(&"TOKEN=ghs_token".into()));
@@ -13501,6 +16086,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::Cache,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("path".into(), "~/.cache/rust-script".into()),
                         (
@@ -13525,6 +16112,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         (
                             "name".into(),
@@ -13550,6 +16139,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::DownloadArtifact,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("pattern".into(), "construct-digest-*".into()),
                         ("path".into(), "${{ env.DIGEST_DIR }}".into()),
@@ -13570,6 +16161,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::GitHubRuntimeExport,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [("github-token".into(), "ghs_token".into())].into(),
                     env: Vec::new(),
                 },
@@ -13640,8 +16233,10 @@ fi"#
             .collect::<Vec<_>>();
         assert_eq!(node_calls.len(), 0);
         assert_eq!(results[0].state.outputs["cache-hit"], "false");
+        // Root exposes only `cache-hit`; the primary key stays internal state.
+        assert!(!results[0].state.outputs.contains_key("cache-primary-key"));
         assert_eq!(
-            results[0].state.outputs["cache-primary-key"],
+            results[0].state.state["primaryKey"],
             format!("rust-script-Linux-{expected_hash}")
         );
         assert!(results[0]
@@ -13691,6 +16286,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "construct-digest-linux-amd64".into()),
                     ("path".into(), "/__w/digests/linux-amd64.digest".into()),
@@ -13709,6 +16306,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::DownloadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("pattern".into(), "construct-digest-*".into()),
                     ("path".into(), "/__w/downloaded".into()),
@@ -13774,6 +16373,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("name".into(), name.into()),
                         ("path".into(), path.into()),
@@ -13801,6 +16402,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::DownloadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [("path".into(), "/__w/downloaded".into())].into(),
                 env: Vec::new(),
             },
@@ -13852,6 +16455,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "output".into()),
                     ("path".into(), "/github/workspace/output.txt".into()),
@@ -13878,6 +16483,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::DownloadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "output".into()),
                     ("path".into(), "downloads/output".into()),
@@ -13933,6 +16540,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "bin".into()),
                     ("path".into(), "/__w/bin".into()),
@@ -13959,6 +16568,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::DownloadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "bin".into()),
                     ("path".into(), "/__w/downloaded".into()),
@@ -14016,6 +16627,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "jackin-x86_64-unknown-linux-gnu".into()),
                     (
@@ -14058,24 +16671,23 @@ fi"#
     }
 
     #[test]
-    fn native_upload_artifact_reads_persistent_workspace_target_mount() {
+    fn native_upload_artifact_reads_job_local_persistent_workspace_target() {
         let temp = temp_dir();
-        // Persistent buckets deliberately include workflow/job identity. A
-        // workflow filename starts with `.github`, but that host-only parent
-        // must not make ordinary target files hidden from upload-artifact.
-        let target = temp.join(".github_workflows_ci.yml/Check__Velnor_");
+        let mut spec = container(&temp);
+        let target = spec.workspace_host.join("target");
         fs::create_dir_all(target.join("cargo-timings")).unwrap();
         fs::write(target.join("cargo-timings/cargo-timing.html"), "timing\n").unwrap();
         fs::write(target.join("sccache-check.txt"), "stats\n").unwrap();
         fs::write(target.join(".private"), "hidden\n").unwrap();
-        let mut spec = container(&temp);
-        spec.cargo_target_host = Some(target);
+        spec.cargo_target_host = Some(temp.join("persistent-target-generation"));
         let steps = vec![ExecutableStep::Native {
             step_id: "upload".into(),
             display_name: String::new(),
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "cargo-cache-evidence".into()),
                     (
@@ -14133,6 +16745,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
+                    cache_kind: None,
+                    source_path: None,
                     inputs,
                     env: Vec::new(),
                 },
@@ -14173,6 +16787,74 @@ fi"#
     }
 
     #[test]
+    fn native_upload_pages_artifact_uploads_single_dereferenced_tar() {
+        let temp = temp_dir();
+        let site = temp.join("work/site");
+        fs::create_dir_all(site.join("assets")).unwrap();
+        fs::create_dir_all(site.join(".github")).unwrap();
+        fs::create_dir_all(site.join(".well-known")).unwrap();
+        fs::write(site.join("index.html"), "pages\n").unwrap();
+        fs::write(site.join("assets/app.js"), "app\n").unwrap();
+        fs::write(site.join(".github/workflow.yml"), "excluded\n").unwrap();
+        fs::write(site.join(".well-known/security.txt"), "hidden\n").unwrap();
+        fs::hard_link(site.join("index.html"), site.join("hard-linked.html")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("index.html", site.join("linked.html")).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "pages".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::UploadPagesArtifact,
+                cache_kind: None,
+                source_path: None,
+                inputs: [("path".into(), "site".into())].into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+
+        let results = DockerScriptExecutor::new(RecordingRunner::default())
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        assert_eq!(results[0].exit_code, 0);
+        assert_eq!(
+            results[0].state.outputs["artifact_id"],
+            results[0].state.outputs["artifact-id"]
+        );
+        let artifact_dir = temp.join("_velnor_artifacts/local-1/github-pages");
+        let files = fs::read_dir(&artifact_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(files, vec![std::ffi::OsString::from("artifact.tar")]);
+
+        let file = fs::File::open(artifact_dir.join("artifact.tar")).unwrap();
+        let mut archive = tar::Archive::new(file);
+        let mut archived = BTreeMap::new();
+        for entry in archive.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.header().entry_type().is_file() {
+                let mut content = String::new();
+                entry.read_to_string(&mut content).unwrap();
+                archived.insert(entry.path().unwrap().into_owned(), content);
+            }
+        }
+        assert_eq!(archived[Path::new("index.html")], "pages\n");
+        assert_eq!(archived[Path::new("assets/app.js")], "app\n");
+        assert_eq!(archived[Path::new("hard-linked.html")], "pages\n");
+        #[cfg(unix)]
+        assert_eq!(archived[Path::new("linked.html")], "pages\n");
+        assert!(!archived.contains_key(Path::new(".github/workflow.yml")));
+        assert!(!archived.contains_key(Path::new(".well-known/security.txt")));
+
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
     fn native_upload_artifact_requires_overwrite_for_duplicate_name() {
         let temp = temp_dir();
         fs::create_dir_all(temp.join("work")).unwrap();
@@ -14194,6 +16876,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
+                    cache_kind: None,
+                    source_path: None,
                     inputs,
                     env: Vec::new(),
                 },
@@ -14253,6 +16937,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "construct-digest-amd64".into()),
                     (
@@ -14295,6 +16981,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::UploadArtifact,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "result-velnor-app".into()),
                     ("path".into(), "result.json".into()),
@@ -14498,6 +17186,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::UploadArtifact,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("name".into(), "github-pages".into()),
                         ("path".into(), "${{ runner.temp }}/artifact.tar".into()),
@@ -14525,6 +17215,8 @@ fi"#
                 invocation: NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::DeployPages,
+                    cache_kind: None,
+                    source_path: None,
                     inputs: [
                         ("token".into(), "${{ github.token }}".into()),
                         ("artifact_name".into(), "github-pages".into()),
@@ -14773,6 +17465,8 @@ fi"#
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::DockerSetupBuildx,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("name".into(), "jackin-construct".into()),
                     ("driver".into(), "docker-container".into()),
@@ -14790,17 +17484,21 @@ fi"#
             .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
             .unwrap();
 
+        let builder = format!(
+            "jackin-construct-{}",
+            sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap())
+        );
         assert_eq!(results[0].exit_code, 0);
-        assert_eq!(results[0].state.outputs["name"], "jackin-construct");
-        assert_eq!(results[0].state.env["BUILDX_BUILDER"], "jackin-construct");
+        assert_eq!(results[0].state.outputs["name"], builder);
+        assert_eq!(results[0].state.env["BUILDX_BUILDER"], builder);
         let calls = docker_call_strings(&executor.runner().calls);
         let inspect_call = calls
             .iter()
-            .position(|c| c.contains("'buildx' 'inspect' 'jackin-construct'"))
+            .position(|c| c.contains(&format!("'buildx' 'inspect' '{builder}'")))
             .unwrap();
         let use_call = calls
             .iter()
-            .position(|c| c.contains("'buildx' 'use' 'jackin-construct'"))
+            .position(|c| c.contains(&format!("'buildx' 'use' '{builder}'")))
             .unwrap();
         assert!(inspect_call < use_call);
         assert!(
@@ -14811,6 +17509,59 @@ fi"#
         assert!(!calls.iter().any(|c| c.contains("'buildx' 'create'")));
 
         fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn native_setup_buildx_honors_cleanup_controls() {
+        for (cleanup, keep_state, expected_rm) in [
+            ("false", "false", None),
+            ("true", "false", Some("docker buildx rm builder")),
+            (
+                "true",
+                "true",
+                Some("docker buildx rm --keep-state builder"),
+            ),
+        ] {
+            let temp = temp_dir();
+            fs::create_dir_all(&temp).unwrap();
+            let steps = vec![ExecutableStep::Native {
+                step_id: "buildx".into(),
+                display_name: String::new(),
+                invocation: NativeActionInvocation {
+                    git_ref: String::new(),
+                    adapter: NativeActionAdapter::DockerSetupBuildx,
+                    cache_kind: None,
+                    source_path: None,
+                    inputs: [
+                        ("name".into(), "builder".into()),
+                        ("cleanup".into(), cleanup.into()),
+                        ("keep-state".into(), keep_state.into()),
+                    ]
+                    .into(),
+                    env: Vec::new(),
+                },
+                condition: None,
+                continue_on_error: false,
+                timeout_minutes: None,
+            }];
+            let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+            executor
+                .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+                .unwrap();
+
+            let calls = executor
+                .runner()
+                .calls
+                .iter()
+                .map(|(program, args)| format!("{program} {}", args.join(" ")))
+                .collect::<Vec<_>>();
+            match expected_rm {
+                Some(expected) => assert!(calls.iter().any(|call| call.contains(expected))),
+                None => assert!(!calls.iter().any(|call| call.contains("buildx rm"))),
+            }
+            fs::remove_dir_all(temp).unwrap();
+        }
     }
 
     #[test]
@@ -15095,6 +17846,8 @@ bitcoin-processor-app.push=true")
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::Renovate,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("token".into(), "${{ secrets.RENOVATE_TOKEN }}".into()),
                     ("renovate-version".into(), "43".into()),
@@ -16672,6 +19425,8 @@ bitcoin-processor-app.push=true")
             invocation: NativeActionInvocation {
                 git_ref: String::new(),
                 adapter: NativeActionAdapter::DockerBuildPush,
+                cache_kind: None,
+                source_path: None,
                 inputs: [
                     ("context".into(), ".".into()),
                     (
@@ -16710,15 +19465,65 @@ bitcoin-processor-app.push=true")
     }
 
     #[test]
-    fn cosign_installer_script_prefers_preinstalled_and_downloads_on_mismatch() {
-        let script = cosign_installer_script("v3.1.1", "$HOME/.cosign");
-        assert!(script.contains("WANT='3.1.1'"));
+    fn docker_build_push_keeps_explicit_dockerfile_workspace_relative() {
+        let temp = temp_dir();
+        fs::create_dir_all(temp.join("work")).unwrap();
+        let steps = vec![ExecutableStep::Native {
+            step_id: "build".into(),
+            display_name: String::new(),
+            invocation: NativeActionInvocation {
+                git_ref: String::new(),
+                adapter: NativeActionAdapter::DockerBuildPush,
+                cache_kind: None,
+                source_path: None,
+                inputs: [
+                    ("context".into(), "docker".into()),
+                    ("file".into(), "docker/job-ubuntu.Dockerfile".into()),
+                ]
+                .into(),
+                env: Vec::new(),
+            },
+            condition: None,
+            continue_on_error: false,
+            timeout_minutes: None,
+        }];
+        let mut executor = DockerScriptExecutor::new(RecordingRunner::default());
+
+        executor
+            .execute_ordered_steps(&container(&temp), &steps, &[], &temp)
+            .unwrap();
+
+        let calls = docker_call_strings(&executor.runner().calls);
+        let invocation = calls
+            .iter()
+            .find(|call| call.contains("'buildx' 'build'"))
+            .expect("buildx build invoked");
+        assert!(invocation.contains("'--file' 'docker/job-ubuntu.Dockerfile'"));
+        assert!(!invocation.contains("docker/docker/job-ubuntu.Dockerfile"));
+        assert!(invocation.contains("'docker'"));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn cosign_installer_uses_locked_mise_and_rejects_other_releases() {
+        // Requesting the locked version installs via mise, links install-dir,
+        // verifies the version, and never downloads over curl.
+        let script = cosign_installer_script("v3.1.3", "$HOME/.cosign");
+        assert!(script.contains("mise install --locked --yes 'cosign'"));
+        assert!(script.contains("MISE_LOCKED=1"));
+        assert!(script.contains("WANT='3.1.3'"));
+        assert!(script.contains("LOCKED='3.1.3'"));
         assert!(script.contains("DIR=\"$HOME/.cosign\""));
         assert!(script.contains("command -v cosign"));
-        assert!(script.contains(
-            "https://github.com/sigstore/cosign/releases/download/v${ver}/cosign-linux-${arch}"
-        ));
         assert!(script.contains("__VELNOR_COSIGN_DIR__"));
+        assert!(!script.contains("curl"));
+        assert!(!script.contains("releases/download"));
+
+        // A different requested release fails closed (no fallback download).
+        let mismatch = cosign_installer_script("v3.1.1", "$HOME/.cosign");
+        assert!(mismatch.contains("WANT='3.1.1'"));
+        assert!(mismatch.contains("refusing a non-mise download"));
+        assert!(!mismatch.contains("curl"));
     }
 
     #[test]
@@ -16751,6 +19556,8 @@ bitcoin-processor-app.push=true")
                 &NativeActionInvocation {
                     git_ref: String::new(),
                     adapter: NativeActionAdapter::SetupQemu,
+                    cache_kind: None,
+                    source_path: None,
                     inputs,
                     env: Vec::new(),
                 },
@@ -16781,11 +19588,14 @@ bitcoin-processor-app.push=true")
     // ── setup_mold_script ─────────────────────────────────────────────────
 
     #[test]
-    fn setup_mold_script_does_not_require_clang() {
-        // Removing `linker = "clang"` was necessary because clang is not installed
-        // in the arm64 job image. The script must use -fuse-ld=mold with the
-        // default cc (gcc) linker instead.
+    fn setup_mold_script_installs_locked_mise_and_wires_gcc_linker() {
         let script = setup_mold_script();
+        // Plan 008 N8: mold is a locked mise install, never apt.
+        assert!(script.contains("mise install --locked --yes 'mold'"));
+        assert!(script.contains("MISE_LOCKED=1"));
+        assert!(!script.contains("apt-get"));
+        assert!(script.contains("mold --version | grep -F '2.41.0'"));
+        // Cargo-linker wiring is unchanged: gcc + -fuse-ld=mold, no clang.
         assert!(
             !script.contains("linker = \"clang\""),
             "script must not require clang as linker: {script}"
@@ -16794,12 +19604,18 @@ bitcoin-processor-app.push=true")
             script.contains("fuse-ld=mold"),
             "script must wire mold via -fuse-ld=mold: {script}"
         );
-        // Still configures both x86_64 and aarch64 targets.
         assert!(script.contains("x86_64-unknown-linux-gnu"));
         assert!(script.contains("aarch64-unknown-linux-gnu"));
-        // Installs mold via apt if not present.
-        assert!(script.contains("apt-get install"));
-        assert!(script.contains("mold --version"));
+    }
+
+    #[test]
+    fn setup_just_script_installs_locked_mise_without_apt_or_cargo() {
+        let script = setup_just_script();
+        assert!(script.contains("mise install --locked --yes 'just'"));
+        assert!(script.contains("MISE_LOCKED=1"));
+        assert!(script.contains("just --version | grep -F '1.58.0'"));
+        assert!(!script.contains("apt-get"));
+        assert!(!script.contains("cargo install"));
     }
 
     // ── RunServiceStepResult fields ───────────────────────────────────────
@@ -16951,6 +19767,47 @@ bitcoin-processor-app.push=true")
         assert!(
             filtered.iter().any(|(k, _)| k == "PATH"),
             "PATH must be preserved: {filtered:?}"
+        );
+    }
+
+    #[test]
+    fn docker_start_retry_classifies_only_transient_runtime_failures() {
+        for message in [
+            "failed to create TTRPC connection: unsupported protocol",
+            "error reading from server: EOF",
+            "Cannot connect to the Docker daemon. Is the docker daemon running?",
+            "rpc error: transport is closing",
+        ] {
+            assert!(docker_start_error_is_transient(&anyhow::anyhow!(message)));
+        }
+        for message in [
+            "pull access denied for private/image",
+            "invalid reference format",
+            "network with name job already exists",
+            "failed to create task for container: OCI runtime create failed: executable not found",
+        ] {
+            assert!(!docker_start_error_is_transient(&anyhow::anyhow!(message)));
+        }
+    }
+
+    #[test]
+    fn docker_start_retry_delay_is_bounded() {
+        assert_eq!(docker_start_retry_delay(1), Duration::from_secs(1));
+        assert_eq!(docker_start_retry_delay(2), Duration::from_secs(2));
+        assert_eq!(docker_start_retry_delay(3), Duration::from_secs(4));
+        assert_eq!(docker_start_retry_delay(4), Duration::from_secs(8));
+        assert_eq!(docker_start_retry_delay(40), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn github_app_client_id_is_preferred_with_legacy_fallback() {
+        assert_eq!(
+            github_app_identifier("Iv23client".to_string(), "12345".to_string()),
+            "Iv23client"
+        );
+        assert_eq!(
+            github_app_identifier(String::new(), "12345".to_string()),
+            "12345"
         );
     }
 

@@ -51,3 +51,13 @@ Start here:
 - [Storage and disk pressure](storage-and-disk-pressure-2026-07-18.md): live
   Sentry evidence, canonical paths, leases, reclaim-before-register, and the
   compiler-cache comparison method.
+- [Build L3 boundary v1](security/build-l3-boundary-v1.md): the reviewed target
+  TCB, per-job microVM, guest-local Docker, signer separation, cleanup,
+  cache/network, and disk-safety design. Its status is design-only, not live
+  L3 proof.
+- [Build L3 threat/control/test matrix
+  v1](security/build-l3-threat-control-test-v1.tsv): the versioned requirement,
+  attack, control, and one/eight-slot proof inventory for Plans 012 and 017.
+- [Required-check handoff](required-check-handoff.md): exact post-delivery
+  status contexts, current protection inventory, and the operator procedure
+  for decision §12.1.

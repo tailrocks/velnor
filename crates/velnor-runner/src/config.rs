@@ -7,6 +7,38 @@ use serde::{Deserialize, Serialize};
 
 const SETTINGS_FILE: &str = "runner.json";
 
+#[cfg(unix)]
+fn replace_atomically(dir: &Path, path: &Path, bytes: &[u8], temp_path: &Path) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(temp_path)
+        .with_context(|| format!("create temporary config {}", temp_path.display()))?;
+    let write_result = (|| -> Result<()> {
+        file.write_all(bytes)
+            .with_context(|| format!("write {}", temp_path.display()))?;
+        fs::set_permissions(temp_path, fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("chmod 0600 {}", temp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("fsync {}", temp_path.display()))?;
+        fs::rename(temp_path, path)
+            .with_context(|| format!("atomically replace {} with new config", path.display()))?;
+        fs::File::open(dir)
+            .with_context(|| format!("open config directory {}", dir.display()))?
+            .sync_all()
+            .with_context(|| format!("fsync config directory {}", dir.display()))?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(temp_path);
+    }
+    write_result
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunnerSettings {
     pub github_url: String,
@@ -76,20 +108,8 @@ pub fn save(dir: &Path, config: &StoredRunnerConfig) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(config)?;
     #[cfg(unix)]
     {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-            .with_context(|| format!("write {}", path.display()))?;
-        file.write_all(&bytes)
-            .with_context(|| format!("write {}", path.display()))?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("chmod 0600 {}", path.display()))?;
+        let temp_path = dir.join(format!(".{SETTINGS_FILE}.{}.tmp", uuid::Uuid::new_v4()));
+        replace_atomically(dir, &path, &bytes, &temp_path)?;
     }
     #[cfg(not(unix))]
     fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
@@ -162,6 +182,38 @@ mod tests {
             0o600
         );
 
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_staging_does_not_truncate_existing_config() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let temp = std::env::temp_dir().join(format!(
+            "velnor-config-atomic-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        let existing = br#"{"existing":true}"#;
+        fs::write(temp.join(SETTINGS_FILE), existing).unwrap();
+        let blocked_temp = temp.join("blocked-staging-path");
+        fs::create_dir(&blocked_temp).unwrap();
+
+        let error = replace_atomically(
+            &temp,
+            &temp.join(SETTINGS_FILE),
+            br#"{"replacement":true}"#,
+            &blocked_temp,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("create temporary config"));
+        assert_eq!(fs::read(temp.join(SETTINGS_FILE)).unwrap(), existing);
         fs::remove_dir_all(temp).unwrap();
     }
 }

@@ -11,12 +11,17 @@ use crate::cli::{CapabilitiesArgs, CapabilitiesCommand};
 use crate::compiler_cache::CompilerCacheBackend;
 use crate::job_message::{ActionReferenceType, AgentJobRequestMessage};
 
-pub const MANIFEST_VERSION: u32 = 3;
+// Plan 009 introduced v6 (action subpaths + reusable-workflow schema). Plan 010
+// adds source-SHA + crate-version identity to the exported manifest so a consumer
+// can bind the compiled manifest to one release commit, bumping the schema to v7.
+// Approved composites introduced v8; the native GitHub App token adapter is v9.
+pub const MANIFEST_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CapabilityManifest {
     pub version: u32,
     pub actions: &'static [ActionCapability],
+    pub reusable_workflows: &'static [ReusableWorkflow],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -24,6 +29,11 @@ pub struct ActionCapability {
     pub repository: &'static str,
     pub adapter: NativeActionAdapter,
     pub allowed_refs: &'static [AllowedRef],
+    /// Non-root action subpaths this repository exposes (for example
+    /// `actions/cache` exposes `restore` and `save`). The root action is always
+    /// admissible; any subpath outside this set fails closed. Empty means the
+    /// repository is only ever used at its root.
+    pub allowed_subpaths: &'static [&'static str],
     pub inputs: &'static [InputRule],
     pub notes: &'static str,
 }
@@ -34,17 +44,44 @@ pub struct AllowedRef {
     pub release: &'static str,
 }
 
+/// A server-expanded reusable workflow (`jobs.<id>.uses`) that Velnor admits.
+/// This is distinct from a runner-side action: GitHub resolves the workflow
+/// server-side and dispatches an expanded job to Velnor, so admission cross-
+/// checks the workflow's repository, path, and immutable full-SHA ref plus the
+/// dispatched inputs — it never parses `jobs.<id>.uses` as a runner action.
+#[derive(Debug, Clone, Copy)]
+pub struct ReusableWorkflow {
+    pub repository: &'static str,
+    /// Workflow file path within the repository, e.g.
+    /// `.github/workflows/publish.yml`.
+    pub path: &'static str,
+    pub allowed_refs: &'static [AllowedRef],
+    pub inputs: &'static [InputRule],
+    pub notes: &'static str,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum InputRule {
     Any(&'static str),
     Literal(&'static str, &'static [&'static str]),
+    RequiredLiteral(&'static str, &'static [&'static str]),
     Forbidden(&'static str),
+    /// Value is admissible iff the pure predicate returns true. `accepted`
+    /// documents the constraint in violation messages (the value itself stays
+    /// redacted). Used for the strict mise date-version and `install_args`
+    /// tool-key shape rules; membership against the committed lock is enforced
+    /// at install time by `crate::mise`.
+    Predicate(&'static str, fn(&str) -> bool, &'static [&'static str]),
 }
 
 impl InputRule {
     fn name(self) -> &'static str {
         match self {
-            Self::Any(name) | Self::Literal(name, _) | Self::Forbidden(name) => name,
+            Self::Any(name)
+            | Self::Literal(name, _)
+            | Self::RequiredLiteral(name, _)
+            | Self::Forbidden(name)
+            | Self::Predicate(name, _, _) => name,
         }
     }
 }
@@ -64,12 +101,11 @@ impl fmt::Display for CapabilityViolation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "unsupported capability in step '{}': action {}@{}, field '{}' received '{}'; accepted: {}; manifest version {}",
+            "unsupported capability in step '{}': action {}@{}, field '{}' received [redacted]; accepted: {}; manifest version {}",
             self.step,
             self.repository,
             self.action_ref,
             self.field,
-            self.received,
             if self.accepted.is_empty() {
                 "none".to_string()
             } else {
@@ -89,6 +125,7 @@ const fn allowed(value: &'static str, release: &'static str) -> AllowedRef {
 const CHECKOUT_REFS: &[AllowedRef] = &[
     allowed(NATIVE_ACTION_REF, "broker-managed checkout"),
     allowed("9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0", "v7"),
+    allowed("3d3c42e5aac5ba805825da76410c181273ba90b1", "v7"),
     allowed("df4cb1c069e1874edd31b4311f1884172cec0e10", "v6"),
     allowed("34e114876b0b11c390a56381ad16ebd13914f8d5", "v4"),
     allowed("v4", "fixture transition until plan 041"),
@@ -109,17 +146,20 @@ const DOWNLOAD_REFS: &[AllowedRef] = &[
     allowed("v8", "fixture transition until plan 041"),
 ];
 const MISE_REFS: &[AllowedRef] = &[
+    allowed("3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518", "v4.2.5"),
+    allowed("7e36c90d9ab29c415a2384db3006f3ec8a8cc654", "v4.2.4"),
     allowed("dad1bfd3df957f44999b559dd69dc1671cb4e9ea", "v4.2.1"),
     allowed("e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d", "v4.2.0"),
     allowed("dba19683ed58901619b14f395a24841710cb4925", "v4.1.0"),
     allowed("v4", "fixture transition until plan 041"),
 ];
 const SCCACHE_REFS: &[AllowedRef] = &[
+    allowed("fc920bf0ec8de6ee65d409111f7ec508035751ba", "v0.0.11"),
     allowed("9e7fa8a12102821edf02ca5dbea1acd0f89a2696", "v0.0.10"),
-    allowed("1583d6b38d7be47f593cb472781bbb21cab4321e", "v0.0.10"),
     allowed("v0.0.10", "fixture transition until plan 041"),
 ];
 const MOLD_REFS: &[AllowedRef] = &[
+    allowed("7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3", "v1"),
     allowed("9c9c13bf4c3f1adef0cc596abc155580bcb04444", "v1"),
     allowed("v1", "fixture transition until plan 041"),
 ];
@@ -137,8 +177,10 @@ const RUNTIME_REFS: &[AllowedRef] = &[
     allowed("04d248b84655b509d8c44dc1d6f990c879747487", "v4"),
     allowed("v4", "fixture transition until plan 041"),
 ];
-const GITHUB_SCRIPT_REFS: &[AllowedRef] =
-    &[allowed("373c709c69115d41ff229c7e5df9f8788daa9553", "v9")];
+const GITHUB_SCRIPT_REFS: &[AllowedRef] = &[allowed(
+    "3a2844b7e9c422d3c10d287c895573f7108da1b3",
+    "v9.0.0",
+)];
 const GITHUB_SCRIPT_INPUTS: &[InputRule] = &[
     InputRule::Any("github-token"),
     InputRule::Literal(
@@ -150,14 +192,20 @@ const GITHUB_SCRIPT_INPUTS: &[InputRule] = &[
     ),
 ];
 const RENOVATE_REFS: &[AllowedRef] = &[
+    allowed("e09d604f8f803bb527bd8321ed5be06c460b8682", "v46.2.2"),
+    allowed("316d7cd859606d6039a2182b7d69199e9b036835", "v46.2.1"),
+    allowed("3064367f740a1a91cca218698a63902689cce200", "v46"),
     allowed("22e0a16091fc706b04affe6ae53d5e3358ac4023", "v44"),
     allowed("693b9ef15eec82123529a37c782242f091365961", "v43"),
 ];
 const BUILDX_REFS: &[AllowedRef] = &[
+    allowed("37fe631027851001ddb9b187196cc803df7f5f0e", "v4.3.0"),
     allowed("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c", "v4"),
     allowed("v4", "fixture transition until plan 041"),
 ];
 const LOGIN_REFS: &[AllowedRef] = &[
+    allowed("dbcb813823bdd20940b903addbd779551569679f", "v4.6.0"),
+    allowed("abd2ef45e78c5afb21d64d4ca52ee8550d9572c7", "v4"),
     allowed("af1e73f918a031802d376d3c8bbc3fe56130a9b0", "v4"),
     allowed("v4", "fixture transition until plan 041"),
 ];
@@ -189,11 +237,26 @@ const DOWNLOAD_INPUTS: &[InputRule] = &[
     InputRule::Literal("merge-multiple", &["true", "false"]),
 ];
 const MISE_INPUTS: &[InputRule] = &[
-    InputRule::Literal("version", &["2026.7.7"]),
+    // Exact mise date-version only; omission (empty) resolves to the fleet pin.
+    InputRule::Predicate(
+        "version",
+        crate::mise::is_valid_mise_version,
+        &["exact YYYY.M.D mise version, or omitted for the fleet-pinned latest"],
+    ),
     InputRule::Literal("install", &["true", "false"]),
-    InputRule::Any("install_args"),
+    // Whitespace-separated bare tool keys; membership in the committed lock is
+    // enforced fail-closed at install time (crate::mise).
+    InputRule::Predicate(
+        "install_args",
+        crate::mise::is_valid_install_args_shape,
+        &["whitespace-separated tool keys committed in mise.lock (no flags/@version/URLs/paths)"],
+    ),
     InputRule::Any("working_directory"),
     InputRule::Any("github_token"),
+    // Upstream controls Actions-cache transport with this boolean. Velnor's
+    // repository-scoped local mise store does not use that transport, but the
+    // input remains part of the pinned action's admitted interface.
+    InputRule::Literal("cache", &["true", "false"]),
     InputRule::Literal("cache_key_prefix", &["mise-v2"]),
     InputRule::Literal("cache_save", &["true", "false"]),
 ];
@@ -225,6 +288,8 @@ const BUILDX_INPUTS: &[InputRule] = &[
     InputRule::Any("name"),
     InputRule::Literal("driver", &["docker-container"]),
     InputRule::Literal("install", &["true", "false"]),
+    InputRule::Literal("cleanup", &["true", "false"]),
+    InputRule::Literal("keep-state", &["true", "false"]),
     InputRule::Literal(
         "buildkitd-config-inline",
         &["[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]"],
@@ -242,6 +307,7 @@ const BUILD_PUSH_INPUTS: &[InputRule] = &[
     InputRule::Any("tags"),
     InputRule::Any("labels"),
     InputRule::Any("build-args"),
+    InputRule::Any("secrets"),
     InputRule::Any("cache-from"),
     InputRule::Any("cache-to"),
     InputRule::Any("outputs"),
@@ -251,10 +317,14 @@ const BUILD_PUSH_INPUTS: &[InputRule] = &[
 
 macro_rules! capability {
     ($repo:literal, $adapter:ident, $refs:expr, $inputs:expr) => {
+        capability!($repo, $adapter, $refs, $inputs, subpaths: &[])
+    };
+    ($repo:literal, $adapter:ident, $refs:expr, $inputs:expr, subpaths: $subpaths:expr) => {
         ActionCapability {
             repository: $repo,
             adapter: NativeActionAdapter::$adapter,
             allowed_refs: $refs,
+            allowed_subpaths: $subpaths,
             inputs: $inputs,
             notes: "native Rust adapter; estate pin sweep 2026-07-18",
         }
@@ -262,6 +332,84 @@ macro_rules! capability {
 }
 
 pub static ACTIONS: &[ActionCapability] = &[
+    ActionCapability {
+        repository: "tailrocks/velnor-actions",
+        adapter: NativeActionAdapter::ApprovedComposite,
+        allowed_refs: &[
+            allowed(
+                "77d323dcfdb176b332edc24bfc92cb625b3ab4c8",
+                "unified CI release 2026.8.30",
+            ),
+            allowed(
+                "3057391f93f3bfc0fe570ee08cfcea9533ea3f92",
+                "unified CI release 2026.8.18",
+            ),
+        ],
+        allowed_subpaths: &[
+            "actions/run-gate",
+            "actions/cache-contract",
+            "actions/aggregate",
+        ],
+        inputs: &[
+            InputRule::Any("name"),
+            InputRule::Any("command"),
+            InputRule::Any("schema-version"),
+            InputRule::Any("declaration-sha256"),
+            InputRule::Any("expected-declaration-sha256"),
+            InputRule::Any("cache-id"),
+            InputRule::Any("expected-cache-id"),
+            InputRule::Any("scope"),
+            InputRule::Any("expected-scope"),
+            InputRule::Any("cache-owner"),
+            InputRule::Any("expected-cache-owner"),
+            InputRule::Any("reservation-id"),
+            InputRule::Any("expected-reservation-id"),
+            InputRule::Any("required-peak-bytes"),
+            InputRule::Any("quota-reserved-bytes"),
+            InputRule::Any("attributed-bytes"),
+            InputRule::Any("cleanup-state"),
+            InputRule::Any("materialization-id"),
+            InputRule::Any("expected-materialization-id"),
+        ],
+        notes: "pinned unified-CI composites; exact subpaths fetched and recursively validated",
+    },
+    ActionCapability {
+        repository: "jackin-project/jackin-role-action",
+        adapter: NativeActionAdapter::ApprovedComposite,
+        allowed_refs: &[
+            allowed(
+                "041f17a6d32f8fd2a8ef03c2a63be58346993136",
+                "latest composite with mise 2026.8.3 (#95)",
+            ),
+            allowed(
+                "80a1acd07257a23b441c546e6fcad12239ef7626",
+                "estate-pinned composite",
+            ),
+            allowed(
+                "889e01e1fec152cc68271385f8976319244d9251",
+                "latest-build artifact API lookup (#80)",
+            ),
+        ],
+        allowed_subpaths: &[],
+        inputs: &[
+            InputRule::Any("path"),
+            InputRule::Any("jackin-version"),
+            InputRule::Literal("skip-build", &["true", "false"]),
+            InputRule::Any("registry-cache-image"),
+        ],
+        notes: "pinned remote composite; expanded into strictly validated native adapters",
+    },
+    ActionCapability {
+        repository: "fsfe/reuse-action",
+        adapter: NativeActionAdapter::ApprovedComposite,
+        allowed_refs: &[allowed(
+            "676e2d560c9a403aa252096d99fcab3e1132b0f5",
+            "pinned REUSE compliance Docker action",
+        )],
+        allowed_subpaths: &[],
+        inputs: &[],
+        notes: "pinned Docker action; generic Docker execution with a closed identity and input surface",
+    },
     capability!(
         "actions/checkout",
         Checkout,
@@ -278,7 +426,42 @@ pub static ACTIONS: &[ActionCapability] = &[
             InputRule::Literal("lfs", &["true", "false"]),
         ]
     ),
-    capability!("actions/cache", Cache, CACHE_REFS, CACHE_INPUTS),
+    capability!(
+        "actions/cache",
+        Cache,
+        CACHE_REFS,
+        CACHE_INPUTS,
+        subpaths: &["restore", "save"]
+    ),
+    capability!(
+        "actions/attest-build-provenance",
+        AttestBuildProvenance,
+        &[
+            allowed("0f67c3f4856b2e3261c31976d6725780e5e4c373", "v4.1.1"),
+            allowed("4d101475d8b20a2381f78447822ac1eab6504dd8", "v4.2.2"),
+        ],
+        &[InputRule::RequiredLiteral(
+            "subject-path",
+            &["dist/*.tar.gz", "dist/l2-subject.json"]
+        )]
+    ),
+    capability!(
+        "actions/create-github-app-token",
+        CreateGitHubAppToken,
+        &[allowed(
+            "bcd2ba49218906704ab6c1aa796996da409d3eb1",
+            "v3.0.0"
+        )],
+        &[
+            InputRule::Any("client-id"),
+            InputRule::Any("app-id"),
+            InputRule::Any("private-key"),
+            InputRule::Any("owner"),
+            InputRule::Any("repositories"),
+            InputRule::Literal("github-api-url", &["https://api.github.com"]),
+            InputRule::Literal("skip-token-revoke", &["false"]),
+        ]
+    ),
     capability!(
         "actions/upload-artifact",
         UploadArtifact,
@@ -433,8 +616,8 @@ pub static ACTIONS: &[ActionCapability] = &[
         "hadolint/hadolint-action",
         Hadolint,
         &[allowed(
-            "2332a7b74a6de0dda2e2221d575162eba76ba5e5",
-            "v3.3.0"
+            "2a66e89f53d0771bb131a7fa31f3136336094aa6",
+            "v3.4.0"
         )],
         &[
             InputRule::Any("dockerfile"),
@@ -457,7 +640,7 @@ pub static ACTIONS: &[ActionCapability] = &[
     capability!(
         "docker/setup-qemu-action",
         SetupQemu,
-        &[allowed("c7c53464625b32c7a7e944ae62b3e17d2b600130", "v3")],
+        &[allowed("96fe6ef7f33517b61c61be40b68a1882f3264fb8", "v4")],
         &[
             InputRule::Any("image"),
             InputRule::Any("platforms"),
@@ -478,10 +661,229 @@ pub static ACTIONS: &[ActionCapability] = &[
     ),
 ];
 
+/// Exact `on.workflow_call.inputs` surface of the latest approved publish
+/// workflow. Runner expressions are resolved by GitHub before broker admission;
+/// Velnor validates their resulting scalar values here.
+const PUBLISH_WORKFLOW_INPUTS: &[InputRule] = &[
+    InputRule::Any("jackin-version"),
+    InputRule::Any("registry"),
+    InputRule::Any("runner-amd64"),
+    InputRule::Any("runner-arm64"),
+    InputRule::Any("runner-merge"),
+    InputRule::Literal("publish", &["true", "false"]),
+];
+
+const PACKAGE_SIGNER_WORKFLOW_INPUTS: &[InputRule] = &[
+    InputRule::Any("artifact-name"),
+    InputRule::Any("subject-path"),
+    InputRule::Any("source-ref"),
+];
+
+pub static REUSABLE_WORKFLOWS: &[ReusableWorkflow] = &[
+    ReusableWorkflow {
+        repository: "jackin-project/jackin-role-action",
+        path: ".github/workflows/publish.yml",
+        allowed_refs: &[
+            allowed(
+                "041f17a6d32f8fd2a8ef03c2a63be58346993136",
+                "latest publish workflow with mise 2026.8.3 (#95)",
+            ),
+            allowed(
+                "80a1acd07257a23b441c546e6fcad12239ef7626",
+                "estate-pinned publish reusable workflow",
+            ),
+        ],
+        inputs: PUBLISH_WORKFLOW_INPUTS,
+        notes: "server-expanded reusable workflow; identity/full-SHA/inputs admitted, jobs.<id>.uses never parsed as a runner action",
+    },
+    ReusableWorkflow {
+        repository: "tailrocks/velnor-actions",
+        path: ".github/workflows/package-signer.yml",
+        allowed_refs: &[
+            allowed(
+                "77d323dcfdb176b332edc24bfc92cb625b3ab4c8",
+                "fleet 2026.8.30 hosted package signer",
+            ),
+            allowed(
+                "643c5341b160be151a7fae19b89b6a4f8ab3b275",
+                "fleet 2026.8.5 hosted package signer",
+            ),
+        ],
+        inputs: PACKAGE_SIGNER_WORKFLOW_INPUTS,
+        notes: "hosted package signer; full-SHA and closed inputs admitted",
+    },
+];
+
 pub static MANIFEST: CapabilityManifest = CapabilityManifest {
     version: MANIFEST_VERSION,
     actions: ACTIONS,
+    reusable_workflows: REUSABLE_WORKFLOWS,
 };
+
+/// Exact `(repository, mutable-tag)` identities that are deliberately retained as
+/// a documented N2 exception while pre-plan-041 fixtures still reference mutable
+/// tags. `assert_manifest_integrity` accepts these and ONLY these mutable refs;
+/// every other non-`__native` ref must be a full 40-hex SHA. Remove this
+/// allowlist when plan 041 migrates the fixture to immutable refs.
+const PLAN_041_FIXTURE_TRANSITION_ALLOWLIST: &[(&str, &str)] = &[
+    ("actions/checkout", "v4"),
+    ("actions/checkout", "v6"),
+    ("actions/checkout", "v7"),
+    ("actions/upload-artifact", "v7"),
+    ("actions/download-artifact", "v8"),
+    ("jdx/mise-action", "v4"),
+    ("mozilla-actions/sccache-action", "v0.0.10"),
+    ("rui314/setup-mold", "v1"),
+    ("swatinem/rust-cache", "v2"),
+    ("dorny/paths-filter", "v4"),
+    ("crazy-max/ghaction-github-runtime", "v4"),
+    ("docker/setup-buildx-action", "v4"),
+    ("docker/login-action", "v4"),
+    ("docker/bake-action", "v7"),
+    ("actions/upload-pages-artifact", "v5"),
+    ("actions/deploy-pages", "v5"),
+    ("docker/metadata-action", "v6"),
+    ("docker/build-push-action", "v7"),
+];
+
+fn is_full_sha(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_unsafe_subpath(subpath: &str) -> bool {
+    subpath.is_empty()
+        || subpath.starts_with('/')
+        || subpath
+            .split('/')
+            .any(|segment| segment == ".." || segment.is_empty())
+}
+
+/// Startup integrity gate for the compiled manifest. Run once before any work is
+/// accepted; a violation is a programming error in the compiled manifest, so it
+/// fails hard (`bail!`). It rejects any non-`__native` action/workflow ref that
+/// is neither a full 40-hex SHA nor an explicit plan-041 transition tag,
+/// duplicate action/workflow identities, duplicate or unsafe subpaths, and
+/// `__native` used for anything but broker-managed checkout.
+pub fn assert_manifest_integrity() -> Result<()> {
+    assert_manifest_integrity_of(ACTIONS, REUSABLE_WORKFLOWS)
+}
+
+fn assert_manifest_integrity_of(
+    actions: &[ActionCapability],
+    reusable_workflows: &[ReusableWorkflow],
+) -> Result<()> {
+    let mut seen_repositories: Vec<String> = Vec::new();
+    for capability in actions {
+        let repository = capability.repository.to_ascii_lowercase();
+        if seen_repositories.contains(&repository) {
+            anyhow::bail!("manifest integrity: duplicate action repository '{repository}'");
+        }
+        seen_repositories.push(repository.clone());
+
+        let mut seen_refs: Vec<&str> = Vec::new();
+        for allowed_ref in capability.allowed_refs {
+            if seen_refs.contains(&allowed_ref.value) {
+                anyhow::bail!(
+                    "manifest integrity: duplicate ref '{}' for '{}'",
+                    allowed_ref.value,
+                    capability.repository
+                );
+            }
+            seen_refs.push(allowed_ref.value);
+
+            if allowed_ref.value == NATIVE_ACTION_REF {
+                // `__native` authorizes broker-managed checkout only; it must
+                // never stand in for a metadata-fetched action ref.
+                if capability.adapter != NativeActionAdapter::Checkout {
+                    anyhow::bail!(
+                        "manifest integrity: '__native' ref is only valid for broker-managed checkout, found on '{}'",
+                        capability.repository
+                    );
+                }
+                continue;
+            }
+            if is_full_sha(allowed_ref.value) {
+                continue;
+            }
+            if PLAN_041_FIXTURE_TRANSITION_ALLOWLIST
+                .iter()
+                .any(|(repo, tag)| {
+                    repo.eq_ignore_ascii_case(capability.repository) && *tag == allowed_ref.value
+                })
+            {
+                continue;
+            }
+            anyhow::bail!(
+                "manifest integrity: mutable ref '{}' for '{}' is neither a 40-hex SHA nor a plan-041 transition tag",
+                allowed_ref.value,
+                capability.repository
+            );
+        }
+
+        let mut seen_subpaths: Vec<&str> = Vec::new();
+        for subpath in capability.allowed_subpaths {
+            if is_unsafe_subpath(subpath) {
+                anyhow::bail!(
+                    "manifest integrity: unsafe subpath '{}' for '{}'",
+                    subpath,
+                    capability.repository
+                );
+            }
+            if seen_subpaths.contains(subpath) {
+                anyhow::bail!(
+                    "manifest integrity: duplicate subpath '{}' for '{}'",
+                    subpath,
+                    capability.repository
+                );
+            }
+            seen_subpaths.push(subpath);
+        }
+    }
+
+    let mut seen_workflows: Vec<(String, String)> = Vec::new();
+    for workflow in reusable_workflows {
+        let identity = (
+            workflow.repository.to_ascii_lowercase(),
+            workflow.path.to_ascii_lowercase(),
+        );
+        if seen_workflows.contains(&identity) {
+            anyhow::bail!(
+                "manifest integrity: duplicate reusable workflow '{}/{}'",
+                workflow.repository,
+                workflow.path
+            );
+        }
+        seen_workflows.push(identity);
+        if is_unsafe_subpath(workflow.path) {
+            anyhow::bail!(
+                "manifest integrity: unsafe reusable workflow path '{}'",
+                workflow.path
+            );
+        }
+        // Reusable-workflow admission is new in manifest v6; it grants no
+        // plan-041 transition exception — every ref must be a full 40-hex SHA.
+        for allowed_ref in workflow.allowed_refs {
+            if !is_full_sha(allowed_ref.value) {
+                anyhow::bail!(
+                    "manifest integrity: reusable workflow '{}/{}' ref '{}' is not a 40-hex SHA",
+                    workflow.repository,
+                    workflow.path,
+                    allowed_ref.value
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Look up a reusable workflow capability by repository and workflow path.
+pub fn find_reusable_workflow(repository: &str, path: &str) -> Option<&'static ReusableWorkflow> {
+    let path = path.trim_start_matches('/');
+    REUSABLE_WORKFLOWS.iter().find(|workflow| {
+        workflow.repository.eq_ignore_ascii_case(repository)
+            && workflow.path.trim_start_matches('/') == path
+    })
+}
 
 pub fn find(repository: &str) -> Option<&'static ActionCapability> {
     ACTIONS
@@ -493,6 +895,7 @@ pub fn validate_resolved_action(
     step: &str,
     repository: &str,
     action_ref: &str,
+    source_path: Option<&str>,
     inputs: &BTreeMap<String, String>,
 ) -> Result<()> {
     let capability = find(repository).ok_or_else(|| {
@@ -527,12 +930,193 @@ pub fn validate_resolved_action(
         )
         .into());
     }
+    if let Some(error) = subpath_violation(step, repository, action_ref, source_path, capability) {
+        return Err(error.into());
+    }
+    if repository.eq_ignore_ascii_case("tailrocks/velnor-actions") {
+        validate_unified_ci_composite_inputs(step, repository, action_ref, source_path, inputs)?;
+    }
     let mut found = Vec::new();
-    validate_inputs(&mut found, step, repository, action_ref, capability, inputs);
+    validate_inputs(
+        &mut found,
+        step,
+        repository,
+        action_ref,
+        capability.inputs,
+        inputs,
+    );
     if let Some(error) = found.into_iter().next() {
         return Err(error.into());
     }
     Ok(())
+}
+
+fn validate_unified_ci_composite_inputs(
+    step: &str,
+    repository: &str,
+    action_ref: &str,
+    source_path: Option<&str>,
+    inputs: &BTreeMap<String, String>,
+) -> Result<()> {
+    const RUN_GATE: &[&str] = &["name", "command"];
+    const CACHE_CONTRACT: &[&str] = &[
+        "schema-version",
+        "declaration-sha256",
+        "expected-declaration-sha256",
+        "cache-id",
+        "expected-cache-id",
+        "scope",
+        "expected-scope",
+        "cache-owner",
+        "expected-cache-owner",
+        "reservation-id",
+        "expected-reservation-id",
+        "required-peak-bytes",
+        "quota-reserved-bytes",
+        "attributed-bytes",
+        "cleanup-state",
+        "materialization-id",
+        "expected-materialization-id",
+    ];
+    let subpath = source_path
+        .map(|value| value.trim().trim_matches('/'))
+        .filter(|value| !value.is_empty());
+    let accepted = match subpath {
+        Some("actions/run-gate") => RUN_GATE,
+        Some("actions/cache-contract") => CACHE_CONTRACT,
+        Some("actions/aggregate") => &[],
+        _ => {
+            return Err(violation(
+                step,
+                repository,
+                action_ref,
+                "subpath",
+                subpath.unwrap_or("<root>"),
+                vec![
+                    "actions/run-gate".to_string(),
+                    "actions/cache-contract".to_string(),
+                    "actions/aggregate".to_string(),
+                ],
+            )
+            .into());
+        }
+    };
+    if let Some(name) = inputs.keys().find(|name| {
+        !accepted
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(name))
+    }) {
+        return Err(violation(
+            step,
+            repository,
+            action_ref,
+            "input",
+            name,
+            accepted.iter().map(|name| (*name).to_string()).collect(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Validate an action subpath against the capability's admitted subpaths. Root
+/// (absent/empty) is always admissible; a traversal/absolute path or any subpath
+/// outside the declared set fails closed.
+fn subpath_violation(
+    step: &str,
+    repository: &str,
+    action_ref: &str,
+    source_path: Option<&str>,
+    capability: &ActionCapability,
+) -> Option<CapabilityViolation> {
+    let subpath = source_path
+        .map(|value| value.trim().trim_matches('/'))
+        .filter(|value| !value.is_empty())?;
+    if is_unsafe_subpath(subpath)
+        || !capability
+            .allowed_subpaths
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(subpath))
+    {
+        let mut accepted = vec!["<root>".to_string()];
+        accepted.extend(capability.allowed_subpaths.iter().map(|s| s.to_string()));
+        return Some(violation(
+            step, repository, action_ref, "path", subpath, accepted,
+        ));
+    }
+    None
+}
+
+/// Validate a server-expanded reusable workflow identity and its dispatched
+/// inputs. `workflow_ref` must be the immutable full-SHA ref carried by
+/// `github.job_workflow_ref`; a mutable ref, unknown identity, or disallowed
+/// input fails closed. The received value is never surfaced.
+pub fn validate_reusable_workflow(
+    step: &str,
+    repository: &str,
+    path: &str,
+    workflow_ref: &str,
+    inputs: &BTreeMap<String, String>,
+) -> Result<()> {
+    let identity = format!("{repository}/{path}");
+    let workflow = find_reusable_workflow(repository, path).ok_or_else(|| {
+        violation(
+            step,
+            &identity,
+            workflow_ref,
+            "uses",
+            &identity,
+            REUSABLE_WORKFLOWS
+                .iter()
+                .map(|item| format!("{}/{}", item.repository, item.path))
+                .collect(),
+        )
+    })?;
+    if !workflow
+        .allowed_refs
+        .iter()
+        .any(|candidate| candidate.value == workflow_ref)
+    {
+        return Err(violation(
+            step,
+            &identity,
+            workflow_ref,
+            "ref",
+            workflow_ref,
+            workflow
+                .allowed_refs
+                .iter()
+                .map(|candidate| candidate.value.to_string())
+                .collect(),
+        )
+        .into());
+    }
+    let mut found = Vec::new();
+    validate_inputs(
+        &mut found,
+        step,
+        &identity,
+        workflow_ref,
+        workflow.inputs,
+        inputs,
+    );
+    if let Some(error) = found.into_iter().next() {
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+/// Whether `input_name` is capability-affecting (constrained) for `repository`:
+/// true unless the repository declares it as a free-form `Any` input. An unknown
+/// repository or input counts as constrained (it is rejected outright), so an
+/// unresolved `${{ … }}` expression in such an input must fail admission.
+pub fn action_input_is_constrained(repository: &str, input_name: &str) -> bool {
+    match find(repository) {
+        Some(capability) => !capability.inputs.iter().any(
+            |rule| matches!(rule, InputRule::Any(name) if name.eq_ignore_ascii_case(input_name)),
+        ),
+        None => true,
+    }
 }
 
 pub fn violations(job: &AgentJobRequestMessage) -> Vec<CapabilityViolation> {
@@ -610,6 +1194,15 @@ pub fn violations_with_context(
                     .collect(),
             ));
         }
+        if let Some(error) = subpath_violation(
+            &step_name,
+            repository,
+            action_ref,
+            reference.path.as_deref(),
+            capability,
+        ) {
+            violations.push(error);
+        }
         let inputs = match string_inputs(step) {
             Ok(inputs) => inputs
                 .into_iter()
@@ -637,12 +1230,82 @@ pub fn violations_with_context(
             &step_name,
             repository,
             action_ref,
-            capability,
+            capability.inputs,
             &inputs,
         );
     }
     validate_compiler_cache_topology(job, &mut violations);
+    validate_attestation_permissions(job, &mut violations);
     violations
+}
+
+fn validate_attestation_permissions(
+    job: &AgentJobRequestMessage,
+    violations: &mut Vec<CapabilityViolation>,
+) {
+    let uses_attestation = job.steps.iter().filter(|step| step.enabled).any(|step| {
+        step.reference
+            .as_ref()
+            .and_then(|reference| reference.name.as_deref())
+            .is_some_and(|repository| {
+                repository.eq_ignore_ascii_case("actions/attest-build-provenance")
+            })
+    });
+    if !uses_attestation {
+        return;
+    }
+    let has_id_token_endpoint = job.system_connection().is_some_and(|endpoint| {
+        endpoint.data.iter().any(|(name, value)| {
+            matches!(
+                name.to_ascii_lowercase().replace(['-', '_'], "").as_str(),
+                "generateidtokenurl" | "actionsidtokenrequesturl"
+            ) && !value.trim().is_empty()
+        })
+    });
+    if !has_id_token_endpoint {
+        violations.push(violation(
+            "job preflight",
+            "actions/attest-build-provenance",
+            "permissions",
+            "permissions.id-token",
+            "absent",
+            vec!["write".into()],
+        ));
+    }
+    let parsed = job
+        .variables
+        .get("system.github.token.permissions")
+        .and_then(|variable| variable.value.as_deref())
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+        .and_then(|value| value.as_object().cloned());
+    let Some(permissions) = parsed else {
+        violations.push(violation(
+            "job preflight",
+            "actions/attest-build-provenance",
+            "permissions",
+            "permissions",
+            "absent or malformed",
+            vec!["contents: read, attestations: write".into()],
+        ));
+        return;
+    };
+    for (scope, accepted) in [("contents", "read"), ("attestations", "write")] {
+        let received = permissions
+            .iter()
+            .find(|(name, _)| name.to_ascii_lowercase().replace(['-', '_'], "") == scope)
+            .and_then(|(_, value)| value.as_str())
+            .unwrap_or("absent");
+        if !received.eq_ignore_ascii_case(accepted) {
+            violations.push(violation(
+                "job preflight",
+                "actions/attest-build-provenance",
+                "permissions",
+                &format!("permissions.{scope}"),
+                received,
+                vec![accepted.into()],
+            ));
+        }
+    }
 }
 
 pub fn compiler_cache_backend(job: &AgentJobRequestMessage) -> CompilerCacheBackend {
@@ -785,28 +1448,38 @@ fn validate_inputs(
     step: &str,
     repository: &str,
     action_ref: &str,
-    capability: &ActionCapability,
+    rules: &[InputRule],
     inputs: &BTreeMap<String, String>,
 ) {
     for (name, value) in inputs {
-        match capability
-            .inputs
+        match rules
             .iter()
             .copied()
             .find(|rule| rule.name().eq_ignore_ascii_case(name))
         {
             Some(InputRule::Any(_)) => {}
-            Some(InputRule::Literal(_, allowed))
+            Some(InputRule::Literal(_, allowed) | InputRule::RequiredLiteral(_, allowed))
                 if allowed
                     .iter()
                     .any(|candidate| candidate.eq_ignore_ascii_case(value.trim())) => {}
-            Some(InputRule::Literal(_, allowed)) => violations.push(violation(
+            Some(InputRule::Literal(_, allowed) | InputRule::RequiredLiteral(_, allowed)) => {
+                violations.push(violation(
+                    step,
+                    repository,
+                    action_ref,
+                    &format!("with.{name}"),
+                    value,
+                    allowed.iter().map(|value| (*value).to_string()).collect(),
+                ))
+            }
+            Some(InputRule::Predicate(_, check, _)) if check(value.trim()) => {}
+            Some(InputRule::Predicate(_, _, accepted)) => violations.push(violation(
                 step,
                 repository,
                 action_ref,
                 &format!("with.{name}"),
                 value,
-                allowed.iter().map(|value| (*value).to_string()).collect(),
+                accepted.iter().map(|value| (*value).to_string()).collect(),
             )),
             Some(InputRule::Forbidden(_)) => violations.push(violation(
                 step,
@@ -822,12 +1495,22 @@ fn validate_inputs(
                 action_ref,
                 &format!("with.{name}"),
                 value,
-                capability
-                    .inputs
-                    .iter()
-                    .map(|rule| rule.name().to_string())
-                    .collect(),
+                rules.iter().map(|rule| rule.name().to_string()).collect(),
             )),
+        }
+    }
+    for rule in rules {
+        if let InputRule::RequiredLiteral(name, allowed) = rule {
+            if !inputs.keys().any(|input| input.eq_ignore_ascii_case(name)) {
+                violations.push(violation(
+                    step,
+                    repository,
+                    action_ref,
+                    &format!("with.{name}"),
+                    "absent",
+                    allowed.iter().map(|value| (*value).to_string()).collect(),
+                ));
+            }
         }
     }
 }
@@ -867,12 +1550,28 @@ pub fn validate_job_with_context(
 #[derive(Serialize)]
 struct ExportManifest<'a> {
     version: u32,
+    /// Plan 010: the exact source commit this binary (and therefore this compiled
+    /// manifest) was built from. `development` for non-release builds. Lets a
+    /// consumer bind the manifest to one release record.
+    source_sha: &'a str,
+    /// The crate version compiled into this binary.
+    crate_version: &'a str,
     actions: Vec<ExportAction<'a>>,
+    reusable_workflows: Vec<ExportReusableWorkflow<'a>>,
 }
 #[derive(Serialize)]
 struct ExportAction<'a> {
     repository: &'a str,
     adapter: String,
+    allowed_refs: Vec<&'a str>,
+    allowed_subpaths: Vec<&'a str>,
+    inputs: Vec<&'a str>,
+    notes: &'a str,
+}
+#[derive(Serialize)]
+struct ExportReusableWorkflow<'a> {
+    repository: &'a str,
+    path: &'a str,
     allowed_refs: Vec<&'a str>,
     inputs: Vec<&'a str>,
     notes: &'a str,
@@ -890,19 +1589,47 @@ pub fn to_json() -> Result<String> {
                 .iter()
                 .map(|reference| reference.value)
                 .collect(),
+            allowed_subpaths: item.allowed_subpaths.to_vec(),
+            inputs: item.inputs.iter().map(|input| input.name()).collect(),
+            notes: item.notes,
+        })
+        .collect();
+    let reusable_workflows = MANIFEST
+        .reusable_workflows
+        .iter()
+        .map(|item| ExportReusableWorkflow {
+            repository: item.repository,
+            path: item.path,
+            allowed_refs: item
+                .allowed_refs
+                .iter()
+                .map(|reference| reference.value)
+                .collect(),
             inputs: item.inputs.iter().map(|input| input.name()).collect(),
             notes: item.notes,
         })
         .collect();
     Ok(serde_json::to_string_pretty(&ExportManifest {
         version: MANIFEST.version,
+        source_sha: env!("VELNOR_SOURCE_SHA"),
+        crate_version: env!("CARGO_PKG_VERSION"),
         actions,
+        reusable_workflows,
     })?)
+}
+
+/// Canonical bytes emitted by `capabilities export` and hashed into release
+/// records. Keep framing here so release activation cannot hash a subtly
+/// different representation of the same JSON value.
+pub fn to_json_document() -> Result<String> {
+    let mut document = to_json()?;
+    document.push('\n');
+    Ok(document)
 }
 
 pub fn run(args: CapabilitiesArgs) -> Result<()> {
     match args.command {
-        CapabilitiesCommand::Export => println!("{}", to_json()?),
+        CapabilitiesCommand::Export => print!("{}", to_json_document()?),
         CapabilitiesCommand::Check { job_dump } => {
             let bytes = std::fs::read(&job_dump)?;
             let job: AgentJobRequestMessage = serde_json::from_slice(&bytes)?;
@@ -931,6 +1658,43 @@ pub fn run(args: CapabilitiesArgs) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn collect_uses(value: &serde_yaml::Value, uses: &mut Vec<(String, Vec<String>)>) {
+        match value {
+            serde_yaml::Value::Mapping(mapping) => {
+                let action = mapping
+                    .iter()
+                    .find(|(key, _)| key.as_str() == "uses")
+                    .and_then(|(_, value)| value.as_str());
+                if let Some(action) = action {
+                    let inputs = mapping
+                        .iter()
+                        .find(|(key, _)| key.as_str() == "with")
+                        .and_then(|(_, value)| match value {
+                            serde_yaml::Value::Mapping(inputs) => Some(
+                                inputs
+                                    .keys()
+                                    .map(|key| key.as_str().to_string())
+                                    .collect::<Vec<_>>(),
+                            ),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    uses.push((action.to_string(), inputs));
+                }
+                for (key, value) in mapping {
+                    let _ = key;
+                    collect_uses(value, uses);
+                }
+            }
+            serde_yaml::Value::Sequence(sequence) => {
+                for value in sequence {
+                    collect_uses(value, uses);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn job(
         repository: &str,
         action_ref: Option<&str>,
@@ -944,6 +1708,17 @@ mod tests {
             "jobDisplayName": "manifest test",
             "jobName": "test",
             "requestId": 1,
+            "variables": {
+                "system.github.token.permissions": {
+                    "value": "{\"Contents\":\"read\",\"Attestations\":\"write\"}"
+                }
+            },
+            "resources": {
+                "endpoints": [{
+                    "name": "SystemVssConnection",
+                    "data": { "GenerateIdTokenUrl": "https://oidc.actions.example/token" }
+                }]
+            },
             "steps": [{
                 "type": "Action",
                 "displayName": "target action",
@@ -958,9 +1733,495 @@ mod tests {
         .unwrap()
     }
 
+    fn capability_with(
+        repository: &'static str,
+        allowed_refs: &'static [AllowedRef],
+        allowed_subpaths: &'static [&'static str],
+    ) -> ActionCapability {
+        ActionCapability {
+            repository,
+            adapter: NativeActionAdapter::Cache,
+            allowed_refs,
+            allowed_subpaths,
+            inputs: &[],
+            notes: "synthetic",
+        }
+    }
+
+    #[test]
+    fn compiled_manifest_is_version_nine_and_structurally_immutable() {
+        // Unified-CI composite admission changes the accepted capability surface,
+        // and the approved GitHub App token adapter advances it from v8 to v9.
+        assert_eq!(MANIFEST_VERSION, 9);
+        assert_eq!(MANIFEST.version, 9);
+        assert_manifest_integrity().expect("compiled manifest must pass integrity");
+    }
+
+    #[test]
+    fn release_workflow_action_refs_are_compiled_into_the_manifest() {
+        let workflow: serde_yaml::Value =
+            serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
+                .expect("release workflow must parse");
+        let mut uses = Vec::new();
+        collect_uses(&workflow, &mut uses);
+
+        for (action, inputs) in uses {
+            if action.starts_with("./") {
+                continue;
+            }
+            let (path, action_ref) = action
+                .rsplit_once('@')
+                .unwrap_or_else(|| panic!("release action must have a ref: {action}"));
+            let mut segments = path.split('/');
+            let repository = format!(
+                "{}/{}",
+                segments.next().expect("action owner"),
+                segments.next().expect("action repository")
+            );
+            let subpath = segments.collect::<Vec<_>>().join("/");
+            if !subpath.is_empty() {
+                let workflow_path = subpath.as_str();
+                if let Some(workflow) = REUSABLE_WORKFLOWS.iter().find(|candidate| {
+                    candidate.repository.eq_ignore_ascii_case(&repository)
+                        && candidate.path.trim_start_matches(".github/workflows/")
+                            == workflow_path.trim_start_matches(".github/workflows/")
+                }) {
+                    assert!(
+                        workflow
+                            .allowed_refs
+                            .iter()
+                            .any(|candidate| candidate.value == action_ref),
+                        "release workflow ref is absent from manifest: {action}"
+                    );
+                    for input in inputs {
+                        assert!(
+                            workflow
+                                .inputs
+                                .iter()
+                                .copied()
+                                .any(|rule| rule.name().eq_ignore_ascii_case(&input)),
+                            "release workflow input is absent from manifest: {action} with.{input}"
+                        );
+                    }
+                    continue;
+                }
+            }
+            let capability = ACTIONS
+                .iter()
+                .find(|candidate| candidate.repository.eq_ignore_ascii_case(&repository))
+                .unwrap_or_else(|| panic!("release action is absent from manifest: {action}"));
+            assert!(
+                capability
+                    .allowed_refs
+                    .iter()
+                    .any(|candidate| candidate.value == action_ref),
+                "release action ref is absent from manifest: {action}"
+            );
+            assert!(
+                subpath.is_empty()
+                    || capability
+                        .allowed_subpaths
+                        .iter()
+                        .any(|candidate| *candidate == subpath),
+                "release action subpath is absent from manifest: {action}"
+            );
+            for input in inputs {
+                assert!(
+                    capability
+                        .inputs
+                        .iter()
+                        .copied()
+                        .any(|rule| rule.name().eq_ignore_ascii_case(&input)),
+                    "release action input is absent from manifest: {action} with.{input}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn create_github_app_token_admits_current_client_id_input() {
+        let capability = ACTIONS
+            .iter()
+            .find(|candidate| candidate.repository == "actions/create-github-app-token")
+            .expect("create-github-app-token capability");
+        assert!(capability
+            .inputs
+            .iter()
+            .any(|rule| matches!(rule, InputRule::Any(name) if *name == "client-id")));
+    }
+
+    #[test]
+    fn release_workflow_reads_platforms_from_imagetools_inspect_schema() {
+        let workflow = include_str!("../../../.github/workflows/release.yml");
+        for architecture in ["amd64", "arm64"] {
+            let selector = format!(
+                ".manifest.manifests[] | select(.platform.architecture==\"{architecture}\") | .digest"
+            );
+            assert!(
+                workflow.contains(&selector),
+                "release record must read {architecture} from the manifest nested in the imagetools JSON output"
+            );
+        }
+    }
+
+    #[test]
+    fn release_record_derives_manifest_version_from_compiled_artifact() {
+        let workflow = include_str!("../../../.github/workflows/release.yml");
+        assert!(
+            workflow.contains("manifest_version=\"$(jq -er '.version"),
+            "release assembly must read the compiled manifest version"
+        );
+        assert!(
+            workflow.contains("--argjson mv \"$manifest_version\""),
+            "release record must bind the derived manifest version"
+        );
+        assert!(
+            !workflow.contains("--argjson mv 7"),
+            "release assembly must not retain a stale schema literal"
+        );
+    }
+
+    #[test]
+    fn release_record_downloads_compiled_tool_before_independent_verification() {
+        let workflow: serde_yaml::Value =
+            serde_yaml::from_str(include_str!("../../../.github/workflows/release.yml"))
+                .expect("release workflow must parse");
+        let steps = workflow["jobs"]["release"]["steps"]
+            .as_sequence()
+            .expect("release job steps");
+        let download = steps
+            .iter()
+            .position(|step| {
+                step.get("uses")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
+            })
+            .expect("release job must download the compiled release tool");
+        let verify = steps
+            .iter()
+            .position(|step| {
+                step.get("run")
+                    .and_then(serde_yaml::Value::as_str)
+                    .is_some_and(|run| run.contains("release assemble"))
+            })
+            .expect("release job must independently verify the release");
+        assert!(
+            download < verify,
+            "compiled release tool must be downloaded before record verification"
+        );
+    }
+
+    #[test]
+    fn every_non_native_ref_is_full_sha_or_documented_transition_tag() {
+        for capability in ACTIONS {
+            for allowed_ref in capability.allowed_refs {
+                if allowed_ref.value == NATIVE_ACTION_REF {
+                    assert_eq!(
+                        capability.adapter,
+                        NativeActionAdapter::Checkout,
+                        "__native only for checkout"
+                    );
+                    continue;
+                }
+                let is_sha = is_full_sha(allowed_ref.value);
+                let is_transition =
+                    PLAN_041_FIXTURE_TRANSITION_ALLOWLIST
+                        .iter()
+                        .any(|(repo, tag)| {
+                            repo.eq_ignore_ascii_case(capability.repository)
+                                && *tag == allowed_ref.value
+                        });
+                assert!(
+                    is_sha || is_transition,
+                    "{} ref '{}' is neither SHA nor transition tag",
+                    capability.repository,
+                    allowed_ref.value
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn integrity_rejects_new_mutable_tag() {
+        let actions = [capability_with(
+            "acme/widget",
+            &[AllowedRef {
+                value: "v9",
+                release: "not on the allowlist",
+            }],
+            &[],
+        )];
+        let error = assert_manifest_integrity_of(&actions, &[]).unwrap_err();
+        assert!(error.to_string().contains("mutable ref"));
+    }
+
+    #[test]
+    fn integrity_rejects_duplicate_identities_and_unsafe_subpaths() {
+        const SHA_REF: &[AllowedRef] = &[AllowedRef {
+            value: "0000000000000000000000000000000000000000",
+            release: "",
+        }];
+        let duplicate = [
+            capability_with("acme/dup", SHA_REF, &[]),
+            capability_with("acme/dup", SHA_REF, &[]),
+        ];
+        assert!(assert_manifest_integrity_of(&duplicate, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate action repository"));
+
+        let traversal = [capability_with("acme/trav", SHA_REF, &["../escape"])];
+        assert!(assert_manifest_integrity_of(&traversal, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("unsafe subpath"));
+
+        let absolute = [capability_with("acme/abs", SHA_REF, &["/etc"])];
+        assert!(assert_manifest_integrity_of(&absolute, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("unsafe subpath"));
+    }
+
+    #[test]
+    fn integrity_rejects_native_ref_outside_checkout() {
+        let actions = [ActionCapability {
+            repository: "acme/notcheckout",
+            adapter: NativeActionAdapter::Cache,
+            allowed_refs: &[AllowedRef {
+                value: NATIVE_ACTION_REF,
+                release: "",
+            }],
+            allowed_subpaths: &[],
+            inputs: &[],
+            notes: "synthetic",
+        }];
+        assert!(assert_manifest_integrity_of(&actions, &[])
+            .unwrap_err()
+            .to_string()
+            .contains("__native"));
+    }
+
+    #[test]
+    fn integrity_rejects_mutable_reusable_workflow_ref() {
+        let workflows = [ReusableWorkflow {
+            repository: "acme/flows",
+            path: ".github/workflows/x.yml",
+            allowed_refs: &[AllowedRef {
+                value: "v1",
+                release: "",
+            }],
+            inputs: &[],
+            notes: "synthetic",
+        }];
+        assert!(assert_manifest_integrity_of(&[], &workflows)
+            .unwrap_err()
+            .to_string()
+            .contains("not a 40-hex SHA"));
+    }
+
+    #[test]
+    fn validate_resolved_action_enforces_admitted_subpaths() {
+        let inputs = BTreeMap::from([
+            ("path".to_string(), "target".to_string()),
+            ("key".to_string(), "k".to_string()),
+        ]);
+        // Root, restore, and save are admitted.
+        for subpath in [None, Some("restore"), Some("save")] {
+            validate_resolved_action(
+                "cache",
+                "actions/cache",
+                "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+                subpath,
+                &inputs,
+            )
+            .unwrap();
+        }
+        // An unknown subpath fails on the `path` field.
+        let error = validate_resolved_action(
+            "cache",
+            "actions/cache",
+            "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+            Some("bogus"),
+            &inputs,
+        )
+        .unwrap_err();
+        let violation = error.downcast_ref::<CapabilityViolation>().unwrap();
+        assert_eq!(violation.field, "path");
+
+        // Traversal is rejected.
+        assert!(validate_resolved_action(
+            "cache",
+            "actions/cache",
+            "55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
+            Some("../etc"),
+            &inputs,
+        )
+        .is_err());
+
+        // A repository with no declared subpaths rejects any subpath.
+        assert!(validate_resolved_action(
+            "checkout",
+            "actions/checkout",
+            "9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0",
+            Some("sub"),
+            &BTreeMap::new(),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn reuse_docker_action_is_exactly_scoped() {
+        const REUSE_SHA: &str = "676e2d560c9a403aa252096d99fcab3e1132b0f5";
+
+        validate_resolved_action(
+            "reuse",
+            "fsfe/reuse-action",
+            REUSE_SHA,
+            None,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        for (action_ref, subpath, inputs, field) in [
+            (
+                "1111111111111111111111111111111111111111",
+                None,
+                BTreeMap::new(),
+                "ref",
+            ),
+            (REUSE_SHA, Some("nested"), BTreeMap::new(), "path"),
+            (
+                REUSE_SHA,
+                None,
+                BTreeMap::from([("unexpected".to_string(), "value".to_string())]),
+                "with.unexpected",
+            ),
+        ] {
+            let error = validate_resolved_action(
+                "reuse",
+                "fsfe/reuse-action",
+                action_ref,
+                subpath,
+                &inputs,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<CapabilityViolation>().unwrap().field,
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn reusable_workflow_validation_enforces_identity_ref_and_inputs() {
+        let publish_sha = "041f17a6d32f8fd2a8ef03c2a63be58346993136";
+        // Approved identity + immutable ref + no inputs is admitted.
+        validate_reusable_workflow(
+            "wf",
+            "jackin-project/jackin-role-action",
+            ".github/workflows/publish.yml",
+            publish_sha,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+
+        // Unknown identity is rejected.
+        assert!(validate_reusable_workflow(
+            "wf",
+            "acme/unknown",
+            ".github/workflows/publish.yml",
+            publish_sha,
+            &BTreeMap::new(),
+        )
+        .is_err());
+
+        // A mismatched ref is rejected.
+        let error = validate_reusable_workflow(
+            "wf",
+            "jackin-project/jackin-role-action",
+            ".github/workflows/publish.yml",
+            "1111111111111111111111111111111111111111",
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CapabilityViolation>().unwrap().field,
+            "ref"
+        );
+    }
+
+    #[test]
+    fn constrained_input_classification() {
+        // Free-form `Any` inputs are unconstrained; literals/predicates are.
+        assert!(!action_input_is_constrained("actions/cache", "path"));
+        assert!(action_input_is_constrained("actions/cache", "lookup-only"));
+        // Unknown repositories and inputs count as constrained.
+        assert!(action_input_is_constrained("acme/unknown", "whatever"));
+        assert!(action_input_is_constrained(
+            "actions/cache",
+            "not-a-real-input"
+        ));
+    }
+
+    #[test]
+    fn pinned_unified_ci_composites_are_exactly_scoped() {
+        let sha = "3057391f93f3bfc0fe570ee08cfcea9533ea3f92";
+        let inputs = BTreeMap::from([
+            ("name".to_string(), "test".to_string()),
+            ("command".to_string(), "mise run test".to_string()),
+        ]);
+        validate_resolved_action(
+            "gate",
+            "tailrocks/velnor-actions",
+            sha,
+            Some("actions/run-gate"),
+            &inputs,
+        )
+        .unwrap();
+        for (rejected, field) in [
+            ("actions/not-approved", "path"),
+            ("../actions/run-gate", "path"),
+        ] {
+            let error = validate_resolved_action(
+                "gate",
+                "tailrocks/velnor-actions",
+                sha,
+                Some(rejected),
+                &inputs,
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<CapabilityViolation>().unwrap().field,
+                field
+            );
+        }
+        assert!(validate_resolved_action(
+            "gate",
+            "tailrocks/velnor-actions",
+            "1111111111111111111111111111111111111111",
+            Some("actions/run-gate"),
+            &inputs,
+        )
+        .is_err());
+        let error = validate_resolved_action(
+            "aggregate",
+            "tailrocks/velnor-actions",
+            sha,
+            Some("actions/aggregate"),
+            &BTreeMap::from([("command".to_string(), "true".to_string())]),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<CapabilityViolation>().unwrap().field,
+            "input"
+        );
+    }
+
     #[test]
     fn manifest_covers_every_native_adapter() {
         let expected = [
+            NativeActionAdapter::ApprovedComposite,
             NativeActionAdapter::Checkout,
             NativeActionAdapter::Cache,
             NativeActionAdapter::UploadArtifact,
@@ -968,6 +2229,7 @@ mod tests {
             NativeActionAdapter::UploadPagesArtifact,
             NativeActionAdapter::ConfigurePages,
             NativeActionAdapter::DeployPages,
+            NativeActionAdapter::AttestBuildProvenance,
             NativeActionAdapter::PathsFilter,
             NativeActionAdapter::Mise,
             NativeActionAdapter::Sccache,
@@ -997,9 +2259,36 @@ mod tests {
 
     #[test]
     fn manifest_exports_json() {
-        let value: serde_json::Value = serde_json::from_str(&to_json().unwrap()).unwrap();
+        let json = to_json().unwrap();
+        let document = to_json_document().unwrap();
+        assert_eq!(document, format!("{json}\n"));
+        assert!(!json.ends_with('\n'));
+        assert!(document.ends_with('\n'));
+        let value: serde_json::Value = serde_json::from_str(&document).unwrap();
         assert_eq!(value["version"], MANIFEST_VERSION);
         assert_eq!(value["actions"].as_array().unwrap().len(), ACTIONS.len());
+        // Plan 010: the export binds the compiled manifest to one source commit +
+        // crate version. In the default (feature-off) build these are the
+        // `development` sentinel from build.rs.
+        assert_eq!(value["source_sha"], env!("VELNOR_SOURCE_SHA"));
+        assert_eq!(value["crate_version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn pinned_role_composite_is_admitted_but_not_executed_as_native() {
+        let job = job(
+            "jackin-project/jackin-role-action",
+            Some("041f17a6d32f8fd2a8ef03c2a63be58346993136"),
+            serde_json::json!({
+                "path": ".",
+                "skip-build": "false",
+                "registry-cache-image": "ghcr.io/jackin-project/the-architect"
+            }),
+        );
+        assert!(violations(&job).is_empty());
+        assert!(
+            crate::action::native_action_adapter("jackin-project/jackin-role-action").is_none()
+        );
     }
 
     #[test]
@@ -1009,17 +2298,64 @@ mod tests {
     }
 
     #[test]
-    fn validate_job_rejects_attestation_with_writer_lane_guidance() {
+    fn validate_job_accepts_exact_attestation_surface() {
+        let errors = violations(&job(
+            "actions/attest-build-provenance",
+            Some("0f67c3f4856b2e3261c31976d6725780e5e4c373"),
+            serde_json::json!({"subject-path": "dist/*.tar.gz"}),
+        ));
+        assert!(errors.is_empty(), "{errors:#?}");
+
+        let fixture_errors = violations(&job(
+            "actions/attest-build-provenance",
+            Some("4d101475d8b20a2381f78447822ac1eab6504dd8"),
+            serde_json::json!({"subject-path": "dist/l2-subject.json"}),
+        ));
+        assert!(fixture_errors.is_empty(), "{fixture_errors:#?}");
+    }
+
+    #[test]
+    fn validate_job_rejects_unapproved_attestation_surface() {
         let errors = violations(&job(
             "actions/attest-build-provenance",
             Some("0f67c3f4856b2e3261c31976d6725780e5e4c373"),
             serde_json::json!({"subject-path": "release.tar.gz"}),
         ));
-        assert_eq!(errors[0].field, "uses");
-        assert!(errors[0]
-            .accepted
-            .iter()
-            .any(|message| message.contains("GitHub writer lane")));
+        assert_eq!(errors[0].field, "with.subject-path");
+        let missing = violations(&job(
+            "actions/attest-build-provenance",
+            Some("0f67c3f4856b2e3261c31976d6725780e5e4c373"),
+            serde_json::json!({}),
+        ));
+        assert_eq!(missing[0].received, "absent");
+    }
+
+    #[test]
+    fn validate_job_rejects_missing_attestation_permissions() {
+        let mut target = job(
+            "actions/attest-build-provenance",
+            Some("0f67c3f4856b2e3261c31976d6725780e5e4c373"),
+            serde_json::json!({"subject-path": "dist/*.tar.gz"}),
+        );
+        target.variables.clear();
+        let errors = violations(&target);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, "permissions");
+        assert_eq!(errors[0].received, "absent or malformed");
+    }
+
+    #[test]
+    fn validate_job_rejects_missing_attestation_id_token_endpoint() {
+        let mut target = job(
+            "actions/attest-build-provenance",
+            Some("0f67c3f4856b2e3261c31976d6725780e5e4c373"),
+            serde_json::json!({"subject-path": "dist/*.tar.gz"}),
+        );
+        target.resources.endpoints.clear();
+        let errors = violations(&target);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, "permissions.id-token");
+        assert_eq!(errors[0].received, "absent");
     }
 
     #[test]
@@ -1033,6 +2369,24 @@ mod tests {
     }
 
     #[test]
+    fn hadolint_accepts_latest_ref_and_rejects_retired_ref() {
+        let latest = violations(&job(
+            "hadolint/hadolint-action",
+            Some("2a66e89f53d0771bb131a7fa31f3136336094aa6"),
+            serde_json::json!({"failure-threshold": "error"}),
+        ));
+        assert!(latest.is_empty());
+
+        let retired = violations(&job(
+            "hadolint/hadolint-action",
+            Some("2332a7b74a6de0dda2e2221d575162eba76ba5e5"),
+            serde_json::json!({}),
+        ));
+        assert_eq!(retired.len(), 1);
+        assert_eq!(retired[0].field, "ref");
+    }
+
+    #[test]
     fn validate_job_rejects_forbidden_input() {
         let errors = violations(&job(
             "mozilla-actions/sccache-action",
@@ -1040,6 +2394,24 @@ mod tests {
             serde_json::json!({"token": "secret"}),
         ));
         assert_eq!(errors[0].field, "with.token");
+    }
+
+    #[test]
+    fn capability_violation_display_never_exposes_received_value() {
+        let secret = "ghs_runtime_secret";
+        let violation = violation(
+            "build",
+            "docker/build-push-action",
+            "sha",
+            "with.secrets",
+            secret,
+            vec!["context".to_string()],
+        );
+
+        let rendered = violation.to_string();
+        assert!(!rendered.contains(secret));
+        assert!(rendered.contains("received [redacted]"));
+        assert_eq!(violation.received, secret);
     }
 
     #[test]
@@ -1052,6 +2424,7 @@ mod tests {
                     "version": "2026.7.7",
                     "install_args": "rust zig",
                     "github_token": "masked",
+                    "cache": "false",
                     "cache_key_prefix": "mise-v2",
                     "cache_save": "false"
                 }),
@@ -1062,7 +2435,63 @@ mod tests {
     }
 
     #[test]
+    fn validate_job_accepts_current_mise_and_sccache_pins() {
+        validate_job_with_context(
+            &job(
+                "jdx/mise-action",
+                Some("7e36c90d9ab29c415a2384db3006f3ec8a8cc654"),
+                serde_json::json!({}),
+            ),
+            &[],
+        )
+        .unwrap();
+        validate_job_with_context(
+            &job(
+                "mozilla-actions/sccache-action",
+                Some("fc920bf0ec8de6ee65d409111f7ec508035751ba"),
+                serde_json::json!({}),
+            ),
+            &[],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_job_accepts_current_renovate_action() {
+        validate_job_with_context(
+            &job(
+                "renovatebot/github-action",
+                Some("e09d604f8f803bb527bd8321ed5be06c460b8682"),
+                serde_json::json!({
+                    "token": "masked",
+                    "renovate-version": "43",
+                    "renovate-image": "ghcr.io/renovatebot/renovate"
+                }),
+            ),
+            &[],
+        )
+        .unwrap();
+
+        validate_job_with_context(
+            &job(
+                "docker/login-action",
+                Some("dbcb813823bdd20940b903addbd779551569679f"),
+                serde_json::json!({"username": "masked", "password": "masked"}),
+            ),
+            &[],
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn validate_job_rejects_unapproved_mise_cache_surface() {
+        let errors = violations(&job(
+            "jdx/mise-action",
+            Some("7e36c90d9ab29c415a2384db3006f3ec8a8cc654"),
+            serde_json::json!({"cache": "sometimes"}),
+        ));
+        assert_eq!(errors[0].field, "with.cache");
+
         let errors = violations(&job(
             "jdx/mise-action",
             Some("dad1bfd3df957f44999b559dd69dc1671cb4e9ea"),
@@ -1070,12 +2499,29 @@ mod tests {
         ));
         assert_eq!(errors[0].field, "with.cache_key_prefix");
 
+        // Post-008 the version must be an exact YYYY.M.D date-version; a
+        // selector like `latest` (a live lookup) is rejected before install.
         let errors = violations(&job(
             "jdx/mise-action",
             Some("dad1bfd3df957f44999b559dd69dc1671cb4e9ea"),
-            serde_json::json!({"version": "2025.1.0"}),
+            serde_json::json!({"version": "latest"}),
         ));
         assert_eq!(errors[0].field, "with.version");
+
+        // A leading `v` and a flag-shaped install arg are likewise rejected.
+        let errors = violations(&job(
+            "jdx/mise-action",
+            Some("dad1bfd3df957f44999b559dd69dc1671cb4e9ea"),
+            serde_json::json!({"version": "v2026.7.7"}),
+        ));
+        assert_eq!(errors[0].field, "with.version");
+
+        let errors = violations(&job(
+            "jdx/mise-action",
+            Some("dad1bfd3df957f44999b559dd69dc1671cb4e9ea"),
+            serde_json::json!({"install_args": "--yes"}),
+        ));
+        assert_eq!(errors[0].field, "with.install_args");
     }
 
     #[test]
@@ -1148,6 +2594,19 @@ mod tests {
     }
 
     #[test]
+    fn validate_job_accepts_buildx_cleanup_controls() {
+        validate_job_with_context(
+            &job(
+                "docker/setup-buildx-action",
+                Some("bb05f3f5519dd87d3ba754cc423b652a5edd6d2c"),
+                serde_json::json!({"cleanup": false, "keep-state": true}),
+            ),
+            &[],
+        )
+        .unwrap();
+    }
+
+    #[test]
     fn validate_github_script_accepts_only_jackin_patterns() {
         for script in [
             "core.setOutput('docs-xtask', process.env.CONTRACT)",
@@ -1156,7 +2615,7 @@ mod tests {
             validate_job_with_context(
                 &job(
                     "actions/github-script",
-                    Some("373c709c69115d41ff229c7e5df9f8788daa9553"),
+                    Some("3a2844b7e9c422d3c10d287c895573f7108da1b3"),
                     serde_json::json!({"github-token": "masked", "script": script}),
                 ),
                 &[],
@@ -1165,17 +2624,26 @@ mod tests {
         }
         let errors = violations(&job(
             "actions/github-script",
-            Some("373c709c69115d41ff229c7e5df9f8788daa9553"),
+            Some("3a2844b7e9c422d3c10d287c895573f7108da1b3"),
             serde_json::json!({"script": "console.log('adjacent')"}),
         ));
         assert_eq!(errors[0].field, "with.script");
+
+        let errors = violations(&job(
+            "actions/github-script",
+            Some("373c709c69115d41ff229c7e5df9f8788daa9553"),
+            serde_json::json!({
+                "script": "core.setOutput('docs-xtask', process.env.CONTRACT)"
+            }),
+        ));
+        assert_eq!(errors[0].field, "ref");
     }
 
     #[test]
     fn validate_job_expands_matrix_literals_before_capability_checks() {
         let job = job(
             "actions/checkout",
-            Some("9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0"),
+            Some("3d3c42e5aac5ba805825da76410c181273ba90b1"),
             serde_json::json!({"lfs": "${{ matrix.package == 'heimdall' }}"}),
         );
         let context = vec![(

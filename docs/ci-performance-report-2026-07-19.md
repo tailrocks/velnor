@@ -64,7 +64,9 @@ program PR, use the exact required job shown by its green three-lane runs
 after the PR merges. Decisions to require the GitHub comparison lane, enable
 a remote GitHub compiler cache, or add a scheduled `both` matrix arm remain
 operator-only because they change branch protection, cache trust/network
-surface, or the canonical standard respectively. Exact human actions are in
+surface, or the canonical standard respectively. Exact contexts, delivery
+prerequisites, and non-destructive verification are in
+`docs/required-check-handoff.md`; the decision record remains in
 `plans/OPERATOR-REPORT.md`.
 
 ## FINAL NUMBERS

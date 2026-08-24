@@ -32,7 +32,7 @@ The implementation checklist is tracked in [roadmap.md](roadmap.md).
 
 ```sh
 scripts/target_verify.sh
-cargo test -q
+cargo nextest run --workspace --locked
 ```
 
 The target verifier checks that the local `jackin` and ChainArgos checkouts have
@@ -102,6 +102,12 @@ rootless/containerized daemon mode, but Phase 0 uses the host socket because the
 two target repositories need Buildx/Bake and direct Docker commands to work from
 inside the job container.
 
+This model is restricted to admitted trusted work. It is not Build L3 and must
+not receive public unmerged code. The accepted lower-trust target is one fresh
+microVM per job with guest-local Docker and no host socket, as defined by
+[Build L3 boundary v1](security/build-l3-boundary-v1.md). A privileged
+container-only DinD variant is not an accepted host boundary.
+
 ## Run Public Fixture First
 
 Before the real target repositories, use the public fixture:
@@ -113,7 +119,7 @@ scripts/fixture_smoke.sh
 
 The readiness script checks fixture status, fixture feature-surface drift, and
 host Docker readiness without JIT runner config creation or workflow dispatch. The
-smoke script runs `cargo test -q`, Docker preflight through the host doctor,
+smoke script runs `cargo nextest run --workspace --locked`, Docker preflight through the host doctor,
 fixture JIT runner slot setup, one bounded Velnor daemon with `--once` and
 one internal slot per requested fixture job, and a GitHub run status summary.
 Set `VELNOR_RUN_TARGET_VERIFY=true` when you also want the host doctor to run

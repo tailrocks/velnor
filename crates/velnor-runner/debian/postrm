@@ -8,7 +8,10 @@ case "$1" in
         systemctl disable "$unit" || true
         systemctl reset-failed "$unit" || true
       done
-      systemctl disable velnor-daemon.service || true
+      for unit in $(systemctl list-unit-files --no-legend --plain 'velnor-daemon.service' 'velnor-daemon@*.service' 2>/dev/null | awk '{print $1}'); do
+        systemctl disable "$unit" || true
+        systemctl reset-failed "$unit" || true
+      done
       systemctl daemon-reload || true
     fi
     ;;

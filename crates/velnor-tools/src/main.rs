@@ -801,6 +801,10 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
             ".github/workflows/compat.yml",
             vec![
                 ("matrix config lanes", "matrix.config"),
+                (
+                    "weekly schedule both arm",
+                    "github.event_name == 'schedule'",
+                ),
                 ("inline lane ternary", "inputs.lanes == 'both'"),
                 ("github lane entry", r#""lane":"GitHub""#),
                 ("velnor lane entry", r#""lane":"Velnor""#),
@@ -810,7 +814,7 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
                 ("path filtering", "dorny/paths-filter@v4"),
                 ("mise tool installer", "jdx/mise-action@v4"),
                 ("mold linker", "rui314/setup-mold@v1"),
-                ("sccache action", "mozilla-actions/sccache-action@1583d6b"),
+                ("sccache action", "mozilla-actions/sccache-action@9e7fa8a"),
                 ("sccache local env", "SCCACHE_GHA_ENABLED: \"false\""),
                 ("cargo cache", "actions/cache@55cc834"),
                 ("cargo cache restore-keys", "restore-keys:"),
@@ -820,6 +824,13 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
                 ("Postgres services job", "services-postgres:"),
                 ("services declaration", "services:"),
                 ("Postgres health check", "pg_isready"),
+                ("provenance attestation job", "attestation:"),
+                (
+                    "pinned provenance attestation",
+                    "actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373",
+                ),
+                ("attestation permission", "attestations: write"),
+                ("attestation verification", "gh attestation verify"),
                 ("artifact upload", "actions/upload-artifact@v7"),
                 ("artifact download", "actions/download-artifact@v8"),
                 ("command env file", "GITHUB_ENV"),
@@ -831,7 +842,6 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
                 ("lane in step summary", "matrix.config.lane }}"),
                 ("fmt check", "just fmt-check"),
                 ("clippy", "just clippy"),
-                ("cargo test", "just test"),
                 ("nextest", "just nextest"),
                 ("compare needs", "needs: [compat]"),
                 (
@@ -839,6 +849,15 @@ fn fixture_required_snippets() -> Vec<(&'static str, Vec<(&'static str, &'static
                     "./.github/actions/check-fixture-output",
                 ),
                 ("aggregate composite", "./.github/actions/aggregate-needs"),
+            ],
+        ),
+        (
+            ".github/workflows/attestation-negative.yml",
+            vec![
+                ("missing permission case", "missing-permission:"),
+                ("no subject match case", "no-match:"),
+                ("unapproved input case", "unapproved-input:"),
+                ("unapproved registry input", "push-to-registry: false"),
             ],
         ),
         (
@@ -1034,7 +1053,7 @@ fn fixture_readiness(args: FixtureReadinessArgs) -> Result<()> {
         run_readiness_section("scripts/target_verify.sh")?;
 
         println!("==> Running Rust test suite");
-        run_readiness_section("cargo test -q")?;
+        run_readiness_section("cargo nextest run --workspace --locked")?;
     }
 
     println!("==> Checking live host readiness");
@@ -2744,23 +2763,19 @@ async fn target_verify(root: &Path, mut args: TargetVerifyArgs) -> Result<()> {
     for script in target_verify_helper_scripts() {
         run_passthrough(root, script, Command::new(script))?;
     }
-    println!("==> cargo test -p velnor-tools live_sequence");
-    let tools_output = run_cargo_tools_test_filter(root, "live_sequence")?;
+    println!("==> cargo nextest run -p velnor-tools live_sequence");
+    let tools_output = run_nextest_filter(root, "velnor-tools", "live_sequence")?;
     print!("{tools_output}");
-    assert_cargo_filter_matched("live_sequence", &tools_output)?;
-    println!("==> cargo test -p velnor-tools smoke_plan");
-    let tools_output = run_cargo_tools_test_filter(root, "smoke_plan")?;
+    println!("==> cargo nextest run -p velnor-tools smoke_plan");
+    let tools_output = run_nextest_filter(root, "velnor-tools", "smoke_plan")?;
     print!("{tools_output}");
-    assert_cargo_filter_matched("smoke_plan", &tools_output)?;
-    println!("==> cargo test -p velnor-tools host_doctor_plan");
-    let tools_output = run_cargo_tools_test_filter(root, "host_doctor_plan")?;
+    println!("==> cargo nextest run -p velnor-tools host_doctor_plan");
+    let tools_output = run_nextest_filter(root, "velnor-tools", "host_doctor_plan")?;
     print!("{tools_output}");
-    assert_cargo_filter_matched("host_doctor_plan", &tools_output)?;
     for test_name in target_verify_focused_tests() {
-        println!("==> cargo test {test_name}");
-        let output = run_cargo_test_filter(root, test_name)?;
+        println!("==> cargo nextest run -p velnor-runner {test_name}");
+        let output = run_nextest_filter(root, "velnor-runner", test_name)?;
         print!("{output}");
-        assert_cargo_filter_matched(test_name, &output)?;
     }
 
     println!("target audit written to /tmp/velnor-target-audit.txt");
@@ -2865,43 +2880,28 @@ fn run_passthrough(root: &Path, label: &str, mut command: Command) -> Result<()>
     Ok(())
 }
 
-fn run_cargo_test_filter(root: &Path, test_name: &str) -> Result<String> {
+fn run_nextest_filter(root: &Path, package: &str, test_name: &str) -> Result<String> {
     let output = Command::new("cargo")
         .current_dir(root)
-        .args(["test", "-q", "-p", "velnor-runner", test_name])
+        .args([
+            "nextest",
+            "run",
+            "--locked",
+            "-p",
+            package,
+            "--no-tests",
+            "fail",
+            test_name,
+        ])
         .output()
-        .with_context(|| format!("run cargo test {test_name}"))?;
+        .with_context(|| format!("run cargo nextest for {package} filter {test_name}"))?;
     let mut combined = String::new();
     combined.push_str(&String::from_utf8_lossy(&output.stdout));
     combined.push_str(&String::from_utf8_lossy(&output.stderr));
     if !output.status.success() {
-        bail!("cargo test {test_name} failed:\n{combined}");
+        bail!("cargo nextest for {package} filter {test_name} failed:\n{combined}");
     }
     Ok(combined)
-}
-
-fn run_cargo_tools_test_filter(root: &Path, test_name: &str) -> Result<String> {
-    let output = Command::new("cargo")
-        .current_dir(root)
-        .args(["test", "-q", "-p", "velnor-tools", test_name])
-        .output()
-        .with_context(|| format!("run cargo test -p velnor-tools {test_name}"))?;
-    let mut combined = String::new();
-    combined.push_str(&String::from_utf8_lossy(&output.stdout));
-    combined.push_str(&String::from_utf8_lossy(&output.stderr));
-    if !output.status.success() {
-        bail!("cargo test -p velnor-tools {test_name} failed:\n{combined}");
-    }
-    Ok(combined)
-}
-
-fn assert_cargo_filter_matched(test_name: &str, output: &str) -> Result<()> {
-    let regex = Regex::new(r"running [1-9][0-9]* tests?")?;
-    if regex.is_match(output) {
-        Ok(())
-    } else {
-        bail!("test filter matched zero tests: {test_name}")
-    }
 }
 
 fn target_verify_shell_files() -> Vec<&'static str> {
@@ -4136,6 +4136,7 @@ fn fixture_parity_workflows() -> Vec<(&'static str, &'static str)> {
         (".github/workflows/compat.yml", "cache-sccache"),
         (".github/workflows/compat.yml", "cache-kache"),
         (".github/workflows/compat.yml", "services-postgres"),
+        (".github/workflows/compat.yml", "attestation"),
         (".github/workflows/docker.yml", "docker"),
         (".github/workflows/pages.yml", "build"),
         (".github/workflows/renovate.yml", "renovate"),
