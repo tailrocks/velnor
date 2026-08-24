@@ -207,27 +207,27 @@ pub enum Command {
     /// Generate shell completion scripts.
     Completion(completion::CompletionArgs),
     /// Inspect Velnor's daemon-shared host cache stores.
-    Cache(legacy::CacheArgs),
+    Cache(Box<legacy::CacheArgs>),
     /// Inspect or validate against the compiled strict capability manifest.
-    Capabilities(legacy::CapabilitiesArgs),
+    Capabilities(Box<legacy::CapabilitiesArgs>),
     /// Create and store a GitHub JIT runner configuration.
-    Configure(legacy::ConfigureArgs),
+    Configure(Box<legacy::ConfigureArgs>),
     /// Run one daemon process that manages one or more internal runner slots.
-    Daemon(legacy::DaemonArgs),
+    Daemon(Box<legacy::DaemonArgs>),
     /// Probe GitHub for this daemon's registered runners and fail loudly when
     /// the fleet is gone (run from a systemd timer for alerting).
-    Doctor(legacy::DoctorArgs),
+    Doctor(Box<legacy::DoctorArgs>),
     /// Validate local Docker prerequisites before polling GitHub for jobs.
-    Preflight(legacy::PreflightArgs),
+    Preflight(Box<legacy::PreflightArgs>),
     /// Plan 010 release-coherence chain over the installed identity. Service
     /// plumbing until Plan 079 replaces it with signed apt/dpkg operations.
-    Release(legacy::ReleaseArgs),
+    Release(Box<legacy::ReleaseArgs>),
     /// Remove local runner configuration.
-    Remove(legacy::RemoveArgs),
+    Remove(Box<legacy::RemoveArgs>),
     /// Print local runner configuration status.
-    Status(legacy::StatusArgs),
+    Status(Box<legacy::StatusArgs>),
     /// Inspect the canonical Velnor storage layout and catalog.
-    Storage(legacy::StorageArgs),
+    Storage(Box<legacy::StorageArgs>),
 }
 
 /// Error a command execution returns, carrying its exit class.

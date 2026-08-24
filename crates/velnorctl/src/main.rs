@@ -27,18 +27,22 @@ async fn dispatch(command: Command) -> Result<(), CommandError> {
     match command {
         Command::Man(args) => velnorctl::man::run(&args),
         Command::Completion(args) => velnorctl::completion::run(&args),
-        Command::Cache(args) => velnorctl::execute_legacy(LegacyCommand::Cache(args)).await,
+        Command::Cache(args) => velnorctl::execute_legacy(LegacyCommand::Cache(*args)).await,
         Command::Capabilities(args) => {
-            velnorctl::execute_legacy(LegacyCommand::Capabilities(args)).await
+            velnorctl::execute_legacy(LegacyCommand::Capabilities(*args)).await
         }
-        Command::Configure(args) => velnorctl::execute_legacy(LegacyCommand::Configure(args)).await,
-        Command::Daemon(args) => velnorctl::execute_legacy(LegacyCommand::Daemon(args)).await,
-        Command::Doctor(args) => velnorctl::execute_legacy(LegacyCommand::Doctor(args)).await,
-        Command::Preflight(args) => velnorctl::execute_legacy(LegacyCommand::Preflight(args)).await,
-        Command::Release(args) => velnorctl::execute_legacy(LegacyCommand::Release(args)).await,
-        Command::Remove(args) => velnorctl::execute_legacy(LegacyCommand::Remove(args)).await,
-        Command::Status(args) => velnorctl::execute_legacy(LegacyCommand::Status(args)).await,
-        Command::Storage(args) => velnorctl::execute_legacy(LegacyCommand::Storage(args)).await,
+        Command::Configure(args) => {
+            velnorctl::execute_legacy(LegacyCommand::Configure(*args)).await
+        }
+        Command::Daemon(args) => velnorctl::execute_legacy(LegacyCommand::Daemon(*args)).await,
+        Command::Doctor(args) => velnorctl::execute_legacy(LegacyCommand::Doctor(*args)).await,
+        Command::Preflight(args) => {
+            velnorctl::execute_legacy(LegacyCommand::Preflight(*args)).await
+        }
+        Command::Release(args) => velnorctl::execute_legacy(LegacyCommand::Release(*args)).await,
+        Command::Remove(args) => velnorctl::execute_legacy(LegacyCommand::Remove(*args)).await,
+        Command::Status(args) => velnorctl::execute_legacy(LegacyCommand::Status(*args)).await,
+        Command::Storage(args) => velnorctl::execute_legacy(LegacyCommand::Storage(*args)).await,
     }
 }
 
