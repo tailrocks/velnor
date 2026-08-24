@@ -19,5 +19,3 @@ velnor-model = { path = "../velnor-model", version = "0.1.0" }
 velnor-control = { path = "../velnor-control", version = "0.1.0" }
 velnor-client = { path = "../velnor-client", version = "0.1.0" }
 velnor-render = { path = "../velnor-render", version = "0.1.0" }
-
-[dev-dependencies]
