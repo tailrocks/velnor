@@ -1,0 +1,1 @@
+{"conclusion":"success","created_at":"2026-08-24T07:07:12Z","event":"workflow_dispatch","ref":"plan-063-fixture-control-plane","run_id":32700101089,"run_started_at":"2026-08-24T07:07:12Z","sha":"46f71d3","status":"completed","updated_at":"2026-08-24T07:08:37Z","url":"https://github.com/tailrocks/velnor-actions-fixture/actions/runs/32700101089","workflow":"compat"}

@@ -25,6 +25,11 @@ observed (2026-08-24). These rules prevent exclusive-scope collisions.
    block.
 6. **Shared external resources.** Fixture dispatches, live mutations, and
    status-index commits remain serialized across sessions regardless of leaf.
+7. **Commit and push everything (operator directive 2026-08-24).** Every
+   session commits and pushes its own outputs immediately: leaf code, plan and
+   index updates, and sanitized `.velnor-compare/` evidence included. Foreign
+   dirty files inside another session's active claim are the sole exception —
+   never staged or committed by anyone but their owning session.
 
 ## Active claims
 
