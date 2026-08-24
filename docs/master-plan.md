@@ -2,7 +2,8 @@
 
 Status date: 2026-07-18. This document is the single top-level plan for making
 Velnor the fastest, most stable GitHub-Actions-compatible runner for the
-standardized 13-repository portfolio, and for making the whole CI/CD estate
+standardized 13-repository portfolio of 2026-07-18 (historical; the estate is
+now governed by the marked canonical class map), and for making the whole CI/CD estate
 (ChainArgos + Jackin + Tailrocks) maximally fast on both runner lanes. It extends
 [roadmap.md](roadmap.md) (runner-internal implementation detail) and is bound
 by [mission.md](mission.md) and the hard rules in [`../AGENTS.md`](../AGENTS.md).
@@ -180,8 +181,11 @@ standardized repository defaults to Velnor for automatic and manual runs,
 retains an explicit pinned-Ubuntu GitHub lane, and supports `both` with the
 same workload and exactly one writer for shared/external state.** This
 supersedes the 2026-06-11 jackin-family GitHub-default exception. The first
-standardization portfolio is the 13 repositories enumerated and analyzed in
-[`../VELNOR_PROJECTS_SETUP.md`](../VELNOR_PROJECTS_SETUP.md). All carry the
+standardization portfolio — the 13 repositories enumerated on 2026-07-18 — is
+now governed by the marked 2026-08-09 unified-CI contract's canonical class map
+(28 repositories) in
+[`../VELNOR_PROJECTS_SETUP.md`](../VELNOR_PROJECTS_SETUP.md); the 13-repository
+figure is the historical 2026-07-18 scope. All carry the
 same `lanes: velnor | github | both` contract; GitHub means exactly
 `ubuntu-26.04`, and no macOS/Windows or `ubuntu-latest` fourth lane is allowed.
 The fixture keeps its own both-lanes-by-default contract role. **Velnor must
