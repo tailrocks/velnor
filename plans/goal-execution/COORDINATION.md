@@ -31,7 +31,7 @@ observed (2026-08-24). These rules prevent exclusive-scope collisions.
 | Leaf | Session | Claimed at (UTC) | Status |
 |---|---|---|---|
 | 039 | parallel opencode actor | pre-existing | ACTIVE (fleet/release-refs.toml territory) |
-| 065 | ox-alpha (this coordinator) | 2026-08-24 ~10:40Z | ACTIVE — reconcile-forward decided |
+| 065 | ox-alpha (this coordinator) | 2026-08-24 ~10:40Z | RELEASED to Session B per 40bd5e2 ownership map (B owns velnor-model/velnorctl WIP, observed writing 18:40Z) |
 
 ## Decisions
 
