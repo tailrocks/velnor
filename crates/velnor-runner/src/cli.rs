@@ -5,10 +5,13 @@ use clap::{Args, Parser, Subcommand};
 /// Service-only entrypoint surface of the `velnor-runner` binary.
 ///
 /// Every operator-facing command migrated to the `velnorctl` command center;
-/// what remains is pure service plumbing consumed by systemd units and the
-/// Debian maintainer scripts: the daemon loop, the single-worker mode, and
-/// (via [`Command`]) the release/capability hooks that `ExecStartPre` and
-/// `postinst` invoke. Plan 079 deletes this binary entirely.
+/// what remains is pure service plumbing: the daemon loop, the single-worker
+/// mode, and exactly the verbs packaged consumers invoke — systemd units
+/// (`daemon`, `release verify-installed`, `doctor`), Debian maintainer scripts
+/// (`release export`, `capabilities export`), and the release workflow's
+/// metadata export. [`service_surface_covers_packaged_invokers`] proves the
+/// packaged files never reference a verb this surface dropped. Plan 079
+/// deletes the binary together with that plumbing.
 #[derive(Debug, Parser)]
 #[command(name = "velnor-runner")]
 #[command(about = "Velnor runner service entrypoint")]
@@ -23,6 +26,12 @@ pub enum ServiceCommand {
     Daemon(DaemonArgs),
     /// Start polling GitHub for jobs.
     Run(RunArgs),
+    /// Probe GitHub for registered runners; invoked by velnor-doctor timers.
+    Doctor(DoctorArgs),
+    /// Release-coherence hooks for ExecStartPre, postinst, and release CI.
+    Release(ReleaseArgs),
+    /// Compiled-manifest export for postinst identity validation.
+    Capabilities(CapabilitiesArgs),
 }
 
 impl From<ServiceCommand> for Command {
@@ -30,6 +39,9 @@ impl From<ServiceCommand> for Command {
         match command {
             ServiceCommand::Daemon(args) => Self::Daemon(args),
             ServiceCommand::Run(args) => Self::Run(args),
+            ServiceCommand::Doctor(args) => Self::Doctor(args),
+            ServiceCommand::Release(args) => Self::Release(args),
+            ServiceCommand::Capabilities(args) => Self::Capabilities(args),
         }
     }
 }
@@ -795,12 +807,97 @@ mod tests {
     }
 
     #[test]
-    fn service_surface_offers_only_daemon_and_run() {
+    fn service_surface_offers_exactly_the_packaged_verbs() {
         use clap::CommandFactory;
-        let names: Vec<String> = ServiceCli::command()
+        let mut names: Vec<String> = ServiceCli::command()
             .get_subcommands()
             .map(|sub| sub.get_name().to_owned())
             .collect();
-        assert_eq!(names, ["daemon", "run"]);
+        names.sort();
+        assert_eq!(
+            names,
+            ["capabilities", "daemon", "doctor", "release", "run"]
+        );
+    }
+
+    /// Every `velnor-runner <verb>` invocation shipped in the package (systemd
+    /// units, maintainer scripts) and in the release workflow must resolve
+    /// against this binary's parse surface. Dropping a verb the packaged files
+    /// still invoke breaks installs and releases; this guard fails at test
+    /// time instead. The release workflow copies the built binary to the
+    /// `velnor-release-tool` alias, so both spellings are covered.
+    #[test]
+    fn service_surface_covers_packaged_invokers() {
+        use clap::CommandFactory;
+        use std::path::PathBuf;
+
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest_dir
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("crate sits at crates/<name>")
+            .to_path_buf();
+
+        let mut scanned: Vec<PathBuf> = Vec::new();
+        let debian = manifest_dir.join("debian");
+        for entry in std::fs::read_dir(&debian).expect("debian dir lists") {
+            let path = entry.expect("entry").path();
+            if matches!(
+                path.extension().and_then(|ext| ext.to_str()),
+                Some("service" | "sh")
+            ) || path.file_name().is_some_and(|name| {
+                matches!(
+                    name.to_str(),
+                    Some("postinst" | "preinst" | "prerm" | "postrm")
+                )
+            }) {
+                scanned.push(path);
+            }
+        }
+        scanned.push(repo_root.join(".github/workflows/release.yml"));
+
+        let known: Vec<String> = ServiceCli::command()
+            .get_subcommands()
+            .map(|sub| sub.get_name().to_owned())
+            .collect();
+
+        const NAMES: [&str; 2] = ["velnor-runner", "velnor-release-tool"];
+        let mut checked = 0usize;
+
+        for path in &scanned {
+            let text = std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            for name in NAMES {
+                for (index, _) in text.match_indices(name) {
+                    // Quoted occurrences are echo strings, not invocations.
+                    if text[..index].ends_with('"') {
+                        continue;
+                    }
+                    // A verb lives on the same line as the binary name.
+                    let same_line = text[index + name.len()..].split('\n').next().unwrap_or("");
+                    let trimmed = same_line
+                        .trim_start()
+                        .split([' ', '"'])
+                        .next()
+                        .unwrap_or("");
+                    if !trimmed.starts_with(|c: char| c.is_ascii_lowercase()) {
+                        // Verbs are bare lowercase words; anything else is a
+                        // path, flag, glob, label, assignment, or prose.
+                        continue;
+                    }
+                    assert!(
+                        known.iter().any(|verb| verb == trimmed),
+                        "{} invokes '{name} {trimmed}' but the service surface only offers {known:?}",
+                        path.display()
+                    );
+                    checked += 1;
+                }
+            }
+        }
+
+        assert!(
+            checked > 0,
+            "guard found no packaged invocations; the scan is vacuous"
+        );
     }
 }
