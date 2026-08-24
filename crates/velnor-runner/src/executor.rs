@@ -3714,14 +3714,18 @@ if [ -n "$install_requested" ]; then
   done
   "$mise_bin" trust --all 2>/dev/null || true
   # Drop poisoned version dirs a previous interrupted install may have left.
-  # An interrupted cargo-backend install leaves a non-empty version dir without
-  # its bin/ output; mise treats any existing version dir as installed, so the
-  # partial entry would persist ("all tools are installed" while the binary is
-  # missing) and fail every later job on this store. Treat a cargo-* version
-  # dir as valid only when bin/ exists and is non-empty; dropping the dir makes
-  # the locked install below perform a real reinstall.
+  # An interrupted install leaves a non-empty version dir without its bin/
+  # output; mise treats any existing version dir as installed, so the partial
+  # entry would persist ("all tools are installed" while the binary is
+  # missing) and fail every later job on this store. The sweep covers the
+  # backends whose install layout guarantees a bin/ directory (cargo-* source
+  # compiles, pipx-* venv entry points); other backends legitimately place the
+  # binary directly in the version dir (for example aqua cosign), so a missing
+  # bin/ is only a poison signal for these. Treat a covered version dir as
+  # valid only when bin/ exists and is non-empty; dropping the dir makes the
+  # locked install below perform a real reinstall.
   find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d -empty -exec rm -rf {} + 2>/dev/null || true
-  for tool_dir in "$mise_home/installs"/cargo-*; do
+  for tool_dir in "$mise_home/installs"/cargo-* "$mise_home/installs"/pipx-*; do
     [ -d "$tool_dir" ] || continue
     for version_dir in "$tool_dir"/*; do
       [ -d "$version_dir" ] || continue
@@ -9929,9 +9933,11 @@ mod tests {
         assert!(script.contains("cache_key_prefix='mise-v2'"));
         assert!(script.contains("cache_save_requested=\"\""));
         assert!(script.contains(r#"find "$mise_home/installs" -mindepth 3 -maxdepth 3"#));
-        // A cargo-backend version dir is valid only with a non-empty bin/ — an
-        // interrupted source compile must never be treated as installed.
-        assert!(script.contains(r#"for tool_dir in "$mise_home/installs"/cargo-*; do"#));
+        // A cargo- or pipx-backend version dir is valid only with a non-empty
+        // bin/ — an interrupted install must never be treated as installed.
+        assert!(script.contains(
+            r#"for tool_dir in "$mise_home/installs"/cargo-* "$mise_home/installs"/pipx-*; do"#
+        ));
         assert!(script.contains(r#"[ ! -d "$version_dir/bin" ]"#));
         assert!(script.contains("dropping incomplete install"));
         assert!(script.contains("__VELNOR_MISE_BIN__"));
