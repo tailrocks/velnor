@@ -6,7 +6,7 @@ use std::time::Duration;
 use velnor_control::store::{
     EventRow, InstanceRow, JobRow, OpenOptions, Store, Transition, LATEST_SCHEMA_VERSION,
 };
-use velnor_model::{ExitClass, Timestamp};
+use velnor_model::{EventReason, ExitClass, Slug, Timestamp};
 
 struct TempDb {
     dir: std::path::PathBuf,
@@ -67,16 +67,29 @@ fn job(slug: &str, uid: &str) -> JobRow {
     }
 }
 
-fn transition(token: &str, reason: &str, phase: &str, conclusion: Option<&str>) -> Transition {
+fn transition(token: &str, reason: EventReason, conclusion: Option<&str>) -> Transition {
     Transition {
         token: token.to_owned(),
-        correlation_id: format!("corr-{token}"),
-        reason: reason.to_owned(),
-        message: Some(format!("{reason} observed")),
+        correlation_id: Slug::validate("correlation_id", &format!("corr-{token}"))
+            .expect("valid slug"),
+        reason,
+        message: Some(format!("{} observed", reason.as_str())),
         transition_time: Timestamp::now(),
-        next_phase: phase.to_owned(),
         conclusion: conclusion.map(str::to_owned),
         infrastructure_category: None,
+    }
+}
+
+/// Walk one job through the legal prefix up to `started`.
+fn walk_to_started(store: &Store, instance_slug: &str, job_uid: &str) {
+    for (token, reason) in [
+        ("t-acquire", EventReason::JobAcquired),
+        ("t-wait", EventReason::JobWaiting),
+        ("t-start", EventReason::JobStarted),
+    ] {
+        assert!(store
+            .record_job_transition(instance_slug, job_uid, &transition(token, reason, None))
+            .unwrap());
     }
 }
 
@@ -92,12 +105,12 @@ fn round_trip_summary_and_atomic_transition() {
         .record_job_transition(
             "it",
             "hold-job",
-            &transition("t-acquire", "job.acquired", "running", None)
+            &transition("t-acquire", EventReason::JobAcquired, None)
         )
         .unwrap());
 
     let summary = &store.job_summaries("it").unwrap()[0];
-    assert_eq!(summary.phase, "running");
+    assert_eq!(summary.phase, "acquired");
     assert_eq!(summary.repository, "tailrocks/velnor-actions-fixture");
     assert_eq!(summary.run_id, Some(9));
     assert_eq!(summary.trust_scope.as_deref(), Some("trusted"));
@@ -107,7 +120,7 @@ fn round_trip_summary_and_atomic_transition() {
     // Reopen proves WAL persistence across process-style boundaries.
     drop(store);
     let reopened = Store::open(&temp.path).unwrap();
-    assert_eq!(reopened.job_summaries("it").unwrap()[0].phase, "running");
+    assert_eq!(reopened.job_summaries("it").unwrap()[0].phase, "acquired");
 }
 
 #[test]
@@ -117,14 +130,17 @@ fn transition_replay_is_idempotent_noop() {
     store.upsert_instance(&instance("rp")).unwrap();
     store.record_job(&job("rp", "j")).unwrap();
 
+    walk_to_started(&store, "rp", "j");
     let apply = |conclusion: Option<&str>| {
         store.record_job_transition(
             "rp",
             "j",
-            &transition("t-final", "job.completed", "completed", conclusion),
+            &transition("t-final", EventReason::JobCompleted, conclusion),
         )
     };
     assert!(apply(Some("success")).unwrap());
+    assert_eq!(store.job_summaries("rp").unwrap()[0].phase, "completed");
+
     assert!(
         !apply(Some("success")).unwrap(),
         "replayed token is a no-op"
@@ -134,8 +150,8 @@ fn transition_replay_is_idempotent_noop() {
     let summary = &store.job_summaries("rp").unwrap()[0];
     assert_eq!(summary.phase, "completed");
     assert_eq!(summary.conclusion.as_deref(), Some("success"));
-    assert_eq!(store.transition_count("rp", "j").unwrap(), 1);
-    assert_eq!(store.event_count("rp", "j").unwrap(), 1);
+    assert_eq!(store.transition_count("rp", "j").unwrap(), 4);
+    assert_eq!(store.event_count("rp", "j").unwrap(), 4);
 }
 
 #[test]
@@ -147,7 +163,7 @@ fn unknown_job_transition_fails_unavailable_and_writes_nothing() {
         .record_job_transition(
             "uj",
             "absent",
-            &transition("t1", "job.acquired", "running", None),
+            &transition("t1", EventReason::JobAcquired, None),
         )
         .expect_err("unknown job rejected");
     assert_eq!(error.envelope.class, ExitClass::Unavailable.as_str());

@@ -13,6 +13,7 @@ pub mod cli_meta;
 pub mod condition;
 pub mod error_envelope;
 pub mod job_summary;
+pub mod lifecycle;
 pub mod phase;
 pub mod resources;
 pub mod sanitized;
@@ -27,6 +28,7 @@ pub use job_summary::{
     InfrastructureCategory, InvalidJobSummaryField, JobConclusion, JobPhase, JobSummary,
     NormalizedJob, Slug, TriggerEvent, MAX_SLUG_LEN,
 };
+pub use lifecycle::{transition_target, EventReason, InvalidLifecycleToken, JobState};
 pub use phase::{SlotKind, SlotPhase};
 pub use resources::{
     Adapter, AnyResource, Capability, Event, Host, Instance, Job, Lease, QueueEntry, Reservation,

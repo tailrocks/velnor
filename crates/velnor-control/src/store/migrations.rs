@@ -279,7 +279,10 @@ pub(crate) fn apply_pending(
             continue;
         }
         heartbeat(conn, owner)?;
-        let transaction = conn.transaction()?;
+        // Immediate: migration DDL must not race a lock upgrade against
+        // concurrent daemon readers; the busy timeout governs the wait.
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         transaction.execute_batch(migration.sql)?;
         if let Some(hook) = hook {
             hook(migration.version)?;

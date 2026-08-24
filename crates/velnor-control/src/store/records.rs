@@ -6,8 +6,9 @@
 
 use rusqlite::params;
 use velnor_model::{
-    ExitClass, InfrastructureCategory, InvalidJobSummaryField, JobConclusion, JobPhase,
-    JobSummary as ModelJobSummary, NormalizedJob, RepositoryRef, Timestamp, TriggerEvent,
+    transition_target, EventReason, ExitClass, InfrastructureCategory, InvalidJobSummaryField,
+    JobConclusion, JobPhase, JobState, JobSummary as ModelJobSummary, NormalizedJob, RepositoryRef,
+    Slug, Timestamp, TriggerEvent,
 };
 
 use super::error::{StoreError, StoreResult};
@@ -79,17 +80,24 @@ pub struct JobRow {
     pub updated_at: Timestamp,
 }
 
-/// One idempotent state transition for a stored job.
+/// One idempotent, machine-validated state transition for a stored job.
+///
+/// The target phase is never supplied by the caller: [`Store::record_job_transition`]
+/// derives it from the enforced Plan 066 transition table
+/// (`queued → acquired → waiting → started → terminal`), so an impossible
+/// edge cannot even be expressed, let alone persisted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transition {
     /// Unique retry token; replaying a `(instance, job, token)` triple is a
     /// no-op instead of a duplicate.
     pub token: String,
-    pub correlation_id: String,
-    pub reason: String,
+    /// Validated non-empty correlation slug carried on the row and its event.
+    pub correlation_id: Slug,
+    /// Retained taxonomy reason driving this transition.
+    pub reason: EventReason,
     pub message: Option<String>,
     pub transition_time: Timestamp,
-    pub next_phase: String,
+    /// Terminal payload data; ignored by the state machine itself.
     pub conclusion: Option<String>,
     pub infrastructure_category: Option<String>,
 }
@@ -384,15 +392,27 @@ impl Store {
         }
     }
 
-    /// Atomically apply one transition: update the job's current-state row
-    /// and append its event in a single transaction.
+    /// Atomically apply one transition under the enforced job state machine:
+    /// update the job's current-state row and append its event in a single
+    /// transaction.
+    ///
+    /// Validation order is deliberate:
+    /// 1. the job must exist (`store.job.missing`, `UNAVAILABLE`);
+    /// 2. an already-applied token is an idempotent no-op success
+    ///    (`Ok(false)`) even past a terminal state — retry-safe;
+    /// 3. otherwise `(current phase, reason)` must be a legal edge of the
+    ///    Plan 066 table; an impossible transition fails with `CONFLICT`
+    ///    naming from/to and writes nothing;
+    /// 4. the correlation id must be a validated non-empty slug
+    ///    (`store.job.transition.correlation`) or nothing is written.
     ///
     /// Returns `Ok(true)` when applied; `Ok(false)` when the same transition
     /// token was already applied (idempotent replay).
     ///
     /// # Errors
-    /// Unknown jobs are `UNAVAILABLE`; other persistence failures are
-    /// envelope-classified and leave both rows untouched via rollback.
+    /// Unknown jobs are `UNAVAILABLE`; impossible transitions are `CONFLICT`
+    /// naming the from/to states; invalid correlation ids fail closed; all
+    /// leave both rows untouched via rollback.
     pub fn record_job_transition(
         &self,
         instance_slug: &str,
@@ -400,7 +420,28 @@ impl Store {
         transition: &Transition,
     ) -> StoreResult<bool> {
         let mut conn = self.lock_conn()?;
-        let transaction = conn.transaction()?;
+        // Immediate, not deferred: a deferred transaction that reads first
+        // and writes later must upgrade its lock mid-flight, and SQLite
+        // refuses such upgrades with an immediate SQLITE_BUSY that no busy
+        // timeout can absorb when two daemons race the same upgrade. Taking
+        // the write intent up front makes the bounded busy timeout govern
+        // the whole wait instead.
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let current_phase: String = transaction
+            .query_row(
+                "SELECT phase FROM jobs WHERE instance_slug = ?1 AND job_uid = ?2",
+                params![instance_slug, job_uid],
+                |row| row.get(0),
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    StoreError::new(ExitClass::Unavailable, "store.job.missing").with_remediation(
+                        format!("job {job_uid} is not recorded for this instance"),
+                    )
+                }
+                other => StoreError::from(other),
+            })?;
         let inserted = transaction
             .execute(
                 "INSERT OR IGNORE INTO job_transitions (instance_slug, job_uid, transition_token,
@@ -410,21 +451,31 @@ impl Store {
                     instance_slug,
                     job_uid,
                     transition.token,
-                    transition.correlation_id,
-                    transition.reason,
+                    transition.correlation_id.as_str(),
+                    transition.reason.as_str(),
                     transition.message,
                     rfc3339(transition.transition_time),
                 ],
             )?;
         if inserted == 0 {
+            // Exact-token replay: no-op success, never a duplicate row or
+            // event, valid even when the job has since reached a terminal
+            // state.
             transaction.commit()?;
             return Ok(false);
         }
+        let from = JobState::try_from(current_phase.as_str()).map_err(|_| {
+            StoreError::new(ExitClass::Operation, "store.job.state.unknown")
+                .with_remediation("stored phase is not part of the closed job state taxonomy")
+        })?;
+        let Some(target) = transition_target(from, transition.reason) else {
+            return Err(illegal_transition_error(from, transition.reason));
+        };
         let updated = transaction.execute(
             "UPDATE jobs SET phase = ?1, conclusion = ?2, infrastructure_category = ?3, updated_at = ?4
              WHERE instance_slug = ?5 AND job_uid = ?6",
             params![
-                transition.next_phase,
+                target.as_str(),
                 transition.conclusion,
                 transition.infrastructure_category,
                 rfc3339(transition.transition_time),
@@ -441,9 +492,9 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 instance_slug,
-                format!("job.transition.{}", transition.reason),
+                format!("job.transition.{}", transition.reason.as_str()),
                 job_uid,
-                transition.correlation_id,
+                transition.correlation_id.as_str(),
                 rfc3339(transition.transition_time),
                 transition.message,
             ],
@@ -658,6 +709,27 @@ fn unidentified_summary() -> StoreError {
     StoreError::new(ExitClass::Operation, "store.job.summary.unidentified").with_remediation(
         "persist only summaries carrying both run_id and attempt so the upsert key exists",
     )
+}
+
+/// Impossible transition under the Plan 066 table: names from/to and the
+/// rejected reason without ambiguity.
+fn illegal_transition_error(from: JobState, reason: EventReason) -> StoreError {
+    let to = reason
+        .job_target()
+        .map_or_else(|| "<n/a>".to_owned(), |target| target.as_str().to_owned());
+    let why = if reason.is_job_transition() {
+        format!(
+            "job state '{}' has no edge to '{}' via reason '{}'",
+            from.as_str(),
+            to,
+            reason.as_str()
+        )
+    } else {
+        format!("reason '{}' is not a job transition", reason.as_str())
+    };
+    StoreError::new(ExitClass::Conflict, "store.job.transition.illegal").with_remediation(format!(
+        "{why}; legal path is queued→acquired→waiting→started→terminal"
+    ))
 }
 
 fn summary_out_of_range(field: &'static str) -> StoreError {

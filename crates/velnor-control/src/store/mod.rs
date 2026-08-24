@@ -33,6 +33,20 @@ pub const DEFAULT_STATE_DB_PATH: &str = "/var/lib/velnor/state.db";
 
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Cold-start contention windows are structurally retried, never ignored:
+/// several daemons opening one fresh database simultaneously race the WAL
+/// journal-mode switch and meta-table seed before any lock coordination
+/// exists, and SQLite's busy handler does not cover every such window. A
+/// bounded backoff around connection setup closes that flake class while
+/// keeping open semantics identical (same success value, same failure
+/// envelope once retries exhaust).
+const SETUP_RETRIES: u32 = 5;
+const SETUP_BACKOFF_STEP: Duration = Duration::from_millis(40);
+
+fn is_transient_contention(error: &StoreError) -> bool {
+    error.envelope.reason == "store.locked"
+}
+
 /// Tunables for [`Store::open_with`].
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
@@ -99,14 +113,19 @@ impl Store {
                 );
             }
         }
-        let mut conn = Connection::open(path).map_err(|error| {
-            StoreError::from(error).with_remediation(format!(
-                "verify filesystem permissions for {}",
-                path.display()
-            ))
-        })?;
-        configure_connection(&conn)?;
-        migrations::ensure_meta_tables(&conn)?;
+        let mut conn = {
+            let mut attempt = 0;
+            loop {
+                match open_setup(path) {
+                    Ok(conn) => break conn,
+                    Err(error) if is_transient_contention(&error) && attempt < SETUP_RETRIES => {
+                        attempt += 1;
+                        std::thread::sleep(SETUP_BACKOFF_STEP * attempt);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        };
         if migrations::current_version(&conn)? < LATEST_SCHEMA_VERSION {
             let owner = lock_owner_token();
             migrations::acquire_lock(&conn, &owner, options.migration_lock_wait)?;
@@ -164,6 +183,21 @@ fn configure_connection(conn: &Connection) -> StoreResult<()> {
     Ok(())
 }
 
+/// One attempt of the contention-retried setup section: open, WAL
+/// configuration, and meta-table seeding. Any `store.locked` outcome here
+/// is retried by [`Store::open_with`]; everything else fails immediately.
+fn open_setup(path: &Path) -> StoreResult<Connection> {
+    let conn = Connection::open(path).map_err(|error| {
+        StoreError::from(error).with_remediation(format!(
+            "verify filesystem permissions for {}",
+            path.display()
+        ))
+    })?;
+    configure_connection(&conn)?;
+    migrations::ensure_meta_tables(&conn)?;
+    Ok(conn)
+}
+
 fn lock_owner_token() -> String {
     let nanos = Timestamp::now()
         .as_offset_datetime()
@@ -177,8 +211,8 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
-    use rusqlite::Connection;
-    use velnor_model::Timestamp;
+    use rusqlite::{params, Connection};
+    use velnor_model::{EventReason, Slug, Timestamp};
 
     use super::migrations;
     use super::records::test_connection;
@@ -247,17 +281,55 @@ mod tests {
         }
     }
 
-    fn acquire(store: &str) -> Transition {
+    fn acquire(token_suffix: &str) -> Transition {
         Transition {
-            token: format!("acquire-{store}"),
-            correlation_id: "corr-1".to_owned(),
-            reason: "job.acquired".to_owned(),
+            token: format!("acquire-{token_suffix}"),
+            correlation_id: Slug::validate("correlation_id", "corr-1").expect("valid slug"),
+            reason: EventReason::JobAcquired,
             message: Some("slot assigned".to_owned()),
             transition_time: Timestamp::now(),
-            next_phase: "running".to_owned(),
             conclusion: None,
             infrastructure_category: None,
         }
+    }
+
+    fn transition(
+        token: &str,
+        correlation: &str,
+        reason: EventReason,
+        conclusion: Option<&str>,
+    ) -> Transition {
+        Transition {
+            token: token.to_owned(),
+            correlation_id: Slug::validate("correlation_id", correlation).expect("valid slug"),
+            reason,
+            message: Some(format!("{} observed", reason.as_str())),
+            transition_time: Timestamp::now(),
+            conclusion: conclusion.map(str::to_owned),
+            infrastructure_category: None,
+        }
+    }
+
+    /// Walk one job through the full legal path; returns applied flags.
+    fn walk_happy_path(store: &Store, instance_slug: &str, job_uid: &str) -> Vec<bool> {
+        let steps = [
+            ("t-acquire", EventReason::JobAcquired, None),
+            ("t-wait", EventReason::JobWaiting, None),
+            ("t-start", EventReason::JobStarted, None),
+            ("t-complete", EventReason::JobCompleted, Some("success")),
+        ];
+        steps
+            .iter()
+            .map(|(token, reason, conclusion)| {
+                store
+                    .record_job_transition(
+                        instance_slug,
+                        job_uid,
+                        &transition(token, "corr-happy", *reason, *conclusion),
+                    )
+                    .expect("legal step applies")
+            })
+            .collect()
     }
 
     #[test]
@@ -352,54 +424,60 @@ mod tests {
 
     #[test]
     fn five_concurrent_daemons_migrate_and_write_without_corruption() {
-        let temp = TempDb::new("concurrent");
-        let shared = Arc::new(temp.path.clone());
-        let handles: Vec<_> = (0..5)
-            .map(|index| {
-                let path = Arc::clone(&shared);
-                thread::spawn(move || {
-                    let slug = format!("daemon-{index}");
-                    let store = Store::open(path.as_path()).expect("concurrent open");
-                    store.upsert_instance(&instance(&slug)).unwrap();
-                    let row = job(&slug, &format!("job-{index}"), "org/concurrent");
-                    store.record_job(&row).unwrap();
-                    assert!(store
-                        .record_job_transition(&slug, &row.job_uid, &acquire("c"))
-                        .unwrap());
-                    store
-                        .append_event(&EventRow {
-                            instance_slug: slug.clone(),
-                            event_kind: "slot.ready".to_owned(),
-                            subject: slug.clone(),
-                            correlation_id: None,
-                            occurred_at: Timestamp::now(),
-                            detail: None,
-                        })
-                        .unwrap();
+        // Stress hardening for the cold-parallel flake class: the exact
+        // scenario runs five times, each on a fresh database file, so a
+        // one-in-N startup race cannot hide behind a lucky single pass.
+        // Original assertions are preserved per iteration.
+        for iteration in 0..5 {
+            let temp = TempDb::new(&format!("concurrent-{iteration}"));
+            let shared = Arc::new(temp.path.clone());
+            let handles: Vec<_> = (0..5)
+                .map(|index| {
+                    let path = Arc::clone(&shared);
+                    thread::spawn(move || {
+                        let slug = format!("daemon-{index}");
+                        let store = Store::open(path.as_path()).expect("concurrent open");
+                        store.upsert_instance(&instance(&slug)).unwrap();
+                        let row = job(&slug, &format!("job-{index}"), "org/concurrent");
+                        store.record_job(&row).unwrap();
+                        assert!(store
+                            .record_job_transition(&slug, &row.job_uid, &acquire("c"))
+                            .unwrap());
+                        store
+                            .append_event(&EventRow {
+                                instance_slug: slug.clone(),
+                                event_kind: "slot.ready".to_owned(),
+                                subject: slug.clone(),
+                                correlation_id: None,
+                                occurred_at: Timestamp::now(),
+                                detail: None,
+                            })
+                            .unwrap();
+                    })
                 })
-            })
-            .collect();
-        for handle in handles {
-            handle.join().expect("writer thread succeeded");
+                .collect();
+            for handle in handles {
+                handle.join().expect("writer thread succeeded");
+            }
+            let store = Store::open(&temp.path).expect("final reopen");
+            assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
+            for index in 0..5 {
+                let slug = format!("daemon-{index}");
+                assert_eq!(store.job_summaries(&slug).unwrap().len(), 1);
+                assert_eq!(
+                    store
+                        .transition_count(&slug, &format!("job-{index}"))
+                        .unwrap(),
+                    1
+                );
+                assert_eq!(store.event_count(&slug, &slug).unwrap(), 1);
+            }
+            let conn = test_connection(&store);
+            let integrity: String = conn
+                .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(integrity, "ok");
         }
-        let store = Store::open(&temp.path).expect("final reopen");
-        assert_eq!(store.schema_version().unwrap(), LATEST_SCHEMA_VERSION);
-        for index in 0..5 {
-            let slug = format!("daemon-{index}");
-            assert_eq!(store.job_summaries(&slug).unwrap().len(), 1);
-            assert_eq!(
-                store
-                    .transition_count(&slug, &format!("job-{index}"))
-                    .unwrap(),
-                1
-            );
-            assert_eq!(store.event_count(&slug, &slug).unwrap(), 1);
-        }
-        let conn = test_connection(&store);
-        let integrity: String = conn
-            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(integrity, "ok");
     }
 
     #[test]
@@ -507,12 +585,374 @@ mod tests {
             alpha_row.phase, "queued",
             "alpha untouched by beta transition"
         );
-        assert_eq!(store.job_summaries("beta").unwrap()[0].phase, "running");
+        assert_eq!(store.job_summaries("beta").unwrap()[0].phase, "acquired");
 
         let conn = test_connection(&store);
         let slot_count: u32 = conn
             .query_row("SELECT COUNT(*) FROM slots", [], |r| r.get(0))
             .unwrap();
         assert_eq!(slot_count, 1, "slots are scoped per instance key");
+    }
+
+    #[test]
+    fn full_happy_path_emits_each_required_reason_exactly_once_across_replay() {
+        let temp = TempDb::new("happy-path");
+        let store = Store::open(&temp.path).unwrap();
+        store.upsert_instance(&instance("hp")).unwrap();
+        // Distinct (run_id, attempt) identities: the summary identity index
+        // is (instance_slug, run_id, attempt).
+        for (job_uid, run_id) in [("job-a", 101), ("job-b", 102), ("job-c", 103)] {
+            let mut row = job("hp", job_uid, "org/happy");
+            row.attempt = Some(1);
+            row.run_id = Some(run_id);
+            store.record_job(&row).unwrap();
+        }
+
+        let applied = walk_happy_path(&store, "hp", "job-a");
+        assert_eq!(applied, vec![true, true, true, true]);
+
+        // Every replay of an already-applied token is a no-op success.
+        for _ in 0..2 {
+            let replayed = walk_happy_path(&store, "hp", "job-a");
+            assert_eq!(
+                replayed,
+                vec![false, false, false, false],
+                "replay must never duplicate a step"
+            );
+        }
+
+        // Canceled and rejected branches walk the same prefix to `started`.
+        let canceled = walk_with_suffix(&store, "hp", "job-b", EventReason::JobCanceled, "cancel");
+        assert_eq!(canceled, vec![true, true, true, true]);
+        let rejected = walk_with_suffix(&store, "hp", "job-c", EventReason::JobRejected, "reject");
+        assert_eq!(rejected, vec![true, true, true, true]);
+
+        // Each required job reason was emitted exactly once per job.
+        for (job_uid, mut expected) in [
+            (
+                "job-a",
+                vec![
+                    "job.acquired",
+                    "job.waiting",
+                    "job.started",
+                    "job.completed",
+                ],
+            ),
+            (
+                "job-b",
+                vec!["job.acquired", "job.waiting", "job.started", "job.canceled"],
+            ),
+            (
+                "job-c",
+                vec!["job.acquired", "job.waiting", "job.started", "job.rejected"],
+            ),
+        ] {
+            let reasons = stored_reasons(&store, "hp", job_uid);
+            expected.sort_unstable();
+            let mut actual = reasons.clone();
+            actual.sort_unstable();
+            assert_eq!(actual, expected, "{job_uid} reasons");
+            assert_eq!(reasons.len(), 4);
+            assert_eq!(store.transition_count("hp", job_uid).unwrap(), 4);
+            assert_eq!(store.event_count("hp", job_uid).unwrap(), 4);
+        }
+
+        // Terminal phases match each branch (summaries are id-DESC).
+        let summaries = store.job_summaries("hp").unwrap();
+        assert_eq!(summaries[0].job_uid, "job-c");
+        assert_eq!(summaries[0].phase, "rejected");
+        assert_eq!(
+            summaries
+                .iter()
+                .find(|s| s.job_uid == "job-a")
+                .expect("job-a summary")
+                .phase,
+            "completed"
+        );
+        assert_eq!(
+            summaries
+                .iter()
+                .find(|s| s.job_uid == "job-b")
+                .expect("job-b summary")
+                .phase,
+            "canceled"
+        );
+    }
+
+    fn walk_with_suffix(
+        store: &Store,
+        instance_slug: &str,
+        job_uid: &str,
+        terminal: EventReason,
+        suffix: &str,
+    ) -> Vec<bool> {
+        let conclusion = match terminal {
+            EventReason::JobCanceled => Some("cancelled"),
+            EventReason::JobRejected => None,
+            _ => None,
+        };
+        [
+            (
+                format!("t-{suffix}-acquire"),
+                EventReason::JobAcquired,
+                None,
+            ),
+            (format!("t-{suffix}-wait"), EventReason::JobWaiting, None),
+            (format!("t-{suffix}-start"), EventReason::JobStarted, None),
+            (format!("t-{suffix}-terminal"), terminal, conclusion),
+        ]
+        .iter()
+        .map(|(token, reason, concl)| {
+            store
+                .record_job_transition(
+                    instance_slug,
+                    job_uid,
+                    &transition(token, "corr-walk", *reason, *concl),
+                )
+                .expect("legal step applies")
+        })
+        .collect()
+    }
+
+    fn stored_reasons(store: &Store, instance_slug: &str, job_uid: &str) -> Vec<String> {
+        let conn = test_connection(store);
+        let mut statement = conn
+            .prepare(
+                "SELECT reason FROM job_transitions
+                 WHERE instance_slug = ?1 AND job_uid = ?2 ORDER BY id",
+            )
+            .expect("reason query prepares");
+        let rows = statement
+            .query_map(params![instance_slug, job_uid], |row| row.get(0))
+            .expect("reason query maps");
+        rows.map(|row| row.expect("reason row")).collect()
+    }
+
+    fn stored_correlations(store: &Store, instance_slug: &str, job_uid: &str) -> Vec<String> {
+        let conn = test_connection(store);
+        let mut statement = conn
+            .prepare(
+                "SELECT correlation_id FROM job_transitions
+                 WHERE instance_slug = ?1 AND job_uid = ?2 ORDER BY id",
+            )
+            .expect("correlation query prepares");
+        let rows = statement
+            .query_map(params![instance_slug, job_uid], |row| row.get(0))
+            .expect("correlation query maps");
+        rows.map(|row| row.expect("correlation row")).collect()
+    }
+
+    #[test]
+    fn transitions_carry_validated_correlation_and_utc_timestamp() {
+        let temp = TempDb::new("correlation");
+        let store = Store::open(&temp.path).unwrap();
+        store.upsert_instance(&instance("co")).unwrap();
+        store.record_job(&job("co", "j", "org/corr")).unwrap();
+
+        // Missing and blank correlations fail closed at the validated-slug
+        // construction seam: no such Transition can exist.
+        for blank in ["", "   ", "\t"] {
+            let error = Slug::validate("correlation_id", blank).expect_err(blank);
+            assert_eq!(error.field, "correlation_id");
+        }
+        assert!(Slug::validate("correlation_id", "corr-run-42").is_ok());
+
+        // The epoch anchor proves the stored instant is the exact UTC RFC
+        // 3339 rendering of the supplied Timestamp.
+        let mut step = transition("t-acquire", "corr-run-42", EventReason::JobAcquired, None);
+        step.transition_time = Timestamp::UNIX_EPOCH;
+        assert!(store.record_job_transition("co", "j", &step).unwrap());
+
+        assert_eq!(stored_correlations(&store, "co", "j"), vec!["corr-run-42"]);
+        let conn = test_connection(&store);
+        let stored_time: String = conn
+            .query_row(
+                "SELECT transition_time FROM job_transitions
+                 WHERE instance_slug = 'co' AND job_uid = 'j'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_time, "1970-01-01T00:00:00Z");
+        assert!(stored_time.ends_with('Z'), "stored instants render UTC");
+    }
+
+    #[test]
+    fn different_event_after_terminal_is_rejected_naming_from_to() {
+        let temp = TempDb::new("after-terminal");
+        let store = Store::open(&temp.path).unwrap();
+        store.upsert_instance(&instance("at")).unwrap();
+        store.record_job(&job("at", "j", "org/term")).unwrap();
+
+        // Cancel at started: legal terminal branch.
+        let cancel_steps: Vec<bool> = [
+            ("t1-acquire", EventReason::JobAcquired),
+            ("t1-wait", EventReason::JobWaiting),
+            ("t1-start", EventReason::JobStarted),
+            ("t1-cancel", EventReason::JobCanceled),
+        ]
+        .iter()
+        .map(|(token, reason)| {
+            store
+                .record_job_transition(
+                    "at",
+                    "j",
+                    &transition(token, "corr-at", *reason, Some("cancelled")),
+                )
+                .expect("cancel path is legal")
+        })
+        .collect();
+        assert_eq!(cancel_steps, vec![true, true, true, true]);
+        assert_eq!(store.job_summaries("at").unwrap()[0].phase, "canceled");
+
+        // A DIFFERENT event after the terminal state is rejected outright.
+        let error = store
+            .record_job_transition(
+                "at",
+                "j",
+                &transition(
+                    "t2-complete",
+                    "corr-at",
+                    EventReason::JobCompleted,
+                    Some("success"),
+                ),
+            )
+            .expect_err("completed after canceled must be rejected");
+        assert_eq!(error.envelope.class, ExitClass::Conflict.as_str());
+        assert_eq!(error.envelope.reason, "store.job.transition.illegal");
+        let remediation = error.envelope.remediation.expect("names from/to");
+        assert!(remediation.contains("canceled"), "{remediation}");
+        assert!(remediation.contains("completed"), "{remediation}");
+
+        // And so is any other late event.
+        let error = store
+            .record_job_transition(
+                "at",
+                "j",
+                &transition("t3-start", "corr-at", EventReason::JobStarted, None),
+            )
+            .expect_err("started after canceled must be rejected");
+        assert_eq!(error.envelope.reason, "store.job.transition.illegal");
+
+        // Nothing from the rejected attempts persisted.
+        assert_eq!(store.transition_count("at", "j").unwrap(), 4);
+        assert_eq!(store.event_count("at", "j").unwrap(), 4);
+
+        // Same-token replay of the applied terminal event stays a no-op
+        // success even past the terminal state.
+        assert!(!store
+            .record_job_transition(
+                "at",
+                "j",
+                &transition(
+                    "t1-cancel",
+                    "corr-at",
+                    EventReason::JobCanceled,
+                    Some("cancelled")
+                ),
+            )
+            .unwrap());
+        assert_eq!(store.transition_count("at", "j").unwrap(), 4);
+        assert_eq!(store.event_count("at", "j").unwrap(), 4);
+    }
+
+    #[test]
+    fn impossible_transition_matrix_spot_checks_fail_conflict_writing_nothing() {
+        let temp = TempDb::new("impossible");
+        let store = Store::open(&temp.path).unwrap();
+        store.upsert_instance(&instance("im")).unwrap();
+        for (job_uid, run_id) in [("done", 201), ("axed", 202), ("fresh", 203)] {
+            let mut row = job("im", job_uid, "org/matrix");
+            row.attempt = Some(1);
+            row.run_id = Some(run_id);
+            store.record_job(&row).unwrap();
+        }
+
+        // completed -> started
+        let steps: [(&str, &str, EventReason); 4] = [
+            ("d1", "done", EventReason::JobAcquired),
+            ("d2", "done", EventReason::JobWaiting),
+            ("d3", "done", EventReason::JobStarted),
+            ("d4", "done", EventReason::JobCompleted),
+        ];
+        for (token, job_uid, reason) in steps {
+            assert!(store
+                .record_job_transition("im", job_uid, &transition(token, "corr-im", reason, None))
+                .unwrap());
+        }
+        let error = store
+            .record_job_transition(
+                "im",
+                "done",
+                &transition("x1", "corr-im", EventReason::JobStarted, None),
+            )
+            .expect_err("completed→started is illegal");
+        assert_eq!(error.envelope.class, ExitClass::Conflict.as_str());
+        let remediation = error.envelope.remediation.expect("names from/to");
+        assert!(
+            remediation.contains("completed") && remediation.contains("acquired"),
+            "{remediation}"
+        );
+
+        // canceled -> completed
+        for (token, reason) in [
+            ("a1", EventReason::JobAcquired),
+            ("a2", EventReason::JobWaiting),
+            ("a3", EventReason::JobStarted),
+            ("a4", EventReason::JobCanceled),
+        ] {
+            assert!(store
+                .record_job_transition("im", "axed", &transition(token, "corr-im", reason, None))
+                .unwrap());
+        }
+        let error = store
+            .record_job_transition(
+                "im",
+                "axed",
+                &transition("x2", "corr-im", EventReason::JobCompleted, Some("success")),
+            )
+            .expect_err("canceled→completed is illegal");
+        assert_eq!(error.envelope.reason, "store.job.transition.illegal");
+        let remediation = error.envelope.remediation.expect("names from/to");
+        assert!(
+            remediation.contains("canceled") && remediation.contains("completed"),
+            "{remediation}"
+        );
+
+        // queued -> started directly skips two edges.
+        let error = store
+            .record_job_transition(
+                "im",
+                "fresh",
+                &transition("x3", "corr-im", EventReason::JobStarted, None),
+            )
+            .expect_err("queued→started is illegal");
+        assert_eq!(error.envelope.reason, "store.job.transition.illegal");
+
+        // Non-job reasons never move job state through this seam either.
+        let error = store
+            .record_job_transition(
+                "im",
+                "fresh",
+                &transition("x4", "corr-im", EventReason::CapacityPressure, None),
+            )
+            .expect_err("capacity.pressure is not a job transition");
+        assert!(error.to_string().contains("not a job transition"));
+
+        // Rejected attempts wrote nothing anywhere.
+        for (job_uid, expected) in [("done", 4), ("axed", 4), ("fresh", 0)] {
+            assert_eq!(store.transition_count("im", job_uid).unwrap(), expected);
+            assert_eq!(store.event_count("im", job_uid).unwrap(), expected);
+        }
+        let summaries = store.job_summaries("im").unwrap();
+        assert_eq!(
+            summaries
+                .iter()
+                .find(|s| s.job_uid == "fresh")
+                .expect("fresh summary")
+                .phase,
+            "queued",
+            "rejected attempts never moved the untouched job"
+        );
     }
 }
