@@ -2,8 +2,11 @@
 
 Every executable workflow uses one canonical YAML shape on all lanes:
 
-- The sole dispatch selector is the `lane` choice input with exactly
-  `github | velnor | both`; never use plural `lanes`.
+- The dispatch selector is the plural `lanes` choice input with exactly
+  `velnor | github | both` (`lanes: type: choice, default: velnor,
+  options: [velnor, github, both]`); never use a singular dispatch selector.
+  Callable reusable workflows keep their singular `lane` input; callers derive
+  it from `inputs.lanes`.
 - Defaults are organization-derived, exactly as the marked contract states:
   every listed `jackin-project/*` repository defaults to `github`; every
   listed `tailrocks/*` and `ChainArgos/*` repository defaults to `velnor`.

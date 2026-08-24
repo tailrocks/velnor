@@ -3,7 +3,7 @@ Velnor unified CI contract (2026-08-09):
 
 - Estate: exactly 28 repositories in the canonical class map in `VELNOR_PROJECTS_SETUP.md`.
 - Classes: exactly four generated templates—20 code, 5 tap, 2 apt, 1 fixture—byte-identical within each class; no concern-based omission or repository-local fork.
-- Selector: only `lane`, with exact values `github | velnor | both`; every repository supports all three values.
+- Selector: exactly the plural `lanes` choice input with values `velnor | github | both` (`lanes: type: choice, default: velnor, options: [velnor, github, both]`); every repository supports all three values. Callable reusable workflows keep their singular `lane` input; callers derive it from `inputs.lanes`.
 - Defaults: every listed `jackin-project/*` repository defaults to `github`; every listed `tailrocks/*` and `ChainArgos/*` repository defaults to `velnor`.
 - Trust route: public unmerged contributor code uses GitHub-hosted until lower-trust Velnor isolation is live-proven. This explicit safety override does not change repository default, applicable checks, or permit silent failover.
 - Trusted admission: Velnor trusted access is limited to exact default-branch or release workflow paths and refs, never an entire public repository.
@@ -164,6 +164,15 @@ Whenever a discussion or change affects the **vision, plan, or roadmap**:
 Never let a prompt, README, or doc describe a direction that the current vision/plan/roadmap no longer holds. If the prompt and `docs/` disagree, `docs/` wins — fix the prompt.
 
 ### Direction change log
+
+- 2026-08-24: **Plural `lanes` selector restored as canonical** (operator
+  ruling, same day): the estate dispatch selector is exactly the plural
+  `lanes` choice input (`velnor | github | both`, Velnor default), superseding
+  the sole-`lane` entries recorded earlier this day. Authority: generator
+  `tailrocks/velnor-actions` origin/main commits `87b3c31`, `3f03ffe`,
+  `84a3d2c` (mirrored release `2026.8.31`) and fixture PRs #85–#88. Callable
+  reusable workflows keep their singular `lane` input; callers derive it from
+  `inputs.lanes`. Org-derived defaults are unchanged.
 
 - 2026-08-24: **velnorctl migration adopted** (operator): final crate
   ownership is the `velnorctl` operator CLI with a service-only `daemon`

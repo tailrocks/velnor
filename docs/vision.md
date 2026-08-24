@@ -5,7 +5,7 @@ Velnor unified CI contract (2026-08-09):
 
 - Estate: exactly 28 repositories in the canonical class map in `VELNOR_PROJECTS_SETUP.md`.
 - Classes: exactly four generated templates—20 code, 5 tap, 2 apt, 1 fixture—byte-identical within each class; no concern-based omission or repository-local fork.
-- Selector: only `lane`, with exact values `github | velnor | both`; every repository supports all three values.
+- Selector: exactly the plural `lanes` choice input with values `velnor | github | both` (`lanes: type: choice, default: velnor, options: [velnor, github, both]`); every repository supports all three values. Callable reusable workflows keep their singular `lane` input; callers derive it from `inputs.lanes`.
 - Defaults: every listed `jackin-project/*` repository defaults to `github`; every listed `tailrocks/*` and `ChainArgos/*` repository defaults to `velnor`.
 - Trust route: public unmerged contributor code uses GitHub-hosted until lower-trust Velnor isolation is live-proven. This explicit safety override does not change repository default, applicable checks, or permit silent failover.
 - Trusted admission: Velnor trusted access is limited to exact default-branch or release workflow paths and refs, never an entire public repository.
@@ -39,7 +39,7 @@ conclusions in the GitHub UI — is **achieved and in production**:
   boundary, not lower-trust or Build L3 isolation. The design-only target is
   [Build L3 boundary v1](security/build-l3-boundary-v1.md).
 - The estate program standardizes the exact 28 repositories in
-  `VELNOR_PROJECTS_SETUP.md` on one generated class surface with sole `lane`
+  `VELNOR_PROJECTS_SETUP.md` on one generated class surface with plural `lanes`
   selector and organization-scoped defaults. Repositories whose delivery is blocked retain their pushed
   program branch and exact evidence; their current `main` is not represented
   as migrated until its PR can merge.
