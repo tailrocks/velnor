@@ -44,6 +44,15 @@ prevent exclusive-scope collisions.
 
 ## Decisions
 
+- **2026-08-24 leaf 039 slice wave 2** (ox-alpha session C): lanes-checker
+  alignment `8b8b4b6` (generator-owned plural `lanes` is canonical; audit-ci
+  exits 0 on repo), removal-reason labeling + dual-input guard `357410c`,
+  docs truth `4d24356`+`faff2a2` (all active-doc 13-repo claims marked
+  superseded), leaf Evidence + execution-reconciliation block `75a60d0`.
+  Reviewer APPROVE on 8b45fe0+8b8b4b6. Ref-shape STOP + per-org digest
+  approvals now the blocking operator decisions for live steps 3–5;
+  repo-side systemd audit-timer unit slice queued next.
+
 - **2026-08-24 leaf 065 defect-reopen** (Session C validator): DONE flip
   `c27a83d` predates round-2 review findings; reviewer verdict was BLOCK on a
   MAJOR (opaque/cannot-be-a-base URLs bypass redaction via silent
