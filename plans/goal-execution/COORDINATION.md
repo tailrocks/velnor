@@ -41,6 +41,19 @@ prevent exclusive-scope collisions.
 
 ## Decisions
 
+- **2026-08-24 leaf 039 progress** (ox-alpha session C): step-1/6 code surface
+  landed and independently verified — `041079c` deterministic offline
+  `fleet-policy generate` (byte-identical to reviewed snapshots, audit-ci rules
+  `fleet-policy-ledger/-current/-extra/-generate`, `fleet-generate` in check
+  chain) and `cf3ba76` idempotency + concrete TOML-parse coverage from review
+  findings. Verifier C1–C9 VERIFIED; reviewer APPROVE, actionable findings
+  fixed in `cf3ba76`. Remaining before DONE: ref-shape regeneration ruling,
+  terraform-repo selection contradiction resolution, scheduled read-only audit
+  wiring, stale-docs sweep, operator digest approval, then live steps 4–5.
+  Pre-existing finding recorded for owners: this repo's `.github/workflows/ci.yml`
+  fails four `generated-caller` lane checks (audit-ci exit 1 independent of
+  fleet scope).
+
 - **2026-08-24 leaf 065**: two writers interleaved inside `crates/velnor-model`
   (evidence: `.velnor-compare/2026-08-24-065-writer-conflict/`). Per operator
   direction, sessions cooperate: the coherent on-disk design is the canonical

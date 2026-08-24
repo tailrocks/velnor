@@ -13,7 +13,7 @@ and operator authorization.
 
 | Plan | Title | Priority | Depends on | Status |
 |---|---|---:|---|---|
-| [039](039-org-jit-multi-repo-fleet.md) | Reconcile restricted organization JIT fleets | P0 | Unified-CI contract | TODO |
+| [039](039-org-jit-multi-repo-fleet.md) | Reconcile restricted organization JIT fleets | P0 | Unified-CI contract | IN PROGRESS |
 
 ## Boundary
 
