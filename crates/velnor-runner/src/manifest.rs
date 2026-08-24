@@ -159,6 +159,7 @@ const SCCACHE_REFS: &[AllowedRef] = &[
     allowed("v0.0.10", "fixture transition until plan 041"),
 ];
 const MOLD_REFS: &[AllowedRef] = &[
+    allowed("7e4f20ad28a2e8ca6fd0892ccf72e2abb706b9c3", "v1"),
     allowed("9c9c13bf4c3f1adef0cc596abc155580bcb04444", "v1"),
     allowed("v1", "fixture transition until plan 041"),
 ];
