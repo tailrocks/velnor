@@ -7,6 +7,7 @@
 >
 > **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- AGENTS.md .github/AGENTS.md README.md docs/vision.md docs/roadmap.md docs/prompt.md plans/README.md crates/velnor-tools/src/main.rs scripts`
 > Compare live text with the evidence below before editing.
+> Reconciled 2026-08-24 at Velnor b57b036; generator ce23409 emits sole `lane`; fixture pin dc4204c green (compat run 32675488430).
 
 ## Status
 
@@ -29,7 +30,9 @@ plane inspection. Every later task needs one stable integration corpus.
 - `docs/vision.md:48-66` names performance, native adapters, and UX as active
   direction but does not name `velnorctl` or removal of `velnor-runner`.
 - `docs/prompt.md:19-21` says only the tracked unified-CI graph is active.
-- `plans/README.md` previously declared every numbered plan historical.
+- `.github/AGENTS.md` still instructs the `lanes` choice input and a universal
+  `velnor` default, both contradicting the marked contract's sole
+  `lane=github|velnor|both` selector and organization-derived defaults.
 - `crates/velnor-tools/src/main.rs:18` still defaults fixture tooling to
   `donbeave/velnor-actions-fixture`; authoritative fixture is now
   `tailrocks/velnor-actions-fixture`.
@@ -37,6 +40,28 @@ plane inspection. Every later task needs one stable integration corpus.
   hold/fail/cancel phases needed by `logs`, `wait`, lifecycle, queue, and event
   validation. Its current manual input is `lanes`, which conflicts with the
   marked contract's sole selector `lane`.
+
+## Drift reconciliation 2026-08-24
+
+Reconciled at Velnor b57b036 against live repository state:
+
+- The canonical fixture-class generator (`tailrocks/velnor-actions`) at
+  committed state ce23409 already emits the sole `lane` input in all five class
+  templates; that input-name change is committed. Its working tree carries
+  unrelated uncommitted concurrency-isolation work owned outside this campaign;
+  it must not be touched or relied on.
+- Estate-wide selector propagation has partially landed:
+  `ChainArgos/java-monorepo` main carries singular `lane`; `jackin`,
+  `schemalane`, `velnor`, the fixture, and this repository's generated workflow
+  bytes still reference plural `lanes`. That propagation is tracked for later
+  phases and the Follow-up queue.
+- The executable step-3 gate remains exactly as written below and is defined as:
+  generator-emitted bytes applied to Velnor-tui workflows, fixture
+  compat/control-plane aligned to sole `lane`, and live proof. Never a hand
+  fork of `compat.yml`.
+- Fixture pin dc4204c is clean and green (compat main run 32675488430).
+- `plans/README.md` now contains the `velnorctl-migration` category row and
+  already orders Plan 063 first; no index reconciliation is required here.
 
 ## Scope
 
