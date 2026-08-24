@@ -16,17 +16,1183 @@
 #   expiry            = optional review-by date "YYYY-MM-DD"
 #
 # Only entries with review_state = "approved" flow into generated org policy.
-# The entries below are structural seeds only: exact pinned SHAs for the full
-# approved direct-workflow closure are not discoverable offline and MUST be
-# supplied by operator review before any live plan/audit/apply run.
+# Every entry below is review_state = "seed-pending-review": operator approval
+# MUST precede any live plan/audit/apply run.
+#
+# Discovery (2026-08-24): read-only enumeration via `gh api` contents listing of
+# `.github/workflows/*.yml` at each canonical class-map repository's
+# GitHub-reported default branch (all 28 resolved to `refs/heads/main`; no
+# throttle gaps, no fabricated entries). Candidates = workflows containing the
+# plural `lanes:` choice input or calling a pinned `ci-*.yml` / `package-*.yml`
+# reusable from a velnor-actions mirror. Raw evidence:
+# .velnor-compare/2026-08-24-039-snapshots/{workflow-enumeration.tsv,*-groups.json}.
+#
+# NOT covered by this pass (operator follow-up before closure is complete): the
+# velnor-actions mirror repositories themselves — tailrocks/velnor-actions,
+# jackin-project/velnor-actions, ChainArgos/velnor-actions (callables ci-code/
+# ci-native/ci-tap/ci-apt/ci-fixture/package-signer/package-updater observed
+# SHA-pinned from estate callers). Only the pre-existing
+# tailrocks/velnor-actions ci-code.yml seed is present below.
 schema_version = 1
+
+[[entries]]
+owner = "ChainArgos"
+repository = "blockchain-nodes"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "blockchain-nodes"
+workflow_path = ".github/workflows/dco.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "blockchain-nodes"
+workflow_path = ".github/workflows/renovate.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "jackin-agent-brown"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "jackin-agent-brown"
+workflow_path = ".github/workflows/gitleaks-history.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "jackin-agent-brown"
+workflow_path = ".github/workflows/precommit.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "jackin-agent-brown"
+workflow_path = ".github/workflows/publish-image.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "jackin-agent-brown"
+workflow_path = ".github/workflows/renovate.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "java-monorepo"
+workflow_path = ".github/workflows/ansible.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "java-monorepo"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "java-monorepo"
+workflow_path = ".github/workflows/kestra-build-publish.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "java-monorepo"
+workflow_path = ".github/workflows/renovate.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "java-monorepo"
+workflow_path = ".github/workflows/rust-docker.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "homebrew-tap"
+workflow_path = ".github/workflows/cask-validation.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "homebrew-tap"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "homebrew-tap"
+workflow_path = ".github/workflows/package-update.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "homebrew-tap"
+workflow_path = ".github/workflows/reuse-compliance-public-unmerged.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "homebrew-tap"
+workflow_path = ".github/workflows/reuse-compliance.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-agent-smith"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-agent-smith"
+workflow_path = ".github/workflows/gitleaks-history.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-agent-smith"
+workflow_path = ".github/workflows/precommit-public-unmerged.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-agent-smith"
+workflow_path = ".github/workflows/precommit.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-agent-smith"
+workflow_path = ".github/workflows/publish-image.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-agent-smith"
+workflow_path = ".github/workflows/renovate.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-agent-smith"
+workflow_path = ".github/workflows/reuse-compliance-public-unmerged.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-agent-smith"
+workflow_path = ".github/workflows/reuse-compliance.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-dev"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-dev"
+workflow_path = ".github/workflows/reuse-compliance-public-unmerged.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-dev"
+workflow_path = ".github/workflows/reuse-compliance.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-role-action"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-role-action"
+workflow_path = ".github/workflows/renovate.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-role-action"
+workflow_path = ".github/workflows/reuse-compliance-public-unmerged.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-role-action"
+workflow_path = ".github/workflows/reuse-compliance.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-sentinel"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-sentinel"
+workflow_path = ".github/workflows/gitleaks-history.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-sentinel"
+workflow_path = ".github/workflows/precommit-public-unmerged.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-sentinel"
+workflow_path = ".github/workflows/precommit.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-sentinel"
+workflow_path = ".github/workflows/publish-image.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-sentinel"
+workflow_path = ".github/workflows/renovate.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-sentinel"
+workflow_path = ".github/workflows/reuse-compliance-public-unmerged.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-sentinel"
+workflow_path = ".github/workflows/reuse-compliance.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-the-architect"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-the-architect"
+workflow_path = ".github/workflows/gitleaks-history.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-the-architect"
+workflow_path = ".github/workflows/jackin-toolchain.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-the-architect"
+workflow_path = ".github/workflows/precommit-public-unmerged.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-the-architect"
+workflow_path = ".github/workflows/precommit.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-the-architect"
+workflow_path = ".github/workflows/renovate.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-the-architect"
+workflow_path = ".github/workflows/reuse-compliance-public-unmerged.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin-the-architect"
+workflow_path = ".github/workflows/reuse-compliance.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin"
+workflow_path = ".github/workflows/cache-cleanup.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin"
+workflow_path = ".github/workflows/construct-public-unmerged.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin"
+workflow_path = ".github/workflows/construct.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin"
+workflow_path = ".github/workflows/desktop-cadence.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin"
+workflow_path = ".github/workflows/docs-public-unmerged.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin"
+workflow_path = ".github/workflows/docs.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin"
+workflow_path = ".github/workflows/hygiene.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin"
+workflow_path = ".github/workflows/jackin-dev-public-unmerged.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin"
+workflow_path = ".github/workflows/jackin-dev.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin"
+workflow_path = ".github/workflows/preview.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin"
+workflow_path = ".github/workflows/release.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin"
+workflow_path = ".github/workflows/renovate-validate-public-unmerged.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin"
+workflow_path = ".github/workflows/renovate-validate.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin"
+workflow_path = ".github/workflows/renovate.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin"
+workflow_path = ".github/workflows/reuse-compliance-public-unmerged.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "jackin"
+workflow_path = ".github/workflows/reuse-compliance.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "holla-apt"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "holla-apt"
+workflow_path = ".github/workflows/package-update.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "holla-apt"
+workflow_path = ".github/workflows/publish.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "holla-apt"
+workflow_path = ".github/workflows/renovate.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "holla"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "holla"
+workflow_path = ".github/workflows/preview.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "holla"
+workflow_path = ".github/workflows/release-deb.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "holla"
+workflow_path = ".github/workflows/release.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "holla"
+workflow_path = ".github/workflows/renovate.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "homebrew-holla"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "homebrew-holla"
+workflow_path = ".github/workflows/package-update.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "homebrew-holla"
+workflow_path = ".github/workflows/renovate.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "homebrew-holla"
+workflow_path = ".github/workflows/update-preview.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "homebrew-parallax"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "homebrew-parallax"
+workflow_path = ".github/workflows/package-update.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "homebrew-parallax"
+workflow_path = ".github/workflows/update-preview.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "homebrew-ruxel"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "homebrew-tablerock"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "homebrew-tablerock"
+workflow_path = ".github/workflows/package-update.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "homebrew-tablerock"
+workflow_path = ".github/workflows/update-preview.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "parallax-telemetry-playground"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "parallax"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "parallax"
+workflow_path = ".github/workflows/dependency-discovery.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "parallax"
+workflow_path = ".github/workflows/footprint.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "parallax"
+workflow_path = ".github/workflows/preview.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "parallax"
+workflow_path = ".github/workflows/release.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "parallax"
+workflow_path = ".github/workflows/scheduled-measurement.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "parallax"
+workflow_path = ".github/workflows/storage-integration.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "parallax"
+workflow_path = ".github/workflows/upgrade-harness.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "pg-bigdecimal"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "pg-bigdecimal"
+workflow_path = ".github/workflows/release.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "ruxel"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "ruxel"
+workflow_path = ".github/workflows/preview.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "ruxel"
+workflow_path = ".github/workflows/release.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "schemalane"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "schemalane"
+workflow_path = ".github/workflows/release.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "tablerock"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "tablerock"
+workflow_path = ".github/workflows/package-release.yml"
+git_ref = "refs/heads/main"
+admission_reason = "calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "tablerock"
+workflow_path = ".github/workflows/preview.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "tailrocks-skills"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "tailrocks-skills"
+workflow_path = ".github/workflows/docs.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "tailrocks-skills"
+workflow_path = ".github/workflows/refresh-pins.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "tailrocks-skills"
+workflow_path = ".github/workflows/validate-public-unmerged.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "tailrocks-skills"
+workflow_path = ".github/workflows/validate.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "termrock"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "termrock"
+workflow_path = ".github/workflows/docs.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "termrock"
+workflow_path = ".github/workflows/hygiene.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "termrock"
+workflow_path = ".github/workflows/release.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "tracing-request-level"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "tracing-request-level"
+workflow_path = ".github/workflows/release.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/attestation-negative.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
 
 [[entries]]
 owner = "tailrocks"
 repository = "velnor-actions-fixture"
 workflow_path = ".github/workflows/ci.yml"
 git_ref = "refs/heads/main"
-admission_reason = "fixture default-branch CI directly defines Velnor-lane jobs"
+admission_reason = "calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/compat.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/control-plane.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/docker.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/l2-negative.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/l2-provenance.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/l2-runtime.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/multi-arch.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/pages.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/renovate.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/reuse-caller.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/schedule.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
 approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
 review_state = "seed-pending-review"
 
@@ -36,5 +1202,68 @@ repository = "velnor-actions"
 workflow_path = ".github/workflows/ci-code.yml"
 git_ref = "refs/heads/main"
 admission_reason = "shared reusable CI workflow directly defining Velnor jobs for selected consumers"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-apt"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-apt"
+workflow_path = ".github/workflows/package-update.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-apt"
+workflow_path = ".github/workflows/publish.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-apt"
+workflow_path = ".github/workflows/renovate.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor"
+workflow_path = ".github/workflows/release.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on default branch and calls pinned velnor-actions reusable workflows that directly define Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor"
+workflow_path = ".github/workflows/renovate.yml"
+git_ref = "refs/heads/main"
+admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
 approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
 review_state = "seed-pending-review"
