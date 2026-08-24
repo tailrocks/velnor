@@ -21,7 +21,7 @@ Rules for every agent working this list:
 
 Status legend: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[-]` BLOCKED(reason)
 
-Progress: 2 / 94 done.
+Progress: 3 / 94 done.
 
 ## Track A - fleet policy (P0, independent)
 
@@ -54,7 +54,7 @@ Progress: 2 / 94 done.
 - [ ] **C002** - `api-resources` (P2) - [commands/C002-api-resources.md](velnorctl-migration/commands/C002-api-resources.md)
 - [ ] **C003** - `explain` (P2) - [commands/C003-explain.md](velnorctl-migration/commands/C003-explain.md)
 - [ ] **C004** - `completion` (P1) - [commands/C004-completion.md](velnorctl-migration/commands/C004-completion.md)
-- [ ] **C005** - `man` (P2) - [commands/C005-man.md](velnorctl-migration/commands/C005-man.md)
+- [x] **C005** - `man` (P2) - [commands/C005-man.md](velnorctl-migration/commands/C005-man.md)
 - [ ] **C007** - `get instances` (P1) - [commands/C007-get-instances.md](velnorctl-migration/commands/C007-get-instances.md)
 - [ ] **C009** - `get runners` (P1) - [commands/C009-get-runners.md](velnorctl-migration/commands/C009-get-runners.md)
 - [ ] **C010** - `get jobs` (P1) - [commands/C010-get-jobs.md](velnorctl-migration/commands/C010-get-jobs.md)

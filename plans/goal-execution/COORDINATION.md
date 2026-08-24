@@ -40,9 +40,34 @@ prevent exclusive-scope collisions.
 | 065 | Session B | 2026-08-24 ~10:40Z | DONE @8734b4b — reconciling-executor convergence complete (gates 943/943 at landing); verification chain closed 2026-08-24 |
 | 066 | orchestrating ox-alpha (validator session) | 2026-08-24 ~13:30Z | CLAIMED — Track B next-ready leaf; implementation via fresh writer subagent on this branch; other sessions read-only on 066 scope |
 | 065-defect-fix | Session C validator (ox-alpha) | 2026-08-24 ~13:45Z | CLOSED @f06d439 — fail-closed opaque rejection landed; verifier PASS 973/973; reviewer APPROVE-CLOSE; evidence addendum in 065 file |
-| C005-man | Session C validator (ox-alpha) | 2026-08-24 ~14:05Z | IMPLEMENTED+REVIEWED, pushed @b98801e+0630a98 (18/18 command_c005, full check 997/997, verifier PASS, reviewer APPROVE-FLIP findings closed). FIXTURE DISPATCH WINDOW OPENED ~15:20Z: pin `bd4be09375154e891052b5159801f613fa0b4f09`, cancel-clean-dispatch-monitor hygiene, single dispatch, sanitized evidence only. Other sessions: do NOT dispatch fixture runs until this row closes. DONE flip after fixture proof lands |
+| C005-man | Session C validator (ox-alpha) | 2026-08-24 ~14:05Z | DONE — implemented b98801e + review-fixed 0630a98, fixture run 32744695926 success @bd4be09, indexes flipped atomically; dispatch window closed |
+| clap-cli-migration | third-peer session (074-078 pool owner) | 2026-08-24 ~15:45Z | CLAIMED — operator directive: rewrite `crates/velnorctl` CLI on idiomatic stable `clap` derive APIs (PR #286 surface, local branch `velnorctl-clap-migration` off merged main); scope = crates/velnorctl/* + workspace Cargo.toml/Cargo.lock clap deps + its tests; deletes handwritten parser/metadata/man generation in favor of clap/clap_complete/clap_mangen; supersedes temporary 065 parser implementation per operator authority; divergence from landed 065/C005 evidence recorded in this row. Other sessions read-only on velnorctl until CLOSED |
 
 ## Decisions
+
+- **2026-08-24 OPERATOR RULING — leaf 039 removals + probes** (verbatim
+  intent): "Never remove any repositories I listed. We must keep all of them
+  to run on Velnor by default, same as any other repositories we have. Those
+  repositories aren't unique and must follow the same principles."
+  Consequences recorded by ox-alpha session C:
+  1. NO removals: cloudflare-tofu (tailrocks, ChainArgos),
+     ChainArgos/github-terraform, jackin-project/jackin-github-terraform stay
+     selected in `velnor-trusted` groups. The leaf's removal diff is dropped;
+     its STOP was honored (nothing was ever applied).
+  2. The four repos must become FIRST-CLASS estate members ("same
+     principles"): each needs canonical estate-standard workflows so real
+     release-ref closure entries can replace operator mandate. Follow-up
+     program work: extend class map + generator coverage + repo workflows;
+     until then generated policy cannot yet include them via closure alone.
+  3. Ref-shape ruling DEFERRED by operator: no probe dispatches now; live
+     restriction flip stays gated on it.
+  4. Plan 039 therefore remains IN PROGRESS: code/docs/evidence surface DONE
+     (see leaf Evidence block @75a60d0); steps 3–5 (live) await ref-shape
+     ruling + closure path for the four kept repos. Required doc
+     reconciliation (VELNOR_PROJECTS_SETUP class map, roadmap) flagged for
+     the owning sessions before any further live step.
+   5. Foreign `git stash@{0}` ("s-e-verify", holds a velnorctl src snapshot)
+      belongs to another session — nobody drops/pops it blindly.
 
 - **2026-08-24 leaf 039 slice wave 2** (ox-alpha session C): lanes-checker
   alignment `8b8b4b6` (generator-owned plural `lanes` is canonical; audit-ci

@@ -1,38 +1,37 @@
 use std::process::ExitCode;
 
+use clap::Parser;
+use velnor_render::OutputFormat;
+use velnorctl::{Cli, Command, CommandError};
+
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let registry = velnorctl::compose();
-    let outcome = velnorctl::run(&registry, &args);
-    let machine_output = match velnorctl::parse_invocation(&args) {
-        velnorctl::ParseOutcome::Ok(parsed) => parsed.output_format().is_machine(),
-        _ => false,
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let _ = error.print();
+            return ExitCode::from(u8::try_from(error.exit_code()).unwrap_or(2));
+        }
     };
-    report(&outcome, machine_output);
-    ExitCode::from(outcome.exit_code())
+    let machine_output = OutputFormat::from(cli.globals.output).is_machine();
+    let result: Result<(), CommandError> = match cli.command {
+        Command::Man(args) => velnorctl::man::run(&args),
+        Command::Completion(args) => velnorctl::completion::run(&args),
+    };
+    report(result.err().as_ref(), machine_output)
 }
 
-fn report(outcome: &velnorctl::Outcome, machine_output: bool) {
-    match outcome {
-        velnorctl::Outcome::Help(text) | velnorctl::Outcome::Version(text) => print!("{text}"),
-        velnorctl::Outcome::NoCommand(text) | velnorctl::Outcome::Usage(text) => eprint!("{text}"),
-        velnorctl::Outcome::Handled { .. } => {}
-        velnorctl::Outcome::CommandFailed { error, .. } => {
+fn report(error: Option<&CommandError>, machine_output: bool) -> ExitCode {
+    match error {
+        None => ExitCode::SUCCESS,
+        Some(error) => {
             if machine_output {
                 let envelope =
-                    serde_json::to_string(&error.envelope()).unwrap_or_else(|_| "{}".to_owned());
+                    serde_json::to_string(&error.envelope()).unwrap_or_else(|_| "{}".into());
                 eprintln!("{envelope}");
             } else {
                 eprintln!("error: {error}");
             }
+            ExitCode::from(error.exit_code())
         }
-        velnorctl::Outcome::Unimplemented { name } => eprintln!(
-            "error: '{name}' is not implemented by this build of {}",
-            velnorctl::BIN_NAME
-        ),
-        velnorctl::Outcome::LegacyRejected { name } => eprintln!(
-            "error: '{name}' belongs to the legacy velnor-runner binary; {} has no backward-compatible aliases",
-            velnorctl::BIN_NAME
-        ),
     }
 }
