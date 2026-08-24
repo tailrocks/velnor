@@ -97,10 +97,40 @@ they disagree:
 - The fixture checkout (`tailrocks/velnor-actions-fixture`, main at dc4204c)
   is clean and green locally (`mise run check`: actionlint, l2-closure,
   nextest 7/7), satisfying STOP condition #1. Its `compat.yml:10` still
-  consumes plural `lanes`, so the byte-identical rollout required before
+  consumes plural `lanes`,   so the byte-identical rollout required before
   adding the control workflow has not landed. Control-plane creation stays
   stopped per step 3 until both external gaps close; live dispatch evidence
   for step 4 remains gated behind it.
+
+### Execution closeout 2026-08-24 (at Velnor 82b15f5)
+
+**LANED**: docs direction verified at aed09eb; generator sole-lane fix landed in
+`tailrocks/velnor-actions` branch `campaign/sole-lane-package-update` commit
+`7296821` with gates green; fixture PR #90 squash-merged as
+`799178c1b53ddb5d1db5ddfc46d41c6284e1b72b` (control-plane corpus + compat
+sole-lane, all 13 checks green); live compat `lane=both` run `32703106587`
+succeeded on both lanes; control scenarios at fixture main `799178c`:
+success `32703865136`, failure-at-named-step `32704019420`,
+hold-cancelled-no-orphans `32704204228`, concurrent-overlap-20s
+`32704312250`, artifacts-3-distinct `32704438283`, cache cold `32704574052`
+warm `32704719858`, load-teardown `32704848711`. Evidence:
+`.velnor-compare/2026-08-24-control-plane/`.
+
+**UNPROVEN EXACT**: queue isolation — run `32705006580` was cancelled after
+>4 minutes queued; no runner carries label `velnor-cp-queue-validation`; no
+JIT registration was observed; requires an operator-provided dedicated
+validation instance. GitHub-leg control scenarios remain pending (defaults
+dispatched the Velnor lane).
+
+**Deferred reviewer follow-ups** (both diffs APPROVE): explicit
+`CP_CACHE_STATE` marker; org-slug charset check `fleet_policy.rs:196`; audit
+duplicate re-resolution `fleet_policy_client.rs:615`; fixture squash trailer
+formatting; Velnor rendered `${{ steps.controlled-failure.outcome }}`
+literally (expression-parity observation).
+
+**Status**: BLOCKED — queue-isolation proof requires operator-provided
+dedicated validation runner labeled `velnor-cp-queue-validation`; all other
+criteria evidenced.
 
 ## Scope
 
@@ -208,15 +238,15 @@ no orphaned runner registration.
 
 ## Done criteria
 
-- [ ] Direction files and prompt agree on complete `velnor-runner` removal.
-- [ ] Root and `.github` instructions agree on sole `lane` selector, runner
+- [x] Direction files and prompt agree on complete `velnor-runner` removal.
+- [x] Root and `.github` instructions agree on sole `lane` selector, runner
       group/label distinction, and class-derived defaults.
-- [ ] Direction files agree that apt/dpkg exclusively own installed-version
+- [x] Direction files agree that apt/dpkg exclusively own installed-version
       management and no Velnor release command/resource/API remains.
-- [ ] Fixture tooling defaults to `tailrocks/velnor-actions-fixture`.
-- [ ] Control workflow adds coverage without changing existing fixtures.
-- [ ] `rtk mise run check` passes in both repositories.
-- [ ] Fresh fixture run IDs and conclusions are recorded.
+- [x] Fixture tooling defaults to `tailrocks/velnor-actions-fixture`.
+- [x] Control workflow adds coverage without changing existing fixtures.
+- [x] `rtk mise run check` passes in both repositories.
+- [x] Fresh fixture run IDs and conclusions are recorded.
 
 ## STOP conditions
 
