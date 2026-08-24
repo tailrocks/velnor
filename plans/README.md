@@ -19,9 +19,8 @@ Velnor unified CI contract (2026-08-09):
 Current execution follows the marked contract and the tracked active goal graph.
 
 Legacy plans 001–038 and 040–062 are historical and non-executable. Remaining
-stale working files were removed; Git history and `OPERATOR-REPORT.md` preserve
-delivery evidence. Plan 039 was refreshed because exact trusted-workflow
-admission remains unfinished.
+stale working files were removed; Git history preserves delivery evidence. Plan
+039 was refreshed because exact trusted-workflow admission remains unfinished.
 
 ## Current categories
 
@@ -41,7 +40,7 @@ implementation.
 ## Plan-library rules
 
 - Every executable plan belongs to one category directory with its own index.
-- Root contains only this index and historical `OPERATOR-REPORT.md` evidence;
-  orchestration lives in `goal-execution/`.
+- Root contains only this index, the executable [`TASKS.md`](TASKS.md)
+  checkbox mirror, and category directories;
 - Completed or fully superseded plans are removed; Git history is the archive.
 - Category indexes state ownership boundaries so work is not duplicated.
