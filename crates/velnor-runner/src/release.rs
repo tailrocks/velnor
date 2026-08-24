@@ -1087,7 +1087,9 @@ fn activate_command(args: ReleaseActivateArgs) -> Result<()> {
     let architecture = record
         .architecture(host)
         .context("release record lacks host architecture")?;
-    let installed_binary = Path::new("/usr/bin/velnor-runner");
+    // The shipped product binary is `velnorctl` (Plan 079 cutover, #318);
+    // the record's per-arch binary digest binds exactly that artifact.
+    let installed_binary = Path::new("/usr/bin/velnorctl");
     let binary_sha256 = sha256_file(installed_binary)?;
     if binary_sha256 != architecture.binary_sha256 {
         bail!("installed binary digest disagrees with release record");
