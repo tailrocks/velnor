@@ -15,15 +15,20 @@
 - **Depends on**: Plan 065
 - **Category**: architecture, migration
 - **Planned at**: commit `35d5bb7`, 2026-08-24
-- **Progress** (2026-08-25): steps 1–5 implemented on
-  `velnor-estate-standard` — store schema v3 with retention state,
-  sanitized admission persistence wired at the daemon acquisition boundary,
-  idempotent transitions/events emitted from real boundaries, required-write
-  fail-close semantics, bounded retention (age/row/byte budgets,
-  incremental vacuum, WAL accounting), and the Plan 064 dependency-boundary
-  test amended to allow the transitional runner→store edge that Plan 079
-  deletes. Step 6 (fixture hold/cancel proof) runs against the deployed apt
-  build.
+- **Progress** (2026-08-25): DONE. Steps 1–5 shipped through v0.1.186–
+  v0.1.188 (PRs #308, #312): store schema v3, sanitized admission wired at
+  the daemon acquisition boundary as a required fail-close write,
+  idempotent transitions/events from real boundaries, bounded retention
+  (age/row/byte budgets, incremental vacuum, WAL accounting), and the Plan
+  064 boundary test amended for the transitional runner→store edge that
+  Plan 079 deletes. Step 6 fixture proof executed against the deployed
+  v0.1.188 sentry fleet: hold run 32787266979 admitted live into
+  `/var/lib/velnor/state.db` (phase `started` while active), canceled via
+  GitHub mid-hold, terminal row `canceled/cancelled` with the exact
+  transition order acquired→waiting→started→canceled; no secret markers in
+  any page; no orphan registration. Production also surfaced and fixed two
+  defects (summary replay regressing machine phase; skipped waiting edge on
+  immediate capacity reservation).
 
 ## Why this matters
 
