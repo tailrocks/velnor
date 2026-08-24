@@ -38,7 +38,7 @@ baselines.
 
 ## Scheduled Usage
 
-A GitHub-hosted scheduled canary should dispatch or inspect a `lanes=both` run,
+A GitHub-hosted scheduled canary should dispatch or inspect a `lane=both` run,
 then call:
 
 ```bash

@@ -114,7 +114,7 @@ The authenticated operator token now carries `admin:org`, `repo`, and
      --jq '.repositories[].full_name'
    ```
 
-5. Cancel every older active verification run. Dispatch one `lanes=both` run
+5. Cancel every older active verification run. Dispatch one `lane=both` run
    per repository, monitor only its returned id, and require a non-empty runner
    and group assignment within two minutes. Then run `velnor-runner doctor`
    and the warm rerun proof before declaring migration complete.

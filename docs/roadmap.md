@@ -31,6 +31,14 @@ native HTTP transport, zero-copy logs, dynamic slots, org-level JIT), P3b
 Sections below describe standing architecture; the marked contract governs
 unified-CI conflicts.
 
+The current host-socket Docker model is not a lower-trust or Build L3
+isolation boundary. Public unmerged code stays GitHub-hosted. The proposed
+microVM, guest-local Docker, signing, cleanup, cache/network, and disk-safety
+boundary is frozen in [Build L3 boundary
+v1](security/build-l3-boundary-v1.md) with its [versioned threat/control/test
+matrix](security/build-l3-threat-control-test-v1.tsv). Both are design-only
+until Plans 012 and 017 implement and prove them live.
+
 ## velnorctl migration
 
 The `velnorctl` migration replaces every `velnor-runner` product, binary,
@@ -39,14 +47,6 @@ in [`plans/velnorctl-migration/README.md`](../plans/velnorctl-migration/README.m
 and [`plans/velnorctl-migration/commands/README.md`](../plans/velnorctl-migration/commands/README.md);
 Plan 063 lands first. This section intentionally does not duplicate their
 detail.
-
-The current host-socket Docker model is not a lower-trust or Build L3
-isolation boundary. Public unmerged code stays GitHub-hosted. The proposed
-microVM, guest-local Docker, signing, cleanup, cache/network, and disk-safety
-boundary is frozen in [Build L3 boundary
-v1](security/build-l3-boundary-v1.md) with its [versioned threat/control/test
-matrix](security/build-l3-threat-control-test-v1.tsv). Both are design-only
-until Plans 012 and 017 implement and prove them live.
 
 ## Hard Rules
 
