@@ -157,11 +157,18 @@ fn persist_fetch_round_trip_and_idempotent_repersist() {
     let fetched = store.fetch_summary("sentry/main", 42, 1).unwrap();
     assert_eq!(fetched.as_ref(), Some(&first), "decoded DTO is exact");
 
-    // Same identity again: refreshes in place, never duplicates.
+    // Same identity again: refreshes identity/metadata in place, never
+    // duplicates. Lifecycle columns (phase/conclusion/category) are owned
+    // exclusively by the state machine, so replaying a stale admission can
+    // never regress or rewrite them.
     let terminal = completed(&first);
     store.persist_summary(&terminal).unwrap();
     let refetched = store.fetch_summary("sentry/main", 42, 1).unwrap();
-    assert_eq!(refetched.as_ref(), Some(&terminal));
+    assert_eq!(
+        refetched.as_ref(),
+        Some(&first),
+        "lifecycle columns survive replay"
+    );
     assert_eq!(store.job_summaries("sentry/main").unwrap().len(), 1);
 
     // First-seen queue/acquisition times survive the refresh (COALESCE).

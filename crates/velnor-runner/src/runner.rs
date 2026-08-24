@@ -3401,7 +3401,6 @@ async fn handle_job_request(
             let _ = sink;
             Some(format!("summary-run-{run_id}-attempt-{attempt}"))
         });
-        let mut emitted_waiting = false;
         let mut emitted_pressure = false;
         let job_peak_reservation = loop {
             let reserve_result = reserve_job_peak_capacity(config_dir, args);
@@ -3427,19 +3426,6 @@ async fn handle_job_request(
                     break reservation;
                 }
                 crate::capacity::PreExecutionWaitDecision::RetryReserve { sleep } => {
-                    if let (Some(sink), Some(uid), false) =
-                        (&crate::ops::global(), &ops_job_uid, emitted_waiting)
-                    {
-                        sink.transition(
-                            uid,
-                            &format!("t-waiting-{uid}"),
-                            velnor_model::EventReason::JobWaiting,
-                            Some("waiting for host capacity before execution".to_owned()),
-                            None,
-                            None,
-                        );
-                        emitted_waiting = true;
-                    }
                     if let (Some(sink), Some(uid), false) =
                         (&crate::ops::global(), &ops_job_uid, emitted_pressure)
                     {
@@ -3549,6 +3535,17 @@ async fn handle_job_request(
             eprintln!("Best-effort timeline job start update failed: {error:#}");
         }
         if let (Some(sink), Some(uid)) = (&crate::ops::global(), &ops_job_uid) {
+            // The machine path is acquired→waiting→started even when no
+            // capacity wait happened; emit the intermediate edge first so
+            // the started transition is always legal.
+            sink.transition(
+                uid,
+                &format!("t-waiting-{uid}"),
+                velnor_model::EventReason::JobWaiting,
+                Some("reservations acquired".to_owned()),
+                None,
+                None,
+            );
             sink.transition(
                 uid,
                 &format!("t-started-{uid}"),
