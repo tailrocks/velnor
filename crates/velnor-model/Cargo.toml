@@ -8,4 +8,3 @@ description = "Shared versioned model types for the Velnor control plane and ope
 
 [dependencies]
 
-[dev-dependencies]

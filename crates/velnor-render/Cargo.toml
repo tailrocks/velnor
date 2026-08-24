@@ -9,4 +9,3 @@ description = "Output renderers for Velnor operator surfaces"
 [dependencies]
 velnor-model = { path = "../velnor-model", version = "0.1.0" }
 
-[dev-dependencies]

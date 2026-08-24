@@ -62,7 +62,7 @@ Command granularity is normative:
 | Plan | Title | Priority | Effort | Depends on | Status |
 |---|---|---:|---:|---|---|
 | [063](063-record-direction-and-fixture-contract.md) | Record direction and fixture control contract | P1 | M | — | DONE |
-| [064](064-scaffold-workspace-and-cli.md) | Scaffold workspace and CLI seams | P1 | L | 063 | TODO |
+| [064](064-scaffold-workspace-and-cli.md) | Scaffold workspace and CLI seams | P1 | L | 063 | DONE |
 | [065](065-resource-model-rendering-cli-conventions.md) | Define resources, rendering, and global conventions | P1 | L | 064 | TODO |
 | [066](066-operational-history-and-events.md) | Persist sanitized operational history and events | P1 | L | 065 | TODO |
 | [067](067-unix-control-api.md) | Serve versioned Unix-socket control API | P1 | L | 066 | TODO |

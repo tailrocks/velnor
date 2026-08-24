@@ -9,4 +9,3 @@ description = "Daemon-side control-plane application services for Velnor"
 [dependencies]
 velnor-model = { path = "../velnor-model", version = "0.1.0" }
 
-[dev-dependencies]

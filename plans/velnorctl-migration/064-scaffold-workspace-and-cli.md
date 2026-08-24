@@ -154,8 +154,23 @@ Provenance notes:
   are all resolved in `5ab7479` per
   `.velnor-compare/2026-08-24-064-seam-review/feedback-to-twin.md`; the
   residual empty `[dev-dependencies]` header was removed in `7a63d72`.
-- Executor run id 32714016121 was untraceable in the tree and is superseded
-  by the `summary.md` evidence above.
+- Executor run id 32714016121 was untraceable in the tree and is superseded by
+  the `summary.md` evidence above.
+
+### Execution evidence 2026-08-24 @ 5ab7479 (+nit/closeout commit)
+
+- Gates: `mise run test-focused -- -p velnorctl -p velnor-client -p
+  velnor-model -p velnor-control -p velnor-render` exit 0 (23/23); `mise run
+  check` exit 0 (877/877 pre-nit baseline). Nits re-verified with both gates
+  exit 0.
+- Fixture: fresh `control-plane` run 32714994603 success in 28s through the
+  unchanged old daemon; no execution or conclusion change.
+- Verification: PASS (gates green, criteria mapped). Review: APPROVE
+  (`dependency_boundaries.rs:189-200` direction pin deliberate, left as is).
+- Message correction: commit `fb4fdbc` claims `velnorctl` depends on the
+  `velnor-runner` facade; the facade was extracted but never consumed. The
+  dependency exists only in the migration-scaffold allowance, and no code path
+  uses it. This note supersedes that message text.
 
 ## STOP conditions
 

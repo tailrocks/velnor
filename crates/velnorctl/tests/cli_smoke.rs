@@ -3,7 +3,7 @@
 
 use std::process::Command;
 
-use velnorctl::{self, Outcome};
+use velnorctl::Outcome;
 
 fn dispatch_exit(args: &[&str]) -> (Outcome, u8) {
     let argv: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
