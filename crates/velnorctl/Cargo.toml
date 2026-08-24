@@ -1,0 +1,23 @@
+[package]
+name = "velnorctl"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Velnor operator CLI"
+
+[lib]
+name = "velnorctl"
+path = "src/lib.rs"
+
+[[bin]]
+name = "velnorctl"
+path = "src/main.rs"
+
+[dependencies]
+velnor-model = { path = "../velnor-model", version = "0.1.0" }
+velnor-control = { path = "../velnor-control", version = "0.1.0" }
+velnor-client = { path = "../velnor-client", version = "0.1.0" }
+velnor-render = { path = "../velnor-render", version = "0.1.0" }
+
+[dev-dependencies]

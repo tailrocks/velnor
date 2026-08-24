@@ -1,5 +1,13 @@
 [workspace]
-members = ["crates/velnor-runner", "crates/velnor-tools"]
+members = [
+  "crates/velnor-model",
+  "crates/velnor-control",
+  "crates/velnor-client",
+  "crates/velnor-render",
+  "crates/velnorctl",
+  "crates/velnor-runner",
+  "crates/velnor-tools",
+]
 resolver = "2"
 
 [workspace.package]
