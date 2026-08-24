@@ -102,7 +102,7 @@ fn cli_c005_directory_mode_writes_a_complete_deterministic_0644_page_set() {
             "remove.1",
             "status.1",
             "storage.1",
-            "velnorctl.1"
+            "velnorctl.1",
         ]
     );
 

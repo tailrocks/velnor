@@ -1,26 +1,26 @@
 [package]
 name = "velnor-runner"
-version = "0.1.188"
+version = "0.1.189"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Velnor self-hosted GitHub Actions runner daemon"
 
-[[bin]]
-name = "velnor-runner"
-path = "src/main.rs"
+# No [[bin]]: the crate is a pure runtime library. `/usr/bin/velnorctl` (the
+# velnorctl command center) is the single product binary and executes the
+# daemon, doctor, and release hooks through this library — the Velnor CLI
+# lives only in velnorctl.
 
-# Debian packaging (cargo-deb). 
+# Debian packaging (cargo-deb).
 # The unified release.yml (on tag) handles:
 #   cargo zigbuild --release --locked --target $TGT
 #   cargo deb -p velnor-runner --target $TGT --no-build --deb-version "$VERSION"
 # This produces target/<triple>/debian/velnor-runner_<ver>_<arch>.deb .
 #
-# NOTE: an explicit `assets` list REPLACES cargo-deb's implicit defaults
-# (including the [[bin]] itself) in current cargo-deb, so the binary MUST be
-# listed below — the 0.1.2 deb shipped without /usr/bin/velnor-runner exactly
-# because it was missing. cargo-deb rewrites target/release/... to
-# target/<triple>/release/... when --target is passed.
+# NOTE: an explicit `assets` list REPLACES cargo-deb's implicit defaults in
+# current cargo-deb, so every shipped file MUST be listed below. cargo-deb
+# rewrites target/release/... to target/<triple>/release/... when --target is
+# passed.
 [package.metadata.deb]
 maintainer = "Alexey Zhokhov <alexey@zhokhov.com>"
 copyright = "2026, Tailrocks"
@@ -41,12 +41,7 @@ depends = "libc6 (>= 2.34), libgcc-s1, git, curl, ca-certificates, docker.io | d
 conf-files = ["/etc/velnor/velnor.env"]
 maintainer-scripts = "debian/"
 assets = [
-  ["target/release/velnor-runner", "usr/bin/velnor-runner", "755"],
-  # Transitional (velnorctl-migration): ship the velnorctl operator CLI inside
-  # the interim velnor-runner package so apt upgrades expose /usr/bin/velnorctl
-  # before the Plan 079 package rename; Plan 076 owns the dedicated velnorctl
-  # package metadata. The release workflow builds -p velnorctl together with
-  # -p velnor-runner.
+  # The single product binary: the velnorctl command center (Plan 064/079).
   ["target/release/velnorctl", "usr/bin/velnorctl", "755"],
   ["debian/velnor-daemon.service", "lib/systemd/system/velnor-daemon.service", "644"],
   ["debian/velnor-daemon@.service", "lib/systemd/system/velnor-daemon@.service", "644"],
@@ -77,7 +72,6 @@ velnor-control = { path = "../velnor-control", version = "0.1.0" }
 velnor-model = { path = "../velnor-model", version = "0.1.0" }
 aho-corasick = "1.1.4"
 base64.workspace = true
-clap.workspace = true
 jsonwebtoken.workspace = true
 reqwest.workspace = true
 rayon.workspace = true

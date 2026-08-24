@@ -40,7 +40,8 @@ Own repository, hosted on GitHub (GitHub Pages), built + signed in CI on tag.
      cargo-binstall/QuickInstall artifact; CI fails instead of compiling it.
    - `cargo deb -p velnor-runner --target $TGT --no-build --deb-version "$VERSION"`
    Produces `velnor-runner_<version>_<arch>.deb` (amd64 + arm64).
-   - Package contents: binary → `/usr/bin/velnor-runner`; systemd units →
+   - Package contents: single product binary → `/usr/bin/velnorctl` (the
+     velnorctl command center; the velnor-runner crate is a lib-only runtime); systemd units →
      `/usr/lib/systemd/system/velnor-daemon.service` and
      `velnor-daemon@.service`; default config → `/etc/velnor/velnor.env`;
      operator-owned tokens → `/etc/velnor/secrets.env` or

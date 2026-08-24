@@ -11,11 +11,11 @@
 # exact rollback predecessor until the operator activates the new record.
 # ExecStartPre fails closed on that temporary mismatch, so no daemon can start.
 # Activation, image acquisition, and restart
-# are a separate, explicit `velnor-runner release activate` step run by the
+# are a separate, explicit `velnorctl release activate` step run by the
 # deployment flow, never here.
 set -e
 
-BIN=/usr/bin/velnor-runner
+BIN=/usr/bin/velnorctl
 SHARE=/usr/share/velnor
 RELEASE_DIR=/var/lib/velnor/release
 ACTIVE_DIR=$RELEASE_DIR/active
@@ -81,10 +81,10 @@ case "$1" in
       # default daemon/doctor or invent doctors for inactive template instances.
     fi
 
-    echo "velnor-runner installed. NOTE: this package never restarts the fleet."
+    echo "velnorctl (velnor-runner package) installed. NOTE: this package never restarts the fleet."
     echo "Configure /etc/velnor/secrets.env (0600) + /etc/velnor/velnor.env, then"
     echo "activate a coherent release and start:"
-    echo "  sudo velnor-runner release activate --record <release-record.json>"
+    echo "  sudo velnorctl release activate --record <release-record.json>"
     echo "  sudo systemctl enable --now velnor-daemon@<name>  # operator-selected instance"
     ;;
 esac

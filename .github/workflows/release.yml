@@ -172,8 +172,8 @@ jobs:
         id: export
         run: |
           set -euo pipefail
-          cargo build -q -p velnor-runner --release --locked --features release-build
-          runner=target/release/velnor-runner
+          cargo build -q -p velnorctl --release --locked --features release-build
+          runner=target/release/velnorctl
           "$runner" release export > build-identity.json
           "$runner" capabilities export > manifest.json
           sha256="$(sha256sum manifest.json | awk '{print $1}')"
@@ -367,8 +367,6 @@ jobs:
           cargo-deb --version
 
       - name: Build (release-build embeds source SHA + tag; fails on drift)
-        # velnorctl ships transitionally inside the deb until the Plan 079
-        # package rename; release-build features stay runner-only.
         run: cargo zigbuild -p velnor-runner -p velnorctl --release --locked --features release-build --target ${{ matrix.target }}
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -379,11 +377,14 @@ jobs:
       - name: Package tar + independent hash
         run: |
           set -euo pipefail
+          # Artifact NAMES keep the velnor-runner prefix until the Plan 079
+          # package rename (downstream apt verify + evidence reference them);
+          # the bound BINARY is the shipped product: /usr/bin/velnorctl.
           archive="velnor-runner-${VERSION}-${{ matrix.arch }}.tar.gz"
-          tar -czf "$archive" -C "target/${{ matrix.target }}/release" velnor-runner
+          tar -czf "$archive" -C "target/${{ matrix.target }}/release" velnorctl
           sha256sum "$archive" | awk '{print $1}' > "$archive.sha256"
           # Independent digest of the raw binary (the record's per-arch binary id).
-          sha256sum "target/${{ matrix.target }}/release/velnor-runner" | awk '{print $1}' > "velnor-runner-${{ matrix.arch }}.bin.sha256"
+          sha256sum "target/${{ matrix.target }}/release/velnorctl" | awk '{print $1}' > "velnor-runner-${{ matrix.arch }}.bin.sha256"
 
       - name: Stage acyclic identity files packaged into the deb
         run: |
@@ -416,8 +417,8 @@ jobs:
           [ "$(dpkg-deb -f "$src" Architecture)" = "$expected_arch" ] || { echo "::error::deb arch != $expected_arch" >&2; exit 1; }
           manifest="$(mktemp)"
           dpkg-deb -c "$src" > "$manifest"
-          grep -q "usr/bin/velnor-runner" "$manifest" || { echo "::error::deb missing usr/bin/velnor-runner" >&2; exit 1; }
           grep -q "usr/bin/velnorctl" "$manifest" || { echo "::error::deb missing usr/bin/velnorctl" >&2; exit 1; }
+          grep -q "usr/bin/velnor-runner" "$manifest" && { echo "::error::deb still ships the deleted velnor-runner binary" >&2; exit 1; } || true
           grep -q "usr/share/velnor/job-ubuntu.Dockerfile" "$manifest" || { echo "::error::deb missing canonical Dockerfile" >&2; exit 1; }
           [ "$(stat -c%s "$src")" -gt 1000000 ] || { echo "::error::deb suspiciously small: $(stat -c%s "$src") bytes" >&2; exit 1; }
           dst="velnor-runner-${VERSION}-${{ matrix.arch }}.deb"

@@ -15,20 +15,27 @@ name = "velnorctl"
 path = "src/main.rs"
 
 [dependencies]
-anyhow.workspace = true
 clap = { workspace = true }
 clap_complete = { workspace = true }
 clap_mangen = { workspace = true }
+anyhow.workspace = true
 serde_json = { workspace = true }
 tokio = { workspace = true }
-# Interim facade (Plan 064 dependency law): the operator CLI owns every
-# command surface while the legacy runtime keeps executing the handlers.
-# Removed together with the velnor-runner cutover in Plan 079.
-velnor-runner = { path = "../velnor-runner" }
 velnor-model = { path = "../velnor-model", version = "0.1.0" }
 velnor-control = { path = "../velnor-control", version = "0.1.0" }
 velnor-client = { path = "../velnor-client", version = "0.1.0" }
 velnor-render = { path = "../velnor-render", version = "0.1.0" }
+# Interim execution facade (Plan 064 dependency law): the operator CLI owns
+# every command surface while the legacy runtime library executes the
+# handlers. Removed together with the velnor-runner crate cutover in Plan 079.
+velnor-runner = { path = "../velnor-runner" }
+
+[features]
+default = []
+# Forward release identity embedding to the runtime library so `velnorctl
+# release export` / `capabilities export` carry the same coherent build
+# identity that deb packaging and postinst verify.
+release-build = ["velnor-runner/release-build"]
 
 [dev-dependencies]
 sha2 = { workspace = true }

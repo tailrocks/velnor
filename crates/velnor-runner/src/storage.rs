@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Context, Result};
 
-use crate::cli::{StorageArgs, StorageCommand};
+use crate::args::{StorageArgs, StorageCommand};
 
 pub fn run(args: StorageArgs) -> Result<()> {
     let layout = match StorageLayout::resolve() {
