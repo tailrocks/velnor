@@ -19,6 +19,7 @@ use velnor_model::{ExitClass, Timestamp};
 pub mod error;
 pub mod migrations;
 pub mod records;
+pub mod retention;
 
 pub use error::{StoreError, StoreResult};
 pub use migrations::LATEST_SCHEMA_VERSION;
@@ -26,6 +27,7 @@ pub use records::{
     EventRow, InstanceRow, JobRow, JobSummary, ReconciliationRow, RunnerRegistrationRow, SlotRow,
     Transition,
 };
+pub use retention::{PrunePhase, PruneReport, RetentionBudget, StoreAccounting};
 
 /// Default operational database location; created only by deployment, never
 /// implicitly by the daemon when its parent directory is absent.
@@ -169,6 +171,15 @@ pub(crate) fn rfc3339(timestamp: Timestamp) -> String {
 
 fn configure_connection(conn: &Connection) -> StoreResult<()> {
     conn.busy_timeout(BUSY_TIMEOUT)?;
+    // Incremental auto-vacuum lets bounded retention actually release pages
+    // after pruning (`PRAGMA incremental_vacuum` post-prune). The pragma only
+    // takes effect for a database created or VACUUMed afterwards; existing
+    // databases keep their mode until such a VACUUM, which is safe.
+    // Values: 0 = none, 1 = full, 2 = incremental.
+    let auto_vacuum: i64 = conn.query_row("PRAGMA auto_vacuum", [], |row| row.get(0))?;
+    if auto_vacuum != 2 {
+        conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;
+    }
     let wal: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
     if !wal.eq_ignore_ascii_case("wal") {
         return Err(

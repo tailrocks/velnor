@@ -3385,6 +3385,7 @@ name = "velnor-control"
 version = "0.1.0"
 dependencies = [
  "rusqlite",
+ "time",
  "velnor-model",
 ]
 
@@ -3420,6 +3421,7 @@ dependencies = [
  "futures-util",
  "globset",
  "jsonwebtoken",
+ "libc",
  "noyalib",
  "opentelemetry",
  "opentelemetry-otlp",
@@ -3443,6 +3445,8 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "velnor-control",
+ "velnor-model",
  "wiremock",
  "zip",
 ]

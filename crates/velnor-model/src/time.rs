@@ -28,6 +28,17 @@ impl Timestamp {
         self.0
     }
 
+    /// This instant minus `age`.
+    ///
+    /// Retention cutoffs use this instead of SQL string arithmetic so
+    /// comparisons happen on parsed instants, never lexicographically.
+    #[must_use]
+    pub fn minus(&self, age: Duration) -> Self {
+        let shifted =
+            self.0 - time::Duration::seconds(i64::try_from(age.as_secs()).unwrap_or(i64::MAX));
+        Self(shifted)
+    }
+
     /// Parse an RFC 3339 string; anything else is rejected.
     pub fn parse(raw: &str) -> Result<Self, InvalidTimestamp> {
         OffsetDateTime::parse(raw, &Rfc3339)

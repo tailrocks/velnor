@@ -198,7 +198,7 @@ fn crate_dependency_direction_matches_plan_064() {
             "velnorctl -> {required}"
         );
     }
-    for legacy in ["velnor-runner", "velnor-tools"] {
+    for legacy in ["velnor-tools"] {
         for new_crate in [
             "velnor-model",
             "velnor-control",
@@ -211,6 +211,17 @@ fn crate_dependency_direction_matches_plan_064() {
             );
         }
     }
+    // Transitional Plan 066 amendment: the legacy runner feeds the durable
+    // operational store directly at its lifecycle boundaries until Plan 079
+    // deletes the crate; after the cutover this allowance dies with it.
+    assert!(
+        graph["velnor-runner"].iter().any(|d| d == "velnor-model"),
+        "runner reads shared model types"
+    );
+    assert!(
+        graph["velnor-runner"].iter().any(|d| d == "velnor-control"),
+        "runner persists sanitized lifecycle state through the store"
+    );
 }
 
 #[test]
