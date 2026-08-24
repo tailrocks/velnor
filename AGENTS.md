@@ -95,6 +95,14 @@ The same law covers the estate workflow surface
 stable action majors SHA-pinned with Renovate active, latest tool/toolchain
 versions via mise, no deprecated workflow commands or superseded inputs.
 
+## HARD RULE: Modern-first gate — never degrade silently
+
+Every change must be the modern approach: fastest path plus a better product
+with more features. Never apply a change that contradicts this — above all any
+performance degradation — without first asking the operator explicitly:
+"this makes it worse, not better — are you sure?" Prefer arguing with reasons
+over blind compliance; apply only after explicit confirmation.
+
 ## HARD RULE: Use actions/runner as the source of truth for protocol behavior
 
 When implementing or debugging any GitHub Actions runner protocol feature — job message parsing, broker messages, expression evaluation, credential handling, run-service, timeline, etc. — **always consult the official runner source first**:
@@ -164,6 +172,11 @@ Whenever a discussion or change affects the **vision, plan, or roadmap**:
 Never let a prompt, README, or doc describe a direction that the current vision/plan/roadmap no longer holds. If the prompt and `docs/` disagree, `docs/` wins — fix the prompt.
 
 ### Direction change log
+
+- 2026-08-25: **Modern-first gate added** (operator): every change must be the
+  modern approach — fastest path, better product, more features; any
+  contradicting change (performance degradation first) requires explicit
+  operator confirmation before applying. Recorded as HARD RULE above.
 
 - 2026-08-24: **Plural `lanes` selector restored as canonical** (operator
   ruling, same day): the estate dispatch selector is exactly the plural
