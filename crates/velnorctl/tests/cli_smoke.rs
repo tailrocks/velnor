@@ -65,6 +65,21 @@ fn unimplemented_future_commands_fail_without_placeholder_success() {
 }
 
 #[test]
+fn success_invocations_write_nothing_to_stderr() {
+    let bin = env!("CARGO_BIN_EXE_velnorctl");
+
+    for args in [&["--help"][..], &["-h"][..], &["--version"][..]] {
+        let run = Command::new(bin).args(args).output().unwrap();
+        assert_eq!(run.status.code(), Some(0), "{args:?} should succeed");
+        assert!(
+            run.stderr.is_empty(),
+            "{args:?} wrote to stderr: {:?}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+}
+
+#[test]
 fn binary_smoke_help_success_and_rejections_over_subprocess() {
     let bin = env!("CARGO_BIN_EXE_velnorctl");
 

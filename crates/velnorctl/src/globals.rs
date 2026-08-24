@@ -130,7 +130,6 @@ pub fn parse_invocation(argv: &[String]) -> ParseOutcome {
     let mut index = 0;
 
     while index < argv.len() {
-        eprintln!("DBG top index={index} tok={:?}", argv.get(index));
         let token = argv[index].clone();
         index += 1;
 
