@@ -285,3 +285,68 @@ fn reopen_after_prune_stays_consistent_and_schema_current() {
     let accounting = reopened.accounting().unwrap();
     assert!(accounting.last_prune_at.is_some());
 }
+
+#[test]
+fn summary_replay_never_regresses_machine_phase() {
+    use velnor_control::store::Transition;
+    use velnor_model::{
+        EventReason, JobSummary as ModelJobSummary, NormalizedJob, RepositoryRef, Slug, Timestamp,
+        TriggerEvent,
+    };
+    let temp = TempDb::new("replay-phase");
+    let store = Store::open(&temp.path).unwrap();
+
+    let summary = |phase: velnor_model::JobPhase| {
+        ModelJobSummary::from_normalized(NormalizedJob {
+            instance_slug: "rp".to_owned(),
+            job_uid: "summary-run-77-attempt-1".to_owned(),
+            repository: RepositoryRef::new("tailrocks", "velnor-actions-fixture"),
+            workflow: "control-plane".to_owned(),
+            job_name: "hold".to_owned(),
+            run_id: Some(77),
+            attempt: Some(1),
+            head_ref: None,
+            head_sha: None,
+            trigger_event: Some(TriggerEvent::WorkflowDispatch),
+            queued_at: None,
+            acquired_at: Some(Timestamp::now()),
+            runner_name: Some("fixture-runner-0".to_owned()),
+            trust_scope: Some("trusted".to_owned()),
+            resource_policy: None,
+            phase,
+            conclusion: None,
+            infrastructure_category: None,
+        })
+        .unwrap()
+    };
+
+    // Admission (queued), then the machine advances to acquired.
+    store
+        .persist_summary(&summary(velnor_model::JobPhase::Queued))
+        .unwrap();
+    let uid = "summary-run-77-attempt-1";
+    let correlation = Slug::validate("correlation_id", "corr-t-acquired").unwrap();
+    store
+        .record_job_transition(
+            "rp",
+            uid,
+            &Transition {
+                token: "t-acquired".to_owned(),
+                correlation_id: correlation,
+                reason: EventReason::JobAcquired,
+                message: None,
+                transition_time: Timestamp::now(),
+                conclusion: None,
+                infrastructure_category: None,
+            },
+        )
+        .unwrap();
+
+    // Duplicate delivery replays the admission summary; the machine state
+    // must survive untouched instead of regressing to queued.
+    store
+        .persist_summary(&summary(velnor_model::JobPhase::Queued))
+        .unwrap();
+    let stored = store.fetch_summary("rp", 77, 1).unwrap().unwrap();
+    assert_eq!(stored.phase(), velnor_model::JobPhase::Running);
+}

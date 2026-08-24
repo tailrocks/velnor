@@ -295,6 +295,11 @@ impl Store {
     /// `(instance_slug, run_id, attempt)` so replaying the same identity
     /// refreshes the row instead of duplicating it.
     ///
+    /// The upsert deliberately never touches `phase`, `conclusion`, or
+    /// `infrastructure_category`: those columns belong exclusively to the
+    /// enforced state machine, so a duplicate delivery replaying the
+    /// admission summary can never regress a job that already advanced.
+    ///
     /// The runner keeps its private in-flight record (`in-flight-job.json`,
     /// which holds the run-service URL and billing owner) until
     /// reconciliation has switched over to this summary path; that file stays
@@ -321,8 +326,8 @@ impl Store {
                                trust_scope, resource_policy, phase, conclusion, infrastructure_category, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
              ON CONFLICT (instance_slug, run_id, attempt)
-               WHERE run_id IS NOT NULL AND attempt IS NOT NULL
-             DO UPDATE SET
+                WHERE run_id IS NOT NULL AND attempt IS NOT NULL
+              DO UPDATE SET
                 job_uid = excluded.job_uid,
                 repository = excluded.repository,
                 workflow = excluded.workflow,
@@ -335,9 +340,6 @@ impl Store {
                 runner_name = excluded.runner_name,
                 trust_scope = excluded.trust_scope,
                 resource_policy = excluded.resource_policy,
-                phase = excluded.phase,
-                conclusion = excluded.conclusion,
-                infrastructure_category = excluded.infrastructure_category,
                 updated_at = excluded.updated_at",
             params![
                 summary.instance_slug(),
