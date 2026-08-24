@@ -45,19 +45,27 @@ impl fmt::Display for RepositoryRef {
 /// endpoint URL with embedded credentials can never be serialized.
 /// Deserialization applies the same projection and fails closed: wire input
 /// that cannot be parsed into a sanitizable URL is rejected rather than
-/// stored verbatim.
+/// stored verbatim. Opaque (`cannot-be-a-base`) schemes such as `mailto:`
+/// have no authority to strip credentials from, so they are also rejected:
+/// storing them would echo wire input verbatim inside a redaction type.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String")]
 pub struct SanitizedUrl(String);
 
 /// Strip userinfo from a parsed URL.
 ///
-/// Fails when parsing fails entirely; callers decide whether that degrades
-/// or propagates.
+/// Fails when parsing fails entirely or the URL is opaque
+/// (`cannot-be-a-base`): such URLs carry no authority, so credentials in
+/// them cannot be stripped and the input is rejected rather than degraded.
 fn sanitize(raw: &str) -> Result<String, url::ParseError> {
     let mut parsed = url::Url::parse(raw)?;
-    let _ = parsed.set_username("");
-    let _ = parsed.set_password(None);
+    if parsed.cannot_be_a_base() {
+        return Err(url::ParseError::SetHostOnCannotBeABaseUrl);
+    }
+    parsed
+        .set_username("")
+        .and_then(|()| parsed.set_password(None))
+        .map_err(|_| url::ParseError::SetHostOnCannotBeABaseUrl)?;
     Ok(parsed.to_string())
 }
 
@@ -72,8 +80,9 @@ impl TryFrom<String> for SanitizedUrl {
 impl SanitizedUrl {
     /// Project `raw` down to its scheme + host (+ port/path) form.
     ///
-    /// Any userinfo segment is removed; if parsing fails entirely the value
-    /// degrades to the empty string rather than echoing unvetted input.
+    /// Any userinfo segment is removed; if parsing fails or the URL is
+    /// opaque (`cannot-be-a-base`) the value degrades to the empty string
+    /// rather than echoing unvetted input.
     #[must_use]
     pub fn project(raw: &str) -> Self {
         Self(sanitize(raw).unwrap_or_default())
@@ -172,6 +181,33 @@ mod tests {
     #[test]
     fn deserialization_fails_closed_on_unparseable_url() {
         assert!(serde_json::from_str::<SanitizedUrl>(r#""not a url at all""#).is_err());
+    }
+
+    #[test]
+    fn sanitize_rejects_credential_bearing_opaque_url() {
+        assert!(sanitize("mailto:octocat:ghp_supersecret@example.com").is_err());
+    }
+
+    #[test]
+    fn sanitize_rejects_every_opaque_url_even_without_credentials() {
+        assert!(sanitize("mailto:octocat@example.com").is_err());
+        assert!(sanitize("urn:isbn:0451450523").is_err());
+    }
+
+    #[test]
+    fn project_degrades_opaque_url_to_empty_instead_of_echoing_it() {
+        assert_eq!(
+            SanitizedUrl::project("mailto:octocat:ghp_supersecret@example.com").as_str(),
+            ""
+        );
+    }
+
+    #[test]
+    fn deserialization_rejects_opaque_url_without_storing_the_token() {
+        let raw = r#""mailto:octocat:ghp_supersecret@example.com""#;
+        let outcome = serde_json::from_str::<SanitizedUrl>(raw);
+        assert!(outcome.is_err());
+        assert!(!format!("{outcome:?}").contains("ghp_supersecret"));
     }
 
     #[test]
