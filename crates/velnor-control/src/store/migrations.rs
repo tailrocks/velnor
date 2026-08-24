@@ -9,7 +9,7 @@ use super::error::{StoreError, StoreResult};
 use super::rfc3339;
 
 /// Current schema version every fresh or reopened database converges to.
-pub const LATEST_SCHEMA_VERSION: u32 = 1;
+pub const LATEST_SCHEMA_VERSION: u32 = 2;
 
 /// Lease after which an abandoned migration lock is considered stale.
 pub(crate) const LOCK_LEASE: Duration = Duration::from_secs(15);
@@ -109,12 +109,27 @@ CREATE TABLE IF NOT EXISTS reconciliations (
 CREATE INDEX IF NOT EXISTS idx_events_subject ON events (instance_slug, subject, id);
 ";
 
+/// Summary upserts are idempotent by `(instance_slug, run_id, attempt)`;
+/// the partial index leaves pre-identity rows (NULL run/attempt) untouched.
+const SCHEMA_V2: &str = "
+CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_instance_run_attempt
+ON jobs (instance_slug, run_id, attempt)
+WHERE run_id IS NOT NULL AND attempt IS NOT NULL;
+";
+
 /// Every migration in order; appending is the only allowed change.
-pub static MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "operational-store-baseline",
-    sql: SCHEMA_V1,
-}];
+pub static MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "operational-store-baseline",
+        sql: SCHEMA_V1,
+    },
+    Migration {
+        version: 2,
+        name: "jobs-summary-run-attempt-identity",
+        sql: SCHEMA_V2,
+    },
+];
 
 const META_TABLES_SQL: &str = "
 CREATE TABLE IF NOT EXISTS schema_version (

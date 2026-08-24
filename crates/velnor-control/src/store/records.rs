@@ -5,7 +5,10 @@
 //! update or delete helper exists for them.
 
 use rusqlite::params;
-use velnor_model::{ExitClass, Timestamp};
+use velnor_model::{
+    ExitClass, InfrastructureCategory, InvalidJobSummaryField, JobConclusion, JobPhase,
+    JobSummary as ModelJobSummary, NormalizedJob, RepositoryRef, Timestamp, TriggerEvent,
+};
 
 use super::error::{StoreError, StoreResult};
 use super::rfc3339;
@@ -280,6 +283,107 @@ impl Store {
         Ok(())
     }
 
+    /// Persist one sanitized [`ModelJobSummary`], upserting by
+    /// `(instance_slug, run_id, attempt)` so replaying the same identity
+    /// refreshes the row instead of duplicating it.
+    ///
+    /// The runner keeps its private in-flight record (`in-flight-job.json`,
+    /// which holds the run-service URL and billing owner) until
+    /// reconciliation has switched over to this summary path; that file stays
+    /// runner-local and neither of those fields exists on the sanitized DTO,
+    /// so they can never enter this table.
+    ///
+    /// # Errors
+    /// `store.job.summary.unidentified` when the summary lacks a run ID or
+    /// attempt (the idempotency key would be undefined); other persistence
+    /// failures are envelope-classified.
+    pub fn persist_summary(&self, summary: &ModelJobSummary) -> StoreResult<()> {
+        let Some(run_id) = summary.run_id() else {
+            return Err(unidentified_summary());
+        };
+        let Some(attempt) = summary.attempt() else {
+            return Err(unidentified_summary());
+        };
+        let run_id = i64::try_from(run_id).map_err(|_| summary_out_of_range("run_id"))?;
+        let job_uid = format!("summary-run-{run_id}-attempt-{attempt}");
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO jobs (instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
+                               head_ref, head_sha, trigger_event, queued_at, acquired_at, runner_name,
+                               trust_scope, resource_policy, phase, conclusion, infrastructure_category, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+             ON CONFLICT (instance_slug, run_id, attempt)
+               WHERE run_id IS NOT NULL AND attempt IS NOT NULL
+             DO UPDATE SET
+                job_uid = excluded.job_uid,
+                repository = excluded.repository,
+                workflow = excluded.workflow,
+                job_name = excluded.job_name,
+                head_ref = excluded.head_ref,
+                head_sha = excluded.head_sha,
+                trigger_event = excluded.trigger_event,
+                queued_at = COALESCE(jobs.queued_at, excluded.queued_at),
+                acquired_at = COALESCE(jobs.acquired_at, excluded.acquired_at),
+                runner_name = excluded.runner_name,
+                trust_scope = excluded.trust_scope,
+                resource_policy = excluded.resource_policy,
+                phase = excluded.phase,
+                conclusion = excluded.conclusion,
+                infrastructure_category = excluded.infrastructure_category,
+                updated_at = excluded.updated_at",
+            params![
+                summary.instance_slug(),
+                job_uid,
+                summary.repository().full_name(),
+                summary.workflow(),
+                summary.job_name(),
+                run_id,
+                i64::from(attempt),
+                summary.head_ref(),
+                summary.head_sha(),
+                summary.trigger_event().map(TriggerEvent::as_str),
+                summary.queued_at().map(rfc3339),
+                summary.acquired_at().map(rfc3339),
+                summary.runner_name(),
+                summary.trust_scope(),
+                summary.resource_policy(),
+                summary.phase().as_str(),
+                summary.conclusion().map(JobConclusion::as_str),
+                summary
+                    .infrastructure_category()
+                    .map(InfrastructureCategory::as_str),
+                rfc3339(Timestamp::now()),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch one persisted sanitized summary by its identity triple.
+    ///
+    /// # Errors
+    /// Envelope-classified read failures; a stored value that no longer
+    /// satisfies the sanitized contract is `store.job.summary.decode`.
+    pub fn fetch_summary(
+        &self,
+        instance_slug: &str,
+        run_id: u64,
+        attempt: u32,
+    ) -> StoreResult<Option<ModelJobSummary>> {
+        let run_id = i64::try_from(run_id).map_err(|_| summary_out_of_range("run_id"))?;
+        let conn = self.lock_conn()?;
+        let mut statement = conn.prepare_cached(
+            "SELECT instance_slug, job_uid, repository, workflow, job_name, run_id, attempt,
+                    head_ref, head_sha, trigger_event, queued_at, acquired_at, runner_name,
+                    trust_scope, resource_policy, phase, conclusion, infrastructure_category
+             FROM jobs WHERE instance_slug = ?1 AND run_id = ?2 AND attempt = ?3",
+        )?;
+        let mut rows = statement.query(params![instance_slug, run_id, i64::from(attempt)])?;
+        match rows.next()? {
+            Some(row) => decode_summary_row(row).map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// Atomically apply one transition: update the job's current-state row
     /// and append its event in a single transaction.
     ///
@@ -489,6 +593,82 @@ fn map_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobSummary> {
         conclusion: row.get(16)?,
         infrastructure_category: row.get(17)?,
     })
+}
+
+/// Re-validate one stored job summary back into the sanitized model DTO.
+///
+/// Every stored value passes through [`JobSummary::from_normalized`] again,
+/// so a hand-edited database cannot smuggle an unvalidated string into the
+/// query path. The error remediation names the field, never the value.
+fn decode_summary_row(row: &rusqlite::Row<'_>) -> StoreResult<ModelJobSummary> {
+    let repository_full: String = row.get(2)?;
+    let (owner, name) = repository_full
+        .rsplit_once('/')
+        .ok_or_else(|| summary_decode("repository"))?;
+    let phase_raw: String = row.get(15)?;
+    let phase = JobPhase::try_from(phase_raw.as_str()).map_err(|_| summary_decode("phase"))?;
+    let run_id: i64 = row.get(5)?;
+    let attempt: i64 = row.get(6)?;
+    ModelJobSummary::from_normalized(NormalizedJob {
+        instance_slug: row.get(0)?,
+        job_uid: row.get(1)?,
+        repository: RepositoryRef::new(owner, name),
+        workflow: row.get(3)?,
+        job_name: row.get(4)?,
+        run_id: Some(u64::try_from(run_id).map_err(|_| summary_decode("run_id"))?),
+        attempt: Some(u32::try_from(attempt).map_err(|_| summary_decode("attempt"))?),
+        head_ref: row.get(7)?,
+        head_sha: row.get(8)?,
+        trigger_event: optional_enum("trigger_event", row.get(9)?, |raw: &str| {
+            TriggerEvent::try_from(raw)
+        })?,
+        queued_at: optional_timestamp("queued_at", row.get(10)?)?,
+        acquired_at: optional_timestamp("acquired_at", row.get(11)?)?,
+        runner_name: row.get(12)?,
+        trust_scope: row.get(13)?,
+        resource_policy: row.get(14)?,
+        phase,
+        conclusion: optional_enum("conclusion", row.get(16)?, |raw: &str| {
+            JobConclusion::try_from(raw)
+        })?,
+        infrastructure_category: optional_enum(
+            "infrastructure_category",
+            row.get(17)?,
+            |raw: &str| InfrastructureCategory::try_from(raw),
+        )?,
+    })
+    .map_err(|_| summary_decode("summary"))
+}
+
+fn optional_enum<T>(
+    field: &'static str,
+    raw: Option<String>,
+    parse: impl Fn(&str) -> Result<T, InvalidJobSummaryField>,
+) -> StoreResult<Option<T>> {
+    raw.map(|value| parse(&value).map_err(|_| summary_decode(field)))
+        .transpose()
+}
+
+fn optional_timestamp(field: &'static str, raw: Option<String>) -> StoreResult<Option<Timestamp>> {
+    raw.map(|value| Timestamp::parse(&value).map_err(|_| summary_decode(field)))
+        .transpose()
+}
+
+fn unidentified_summary() -> StoreError {
+    StoreError::new(ExitClass::Operation, "store.job.summary.unidentified").with_remediation(
+        "persist only summaries carrying both run_id and attempt so the upsert key exists",
+    )
+}
+
+fn summary_out_of_range(field: &'static str) -> StoreError {
+    StoreError::new(ExitClass::Operation, "store.job.summary.range")
+        .with_remediation(format!("{field} exceeds the database integer range"))
+}
+
+fn summary_decode(field: &'static str) -> StoreError {
+    StoreError::new(ExitClass::Operation, "store.job.summary.decode").with_remediation(format!(
+        "stored {field} no longer satisfies the sanitized contract; rewrite the row through persist_summary"
+    ))
 }
 
 /// Direct connection access used by migration tests only.

@@ -12,6 +12,7 @@
 pub mod cli_meta;
 pub mod condition;
 pub mod error_envelope;
+pub mod job_summary;
 pub mod phase;
 pub mod resources;
 pub mod sanitized;
@@ -22,6 +23,10 @@ pub mod time;
 pub use cli_meta::{CommandMetadata, FlagMetadata, SchemaDocument};
 pub use condition::{Condition, ConditionStatus, Labels, ResourceMeta};
 pub use error_envelope::{exit_code_for_class, ExitClass, MachineErrorEnvelope};
+pub use job_summary::{
+    InfrastructureCategory, InvalidJobSummaryField, JobConclusion, JobPhase, JobSummary,
+    NormalizedJob, Slug, TriggerEvent, MAX_SLUG_LEN,
+};
 pub use phase::{SlotKind, SlotPhase};
 pub use resources::{
     Adapter, AnyResource, Capability, Event, Host, Instance, Job, Lease, QueueEntry, Reservation,
