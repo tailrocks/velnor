@@ -57,10 +57,17 @@ Monitor only newly returned run IDs at intervals no longer than 60 seconds. Diag
 
 ## Done criteria
 
-- [ ] `velnorctl man --help` exits 0 and documents exact accepted syntax.
-- [ ] Focused tests and `rtk mise run check` pass.
-- [ ] Fixture validation proves live behavior and no secret leakage.
-- [ ] No sibling command, compatibility alias, or direct internal-file parser was added.
+- [x] `velnorctl man --help` exits 0 and documents exact accepted syntax.
+- [x] Focused tests and `rtk mise run check` pass.
+- [x] Fixture validation proves live behavior and no secret leakage.
+- [x] No sibling command, compatibility alias, or direct internal-file parser was added.
+
+## Execution evidence (2026-08-24)
+
+- Implementation `b98801e`, review-fix `0630a98`; drift ruling recorded: leaf's "same Clap metadata as help" satisfied via the Plan-064 hand-rolled CommandMetadata/SchemaDocument single source (clap is forbidden in velnorctl by dependency law); flat module src/man.rs per live layout.
+- Gates via rtk mise tasks: fmt/lint clean; `test-focused -- -p velnorctl command_c005` 18/18; `-p velnorctl` 41/41; full `rtk mise run check` 997/997 exit 0. Independent verifier PASS twice; reviewer APPROVE-FLIP with MED+LOW findings all closed in 0630a98 (io-failure exit-8 test, force-vs-symlinked-member refusal, roff_escape, hyphen escaping, flag-like --directory value Usage).
+- Fixture: pin bd4be09375154e891052b5159801f613fa0b4f09; pre-dispatch sweep zero active runs; single dispatch run 32744695926 control-plane, completed success (~2 min), scenario-hold green on Velnor lane; post sweep zero non-completed runs; evidence `.velnor-compare/2026-08-24-C005-fixture-proof/evidence.md`.
+- Live behavior proofs: --help exit 0 stderr-empty; directory mode modes 644 byte-deterministic across tmpdirs; refusals observed 6/2/2/2 (member-exists, dest symlink, symlinked member under force, flag-like value); mandoc renders pages without error (cosmetic .TH date-slot WARNING noted).
 
 ## STOP conditions
 
