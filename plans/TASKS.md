@@ -21,11 +21,7 @@ Rules for every agent working this list:
 
 Status legend: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[-]` BLOCKED(reason)
 
-<<<<<<< HEAD
 Progress: 4 / 94 done.
-=======
-Progress: 3 / 94 done.
->>>>>>> origin/main
 
 ## Track A - fleet policy (P0, independent)
 
