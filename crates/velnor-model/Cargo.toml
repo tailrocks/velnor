@@ -7,4 +7,10 @@ repository.workspace = true
 description = "Shared versioned model types for the Velnor control plane and operator CLI"
 
 [dependencies]
+serde = { workspace = true }
+time = { workspace = true, features = ["macros"] }
+url = { workspace = true }
 
+[dev-dependencies]
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }

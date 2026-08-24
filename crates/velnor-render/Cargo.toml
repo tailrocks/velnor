@@ -7,5 +7,11 @@ repository.workspace = true
 description = "Output renderers for Velnor operator surfaces"
 
 [dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 velnor-model = { path = "../velnor-model", version = "0.1.0" }
 
+[dev-dependencies]
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }

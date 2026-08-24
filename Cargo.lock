@@ -3278,11 +3278,21 @@ dependencies = [
 [[package]]
 name = "velnor-model"
 version = "0.1.0"
+dependencies = [
+ "noyalib",
+ "serde",
+ "serde_json",
+ "time",
+ "url",
+]
 
 [[package]]
 name = "velnor-render"
 version = "0.1.0"
 dependencies = [
+ "noyalib",
+ "serde",
+ "serde_json",
  "velnor-model",
 ]
 
@@ -3347,6 +3357,7 @@ dependencies = [
 name = "velnorctl"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "velnor-client",
  "velnor-control",
  "velnor-model",
