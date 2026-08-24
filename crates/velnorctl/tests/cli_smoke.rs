@@ -1,114 +1,227 @@
-//! CLI smoke tests: parse/dispatch through the public library API plus a real
-//! subprocess run of the built binary, without owning any leaf command.
+//! Binary-level behavior of the clap-native `velnorctl`.
 
-use std::process::Command;
+use std::process::{Command, Output};
 
-use velnor_model::ExitClass;
-use velnorctl::Outcome;
-
-fn dispatch_exit(args: &[&str]) -> (Outcome, u8) {
-    let argv: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
-    let registry = velnorctl::compose();
-    let outcome = velnorctl::run(&registry, &argv);
-    (outcome.clone(), outcome.exit_code())
+fn bin() -> &'static str {
+    env!("CARGO_BIN_EXE_velnorctl")
 }
 
-#[test]
-fn explicit_help_and_version_succeed() {
-    for args in [&["-h"][..], &["--help"][..], &["--version"][..]] {
-        let (outcome, code) = dispatch_exit(args);
-        assert!(
-            matches!(outcome, Outcome::Help(_) | Outcome::Version(_)),
-            "{args:?} -> {outcome:?}"
-        );
-        assert_eq!(code, 0);
-    }
-}
-
-#[test]
-fn bare_invocation_prints_usage_and_fails_as_usage_class() {
-    let (outcome, code) = dispatch_exit(&[]);
-    assert!(matches!(outcome, Outcome::NoCommand(_)));
-    assert_eq!(outcome.exit_class(), ExitClass::Usage);
-    assert_eq!(code, 2);
-}
-
-#[test]
-fn legacy_runner_names_fail_with_the_usage_class() {
-    for name in velnorctl::LEGACY_RUNNER_COMMANDS {
-        let (outcome, code) = dispatch_exit(&[name]);
-        assert_eq!(
-            outcome,
-            Outcome::LegacyRejected {
-                name: name.to_owned()
-            }
-        );
-        assert_eq!(outcome.exit_class(), ExitClass::Usage);
-        assert_eq!(code, 2);
-    }
-}
-
-#[test]
-fn unimplemented_future_commands_fail_without_placeholder_success() {
-    for name in ["version", "list", "anything-unregistered"] {
-        let (outcome, code) = dispatch_exit(&[name]);
-        assert!(!outcome.succeeded());
-        assert_eq!(
-            outcome,
-            Outcome::Unimplemented {
-                name: name.to_owned()
-            }
-        );
-        assert_eq!(outcome.exit_class(), ExitClass::Usage);
-        assert_eq!(code, 2);
-    }
-}
-
-#[test]
-fn success_invocations_write_nothing_to_stderr() {
-    let bin = env!("CARGO_BIN_EXE_velnorctl");
-
-    for args in [&["--help"][..], &["-h"][..], &["--version"][..]] {
-        let run = Command::new(bin).args(args).output().unwrap();
-        assert_eq!(run.status.code(), Some(0), "{args:?} should succeed");
-        assert!(
-            run.stderr.is_empty(),
-            "{args:?} wrote to stderr: {:?}",
-            String::from_utf8_lossy(&run.stderr)
-        );
-    }
-}
-
-#[test]
-fn binary_smoke_help_success_and_rejections_over_subprocess() {
-    let bin = env!("CARGO_BIN_EXE_velnorctl");
-
-    let help = Command::new(bin).arg("--help").output().unwrap();
-    assert_eq!(help.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&help.stdout);
-    assert!(stdout.contains(velnorctl::BIN_NAME), "stdout was: {stdout}");
-
-    let version = Command::new(bin).arg("--version").output().unwrap();
-    assert_eq!(version.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&version.stdout).contains('.'));
-
-    let bare = Command::new(bin).output().unwrap();
-    assert_eq!(bare.status.code(), Some(2));
-
-    let legacy = Command::new(bin).args(["cache", "du"]).output().unwrap();
-    assert_eq!(legacy.status.code(), Some(2));
-    let stderr = String::from_utf8_lossy(&legacy.stderr);
-    assert!(
-        stderr.contains("cache"),
-        "stderr should name the rejected command, got: {stderr}"
-    );
-
-    let unknown = Command::new(bin).arg("version").output().unwrap();
-    assert_eq!(unknown.status.code(), Some(2));
-
-    let bad_flag = Command::new(bin)
-        .args(["--output", "csv", "status"])
+fn run(args: &[&str]) -> Output {
+    Command::new(bin())
+        .args(args)
+        .env_remove("CLICOLOR")
         .output()
-        .unwrap();
-    assert_eq!(bad_flag.status.code(), Some(2));
+        .expect("spawn velnorctl")
+}
+
+fn code(output: &Output) -> u8 {
+    output
+        .status
+        .code()
+        .and_then(|value| u8::try_from(value).ok())
+        .unwrap_or(u8::MAX)
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+#[test]
+fn cli_c005_root_help_goes_to_stdout_and_exits_success_with_silent_stderr() {
+    let output = run(&["--help"]);
+    assert_eq!(code(&output), 0);
+    assert!(text(&output.stderr).is_empty());
+    let help = text(&output.stdout);
+    assert!(help.contains("Usage:"), "{help}");
+    assert!(help.contains("velnorctl"), "{help}");
+    assert!(help.contains("man"), "{help}");
+    assert!(help.contains("completion"), "{help}");
+}
+
+#[test]
+fn cli_c005_version_prints_binary_and_workspace_version_to_stdout() {
+    let output = run(&["--version"]);
+    assert_eq!(code(&output), 0);
+    assert!(text(&output.stderr).is_empty());
+    let version = text(&output.stdout);
+    assert!(version.starts_with("velnorctl "), "{version}");
+    assert!(version.contains(env!("CARGO_PKG_VERSION")), "{version}");
+}
+
+#[test]
+fn cli_c005_bare_invocation_prints_usage_to_stderr_and_exits_two() {
+    let output = run(&[]);
+    assert_eq!(code(&output), 2);
+    assert!(text(&output.stdout).is_empty());
+    let usage = text(&output.stderr);
+    assert!(!usage.trim().is_empty(), "usage must be shown");
+}
+
+#[test]
+fn cli_c005_unknown_commands_fail_like_any_unknown_clap_subcommand() {
+    for name in [
+        "definitely-not-a-command",
+        // Legacy velnor-runner names get no special casing or aliases:
+        "status",
+        "doctor",
+        "run",
+        "daemon",
+    ] {
+        let output = run(&[name]);
+        assert_eq!(code(&output), 2, "{name}");
+        let stderr = text(&output.stderr);
+        assert!(
+            stderr.contains("unrecognized subcommand"),
+            "{name}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn cli_c005_close_typos_get_a_clap_suggestion() {
+    let output = run(&["mann"]);
+    assert_eq!(code(&output), 2);
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains("a similar subcommand exists") && stderr.contains("'man'"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn cli_c005_no_color_is_a_switch_and_rejects_inline_values() {
+    let output = run(&["--no-color=true", "man"]);
+    assert_eq!(code(&output), 2);
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("--no-color"), "{stderr}");
+}
+
+#[test]
+fn cli_c005_repeated_verbosity_flags_parse_before_subcommands() {
+    for argv in [["-v", "man"], ["-vv", "man"], ["-vvv", "man"]] {
+        let output = run(&argv);
+        assert_eq!(code(&output), 0, "{argv:?}");
+        assert!(text(&output.stdout).contains(".TH"), "{argv:?}");
+    }
+}
+
+#[test]
+fn cli_c005_output_global_is_accepted_before_and_after_the_subcommand() {
+    let dir = tempfile_dir("c005-after");
+    let output = run(&[
+        "--output",
+        "json",
+        "man",
+        "--directory",
+        &dir,
+        "--force",
+        "--no-color",
+    ]);
+    assert_eq!(code(&output), 0, "{}", text(&output.stderr));
+    assert!(std::path::Path::new(&dir).join("velnorctl.1").exists());
+
+    let dir2 = tempfile_dir("c005-before");
+    let output = run(&["man", "--directory", &dir2, "--force", "-o", "json"]);
+    assert_eq!(code(&output), 0, "{}", text(&output.stderr));
+    assert!(std::path::Path::new(&dir2).join("velnorctl.1").exists());
+}
+
+#[test]
+fn cli_c005_invalid_closed_choice_values_exit_two() {
+    let output = run(&["--output", "csv", "man"]);
+    assert_eq!(code(&output), 2);
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains("csv") || stderr.contains("invalid"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn cli_c005_success_paths_keep_stderr_silent() {
+    let dir = tempfile_dir("c005-silent");
+    let output = run(&["man", "--directory", &dir]);
+    assert_eq!(code(&output), 0);
+    assert!(text(&output.stderr).is_empty(), "{}", text(&output.stderr));
+
+    let output = run(&["completion", "bash"]);
+    assert_eq!(code(&output), 0);
+    assert!(text(&output.stderr).is_empty());
+}
+
+#[test]
+fn cli_c005_runtime_failure_reports_machine_envelope_under_json_output() {
+    let dir = tempfile_dir("c005-iofail");
+    make_read_only(&dir);
+    if writes_succeed_anyway(&dir) {
+        return;
+    }
+    let output = run(&["--output", "json", "man", "--directory", &dir]);
+    restore_writable(&dir);
+    assert_eq!(code(&output), 8);
+    let stderr = text(&output.stderr);
+    let parsed: serde_json::Value =
+        serde_json::from_str(stderr.trim()).expect("machine envelope JSON");
+    assert_eq!(parsed["class"], "OPERATION", "{parsed}");
+    assert_eq!(parsed["code"], 8, "{parsed}");
+}
+
+#[test]
+fn cli_c005_runtime_failure_reports_human_error_by_default() {
+    let dir = tempfile_dir("c005-human-fail");
+    make_read_only(&dir);
+    if writes_succeed_anyway(&dir) {
+        return;
+    }
+    let output = run(&["man", "--directory", &dir]);
+    restore_writable(&dir);
+    assert_eq!(code(&output), 8);
+    let stderr = text(&output.stderr);
+    assert!(stderr.starts_with("error:"), "{stderr}");
+    assert!(
+        !stderr.trim_start_matches("error:").starts_with('{'),
+        "{stderr}"
+    );
+}
+
+fn writes_succeed_anyway(path: &str) -> bool {
+    let dir = std::path::Path::new(path);
+    let probe = dir.join(".velnorctl-write-probe");
+    match std::fs::write(&probe, b"probe") {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn tempfile_dir(label: &str) -> String {
+    let base = std::env::temp_dir();
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = base.join(format!(
+        "velnorctl-cli-{label}-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&path).expect("create scratch dir");
+    path.to_string_lossy().into_owned()
+}
+
+fn make_read_only(path: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let target = std::path::Path::new(path);
+    let mut perms = std::fs::metadata(target).expect("stat").permissions();
+    perms.set_mode(0o500);
+    std::fs::set_permissions(target, perms).expect("chmod");
+}
+
+fn restore_writable(path: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let target = std::path::Path::new(path);
+    let mut perms = std::fs::metadata(target).expect("stat").permissions();
+    perms.set_mode(0o700);
+    std::fs::set_permissions(target, perms).expect("chmod");
 }

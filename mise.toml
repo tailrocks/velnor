@@ -18,6 +18,10 @@ cargo.binstall_quickinstall = true
 [tasks.fmt]
 run = "cargo fmt --all --check"
 
+# Apply formatting in place; `fmt` above stays the read-only gate.
+[tasks.fmt-fix]
+run = "cargo fmt --all"
+
 [tasks.lint]
 run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
 

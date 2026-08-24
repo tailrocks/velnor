@@ -1,7 +1,9 @@
-//! `velnorctl man` (C005): deterministic roff page generation.
+//! `velnorctl man` (C005): deterministic roff page generation from the live
+//! clap command tree.
 //!
-//! The pages render from the same [`velnor_model::CommandMetadata`] and
-//! [`velnor_model::FlagMetadata`] structs that power help text, so the
+//! Argument syntax and option listings come from `clap_mangen` rendering of
+//! the same [`crate::Cli`] tree users execute; Velnor-specific semantic
+//! sections (output contracts, exit statuses, safety) are appended so the
 //! documented surface and the executable surface cannot drift. Without
 //! `--directory` one combined `velnorctl.1` page goes to stdout; with it the
 //! complete deterministic page set is written into that exact directory,
@@ -10,13 +12,12 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use velnor_model::{CommandMetadata, ExitClass, FlagMetadata};
+use clap::CommandFactory;
+use velnor_model::ExitClass;
 
-use crate::metadata::{self, DocumentedCommand};
-use crate::{CommandError, Handler, BIN_NAME};
+use crate::{Cli, CommandError};
 
 /// File name of the combined manual page.
 pub const MAN_PAGE_NAME: &str = "velnorctl.1";
@@ -25,167 +26,111 @@ pub const MAN_PAGE_NAME: &str = "velnorctl.1";
 /// final member name, so leftover cleanup stays identifiable.
 const TEMP_PREFIX: &str = ".velnorctl-man-tmp-";
 
-/// The `man` leaf command's published CLI surface.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ManCommand;
+/// Typed leaf arguments of `man`; globals arrive through [`crate::GlobalArgs`].
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct ManArgs {
+    /// Write the complete deterministic page set into this exact directory.
+    #[arg(long, value_name = "PATH")]
+    pub directory: Option<PathBuf>,
 
-impl DocumentedCommand for ManCommand {
-    fn metadata(&self) -> CommandMetadata {
-        CommandMetadata {
-            name: "man".to_owned(),
-            about: "generate man pages for the current command tree".to_owned(),
-            flags: vec![
-                FlagMetadata {
-                    long: "directory".to_owned(),
-                    short: None,
-                    value_name: Some("<PATH>".to_owned()),
-                    help: "write the complete deterministic page set into this exact directory"
-                        .to_owned(),
-                    global: false,
-                },
-                FlagMetadata {
-                    long: "force".to_owned(),
-                    short: None,
-                    value_name: None,
-                    help: "overwrite existing page members; never bypasses destination checks"
-                        .to_owned(),
-                    global: false,
-                },
-            ],
+    /// Overwrite existing page members; never bypasses destination checks.
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// Execute `man` over the parsed typed arguments.
+///
+/// # Errors
+/// Returns a [`CommandError`] carrying the documented exit class when the
+/// destination is invalid, an existing member conflicts, or writing fails.
+pub fn run(args: &ManArgs) -> Result<(), CommandError> {
+    match &args.directory {
+        Some(directory) => write_page_set(directory, args.force),
+        None => {
+            let page = combined_page();
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
+            lock.write_all(page.as_bytes())
+                .and_then(|()| lock.flush())
+                .map_err(|error| io_error("cannot write the combined page", error))
         }
     }
 }
 
-/// Compose the registered `man` handler over the documented leaf commands.
-///
-/// The command list is captured at composition time so the rendered page set
-/// can never diverge from what this build actually registers.
+fn root_command() -> clap::Command {
+    Cli::command()
+}
+
+fn render_man(command: &clap::Command) -> String {
+    let mut buffer = Vec::new();
+    clap_mangen::Man::new(command.clone())
+        .manual("Velnor Manual")
+        .render(&mut buffer)
+        .unwrap_or_default();
+    String::from_utf8_lossy(&buffer).into_owned()
+}
+
+/// Render the combined binary page from the live command tree: the root
+/// manual (NAME, SYNOPSIS, global OPTIONS, subcommand list) followed by the
+/// Velnor-specific semantic sections and one full section block per leaf
+/// command. Deterministic by construction.
 #[must_use]
-pub fn handler(commands: Vec<CommandMetadata>) -> Handler {
-    Arc::new(move |args: &[String]| {
-        let parsed = parse_args(args)?;
-        match parsed.directory {
-            Some(directory) => write_page_set(Path::new(&directory), &commands, parsed.force),
-            None => {
-                let page = combined_page(BIN_NAME, &commands);
-                let stdout = std::io::stdout();
-                let mut lock = stdout.lock();
-                lock.write_all(page.as_bytes())
-                    .and_then(|()| lock.flush())
-                    .map_err(|error| io_error("cannot write the combined page", error))
-            }
-        }
-    })
+pub fn combined_page() -> String {
+    let mut page = render_man(&root_command());
+    page.push_str(semantic_sections().as_str());
+    let mut subs: Vec<clap::Command> = root_command().get_subcommands().cloned().collect();
+    subs.sort_by(|left, right| left.get_name().cmp(right.get_name()));
+    for sub in &subs {
+        page.push_str(&render_man(sub));
+        page.push('\n');
+    }
+    page
 }
 
-/// Parsed leaf arguments of `man`; globals are consumed upstream.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct ManArgs {
-    directory: Option<PathBuf>,
-    force: bool,
+/// The complete deterministic page set: the combined page first, then one
+/// `<command>.1` page per leaf command in stable name order.
+fn page_set() -> Vec<(String, String)> {
+    let mut members = vec![(MAN_PAGE_NAME.to_owned(), combined_page())];
+    let mut subs: Vec<clap::Command> = root_command().get_subcommands().cloned().collect();
+    subs.sort_by(|left, right| left.get_name().cmp(right.get_name()));
+    for sub in &subs {
+        members.push((format!("{}.1", sub.get_name()), render_man(sub)));
+    }
+    members
 }
 
-fn usage_error(message: String) -> CommandError {
-    CommandError::new(
-        ExitClass::Usage,
-        crate::USAGE_REASON,
-        format!("error[{}]: {message}", crate::USAGE_REASON),
+/// Velnor-specific semantics that clap cannot know: output/source rules,
+/// the fixed exit-status mapping, and `man` safety behavior.
+fn semantic_sections() -> String {
+    format!(
+        "{}{}{}",
+        output_section(),
+        exit_status_section(),
+        safety_section()
     )
 }
 
-/// Interpret one `--directory` value; flag-like values are rejected as
-/// usage errors so `--directory --force` can never swallow `--force`.
-fn directory_value(value: &str) -> Result<PathBuf, CommandError> {
-    if value.starts_with('-') {
-        return Err(usage_error(format!(
-            "flag '--directory' requires a value; '{value}' looks like another flag"
-        )));
-    }
-    Ok(PathBuf::from(value))
+fn output_section() -> String {
+    ".SH OUTPUT\n\
+     Resource data is written to stdout; warnings and diagnostics go to stderr.\n\
+     Machine output modes (--output json|yaml|jsonl|name) render versioned\n\
+     resources stamped with a schema version; human table/wide views render the\n\
+     same types and are never the source of truth.\n\
+     .PP\n\
+     Slot resources carry slotKind \"stable\" (a persistent named slot reused\n\
+     across jobs) or \"ephemeral\" (a single-job runner created for one job and\n\
+     discarded afterwards); consumers read the distinction from the typed field,\n\
+     never from labels or names.\n"
+        .to_owned()
 }
 
-fn parse_args(argv: &[String]) -> Result<ManArgs, CommandError> {
-    let mut args = ManArgs::default();
-    let mut index = 0;
-    while index < argv.len() {
-        let token = argv[index].as_str();
-        index += 1;
-        if token == "--force" {
-            args.force = true;
-        } else if token == "--directory" {
-            let Some(value) = argv.get(index) else {
-                return Err(usage_error(
-                    "flag '--directory' requires a value".to_owned(),
-                ));
-            };
-            index += 1;
-            args.directory = Some(directory_value(value)?);
-        } else if let Some(value) = token.strip_prefix("--directory=") {
-            args.directory = Some(directory_value(value)?);
-        } else if token.starts_with('-') {
-            return Err(usage_error(format!(
-                "unknown flag '{token}' for '{BIN_NAME} man'"
-            )));
-        } else {
-            return Err(usage_error(format!(
-                "unexpected argument '{token}' for '{BIN_NAME} man'; only --directory and \
-                 --force are accepted"
-            )));
-        }
-    }
-    Ok(args)
-}
-
-/// Render the combined binary page: header, global options, output/exit/
-/// safety conventions, then one section block per leaf command in stable
-/// name order. An empty registry renders binary, globals, and conventions
-/// only — every registered leaf appears exactly once by construction.
-#[must_use]
-pub fn combined_page(binary: &str, commands: &[CommandMetadata]) -> String {
-    let version = velnor_model::CRATE_VERSION;
-    let mut page = format!(
-        ".TH {upper} 1 \"{version}\" \"{binary} {version}\" \"Velnor Manual\"\n",
-        upper = binary.to_uppercase(),
-    );
-    page.push_str(".SH NAME\n");
-    page.push_str(&format!("{binary} \\- Velnor operator CLI\n"));
-    page.push_str(&format!(
-        ".SH SYNOPSIS\n.B {binary} [GLOBAL FLAGS] <COMMAND> [ARGS]...\n"
-    ));
-    page.push_str(".SH GLOBAL OPTIONS\n");
-    for flag in metadata::global_flags() {
-        page.push_str(&format!(
-            ".TP\n\\fB{}\\fR\n{}\n",
-            flag.invocation(),
-            metadata::roff_escape(&flag.help)
-        ));
-    }
-    page.push_str(
-        ".SH OUTPUT\n\
-         Resource data is written to stdout; warnings and diagnostics go to stderr.\n\
-         Machine output modes (--output json|yaml|jsonl|name) render versioned\n\
-         resources stamped with a schema version; human table/wide views render the\n\
-         same types and are never the source of truth.\n\
-         .PP\n\
-         Slot resources carry slotKind \"stable\" (a persistent named slot reused\n\
-         across jobs) or \"ephemeral\" (a single-job runner created for one job and\n\
-         discarded afterwards); consumers read the distinction from the typed field,\n\
-         never from labels or names.\n",
-    );
-    page.push_str(&exit_status_section());
-    page.push_str(
-        ".SH SAFETY\n\
-         --directory writes only into the exact destination given: system man paths\n\
-         are never installed, updated, or removed implicitly. A symbolic-link or\n\
-         non-directory destination is rejected outright, and an existing member is\n\
-         overwritten only under --force.\n",
-    );
-    let mut sorted: Vec<&CommandMetadata> = commands.iter().collect();
-    sorted.sort_by(|left, right| left.name.cmp(&right.name));
-    for command in sorted {
-        page.push_str(&metadata::command_man_sections(binary, command));
-    }
-    page
+fn safety_section() -> String {
+    ".SH SAFETY\n\
+     --directory writes only into the exact destination given: system man paths\n\
+     are never installed, updated, or removed implicitly. A symbolic-link or\n\
+     non-directory destination is rejected outright, and an existing member is\n\
+     overwritten only under --force.\n"
+        .to_owned()
 }
 
 /// The EXIT STATUS section, derived from the one public [`ExitClass`]
@@ -220,31 +165,12 @@ fn exit_status_section() -> String {
     section
 }
 
-/// The complete deterministic page set: the combined page first, then one
-/// `<command>.1` page per leaf command in stable name order.
-fn page_set(commands: &[CommandMetadata]) -> Vec<(String, String)> {
-    let mut members = vec![(MAN_PAGE_NAME.to_owned(), combined_page(BIN_NAME, commands))];
-    let mut sorted: Vec<&CommandMetadata> = commands.iter().collect();
-    sorted.sort_by(|left, right| left.name.cmp(&right.name));
-    for command in sorted {
-        members.push((
-            format!("{}.1", command.name),
-            metadata::man_page(BIN_NAME, command),
-        ));
-    }
-    members
-}
-
 /// Validate the destination fully before touching anything, then write every
 /// member atomically. Symlinked and non-directory destinations are rejected
 /// as invalid local input; an existing member without `--force` conflicts
 /// with the safety precondition, and a symbolic-link member is refused even
 /// under `--force`.
-fn write_page_set(
-    directory: &Path,
-    commands: &[CommandMetadata],
-    force: bool,
-) -> Result<(), CommandError> {
+fn write_page_set(directory: &Path, force: bool) -> Result<(), CommandError> {
     let inspected = std::fs::symlink_metadata(directory).map_err(|error| {
         io_error(
             format!("cannot inspect destination '{}'", directory.display()),
@@ -268,7 +194,7 @@ fn write_page_set(
             format!("destination '{}' is not a directory", directory.display()),
         ));
     }
-    for (name, _) in page_set(commands) {
+    for (name, _) in page_set() {
         let member = directory.join(&name);
         let existing = std::fs::symlink_metadata(&member);
         if matches!(&existing, Ok(meta) if meta.file_type().is_symlink()) {
@@ -293,7 +219,7 @@ fn write_page_set(
             ));
         }
     }
-    for (name, contents) in page_set(commands) {
+    for (name, contents) in page_set() {
         write_member_atomic(directory, &name, contents.as_bytes())?;
     }
     Ok(())

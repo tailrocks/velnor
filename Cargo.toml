@@ -23,7 +23,9 @@ strip = "symbols"
 [workspace.dependencies]
 anyhow = "1.0.98"
 base64 = "0.22.1"
-clap = { version = "4.5.38", features = ["derive", "env"] }
+clap = { version = "4.6.6", features = ["derive", "env"] }
+clap_complete = "4.6.9"
+clap_mangen = "0.3.3"
 # rust_crypto: jsonwebtoken >=10.4 requires exactly one crypto-provider feature
 # or OAuth assertion signing panics at runtime.
 jsonwebtoken = { version = "10.0.0", default-features = false, features = ["rust_crypto", "use_pem"] }
