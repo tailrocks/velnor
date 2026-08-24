@@ -21,9 +21,8 @@ it is not an execution allowlist.
 > inputs/outputs/behavior, and match it — do not guess from docs or memory.
 >
 > **Scope of analysis is consumer-driven.** We do **not** reimplement every
-> upstream feature — only the features the 13-repository estate actually uses.
-> The authoritative estate and local-clone map live in
-> `VELNOR_PROJECTS_SETUP.md` §1 and §13.
+> upstream feature — only the features the canonical estate (the
+> `VELNOR_PROJECTS_SETUP.md` §1 and §13 class map) actually uses.
 >
 > A feature absent from both consumers is out of focus until one adopts it. The
 > **Features in focus** column is the intersection of "upstream supports it" and

@@ -1,4 +1,6 @@
 mod audit_ci;
+mod fleet_policy;
+mod fleet_policy_client;
 mod lane_compare;
 
 use anyhow::{bail, Context, Result};
@@ -15,7 +17,7 @@ use std::{
     time::Duration,
 };
 
-const DEFAULT_FIXTURE_REPO: &str = "donbeave/velnor-actions-fixture";
+const DEFAULT_FIXTURE_REPO: &str = "tailrocks/velnor-actions-fixture";
 const DEFAULT_FIXTURE_REF: &str = "main";
 const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/actions/runner/releases/latest";
 const LATEST_RELEASE_REDIRECT_URL: &str = "https://github.com/actions/runner/releases/latest";
@@ -69,6 +71,8 @@ enum CommandKind {
     Compare(lane_compare::LaneCompareArgs),
     /// Diff the GitHub-hosted and Velnor lanes of one run via the GitHub API (equal-or-better gate).
     LaneCompare(lane_compare::LaneCompareArgs),
+    /// Maintainer-only org-JIT fleet policy operations (Plan 039).
+    FleetPolicy(fleet_policy::FleetPolicyArgs),
 }
 
 #[derive(Debug, Args)]
@@ -510,6 +514,7 @@ async fn main() -> Result<()> {
         CommandKind::AuditCi(args) => audit_ci::audit_ci(args),
         CommandKind::Compare(args) => lane_compare::lane_compare(&root, args),
         CommandKind::LaneCompare(args) => lane_compare::lane_compare(&root, args),
+        CommandKind::FleetPolicy(args) => fleet_policy::fleet_policy(args.command).await,
     }
 }
 
@@ -4427,7 +4432,7 @@ mno\trefs/tags/not-a-runner-release
         assert!(validate_live_evidence_controls("80", "abc").is_err());
 
         assert!(validate_real_target_manual_confirmation(
-            "donbeave/velnor-actions-fixture",
+            "tailrocks/velnor-actions-fixture",
             "false"
         )
         .is_ok());
@@ -4474,7 +4479,7 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
     #[test]
     fn smoke_plan_fixture_daemon_args_match_shell_contract() {
         let args = fixture_smoke_daemon_args(
-            "https://github.com/donbeave/velnor-actions-fixture",
+            "https://github.com/tailrocks/velnor-actions-fixture",
             "velnor-target-mvp",
             "velnor-target-mvp",
             2,
@@ -4581,7 +4586,7 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
     #[test]
     fn smoke_plan_target_requires_manual_confirmation_for_real_targets() {
         assert!(validate_real_target_manual_confirmation_bool(
-            "donbeave/velnor-actions-fixture",
+            "tailrocks/velnor-actions-fixture",
             false
         )
         .is_ok());

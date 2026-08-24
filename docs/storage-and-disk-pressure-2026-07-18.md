@@ -1,7 +1,7 @@
 # Velnor Storage Contract and Sentry Disk-Pressure Investigation
 
 Status: accepted direction and implementation plan (2026-07-18)  
-Scope: the current 13-repository Rust, TypeScript, Java, Docker, and service-test estate  
+Scope: the 13-repository portfolio of 2026-07-18 (historical; estate membership now governed by the marked 2026-08-09 canonical class map in VELNOR_PROJECTS_SETUP.md) — the Rust, TypeScript, Java, Docker, and service-test estate  
 Related: [master-plan.md](master-plan.md), [cache-gc-design.md](cache-gc-design.md), [rust-build-cache-hygiene-velnor.md](rust-build-cache-hygiene-velnor.md)
 
 Strict local-only action configuration:

@@ -137,6 +137,18 @@ Units (all shipped by the package):
   `systemctl list-units --type=service --all` is the normal completed state
   after a timer run. Inspect `systemctl list-timers 'velnor-doctor*'` and
   failed units instead of treating inactive one-shot services as stale daemons.
+- `velnor-fleet-policy-audit.timer` / `velnor-fleet-policy-audit.service`
+  (velnor-tools surface) — weekly read-only fleet-policy audit
+  (`Sat *-*-* 03:17`, `Persistent=true`). The service runs
+  `velnor-tools fleet-policy audit` sequentially for every organization listed
+  in `VELNOR_FLEET_ORGS` (`/etc/velnor/fleet-policy-audit.env`) against that
+  org's generated desired-policy JSON under
+  `VELNOR_FLEET_POLICY_DIR` (default `/var/lib/velnor/fleet-policy`). It is
+  strictly **read-only**: it never invokes plan-with-write or apply; any live
+  drift exits nonzero and stops the remaining organizations. Enable with
+  `sudo systemctl enable --now velnor-fleet-policy-audit.timer`. Host
+  enablement is an operator action performed only after policy cutover
+  approval (not yet packaged; pending velnor-tools deb wiring).
 
 Persistent stores use `/var/cache/velnor/v1/<trust-scope>/...`; durable state,
 runtime leases, and logs use `/var/lib/velnor`, `/run/velnor`, and

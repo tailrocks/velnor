@@ -3261,6 +3261,42 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
+name = "velnor-client"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "velnor-model",
+]
+
+[[package]]
+name = "velnor-control"
+version = "0.1.0"
+dependencies = [
+ "velnor-model",
+]
+
+[[package]]
+name = "velnor-model"
+version = "0.1.0"
+dependencies = [
+ "noyalib",
+ "serde",
+ "serde_json",
+ "time",
+ "url",
+]
+
+[[package]]
+name = "velnor-render"
+version = "0.1.0"
+dependencies = [
+ "noyalib",
+ "serde",
+ "serde_json",
+ "velnor-model",
+]
+
+[[package]]
 name = "velnor-runner"
 version = "0.1.180"
 dependencies = [
@@ -3310,9 +3346,22 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "time",
  "tokio",
+ "toml",
  "zip",
+]
+
+[[package]]
+name = "velnorctl"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "velnor-client",
+ "velnor-control",
+ "velnor-model",
+ "velnor-render",
 ]
 
 [[package]]

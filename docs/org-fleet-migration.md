@@ -53,24 +53,25 @@ The authenticated operator token now carries `admin:org`, `repo`, and
    fork execution remains governed by the separate untrusted-pool rule above.
 
    ```sh
+   args=()
+   for repository in \
+     $(jq -r '.selected_repositories[]' fleet/policies/tailrocks-desired-policy.json)
+   do
+     args+=(-F "selected_repository_ids[]=$(
+       gh api -H 'X-GitHub-Api-Version: 2026-03-10' "repos/${repository}" --jq .id)")
+   done
    gh api --method POST -H 'X-GitHub-Api-Version: 2026-03-10' \
      orgs/tailrocks/actions/runner-groups \
      -f name='velnor-trusted' \
      -f visibility='selected' \
      -F allows_public_repositories=true \
-     -F 'selected_repository_ids[]=1255367013' \
-     -F 'selected_repository_ids[]=1235761953' \
-     -F 'selected_repository_ids[]=1277301638' \
-     -F 'selected_repository_ids[]=1301508644' \
-     -F 'selected_repository_ids[]=1262209244' \
-     -F 'selected_repository_ids[]=1265722009' \
-     -F 'selected_repository_ids[]=1302045151' \
-     -F 'selected_repository_ids[]=1168023899' \
-     -F 'selected_repository_ids[]=1247026498' \
-     -F 'selected_repository_ids[]=1247026496' \
-     -F 'selected_repository_ids[]=1256201624' \
+     "${args[@]}" \
      --jq '[.id, .name, .visibility, .allows_public_repositories] | @tsv'
    ```
+
+   No repository id is inlined here; each id is resolved at run time from its
+   full name in the `selected_repositories` field of the generated
+   `tailrocks-desired-policy.json`.
 
    [GitHub documents](https://docs.github.com/en/rest/actions/self-hosted-runner-groups?apiVersion=2026-03-10#create-a-self-hosted-runner-group-for-an-organization)
    `POST /orgs/{org}/actions/runner-groups` for this operation; classic
@@ -86,25 +87,29 @@ The authenticated operator token now carries `admin:org`, `repo`, and
    ```
 
 3. Set `trusted_group_id` to that numeric id, then add every tailrocks estate
-   repository. These repository ids are stable GitHub ids:
+   repository listed in the generated policy. Derive each numeric id at run
+   time from its full name in `fleet/policies/tailrocks-desired-policy.json`:
 
    ```sh
    trusted_group_id=<TRUSTED_GROUP_ID>
-   for repository_id in \
-     1255367013 1235761953 1277301638 1301508644 1262209244 \
-     1265722009 1302045151 1168023899 1247026498 1247026496 \
-     1256201624
+   for repository in \
+     $(jq -r '.selected_repositories[]' fleet/policies/tailrocks-desired-policy.json)
    do
+     repository_id=$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+       "repos/${repository}" --jq .id)
      gh api --method PUT -H 'X-GitHub-Api-Version: 2026-03-10' \
        "orgs/tailrocks/actions/runner-groups/${trusted_group_id}/repositories/${repository_id}" \
        --silent
    done
    ```
 
-   The ids map respectively to `velnor`, `parallax`,
-   `parallax-telemetry-playground`, `tablerock`, `holla`, `ruxel`, `termrock`,
-   `schemalane`, `pg-bigdecimal`, `tracing-request-level`, and
-   `velnor-actions-fixture`.
+   The allowlist is owned by the generated policy, never by this page:
+   `fleet/release-refs.toml` is the release-ref ledger, `mise run
+   fleet-generate` regenerates the per-org policy JSONs under
+   `fleet/policies/`, `mise run fleet-digests` prints their digests, and the
+   audit-ci rule `fleet-policy-current` fails when committed policy bytes are
+   stale. If membership changes, regenerate and commit the policy instead of
+   editing repository ids here.
 
 4. Verify the allowlist before dispatching anything:
 
@@ -114,7 +119,7 @@ The authenticated operator token now carries `admin:org`, `repo`, and
      --jq '.repositories[].full_name'
    ```
 
-5. Cancel every older active verification run. Dispatch one `lanes=both` run
+5. Cancel every older active verification run. Dispatch one `lane=both` run
    per repository, monitor only its returned id, and require a non-empty runner
    and group assignment within two minutes. Then run `velnor-runner doctor`
    and the warm rerun proof before declaring migration complete.
@@ -140,21 +145,17 @@ repository:
 scripts/runner_group_doctor.sh            # defaults: --org tailrocks --group velnor-trusted
 ```
 
-Current full allowlist (21 repositories; stable GitHub ids):
+The authoritative allowlist is the `selected_repositories` field of
+`fleet/policies/tailrocks-desired-policy.json` — generated from
+`fleet/release-refs.toml`, digest-reported by `mise run fleet-digests`, and
+byte-compared against the ledger by the audit-ci `fleet-policy-current` rule.
+Do not mirror it as a hand-maintained table here; inspect the generated policy
+and live state directly:
 
-| Repository | Id | Repository | Id |
-|---|---:|---|---:|
-| velnor | 1255367013 | parallax | 1235761953 |
-| parallax-telemetry-playground | 1277301638 | tablerock | 1301508644 |
-| holla | 1262209244 | ruxel | 1265722009 |
-| termrock | 1302045151 | schemalane | 1168023899 |
-| pg-bigdecimal | 1247026498 | tracing-request-level | 1247026496 |
-| velnor-actions-fixture | 1256201624 | cloudflare-tofu | 1331336420 |
-| github-terraform | 1269732081 | holla-apt | 1262993132 |
-| homebrew-holla | 1262212487 | homebrew-parallax | 1269643904 |
-| homebrew-ruxel | 1328281709 | homebrew-tablerock | 1307223747 |
-| tailrocks-skills | 1287598760 | velnor-actions | 1310641212 |
-| velnor-apt | 1259812770 | | |
+```sh
+jq -r '.selected_repositories[]' fleet/policies/tailrocks-desired-policy.json
+scripts/runner_group_doctor.sh            # defaults: --org tailrocks --group velnor-trusted
+```
 
 ## Rollback
 

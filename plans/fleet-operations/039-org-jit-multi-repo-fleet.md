@@ -238,3 +238,49 @@ by readback; attach its next authorized run as later live evidence.
 - [GitHub runner-group access management](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/manage-access):
   exact full workflow paths and pinned refs; only directly defined jobs get
   access
+
+## Evidence (2026-08-24)
+
+### Code-surface completion (steps 1, 2, 6 partial)
+- Deterministic offline generation `fleet-policy generate`: byte-identical to reviewed snapshots for
+  tailrocks, ChainArgos, jackin-project (`cmp` empty ×3; sha256 stable across regen) — commit `041079c`;
+  idempotency + stale-org removal + symlink/case-collision fail-closed guards — `cf3ba76`, `080f1bb`,
+  `8b45fe0`; review APPROVE verdicts recorded (final re-review APPROVE).
+- Audit enforcement rules `fleet-policy-ledger/-current/-extra/-generate` + concrete malformed-TOML
+  coverage — `041079c`, `cf3ba76`; audit-ci exits 0 on repo after lanes alignment — `8b8b4b6`; dual
+  lane/lanes rejection hardening — `357410c`.
+- Removal labeling: every observed-but-not-desired repository emits reason `no direct workflow closure
+  in release-ref ledger`, pinned for github-terraform and jackin-github-terraform fixture cases —
+  `357410c`.
+- Gates: `rtk mise run check` exit 0 at each landing (workspace nextest 956→993 passing across slices;
+  final focused suites fleet_policy 57/57, audit_ci green); `rtk mise run fmt/lint/actionlint/deny`
+  exit 0.
+- Independent verification C1–C9 VERIFIED at `041079c`; reviewer APPROVE ×3 (cf3ba76 findings fixed
+  same-slice; residual collision-class LOWs closed in `8b45fe0`; re-review APPROVE).
+
+### Step 6 docs truth
+- org-fleet-migration.md hardcoded id lists + 21-repo allowlist table replaced by generated-policy/
+  ledger authority pointers — `4d24356`.
+- master-plan.md, target-action-registry.md, storage doc: 13-repository figures marked superseded by
+  marked canonical class map — `faff2a2`.
+
+### Execution reconciliation (plan-vs-reality, recorded before live steps)
+- Anchor A: leaf step 4 premise "Tailrocks begins removal-free" is false against live capture
+  (`.velnor-compare/2026-08-24-039-snapshots/summary.md:16-19`): live selection adds cloudflare-tofu +
+  github-terraform beyond canonical 18 + velnor-actions. Apply produces a removal diff; STOP rule
+  (removal without reviewed closure) honored — no live mutation attempted.
+- Anchor B: leaf contract lines listing ChainArgos `github-terraform` / jackin
+  `jackin-github-terraform` as selected conflict with generated closure (zero direct workflow entries;
+  workflow-enumeration.tsv has none). Recorded as live drift to shrink pending explicit operator
+  removal approval; diff now self-labels the reason.
+- Anchor C: snapshots summary says "137 ledger entries"; committed ledger has 157 (mirror-callable pass
+  eea87eb post-dated prose). Ledger file is authoritative.
+- Anchor D: stale module doc claiming live plan/audit/apply unimplemented corrected in `041079c`.
+- Ref-shape STOP stands: ledger admits only refs/heads/main identities; runtime evidence shows ~25% of
+  recent Velnor runs on non-main refs (ref-coverage-audit.md GAPS verdict). Admission-shape resolution
+  requires operator ruling before any restriction flip.
+
+### Remaining for DONE (explicitly operator/live-gated)
+Live steps 3–5: pre-change sanitized captures, operator digest review/approval per org, sequential
+apply ×3, routing/denial/warm proof with run ids, scheduled-audit host enablement (repo-side systemd
+unit slice queued), ledger seed approval after ref-shape ruling.

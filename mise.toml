@@ -24,14 +24,76 @@ run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
 [tasks.test]
 run = "cargo nextest run --workspace --locked --color=always"
 
+[tasks.test-focused]
+description = "Focused nextest run; pass filters after the task, e.g. rtk mise run test-focused -- -p velnor-tools"
+run = "cargo nextest run --locked --color=always"
+
 [tasks.actionlint]
 run = "actionlint"
 
 [tasks.deny]
 run = "cargo deny check advisories"
 
+# Plan 039 tooling-law closure: the fleet policy CLI is fully offline. The
+# committed per-org desired-policy JSONs live in fleet/policies/ and are
+# byte-reproducible via [tasks.fleet-generate]; audit-ci enforces that they
+# stay current with fleet/release-refs.toml.
+[tasks.fleet-generate]
+description = "Regenerate fleet/policies/<org>-desired-policy.json from the release-ref ledger (offline, deterministic)"
+run = "cargo run -p velnor-tools --locked --quiet -- fleet-policy generate --ledger fleet/release-refs.toml --out-dir fleet/policies"
+
+[tasks.fleet-plan]
+description = "Print deterministic desired-policy summary + sha256 digest per org from the release-ref ledger (offline)"
+run = """
+set -eu
+ledger=fleet/release-refs.toml
+if [ ! -f "$ledger" ]; then
+  echo "fleet plan: release-ref ledger '$ledger' not found" >&2
+  exit 1
+fi
+found=0
+for base in fleet/policies .velnor-compare/2026-08-24-039-snapshots; do
+  for f in "$base"/*-desired-policy.json; do
+    [ -f "$f" ] || continue
+    found=1
+    echo "== $f =="
+    cargo run -p velnor-tools --locked --quiet -- fleet-policy plan --policy "$f" --ledger "$ledger"
+  done
+done
+if [ "$found" -ne 1 ]; then
+  echo "fleet plan: no *-desired-policy.json under fleet/policies/ or .velnor-compare/2026-08-24-039-snapshots/" >&2
+  echo "fleet plan: run rtk mise run fleet-generate to produce fleet/policies/<org>-desired-policy.json" >&2
+  exit 1
+fi
+"""
+
+[tasks.fleet-digests]
+description = "Emit one '<org> -> <digest>' line per desired policy"
+run = """
+set -eu
+ledger=fleet/release-refs.toml
+if [ ! -f "$ledger" ]; then
+  echo "fleet digests: release-ref ledger '$ledger' not found" >&2
+  exit 1
+fi
+found=0
+for base in fleet/policies .velnor-compare/2026-08-24-039-snapshots; do
+  for f in "$base"/*-desired-policy.json; do
+    [ -f "$f" ] || continue
+    found=1
+    digest=$(cargo run -p velnor-tools --locked --quiet -- fleet-policy plan --policy "$f" --ledger "$ledger" | sed -n 's/^digest: //p')
+    printf '%s -> %s\n' "$(basename "$f" -desired-policy.json)" "$digest"
+  done
+done
+if [ "$found" -ne 1 ]; then
+  echo "fleet digests: no *-desired-policy.json under fleet/policies/ or .velnor-compare/2026-08-24-039-snapshots/" >&2
+  echo "fleet digests: run rtk mise run fleet-generate to produce fleet/policies/<org>-desired-policy.json" >&2
+  exit 1
+fi
+"""
+
 [tasks.check]
-depends = ["fmt", "actionlint", "deny", "lint", "test"]
+depends = ["fmt", "actionlint", "deny", "fleet-generate", "lint", "test"]
 
 [tasks.ci]
 depends = ["check"]
