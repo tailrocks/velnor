@@ -27,12 +27,15 @@
 # reusable from a velnor-actions mirror. Raw evidence:
 # .velnor-compare/2026-08-24-039-snapshots/{workflow-enumeration.tsv,*-groups.json}.
 #
-# NOT covered by this pass (operator follow-up before closure is complete): the
-# velnor-actions mirror repositories themselves — tailrocks/velnor-actions,
-# jackin-project/velnor-actions, ChainArgos/velnor-actions (callables ci-code/
-# ci-native/ci-tap/ci-apt/ci-fixture/package-signer/package-updater observed
-# SHA-pinned from estate callers). Only the pre-existing
-# tailrocks/velnor-actions ci-code.yml seed is present below.
+# Mirror-callable discovery pass (2026-08-24): the three velnor-actions mirror
+# repositories (tailrocks, ChainArgos, jackin-project) are represented per leaf
+# option (b): each mirror stays a selected repository AND its seven callable
+# workflows directly consumed by estate callers (ci-apt, ci-code, ci-fixture,
+# ci-native, ci-tap, package-signer, package-updater — SHA-pinned uses:
+# observed in workflow-enumeration.tsv) carry their own ledger entries at the
+# mirror default branch refs/heads/main. Mirror-local ci.yml,
+# fanout-smoke.yml, and owner-fanout-canary.yml define no estate-consumed job
+# and are deliberately absent (minimal valid closure).
 schema_version = 1
 
 [[entries]]
@@ -149,6 +152,69 @@ repository = "java-monorepo"
 workflow_path = ".github/workflows/rust-docker.yml"
 git_ref = "refs/heads/main"
 admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/ci-apt.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/ci-code.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/ci-fixture.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/ci-native.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/ci-tap.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/package-signer.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "ChainArgos"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/package-updater.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
 approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
 review_state = "seed-pending-review"
 
@@ -626,6 +692,69 @@ repository = "jackin"
 workflow_path = ".github/workflows/reuse-compliance.yml"
 git_ref = "refs/heads/main"
 admission_reason = "defines the canonical lanes dispatch surface (velnor|github|both) on the default branch with direct Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/ci-apt.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/ci-code.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/ci-fixture.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/ci-native.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/ci-tap.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/package-signer.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "jackin-project"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/package-updater.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
 approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
 review_state = "seed-pending-review"
 
@@ -1199,9 +1328,63 @@ review_state = "seed-pending-review"
 [[entries]]
 owner = "tailrocks"
 repository = "velnor-actions"
+workflow_path = ".github/workflows/ci-apt.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions"
 workflow_path = ".github/workflows/ci-code.yml"
 git_ref = "refs/heads/main"
 admission_reason = "shared reusable CI workflow directly defining Velnor jobs for selected consumers"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/ci-fixture.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/ci-native.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/ci-tap.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/package-signer.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/package-updater.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for estate callers pinned to this mirror"
 approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
 review_state = "seed-pending-review"
 
