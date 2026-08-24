@@ -10258,6 +10258,35 @@ esac
         }
     }
 
+    fn assert_cleanup_reclaims_job_docker(
+        calls: &[(String, Vec<String>)],
+        rm_index: usize,
+        temp: &Path,
+    ) {
+        assert_eq!(calls[rm_index].1[0], "rm");
+        assert_eq!(
+            calls[rm_index + 1].1,
+            crate::docker_lease::list_owned_containers_args("job")
+        );
+        assert_eq!(
+            calls[rm_index + 2].1,
+            crate::docker_lease::list_owned_networks_args("job")
+        );
+        assert_eq!(
+            calls[rm_index + 3].1,
+            crate::docker_lease::list_owned_volumes_args("job")
+        );
+        assert_eq!(calls[rm_index + 4].1[0], "ps");
+        assert!(calls[rm_index + 4]
+            .1
+            .iter()
+            .any(|arg| arg.contains("name=-")));
+        let scope = sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap());
+        assert!(calls[rm_index + 4].1.contains(&format!("name=-{scope}0$")));
+        assert_eq!(calls[rm_index + 5].1[0], "volume");
+        assert_eq!(calls[rm_index + 6].1[0], "network");
+    }
+
     fn expected_network_create_args() -> Vec<String> {
         [
             "network",
@@ -10526,52 +10555,7 @@ esac
         assert!(calls[2]
             .1
             .contains(&"GITHUB_OUTPUT=/__t/step1_output".into()));
-        assert_eq!(
-            calls[3].1,
-            vec!["rm", "--force", "job"]
-                .into_iter()
-                .map(String::from)
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(
-            calls[4].1,
-            vec![
-                "ps",
-                "--all",
-                "--quiet",
-                "--filter",
-                &format!(
-                    "name=-{}0$",
-                    sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap())
-                )
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect::<Vec<_>>()
-        );
-        assert_eq!(
-            calls[5].1,
-            vec![
-                "volume",
-                "ls",
-                "--quiet",
-                "--filter",
-                &format!(
-                    "name=-{}0_state$",
-                    sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap())
-                )
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect::<Vec<_>>()
-        );
-        assert_eq!(
-            calls[6].1,
-            vec!["network", "rm", "net"]
-                .into_iter()
-                .map(String::from)
-                .collect::<Vec<_>>()
-        );
+        assert_cleanup_reclaims_job_docker(calls, 3, &temp);
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -10603,11 +10587,7 @@ esac
             .unwrap();
 
         assert_eq!(result.exit_code, 7);
-        assert_eq!(executor.runner().calls.len(), 7);
-        assert_eq!(executor.runner().calls[3].1[0], "rm");
-        assert_eq!(executor.runner().calls[4].1[0], "ps");
-        assert_eq!(executor.runner().calls[5].1[0], "volume");
-        assert_eq!(executor.runner().calls[6].1[0], "network");
+        assert_cleanup_reclaims_job_docker(&executor.runner().calls, 3, &temp);
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -10649,15 +10629,11 @@ esac
         assert_eq!(results.len(), 2);
         let runner = executor.runner();
         let calls = &runner.calls;
-        assert_eq!(calls.len(), 8);
         assert_eq!(calls[0].1[0], "network");
         assert_eq!(calls[1].1[0], "run");
         assert_eq!(calls[2].1[0], "exec");
         assert_eq!(calls[3].1[0], "exec");
-        assert_eq!(calls[4].1[0], "rm");
-        assert_eq!(calls[5].1[0], "ps");
-        assert_eq!(calls[6].1[0], "volume");
-        assert_eq!(calls[7].1[0], "network");
+        assert_cleanup_reclaims_job_docker(calls, 4, &temp);
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -13195,7 +13171,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 0, 0, 0, 0],
+            codes: vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         });
 
         let results = executor
@@ -13205,11 +13181,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert_eq!(results.len(), 1);
         let calls = &executor.runner().calls;
         assert_eq!(calls[0].1, expected_network_create_args());
-        assert_eq!(calls[1].1, vec!["rm", "--force", "job"]);
-        assert_eq!(calls[2].1[0], "ps");
-        assert_eq!(calls[3].1[0], "volume");
-        assert_eq!(calls[4].1, vec!["network", "rm", "net"]);
-        assert_eq!(calls[5].1, expected_network_create_args());
+        assert_cleanup_reclaims_job_docker(calls, 1, &temp);
+        assert_eq!(calls[8].1, expected_network_create_args());
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -13221,7 +13194,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+            codes: vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
         });
 
         let error = executor
@@ -13231,16 +13204,10 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert!(error.to_string().contains("docker run"));
         let calls = &executor.runner().calls;
         assert_eq!(calls[0].1, expected_network_create_args());
-        assert_eq!(calls[1].1, vec!["rm", "--force", "job"]);
-        assert_eq!(calls[2].1[0], "ps");
-        assert_eq!(calls[3].1[0], "volume");
-        assert_eq!(calls[4].1, vec!["network", "rm", "net"]);
-        assert_eq!(calls[5].1, expected_network_create_args());
-        assert_eq!(calls[6].1[0], "run");
-        assert_eq!(calls[7].1, vec!["rm", "--force", "job"]);
-        assert_eq!(calls[8].1[0], "ps");
-        assert_eq!(calls[9].1[0], "volume");
-        assert_eq!(calls[10].1, vec!["network", "rm", "net"]);
+        assert_cleanup_reclaims_job_docker(calls, 1, &temp);
+        assert_eq!(calls[8].1, expected_network_create_args());
+        assert_eq!(calls[9].1[0], "run");
+        assert_cleanup_reclaims_job_docker(calls, 10, &temp);
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -16134,16 +16101,12 @@ fi"#
 
         assert_eq!(results.len(), 3);
         let calls = &executor.runner().calls;
-        assert_eq!(calls.len(), 9);
         assert_eq!(calls[0].1[0], "network");
         assert_eq!(calls[1].1[0], "run");
         assert_eq!(calls[2].1[0], "exec");
         assert_eq!(calls[3].1[0], "run");
         assert_eq!(calls[4].1[0], "exec");
-        assert_eq!(calls[5].1[0], "rm");
-        assert_eq!(calls[6].1[0], "ps");
-        assert_eq!(calls[7].1[0], "volume");
-        assert_eq!(calls[8].1[0], "network");
+        assert_cleanup_reclaims_job_docker(calls, 5, &temp);
         assert!(calls[3].1.contains(&"INPUT_NAME=value".into()));
         assert!(calls[3].1.contains(&"GITHUB_REPOSITORY=acme/repo".into()));
         assert!(calls[3].1.contains(&"TOKEN=ghs_token".into()));
