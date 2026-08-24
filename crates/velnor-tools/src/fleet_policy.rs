@@ -1,9 +1,12 @@
 //! Maintainer-only org-JIT fleet policy model (Plan 039 Steps 1–2).
 //!
 //! Deterministic generation surface: strict validation, canonical JSON,
-//! sha256 digests, and the release-ref ledger schema. No network I/O lives
-//! here; live GitHub access is behind [`FleetStateSource`] and is not yet
-//! implemented (`plan`/`audit`/`apply` report the gap explicitly).
+//! sha256 digests, and the release-ref ledger schema. `generate` is fully
+//! offline: it reads the release-ref ledger and emits byte-stable per-org
+//! policy JSON (see [`generate_policies_from_ledger`]). `plan` prints a
+//! desired-policy summary offline. `audit` and `apply` reach live GitHub
+//! runner-group state through [`crate::fleet_policy_client::FleetGateway`]
+//! (`ReqwestFleetHttp`); apply stays manual and digest-gated.
 
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
@@ -659,6 +662,8 @@ pub enum FleetPolicyCommand {
     Audit(FleetAuditArgs),
     /// Apply a reviewed plan digest to exactly one organization (requires the live client).
     Apply(FleetApplyArgs),
+    /// Regenerate per-org desired-policy JSON from the release-ref ledger offline.
+    Generate(FleetGenerateArgs),
 }
 
 #[derive(Debug, Args)]
@@ -692,6 +697,16 @@ pub struct FleetApplyArgs {
     /// Reviewed plan digest; a stale digest aborts before any mutation.
     #[arg(long)]
     pub plan_digest: String,
+}
+
+#[derive(Debug, Args)]
+pub struct FleetGenerateArgs {
+    /// Release-ref ledger to generate from (validated before any write).
+    #[arg(long, default_value = "fleet/release-refs.toml")]
+    pub ledger: PathBuf,
+    /// Directory receiving `<org>-desired-policy.json` files.
+    #[arg(long, default_value = "fleet/policies")]
+    pub out_dir: PathBuf,
 }
 
 const NOT_IMPLEMENTED_LIVE: &str =
@@ -732,7 +747,76 @@ pub async fn fleet_policy(command: FleetPolicyCommand) -> Result<()> {
         FleetPolicyCommand::Plan(args) => fleet_plan(args),
         FleetPolicyCommand::Audit(args) => fleet_audit(args).await,
         FleetPolicyCommand::Apply(args) => fleet_apply(args).await,
+        FleetPolicyCommand::Generate(args) => fleet_generate(args),
     }
+}
+
+/// Build the deterministic per-organization desired policies from a validated
+/// ledger.
+///
+/// Review-state mechanism (exact behavior that produced the committed
+/// 2026-08-24 snapshots): [`validate_ledger`] rejects `expired` entries
+/// outright, so every entry surviving validation — both `approved` and
+/// `seed-pending-review` — flows into its organization's policy. The seed
+/// ledger is entirely `seed-pending-review`, and the committed snapshots were
+/// generated from it with all entries included; operator approval gates live
+/// plan/audit/apply runs, not byte generation. Entries are grouped by owner;
+/// repositories and workflow identities are sorted and de-duplicated by
+/// [`OrgPolicy::normalized`] before canonical serialization.
+pub fn generate_policies_from_ledger(ledger: &ReleaseRefLedger) -> Result<Vec<OrgPolicy>> {
+    let mut by_org: BTreeMap<&str, Vec<&ReleaseRefEntry>> = BTreeMap::new();
+    for entry in &ledger.entries {
+        by_org.entry(entry.owner.as_str()).or_default().push(entry);
+    }
+    let mut policies = Vec::new();
+    for (organization, entries) in &by_org {
+        let mut policy = OrgPolicy::new((*organization).to_owned());
+        let mut repositories = BTreeSet::new();
+        let mut workflows = Vec::new();
+        for entry in entries {
+            repositories.insert(format!("{}/{}", entry.owner, entry.repository));
+            workflows.push(WorkflowIdentity {
+                path: format!(
+                    "{}/{}/{}",
+                    entry.owner, entry.repository, entry.workflow_path
+                ),
+                git_ref: entry.git_ref.clone(),
+            });
+        }
+        policy.selected_repositories = repositories.into_iter().collect();
+        policy.selected_workflows = workflows;
+        let policy = policy.normalized();
+        // Canonical JSON validates; a generated policy can never be invalid.
+        policy.canonical_json()?;
+        policies.push(policy);
+    }
+    if policies.is_empty() {
+        bail!("field 'entries': value must be non-empty");
+    }
+    Ok(policies)
+}
+
+fn fleet_generate(args: FleetGenerateArgs) -> Result<()> {
+    let ledger = ReleaseRefLedger::load(&args.ledger)?;
+    let policies = generate_policies_from_ledger(&ledger)?;
+    fs::create_dir_all(&args.out_dir)
+        .with_context(|| format!("creating {}", args.out_dir.display()))?;
+    for policy in &policies {
+        let path = args
+            .out_dir
+            .join(format!("{}-desired-policy.json", policy.organization));
+        let bytes = format!("{}\n", policy.canonical_json()?);
+        fs::write(&path, bytes)
+            .with_context(|| format!("writing fleet policy {}", path.display()))?;
+        println!(
+            "{}: {} repos, {} workflows, {}",
+            path.display(),
+            policy.selected_repositories.len(),
+            policy.selected_workflows.len(),
+            policy.digest()?
+        );
+    }
+    Ok(())
 }
 
 async fn fleet_audit(args: FleetAuditArgs) -> Result<()> {
@@ -1233,5 +1317,140 @@ mod tests {
         assert!(semantic_diff(&desired, "tailrocks", &observed)
             .expect("diff")
             .is_empty());
+    }
+
+    fn repo_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    #[test]
+    fn generate_reproduces_committed_snapshot_bytes() {
+        let ledger =
+            ReleaseRefLedger::load(&repo_root().join("fleet/release-refs.toml")).expect("ledger");
+        let policies = generate_policies_from_ledger(&ledger).expect("policies");
+        let mut seen = BTreeSet::new();
+        for policy in &policies {
+            seen.insert(policy.organization.clone());
+            let generated = format!("{}\n", policy.canonical_json().expect("canonical"));
+            let snapshot = repo_root()
+                .join(".velnor-compare/2026-08-24-039-snapshots")
+                .join(format!("{}-desired-policy.json", policy.organization));
+            let committed = fs::read_to_string(&snapshot)
+                .unwrap_or_else(|error| panic!("read {snapshot:?}: {error}"));
+            assert_eq!(
+                generated,
+                committed,
+                "generated bytes diverge from {}",
+                snapshot.display()
+            );
+        }
+        assert_eq!(
+            seen,
+            BTreeSet::from([
+                "ChainArgos".to_owned(),
+                "jackin-project".to_owned(),
+                "tailrocks".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn generate_is_deterministic_across_runs() {
+        let ledger =
+            ReleaseRefLedger::load(&repo_root().join("fleet/release-refs.toml")).expect("ledger");
+        let first = generate_policies_from_ledger(&ledger).expect("first");
+        let second = generate_policies_from_ledger(&ledger).expect("second");
+        assert_eq!(first.len(), second.len());
+        for (left, right) in first.iter().zip(second.iter()) {
+            assert_eq!(left, right);
+            assert_eq!(
+                left.canonical_json().expect("left"),
+                right.canonical_json().expect("right")
+            );
+            assert_eq!(left.digest().expect("left"), right.digest().expect("right"));
+        }
+    }
+
+    fn ledger_toml(entries: &[String]) -> String {
+        let mut text = String::from("schema_version = 1\n");
+        for entry in entries {
+            text.push_str(entry);
+        }
+        text
+    }
+
+    fn base_entry() -> String {
+        "[[entries]]\n\
+         owner = \"tailrocks\"\n\
+         repository = \"ruxel\"\n\
+         workflow_path = \".github/workflows/ci.yml\"\n\
+         git_ref = \"refs/heads/main\"\n\
+         admission_reason = \"test\"\n\
+         approving_change = \"test\"\n\
+         review_state = \"seed-pending-review\"\n"
+            .to_owned()
+    }
+
+    fn parsed_ledger_error(text: &str) -> String {
+        let parsed: ReleaseRefLedger =
+            toml::from_str(text).expect("malformed fixtures must stay TOML-parseable");
+        validate_ledger(&parsed)
+            .err()
+            .map(|error| error.to_string())
+            .expect("ledger must be rejected")
+    }
+
+    #[test]
+    fn generation_fails_loudly_on_duplicate_entries() {
+        let mut duplicate = base_entry();
+        duplicate.push_str(&base_entry());
+        let err = parsed_ledger_error(&ledger_toml(&[duplicate]));
+        assert!(err.contains("field 'entries': duplicate entry"), "{err}");
+    }
+
+    #[test]
+    fn generation_fails_loudly_on_wildcards() {
+        let mut wildcard = base_entry();
+        wildcard = wildcard.replace(
+            "workflow_path = \".github/workflows/ci.yml\"",
+            "workflow_path = \".github/workflows/*.yml\"",
+        );
+        let err = parsed_ledger_error(&ledger_toml(&[wildcard]));
+        assert!(err.contains("wildcards"), "{err}");
+    }
+
+    #[test]
+    fn generation_fails_loudly_on_unqualified_refs() {
+        let unqualified =
+            base_entry().replace("git_ref = \"refs/heads/main\"", "git_ref = \"main\"");
+        let err = parsed_ledger_error(&ledger_toml(&[unqualified]));
+        assert!(err.contains("unqualified ref"), "{err}");
+    }
+
+    #[test]
+    fn generation_fails_loudly_on_contradictions() {
+        let mut conflicting = base_entry();
+        conflicting = conflicting.replace(
+            "git_ref = \"refs/heads/main\"",
+            "git_ref = \"refs/tags/v9\"",
+        );
+        let err = parsed_ledger_error(&ledger_toml(&[base_entry(), conflicting]));
+        assert!(err.contains("contradictory entries"), "{err}");
+
+        // Policy-layer backstop: even an unvalidated in-memory ledger cannot
+        // reach canonical bytes with two refs for one workflow path.
+        let mut ledger = sample_ledger();
+        ledger.entries.push(ReleaseRefEntry {
+            git_ref: "refs/heads/release".to_owned(),
+            ..sample_ledger().entries[0].clone()
+        });
+        let err = generate_policies_from_ledger(&ledger)
+            .map(|policies| policies[0].canonical_json().expect("canonical"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("contradictory entries for workflow path"),
+            "{err}"
+        );
     }
 }

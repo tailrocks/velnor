@@ -9,6 +9,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::fleet_policy::{generate_policies_from_ledger, ReleaseRefLedger};
+
 const INLINE_MATRIX_MARKERS: [&str; 2] = ["inputs.lanes == 'both'", "inputs.lane == 'both'"];
 
 fn has_real_both_lane_expansion(text: &str) -> bool {
@@ -734,6 +736,7 @@ fn audit_repo_profile(
 ) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
     findings.extend(audit_test_runner_surfaces(root)?);
+    findings.extend(audit_fleet_policy_surface(root)?);
     let mise_path = root.join("mise.toml");
     if mise_path.is_file() {
         let text = fs::read_to_string(&mise_path)
@@ -790,6 +793,143 @@ fn audit_repo_profile(
         (&left.file, &left.path, left.rule).cmp(&(&right.file, &right.path, right.rule))
     });
     Ok(findings)
+}
+
+/// Plan 039 Step 1 repository-local enforcement: when a checkout carries
+/// `fleet/release-refs.toml`, validate it against the ledger schema and require
+/// every generated `<org>-desired-policy.json` under `fleet/policies/` to be
+/// byte-current versus offline deterministic generation.
+fn audit_fleet_policy_surface(root: &Path) -> Result<Vec<Finding>> {
+    let ledger_path = root.join("fleet/release-refs.toml");
+    if !ledger_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let policies_dir = root.join("fleet/policies");
+    let mut on_disk = BTreeMap::new();
+    let mut unreadable = Vec::new();
+    if policies_dir.is_dir() {
+        for entry in fs::read_dir(&policies_dir)
+            .with_context(|| format!("read {}", policies_dir.display()))?
+        {
+            let path = entry
+                .with_context(|| format!("read entry under {}", policies_dir.display()))?
+                .path();
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            let Some(stem) = name.strip_suffix("-desired-policy.json") else {
+                continue;
+            };
+            match fs::read_to_string(&path) {
+                Ok(content) => {
+                    on_disk.insert(stem.to_owned(), content);
+                }
+                Err(error) => unreadable.push((stem.to_owned(), error.to_string())),
+            }
+        }
+    }
+    let ledger = ReleaseRefLedger::load(&ledger_path);
+    let mut findings = fleet_policy_findings(ledger, &on_disk);
+    for (stem, reason) in unreadable {
+        findings.push(Finding::error(
+            "fleet-policy-current",
+            &format!("fleet/policies/{stem}-desired-policy.json"),
+            "$",
+            format!("generated policy file is unreadable: {reason}"),
+        ));
+    }
+    Ok(findings)
+}
+
+/// Pure comparison core for [`audit_fleet_policy_surface`]: ledger parse
+/// result plus org → on-disk policy bytes produces precise findings only.
+fn fleet_policy_findings(
+    ledger: Result<ReleaseRefLedger>,
+    on_disk: &BTreeMap<String, String>,
+) -> Vec<Finding> {
+    const LEDGER_FILE: &str = "fleet/release-refs.toml";
+    let ledger = match ledger {
+        Ok(ledger) => ledger,
+        Err(error) => {
+            return vec![Finding::error(
+                "fleet-policy-ledger",
+                LEDGER_FILE,
+                "$",
+                format!("{:#}", error),
+            )];
+        }
+    };
+    let expected: BTreeMap<String, String> = match generate_policies_from_ledger(&ledger) {
+        Ok(policies) => {
+            let mut map = BTreeMap::new();
+            for policy in policies {
+                match policy.canonical_json() {
+                    Ok(json) => {
+                        map.insert(policy.organization.clone(), format!("{json}\n"));
+                    }
+                    Err(error) => {
+                        return vec![Finding::error(
+                            "fleet-policy-generate",
+                            LEDGER_FILE,
+                            "$",
+                            format!("{:#}", error),
+                        )];
+                    }
+                }
+            }
+            map
+        }
+        Err(error) => {
+            return vec![Finding::error(
+                "fleet-policy-generate",
+                LEDGER_FILE,
+                "$",
+                format!("{:#}", error),
+            )];
+        }
+    };
+    let mut findings = Vec::new();
+    for (organization, wanted) in &expected {
+        let relative = format!("fleet/policies/{organization}-desired-policy.json");
+        let Some(content) = on_disk.get(organization) else {
+            findings.push(Finding::error(
+                "fleet-policy-current",
+                &relative,
+                "$",
+                "missing required generated policy file; run rtk mise run fleet-generate",
+            ));
+            continue;
+        };
+        if content != wanted {
+            let first_difference = content
+                .bytes()
+                .zip(wanted.bytes())
+                .position(|(left, right)| left != right)
+                .unwrap_or_else(|| content.len().min(wanted.len()));
+            findings.push(Finding::error(
+                "fleet-policy-current",
+                &relative,
+                "$",
+                format!(
+                    "policy bytes are stale versus deterministic generation (first difference at byte {first_difference}); run rtk mise run fleet-generate"
+                ),
+            ));
+        }
+    }
+    for organization in on_disk.keys() {
+        if !expected.contains_key(organization) {
+            findings.push(Finding::error(
+                "fleet-policy-extra",
+                &format!("fleet/policies/{organization}-desired-policy.json"),
+                "$",
+                format!(
+                    "no ledger entries for organization '{organization}'; remove this stale generated policy"
+                ),
+            ));
+        }
+    }
+    findings
 }
 
 fn audit_test_runner_surfaces(root: &Path) -> Result<Vec<Finding>> {
@@ -2793,4 +2933,119 @@ jobs:
         "required-aggregator",
         "workflow-safety",
     ];
+
+    fn sample_fleet_ledger() -> ReleaseRefLedger {
+        ReleaseRefLedger {
+            schema_version: 1,
+            entries: vec![crate::fleet_policy::ReleaseRefEntry {
+                owner: "tailrocks".to_owned(),
+                repository: "ruxel".to_owned(),
+                workflow_path: ".github/workflows/ci.yml".to_owned(),
+                git_ref: "refs/heads/main".to_owned(),
+                admission_reason: "test".to_owned(),
+                approving_change: "test".to_owned(),
+                review_state: crate::fleet_policy::ReviewState::SeedPendingReview,
+                expiry: None,
+            }],
+        }
+    }
+
+    fn expected_policy_bytes(ledger: &ReleaseRefLedger) -> BTreeMap<String, String> {
+        crate::fleet_policy::generate_policies_from_ledger(ledger)
+            .expect("sample ledger generates")
+            .into_iter()
+            .map(|policy| {
+                let bytes = format!("{}\n", policy.canonical_json().expect("canonical"));
+                (policy.organization.clone(), bytes)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fleet_policy_findings_empty_when_bytes_current() {
+        let ledger = sample_fleet_ledger();
+        let findings = fleet_policy_findings(Ok(ledger.clone()), &expected_policy_bytes(&ledger));
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    #[test]
+    fn fleet_policy_findings_name_missing_file() {
+        let ledger = sample_fleet_ledger();
+        let findings = fleet_policy_findings(Ok(ledger), &BTreeMap::new());
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, "fleet-policy-current");
+        assert_eq!(
+            findings[0].file,
+            "fleet/policies/tailrocks-desired-policy.json"
+        );
+        assert!(findings[0]
+            .message
+            .contains("missing required generated policy file"));
+    }
+
+    #[test]
+    fn fleet_policy_findings_pinpoint_stale_bytes() {
+        let ledger = sample_fleet_ledger();
+        let mut stale = expected_policy_bytes(&ledger);
+        let current = stale.get("tailrocks").cloned().expect("tailrocks");
+        // Flip the very first byte of the JSON body.
+        let drifted = current.replacen('{', "[", 1);
+        assert_ne!(drifted, current);
+        stale.insert("tailrocks".to_owned(), drifted);
+        let findings = fleet_policy_findings(Ok(ledger), &stale);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, "fleet-policy-current");
+        assert!(
+            findings[0].message.contains("first difference at byte 0"),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn fleet_policy_findings_reject_extra_org_files() {
+        let ledger = sample_fleet_ledger();
+        let mut on_disk = expected_policy_bytes(&ledger);
+        on_disk.insert("ghost-org".to_owned(), "{}\n".to_owned());
+        let findings = fleet_policy_findings(Ok(ledger), &on_disk);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, "fleet-policy-extra");
+        assert!(findings[0].message.contains("'ghost-org'"));
+    }
+
+    #[test]
+    fn fleet_policy_findings_surface_invalid_ledger_precisely() {
+        let mut invalid = sample_fleet_ledger();
+        invalid.entries[0].git_ref = "main".to_owned();
+        let findings = fleet_policy_findings(Err(anyhow::anyhow!("boom")), &BTreeMap::new());
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, "fleet-policy-ledger");
+        assert_eq!(findings[0].file, "fleet/release-refs.toml");
+        assert_eq!(findings[0].message, "boom");
+        // The filesystem path validates before comparing anything.
+        assert!(crate::fleet_policy::validate_ledger(&invalid)
+            .unwrap_err()
+            .to_string()
+            .contains("unqualified ref"));
+    }
+
+    #[test]
+    fn fleet_policy_surface_skips_checkouts_without_ledger() {
+        let root = TestRepo::new();
+        assert!(audit_fleet_policy_surface(&root.path)
+            .expect("skip")
+            .is_empty());
+
+        std::fs::create_dir_all(root.path.join("fleet")).unwrap();
+        std::fs::write(
+            root.path.join("fleet/release-refs.toml"),
+            "schema_version = 1\n\n[[entries]]\nowner = \"tailrocks\"\nrepository = \"ruxel\"\nworkflow_path = \".github/workflows/ci.yml\"\ngit_ref = \"refs/heads/main\"\nadmission_reason = \"test\"\napproving_change = \"test\"\nreview_state = \"seed-pending-review\"\n",
+        )
+        .unwrap();
+        let findings = audit_fleet_policy_surface(&root.path).expect("audit");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, "fleet-policy-current");
+        assert!(findings[0]
+            .message
+            .contains("missing required generated policy file"));
+    }
 }
