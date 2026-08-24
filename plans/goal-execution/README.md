@@ -72,32 +72,36 @@ before any gate runs. Rust tests use nextest, never `cargo test`.
 
 ## Canonical whole-campaign prompt
 
-Submit this entire block once in Codex. The `/goal` parser rejects objectives
-over 4000 characters and treats dash-prefixed words (`--check`, a bare
-argument separator, `-s`) as unknown flags, so the objective below stays under
-the limit and contains none; do not re-add them.
+Submit this entire block once per OpenCode session. Three concurrent OpenCode
+sessions execute this goal together as peers; ownership between them is
+arbitrated by [`COORDINATION.md`](COORDINATION.md), not by goal state. The
+`/goal` parser rejects objectives over 4000 characters and treats dash-prefixed
+words (`--check`, a bare argument separator, `-s`) as unknown flags, so the
+objective below stays under the limit and contains none; do not re-add them.
+Supported flags (`--max-turns`, `--max-minutes`, `--max-duration-ms`,
+`--max-tokens`, `--budget`, `--cooldown-ms`, `--no-progress-threshold`,
+`--no-progress-turns`, `--no-tool-turns`, `--success`, `--constraints`,
+`--mode`) are optional; the objective alone is sufficient.
 
 ```text
-/goal Complete the entire Velnor plan graph: Plan 039, Plans 063–080, commands C001–C075 DONE at current HEAD; every done criterion machine-verifiably evidenced; focused, repository, integration, fixture, safety, package, fleet, and final acceptance gates green; indexes consistent; no unresolved review finding. plans/goal-execution/README.md binds: its read-first inventory, controller loop, tooling law, execution graph, validation layers, reconciliation, and recovery rules are mandatory.
+/goal Complete the entire Velnor plan graph at current HEAD: Plan 039, Plans 063-080, commands C001-C075 DONE; every done criterion machine-verifiably evidenced; all focused, repository, integration, fixture, safety, package, fleet, and acceptance gates green; indexes consistent; no unresolved review finding. plans/goal-execution/README.md binds: read-first inventory, controller loop, tooling law, execution graph, validation layers, reconciliation, recovery rules.
 
-Primary agent orchestrates only (dependencies, dispatch, conflict prevention, operator-approval boundaries, evidence reconciliation, ledger consistency, verdict); never implements, edits, tests, or reviews a leaf directly. Per leaf dispatch fresh subagents: investigation (read-only drift/dependency validation), implementation (owned file scope on the campaign branch), verification (commands, fixture runs, artifacts, done criteria), independent diff review, plus specialists whenever security, protocol, packaging, fleet, storage, migration, or documentation surfaces appear. Each receives the full leaf file, this contract, dependency evidence, applicable AGENTS.md, exact scope, STOP conditions, and return schema, not chat summaries. A separate verifier confirms claims against repository state; self-asserted success never counts; an implementer never provides the only review or verdict.
+Three OpenCode sessions run this goal together as peers. Binding channel: plans/goal-execution/COORDINATION.md. Claim a leaf there and push before any writer acts; one writer per leaf; claims expire after 60 idle minutes or RELEASED. On collision the later session stops writing, saves evidence under .velnor-compare/, then reconciles forward from the coherent on-disk design; the leaf file wins over any peer design. Fixture dispatches, live mutations, and status-index commits stay serialized across sessions.
 
-Subagents are mandatory for every plan item and all implementation, investigation, testing, fixture validation, documentation reconciliation, safety audit, and review work. No slot free: bounded wait/retry cycles while checking state, or only non-conflicting orchestrator work; unavailability never stops the campaign or pulls a leaf into primary context.
+Each session's primary agent orchestrates only: dependencies, dispatch, conflict prevention, operator-approval boundaries, evidence reconciliation, ledger consistency, verdict. Never implement, edit, test, or review a leaf directly. Per leaf dispatch fresh subagents for investigation (drift and dependency validation), implementation (owned file scope), verification (commands, fixture runs, artifacts, done criteria), independent diff review, plus specialists for security, protocol, packaging, fleet, storage, migration, or documentation surfaces. Subagents get the full leaf file, this contract, dependency evidence, applicable AGENTS.md, exact scope, STOP conditions, and return schema. Subagents are mandatory for every plan item; if no slot is free use bounded wait and retry cycles while checking state, never pulling a leaf into primary context. A separate verifier confirms claims against repository state; self-asserted success never counts; an implementer never provides the only review or verdict.
 
-One campaign branch recorded at start carries every leaf commit sequentially; never create or switch branches; no separate implementation worktree; one writer subagent at a time, others read-only; prove HEAD and branch match the campaign ledger at every handoff and repair mismatch by returning to the recorded branch without discarding work.
+One campaign branch carries every leaf commit sequentially; never create or switch branches; no separate implementation worktree. Prove HEAD and branch match the campaign ledger at every handoff; repair mismatch by returning to the recorded branch without discarding work.
 
-All execution runs through mise tasks invoked via rtk (rtk mise run <task>); never call cargo, clippy, nextest, actionlint, or cargo-deny directly where a task wraps them. Gates fmt, lint, test (nextest), actionlint, deny, composite check, ci always run as mise tasks; filters ride after the task name: focused scopes the task, never bypasses it. Missing capability: add a mise.lock-pinned mise.toml task, not ad-hoc commands. Trust/configure mise before gates.
+All gates run through mise tasks invoked via rtk (rtk mise run <task>): fmt, lint, test (nextest), actionlint, deny, composite check, ci. Never call cargo, clippy, nextest, actionlint, or cargo-deny directly where a task wraps them. Filters ride after the task name; focused scopes the task, never bypasses it. Missing capability means a mise.lock-pinned mise.toml task, never ad-hoc commands. Configure mise before gates.
 
-Per leaf: verify rtk and mise; inspect git status untouched; resolve live dependencies and statuses; prove dependencies DONE; drift-check against HEAD; inspect cited symbols; record baseline commit, worktree state, fixture commit, manifest version, baseline scoped tests; reconcile plan versus reality through subagents before implementing; never silently adapt or skip.
+Per leaf: verify rtk and mise; prove dependencies DONE; drift-check against HEAD; inspect cited symbols; record baseline commit, worktree state, fixture commit, manifest version, baseline scoped tests; reconcile plan versus reality through subagents before implementing; never silently adapt or skip. Execute one step at a time verified through its mise task; retain shortest decisive evidence; use Rust and repository patterns; consult current official docs where required; GitHub runner protocol reads actions/runner first; no strict-capability expansion without operator approval; never weaken the fixture or fake missing Velnor behavior locally.
 
-Execute one step at a time, verified through its mise task; retain shortest decisive evidence; use Rust and repository patterns; consult current official docs where required; GitHub runner protocol reads actions/runner first; no strict-capability expansion without operator approval; never weaken the fixture or fake missing Velnor behavior locally.
-
-Leaf completion requires verifier and reviewer reruns of scoped focused tests, mise run check, integration/fixture gates, whitespace check, scope audit, secret scan, and independent diff review, affected gates rerun after fixes, every criterion mapped to evidence; a status subagent flips item file plus index rows to DONE atomically. Conventional Commits, signed-off commits, trailer Co-authored-by: Codex <codex@openai.com>. Push, PR, merge, publish, deploy, or destructive live work only when item and operator authorization demand. Actions-dispatch hygiene, STOP conditions, and BLOCKED handling follow the playbook exactly.
+Leaf completion requires verifier and reviewer reruns of scoped focused tests, mise run check, integration and fixture gates, whitespace check, scope audit, secret scan, independent diff review; affected gates rerun after fixes; every criterion mapped to evidence; a status subagent flips item file plus index rows to DONE atomically. Conventional Commits, signed-off commits, trailer Co-authored-by: Codex <codex@openai.com>. Push, PR, merge, publish, deploy, or destructive live work only when item and operator authorization demand. Dispatch hygiene, STOP conditions, and BLOCKED handling follow the playbook exactly.
 ```
 
-For Claude Code, remove only the `/goal` prefix. Keep the complete campaign
-objective and contract. Use its subagent/task mechanism for every leaf and every
-specialist pass. Repository status and evidence, not chat memory, carry progress.
+Repository status and evidence, not chat memory, carry progress across
+sessions. When another session holds a claim, run only read-only work or pick
+an unclaimed dependency-ready leaf after recording your own claim row.
 
 ## Controller loop
 
