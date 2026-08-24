@@ -46,7 +46,7 @@ jobs:
   identity:
     name: Resolve + gate release identity
     timeout-minutes: 20
-    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || (github.event_name == 'push') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     outputs:
       version: ${{ steps.gate.outputs.version }}
       commit: ${{ steps.gate.outputs.commit }}
@@ -107,7 +107,7 @@ jobs:
     needs: identity
     name: Compile release metadata once
     timeout-minutes: 30
-    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || (github.event_name == 'push') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     outputs:
       manifest_sha256: ${{ steps.export.outputs.manifest_sha256 }}
     env:
@@ -192,7 +192,7 @@ jobs:
     needs: [identity, metadata]
     name: Build + push one multi-platform GHCR image
     timeout-minutes: 60
-    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || (github.event_name == 'push') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     permissions:
       contents: read
       packages: write
@@ -292,7 +292,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - arch: arm64
             target: aarch64-unknown-linux-gnu
-    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || (github.event_name == 'push') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     env:
       VERSION: ${{ needs.identity.outputs.version }}
       CARGO_INCREMENTAL: "0"
@@ -367,7 +367,9 @@ jobs:
           cargo-deb --version
 
       - name: Build (release-build embeds source SHA + tag; fails on drift)
-        run: cargo zigbuild -p velnor-runner --release --locked --features release-build --target ${{ matrix.target }}
+        # velnorctl ships transitionally inside the deb until the Plan 079
+        # package rename; release-build features stay runner-only.
+        run: cargo zigbuild -p velnor-runner -p velnorctl --release --locked --features release-build --target ${{ matrix.target }}
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
@@ -415,6 +417,7 @@ jobs:
           manifest="$(mktemp)"
           dpkg-deb -c "$src" > "$manifest"
           grep -q "usr/bin/velnor-runner" "$manifest" || { echo "::error::deb missing usr/bin/velnor-runner" >&2; exit 1; }
+          grep -q "usr/bin/velnorctl" "$manifest" || { echo "::error::deb missing usr/bin/velnorctl" >&2; exit 1; }
           grep -q "usr/share/velnor/job-ubuntu.Dockerfile" "$manifest" || { echo "::error::deb missing canonical Dockerfile" >&2; exit 1; }
           [ "$(stat -c%s "$src")" -gt 1000000 ] || { echo "::error::deb suspiciously small: $(stat -c%s "$src") bytes" >&2; exit 1; }
           dst="velnor-runner-${VERSION}-${{ matrix.arch }}.deb"
@@ -435,7 +438,7 @@ jobs:
     needs: [identity, metadata, image, build]
     name: Assemble, verify + publish one coherent release
     timeout-minutes: 30
-    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || (github.event_name == 'push') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && 'ubuntu-26.04' || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
     permissions:
       contents: write
     env:
@@ -559,13 +562,7 @@ jobs:
           mkdir signer-input
           cp artifacts/velnor-runner-*.tar.gz artifacts/velnor-runner-*.deb signer-input/
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: package-subjects
-          path: signer-input
-          if-no-files-found: error
-
-      - name: Create release once — no clobber, digest-exact idempotency
+      - name: Create release once — no clobber, record-verified idempotency
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -574,26 +571,63 @@ jobs:
           # Fail (never mint at main HEAD) if there is nothing to publish.
           [ -f release-record.json ] || { echo "::error::no assembled record" >&2; exit 1; }
           if gh release view "$tag" >/dev/null 2>&1; then
-            # Existing release: accept ONLY when every asset we would upload
-            # already matches by exact sha256; otherwise fail (no --clobber).
+            # Existing release: rebuilds are NOT bit-reproducible (tar/deb/OCI
+            # payloads embed build metadata), so byte-equality against a fresh
+            # build can never hold and re-runs would fail forever. Instead
+            # verify the PUBLISHED release is coherent: its record names this
+            # exact tag/commit/version/manifest and every published asset
+            # matches the digests inside that record. Never clobber (N-immutable).
             tmp="$(mktemp -d)"
-            fail=0
-            for f in release-record.json release-record.json.sha256 \
-                     manifest.json manifest.json.sha256 \
-                     artifacts/velnor-runner-*.tar.gz artifacts/velnor-runner-*.deb; do
-              name="$(basename "$f")"
-              if gh release download "$tag" --pattern "$name" --dir "$tmp" >/dev/null 2>&1; then
-                if [ "$(sha256sum "$f" | awk '{print $1}')" != "$(sha256sum "$tmp/$name" | awk '{print $1}')" ]; then
-                  echo "::error::existing asset $name differs — refusing to clobber an immutable release" >&2
-                  fail=1
-                fi
-              else
-                echo "::error::release $tag exists but is missing $name — refusing partial overwrite" >&2
-                fail=1
-              fi
+            for name in release-record.json release-record.json.sha256 \
+                        manifest.json manifest.json.sha256 SHA256SUMS \
+                        "velnor-runner-${VERSION}-amd64.tar.gz" "velnor-runner-${VERSION}-amd64.tar.gz.sha256" \
+                        "velnor-runner-${VERSION}-arm64.tar.gz" "velnor-runner-${VERSION}-arm64.tar.gz.sha256" \
+                        "velnor-runner-${VERSION}-amd64.deb" "velnor-runner-${VERSION}-amd64.deb.sha256" \
+                        "velnor-runner-${VERSION}-arm64.deb" "velnor-runner-${VERSION}-arm64.deb.sha256"; do
+              gh release download "$tag" --pattern "$name" --dir "$tmp" --clobber >/dev/null 2>&1 \
+                || { echo "::error::release $tag exists but is missing $name — refusing partial overwrite" >&2; exit 1; }
             done
-            [ "$fail" = "0" ] || exit 1
-            echo "Release $tag already published with identical assets; nothing to do."
+            # Sidecar checksums must match their payloads.
+            [ "$(awk '{print $1}' "$tmp/release-record.json.sha256")" = "$(sha256sum "$tmp/release-record.json" | awk '{print $1}')" ] \
+              || { echo "::error::published release-record.json fails its sidecar checksum" >&2; exit 1; }
+            [ "$(awk '{print $1}' "$tmp/manifest.json.sha256")" = "$(sha256sum "$tmp/manifest.json" | awk '{print $1}')" ] \
+              || { echo "::error::published manifest.json fails its sidecar checksum" >&2; exit 1; }
+            # The record must name this exact tag, source commit, crate version
+            # and the manifest this source tree compiles to (the compiled
+            # manifest is byte-reproducible; binaries are not).
+            [ "$(jq -r '.build.tag' "$tmp/release-record.json")" = "$tag" ] \
+              || { echo "::error::published record tag mismatch — refusing to touch $tag" >&2; exit 1; }
+            [ "$(jq -r '.build.commit' "$tmp/release-record.json")" = "$COMMIT" ] \
+              || { echo "::error::published record commit mismatch — tag may have moved" >&2; exit 1; }
+            [ "$(jq -r '.build.crate_version' "$tmp/release-record.json")" = "$VERSION" ] \
+              || { echo "::error::published record version mismatch" >&2; exit 1; }
+            [ "$(jq -r '.build.manifest_sha256' "$tmp/release-record.json")" = "$(sha256sum "$tmp/manifest.json" | awk '{print $1}')" ] \
+              || { echo "::error::published record/manifest incoherent" >&2; exit 1; }
+            [ "$(jq -r '.build.manifest_sha256' "$tmp/release-record.json")" = "$MANIFEST_SHA256" ] \
+              || { echo "::error::published record manifest != manifest compiled from $COMMIT" >&2; exit 1; }
+            # Every published package asset must match the record's digests.
+            (cd "$tmp" && sha256sum --check --strict SHA256SUMS)
+            for arch in amd64 arm64; do
+              tarball="velnor-runner-${VERSION}-${arch}.tar.gz"
+              deb="velnor-runner-${VERSION}-${arch}.deb"
+              record_deb="$(jq -r --arg arch "$arch" '.architectures[] | select(.arch == $arch) | .deb_sha256' "$tmp/release-record.json")"
+              record_bin="$(jq -r --arg arch "$arch" '.architectures[] | select(.arch == $arch) | .binary_sha256' "$tmp/release-record.json")"
+              [ "$(awk '{print $1}' "$tmp/${tarball}.sha256")" = "$(sha256sum "$tmp/$tarball" | awk '{print $1}')" ] \
+                || { echo "::error::published tarball fails its sidecar checksum ($arch)" >&2; exit 1; }
+              [ "$(awk '{print $1}' "$tmp/${deb}.sha256")" = "$(sha256sum "$tmp/$deb" | awk '{print $1}')" ] \
+                || { echo "::error::published deb fails its sidecar checksum ($arch)" >&2; exit 1; }
+              [ "$(sha256sum "$tmp/$deb" | awk '{print $1}')" = "$record_deb" ] \
+                || { echo "::error::published deb digest != record ($arch)" >&2; exit 1; }
+              mkdir -p "$tmp/extract-$arch"
+              tar -xzf "$tmp/$tarball" -C "$tmp/extract-$arch"
+              [ "$(sha256sum "$tmp/extract-$arch/velnor-runner" | awk '{print $1}')" = "$record_bin" ] \
+                || { echo "::error::published binary digest != record ($arch)" >&2; exit 1; }
+            done
+            # Sign the published bytes, not the non-reproducible rebuild.
+            rm -rf signer-input
+            mkdir signer-input
+            cp "$tmp"/velnor-runner-*.tar.gz "$tmp"/velnor-runner-*.deb signer-input/
+            echo "Release $tag already published; record + assets verified coherent. Nothing to upload."
           else
             gh release create "$tag" --title "$tag" --generate-notes \
               release-record.json release-record.json.sha256 \
@@ -605,6 +639,15 @@ jobs:
           # NOTE (N6): this workflow deliberately does NOT push to velnor-apt or
           # dispatch its publish. tailrocks/velnor-apt pulls this record itself
           # and verifies it before reprepro. No APT credential exists here.
+
+      # Uploaded AFTER the create/verify step: on an already-published tag the
+      # signer must attest the published bytes (staged above from the release),
+      # not this run's non-bit-reproducible rebuild.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: package-subjects
+          path: signer-input
+          if-no-files-found: error
 
   sign-amd64-tar:
     needs: [identity, release]

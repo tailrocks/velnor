@@ -826,6 +826,7 @@ pub struct DockerScriptExecutor<R> {
     /// just `run:` steps).
     live_step: Option<LiveStepIdentity>,
     job_environment_started: bool,
+    docker_lease: Option<crate::docker_lease::DockerLeaseGuard>,
 }
 
 #[derive(Debug, Clone)]
@@ -853,6 +854,7 @@ where
             trust_scope: "trusted".to_string(),
             live_step: None,
             job_environment_started: false,
+            docker_lease: None,
         }
     }
 
@@ -3046,11 +3048,14 @@ where
 
     pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
+        let owned_result = self.reclaim_job_owned_docker(&container.name);
         let buildkit_result = self.cleanup_job_buildkit(container);
         let service_result = self.cleanup_services(container);
         let network_result = self.run_docker(&container.remove_network_args());
+        self.docker_lease.take();
 
         container_result?;
+        owned_result?;
         buildkit_result?;
         service_result?;
         network_result?;
@@ -3072,12 +3077,21 @@ where
 
     pub(crate) fn cleanup_job_and_network(&mut self, container: &JobContainerSpec) -> Result<()> {
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
+        let owned_result = self.reclaim_job_owned_docker(&container.name);
         let buildkit_result = self.cleanup_job_buildkit(container);
         let network_result = self.run_docker(&container.remove_network_args());
+        self.docker_lease.take();
         container_result?;
+        owned_result?;
         buildkit_result?;
         network_result?;
         Ok(())
+    }
+
+    fn reclaim_job_owned_docker(&mut self, job_id: &str) -> Result<()> {
+        crate::docker_lease::reclaim_job_owned(job_id, |args| {
+            self.run_docker(args).map(|result| result.stdout)
+        })
     }
 
     /// Remove every BuildKit daemon whose buildx builder belongs to this job.
@@ -3215,6 +3229,13 @@ where
             )
         })?;
         self.seed_mise_store(container)?;
+        if container.mount_docker_socket {
+            self.docker_lease = Some(crate::docker_lease::DockerLeaseGuard::bind(
+                container.guest_docker_socket_host(),
+                container.name.clone(),
+                container.daemon_id.clone(),
+            )?);
+        }
         self.run_docker(&container.create_network_args())?;
         for service in &container.services {
             self.run_docker(&service.start_args())?;
@@ -3346,11 +3367,13 @@ where
 
     fn cleanup_stale(&mut self, container: &JobContainerSpec) {
         self.run_docker(&container.remove_container_args()).ok();
+        self.reclaim_job_owned_docker(&container.name).ok();
         self.cleanup_job_buildkit(container).ok();
         for service in container.services.iter().rev() {
             self.run_docker(&service.remove_args()).ok();
         }
         self.run_docker(&container.remove_network_args()).ok();
+        self.docker_lease.take();
     }
 
     fn run_docker(&mut self, args: &[String]) -> Result<CommandResult> {
@@ -3714,14 +3737,18 @@ if [ -n "$install_requested" ]; then
   done
   "$mise_bin" trust --all 2>/dev/null || true
   # Drop poisoned version dirs a previous interrupted install may have left.
-  # An interrupted cargo-backend install leaves a non-empty version dir without
-  # its bin/ output; mise treats any existing version dir as installed, so the
-  # partial entry would persist ("all tools are installed" while the binary is
-  # missing) and fail every later job on this store. Treat a cargo-* version
-  # dir as valid only when bin/ exists and is non-empty; dropping the dir makes
-  # the locked install below perform a real reinstall.
+  # An interrupted install leaves a non-empty version dir without its bin/
+  # output; mise treats any existing version dir as installed, so the partial
+  # entry would persist ("all tools are installed" while the binary is
+  # missing) and fail every later job on this store. The sweep covers the
+  # backends whose install layout guarantees a bin/ directory (cargo-* source
+  # compiles, pipx-* venv entry points); other backends legitimately place the
+  # binary directly in the version dir (for example aqua cosign), so a missing
+  # bin/ is only a poison signal for these. Treat a covered version dir as
+  # valid only when bin/ exists and is non-empty; dropping the dir makes the
+  # locked install below perform a real reinstall.
   find "$mise_home/installs" -mindepth 2 -maxdepth 2 -type d -empty -exec rm -rf {} + 2>/dev/null || true
-  for tool_dir in "$mise_home/installs"/cargo-*; do
+  for tool_dir in "$mise_home/installs"/cargo-* "$mise_home/installs"/pipx-*; do
     [ -d "$tool_dir" ] || continue
     for version_dir in "$tool_dir"/*; do
       [ -d "$version_dir" ] || continue
@@ -9929,9 +9956,11 @@ mod tests {
         assert!(script.contains("cache_key_prefix='mise-v2'"));
         assert!(script.contains("cache_save_requested=\"\""));
         assert!(script.contains(r#"find "$mise_home/installs" -mindepth 3 -maxdepth 3"#));
-        // A cargo-backend version dir is valid only with a non-empty bin/ — an
-        // interrupted source compile must never be treated as installed.
-        assert!(script.contains(r#"for tool_dir in "$mise_home/installs"/cargo-*; do"#));
+        // A cargo- or pipx-backend version dir is valid only with a non-empty
+        // bin/ — an interrupted install must never be treated as installed.
+        assert!(script.contains(
+            r#"for tool_dir in "$mise_home/installs"/cargo-* "$mise_home/installs"/pipx-*; do"#
+        ));
         assert!(script.contains(r#"[ ! -d "$version_dir/bin" ]"#));
         assert!(script.contains("dropping incomplete install"));
         assert!(script.contains("__VELNOR_MISE_BIN__"));
@@ -10229,6 +10258,35 @@ esac
         }
     }
 
+    fn assert_cleanup_reclaims_job_docker(
+        calls: &[(String, Vec<String>)],
+        rm_index: usize,
+        temp: &Path,
+    ) {
+        assert_eq!(calls[rm_index].1[0], "rm");
+        assert_eq!(
+            calls[rm_index + 1].1,
+            crate::docker_lease::list_owned_containers_args("job")
+        );
+        assert_eq!(
+            calls[rm_index + 2].1,
+            crate::docker_lease::list_owned_networks_args("job")
+        );
+        assert_eq!(
+            calls[rm_index + 3].1,
+            crate::docker_lease::list_owned_volumes_args("job")
+        );
+        assert_eq!(calls[rm_index + 4].1[0], "ps");
+        assert!(calls[rm_index + 4]
+            .1
+            .iter()
+            .any(|arg| arg.contains("name=-")));
+        let scope = sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap());
+        assert!(calls[rm_index + 4].1.contains(&format!("name=-{scope}0$")));
+        assert_eq!(calls[rm_index + 5].1[0], "volume");
+        assert_eq!(calls[rm_index + 6].1[0], "network");
+    }
+
     fn expected_network_create_args() -> Vec<String> {
         [
             "network",
@@ -10301,6 +10359,56 @@ esac
             "rm".into(),
             "net".into()
         ])));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn cleanup_reclaims_labeled_guest_docker_not_just_named_job_objects() {
+        struct ReclaimRunner {
+            calls: Vec<Vec<String>>,
+        }
+        impl CommandRunner for ReclaimRunner {
+            fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+                self.calls.push(args.to_vec());
+                let stdout = if args == crate::docker_lease::list_owned_containers_args("job") {
+                    "guest-postgres\nbuildkit-one\n".into()
+                } else if args == crate::docker_lease::list_owned_networks_args("job") {
+                    "guest-net\n".into()
+                } else if args == crate::docker_lease::list_owned_volumes_args("job") {
+                    "guest-vol\n".into()
+                } else {
+                    String::new()
+                };
+                Ok(CommandResult {
+                    code: 0,
+                    stdout,
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        let mut executor = DockerScriptExecutor::new(ReclaimRunner { calls: Vec::new() });
+        executor.cleanup(&spec).unwrap();
+        let calls = &executor.runner().calls;
+        assert!(calls
+            .iter()
+            .any(|args| args == &crate::docker_lease::list_owned_containers_args("job")));
+        assert!(calls.iter().any(|args| args
+            == &crate::docker_lease::force_remove_container_args(&[
+                "buildkit-one".into(),
+                "guest-postgres".into()
+            ])));
+        assert!(calls
+            .iter()
+            .any(|args| args
+                == &crate::docker_lease::force_remove_network_args(&["guest-net".into()])));
+        assert!(calls
+            .iter()
+            .any(|args| args
+                == &crate::docker_lease::force_remove_volume_args(&["guest-vol".into()])));
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -10447,52 +10555,7 @@ esac
         assert!(calls[2]
             .1
             .contains(&"GITHUB_OUTPUT=/__t/step1_output".into()));
-        assert_eq!(
-            calls[3].1,
-            vec!["rm", "--force", "job"]
-                .into_iter()
-                .map(String::from)
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(
-            calls[4].1,
-            vec![
-                "ps",
-                "--all",
-                "--quiet",
-                "--filter",
-                &format!(
-                    "name=-{}0$",
-                    sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap())
-                )
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect::<Vec<_>>()
-        );
-        assert_eq!(
-            calls[5].1,
-            vec![
-                "volume",
-                "ls",
-                "--quiet",
-                "--filter",
-                &format!(
-                    "name=-{}0_state$",
-                    sanitize_artifact_name(temp.file_name().unwrap().to_str().unwrap())
-                )
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect::<Vec<_>>()
-        );
-        assert_eq!(
-            calls[6].1,
-            vec!["network", "rm", "net"]
-                .into_iter()
-                .map(String::from)
-                .collect::<Vec<_>>()
-        );
+        assert_cleanup_reclaims_job_docker(calls, 3, &temp);
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -10524,11 +10587,7 @@ esac
             .unwrap();
 
         assert_eq!(result.exit_code, 7);
-        assert_eq!(executor.runner().calls.len(), 7);
-        assert_eq!(executor.runner().calls[3].1[0], "rm");
-        assert_eq!(executor.runner().calls[4].1[0], "ps");
-        assert_eq!(executor.runner().calls[5].1[0], "volume");
-        assert_eq!(executor.runner().calls[6].1[0], "network");
+        assert_cleanup_reclaims_job_docker(&executor.runner().calls, 3, &temp);
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -10570,15 +10629,11 @@ esac
         assert_eq!(results.len(), 2);
         let runner = executor.runner();
         let calls = &runner.calls;
-        assert_eq!(calls.len(), 8);
         assert_eq!(calls[0].1[0], "network");
         assert_eq!(calls[1].1[0], "run");
         assert_eq!(calls[2].1[0], "exec");
         assert_eq!(calls[3].1[0], "exec");
-        assert_eq!(calls[4].1[0], "rm");
-        assert_eq!(calls[5].1[0], "ps");
-        assert_eq!(calls[6].1[0], "volume");
-        assert_eq!(calls[7].1[0], "network");
+        assert_cleanup_reclaims_job_docker(calls, 4, &temp);
 
         fs::remove_dir_all(temp).unwrap();
     }
@@ -13116,7 +13171,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 0, 0, 0, 0],
+            codes: vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         });
 
         let results = executor
@@ -13126,11 +13181,8 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert_eq!(results.len(), 1);
         let calls = &executor.runner().calls;
         assert_eq!(calls[0].1, expected_network_create_args());
-        assert_eq!(calls[1].1, vec!["rm", "--force", "job"]);
-        assert_eq!(calls[2].1[0], "ps");
-        assert_eq!(calls[3].1[0], "volume");
-        assert_eq!(calls[4].1, vec!["network", "rm", "net"]);
-        assert_eq!(calls[5].1, expected_network_create_args());
+        assert_cleanup_reclaims_job_docker(calls, 1, &temp);
+        assert_eq!(calls[8].1, expected_network_create_args());
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -13142,7 +13194,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0],
+            codes: vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
         });
 
         let error = executor
@@ -13152,16 +13204,10 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         assert!(error.to_string().contains("docker run"));
         let calls = &executor.runner().calls;
         assert_eq!(calls[0].1, expected_network_create_args());
-        assert_eq!(calls[1].1, vec!["rm", "--force", "job"]);
-        assert_eq!(calls[2].1[0], "ps");
-        assert_eq!(calls[3].1[0], "volume");
-        assert_eq!(calls[4].1, vec!["network", "rm", "net"]);
-        assert_eq!(calls[5].1, expected_network_create_args());
-        assert_eq!(calls[6].1[0], "run");
-        assert_eq!(calls[7].1, vec!["rm", "--force", "job"]);
-        assert_eq!(calls[8].1[0], "ps");
-        assert_eq!(calls[9].1[0], "volume");
-        assert_eq!(calls[10].1, vec!["network", "rm", "net"]);
+        assert_cleanup_reclaims_job_docker(calls, 1, &temp);
+        assert_eq!(calls[8].1, expected_network_create_args());
+        assert_eq!(calls[9].1[0], "run");
+        assert_cleanup_reclaims_job_docker(calls, 10, &temp);
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -16055,16 +16101,12 @@ fi"#
 
         assert_eq!(results.len(), 3);
         let calls = &executor.runner().calls;
-        assert_eq!(calls.len(), 9);
         assert_eq!(calls[0].1[0], "network");
         assert_eq!(calls[1].1[0], "run");
         assert_eq!(calls[2].1[0], "exec");
         assert_eq!(calls[3].1[0], "run");
         assert_eq!(calls[4].1[0], "exec");
-        assert_eq!(calls[5].1[0], "rm");
-        assert_eq!(calls[6].1[0], "ps");
-        assert_eq!(calls[7].1[0], "volume");
-        assert_eq!(calls[8].1[0], "network");
+        assert_cleanup_reclaims_job_docker(calls, 5, &temp);
         assert!(calls[3].1.contains(&"INPUT_NAME=value".into()));
         assert!(calls[3].1.contains(&"GITHUB_REPOSITORY=acme/repo".into()));
         assert!(calls[3].1.contains(&"TOKEN=ghs_token".into()));
@@ -17437,7 +17479,11 @@ fi"#
             .collect::<Vec<_>>();
         assert_eq!(node_calls.len(), 6);
         for call in &node_calls {
-            assert!(call.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
+            assert!(
+                call.iter()
+                    .any(|arg| arg.contains("/tmp/vdl-") && arg.ends_with(":/var/run/docker.sock")),
+                "guest Docker must use the job lease socket, got {call:?}"
+            );
             assert!(call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
             assert!(call.contains(
                 &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
@@ -17793,7 +17839,11 @@ bitcoin-processor-app.push=${{ (github.event_name == 'push' && needs.changes.out
             .collect::<Vec<_>>();
         assert_eq!(node_calls.len(), 5);
         for call in &node_calls {
-            assert!(call.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
+            assert!(
+                call.iter()
+                    .any(|arg| arg.contains("/tmp/vdl-") && arg.ends_with(":/var/run/docker.sock")),
+                "guest Docker must use the job lease socket, got {call:?}"
+            );
             assert!(call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
             assert!(call.contains(
                 &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
@@ -17898,7 +17948,12 @@ bitcoin-processor-app.push=true")
             })
             .map(|(_, args)| args)
             .unwrap();
-        assert!(node_call.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
+        assert!(
+            node_call
+                .iter()
+                .any(|arg| arg.contains("/tmp/vdl-") && arg.ends_with(":/var/run/docker.sock")),
+            "guest Docker must use the job lease socket, got {node_call:?}"
+        );
         assert!(node_call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
         assert!(!node_call.contains(&"INPUT_TOKEN=renovate-token".into()));
         assert!(!node_call.contains(&"RENOVATE_TOKEN=renovate-token".into()));
