@@ -1,8 +1,11 @@
 //! Focused parser matrix over the typed clap tree (`Cli::try_parse_from`).
 
+use std::time::Duration;
+
 use clap::Parser;
+use velnor_model::{DurationMs, Since, Timestamp};
 use velnorctl::man::ManArgs;
-use velnorctl::{schema_document, Cli, Command, OutputArg};
+use velnorctl::{schema_document, Cli, Command, OutputArg, Verbosity};
 
 fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
     let mut full = vec!["velnorctl"];
@@ -80,25 +83,71 @@ fn cli_c005_invalid_output_choices_are_rejected() {
 }
 
 #[test]
-fn cli_c005_timeout_is_typed_u64() {
-    let cli = parse(&["--timeout", "30", "man"]).expect("numeric timeout");
-    assert_eq!(cli.globals.timeout, Some(30));
+fn cli_c005_timeout_is_typed_duration_of_whole_seconds() {
+    let cli = parse(&["--timeout", "45", "man"]).expect("numeric timeout");
+    assert_eq!(cli.globals.timeout, Some(Duration::from_secs(45)));
     assert!(parse(&["--timeout", "soon", "man"]).is_err());
     assert!(parse(&["--timeout", "-1", "man"]).is_err());
 }
 
 #[test]
+fn cli_c005_since_accepts_rfc3339_and_relative_durations() {
+    let cli = parse(&["--since", "2026-08-24T12:30:45Z", "man"]).expect("absolute since");
+    assert_eq!(
+        cli.globals.since,
+        Some(Since::At(Timestamp::parse("2026-08-24T12:30:45Z").unwrap()))
+    );
+    for (argv, expected) in [
+        (
+            vec!["--since", "90s", "man"],
+            Since::Within(DurationMs(90_000)),
+        ),
+        (
+            vec!["--since", "1h30m", "man"],
+            Since::Within(DurationMs(5_400_000)),
+        ),
+    ] {
+        let cli = parse(&argv).expect("relative since");
+        assert_eq!(cli.globals.since, Some(expected), "{argv:?}");
+    }
+}
+
+#[test]
+fn cli_c005_invalid_since_values_are_rejected_naming_the_flag() {
+    for bad in ["", "yesterday", "10", "1.5h"] {
+        let error = parse(&["--since", bad, "man"])
+            .expect_err("invalid --since must fail")
+            .to_string();
+        assert!(
+            error.contains("--since"),
+            "{bad:?} must name the flag: {error}"
+        );
+    }
+}
+
+#[test]
 fn cli_c005_verbosity_counts_repeats_across_short_and_long() {
     for (argv, expected) in [
-        (vec!["-v", "man"], 1_u8),
-        (vec!["-vv", "man"], 2),
-        (vec!["-vvv", "man"], 3),
-        (vec!["--verbose", "--verbose", "man"], 2),
-        (vec!["-v", "--verbose", "man"], 2),
+        (vec!["man"], Verbosity::Normal),
+        (vec!["-v", "man"], Verbosity::Verbose),
+        (vec!["-vv", "man"], Verbosity::Debug),
+        (vec!["-vvv", "man"], Verbosity::Trace),
+        (vec!["--verbose", "--verbose", "man"], Verbosity::Debug),
+        (vec!["-v", "--verbose", "man"], Verbosity::Debug),
     ] {
         let cli = parse(&argv).expect("verbosity parses");
-        assert_eq!(cli.globals.verbose, expected, "{argv:?}");
+        assert_eq!(cli.globals.verbosity(), expected, "{argv:?}");
     }
+}
+
+#[test]
+fn cli_c005_verbosity_saturates_at_trace_beyond_three_flags() {
+    let cli = parse(&["-vvvv", "man"]).expect("verbosity parses");
+    assert_eq!(cli.globals.verbose, 4);
+    assert_eq!(cli.globals.verbosity(), Verbosity::Trace);
+    let cli = parse(&["-vvvvvvvv", "man"]).expect("verbosity parses");
+    assert_eq!(cli.globals.verbose, 8);
+    assert_eq!(cli.globals.verbosity(), Verbosity::Trace);
 }
 
 #[test]
