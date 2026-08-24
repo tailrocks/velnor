@@ -27,14 +27,26 @@ plane inspection. Every later task needs one stable integration corpus.
 
 ## Current state
 
-- `docs/vision.md:48-66` names performance, native adapters, and UX as active
-  direction but does not name `velnorctl` or removal of `velnor-runner`.
-- `docs/prompt.md:19-21` says only the tracked unified-CI graph is active.
-- `.github/AGENTS.md` still instructs the `lanes` choice input and a universal
-  `velnor` default, both contradicting the marked contract's sole
-  `lane=github|velnor|both` selector and organization-derived defaults.
-- `crates/velnor-tools/src/main.rs:18` still defaults fixture tooling to
-  `donbeave/velnor-actions-fixture`; authoritative fixture is now
+Refreshed 2026-08-24 at Velnor `aed09eb`; the original planning-time gaps in
+steps 1–2 are already closed on the campaign branch, and the citations below
+are live anchors:
+
+- `docs/vision.md:70-83` records the authoritative direction: performance,
+  native adapters, and UX stay active, and the velnorctl migration names the
+  final crate layout (`velnorctl`, service-only `daemon` entrypoint,
+  `velnor-model`/`velnor-control`/`velnor-client`/`velnor-render`,
+  maintainer-only `velnor-tools`), zero backward-compatible aliases, complete
+  `velnor-runner` removal after Plan 079, and Debian apt/dpkg as the sole
+  installed-version authority with no release command family or activation API.
+- `docs/prompt.md:19-24` scopes the active surface to exactly the marked
+  unified-CI contract, the tracked goal graph, and the `plans/TASKS.md`
+  mirror; no earlier prompt or plan is active.
+- `.github/AGENTS.md:5-10` instructs the sole `lane=github|velnor|both`
+  selector with organization-derived defaults and no universal Velnor default;
+  lines 15–17 separate runner group `velnor-trusted` from selection label
+  `velnor-target-mvp`; lines 21–24 name final `velnorctl` binary/package
+  ownership with `velnor-runner` interim until Plan 079.
+- `crates/velnor-tools/src/main.rs:18` defaults fixture tooling to
   `tailrocks/velnor-actions-fixture`.
 - Fixture `compat.yml` covers real execution semantics. It lacks deterministic
   hold/fail/cancel phases needed by `logs`, `wait`, lifecycle, queue, and event
@@ -62,6 +74,33 @@ Reconciled at Velnor b57b036 against live repository state:
 - Fixture pin dc4204c is clean and green (compat main run 32675488430).
 - `plans/README.md` now contains the `velnorctl-migration` category row and
   already orders Plan 063 first; no index reconciliation is required here.
+
+### Execution reconciliation 2026-08-24 (at Velnor aed09eb)
+
+Recorded during Plan 063 execution; supersedes the stale spans above where
+they disagree:
+
+- Direction anchors verified live at aed09eb: `docs/vision.md:70-83`,
+  `docs/roadmap.md:42-49`, `AGENTS.md:168-177`, `.github/AGENTS.md:5-24`,
+  `README.md:19-21`. Step 1 is verification-only at this HEAD.
+- This repository's generated `.github/workflows/ci.yml` now consumes the
+  singular `lane` input (aed09eb applied generator code-class bytes);
+  `release.yml` and `renovate.yml` have no canonical generated counterpart at
+  ce23409 and remain unchanged.
+- Correction to the ce23409 claim above: all five class *ci.yml* templates
+  emit the sole `lane` input, but `templates/apt/package-update.yml:9` and
+  `templates/tap/package-update.yml:9` still dispatch plural `lanes`.
+  STOP condition #2 therefore remains open until fixed in the external
+  generator repository, whose dirty working tree on branch
+  `fix/concurrency-event-name` is owned outside this campaign and must not be
+  touched here.
+- The fixture checkout (`tailrocks/velnor-actions-fixture`, main at dc4204c)
+  is clean and green locally (`mise run check`: actionlint, l2-closure,
+  nextest 7/7), satisfying STOP condition #1. Its `compat.yml:10` still
+  consumes plural `lanes`, so the byte-identical rollout required before
+  adding the control workflow has not landed. Control-plane creation stays
+  stopped per step 3 until both external gaps close; live dispatch evidence
+  for step 4 remains gated behind it.
 
 ## Scope
 
