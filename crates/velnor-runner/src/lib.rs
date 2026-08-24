@@ -16,6 +16,7 @@ mod command_files;
 mod compiler_cache;
 mod config;
 mod container;
+mod docker_lease;
 mod executor;
 mod fs_copy;
 mod git_mirror;

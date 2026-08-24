@@ -826,6 +826,7 @@ pub struct DockerScriptExecutor<R> {
     /// just `run:` steps).
     live_step: Option<LiveStepIdentity>,
     job_environment_started: bool,
+    docker_lease: Option<crate::docker_lease::DockerLeaseGuard>,
 }
 
 #[derive(Debug, Clone)]
@@ -853,6 +854,7 @@ where
             trust_scope: "trusted".to_string(),
             live_step: None,
             job_environment_started: false,
+            docker_lease: None,
         }
     }
 
@@ -3046,11 +3048,14 @@ where
 
     pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
+        let owned_result = self.reclaim_job_owned_docker(&container.name);
         let buildkit_result = self.cleanup_job_buildkit(container);
         let service_result = self.cleanup_services(container);
         let network_result = self.run_docker(&container.remove_network_args());
+        self.docker_lease.take();
 
         container_result?;
+        owned_result?;
         buildkit_result?;
         service_result?;
         network_result?;
@@ -3072,12 +3077,21 @@ where
 
     pub(crate) fn cleanup_job_and_network(&mut self, container: &JobContainerSpec) -> Result<()> {
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
+        let owned_result = self.reclaim_job_owned_docker(&container.name);
         let buildkit_result = self.cleanup_job_buildkit(container);
         let network_result = self.run_docker(&container.remove_network_args());
+        self.docker_lease.take();
         container_result?;
+        owned_result?;
         buildkit_result?;
         network_result?;
         Ok(())
+    }
+
+    fn reclaim_job_owned_docker(&mut self, job_id: &str) -> Result<()> {
+        crate::docker_lease::reclaim_job_owned(job_id, |args| {
+            self.run_docker(args).map(|result| result.stdout)
+        })
     }
 
     /// Remove every BuildKit daemon whose buildx builder belongs to this job.
@@ -3215,6 +3229,13 @@ where
             )
         })?;
         self.seed_mise_store(container)?;
+        if container.mount_docker_socket {
+            self.docker_lease = Some(crate::docker_lease::DockerLeaseGuard::bind(
+                container.guest_docker_socket_host(),
+                container.name.clone(),
+                container.daemon_id.clone(),
+            )?);
+        }
         self.run_docker(&container.create_network_args())?;
         for service in &container.services {
             self.run_docker(&service.start_args())?;
@@ -3346,11 +3367,13 @@ where
 
     fn cleanup_stale(&mut self, container: &JobContainerSpec) {
         self.run_docker(&container.remove_container_args()).ok();
+        self.reclaim_job_owned_docker(&container.name).ok();
         self.cleanup_job_buildkit(container).ok();
         for service in container.services.iter().rev() {
             self.run_docker(&service.remove_args()).ok();
         }
         self.run_docker(&container.remove_network_args()).ok();
+        self.docker_lease.take();
     }
 
     fn run_docker(&mut self, args: &[String]) -> Result<CommandResult> {
@@ -10307,6 +10330,56 @@ esac
             "rm".into(),
             "net".into()
         ])));
+        fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn cleanup_reclaims_labeled_guest_docker_not_just_named_job_objects() {
+        struct ReclaimRunner {
+            calls: Vec<Vec<String>>,
+        }
+        impl CommandRunner for ReclaimRunner {
+            fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+                self.calls.push(args.to_vec());
+                let stdout = if args == &crate::docker_lease::list_owned_containers_args("job") {
+                    "guest-postgres\nbuildkit-one\n".into()
+                } else if args == &crate::docker_lease::list_owned_networks_args("job") {
+                    "guest-net\n".into()
+                } else if args == &crate::docker_lease::list_owned_volumes_args("job") {
+                    "guest-vol\n".into()
+                } else {
+                    String::new()
+                };
+                Ok(CommandResult {
+                    code: 0,
+                    stdout,
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let spec = container(&temp);
+        let mut executor = DockerScriptExecutor::new(ReclaimRunner { calls: Vec::new() });
+        executor.cleanup(&spec).unwrap();
+        let calls = &executor.runner().calls;
+        assert!(calls
+            .iter()
+            .any(|args| args == &crate::docker_lease::list_owned_containers_args("job")));
+        assert!(calls.iter().any(|args| args
+            == &crate::docker_lease::force_remove_container_args(&[
+                "buildkit-one".into(),
+                "guest-postgres".into()
+            ])));
+        assert!(calls
+            .iter()
+            .any(|args| args
+                == &crate::docker_lease::force_remove_network_args(&["guest-net".into()])));
+        assert!(calls
+            .iter()
+            .any(|args| args
+                == &crate::docker_lease::force_remove_volume_args(&["guest-vol".into()])));
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -17443,7 +17516,11 @@ fi"#
             .collect::<Vec<_>>();
         assert_eq!(node_calls.len(), 6);
         for call in &node_calls {
-            assert!(call.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
+            assert!(
+                call.iter()
+                    .any(|arg| arg.contains("/tmp/vdl-") && arg.ends_with(":/var/run/docker.sock")),
+                "guest Docker must use the job lease socket, got {call:?}"
+            );
             assert!(call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
             assert!(call.contains(
                 &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
@@ -17799,7 +17876,11 @@ bitcoin-processor-app.push=${{ (github.event_name == 'push' && needs.changes.out
             .collect::<Vec<_>>();
         assert_eq!(node_calls.len(), 5);
         for call in &node_calls {
-            assert!(call.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
+            assert!(
+                call.iter()
+                    .any(|arg| arg.contains("/tmp/vdl-") && arg.ends_with(":/var/run/docker.sock")),
+                "guest Docker must use the job lease socket, got {call:?}"
+            );
             assert!(call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
             assert!(call.contains(
                 &"/usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro".into()
@@ -17904,7 +17985,12 @@ bitcoin-processor-app.push=true")
             })
             .map(|(_, args)| args)
             .unwrap();
-        assert!(node_call.contains(&"/var/run/docker.sock:/var/run/docker.sock".into()));
+        assert!(
+            node_call
+                .iter()
+                .any(|arg| arg.contains("/tmp/vdl-") && arg.ends_with(":/var/run/docker.sock")),
+            "guest Docker must use the job lease socket, got {node_call:?}"
+        );
         assert!(node_call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
         assert!(!node_call.contains(&"INPUT_TOKEN=renovate-token".into()));
         assert!(!node_call.contains(&"RENOVATE_TOKEN=renovate-token".into()));
