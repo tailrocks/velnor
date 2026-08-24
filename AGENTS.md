@@ -103,6 +103,10 @@ performance degradation — without first asking the operator explicitly:
 "this makes it worse, not better — are you sure?" Prefer arguing with reasons
 over blind compliance; apply only after explicit confirmation.
 
+## HARD RULE: No legacy code; finish every migration
+
+Never keep deprecated, legacy, or outdated features or code. When a new feature or approach replaces an old one, finish the whole migration and completely remove the old path — never ship multiple ways with compatibility shims, aliases, or deprecation periods. Any legacy/deprecated/outdated code found in this repository is always free to refactor to the single modern way. Breaking changes are preferred and never blocked by compatibility concerns: this is a preview research project, so never hesitate to change anything.
+
 ## HARD RULE: Use actions/runner as the source of truth for protocol behavior
 
 When implementing or debugging any GitHub Actions runner protocol feature — job message parsing, broker messages, expression evaluation, credential handling, run-service, timeline, etc. — **always consult the official runner source first**:
