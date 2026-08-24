@@ -87,7 +87,24 @@ fn cli_c005_directory_mode_writes_a_complete_deterministic_0644_page_set() {
                 .into_owned()
         })
         .collect();
-    assert_eq!(names, vec!["completion.1", "man.1", "velnorctl.1"]);
+    assert_eq!(
+        names,
+        vec![
+            "cache.1",
+            "capabilities.1",
+            "completion.1",
+            "configure.1",
+            "daemon.1",
+            "doctor.1",
+            "man.1",
+            "preflight.1",
+            "release.1",
+            "remove.1",
+            "status.1",
+            "storage.1",
+            "velnorctl.1"
+        ]
+    );
 
     use std::os::unix::fs::PermissionsExt;
     for member in &members {

@@ -61,11 +61,8 @@ fn cli_c005_bare_invocation_prints_usage_to_stderr_and_exits_two() {
 fn cli_c005_unknown_commands_fail_like_any_unknown_clap_subcommand() {
     for name in [
         "definitely-not-a-command",
-        // Legacy velnor-runner names get no special casing or aliases:
-        "status",
-        "doctor",
+        // The workflow-run namespace is reserved (research deviation 3):
         "run",
-        "daemon",
     ] {
         let output = run(&[name]);
         assert_eq!(code(&output), 2, "{name}");
@@ -74,6 +71,28 @@ fn cli_c005_unknown_commands_fail_like_any_unknown_clap_subcommand() {
             stderr.contains("unrecognized subcommand"),
             "{name}: {stderr}"
         );
+    }
+}
+
+#[test]
+fn migrated_legacy_names_are_first_class_subcommands() {
+    // The velnor-runner command trees are the velnorctl command center now;
+    // they parse as real subcommands with no aliasing or special casing.
+    for name in [
+        "cache",
+        "capabilities",
+        "configure",
+        "daemon",
+        "doctor",
+        "preflight",
+        "release",
+        "remove",
+        "status",
+        "storage",
+    ] {
+        let output = run(&["--help", name]);
+        assert!(code(&output) == 0 || code(&output) == 2, "{name}");
+        assert!(!text(&output.stderr).contains("unrecognized"), "{name}");
     }
 }
 

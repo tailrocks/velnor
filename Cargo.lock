@@ -3474,15 +3474,18 @@ dependencies = [
 name = "velnorctl"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "clap",
  "clap_complete",
  "clap_mangen",
  "serde_json",
  "sha2 0.11.0",
+ "tokio",
  "velnor-client",
  "velnor-control",
  "velnor-model",
  "velnor-render",
+ "velnor-runner",
 ]
 
 [[package]]
