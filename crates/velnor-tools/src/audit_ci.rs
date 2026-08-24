@@ -1390,8 +1390,22 @@ fn audit_generated_caller(file: &str, text: &str, yaml: &Value, findings: &mut V
             "generated-caller must not define legacy singular lane input alongside lanes",
         ));
     }
-    if !text.contains(CALLER_CONTRACT_RESULT_GUARD) || !text.contains(CALLER_CONTRACT_OUTPUT_GUARD)
-    {
+    let guards_present =
+        text.contains(CALLER_CONTRACT_RESULT_GUARD) && text.contains(CALLER_CONTRACT_OUTPUT_GUARD);
+    // Drive the shipped truth table from the YAML text: missing guards look
+    // like success+success (mergeable); present guards are checked against an
+    // infrastructure-failure sample that must never be accepted.
+    let infra_sample_result = if text.contains("${sel_result}") {
+        "failure"
+    } else {
+        "success"
+    };
+    let infra_sample_contract = if text.contains("${sel_contract}") {
+        ""
+    } else {
+        "success"
+    };
+    if !guards_present || fleet_contract_is_success(infra_sample_result, infra_sample_contract) {
         findings.push(Finding::error(
             "generated-caller",
             file,
