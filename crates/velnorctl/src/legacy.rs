@@ -712,42 +712,42 @@ impl From<StatusArgs> for rt::StatusArgs {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Inspect Velnor's daemon-shared host cache stores.
-    Cache(CacheArgs),
+    Cache(Box<CacheArgs>),
     /// Inspect or validate against the compiled strict capability manifest.
-    Capabilities(CapabilitiesArgs),
+    Capabilities(Box<CapabilitiesArgs>),
     /// Create and store a GitHub JIT runner configuration.
-    Configure(ConfigureArgs),
+    Configure(Box<ConfigureArgs>),
     /// Run one daemon process that manages one or more internal runner slots.
-    Daemon(DaemonArgs),
+    Daemon(Box<DaemonArgs>),
     /// Probe GitHub for this daemon's registered runners and fail loudly when
     /// the fleet is gone (run from a systemd timer for alerting).
-    Doctor(DoctorArgs),
+    Doctor(Box<DoctorArgs>),
     /// Validate local Docker prerequisites before polling GitHub for jobs.
-    Preflight(PreflightArgs),
+    Preflight(Box<PreflightArgs>),
     /// Plan 010 release-coherence chain over the installed identity. Service
     /// plumbing until Plan 079 replaces it with signed apt/dpkg operations.
-    Release(ReleaseArgs),
+    Release(Box<ReleaseArgs>),
     /// Remove local runner configuration.
-    Remove(RemoveArgs),
+    Remove(Box<RemoveArgs>),
     /// Print local runner configuration status.
-    Status(StatusArgs),
+    Status(Box<StatusArgs>),
     /// Inspect the canonical Velnor storage layout and catalog.
-    Storage(StorageArgs),
+    Storage(Box<StorageArgs>),
 }
 
 impl From<Command> for rt::Command {
     fn from(command: Command) -> Self {
         match command {
-            Command::Cache(args) => Self::Cache(args.into()),
-            Command::Capabilities(args) => Self::Capabilities(args.into()),
-            Command::Configure(args) => Self::Configure(args.into()),
-            Command::Daemon(args) => Self::Daemon(args.into()),
-            Command::Doctor(args) => Self::Doctor(args.into()),
-            Command::Preflight(args) => Self::Preflight(args.into()),
-            Command::Release(args) => Self::Release(args.into()),
-            Command::Remove(args) => Self::Remove(args.into()),
-            Command::Status(args) => Self::Status(args.into()),
-            Command::Storage(args) => Self::Storage(args.into()),
+            Command::Cache(args) => Self::Cache((*args).into()),
+            Command::Capabilities(args) => Self::Capabilities((*args).into()),
+            Command::Configure(args) => Self::Configure((*args).into()),
+            Command::Daemon(args) => Self::Daemon((*args).into()),
+            Command::Doctor(args) => Self::Doctor((*args).into()),
+            Command::Preflight(args) => Self::Preflight((*args).into()),
+            Command::Release(args) => Self::Release((*args).into()),
+            Command::Remove(args) => Self::Remove((*args).into()),
+            Command::Status(args) => Self::Status((*args).into()),
+            Command::Storage(args) => Self::Storage((*args).into()),
         }
     }
 }
