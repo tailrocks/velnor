@@ -1,0 +1,40 @@
+# Plan 039 release-ref ledger — SEED, pending operator review.
+#
+# Schema (owned by crates/velnor-tools/src/fleet_policy.rs; validated by
+# audit-ci per plans/fleet-operations/039-org-jit-multi-repo-fleet.md Step 1):
+#
+#   schema_version = 1
+#
+#   [[entries]]
+#   owner             = organization login
+#   repository        = repository name
+#   workflow_path     = ".github/workflows/<file>.yml" (no wildcards)
+#   git_ref           = "refs/heads/..." | exact "refs/tags/..." | full 40-char SHA
+#   admission_reason  = why this workflow directly defines an approved Velnor job
+#   approving_change  = approving commit/PR/change record
+#   review_state      = "approved" | "seed-pending-review" | "expired"
+#   expiry            = optional review-by date "YYYY-MM-DD"
+#
+# Only entries with review_state = "approved" flow into generated org policy.
+# The entries below are structural seeds only: exact pinned SHAs for the full
+# approved direct-workflow closure are not discoverable offline and MUST be
+# supplied by operator review before any live plan/audit/apply run.
+schema_version = 1
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions-fixture"
+workflow_path = ".github/workflows/ci.yml"
+git_ref = "refs/heads/main"
+admission_reason = "fixture default-branch CI directly defines Velnor-lane jobs"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"
+
+[[entries]]
+owner = "tailrocks"
+repository = "velnor-actions"
+workflow_path = ".github/workflows/ci-code.yml"
+git_ref = "refs/heads/main"
+admission_reason = "shared reusable CI workflow directly defining Velnor jobs for selected consumers"
+approving_change = "SEED-PENDING-OPERATOR-REVIEW (plan-039)"
+review_state = "seed-pending-review"

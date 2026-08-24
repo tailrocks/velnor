@@ -1,4 +1,5 @@
 mod audit_ci;
+mod fleet_policy;
 mod lane_compare;
 
 use anyhow::{bail, Context, Result};
@@ -69,6 +70,8 @@ enum CommandKind {
     Compare(lane_compare::LaneCompareArgs),
     /// Diff the GitHub-hosted and Velnor lanes of one run via the GitHub API (equal-or-better gate).
     LaneCompare(lane_compare::LaneCompareArgs),
+    /// Maintainer-only org-JIT fleet policy operations (Plan 039).
+    FleetPolicy(fleet_policy::FleetPolicyArgs),
 }
 
 #[derive(Debug, Args)]
@@ -510,6 +513,7 @@ async fn main() -> Result<()> {
         CommandKind::AuditCi(args) => audit_ci::audit_ci(args),
         CommandKind::Compare(args) => lane_compare::lane_compare(&root, args),
         CommandKind::LaneCompare(args) => lane_compare::lane_compare(&root, args),
+        CommandKind::FleetPolicy(args) => fleet_policy::fleet_policy(args.command),
     }
 }
 
