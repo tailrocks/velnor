@@ -10,7 +10,7 @@ use std::{
 use anyhow::{bail, Context, Result};
 
 use crate::{
-    cli::{CacheArgs, CacheCommand, CacheGcArgs},
+    args::{CacheArgs, CacheCommand, CacheGcArgs},
     config,
 };
 

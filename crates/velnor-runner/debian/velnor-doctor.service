@@ -9,7 +9,7 @@ Environment=HOME=/root
 Environment=VELNOR_STORAGE_ROOT=/var
 EnvironmentFile=/etc/velnor/velnor.env
 EnvironmentFile=-/etc/velnor/secrets.env
-ExecStart=/usr/bin/velnor-runner doctor \
+ExecStart=/usr/bin/velnorctl doctor \
   --url ${VELNOR_URL} \
   --name ${VELNOR_NAME} \
   --slots ${VELNOR_SLOTS}

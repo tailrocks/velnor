@@ -59,11 +59,7 @@ fn cli_c005_bare_invocation_prints_usage_to_stderr_and_exits_two() {
 
 #[test]
 fn cli_c005_unknown_commands_fail_like_any_unknown_clap_subcommand() {
-    for name in [
-        "definitely-not-a-command",
-        // The workflow-run namespace is reserved (research deviation 3):
-        "run",
-    ] {
+    for name in ["definitely-not-a-command", "runn", "stat"] {
         let output = run(&[name]);
         assert_eq!(code(&output), 2, "{name}");
         let stderr = text(&output.stderr);
@@ -75,9 +71,9 @@ fn cli_c005_unknown_commands_fail_like_any_unknown_clap_subcommand() {
 }
 
 #[test]
-fn migrated_legacy_names_are_first_class_subcommands() {
-    // The velnor-runner command trees are the velnorctl command center now;
-    // they parse as real subcommands with no aliasing or special casing.
+fn cli_migrated_legacy_names_are_first_class_subcommands() {
+    // The full velnor-runner surface is owned by this binary now; the old
+    // spellings parse as real commands with no alias layer (C001–C075).
     for name in [
         "cache",
         "capabilities",
@@ -90,10 +86,20 @@ fn migrated_legacy_names_are_first_class_subcommands() {
         "status",
         "storage",
     ] {
-        let output = run(&["--help", name]);
-        assert!(code(&output) == 0 || code(&output) == 2, "{name}");
-        assert!(!text(&output.stderr).contains("unrecognized"), "{name}");
+        let output = run(&[name, "--help"]);
+        assert_eq!(code(&output), 0, "{name}");
+        assert!(text(&output.stderr).is_empty(), "{name}");
+        assert!(text(&output.stdout).contains("Usage:"), "{name}");
     }
+}
+
+#[test]
+fn cli_run_worker_is_not_a_public_command() {
+    // C075: the single-worker mode folds into `daemon --once` service
+    // plumbing; `run` stays reserved for the future workflow-run resource.
+    let output = run(&["run", "--help"]);
+    assert_eq!(code(&output), 2);
+    assert!(text(&output.stderr).contains("unrecognized subcommand"));
 }
 
 #[test]

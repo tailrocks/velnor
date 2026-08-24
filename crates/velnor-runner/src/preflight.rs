@@ -1,5 +1,5 @@
 use crate::{
-    cli::PreflightArgs,
+    args::PreflightArgs,
     executor::{CommandRunner, ProcessCommandRunner},
 };
 use anyhow::{bail, Context, Result};
