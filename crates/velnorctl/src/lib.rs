@@ -16,6 +16,7 @@ use std::sync::Arc;
 use velnor_model::{ExitClass, MachineErrorEnvelope};
 
 pub mod globals;
+pub mod man;
 pub mod metadata;
 
 pub use globals::{
@@ -212,10 +213,17 @@ impl Registry {
 
 /// Global composition point.
 ///
-/// Every leaf-command task adds its registration here. Plan 064 owns no leaf
-/// command, so the composed registry is empty by design.
+/// Every leaf-command task adds its registration here. Each documented leaf
+/// publishes its [`CommandMetadata`] alongside its handler so metadata
+/// consumers (`man`, and later `schema`/`help`/`completion`) always render
+/// the exact registered surface.
 pub fn compose() -> Registry {
-    Registry::new()
+    let mut registry = Registry::new();
+    let mut documents: Vec<velnor_model::CommandMetadata> = Vec::new();
+    let man = man::ManCommand;
+    documents.push(man.metadata());
+    registry.register("man", man::handler(documents));
+    registry
 }
 
 /// Parse globals out of `argv` and dispatch the remainder through `registry`.

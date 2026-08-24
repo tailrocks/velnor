@@ -199,29 +199,37 @@ pub fn completion_script(flavor: CompletionFlavor, document: &SchemaDocument) ->
     script
 }
 
-/// Render a roff man page for one command's metadata.
+/// Render the body sections (NAME through OPTIONS) of one command's man
+/// page, shared verbatim by [`man_page`] and the combined `man` page so a
+/// leaf command renders identically everywhere.
 #[must_use]
-pub fn man_page(binary: &str, command: &CommandMetadata) -> String {
+pub fn command_man_sections(binary: &str, command: &CommandMetadata) -> String {
     let upper = command.name.to_uppercase();
-    let mut page = format!(
-        ".TH {binary} 1 \"{}\" \"{binary} {}\" \"Velnor Manual\"\n",
-        velnor_model::CRATE_VERSION,
-        velnor_model::CRATE_VERSION
-    );
-    page.push_str(&format!(".SH NAME\n{binary}-{upper}\n"));
-    page.push_str(&format!(".SH SYNOPSIS\n.B {binary} {}\n", command.name));
-    page.push_str(&format!(".SH DESCRIPTION\n{}\n", command.about));
+    let mut sections = format!(".SH NAME\n{binary}-{upper}\n");
+    sections.push_str(&format!(".SH SYNOPSIS\n.B {binary} {}\n", command.name));
+    sections.push_str(&format!(".SH DESCRIPTION\n{}\n", command.about));
     if !command.flags.is_empty() {
-        page.push_str(".SH OPTIONS\n");
+        sections.push_str(".SH OPTIONS\n");
         for flag in &command.flags {
-            page.push_str(&format!(
+            sections.push_str(&format!(
                 ".TP\n\\fB{}\\fR\n{}\n",
                 flag.invocation(),
                 flag.help
             ));
         }
     }
-    page
+    sections
+}
+
+/// Render a roff man page for one command's metadata.
+#[must_use]
+pub fn man_page(binary: &str, command: &CommandMetadata) -> String {
+    let head = format!(
+        ".TH {binary} 1 \"{}\" \"{binary} {}\" \"Velnor Manual\"\n",
+        velnor_model::CRATE_VERSION,
+        velnor_model::CRATE_VERSION
+    );
+    format!("{head}{}", command_man_sections(binary, command))
 }
 
 /// Registry-side seam: leaf commands publish metadata through composition.
