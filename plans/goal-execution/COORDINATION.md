@@ -45,6 +45,22 @@ prevent exclusive-scope collisions.
 
 ## Decisions
 
+- **2026-08-24 branch-merge directive executed; campaign work recovered**
+  (ox-alpha session C): operator ordered all branches merged to `main` via
+  PRs with modern-direction conflict resolution, and deletion of merged
+  branches. The consolidation pass (d6267fb) had dropped seventeen campaign
+  commits (039 wave, 066 store slices, coordination records) that existed
+  only on the deleted remote `velnor-estate-standard`; they were recovered
+  from local objects and re-merged — restored branch pushed and opened as
+  PR #297. Branch dispositions: `chore/prepare-0.1.181` merged as #295;
+  `velnorctl-clap-migration` delivered via #291 (+ #293 closed superseded);
+  `fix/admit-paths-filter-v4.0.3` duplicate of merged #292 (identical
+  manifest.rs patch) — deleted unmerged-by-design; `fix/velnorctl-typed-globals`
+  (85d2509 ≡ 80ad1c8) targets the deleted handwritten-parser era and is
+  superseded by #291's typed clap `GlobalArgs` — deleted per modern-direction
+  resolution; `docs/consolidate-main-flow` content contained via d6267fb in
+  #297. Remaining: merge #297 after velnor lane, then fast-forward main.
+
 - **2026-08-24 branch consolidation to main** (operator directive): every
   delivery now follows the modern flow — feature branch → PR → squash merge
   into `main`. The campaign branches are gone: `velnor-estate-standard` merged
