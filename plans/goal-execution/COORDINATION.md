@@ -41,3 +41,16 @@ observed (2026-08-24). These rules prevent exclusive-scope collisions.
   base; this session's conflicting files yield to it except where the leaf file
   requires otherwise (fail-closed serde, schema-versioned envelope, Source
   LOCAL\|GITHUB\|MERGED semantics). One reconciling executor finishes 065.
+- **2026-08-24 ownership map** (Plan 039 prerequisites-first session):
+  - **Session A** (this claim row for 039): Plan 039 Track A, fleet surface
+    (`fleet/release-refs.toml`, org policy drafts, `restricted_to_workflows`
+    prerequisites), fixture control-plane validation follow-ups.
+  - **Session B**: Track B sequence Plans 064–073 including 065 in flight;
+    owns current `crates/velnor-model/*` + `crates/velnorctl/*` WIP and
+    `Cargo.lock`.
+  - **Session C**: unassigned / C-command pool once Session B dependencies
+    close.
+  - Standing constraints restated: foreign dirty files are never touched or
+    staged by another session; leaf status flips are atomic commits by the
+    owning session only; fixture `main` changes go through PRs only.
+  - Evidence for this map: `.velnor-compare/2026-08-24-039-snapshots/`.
