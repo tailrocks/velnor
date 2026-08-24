@@ -138,6 +138,8 @@ pub struct ClassContract {
     pub platform_runner: Option<String>,
     /// Stable check name for the platform lane, present iff one is required.
     pub platform_name: Option<String>,
+    /// Job timeout for the platform lane in minutes; absent means the default.
+    pub platform_timeout_minutes: Option<u32>,
 }
 
 impl ClassContract {
@@ -355,6 +357,8 @@ struct ClassEntry {
     platform_runner: Option<String>,
     #[serde(default)]
     platform_name: Option<String>,
+    #[serde(default)]
+    platform_timeout_minutes: Option<u32>,
     install: GateEntry,
     build: GateEntry,
     test: GateEntry,
@@ -457,12 +461,27 @@ fn load_classes(path: &Path) -> Result<Vec<ClassContract>, String> {
                 ));
             }
         };
+        if let Some(timeout) = entry.platform_timeout_minutes {
+            if !entry.platform_only {
+                return Err(format!(
+                    "class {} declares platform_timeout_minutes but has no platform-only gate",
+                    class.code()
+                ));
+            }
+            if !(5..=120).contains(&timeout) {
+                return Err(format!(
+                    "class {} has platform_timeout_minutes {timeout} outside 5..=120",
+                    class.code()
+                ));
+            }
+        }
         classes.push(ClassContract {
             class,
             gates,
             platform_only: entry.platform_only,
             platform_runner,
             platform_name,
+            platform_timeout_minutes: entry.platform_timeout_minutes,
         });
     }
 

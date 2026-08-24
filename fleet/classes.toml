@@ -30,6 +30,7 @@ format = { command = "mise run fmt", applicability = "both" }
 platform_only = true
 platform_runner = "macos-26"
 platform_name = "native-usage-menu-bar"
+platform_timeout_minutes = 60
 install = { command = "mise install --locked", applicability = "both" }
 build = { command = "mise run ci", applicability = "both" }
 test = { command = "mise run desktop-ci", applicability = "github" }

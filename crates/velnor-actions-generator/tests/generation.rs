@@ -48,10 +48,15 @@ fn code_lane_timeout_covers_proven_cold_monorepo_runtime() {
     let code = std::fs::read_to_string(workflows.join("ci-code.yml")).unwrap();
     assert_eq!(code.matches("timeout-minutes: 60").count(), 2);
 
-    for class in ["native", "tap", "apt", "fixture"] {
+    for class in ["tap", "apt", "fixture"] {
         let rendered = std::fs::read_to_string(workflows.join(format!("ci-{class}.yml"))).unwrap();
         assert!(!rendered.contains("timeout-minutes: 60"));
     }
+    // The native platform lane runs the full macOS desktop gate on a shared
+    // GitHub-hosted runner: proven runtime spans ~23-30+ minutes cold, so the
+    // class overrides the platform timeout to 60 while lanes stay at 60/30.
+    let native = std::fs::read_to_string(workflows.join("ci-native.yml")).unwrap();
+    assert_eq!(native.matches("timeout-minutes: 60").count(), 1);
 }
 
 #[test]
@@ -649,7 +654,7 @@ fn release_goldens_bind_consumer_interface_and_callable_metrics_schema() {
         ),
         (
             ".github/workflows/ci-native.yml",
-            "f84250cf13d60c6af29bda503ea0b3275a4ec30cd85c552315ba9c488f9c74ae",
+            "4dd078d11c07d65eaaae23a4de39f93e01a16706490a8eb8a3603e8b421b709c",
         ),
         (
             ".github/workflows/ci-tap.yml",

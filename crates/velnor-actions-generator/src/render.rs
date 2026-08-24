@@ -42,6 +42,8 @@ const CHECKOUT_VERSION: &str = "v7.0.1";
 /// Pinned mise setup action (full 40-hex SHA) and its version comment.
 const MISE_ACTION_REF: &str = "7e36c90d9ab29c415a2384db3006f3ec8a8cc654";
 const MISE_ACTION_VERSION: &str = "v4.2.4";
+/// Default platform-lane job timeout unless a class overrides it.
+const DEFAULT_PLATFORM_TIMEOUT_MINUTES: u32 = 30;
 /// Pinned GitHub cache action.
 const CACHE_ACTION_REF: &str = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
 const CACHE_ACTION_VERSION: &str = "v6.1.0";
@@ -477,7 +479,10 @@ pub fn callable_workflow(
         b.line(4, &format!("name: {platform_name}"));
         b.line(4, "needs: validate-request");
         b.line(4, &format!("runs-on: {platform_runner}"));
-        b.line(4, "timeout-minutes: 30");
+        let platform_timeout = contract
+            .platform_timeout_minutes
+            .unwrap_or(DEFAULT_PLATFORM_TIMEOUT_MINUTES);
+        b.line(4, &format!("timeout-minutes: {platform_timeout}"));
         b.line(4, "outputs:");
         b.line(6, "contract: ${{ steps.aggregate.outputs.contract }}");
         b.line(4, "steps:");

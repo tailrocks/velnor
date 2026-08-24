@@ -859,7 +859,7 @@ jobs:
     name: native-usage-menu-bar
     needs: validate-request
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 60
     outputs:
       contract: ${{ steps.aggregate.outputs.contract }}
     steps:
