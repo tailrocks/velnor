@@ -21,11 +21,11 @@ Rules for every agent working this list:
 
 Status legend: `[ ]` TODO · `[x]` DONE · `[~]` IN PROGRESS · `[-]` BLOCKED(reason)
 
-Progress: 3 / 94 done.
+Progress: 4 / 94 done.
 
 ## Track A - fleet policy (P0, independent)
 
-- [ ] **039** - Reconcile restricted organization JIT fleets (P0) - [fleet-operations/039-org-jit-multi-repo-fleet.md](fleet-operations/039-org-jit-multi-repo-fleet.md)
+- [~] **039** - Reconcile restricted organization JIT fleets (P0) - [fleet-operations/039-org-jit-multi-repo-fleet.md](fleet-operations/039-org-jit-multi-repo-fleet.md)
 
 ## Track B - velnorctl migration
 
