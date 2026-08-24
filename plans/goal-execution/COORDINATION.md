@@ -40,6 +40,7 @@ prevent exclusive-scope collisions.
 | 065 | Session B | 2026-08-24 ~10:40Z | DONE @8734b4b — reconciling-executor convergence complete (gates 943/943 at landing); verification chain closed 2026-08-24 |
 | 066 | orchestrating ox-alpha (validator session) | 2026-08-24 ~13:30Z | CLAIMED — Track B next-ready leaf; implementation via fresh writer subagent on this branch; other sessions read-only on 066 scope |
 | 065-defect-fix | Session C validator (ox-alpha) | 2026-08-24 ~13:45Z | CLOSED @f06d439 — fail-closed opaque rejection landed; verifier PASS 973/973; reviewer APPROVE-CLOSE; evidence addendum in 065 file |
+| C005-man | Session C validator (ox-alpha) | 2026-08-24 ~14:05Z | CLAIMED — first dependency-ready C-command (deps 064–065 DONE); full controller loop via fresh subagents; fixture dispatch will be announced in this registry before it happens (serialized resource) |
 
 ## Decisions
 
