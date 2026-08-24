@@ -31,6 +31,15 @@ native HTTP transport, zero-copy logs, dynamic slots, org-level JIT), P3b
 Sections below describe standing architecture; the marked contract governs
 unified-CI conflicts.
 
+## velnorctl migration
+
+The `velnorctl` migration replaces every `velnor-runner` product, binary,
+package, and command surface. Normative command granularity and ordering live
+in [`plans/velnorctl-migration/README.md`](../plans/velnorctl-migration/README.md)
+and [`plans/velnorctl-migration/commands/README.md`](../plans/velnorctl-migration/commands/README.md);
+Plan 063 lands first. This section intentionally does not duplicate their
+detail.
+
 The current host-socket Docker model is not a lower-trust or Build L3
 isolation boundary. Public unmerged code stays GitHub-hosted. The proposed
 microVM, guest-local Docker, signing, cleanup, cache/network, and disk-safety

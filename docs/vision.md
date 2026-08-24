@@ -67,6 +67,20 @@ conclusions in the GitHub UI — is **achieved and in production**:
   signed apt source, never a local package or copied binary; it operates under systemd
   (never-exit supervision, credential diagnosis, watchdog, doctor timers),
   and streams logs live per line to the GitHub UI.
+- **velnorctl migration**: the product surface converges on one `velnorctl`
+  operator CLI with a service-only `daemon` entrypoint. Final crate layout:
+  `velnorctl` (operator CLI), service-only `daemon` entrypoint, and libraries
+  `velnor-model`, `velnor-control`, `velnor-client`, `velnor-render`;
+  `velnor-tools` remains maintainer-only automation.
+- Complete `velnor-runner` removal is the goal: after Plan 079 no
+  `velnor-runner` binary, package, alias, or shim remains. Command-by-command
+  migration is tracked in `plans/velnorctl-migration`; there are no
+  backward-compatible aliases.
+- Debian apt/dpkg is the sole installed-version authority: `velnorctl` has no
+  release command family or release resource, keeps no active-version symlink,
+  previous-version pointer, duplicate version history, or activation API;
+  signed apt remains the only install, upgrade, downgrade, rollback, and
+  recovery mechanism (consistent with the apt-only delivery above).
 
 ## What drives the next phases
 

@@ -165,6 +165,17 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-08-24: **velnorctl migration adopted** (operator): final crate
+  ownership is the `velnorctl` operator CLI with a service-only `daemon`
+  entrypoint (`velnor-model`, `velnor-control`, `velnor-client`,
+  `velnor-render` libraries; maintainer-only `velnor-tools`); zero
+  backward-compatible aliases; complete `velnor-runner` binary/package/alias/
+  shim removal after Plan 079; Debian apt/dpkg is the sole installed-version
+  authority with no release namespace or activation API; sole `lane`
+  selector everywhere including `.github` instructions, with org-derived
+  defaults exactly as the marked contract states; fixture control-plane corpus
+  planned. Plans 063–080 plus C001–C075 are normative.
+
 - 2026-08-09: The marked unified-CI contract supersedes every earlier
   conflicting execution authority, estate count or membership, class,
   selector, default, public-PR route, trusted admission, cache policy, and

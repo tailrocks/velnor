@@ -16,6 +16,9 @@ Velnor unified CI contract (2026-08-09):
 - Supersession: every conflicting earlier execution authority, estate count or membership, class, selector, default, trust route, cache policy, or merge-context statement in this repository is historical and non-executable.
 <!-- unified-ci-contract:end -->
 
-Execute the marked contract through the tracked active goal and its execution graph.
+Execute the marked contract through the tracked active goal and its execution
+graph, with `plans/TASKS.md` as its checkbox mirror. The active surface is
+exactly: the marked unified-CI contract, the tracked goal graph, and the
+`plans/TASKS.md` mirror.
 
 No earlier prompt or plan is active.
