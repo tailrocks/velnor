@@ -4682,7 +4682,17 @@ offline-runner\toffline\tself-hosted,velnor-target-mvp
             .unwrap()
             .parent()
             .unwrap();
-        let tmp = std::env::temp_dir().join("velnor-evidence-test");
+        // Unique per-process scratch directory: a fixed /tmp path races with
+        // any concurrent test process and its cleanup deletes another
+        // runner's inputs mid-test.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let tmp = std::env::temp_dir().join(format!(
+            "velnor-evidence-test-{}-{nanos}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let dump_dir = tmp.join("dumps");
