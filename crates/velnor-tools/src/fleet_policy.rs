@@ -579,6 +579,12 @@ pub fn normalize_observed_workflows(raw: &BTreeSet<String>) -> Result<BTreeSet<W
     Ok(out)
 }
 
+/// Machine-readable reason carried by every repository removal (observed
+/// selection entry absent from the desired closure) in the semantic-diff
+/// surface; operator review must always see why a removal happened.
+#[allow(dead_code)]
+pub const REPOSITORY_REMOVAL_REASON: &str = "no direct workflow closure in release-ref ledger";
+
 /// Semantic equality between desired policy and observed readback; every
 /// mismatch becomes one deterministic line.
 #[allow(dead_code)]
@@ -626,7 +632,9 @@ pub fn semantic_diff(
         diffs.push(format!("selected_repositories: missing '{missing}'"));
     }
     for extra in got_repos.difference(&want_repos) {
-        diffs.push(format!("selected_repositories: unexpected '{extra}'"));
+        diffs.push(format!(
+            "selected_repositories: unexpected '{extra}' reason='{REPOSITORY_REMOVAL_REASON}'"
+        ));
     }
     let want_workflows = normalize_observed_workflows(&BTreeSet::from_iter(
         desired
@@ -1476,6 +1484,64 @@ mod tests {
         let errs = semantic_diff(&desired, "ChainArgos", &exact).expect("diff");
         assert_eq!(errs.len(), 1);
         assert!(errs[0].contains("requested 'ChainArgos'"), "{}", errs[0]);
+    }
+
+    #[test]
+    fn semantic_diff_labels_repo_removals_with_closure_reason() {
+        // Fixture drift mirrors live observed-but-not-desired repositories;
+        // strings only, no network and no live mutation.
+        let desired = sample_policy();
+        let observed = ObservedGroup {
+            name: desired.group_name.clone(),
+            visibility: "selected".to_owned(),
+            allows_public_repositories: true,
+            restricted_to_workflows: true,
+            selected_repositories: BTreeSet::from([
+                "tailrocks/ruxel".to_owned(),
+                "tailrocks/schemalane".to_owned(),
+                "tailrocks/github-terraform".to_owned(),
+                "tailrocks/jackin-github-terraform".to_owned(),
+            ]),
+            selected_workflows: BTreeSet::from([
+                "tailrocks/ruxel/.github/workflows/ci.yml@refs/heads/main".to_owned(),
+                "tailrocks/schemalane/.github/workflows/ci.yml@refs/heads/trunk".to_owned(),
+            ]),
+        };
+        let diffs = semantic_diff(&desired, "tailrocks", &observed).expect("diff");
+        for repo in [
+            "tailrocks/github-terraform",
+            "tailrocks/jackin-github-terraform",
+        ] {
+            let line = diffs
+                .iter()
+                .find(|line| line.contains(&format!("unexpected '{repo}'")))
+                .unwrap_or_else(|| panic!("missing removal line for {repo}: {diffs:?}"));
+            assert!(
+                line.contains(&format!("reason='{REPOSITORY_REMOVAL_REASON}'")),
+                "removal of {repo} must carry the exact closure reason: {line}"
+            );
+            assert_eq!(
+                REPOSITORY_REMOVAL_REASON,
+                "no direct workflow closure in release-ref ledger"
+            );
+        }
+        // Every removal entry carries the reason; nothing else does.
+        let removals = diffs
+            .iter()
+            .filter(|line| line.contains("selected_repositories: unexpected"))
+            .count();
+        assert_eq!(removals, 2, "{diffs:?}");
+        assert_eq!(
+            diffs
+                .iter()
+                .filter(|line| line.contains(REPOSITORY_REMOVAL_REASON))
+                .count(),
+            removals,
+            "reason must appear exactly once per removal and nowhere else: {diffs:?}"
+        );
+        assert!(diffs
+            .iter()
+            .all(|line| !line.contains("missing '") || !line.contains("reason=")));
     }
 
     #[test]

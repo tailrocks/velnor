@@ -1366,6 +1366,18 @@ fn audit_generated_caller(file: &str, _text: &str, yaml: &Value, findings: &mut 
             "generated caller must expose the canonical plural lanes choice with the exact Velnor-default set: velnor, github, both",
         ));
     }
+    let dispatch_inputs = object_get(yaml, "on")
+        .and_then(|on| object_get(on, "workflow_dispatch"))
+        .and_then(|dispatch| object_get(dispatch, "inputs"))
+        .and_then(Value::as_mapping);
+    if dispatch_inputs.is_some_and(|inputs| mapping_get(inputs, "lane").is_some()) {
+        findings.push(Finding::error(
+            "generated-caller",
+            file,
+            "$.on.workflow_dispatch.inputs.lane",
+            "generated-caller must not define legacy singular lane input alongside lanes",
+        ));
+    }
 }
 
 fn audit_entry_job_event_coverage(
@@ -2177,6 +2189,26 @@ jobs:
             .replace("&& inputs.lanes ||", "&& inputs.lane ||");
         let findings = audit(&singular);
         assert!(has_rule(&findings, "generated-caller"), "{findings:?}");
+    }
+
+    #[test]
+    fn generated_caller_rejects_dual_lane_and_lanes_dispatch_inputs() {
+        let dual = GENERATED_CALLER.replace(
+            "      lanes:\n",
+            "      lane:\n        type: choice\n        default: velnor\n        options: [velnor, github, both]\n      lanes:\n",
+        );
+        let findings = audit(&dual);
+        assert!(
+            findings.iter().any(|finding| {
+                finding.rule == "generated-caller"
+                    && finding.path == "$.on.workflow_dispatch.inputs.lane"
+                    && finding.message
+                        == "generated-caller must not define legacy singular lane input alongside lanes"
+            }),
+            "dual dispatch inputs must trip the exact finding: {findings:?}"
+        );
+        // The canonical plural surface alone stays clean.
+        assert!(!has_rule(&audit(GENERATED_CALLER), "generated-caller"));
     }
 
     #[test]
