@@ -8426,6 +8426,23 @@ mod tests {
     }
 
     #[test]
+    fn github_hosted_queued_jobs_are_not_cancelled_by_trusted_queue_timeout() {
+        let timeout = crate::capacity::queue_wait_timeout();
+        let github_hosted = [crate::protocol::ListedWorkflowJob {
+            id: 9,
+            run_id: 101,
+            labels: vec!["ubuntu-26.04".into()],
+            status: Some("queued".into()),
+            runner_id: None,
+            created_at: Some("2020-01-01T00:00:00Z".into()),
+            run_url: Some(
+                "https://api.github.com/repos/jackin-project/jackin/actions/runs/101".into(),
+            ),
+        }];
+        assert!(queued_jobs_to_cancel(&github_hosted, SystemTime::now(), timeout).is_empty());
+    }
+
+    #[test]
     fn merged_push_occupancy_completion_is_failed_not_success() {
         let completion = fail_closed_pre_execution_completion(failed_acquired_job_completion(
             &AcquiredJobIdentity {
