@@ -1369,3 +1369,501 @@ same-version local-artifact sentence is superseded and must not be used.
   operator action: grant org runner administration, then add these six
   repositories (and every remaining estate repository) to the trusted Velnor
   group before redispatch.
+
+### 2026-07-21 Velnor program delivery
+
+- Velnor PR #100 head `62bcf55` passed the current Velnor CI run
+  `29780533701`: actionlint, format, deny, clippy, 649 tests, aggregate, and
+  DCO all green. GitHub accepted an ordinary non-bypassing squash merge as
+  `c493a2f512097abad887007f94ec10445e3c26b4`.
+
+### 2026-07-21 plan 015 rewrite preparation refresh
+
+- Read-only reachability inspection confirms capture-introduction commit
+  `55ed22f` is still reachable from current heads and 97 release tags. The
+  removal commit remains `d7e75af`; no capture exists at current HEAD.
+- Plan 015 now contains the exact coordinated freeze, immutable mirror backup,
+  all-head/all-tag rewrite, protected-ref handling, third-clone verification,
+  rollback, and collaborator/reclone procedure. It explicitly records that
+  release tag commit identities and old provenance change. No history was
+  rewritten and no approval boundary was crossed.
+
+### 2026-07-21 Jackin attestation approval proposal
+
+- `docs/capability-proposal-attest-build-provenance-v4.md` now defines the
+  complete approval boundary: exact v4.1.1 commit, Jackin's sole
+  `subject-path` value, rejected adjacent inputs, outputs, failure semantics,
+  OIDC/Sigstore/GitHub API trust and network effects, job-local storage,
+  upstream action and actions/runner evidence, and V-A/Jackin proof gates.
+- No manifest, runtime, fixture, or Jackin capability change was made. The
+  proposal's explicit yes/no decision remains required before native Rust
+  implementation.
+
+### 2026-07-21 Parallax direct-main recovery and credential blocker
+
+- Reconciled the abandoned PR #21 program work onto Parallax `main` without
+  importing commit `588dc2d` or changing any golden screenshot. Local commit
+  `8190a6d` includes the application-state race fix, current action pins,
+  canonical lane surface, local-only compiler caches, and the canonical
+  `release` writer job.
+- Verification passed: 539 UI tests; UI format and type checks; actionlint;
+  workflow-policy fixtures; Rust formatting; 163 focused Rust tests; and zero
+  Parallax errors from the estate auditor. The no-update visual run differs by
+  3,559/3,544 pixels along text/icon edges when macOS Chromium is compared with
+  Linux-authored goldens. No snapshot was rewritten; Ubuntu CI remains the
+  authoritative visual proof.
+- Delivery is blocked before remote verification. HTTPS rejected the workflow
+  update because the active OAuth token lacks `workflow`; SSH authentication
+  failed because the agent refused the ED25519 signing request. Required
+  operator action: refresh `gh` authentication with `workflow` scope or unlock
+  the registered SSH key, then push Parallax `main` commit `8190a6d`.
+- Parallax stable release still builds native Darwin archives with Apple
+  `dsymutil`, codesign, and linker header padding. Plan 053 explicitly requires
+  an operator decision if no valid Ubuntu cross-build exists; this surface was
+  preserved rather than silently dropping Apple artifacts or claiming Ubuntu
+  equivalence.
+
+### 2026-07-21 stable required-check aggregation
+
+- Phase-4 review found the earlier required-check handoff structurally unsafe:
+  most repositories exposed only leaf jobs, so a later workflow job could be
+  added without becoming required. `audit-ci` now classifies a stable aggregate
+  result as a required concern instead of relying on prose.
+- Canonical `CI required (<lane>)` aggregators were committed on the current
+  program heads: Java `4ef12b2`, blockchain-nodes `367817f`, Holla `bb1a338`,
+  Ruxel `d8380df`, Schemalane `8058791`, pg-bigdecimal `dcdb6fa`,
+  tracing-request-level `106641a`, TermRock `f20f271`, and Parallax telemetry
+  playground `8fba93b`. Actionlint is green across all nine workflows.
+- These workflow commits are local only because the unchanged GitHub token
+  still lacks `workflow` scope and SSH signing remains unavailable. No repeated
+  push was attempted after the identical credential failure was proven.
+- `docs/required-check-handoff.md` records exact contexts and prerequisites.
+  Read-only API inspection found every `main` unprotected except TermRock,
+  whose protection has no required checks. No branch policy was changed; §12.1
+  remains an operator decision.
+
+### 2026-07-21 exact Jackin PR-head audit correction
+
+- A detached, read-only worktree at PR #810 SHA
+  `185359306977eba6f12d935c30cef7d387490063` replaced the stale local checkout
+  in a temporary estate manifest. The result is 18 errors, not the earlier
+  presumed clean state: CI lane/canonical-marker drift, missing compiler-cache
+  setup in scheduled/reusable compile jobs, and three forbidden construct lane
+  conditionals.
+- The operator's normal Jackin checkout remains untouched on its dirty
+  `docs/native-macos-usage-menu-bar` branch. No PR #810 edit or commit was made:
+  Jackin rules require every commit to be pushed immediately, while the active
+  OAuth token cannot update workflows and the SSH agent refuses signing.
+- This correction reopens plan 049's non-attestation work. Once credentials are
+  repaired, continue on the existing `perf/subminute-ci` PR branch, eliminate
+  all 18 errors structurally, run the exact estate audit again, and only then
+  perform the attestation-dependent preview proof after approval.
+
+### 2026-07-21 TableRock STOP revalidation
+
+- TableRock is no longer a dirty worktree: current trunk is clean and two
+  unpublished local commits (`5c37304`, `9e32138`) sit above `origin/main`.
+- The binding preflight still fails exactly as before: formatting passes, then
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` reports 191
+  errors. Plan 057 explicitly stops before workflow delivery on current-code
+  clippy failure. No source or workflow was changed.
+- Required operator choice: authorize repairing the existing TableRock source
+  lint baseline first, or defer plan 057. The obsolete plan branch/template
+  remains forbidden by TableRock's trunk-only rules.
+### 2026-07-21 TableRock technical gate repaired
+
+- TableRock trunk `89e7d16` replaces the obsolete macOS-only checks and
+  dependency workflows with current lane-aware CI while preserving native
+  Apple preview work as an explicit product exception.
+- Strict clippy exposed 191 current-toolchain findings. Compiler-authored
+  mechanical fixes plus narrowly justified typed-boundary lint expectations
+  reduced the baseline to zero without weakening `-D warnings`.
+- Full nextest initially exposed two architectural test defects: real-server
+  binaries launched too many containers concurrently, and several Redis tests
+  trusted container stdout before the host-forwarded port accepted adapter
+  connections. A committed nextest test group serializes real-server binaries;
+  shared adapter-level readiness probing replaces one-shot connects.
+- Proof: `cargo clippy --workspace --all-targets --locked -- -D warnings`,
+  actionlint, and standalone `audit-ci` pass; full nextest reports 768 passed,
+  12 skipped. V-B/V-C remains pending organization-scope runner migration.
+
+### 2026-07-21 workflow credential and organization-admin reconciliation
+
+- The refreshed GitHub authentication now accepts workflow-file pushes and
+  organization runner administration. All prepared estate heads were pushed;
+  Velnor PR #100 is merged, Parallax and Termrock are delivered directly on
+  their policy-mandated trunks, and the remaining program PR heads are listed
+  in `plans/README.md`.
+- Read-only organization inspection reports zero `tailrocks` org runners and
+  only runner group `Default` (`visibility=all`). Five healthy
+  `velnor-dogfood-slot-*` runners remain registered to `tailrocks/velnor`.
+  Therefore the former HTTP 403 is resolved, but plan 039 is not complete:
+  creating/configuring a restricted trusted group is an explicit approval
+  boundary, and the Sentry host key still needs operator acceptance before the
+  daemon can be drained and migrated.
+- Every stale queued/in-progress estate verification run found on 2026-07-21
+  received a cancellation request. No replacement smoke was dispatched while
+  the org fleet was absent.
+
+### 2026-07-21 nextest-only and latest-pin convergence
+
+- Velnor, the fixture PR, Jackin PR #810, all current estate program branches,
+  and direct-main repositories now use nextest for executable/instructional
+  Rust testing. Parser fixtures and historical incident prose remain only as
+  classified non-executable evidence.
+- Checkout now resolves to the v7.0.1 commit
+  `3d3c42e5aac5ba805825da76410c181273ba90b1`. The sccache v0.0.10 annotated
+  tag object was replaced with its executable commit
+  `9e7fa8a12102821edf02ca5dbea1acd0f89a2696` across the strict manifest,
+  canonical inventory, workflows, and estate heads.
+- Jackin verification passed 979 dhat-enabled tests, 18 focused ratchet tests,
+  and 150 view tests. A broader run passed 983 tests before reproducing a
+  pre-existing integration defect: `NoOpDocker` claims container creation
+  succeeded while the attach path invokes the real Docker CLI, so the expected
+  fake container does not exist. This remains technical work; it is not hidden
+  or attributed to the workflow-only migration.
+
+### 2026-07-21 Jackin host-attach test isolation correction
+
+- The broader failure above was traced to the operator shell's intentional
+  `JACKIN_HOST_ATTACH=1`. Integration-test binaries link runtime libraries
+  without `cfg(test)`, so the environment selected the real host transport
+  despite injected `FakeRunner` and `NoOpDocker` dependencies.
+- PR #810 commit `a27fcda` adds explicit test-layout identity to
+  `JackinPaths`; transport selection now honors injected test context before
+  reading operator environment. This removes the whole environment-leak class
+  without weakening production host attach.
+- Proof under the still-exported host-attach variable: exact regression 1/1,
+  path-context regressions 2/2, affected strict clippy clean, and the combined
+  Jackin/console/xtask suite 2,182/2,182 nextest tests passed with the pinned
+  mise toolset.
+
+### 2026-07-21 current-head estate and approval audits
+
+- The machine-readable estate audit was rerun with Jackin's actual PR #810
+  worktree substituted for the intentionally dirty default checkout. It exited
+  successfully with zero errors across all 13 program heads. Remaining warning
+  output is legacy vocabulary and intentional cross-ref single-writer
+  serialization, not a hidden `missing-required` or `canonical-drift` error.
+- Full-history consumers now carry same-line rationale required by the audit;
+  stale checkout v7.0.0 annotations were corrected to v7.0.1, and Parallax's
+  scheduled evidence uploads now use the current upload-artifact v7.0.1 pin.
+- The attestation approval proposal was revalidated: latest upstream remains
+  `actions/attest-build-provenance` v4.1.1, its exact commit and delegated
+  action are unchanged, and official actions/runner remains v2.336.0. The two
+  Jackin call sites remain exact at PR #810 head
+  `67b60bea`; approval is still not inferred.
+- Plan 015's safe ref audit still finds exactly one historical HTML path. It
+  entered at `55ed22f`, was removed at `d7e75af`, remains reachable from the
+  current branches plus nine remote-only branches and 97 release tags, and is
+  absent from the tracked tree. Therefore the prepared coordinated rewrite
+  remains necessary and correctly operator-gated.
+
+### 2026-07-21 TableRock native-workflow reconciliation
+
+- TableRock advanced independently to trunk `36b83dd` with an all-macOS native
+  checkpoint. Its workload is intrinsically Apple-only, so requiring Velnor
+  and Ubuntu lane matrices would create forbidden fake jobs rather than parity.
+- Velnor `4d6af61` makes the estate auditor recognize only the proven shape:
+  every job uses macOS and invokes `./scripts/build-native-app.sh`. A regression
+  test guards the exception, while mixed or generic workflows retain the lane
+  requirement. The full Velnor gate passes 653 nextest tests.
+- TableRock local verification passes strict clippy and all 768 nextest tests
+  in 544.482 seconds. Native run `29803656124` failed on older trunk
+  `d3539b9` because fileprivate protocol witnesses were too narrow; current
+  trunk already repairs that root cause, and replacement run `29804459618` is
+  active. No duplicate patch was applied over the independent trunk repair.
+
+### 2026-07-21 org-fleet authority revalidation
+
+- Current GitHub state still has only the unrestricted `tailrocks` Default
+  runner group, zero organization runners, and five idle online runners scoped
+  to `tailrocks/velnor`. The authenticated identity now has the necessary
+  `admin:org`, `repo`, and `workflow` scopes; lack of scope is no longer the
+  blocker.
+- `docs/org-fleet-migration.md` now contains the exact operator-gated creation
+  request for proposed selected group `velnor-trusted`, including all eleven
+  public-repository ids and `allows_public_repositories=true`, followed by
+  allowlist verification. This follows GitHub's current 2026-03-10 REST shape.
+- Read-only host-key discovery reports Sentry ED25519 fingerprint
+  `SHA256:n42CpA98ASrRoKhbt5xhFTKnqIV/AbRNHHlMktbFtok`. No trust was added;
+  operator out-of-band verification and acceptance remain mandatory.
+
+### 2026-07-21 plan 015 ref-inventory refresh
+
+- A fresh fetch/prune and presence-only scan still finds the capture's add
+  commit `55ed22f`, no tracked HTML in the current tree, and the ignore guard
+  active. Reachability is exactly two local heads, twelve origin refs including
+  `origin/HEAD`, and 97 tags. The full named head/ref list is now in plan 015;
+  tag names remain the `v0.1.2` through `v0.1.98` sequence.
+- No blob contents or embedded values were read or printed. The coordinated
+  rewrite remains unexecuted pending explicit operator confirmation.
+
+### 2026-07-21 v0.1.99 strict-manifest bootstrap release
+
+- Main run `29805908947` assigned all five jobs to the repository-scoped
+  v0.1.98 fleet and failed before any step or uploaded log. That shape is
+  consistent with pre-side-effect strict validation rejecting the newly
+  approved checkout and sccache commits before the installed manifest itself
+  could be upgraded; no broader runtime failure is inferred from absent logs.
+- Tag `v0.1.99` points at signed-off source commit `31306be`. Its automatic
+  Velnor release attempt `29806032075` reproduced the expected pre-step
+  bootstrap failure. The documented recovery path then ran exactly once on
+  GitHub-hosted runners: `29806067427` built and validated amd64 and arm64
+  packages and delivered both source and apt release assets successfully.
+- Apt publisher `29806314708` built and deployed successfully. The live amd64
+  and arm64 package indexes both advertise `velnor-runner` 0.1.99. This local
+  macOS environment lacks `gpgv`, so cryptographic candidate verification is
+  deliberately deferred to Sentry's `apt-get update`; no unsigned or local
+  package path was used.
+- Installation remains blocked solely by unverified Sentry SSH host trust.
+  After operator fingerprint confirmation, drain first, use only
+  `apt-get update && apt-get install velnor-runner`, confirm package/image
+  0.1.99, restore the daemon, and rerun the failed main CI plus fixture smoke.
+
+### 2026-07-21 nextest live-surface enforcement
+
+- Velnor `1bd00cf` closes the audit gap that previously inspected only workflow
+  `run:` blocks. `audit-ci` now checks live scripts, configuration,
+  instructions, and Rust documentation while excluding generated artifacts and
+  explicitly historical plans, migrations, research, evidence, and benchmark
+  records. Its parser test distinguishes executable commands from prohibition
+  and incident prose.
+- The resulting 13-repository audit reports zero errors and zero test-runner
+  findings; the same run retains six already-classified concurrency advisories.
+  Velnor's full format, strict clippy, actionlint, and 655-test nextest gate is
+  green.
+- The wider scan found and repaired live surfaces missed by the older audit:
+  Java PR #1753 head `6f7ee98b`, Ruxel PR #3 head `27fa811`, and Jackin PR
+  #810 head `67b60bea`. Jackin now rejects runnable rustdoc fences unless their
+  examples are mirrored into nextest-discoverable tests; all 27 library
+  packages and 263 xtask tests pass.
+- Ruxel `e96ad0c` fixes the exposed evidence defect structurally: derived
+  floating statistics are rounded before serialization, eliminating
+  Python-version-dependent last-digit drift. Its required gate now passes
+  format, strict clippy, all 215 nextest tests, dependency audit, 54 Python
+  verifier tests, and all oracle, benchmark, and chaos evidence checks.
+
+### 2026-07-21 TableRock native checkpoint closure
+
+- TableRock trunk `9763873` fixes the cancellation proof structurally. The
+  scripted backend supports direct connection; the fixture starts a real
+  `runQuery()` lifecycle; nested query-state changes invalidate presentation;
+  the view observes the active tab directly; and the selectable status exposes
+  its semantic terminal value to accessibility.
+- Native run `29827520875` is fully green: project and binding drift, Rust
+  bridge, Swift feature tests, universal XCFramework, the canonical Xcode
+  checkpoint including UI cancellation, Release archive, and development app
+  verification all pass. Earlier runs are retained as root-cause evidence.
+- TableRock remains incomplete only for fresh org-fleet V-B/V-C. The
+  repository has no applicable Ubuntu execution surface; its Apple-only
+  classification remains enforced by Velnor's shape-aware estate audit.
+
+### 2026-07-21 plan 015 post-release ref refresh
+
+- A fresh fetch/prune and presence-only scan finds the historical capture
+  absent from the tracked tree and still guarded by `.gitignore`. No removed
+  blob contents or embedded values were read.
+- Commit `55ed22f` remains reachable from the same two local heads, twelve
+  origin refs including `origin/HEAD`, and now 98 release tags: the existing
+  sequence through `v0.1.99`. The coordinated rewrite inventory and index were
+  updated; execution still requires explicit approval of the freeze window.
+
+### 2026-07-21 delivered-estate audit and fleet revalidation
+
+- The current 13-repository audit was rerun after TableRock's native proof,
+  with the detached Jackin PR #810 worktree at `67b60bea` substituted for the
+  user's unrelated checkout branch. It reports zero errors and zero
+  test-runner findings. The same six documented cross-ref publication-lock
+  advisories remain; no new applicability or canonical-drift gap appeared.
+- Running the same audit against the user's ordinary Jackin checkout produced
+  94 Jackin-only errors, confirming why exact program-head substitution is
+  required. No user checkout was modified.
+- Live `tailrocks` organization state remains one unrestricted `Default`
+  runner group and zero organization runners. The open estate PRs therefore
+  have DCO/local evidence but no fresh V-B/V-C proof; no merge or runner-group
+  policy change was inferred.
+
+### 2026-07-21 coordinated history rewrite and final-estate convergence
+
+- The operator-approved coordinated rewrite completed. Recoverable backup
+  `/tmp/velnor-history-rewrite-20260721T1443Z/backup.git.tar.gz` has SHA-256
+  `ead88e40cf7b0cd2bd6019dd063f597d00e2a5f332cd87a666bca739a92fbb8b`.
+  Fresh fetch/prune plus local/remote reachable-ref and object-path scans find
+  neither commit `55ed22f` nor `.velnor-compare/*.html`; the last obsolete
+  local pre-rewrite branch was removed. Collaborators must discard pre-rewrite
+  clones/branches and reclone or reset to rewritten remote refs.
+- GitHub runner groups now use exact selected access: Tailrocks group id 3
+  contains the eleven Tailrocks estate repositories; ChainArgos group id 4
+  contains only java-monorepo and blockchain-nodes; jackin-project group id 3
+  contains only jackin-project/jackin. Public-repository access is enabled only
+  because each selected group contains at least one public repository.
+- The Sentry Tailrocks pool runs eight org-scoped slots from signed-apt package
+  0.1.102. ChainArgos and jackin-project groups are prepared for sequential
+  migration; the single host is never registered to mixed organizations.
+- Canonical Sunday `0 4 * * 0` parity and schedule-selected `both` are delivered
+  to every estate CI head plus fixture. Current heads are Velnor `0b40e401`,
+  fixture `5ffc9f92`, java-monorepo `78697247`, blockchain-nodes `cc22d7cc`,
+  jackin PR #810 `d72e3a77`, Holla `94fc643a`, Ruxel `3d7684fa`, Schemalane
+  `fa090cc2`, pg-bigdecimal `c1ac5c8c`, tracing-request-level `84e6caeb`,
+  Parallax trunk `c8cd46d0`, playground trunk `b6ec71e9`, TableRock trunk
+  `31bb6b76`, and TermRock trunk `5a485d39`.
+- The program-head estate audit exits zero. It retains six already-classified
+  cross-ref publication-lock advisories and reports no missing-required or
+  canonical-drift errors. No pull request was merged.
+- TermRock run `29847714724` exposed a contaminated public API inventory that
+  the local gate did not verify. Trunk `5a485d39` removes the two build-status
+  lines and adds nightly-backed API regeneration/diff to `mise run gate`; the
+  complete gate passes with 337 nextest tests.
+- Velnor 0.1.102 reaches GitHub's attestation upload API, where fixture run
+  `29846369353` proves GitHub rejects the mandated public Rekor V2 bundle for
+  zero verifier-counted integrated timestamps. The proposed Sigstore RFC3161
+  TSA expansion remains unimplemented pending exact operator approval.
+
+### 2026-07-21 Parallax and TermRock exact-head closure
+
+- Parallax trunk `7fe3f136` removes two browser races structurally. Shell
+  visual proof waits for loaded overview content, while investigation save
+  exposes a server-confirmed saving/saved lifecycle before tests read the
+  control snapshot. The persistence hook reduces the page function ratchet
+  from 191 to 177. Local formatting, typecheck, 539 UI tests, and the focused
+  browser contract pass; exact-head Velnor run `29854619258` is fully green,
+  including browser contracts, breadth, full stack, policy, audit, and
+  nextest.
+- TermRock exact-head run `29849259484` attempt 3 proved Velnor uploaded Pages
+  site files directly. GitHub rejected that artifact with
+  `deployment_content_failed`; the official `actions/upload-pages-artifact`
+  v5 contract requires one dereferenced `artifact.tar`.
+- Velnor `29a96ff3` implements that contract in native Rust, including hidden
+  entry exclusion, symlink/hardlink dereference, cycle failure, single-file
+  Results Service upload, and regression coverage. CI run `29855770848`,
+  general release `29855968974`, Debian release `29855968916`, and signed apt
+  publication `tailrocks/velnor-apt#29856322505` are green. Sentry apt package,
+  canonical image, active daemon, and all eight online slots verify 0.1.105.
+- TermRock full rerun `29849259484` attempt 4 regenerated the artifact under
+  0.1.105. Both Docs and Deploy Pages pass at `deeefef8`; the uploaded Pages
+  artifact is 713,886 bytes. No pull request was merged.
+
+### 2026-07-22 final-head reconciliation and defect proof
+
+- Velnor 0.1.108 is committed, tagged, built, and published through the signed
+  Debian repository. Sentry remains on the prior package because the configured
+  `~/.ssh/donbeave-ssh` identity is absent and the local SSH agent has no keys.
+  No direct package, binary, local-path apt, or host-filesystem bypass was used.
+- Exact selected `velnor-trusted` group allowlists were revalidated through the
+  GitHub API: Tailrocks id 3 has 11 repositories, ChainArgos id 4 has 2, and
+  jackin-project id 3 has 1. All named final PRs remain open; their heads and
+  bodies were reconciled to exact evidence. No pull request was merged.
+- Parallax GitHub run `29877446570` exposed compiler-driven trybuild contention;
+  `93b3e340` reserves the complete nextest pool for those binaries. Exact Velnor
+  `29878865107` and GitHub `29879539863` then passed. Combined Storage run
+  `29880330009` exposed a second architectural race: graceful shutdown aborted
+  the managed Greptime supervisor but returned before the child released fixed
+  ports, so immediate restart rejected its own terminating child as foreign.
+- Parallax `705af2ca` makes graceful shutdown own task cancellation and await
+  release of all four engine ports through typed engine-I/O composition. It
+  keeps exact anyhow and file-size ratchets unchanged. Local format, policy,
+  strict all-target server clippy, and 102 server nextest tests pass; 9 real
+  engine tests remain explicitly ignored in the ordinary profile. The focused
+  local real-engine run compiled but its one-time 144 MiB engine download ended
+  early at 83 percent, so it is not claimed as passing evidence.
+- The first pushed Parallax form of that checkpoint was amended after policy
+  exposed intermediate generic-error/file-size drift. A SHA-pinned
+  `--force-with-lease` replaced only that just-pushed commit. Automatic run
+  `29881560389` passed every product gate but correctly rejected the now
+  non-linear push event range; local `HEAD^..HEAD` source hygiene passes and
+  exact dispatch `29882121621` is the replacement proof.
+- TableRock exact trunk CI `29880422990` passed at `e2ccfceb`. Native
+  `29880423048` then exposed five related reachability failures: the connected
+  workbench retained the full direct-connect form and clipped result controls
+  below the fixed test window, while styled import/export buttons did not own
+  their final accessibility identifiers. `d5761ef` structurally contains the
+  connected workbench and restores final-view identifier ownership;
+  `f6591b04` expands the machine-checked screen manifest. Exact CI
+  `29881771351` and Native `29881771295` are active. No assertion, golden,
+  retry, sleep, or fixture contract was weakened.
+
+### 2026-07-22 source-revision and Parallax closure
+
+- The estate audit exposed two forbidden TableRock lane-conditional `touch`
+  steps. Hosted run `29875329220` proved why they had been added: commit-time
+  mtime normalization could repeat or move backward across a persistent Cargo
+  target, allowing stale workspace fingerprints. Velnor `0146732` removes the
+  enabling condition by recording the source revision with each target
+  generation, refreshing workspace mtimes only when that revision changes,
+  and retaining same-revision warmth. The complete local Velnor gate passed
+  with 669 nextest tests; exact-head CI `29883003438` is green.
+- Release-deb `29883315448` and signed apt publisher `29884053413` are green
+  for `v0.1.109`; both amd64 and arm64 package indexes advertise `0.1.109`.
+  Sentry remains unmodified because `/Users/donbeave/.ssh/donbeave-ssh` is
+  absent. The configured 1Password agent advertises the registered
+  `donbeave SSH` key but has repeatedly refused the signing operation; no
+  private-key export, direct package path, or host bypass was used.
+- TableRock removed both lane-specific freshness steps at `3a9cdce`; the next
+  estate audit checkpoint reports zero errors and the same six explained
+  publication-lock advisories. TableRock trunk continues moving under its
+  independent roadmap, so no terminal head claim is made yet.
+- Parallax exact-head CI `29882121621` is green at `705af2ca`. After cleaning
+  old runs and stale registrations, combined Storage `29883285817` passed
+  Greptime and Browser Full Stack on both Velnor and GitHub. This directly
+  proves the managed-engine restart fix; no retry, assertion, fixture, or
+  expected outcome was weakened.
+- Operator approval of all pending program decisions except PR merging resolves
+  §12.4 from Parallax's committed measurement: Linux zigbuild cannot embed the
+  required line tables in its single-file Mach-O contract, while native Apple
+  tooling produced and verified both Darwin targets in four-target preview run
+  `29575421066`. Only those preview/stable package producers remain; they are
+  not Velnor/GitHub CI lanes and authorize no broader macOS surface.
+
+### 2026-07-22 live-fleet version precondition
+
+- Parallax direct-main `24aade0` corrects the required aggregator display name
+  to the canonical `CI required`, preserving its logic. The automatic exact-head
+  run `29884970397` was cancelled before acceptance because its setup evidence
+  showed the live fleet had not received the published runner correction.
+- TableRock advanced to `03bc78e8`. CI `29884740470` compiled cleanly but its
+  PTY test spawned a child that exceeded 30 seconds. The job's authoritative
+  setup log identifies `Velnor Runner/0.1.58`; that release predates the
+  source-revision target-generation fix by 51 releases. A persistent target may
+  therefore combine a fresh test executable with a stale spawned `tablerock`
+  binary. This is the exact runner defect fixed by `v0.1.109`, not evidence for
+  widening the product timeout or changing TableRock semantics. The invalid
+  Velnor run was cancelled; Native run `29884740464` was left running because
+  it uses GitHub-hosted macOS and remains valid evidence.
+- No replacement Velnor proof will be dispatched until Sentry installs
+  `v0.1.109` from the signed apt repository and reports the matching package,
+  image, daemon, and doctor state. Existing stale registrations must be removed
+  before that dispatch.
+
+### 2026-07-22 compiler topology and moving-trunk closure
+
+- Parallax exact GitHub run `29885434328` proved the server public-API trybuild
+  case launched a nested cold Cargo graph; its first attempt exceeded five
+  minutes and its warm retry passed, which the evidence gate correctly rejected.
+  Run `29887096900` then proved the API privacy trybuild case had the same
+  architecture: both 60-second attempts timed out. Commits through `f298c850`
+  replace both nested graphs with ordinary integration-test compilation,
+  source visibility invariants, and syntax-derived facade checks. Commit
+  `13b0acb6` removes the now-orphan workspace dependency after run
+  `29887823678` exposed it through cargo-shear. Focused nextest, facade,
+  structural policy, strict clippy, formatting, locked metadata, and shear are
+  green; exact GitHub run `29888329917` is fully green, including Test without
+  retry evidence and dependency Audit.
+- TableRock `061efb1` restores direct accessibility actions for result cells,
+  external URLs, Quick Switcher, and Explain. Its attempted `needs: rust`
+  serialization treated fleet load as the PTY cause, but the authoritative
+  setup evidence identifies Velnor 0.1.58, whose persistent target predates the
+  source-revision fix. Commit `7d57eaa` removes that workaround and records the
+  20/20 nextest proof; exact GitHub CI `29887254539` is green with Rust and
+  real-server jobs parallel. Moving trunk `c511761` then exposed only rustfmt
+  drift in its new shared PostgreSQL tool seam. Commit `b3e7886` formats that
+  file after focused tablerock-tools nextest and strict clippy passed. Exact
+  GitHub CI `29888578314` is fully green, including parallel real-server,
+  UniFFI, CSV, dependency, and required lanes. Native `29888579521` passed
+  bridge, Swift, and universal-XCFramework stages, then exposed four UI-control
+  failures in its canonical checkpoint. Concurrent trunk-only product work
+  modifies the same native sources/tests; those user changes remain untouched
+  and their delivered head must be tested before isolating any residual fix.
+- No pull request was merged. Sentry was not changed: 1Password remains signed
+  out, so no signed SSH operation or apt-only upgrade is yet possible. No key
+  export, direct package, local apt path, or host bypass was used.
