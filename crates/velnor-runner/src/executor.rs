@@ -7125,20 +7125,20 @@ fn job_scoped_buildx_builder_name(requested: &str, state: &JobExecutionState) ->
 
 fn buildx_driver_resource_options(resource_options: &[String]) -> Result<Vec<String>> {
     let mut options = Vec::new();
-    let mut pairs = resource_options.chunks_exact(2);
-    for pair in &mut pairs {
-        match pair[0].as_str() {
-            "--memory" => options.push(format!("memory={}", pair[1])),
+    let (chunks, remainder) = resource_options.as_chunks::<2>();
+    for [flag, value] in chunks {
+        match flag.as_str() {
+            "--memory" => options.push(format!("memory={value}")),
             "--cpus" => {
-                let cpus = pair[1]
+                let cpus = value
                     .parse::<f64>()
-                    .with_context(|| format!("invalid job CPU limit '{}'", pair[1]))?;
+                    .with_context(|| format!("invalid job CPU limit '{value}'"))?;
                 if !cpus.is_finite() || cpus <= 0.0 {
-                    bail!("invalid job CPU limit '{}'", pair[1]);
+                    bail!("invalid job CPU limit '{value}'");
                 }
                 let quota = (cpus * 100_000.0).round();
                 if quota > u64::MAX as f64 {
-                    bail!("job CPU limit '{}' is too large", pair[1]);
+                    bail!("job CPU limit '{value}' is too large");
                 }
                 options.push("cpu-period=100000".to_string());
                 options.push(format!("cpu-quota={quota:.0}"));
@@ -7146,7 +7146,7 @@ fn buildx_driver_resource_options(resource_options: &[String]) -> Result<Vec<Str
             option => bail!("unsupported BuildKit resource option '{option}'"),
         }
     }
-    if !pairs.remainder().is_empty() {
+    if !remainder.is_empty() {
         bail!("job resource options must be flag/value pairs");
     }
     Ok(options)
