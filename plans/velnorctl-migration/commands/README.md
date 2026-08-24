@@ -40,7 +40,7 @@ stable reason codes, never another numeric taxonomy.
 | [C002](C002-api-resources.md) | `velnorctl api-resources` | P2 | S | Plans 065, 067 | TODO |
 | [C003](C003-explain.md) | `velnorctl explain <resource-or-field>` | P2 | S | Plans 065, 067 | TODO |
 | [C004](C004-completion.md) | `velnorctl completion <shell>` | P1 | S | Plans 064–069 | TODO |
-| [C005](C005-man.md) | `velnorctl man` | P2 | S | Plans 064–065 | TODO |
+| [C005](C005-man.md) | `velnorctl man` | P2 | S | Plans 064–065 | DONE |
 | [C006](C006-get-hosts.md) | `velnorctl get hosts` | P3 | M | Plans 065, 067, 069 | TODO |
 | [C007](C007-get-instances.md) | `velnorctl get instances` | P1 | M | Plans 065–069 | TODO |
 | [C008](C008-get-slots.md) | `velnorctl get slots` | P1 | M | Plans 065–069, 073 | TODO |
