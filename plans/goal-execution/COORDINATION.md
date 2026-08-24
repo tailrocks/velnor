@@ -35,8 +35,8 @@ observed (2026-08-24). These rules prevent exclusive-scope collisions.
 
 | Leaf | Session | Claimed at (UTC) | Status |
 |---|---|---|---|
-| 039 | parallel opencode actor | pre-existing | ACTIVE (fleet/release-refs.toml territory) |
-| 065 | ox-alpha (this coordinator) | 2026-08-24 ~10:40Z | RELEASED to Session B per 40bd5e2 ownership map (B owns velnor-model/velnorctl WIP, observed writing 18:40Z) |
+| 039 | ox-alpha session C (takeover) | 2026-08-24 ~12:00Z | ACTIVE — prior `parallel opencode actor` claim EXPIRED per rule 3 (last leaf-scoped commit eea87eb 10:39Z, >60 min idle; no uncommitted fleet files, no unpushed commits at takeover) |
+| 065 | Session B | 2026-08-24 ~10:40Z | ACTIVE — released to B per 40bd5e2 ownership map (B owns velnor-model/velnorctl WIP, observed writing 11:43Z); all sessions hands off |
 
 ## Decisions
 
