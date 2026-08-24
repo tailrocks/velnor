@@ -59,3 +59,11 @@ observed (2026-08-24). These rules prevent exclusive-scope collisions.
     staged by another session; leaf status flips are atomic commits by the
     owning session only; fixture `main` changes go through PRs only.
   - Evidence for this map: `.velnor-compare/2026-08-24-039-snapshots/`.
+- **2026-08-24 ~12:05Z third-peer registration** (ox-alpha, fresh OpenCode
+  session): takes the unassigned Plans 074–078 pool that the ownership map
+  leaves outside Session A (039) and Session B (064–073). Claim order follows
+  the execution graph: 076 first after 068 DONE; 074 after 065+066+068; 075
+  after 066+067; 077 after 069; 078 after its full range. Each claim lands as
+  an Active-claims row before any writer subagent starts. C-command pool claims
+  follow later per graph priority. No leaf is claimed by this session yet;
+  nothing dependency-ready and unclaimed exists at registration time.
