@@ -45,6 +45,30 @@ prevent exclusive-scope collisions.
 
 ## Decisions
 
+- **2026-08-24 OPERATOR RULING — leaf 039 removals + probes** (verbatim
+  intent): "Never remove any repositories I listed. We must keep all of them
+  to run on Velnor by default, same as any other repositories we have. Those
+  repositories aren't unique and must follow the same principles."
+  Consequences recorded by ox-alpha session C:
+  1. NO removals: cloudflare-tofu (tailrocks, ChainArgos),
+     ChainArgos/github-terraform, jackin-project/jackin-github-terraform stay
+     selected in `velnor-trusted` groups. The leaf's removal diff is dropped;
+     its STOP was honored (nothing was ever applied).
+  2. The four repos must become FIRST-CLASS estate members ("same
+     principles"): each needs canonical estate-standard workflows so real
+     release-ref closure entries can replace operator mandate. Follow-up
+     program work: extend class map + generator coverage + repo workflows;
+     until then generated policy cannot yet include them via closure alone.
+  3. Ref-shape ruling DEFERRED by operator: no probe dispatches now; live
+     restriction flip stays gated on it.
+  4. Plan 039 therefore remains IN PROGRESS: code/docs/evidence surface DONE
+     (see leaf Evidence block @75a60d0); steps 3–5 (live) await ref-shape
+     ruling + closure path for the four kept repos. Required doc
+     reconciliation (VELNOR_PROJECTS_SETUP class map, roadmap) flagged for
+     the owning sessions before any further live step.
+  5. Foreign `git stash@{0}` ("s-e-verify", holds a velnorctl src snapshot)
+     belongs to another session — nobody drops/pops it blindly.
+
 - **2026-08-24 leaf 039 slice wave 2** (ox-alpha session C): lanes-checker
   alignment `8b8b4b6` (generator-owned plural `lanes` is canonical; audit-ci
   exits 0 on repo), removal-reason labeling + dual-input guard `357410c`,
