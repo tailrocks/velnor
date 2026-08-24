@@ -17480,8 +17480,12 @@ fi"#
         assert_eq!(node_calls.len(), 6);
         for call in &node_calls {
             assert!(
-                call.iter()
-                    .any(|arg| arg.contains("/tmp/vdl-") && arg.ends_with(":/var/run/docker.sock")),
+                call.iter().any(|arg| {
+                    arg.contains("vdl-")
+                        && arg.contains(".sock:/var/run/docker.sock")
+                        && !arg.starts_with("/tmp/vdl-")
+                        && !arg.starts_with("/var/run/docker.sock:")
+                }),
                 "guest Docker must use the job lease socket, got {call:?}"
             );
             assert!(call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
@@ -17840,8 +17844,12 @@ bitcoin-processor-app.push=${{ (github.event_name == 'push' && needs.changes.out
         assert_eq!(node_calls.len(), 5);
         for call in &node_calls {
             assert!(
-                call.iter()
-                    .any(|arg| arg.contains("/tmp/vdl-") && arg.ends_with(":/var/run/docker.sock")),
+                call.iter().any(|arg| {
+                    arg.contains("vdl-")
+                        && arg.contains(".sock:/var/run/docker.sock")
+                        && !arg.starts_with("/tmp/vdl-")
+                        && !arg.starts_with("/var/run/docker.sock:")
+                }),
                 "guest Docker must use the job lease socket, got {call:?}"
             );
             assert!(call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));
@@ -17949,9 +17957,12 @@ bitcoin-processor-app.push=true")
             .map(|(_, args)| args)
             .unwrap();
         assert!(
-            node_call
-                .iter()
-                .any(|arg| arg.contains("/tmp/vdl-") && arg.ends_with(":/var/run/docker.sock")),
+            node_call.iter().any(|arg| {
+                arg.contains("vdl-")
+                    && arg.contains(".sock:/var/run/docker.sock")
+                    && !arg.starts_with("/tmp/vdl-")
+                    && !arg.starts_with("/var/run/docker.sock:")
+            }),
             "guest Docker must use the job lease socket, got {node_call:?}"
         );
         assert!(node_call.contains(&"/usr/bin/docker:/usr/local/bin/docker:ro".into()));

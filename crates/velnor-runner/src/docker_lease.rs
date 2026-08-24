@@ -35,7 +35,21 @@ pub fn guest_docker_socket_host(job_id: &str, unique: &Path) -> PathBuf {
     let digest = hasher.finalize();
     let mut short = [0_u8; 8];
     short.copy_from_slice(&digest[..8]);
-    PathBuf::from(LEASE_SOCKET_DIR).join(format!("vdl-{:016x}.sock", u64::from_be_bytes(short)))
+    lease_socket_dir().join(format!("vdl-{:016x}.sock", u64::from_be_bytes(short)))
+}
+
+/// Prefer systemd `RuntimeDirectory` (`/run/velnor`): host-visible, not
+/// remapped by `PrivateTmp`. Tests and unprivileged checkouts cannot create
+/// that dir; they fall back to `$TMPDIR/velnor-lease`, still outside the
+/// daemon's private `/tmp/vdl-*` path that dockerd never sees.
+fn lease_socket_dir() -> PathBuf {
+    let runtime = PathBuf::from(LEASE_SOCKET_DIR);
+    if std::fs::create_dir_all(&runtime).is_ok() {
+        return runtime;
+    }
+    let fallback = std::env::temp_dir().join("velnor-lease");
+    let _ = std::fs::create_dir_all(&fallback);
+    fallback
 }
 
 pub fn list_owned_containers_args(job_id: &str) -> Vec<String> {
@@ -586,12 +600,18 @@ mod tests {
             rendered.len() < 100,
             "unix socket path must fit sockaddr_un, got {rendered}"
         );
+        let name = path.file_name().unwrap().to_string_lossy();
         assert!(
-            rendered.starts_with("/run/velnor/vdl-"),
-            "lease socket must be host-visible under RuntimeDirectory, not PrivateTmp /tmp; got {rendered}"
+            name.starts_with("vdl-") && name.ends_with(".sock"),
+            "got {rendered}"
+        );
+        let parent = path.parent().unwrap().to_string_lossy();
+        assert!(
+            parent == LEASE_SOCKET_DIR || parent.ends_with("velnor-lease"),
+            "lease socket must live in /run/velnor or test fallback velnor-lease, not PrivateTmp /tmp/vdl-*; got {rendered}"
         );
         assert!(
-            !rendered.starts_with("/tmp/"),
+            !rendered.starts_with("/tmp/vdl-"),
             "PrivateTmp remaps daemon /tmp; dockerd would not see {rendered}"
         );
     }
