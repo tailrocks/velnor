@@ -2950,6 +2950,11 @@ jobs:
         }
     }
 
+    // Currency expectation is built with the same generator the check audits,
+    // a circularity intentionally mitigated by the independent snapshot
+    // equality test `generate_reproduces_committed_snapshot_bytes`
+    // (crates/velnor-tools/src/fleet_policy.rs), which pins real committed
+    // ground truth.
     fn expected_policy_bytes(ledger: &ReleaseRefLedger) -> BTreeMap<String, String> {
         crate::fleet_policy::generate_policies_from_ledger(ledger)
             .expect("sample ledger generates")
@@ -3026,6 +3031,32 @@ jobs:
             .unwrap_err()
             .to_string()
             .contains("unqualified ref"));
+    }
+
+    #[test]
+    fn fleet_policy_surface_names_toml_parse_failure_class() {
+        let root = TestRepo::new();
+        std::fs::create_dir_all(root.path.join("fleet")).unwrap();
+        std::fs::write(
+            root.path.join("fleet/release-refs.toml"),
+            "schema_version = 1\n[[entries\nowner = \"tailrocks\"\n",
+        )
+        .unwrap();
+        let findings = audit_fleet_policy_surface(&root.path).expect("audit runs");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].rule, "fleet-policy-ledger");
+        assert_eq!(findings[0].file, "fleet/release-refs.toml");
+        // The message names the parse failure class, not a synthetic error.
+        assert!(
+            findings[0].message.contains("parsing release-ref ledger"),
+            "{}",
+            findings[0].message
+        );
+        assert!(
+            findings[0].message.contains("TOML parse error"),
+            "{}",
+            findings[0].message
+        );
     }
 
     #[test]
