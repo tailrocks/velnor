@@ -12,9 +12,11 @@
 //! Plan 079) a narrow public facade of `velnor-runner`. Domain crates never
 //! depend on `clap`; CLI-facing enums convert explicitly at this boundary.
 
+use std::time::Duration;
+
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 use velnor_model::{
-    CommandMetadata, ExitClass, FlagMetadata, MachineErrorEnvelope, SchemaDocument,
+    CommandMetadata, ExitClass, FlagMetadata, MachineErrorEnvelope, SchemaDocument, Since,
 };
 use velnor_render::{ColorPolicy, OutputFormat};
 
@@ -109,21 +111,59 @@ pub struct GlobalArgs {
     #[arg(long, global = true, value_name = "SELECTOR")]
     pub field_selector: Option<String>,
 
-    /// Lower time bound: RFC 3339 or relative duration.
-    #[arg(long, global = true, value_name = "SINCE")]
-    pub since: Option<String>,
+    /// Lower time bound: RFC 3339 instant, or relative duration like 45s,
+    /// 10m, 2h, or 1h30m measured back from now.
+    #[arg(
+        long,
+        global = true,
+        value_name = "SINCE",
+        value_parser = |raw: &str| Since::parse(raw)
+    )]
+    pub since: Option<Since>,
 
     /// Deadline in seconds before the command exits with TIMEOUT.
-    #[arg(long, global = true, value_name = "SECONDS")]
-    pub timeout: Option<u64>,
+    #[arg(
+        long,
+        global = true,
+        value_name = "SECONDS",
+        value_parser = |seconds: &str| seconds.parse::<u64>().map(Duration::from_secs)
+    )]
+    pub timeout: Option<Duration>,
 
     /// Disable ANSI styling regardless of TTY detection.
     #[arg(long, global = true)]
     pub no_color: bool,
 
-    /// Increase verbosity; repeatable.
+    /// Increase verbosity; repeatable up to maximum detail (-vvv).
     #[arg(short = 'v', long = "verbose", global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
+}
+
+/// Effective verbosity resolved from repeated `-v/--verbose` flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verbosity {
+    /// No verbosity flags; default output.
+    Normal,
+    /// One flag (`-v`).
+    Verbose,
+    /// Two flags (`-vv`).
+    Debug,
+    /// Three flags (`-vvv`) and beyond.
+    Trace,
+}
+
+impl Verbosity {
+    /// Map a counted repeat total; counts above three saturate to
+    /// [`Verbosity::Trace`] so deeper nesting never regresses detail.
+    #[must_use]
+    pub fn from_count(count: u8) -> Self {
+        match count {
+            0 => Self::Normal,
+            1 => Self::Verbose,
+            2 => Self::Debug,
+            _ => Self::Trace,
+        }
+    }
 }
 
 impl GlobalArgs {
@@ -131,6 +171,12 @@ impl GlobalArgs {
     #[must_use]
     pub fn output_format(&self) -> OutputFormat {
         self.output.into()
+    }
+
+    /// Effective verbosity level; dispatch reads this, never the raw count.
+    #[must_use]
+    pub fn verbosity(&self) -> Verbosity {
+        Verbosity::from_count(self.verbose)
     }
 
     /// Resolve the color policy from `--no-color` and TTY state.
