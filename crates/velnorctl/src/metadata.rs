@@ -199,22 +199,42 @@ pub fn completion_script(flavor: CompletionFlavor, document: &SchemaDocument) ->
     script
 }
 
+/// Escape interpolated metadata text for roff output: backslashes double so
+/// content can never introduce an escape sequence or a control request, and
+/// a leading hyphen becomes `\-` so it renders as a literal dash instead of
+/// an option marker.
+#[must_use]
+pub fn roff_escape(raw: &str) -> String {
+    let mut escaped = raw.replace('\\', "\\\\");
+    if escaped.starts_with('-') {
+        escaped.insert(0, '\\');
+    }
+    escaped
+}
+
 /// Render the body sections (NAME through OPTIONS) of one command's man
 /// page, shared verbatim by [`man_page`] and the combined `man` page so a
 /// leaf command renders identically everywhere.
 #[must_use]
 pub fn command_man_sections(binary: &str, command: &CommandMetadata) -> String {
     let upper = command.name.to_uppercase();
-    let mut sections = format!(".SH NAME\n{binary}-{upper}\n");
+    let mut sections = format!(
+        ".SH NAME\n{} \\- {}\n",
+        roff_escape(binary),
+        roff_escape(&upper)
+    );
     sections.push_str(&format!(".SH SYNOPSIS\n.B {binary} {}\n", command.name));
-    sections.push_str(&format!(".SH DESCRIPTION\n{}\n", command.about));
+    sections.push_str(&format!(
+        ".SH DESCRIPTION\n{}\n",
+        roff_escape(&command.about)
+    ));
     if !command.flags.is_empty() {
         sections.push_str(".SH OPTIONS\n");
         for flag in &command.flags {
             sections.push_str(&format!(
                 ".TP\n\\fB{}\\fR\n{}\n",
                 flag.invocation(),
-                flag.help
+                roff_escape(&flag.help)
             ));
         }
     }

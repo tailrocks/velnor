@@ -93,6 +93,17 @@ fn usage_error(message: String) -> CommandError {
     )
 }
 
+/// Interpret one `--directory` value; flag-like values are rejected as
+/// usage errors so `--directory --force` can never swallow `--force`.
+fn directory_value(value: &str) -> Result<PathBuf, CommandError> {
+    if value.starts_with('-') {
+        return Err(usage_error(format!(
+            "flag '--directory' requires a value; '{value}' looks like another flag"
+        )));
+    }
+    Ok(PathBuf::from(value))
+}
+
 fn parse_args(argv: &[String]) -> Result<ManArgs, CommandError> {
     let mut args = ManArgs::default();
     let mut index = 0;
@@ -108,9 +119,9 @@ fn parse_args(argv: &[String]) -> Result<ManArgs, CommandError> {
                 ));
             };
             index += 1;
-            args.directory = Some(PathBuf::from(value));
+            args.directory = Some(directory_value(value)?);
         } else if let Some(value) = token.strip_prefix("--directory=") {
-            args.directory = Some(PathBuf::from(value));
+            args.directory = Some(directory_value(value)?);
         } else if token.starts_with('-') {
             return Err(usage_error(format!(
                 "unknown flag '{token}' for '{BIN_NAME} man'"
@@ -146,7 +157,7 @@ pub fn combined_page(binary: &str, commands: &[CommandMetadata]) -> String {
         page.push_str(&format!(
             ".TP\n\\fB{}\\fR\n{}\n",
             flag.invocation(),
-            flag.help
+            metadata::roff_escape(&flag.help)
         ));
     }
     page.push_str(
@@ -227,7 +238,8 @@ fn page_set(commands: &[CommandMetadata]) -> Vec<(String, String)> {
 /// Validate the destination fully before touching anything, then write every
 /// member atomically. Symlinked and non-directory destinations are rejected
 /// as invalid local input; an existing member without `--force` conflicts
-/// with the safety precondition.
+/// with the safety precondition, and a symbolic-link member is refused even
+/// under `--force`.
 fn write_page_set(
     directory: &Path,
     commands: &[CommandMetadata],
@@ -257,7 +269,20 @@ fn write_page_set(
         ));
     }
     for (name, _) in page_set(commands) {
-        if !force && std::fs::symlink_metadata(directory.join(&name)).is_ok() {
+        let member = directory.join(&name);
+        let existing = std::fs::symlink_metadata(&member);
+        if matches!(&existing, Ok(meta) if meta.file_type().is_symlink()) {
+            return Err(CommandError::new(
+                ExitClass::Usage,
+                "man.member_symlink",
+                format!(
+                    "'{name}' already exists as a symbolic link in {}; symbolic-link \
+                     members are never overwritten",
+                    directory.display()
+                ),
+            ));
+        }
+        if !force && existing.is_ok() {
             return Err(CommandError::new(
                 ExitClass::Conflict,
                 "man.member_exists",
@@ -291,6 +316,14 @@ fn write_member_atomic(directory: &Path, name: &str, bytes: &[u8]) -> Result<(),
     Ok(())
 }
 
+/// Write one member through an in-directory temp file plus rename, so a
+/// reader never observes a partial page; mode is fixed at 0644.
+///
+/// The caller's existence validation is best-effort: nothing re-checks the
+/// destination between validation and this final rename, so under concurrent
+/// writers a file created meanwhile is replaced by the rename. That
+/// check-then-rename gap is the accepted single-writer stance; the rename
+/// itself never follows a symbolic link at the destination path.
 fn write_and_rename(temp: &Path, final_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = std::fs::OpenOptions::new()

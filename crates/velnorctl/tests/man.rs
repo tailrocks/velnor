@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use velnor_model::ExitClass;
+use velnor_model::{CommandMetadata, ExitClass, FlagMetadata};
 use velnorctl::man::ManCommand;
 use velnorctl::metadata::DocumentedCommand;
 use velnorctl::Outcome;
@@ -123,6 +123,18 @@ fn command_c005_force_alone_is_valid_without_a_destination() {
     assert_eq!(code, 0);
 }
 
+#[test]
+fn command_c005_flag_like_directory_value_is_usage_not_operation() {
+    // A following flag must never be swallowed as the --directory value;
+    // that previously surfaced as OPERATION (io_failed) instead of USAGE.
+    for args in [
+        vec!["man", "--directory", "--force"],
+        vec!["man", "--directory=-force"],
+    ] {
+        expect_usage_failure(&args);
+    }
+}
+
 // --- stdout combined page ---
 
 #[test]
@@ -146,7 +158,8 @@ fn command_c005_stdout_combined_page_documents_binary_globals_and_leaves() {
         ".SH SAFETY",
         "slotKind \"stable\"",
         // Every registered leaf appears exactly once; `man` is registered.
-        "velnorctl-MAN",
+        // Every registered leaf appears exactly once; `man` is registered.
+        "velnorctl \\- MAN",
         "\\fB--directory <PATH>\\fR",
         "\\fB--force\\fR",
     ] {
@@ -157,6 +170,10 @@ fn command_c005_stdout_combined_page_documents_binary_globals_and_leaves() {
         page.matches(".SH NAME\n").count(),
         2,
         "binary NAME plus one leaf section"
+    );
+    assert!(
+        page.contains("velnorctl \\- MAN"),
+        "the leaf NAME hyphen must be roff-escaped like the combined page"
     );
 }
 
@@ -215,7 +232,7 @@ fn command_c005_directory_mode_writes_the_complete_0644_page_set() {
     let contents = std::fs::read_to_string(&combined).unwrap();
     assert!(contents.starts_with(".TH VELNORCTL 1 "));
     assert!(contents.contains(".SH GLOBAL OPTIONS"));
-    assert!(contents.contains("velnorctl-MAN"));
+    assert!(contents.contains("velnorctl \\- MAN"));
     let leaf = std::fs::read_to_string(&man_page_path).unwrap();
     assert!(leaf.starts_with(".TH velnorctl 1 "));
     assert!(leaf.contains("\\fB--directory <PATH>\\fR"));
@@ -317,6 +334,69 @@ fn command_c005_non_directory_destination_is_rejected() {
 }
 
 #[test]
+#[cfg(unix)]
+fn command_c005_unwritable_destination_maps_to_operation_io_failed() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new("readonly");
+    let restore = |dir: &TempDir| {
+        let _ = std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700));
+    };
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    // An effective root bypasses the permission bits; skip rather than flake.
+    if std::fs::write(dir.path().join(".probe"), b"").is_ok() {
+        restore(&dir);
+        return;
+    }
+    let destination = dir.path().to_string_lossy().into_owned();
+    let (outcome, code) = dispatch_exit(&["man", "--directory", &destination]);
+    restore(&dir);
+    match &outcome {
+        Outcome::CommandFailed { error, .. } => {
+            assert_eq!(error.class, ExitClass::Operation, "{error:?}");
+            assert_eq!(error.reason, "man.io_failed", "{error:?}");
+        }
+        other => panic!("unwritable destination must fail as io_failed, got {other:?}"),
+    }
+    assert_eq!(code, 8, "OPERATION must map to exit code 8");
+}
+
+#[test]
+#[cfg(unix)]
+fn command_c005_force_refuses_symlinked_member() {
+    let dir = TempDir::new("member-link");
+    let outside = dir.path().join("outside.txt");
+    std::fs::write(&outside, b"collateral").unwrap();
+    std::os::unix::fs::symlink("/velnor-man-does-not-exist", dir.path().join("man.1")).unwrap();
+
+    let (outcome, code) = dispatch_exit(&[
+        "man",
+        "--directory",
+        &dir.path().to_string_lossy(),
+        "--force",
+    ]);
+    match &outcome {
+        Outcome::CommandFailed { error, .. } => {
+            assert_eq!(error.class, ExitClass::Usage, "{error:?}");
+            assert_eq!(error.reason, "man.member_symlink", "{error:?}");
+        }
+        other => panic!("--force must refuse a symlinked member, got {other:?}"),
+    }
+    assert_eq!(code, 2);
+    assert!(
+        std::fs::symlink_metadata(dir.path().join("man.1"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the symlinked member must survive untouched"
+    );
+    assert_eq!(std::fs::read(&outside).unwrap(), b"collateral");
+    assert!(
+        !dir.path().join("velnorctl.1").try_exists().unwrap(),
+        "validation fires before any member write"
+    );
+}
+
+#[test]
 fn command_c005_atomicity_smoke_induced_failure_leaves_no_partial_files() {
     let dir = TempDir::new("atomic");
     let destination = dir.path().to_string_lossy().into_owned();
@@ -339,6 +419,39 @@ fn command_c005_atomicity_smoke_induced_failure_leaves_no_partial_files() {
 }
 
 // --- golden output ---
+
+#[test]
+fn command_c005_roff_escapes_about_help_and_name_interpolation() {
+    let tricky = CommandMetadata {
+        name: "tricky".to_owned(),
+        about: "-leading dash and back\\slash".to_owned(),
+        flags: vec![FlagMetadata {
+            long: "opt".to_owned(),
+            short: None,
+            value_name: None,
+            help: "\\leading backslash and mid-dash -stay".to_owned(),
+            global: false,
+        }],
+    };
+    let page = velnorctl::metadata::man_page(velnorctl::BIN_NAME, &tricky);
+    assert!(
+        page.contains(".SH DESCRIPTION\n\\-leading dash and back\\\\slash\n"),
+        "about must escape backslashes and a leading hyphen: {page}"
+    );
+    assert!(
+        page.contains("\\\\leading backslash and mid-dash -stay\n"),
+        "help must double backslashes but leave interior hyphens: {page}"
+    );
+    assert!(
+        page.contains(".SH NAME\nvelnorctl \\- TRICKY\n"),
+        "the leaf NAME line must use the escaped form: {page}"
+    );
+    let combined = velnorctl::man::combined_page(velnorctl::BIN_NAME, &[tricky]);
+    assert!(
+        combined.contains(".SH DESCRIPTION\n\\-leading dash and back\\\\slash\n"),
+        "the combined page escapes leaf sections identically: {combined}"
+    );
+}
 
 #[test]
 fn command_c005_golden_zero_leaf_combined_page_is_exact() {
