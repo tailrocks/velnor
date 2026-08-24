@@ -45,6 +45,16 @@ prevent exclusive-scope collisions.
 
 ## Decisions
 
+- **2026-08-24 branch consolidation to main** (operator directive): every
+  delivery now follows the modern flow — feature branch → PR → squash merge
+  into `main`. The campaign branches are gone: `velnor-estate-standard` merged
+  via #294 and deleted (local + remote); `velnorctl-clap-migration` delivered
+  via #291 and deleted; `fix/admit-paths-filter-v4.0.3` delivered via #292 and
+  deleted; duplicate PR #293 closed as superseded. All future leaf work:
+  claim in this registry, branch off current `origin/main`
+  (`<area>-<leaf-or-slug>`), open a PR, land it with green checks, delete the
+  branch after merge. `main` is the single integration line.
+
 - **2026-08-24 OPERATOR RULING — leaf 039 removals + probes** (verbatim
   intent): "Never remove any repositories I listed. We must keep all of them
   to run on Velnor by default, same as any other repositories we have. Those
