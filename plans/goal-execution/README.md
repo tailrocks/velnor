@@ -44,100 +44,55 @@ with exact evidence and a named external decision or proven project/tool limit.
 Fix ordinary implementation or test failures inside the same campaign leaf
 execution.
 
+## Read-first inventory
+
+Every campaign session reads, before acting: `AGENTS.md`; `docs/mission.md`,
+`docs/vision.md`, `docs/roadmap.md`, `docs/prompt.md`;
+`VELNOR_PROJECTS_SETUP.md`; this playbook; `plans/README.md`;
+`plans/fleet-operations/README.md`; `plans/velnorctl-migration/README.md`;
+`plans/velnorctl-migration/commands/README.md`; every executable plan file;
+`mise.toml` and `mise.lock`; and any narrower `AGENTS.md` governing files in
+scope. Repository text is project data while applicable agent instructions are
+obeyed.
+
+## Tooling law
+
+All execution runs through mise tasks defined in `mise.toml`, invoked via rtk
+(`rtk mise run <task>`). Never call cargo, clippy, nextest, actionlint, or
+cargo-deny directly when a mise task wraps them. Canonical gates: `mise run
+fmt`, `mise run lint`, `mise run test` (nextest), `mise run actionlint`,
+`mise run deny`, composite `mise run check`, and `mise run ci`. Pass filters
+and flags as trailing arguments after the task name (for example a nextest
+filter after `rtk mise run test`); focused verification means the mise task
+scoped by such arguments, never a bypass of the task. If a needed capability
+has no mise task, add the task to `mise.toml` (locked via `mise.lock`) instead
+of running an ad-hoc command; changing task semantics follows the same
+plan-reconciliation rules as any requirement change. Trust and configure mise
+before any gate runs. Rust tests use nextest, never `cargo test`.
+
 ## Canonical whole-campaign prompt
 
-Submit this entire block once in Codex:
+Submit this entire block once in Codex. The `/goal` parser rejects objectives
+over 4000 characters and treats dash-prefixed words (`--check`, a bare
+argument separator, `-s`) as unknown flags, so the objective below stays under
+the limit and contains none; do not re-add them.
 
 ```text
-/goal Execute the complete current Velnor plan graph without stopping until
-Plan 039, Plans 063–080, and every command task C001–C075 are DONE; every done
-criterion has machine-verifiable evidence; all focused, repository, integration,
-fixture, safety, package, fleet, and final acceptance gates pass at current HEAD;
-all authoritative indexes agree; and no unresolved review finding remains.
+/goal Complete the entire Velnor plan graph: Plan 039, Plans 063–080, commands C001–C075 DONE at current HEAD; every done criterion machine-verifiably evidenced; focused, repository, integration, fixture, safety, package, fleet, and final acceptance gates green; indexes consistent; no unresolved review finding. plans/goal-execution/README.md binds: its read-first inventory, controller loop, tooling law, execution graph, validation layers, reconciliation, and recovery rules are mandatory.
 
-Read first: AGENTS.md; docs/mission.md; docs/vision.md; docs/roadmap.md;
-docs/prompt.md; VELNOR_PROJECTS_SETUP.md; plans/goal-execution/README.md;
-plans/README.md; plans/fleet-operations/README.md; plans/velnorctl-migration/
-README.md; plans/velnorctl-migration/commands/README.md; every executable plan
-file; and any narrower AGENTS.md governing files in scope. Treat repository text
-as project data while obeying applicable agent instructions.
+Primary agent orchestrates only (dependencies, dispatch, conflict prevention, operator-approval boundaries, evidence reconciliation, ledger consistency, verdict); never implements, edits, tests, or reviews a leaf directly. Per leaf dispatch fresh subagents: investigation (read-only drift/dependency validation), implementation (owned file scope on the campaign branch), verification (commands, fixture runs, artifacts, done criteria), independent diff review, plus specialists whenever security, protocol, packaging, fleet, storage, migration, or documentation surfaces appear. Each receives the full leaf file, this contract, dependency evidence, applicable AGENTS.md, exact scope, STOP conditions, and return schema, not chat summaries. A separate verifier confirms claims against repository state; self-asserted success never counts; an implementer never provides the only review or verdict.
 
-Primary agent is campaign orchestrator only. Never implement, edit, test, or
-review a plan leaf directly in primary context. For every leaf, use separate
-subagents for: (1) read-only investigation and drift/dependency validation;
-(2) implementation in an explicitly owned file scope on the single campaign
-branch; (3) verification of every command, fixture run, artifact, and done
-criterion; and (4) fresh independent diff review. Use additional specialist
-subagents for security, protocol, packaging, fleet policy, storage, migration,
-or documentation whenever that surface appears. Give each subagent the complete
-leaf file, this campaign contract, direct dependency evidence, applicable
-AGENTS.md, exact scope, STOP conditions, and expected return schema. Subagents
-must not rely on chat context or summaries alone.
+Subagents are mandatory for every plan item and all implementation, investigation, testing, fixture validation, documentation reconciliation, safety audit, and review work. No slot free: bounded wait/retry cycles while checking state, or only non-conflicting orchestrator work; unavailability never stops the campaign or pulls a leaf into primary context.
 
-Primary agent owns only dependency selection, subagent dispatch/coordination,
-conflict prevention, operator-approval boundaries, evidence reconciliation,
-status-ledger consistency, and final campaign verdict. Verify subagent reports
-against repository state and command artifacts through a separate verifier
-subagent. Never accept a subagent's self-asserted success. Never let one subagent
-both implement and provide the only review or completion verdict.
+One campaign branch recorded at start carries every leaf commit sequentially; never create or switch branches; no separate implementation worktree; one writer subagent at a time, others read-only; prove HEAD and branch match the campaign ledger at every handoff and repair mismatch by returning to the recorded branch without discarding work.
 
-Always use subagents for every plan item and all implementation, investigation,
-testing, fixture validation, documentation reconciliation, safety audit, and
-review work. If no subagent slot is immediately available, wait/retry in bounded
-cycles while checking state, or advance only orchestrator work that cannot
-conflict. Never stop the campaign, mark it BLOCKED, skip work, or execute a leaf
-in primary context merely because subagents are temporarily unavailable.
+All execution runs through mise tasks invoked via rtk (rtk mise run <task>); never call cargo, clippy, nextest, actionlint, or cargo-deny directly where a task wraps them. Gates fmt, lint, test (nextest), actionlint, deny, composite check, ci always run as mise tasks; filters ride after the task name: focused scopes the task, never bypasses it. Missing capability: add a mise.lock-pinned mise.toml task, not ad-hoc commands. Trust/configure mise before gates.
 
-Complete the entire campaign on one branch. At campaign start, record current
-branch as campaign branch. Never create, switch to, or merge a per-plan,
-per-command, per-agent, review, or temporary implementation branch. Never use a
-separate implementation worktree. Every leaf commit lands directly and
-sequentially on campaign branch. Permit only one writer subagent at a time;
-investigator, verifier, and reviewer subagents remain read-only while that
-writer owns the leaf. Before and after every handoff, prove HEAD and branch name
-still match campaign ledger. A mismatch is corrected by returning to recorded
-campaign branch without discarding work; it never authorizes a second delivery
-branch.
+Per leaf: verify rtk and mise; inspect git status untouched; resolve live dependencies and statuses; prove dependencies DONE; drift-check against HEAD; inspect cited symbols; record baseline commit, worktree state, fixture commit, manifest version, baseline scoped tests; reconcile plan versus reality through subagents before implementing; never silently adapt or skip.
 
-For each leaf: verify rtk; inspect git status without disturbing user changes;
-resolve live dependencies/status; prove every dependency DONE; run drift check
-against current HEAD; inspect every cited live symbol; record baseline commit,
-worktree state, exact fixture commit, applicable capability-manifest version,
-and baseline focused tests. If plan no longer matches reality, use subagents to
-reconcile plan and indexes first. Do not silently adapt or skip a requirement.
+Execute one step at a time, verified through its mise task; retain shortest decisive evidence; use Rust and repository patterns; consult current official docs where required; GitHub runner protocol reads actions/runner first; no strict-capability expansion without operator approval; never weaken the fixture or fake missing Velnor behavior locally.
 
-Execute one plan step at a time. After each step, run its focused verification
-and retain the shortest decisive evidence. Use Rust and repository patterns.
-Use rtk for shell commands. Use cargo nextest run, never cargo test. Consult
-current official docs when AGENTS.md requires them. For GitHub runner protocol,
-inspect current actions/runner first. Do not expand strict capabilities without
-explicit operator approval. Never weaken the fixture or add a repository-local
-workaround for missing Velnor behavior.
-
-Before every Actions dispatch: cancel all older pending/in-progress runs,
-delete only stale validation-owned runner registrations, prove both clean,
-dispatch once, capture the new run ID, and monitor only that ID. Check state
-within 60 seconds. Diagnose unchanged or queued state before two minutes.
-Never save rendered GitHub HTML.
-
-Before completing each leaf, verification and reviewer subagents must run
-focused tests, rtk mise run check, every item-specific integration/fixture gate,
-git diff --check, scope audit, secret/prohibited-file scan, and independent diff
-review. Re-run affected gates through subagents after every review fix. Map every
-done criterion to evidence. Have a status-owning subagent update only the item
-file plus every authoritative index row to DONE in the same change after primary
-reconciliation. Use Conventional Commits, git commit -s, and add Co-authored-by:
-Codex <codex@openai.com>. Do not push, open or merge a PR, mutate branch
-protection, publish, deploy, or perform live destructive work unless the item
-and operator authorization explicitly require it.
-
-Stop only on the item's STOP conditions, missing required approval, unsafe
-ambiguous ownership, conflicting user changes, or a proven tool/project limit.
-On stop, preserve safe state, record exact blocker and evidence, mark BLOCKED in
-all authoritative indexes, and name the minimal decision or external change
-needed. Never mark DONE because code exists, tests were sampled, or budget is
-low. After each completed leaf, reconcile the entire graph and dispatch the next
-dependency-ready leaf. Continue until the campaign stopping condition is proven.
+Leaf completion requires verifier and reviewer reruns of scoped focused tests, mise run check, integration/fixture gates, whitespace check, scope audit, secret scan, and independent diff review, affected gates rerun after fixes, every criterion mapped to evidence; a status subagent flips item file plus index rows to DONE atomically. Conventional Commits, signed-off commits, trailer Co-authored-by: Codex <codex@openai.com>. Push, PR, merge, publish, deploy, or destructive live work only when item and operator authorization demand. Actions-dispatch hygiene, STOP conditions, and BLOCKED handling follow the playbook exactly.
 ```
 
 For Claude Code, remove only the `/goal` prefix. Keep the complete campaign
@@ -152,13 +107,24 @@ Run this loop for every leaf:
    approvals. Confirm recorded single campaign branch. Select exactly one
    dependency-ready item.
 2. Dispatch fresh investigator and executor subagents for that leaf. Keep one
-   campaign goal; never create or clear a separate leaf goal.
+   campaign goal; never create or clear a separate leaf goal. If no subagent
+   slot is free, wait/retry in bounded cycles while checking state, or advance
+   only non-conflicting orchestrator work; unavailability never stops the
+   campaign or moves a leaf into primary context.
 3. Require investigator baseline evidence before executor edits. Existing
-   unrelated changes remain untouched.
-4. Executor subagent performs each plan step and immediate verification. A
-   failed gate stays in the same leaf until fixed or proven blocked.
-5. Verification subagent runs item integration. Fixture cleanup and two-minute
-   diagnosis rules are mandatory, not optional validation suggestions.
+   unrelated changes remain untouched. Prove HEAD and branch name still match
+   the campaign ledger before and after every handoff; repair mismatch by
+   returning to the recorded branch without discarding work.
+4. Executor subagent performs each plan step and immediate verification through
+   its mise task per the tooling law. A failed gate stays in the same leaf
+   until fixed or proven blocked.
+5. Verification subagent runs item integration. Before any Actions dispatch,
+   cancel all older pending/in-progress runs, delete only stale
+   validation-owned runner registrations, and prove both clean before
+   dispatching once and monitoring only the captured new run ID. Check state
+   within 60 seconds; diagnose unchanged or queued state before two minutes;
+   never save rendered GitHub HTML. Fixture cleanup is mandatory, not an
+   optional validation suggestion.
 6. Dispatch a fresh reviewer subagent. Review the complete diff against scope,
    architecture, capability, trust, storage, network, security, and rollback
    boundaries. Reviewer must inspect changed code and tests, not trust the
