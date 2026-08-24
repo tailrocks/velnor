@@ -32,7 +32,7 @@ Progress: 1 / 94 done.
 ### Shared architecture (execute in order)
 
 - [x] **063** - Record direction and fixture control contract (P1) - first; unblocks everything
-- [ ] **064** - Scaffold workspace and CLI seams (P1, deps 063)
+- [x] **064** - Scaffold workspace and CLI seams (P1, deps 063)
 - [ ] **065** - Resources, rendering, global conventions (P1, deps 064)
 - [ ] **066** - Persist sanitized operational history and events (P1, deps 065)
 - [ ] **067** - Versioned Unix-socket control API (P1, deps 066)
