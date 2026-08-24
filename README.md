@@ -16,6 +16,10 @@ and `ChainArgos/java-monorepo` unchanged, proving correctness against the public
 fixture first. No Velnor-native workflow language, no YAML scheduler, no macOS
 job execution.
 
+The product CLI is becoming `velnorctl`; the command-by-command migration away
+from `velnor-runner` (with no backward-compatible aliases) is tracked in
+[`plans/velnorctl-migration/`](plans/velnorctl-migration/README.md).
+
 ## Documentation (source of truth)
 
 All direction lives in [`docs/`](docs/) — keep it current; everything else

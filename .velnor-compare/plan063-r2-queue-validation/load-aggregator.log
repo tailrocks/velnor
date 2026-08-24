@@ -1,0 +1,224 @@
+﻿2026-08-24T08:47:05.2830397Z Current runner version: '2.336.0'
+2026-08-24T08:47:05.2870409Z ##[group]Runner Image Provisioner
+2026-08-24T08:47:05.2871781Z Hosted Compute Agent
+2026-08-24T08:47:05.2872796Z Version: 20260729.566
+2026-08-24T08:47:05.2873775Z Commit: cf7153fe6e25b664e8693c24944bf2b00355d109
+2026-08-24T08:47:05.2875194Z Build Date: 2026-07-29T19:17:02Z
+2026-08-24T08:47:05.2876374Z Worker ID: {5395082f-9e54-402b-a03e-4e3b241e1f78}
+2026-08-24T08:47:05.2877566Z Azure Region: eastus2
+2026-08-24T08:47:05.2878610Z ##[endgroup]
+2026-08-24T08:47:05.2880680Z ##[group]Operating System
+2026-08-24T08:47:05.2881623Z Ubuntu
+2026-08-24T08:47:05.2882556Z 26.04
+2026-08-24T08:47:05.2883399Z LTS
+2026-08-24T08:47:05.2884284Z ##[endgroup]
+2026-08-24T08:47:05.2885433Z ##[group]Runner Image
+2026-08-24T08:47:05.2886461Z Image: ubuntu-26.04
+2026-08-24T08:47:05.2887492Z Version: 20260817.108.1
+2026-08-24T08:47:05.2889523Z Included Software: https://github.com/actions/runner-images/blob/ubuntu26/20260817.108/images/ubuntu/Ubuntu2604-Readme.md
+2026-08-24T08:47:05.2892773Z Image Release: https://github.com/actions/runner-images/releases/tag/ubuntu26%2F20260817.108
+2026-08-24T08:47:05.2894311Z ##[endgroup]
+2026-08-24T08:47:05.2896360Z ##[group]GITHUB_TOKEN Permissions
+2026-08-24T08:47:05.2899670Z Contents: read
+2026-08-24T08:47:05.2900898Z Metadata: read
+2026-08-24T08:47:05.2901762Z ##[endgroup]
+2026-08-24T08:47:05.2905032Z Secret source: Actions
+2026-08-24T08:47:05.2907263Z Prepare workflow directory
+2026-08-24T08:47:05.3764652Z Prepare all required actions
+2026-08-24T08:47:05.3834512Z Getting action download info
+2026-08-24T08:47:05.5431384Z Download action repository 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' (SHA:3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c)
+2026-08-24T08:47:05.8506936Z Complete job name: aggregator
+2026-08-24T08:47:05.9245538Z ##[group]Run set -euo pipefail
+2026-08-24T08:47:05.9247124Z [36;1mset -euo pipefail[0m
+2026-08-24T08:47:05.9247923Z [36;1mresult_of() { jq -r --arg job "$1" '.[$job].result // "absent"' <<< "${NEEDS_JSON}"; }[0m
+2026-08-24T08:47:05.9248944Z [36;1mecho "::notice::CP_MARKER scenario=${SCENARIO} phase=aggregator"[0m
+2026-08-24T08:47:05.9249713Z [36;1mecho "CP_SCENARIO=${SCENARIO}"[0m
+2026-08-24T08:47:05.9250296Z [36;1mecho "CP_PHASE=aggregator"[0m
+2026-08-24T08:47:05.9251484Z [36;1mjobs=(scenario-success scenario-failure scenario-hold scenario-queue scenario-concurrent scenario-artifacts scenario-cache scenario-load)[0m
+2026-08-24T08:47:05.9252682Z [36;1mfor job in "${jobs[@]}"; do[0m
+2026-08-24T08:47:05.9253306Z [36;1m  echo "CP_OBSERVED ${job}=$(result_of "${job}")"[0m
+2026-08-24T08:47:05.9253940Z [36;1mdone[0m
+2026-08-24T08:47:05.9254381Z [36;1mmismatch() {[0m
+2026-08-24T08:47:05.9255563Z [36;1m  echo "::error::CP_MARKER scenario=${SCENARIO} phase=mismatch job=$1 observed=$2 expected=$3"[0m
+2026-08-24T08:47:05.9256535Z [36;1m  echo "CP_MISMATCH job=$1 observed=$2 expected=$3"[0m
+2026-08-24T08:47:05.9257163Z [36;1m  exit 1[0m
+2026-08-24T08:47:05.9257592Z [36;1m}[0m
+2026-08-24T08:47:05.9258019Z [36;1mexpect() {[0m
+2026-08-24T08:47:05.9258500Z [36;1m  observed="$(result_of "$1")"[0m
+2026-08-24T08:47:05.9259166Z [36;1m  [[ "${observed}" == "$2" ]] || mismatch "$1" "${observed}" "$2"[0m
+2026-08-24T08:47:05.9259821Z [36;1m}[0m
+2026-08-24T08:47:05.9260258Z [36;1mcase "${SCENARIO}" in[0m
+2026-08-24T08:47:05.9260758Z [36;1m  success)[0m
+2026-08-24T08:47:05.9261258Z [36;1m    expect scenario-success success[0m
+2026-08-24T08:47:05.9261875Z [36;1m    expect scenario-failure skipped[0m
+2026-08-24T08:47:05.9262475Z [36;1m    expect scenario-hold skipped[0m
+2026-08-24T08:47:05.9263073Z [36;1m    expect scenario-queue skipped[0m
+2026-08-24T08:47:05.9263681Z [36;1m    expect scenario-concurrent skipped[0m
+2026-08-24T08:47:05.9264315Z [36;1m    expect scenario-artifacts skipped[0m
+2026-08-24T08:47:05.9265053Z [36;1m    expect scenario-cache skipped[0m
+2026-08-24T08:47:05.9265672Z [36;1m    expect scenario-load skipped[0m
+2026-08-24T08:47:05.9266222Z [36;1m    ;;[0m
+2026-08-24T08:47:05.9266937Z [36;1m  failure)[0m
+2026-08-24T08:47:05.9267431Z [36;1m    expect scenario-failure failure[0m
+2026-08-24T08:47:05.9268185Z [36;1m    expect scenario-success skipped[0m
+2026-08-24T08:47:05.9268806Z [36;1m    expect scenario-hold skipped[0m
+2026-08-24T08:47:05.9269402Z [36;1m    expect scenario-queue skipped[0m
+2026-08-24T08:47:05.9270007Z [36;1m    expect scenario-concurrent skipped[0m
+2026-08-24T08:47:05.9270631Z [36;1m    expect scenario-artifacts skipped[0m
+2026-08-24T08:47:05.9271243Z [36;1m    expect scenario-cache skipped[0m
+2026-08-24T08:47:05.9271825Z [36;1m    expect scenario-load skipped[0m
+2026-08-24T08:47:05.9272369Z [36;1m    ;;[0m
+2026-08-24T08:47:05.9272793Z [36;1m  hold)[0m
+2026-08-24T08:47:05.9273271Z [36;1m    expect scenario-hold success[0m
+2026-08-24T08:47:05.9273866Z [36;1m    expect scenario-success skipped[0m
+2026-08-24T08:47:05.9274471Z [36;1m    expect scenario-failure skipped[0m
+2026-08-24T08:47:05.9275234Z [36;1m    expect scenario-queue skipped[0m
+2026-08-24T08:47:05.9275848Z [36;1m    expect scenario-concurrent skipped[0m
+2026-08-24T08:47:05.9276476Z [36;1m    expect scenario-artifacts skipped[0m
+2026-08-24T08:47:05.9277079Z [36;1m    expect scenario-cache skipped[0m
+2026-08-24T08:47:05.9277661Z [36;1m    expect scenario-load skipped[0m
+2026-08-24T08:47:05.9278200Z [36;1m    ;;[0m
+2026-08-24T08:47:05.9278629Z [36;1m  queue)[0m
+2026-08-24T08:47:05.9279097Z [36;1m    expect scenario-queue success[0m
+2026-08-24T08:47:05.9279684Z [36;1m    expect scenario-success skipped[0m
+2026-08-24T08:47:05.9280285Z [36;1m    expect scenario-failure skipped[0m
+2026-08-24T08:47:05.9280873Z [36;1m    expect scenario-hold skipped[0m
+2026-08-24T08:47:05.9281639Z [36;1m    expect scenario-concurrent skipped[0m
+2026-08-24T08:47:05.9282274Z [36;1m    expect scenario-artifacts skipped[0m
+2026-08-24T08:47:05.9282887Z [36;1m    expect scenario-cache skipped[0m
+2026-08-24T08:47:05.9283469Z [36;1m    expect scenario-load skipped[0m
+2026-08-24T08:47:05.9284026Z [36;1m    ;;[0m
+2026-08-24T08:47:05.9284458Z [36;1m  concurrent)[0m
+2026-08-24T08:47:05.9285089Z [36;1m    expect scenario-concurrent success[0m
+2026-08-24T08:47:05.9285712Z [36;1m    expect scenario-success skipped[0m
+2026-08-24T08:47:05.9286313Z [36;1m    expect scenario-failure skipped[0m
+2026-08-24T08:47:05.9286908Z [36;1m    expect scenario-hold skipped[0m
+2026-08-24T08:47:05.9287498Z [36;1m    expect scenario-queue skipped[0m
+2026-08-24T08:47:05.9288223Z [36;1m    expect scenario-artifacts skipped[0m
+2026-08-24T08:47:05.9288831Z [36;1m    expect scenario-cache skipped[0m
+2026-08-24T08:47:05.9289427Z [36;1m    expect scenario-load skipped[0m
+2026-08-24T08:47:05.9289985Z [36;1m    overlap_proofs=0[0m
+2026-08-24T08:47:05.9290712Z [36;1m    test -n "$(find cp-intervals -name 'cp-concurrent-*.json' -print -quit)"[0m
+2026-08-24T08:47:05.9291639Z [36;1m    intervals_json="$(jq -sc . cp-intervals/cp-concurrent-*.json)"[0m
+2026-08-24T08:47:05.9292380Z [36;1m    for lane in Velnor GitHub; do[0m
+2026-08-24T08:47:05.9292990Z [36;1m      overlap="$(jq -r --arg lane "${lane}" '[0m
+2026-08-24T08:47:05.9293668Z [36;1m        [ .[] | select(.lane == $lane) ] | sort_by(.slot) |[0m
+2026-08-24T08:47:05.9294305Z [36;1m        if length == 2 then[0m
+2026-08-24T08:47:05.9295031Z [36;1m          (.[0].start_epoch) as $s1 | (.[0].end_epoch) as $e1 |[0m
+2026-08-24T08:47:05.9295763Z [36;1m          (.[1].start_epoch) as $s2 | (.[1].end_epoch) as $e2 |[0m
+2026-08-24T08:47:05.9296442Z [36;1m          if ($s2 < $e1) and ($s1 < $e2) then[0m
+2026-08-24T08:47:05.9297088Z [36;1m            (if $e1 > $e2 then $e1 - $s2 else $e2 - $s1 end)[0m
+2026-08-24T08:47:05.9297722Z [36;1m          else "none" end[0m
+2026-08-24T08:47:05.9298320Z [36;1m        else empty end' <<< "${intervals_json}")"[0m
+2026-08-24T08:47:05.9299322Z [36;1m      [[ "${overlap}" != "none" ]] || mismatch "scenario-concurrent" "no-overlap lane=${lane}" "overlapping intervals"[0m
+2026-08-24T08:47:05.9300516Z [36;1m      if [[ -z "${overlap}" ]]; then continue; fi[0m
+2026-08-24T08:47:05.9301495Z [36;1m      echo "::notice::CP_MARKER scenario=concurrent phase=overlap lane=${lane} overlap_seconds=${overlap}"[0m
+2026-08-24T08:47:05.9302526Z [36;1m      echo "CP_OVERLAP lane=${lane} overlap_seconds=${overlap}"[0m
+2026-08-24T08:47:05.9303257Z [36;1m      overlap_proofs=$((overlap_proofs + 1))[0m
+2026-08-24T08:47:05.9303838Z [36;1m    done[0m
+2026-08-24T08:47:05.9304909Z [36;1m    [[ "${overlap_proofs}" -ge 1 ]] || mismatch "scenario-concurrent" "no-overlap-evidence" "at least one lane with overlapping intervals"[0m
+2026-08-24T08:47:05.9305959Z [36;1m    ;;[0m
+2026-08-24T08:47:05.9306393Z [36;1m  artifacts)[0m
+2026-08-24T08:47:05.9306910Z [36;1m    expect scenario-artifacts success[0m
+2026-08-24T08:47:05.9307524Z [36;1m    expect scenario-success skipped[0m
+2026-08-24T08:47:05.9308127Z [36;1m    expect scenario-failure skipped[0m
+2026-08-24T08:47:05.9308729Z [36;1m    expect scenario-hold skipped[0m
+2026-08-24T08:47:05.9309389Z [36;1m    expect scenario-queue skipped[0m
+2026-08-24T08:47:05.9310053Z [36;1m    expect scenario-concurrent skipped[0m
+2026-08-24T08:47:05.9310675Z [36;1m    expect scenario-cache skipped[0m
+2026-08-24T08:47:05.9311275Z [36;1m    expect scenario-load skipped[0m
+2026-08-24T08:47:05.9311932Z [36;1m    count="$(awk -F',' '{print NF}' <<< "${ARTIFACT_LIST}")"[0m
+2026-08-24T08:47:05.9313076Z [36;1m    [[ "${count}" -eq "${ARTIFACT_COUNT}" ]] || mismatch "scenario-artifacts" "artifact_count=${count}" "artifact_count=${ARTIFACT_COUNT}"[0m
+2026-08-24T08:47:05.9314280Z [36;1m    distinct="$(tr ',' '\n' <<< "${ARTIFACT_LIST}" | sort -u | wc -l | tr -d ' ')"[0m
+2026-08-24T08:47:05.9315811Z [36;1m    [[ "${distinct}" -eq "${ARTIFACT_COUNT}" ]] || mismatch "scenario-artifacts" "distinct_artifacts=${distinct}" "artifact_count=${ARTIFACT_COUNT}"[0m
+2026-08-24T08:47:05.9317289Z [36;1m    echo "::notice::CP_MARKER scenario=artifacts phase=verified count=${count} distinct=${distinct}"[0m
+2026-08-24T08:47:05.9318350Z [36;1m    echo "CP_ARTIFACTS_VERIFIED count=${count} distinct=${distinct}"[0m
+2026-08-24T08:47:05.9319052Z [36;1m    ;;[0m
+2026-08-24T08:47:05.9319472Z [36;1m  cache)[0m
+2026-08-24T08:47:05.9319946Z [36;1m    expect scenario-cache success[0m
+2026-08-24T08:47:05.9320536Z [36;1m    expect scenario-success skipped[0m
+2026-08-24T08:47:05.9321137Z [36;1m    expect scenario-failure skipped[0m
+2026-08-24T08:47:05.9321735Z [36;1m    expect scenario-hold skipped[0m
+2026-08-24T08:47:05.9322321Z [36;1m    expect scenario-queue skipped[0m
+2026-08-24T08:47:05.9322926Z [36;1m    expect scenario-concurrent skipped[0m
+2026-08-24T08:47:05.9323544Z [36;1m    expect scenario-artifacts skipped[0m
+2026-08-24T08:47:05.9324225Z [36;1m    expect scenario-load skipped[0m
+2026-08-24T08:47:05.9325283Z [36;1m    echo "::notice::CP_MARKER scenario=cache phase=aggregator-note note=unchanged-rerun-expects-cache-hit"[0m
+2026-08-24T08:47:05.9326439Z [36;1m    echo "CP_CACHE_AGGREGATOR_NOTE=unchanged rerun expects CP_CACHE_HIT=true"[0m
+2026-08-24T08:47:05.9327205Z [36;1m    ;;[0m
+2026-08-24T08:47:05.9327629Z [36;1m  load)[0m
+2026-08-24T08:47:05.9328087Z [36;1m    expect scenario-load success[0m
+2026-08-24T08:47:05.9328685Z [36;1m    expect scenario-success skipped[0m
+2026-08-24T08:47:05.9329289Z [36;1m    expect scenario-failure skipped[0m
+2026-08-24T08:47:05.9329881Z [36;1m    expect scenario-hold skipped[0m
+2026-08-24T08:47:05.9330459Z [36;1m    expect scenario-queue skipped[0m
+2026-08-24T08:47:05.9331051Z [36;1m    expect scenario-concurrent skipped[0m
+2026-08-24T08:47:05.9331668Z [36;1m    expect scenario-artifacts skipped[0m
+2026-08-24T08:47:05.9332260Z [36;1m    expect scenario-cache skipped[0m
+2026-08-24T08:47:05.9332802Z [36;1m    ;;[0m
+2026-08-24T08:47:05.9333213Z [36;1m  *)[0m
+2026-08-24T08:47:05.9333953Z [36;1m    mismatch "validate-inputs" "unknown-scenario=${SCENARIO}" "one of the eight scenarios"[0m
+2026-08-24T08:47:05.9335074Z [36;1m    ;;[0m
+2026-08-24T08:47:05.9335497Z [36;1mesac[0m
+2026-08-24T08:47:05.9336164Z [36;1mecho "::notice::CP_MARKER scenario=${SCENARIO} phase=aggregator verdict=match"[0m
+2026-08-24T08:47:05.9336960Z [36;1mecho "CP_VERDICT=match"[0m
+2026-08-24T08:47:05.9337824Z [36;1mecho "### control-plane ${SCENARIO}: requested terminal state observed" >> "${GITHUB_STEP_SUMMARY}"[0m
+2026-08-24T08:47:05.9409751Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-08-24T08:47:05.9410688Z env:
+2026-08-24T08:47:05.9411115Z   SCENARIO: load
+2026-08-24T08:47:05.9411569Z   HOLD_SECONDS: 30
+2026-08-24T08:47:05.9412013Z   ARTIFACT_COUNT: 3
+2026-08-24T08:47:05.9415183Z   NEEDS_JSON: {
+  "validate-inputs": {
+    "result": "success",
+    "outputs": {}
+  },
+  "scenario-success": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "scenario-failure": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "scenario-hold": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "scenario-queue": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "scenario-concurrent": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "scenario-artifacts": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "scenario-cache": {
+    "result": "skipped",
+    "outputs": {}
+  },
+  "scenario-load": {
+    "result": "success",
+    "outputs": {}
+  }
+}
+2026-08-24T08:47:05.9418247Z   ARTIFACT_LIST: 
+2026-08-24T08:47:05.9418681Z ##[endgroup]
+2026-08-24T08:47:05.9609595Z ##[notice]CP_MARKER scenario=load phase=aggregator
+2026-08-24T08:47:05.9617575Z CP_SCENARIO=load
+2026-08-24T08:47:05.9618084Z CP_PHASE=aggregator
+2026-08-24T08:47:05.9618580Z CP_OBSERVED scenario-success=skipped
+2026-08-24T08:47:05.9642252Z CP_OBSERVED scenario-failure=skipped
+2026-08-24T08:47:05.9676650Z CP_OBSERVED scenario-hold=skipped
+2026-08-24T08:47:05.9711242Z CP_OBSERVED scenario-queue=skipped
+2026-08-24T08:47:05.9743749Z CP_OBSERVED scenario-concurrent=skipped
+2026-08-24T08:47:05.9776478Z CP_OBSERVED scenario-artifacts=skipped
+2026-08-24T08:47:05.9809870Z CP_OBSERVED scenario-cache=skipped
+2026-08-24T08:47:05.9842692Z CP_OBSERVED scenario-load=success
+2026-08-24T08:47:06.0120759Z ##[notice]CP_MARKER scenario=load phase=aggregator verdict=match
+2026-08-24T08:47:06.0122667Z CP_VERDICT=match
+2026-08-24T08:47:06.0286417Z Cleaning up orphan processes

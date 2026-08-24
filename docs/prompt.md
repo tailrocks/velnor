@@ -5,7 +5,7 @@ Velnor unified CI contract (2026-08-09):
 
 - Estate: exactly 28 repositories in the canonical class map in `VELNOR_PROJECTS_SETUP.md`.
 - Classes: exactly four generated templates—20 code, 5 tap, 2 apt, 1 fixture—byte-identical within each class; no concern-based omission or repository-local fork.
-- Selector: only `lane`, with exact values `github | velnor | both`; every repository supports all three values.
+- Selector: exactly the plural `lanes` choice input with values `velnor | github | both` (`lanes: type: choice, default: velnor, options: [velnor, github, both]`); every repository supports all three values. Callable reusable workflows keep their singular `lane` input; callers derive it from `inputs.lanes`.
 - Defaults: every listed `jackin-project/*` repository defaults to `github`; every listed `tailrocks/*` and `ChainArgos/*` repository defaults to `velnor`.
 - Trust route: public unmerged contributor code uses GitHub-hosted until lower-trust Velnor isolation is live-proven. This explicit safety override does not change repository default, applicable checks, or permit silent failover.
 - Trusted admission: Velnor trusted access is limited to exact default-branch or release workflow paths and refs, never an entire public repository.
@@ -16,6 +16,9 @@ Velnor unified CI contract (2026-08-09):
 - Supersession: every conflicting earlier execution authority, estate count or membership, class, selector, default, trust route, cache policy, or merge-context statement in this repository is historical and non-executable.
 <!-- unified-ci-contract:end -->
 
-Execute the marked contract through the tracked active goal and its execution graph.
+Execute the marked contract through the tracked active goal and its execution
+graph, with `plans/TASKS.md` as its checkbox mirror. The active surface is
+exactly: the marked unified-CI contract, the tracked goal graph, and the
+`plans/TASKS.md` mirror.
 
 No earlier prompt or plan is active.

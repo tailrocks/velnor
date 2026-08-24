@@ -8,6 +8,7 @@
 
 ## Status
 
+- **Status**: DONE (2026-08-24)
 - **Priority**: P1
 - **Effort**: L
 - **Risk**: MED
@@ -114,11 +115,62 @@ conclusion changes.
 
 ## Done criteria
 
-- [ ] New crates exist with acyclic dependencies.
-- [ ] CLI parser/dispatch seams exist without owning a leaf command.
-- [ ] New code neither spawns nor parses output from old binary.
-- [ ] `rtk mise run check` passes.
-- [ ] Fresh fixture success run passes.
+- [x] New crates exist with acyclic dependencies.
+- [x] CLI parser/dispatch seams exist without owning a leaf command.
+- [x] New code neither spawns nor parses output from old binary.
+- [x] `rtk mise run check` passes.
+- [x] Fresh fixture success run passes.
+
+## Evidence (2026-08-24)
+
+1. **Five crates, acyclic**: `crates/velnor-client/tests/dependency_boundaries.rs`
+   @5ab7479 (exactly-seven-packages assertion, DFS acyclicity check, direction
+   assertions) — 8 tests green. Workspace resolves exactly seven packages
+   (`velnor-runner`, `velnor-tools`, `velnor-model`, `velnor-control`,
+   `velnor-client`, `velnor-render`, `velnorctl`).
+2. **Seams with zero successful commands**: `lib.rs` legacy/unimplemented
+   rejection tests plus `cli_smoke` subprocess assertions (`--help`=0,
+   bare=2, `cache` du=3, `version`=2). Live binary smoke table verified
+   2026-08-24: `version`/`--version`=2, `help`=0, no-args=2,
+   `cache`/`cache du`/`status`/`capabilities`/`run --once`=3.
+3. **No spawn/parse of old binary**: the only `Command` uses are the
+   `CARGO_BIN_EXE_velnorctl` smoke test and the `cargo metadata` boundary
+   probe; zero in new-crate source.
+4. **Gates**: fmt/lint/test-focused (velnorctl 12/12, velnor-runner
+   732/732)/test (877/877)/check all exit 0 @5ab7479; re-ran
+   `test-focused -p velnorctl` + `check` after the dev-deps cleanup
+   (commit `7a63d72`) — both exit 0.
+5. **Fixture success through unchanged old daemon**: sanitized evidence in
+   `.velnor-compare/2026-08-24-control-plane/summary.md` shows fresh
+   successes including dual-lane compat run 32703106587 and the cold→warm
+   cache pair 32704574052→32704719858; daemon is apt-installed and
+   unaffected by velnorctl-only commits fb4fdbc→5ab7479→7a63d72.
+
+Provenance notes:
+
+- Implementation base of record is twin commit `5ab7479`, superseding
+  `fb4fdbc`. Review FIX-FIRST(4) items — missing serde_json dev-dep,
+  phantom runner-edge assertion, exit-code mismatches, dual seam systems —
+  are all resolved in `5ab7479` per
+  `.velnor-compare/2026-08-24-064-seam-review/feedback-to-twin.md`; the
+  residual empty `[dev-dependencies]` header was removed in `7a63d72`.
+- Executor run id 32714016121 was untraceable in the tree and is superseded by
+  the `summary.md` evidence above.
+
+### Execution evidence 2026-08-24 @ 5ab7479 (+nit/closeout commit)
+
+- Gates: `mise run test-focused -- -p velnorctl -p velnor-client -p
+  velnor-model -p velnor-control -p velnor-render` exit 0 (23/23); `mise run
+  check` exit 0 (877/877 pre-nit baseline). Nits re-verified with both gates
+  exit 0.
+- Fixture: fresh `control-plane` run 32714994603 success in 28s through the
+  unchanged old daemon; no execution or conclusion change.
+- Verification: PASS (gates green, criteria mapped). Review: APPROVE
+  (`dependency_boundaries.rs:189-200` direction pin deliberate, left as is).
+- Message correction: commit `fb4fdbc` claims `velnorctl` depends on the
+  `velnor-runner` facade; the facade was extracted but never consumed. The
+  dependency exists only in the migration-scaffold allowance, and no code path
+  uses it. This note supersedes that message text.
 
 ## STOP conditions
 

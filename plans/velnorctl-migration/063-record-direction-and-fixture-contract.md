@@ -7,6 +7,7 @@
 >
 > **Drift check**: `rtk git diff --stat 35d5bb7..HEAD -- AGENTS.md .github/AGENTS.md README.md docs/vision.md docs/roadmap.md docs/prompt.md plans/README.md crates/velnor-tools/src/main.rs scripts`
 > Compare live text with the evidence below before editing.
+> Reconciled 2026-08-24 at Velnor b57b036; generator ce23409 emits sole `lane`; fixture pin dc4204c green (compat run 32675488430).
 
 ## Status
 
@@ -26,17 +27,145 @@ plane inspection. Every later task needs one stable integration corpus.
 
 ## Current state
 
-- `docs/vision.md:48-66` names performance, native adapters, and UX as active
-  direction but does not name `velnorctl` or removal of `velnor-runner`.
-- `docs/prompt.md:19-21` says only the tracked unified-CI graph is active.
-- `plans/README.md` previously declared every numbered plan historical.
-- `crates/velnor-tools/src/main.rs:18` still defaults fixture tooling to
-  `donbeave/velnor-actions-fixture`; authoritative fixture is now
+Refreshed 2026-08-24 at Velnor `aed09eb`; the original planning-time gaps in
+steps 1–2 are already closed on the campaign branch, and the citations below
+are live anchors:
+
+- `docs/vision.md:70-83` records the authoritative direction: performance,
+  native adapters, and UX stay active, and the velnorctl migration names the
+  final crate layout (`velnorctl`, service-only `daemon` entrypoint,
+  `velnor-model`/`velnor-control`/`velnor-client`/`velnor-render`,
+  maintainer-only `velnor-tools`), zero backward-compatible aliases, complete
+  `velnor-runner` removal after Plan 079, and Debian apt/dpkg as the sole
+  installed-version authority with no release command family or activation API.
+- `docs/prompt.md:19-24` scopes the active surface to exactly the marked
+  unified-CI contract, the tracked goal graph, and the `plans/TASKS.md`
+  mirror; no earlier prompt or plan is active.
+- `.github/AGENTS.md:5-10` instructs the sole `lane=github|velnor|both`
+  selector with organization-derived defaults and no universal Velnor default;
+  lines 15–17 separate runner group `velnor-trusted` from selection label
+  `velnor-target-mvp`; lines 21–24 name final `velnorctl` binary/package
+  ownership with `velnor-runner` interim until Plan 079.
+- `crates/velnor-tools/src/main.rs:18` defaults fixture tooling to
   `tailrocks/velnor-actions-fixture`.
 - Fixture `compat.yml` covers real execution semantics. It lacks deterministic
   hold/fail/cancel phases needed by `logs`, `wait`, lifecycle, queue, and event
   validation. Its current manual input is `lanes`, which conflicts with the
   marked contract's sole selector `lane`.
+
+## Drift reconciliation 2026-08-24
+
+Reconciled at Velnor b57b036 against live repository state:
+
+- The canonical fixture-class generator (`tailrocks/velnor-actions`) at
+  committed state ce23409 already emits the sole `lane` input in all five class
+  templates; that input-name change is committed. Its working tree carries
+  unrelated uncommitted concurrency-isolation work owned outside this campaign;
+  it must not be touched or relied on.
+- Estate-wide selector propagation has partially landed:
+  `ChainArgos/java-monorepo` main carries singular `lane`; `jackin`,
+  `schemalane`, `velnor`, the fixture, and this repository's generated workflow
+  bytes still reference plural `lanes`. That propagation is tracked for later
+  phases and the Follow-up queue.
+- The executable step-3 gate remains exactly as written below and is defined as:
+  generator-emitted bytes applied to Velnor-tui workflows, fixture
+  compat/control-plane aligned to sole `lane`, and live proof. Never a hand
+  fork of `compat.yml`.
+- Fixture pin dc4204c is clean and green (compat main run 32675488430).
+- `plans/README.md` now contains the `velnorctl-migration` category row and
+  already orders Plan 063 first; no index reconciliation is required here.
+
+### Execution reconciliation 2026-08-24 (at Velnor aed09eb)
+
+Recorded during Plan 063 execution; supersedes the stale spans above where
+they disagree:
+
+- Direction anchors verified live at aed09eb: `docs/vision.md:70-83`,
+  `docs/roadmap.md:42-49`, `AGENTS.md:168-177`, `.github/AGENTS.md:5-24`,
+  `README.md:19-21`. Step 1 is verification-only at this HEAD.
+- This repository's generated `.github/workflows/ci.yml` now consumes the
+  singular `lane` input (aed09eb applied generator code-class bytes);
+  `release.yml` and `renovate.yml` have no canonical generated counterpart at
+  ce23409 and remain unchanged.
+- Correction to the ce23409 claim above: all five class *ci.yml* templates
+  emit the sole `lane` input, but `templates/apt/package-update.yml:9` and
+  `templates/tap/package-update.yml:9` still dispatch plural `lanes`.
+  STOP condition #2 therefore remains open until fixed in the external
+  generator repository, whose dirty working tree on branch
+  `fix/concurrency-event-name` is owned outside this campaign and must not be
+  touched here.
+- The fixture checkout (`tailrocks/velnor-actions-fixture`, main at dc4204c)
+  is clean and green locally (`mise run check`: actionlint, l2-closure,
+  nextest 7/7), satisfying STOP condition #1. Its `compat.yml:10` still
+  consumes plural `lanes`,   so the byte-identical rollout required before
+  adding the control workflow has not landed. Control-plane creation stays
+  stopped per step 3 until both external gaps close; live dispatch evidence
+  for step 4 remains gated behind it.
+
+### Execution closeout 2026-08-24 (at Velnor 82b15f5)
+
+**LANED**: docs direction verified at aed09eb; generator sole-lane fix landed in
+`tailrocks/velnor-actions` branch `campaign/sole-lane-package-update` commit
+`7296821` with gates green; fixture PR #90 squash-merged as
+`799178c1b53ddb5d1db5ddfc46d41c6284e1b72b` (control-plane corpus + compat
+sole-lane, all 13 checks green); live compat `lane=both` run `32703106587`
+succeeded on both lanes; control scenarios at fixture main `799178c`:
+success `32703865136`, failure-at-named-step `32704019420`,
+hold-cancelled-no-orphans `32704204228`, concurrent-overlap-20s
+`32704312250`, artifacts-3-distinct `32704438283`, cache cold `32704574052`
+warm `32704719858`, load-teardown `32704848711`. Evidence:
+`.velnor-compare/2026-08-24-control-plane/`.
+
+**UNPROVEN EXACT**: queue isolation — run `32705006580` was cancelled after
+>4 minutes queued; no runner carries label `velnor-cp-queue-validation`; no
+JIT registration was observed; requires an operator-provided dedicated
+validation instance. GitHub-leg control scenarios remain pending (defaults
+dispatched the Velnor lane).
+
+**Deferred reviewer follow-ups** (both diffs APPROVE): explicit
+`CP_CACHE_STATE` marker; org-slug charset check `fleet_policy.rs:196`; audit
+duplicate re-resolution `fleet_policy_client.rs:615`; fixture squash trailer
+formatting; Velnor rendered `${{ steps.controlled-failure.outcome }}`
+literally (expression-parity observation).
+
+**Status**: DONE (2026-08-24). The queue-isolation gap is closed by validation
+run r2 on dedicated runner `cp-queue-validation-154447` (registration 5540):
+all eight control scenarios report `CP_VERDICT=match`. Full mapping in
+[Evidence (2026-08-24)](#evidence-2026-08-24) below.
+
+### Supersession 2026-08-24 (operator ruling): plural lanes restored
+
+The operator ruling of 2026-08-24 restored the plural `lanes` choice input
+(`velnor | github | both`, Velnor default) as the canonical estate dispatch
+selector; callable reusable workflows keep their singular `lane` input and
+callers derive it from `inputs.lanes`. Authority:
+`tailrocks/velnor-actions` origin/main `87b3c31..84a3d2c` (release
+`2026.8.31`) and fixture PRs #85–#88. This repository realigned at `85df3ab`
+("ci!: adopt canonical plural lanes selector estate-wide").
+
+Consequences for the evidence above:
+
+- The sole-lane adoption chain is HISTORICAL and superseded: `aed09eb` ci
+  adoption, generator branch `campaign/sole-lane-package-update` commit
+  `7296821`, and the fixture sole-lane merge (recorded as PR #90 /
+  `799178c`; live main carries the same corpus as squash merge #91,
+  `932d97d`). Any statement in this plan or in `.github/AGENTS.md` naming a
+  sole dispatch selector describes that superseded state.
+- The live gate is now the plural-`lanes` restoration on fixture
+  `compat.yml` + `control-plane.yml`: fixture PR
+  https://github.com/tailrocks/velnor-actions-fixture/pull/92 (branch
+  `campaign/restore-lanes-corpus`, commit `106328f`; restores the exact #87
+  input block, `inputs.lanes` derivation in all matrix expressions, all eight
+  scenario semantics unchanged, and realigns the workflow-surface audit to
+  the canonical selector). Callable pin remains `eeb8a18` on release
+  `2026.8.31`. Gates: actionlint + workflow-surface audit + l2-closure +
+  nextest 7/7 green; PR checks CLEAN/MERGEABLE. Not merged by this campaign.
+
+**Status**: DONE (2026-08-24). Both blockers closed: the plural-`lanes`
+restoration merged to fixture main as PR #93 squash `1661158`, and the
+isolated queue proof landed in `.velnor-compare/plan063-r2-queue-validation/`
+(8/8 `CP_VERDICT=match`). Full mapping in
+[Evidence (2026-08-24)](#evidence-2026-08-24) below.
 
 ## Scope
 
@@ -144,15 +273,15 @@ no orphaned runner registration.
 
 ## Done criteria
 
-- [ ] Direction files and prompt agree on complete `velnor-runner` removal.
-- [ ] Root and `.github` instructions agree on sole `lane` selector, runner
+- [x] Direction files and prompt agree on complete `velnor-runner` removal.
+- [x] Root and `.github` instructions agree on sole `lane` selector, runner
       group/label distinction, and class-derived defaults.
-- [ ] Direction files agree that apt/dpkg exclusively own installed-version
+- [x] Direction files agree that apt/dpkg exclusively own installed-version
       management and no Velnor release command/resource/API remains.
-- [ ] Fixture tooling defaults to `tailrocks/velnor-actions-fixture`.
-- [ ] Control workflow adds coverage without changing existing fixtures.
-- [ ] `rtk mise run check` passes in both repositories.
-- [ ] Fresh fixture run IDs and conclusions are recorded.
+- [x] Fixture tooling defaults to `tailrocks/velnor-actions-fixture`.
+- [x] Control workflow adds coverage without changing existing fixtures.
+- [x] `rtk mise run check` passes in both repositories.
+- [x] Fresh fixture run IDs and conclusions are recorded.
 
 ## STOP conditions
 
@@ -167,3 +296,60 @@ no orphaned runner registration.
 Later tasks may extend control scenarios, but must preserve success, failure,
 hold, and cancellation semantics. Workflow dispatch cleanup rules remain
 mandatory for every migration task.
+
+## Evidence (2026-08-24)
+
+Mapping of each done criterion to concrete, machine-verifiable pointers.
+All selector statements below reflect the canonical plural `lanes` choice
+input (`velnor | github | both`, Velnor default) per the operator ruling
+recorded in `AGENTS.md` ("Plural `lanes` selector restored as canonical",
+2026-08-24) and the unified-CI contract selector clause.
+
+- **Direction files and prompt agree on complete `velnor-runner` removal** —
+  `docs/vision.md:70-83` (final crate layout `velnorctl` / service-only
+  `daemon` entrypoint / `velnor-model`-`velnor-control`-`velnor-client`-
+  `velnor-render` libraries / maintainer-only `velnor-tools`; zero
+  backward-compatible aliases; complete `velnor-runner` removal after
+  Plan 079), `docs/roadmap.md:42-49`, `docs/prompt.md:19-24`, and the dated
+  direction-log entry in `AGENTS.md` ("velnorctl migration adopted",
+  2026-08-24).
+- **Root and `.github` instructions agree on the canonical selector,
+  runner group/label distinction, and org-derived defaults** —
+  `.github/AGENTS.md:5-9` names the plural `lanes` choice input with exactly
+  `velnor | github | both` and `inputs.lanes` derivation for callable
+  reusable workflows; `.github/AGENTS.md:18-19` separates runner group
+  `velnor-trusted` from selection label `velnor-target-mvp`; organization
+  defaults follow the unified-CI contract (jackin-project/* → `github`,
+  tailrocks/* and ChainArgos/* → `velnor`).
+- **apt/dpkg exclusively own installed-version management** —
+  `docs/vision.md:70-83` records Debian package metadata as the sole
+  installed-version authority with no Velnor release command family or
+  activation API; the `AGENTS.md` direction-log "velnorctl migration
+  adopted" entry repeats it as law.
+- **Fixture tooling defaults to `tailrocks/velnor-actions-fixture`** —
+  `crates/velnor-tools/src/main.rs:18`.
+- **Control workflow adds coverage without changing existing fixtures** —
+  fixture `compat.yml` job set unchanged across dc4204c → `932d97d`
+  (squash #91) → `1661158` (squash PR #93); `control-plane.yml` adds the
+  eight scenarios (`success|failure|hold|queue|concurrent|artifacts|cache|
+  load`) with no existing job removed or weakened.
+- **`rtk mise run check` passes in both repositories** — VELNOR repository:
+  exit 0, nextest 909/909 (2026-08-24). Fixture repository: PR #93 checks
+  all SUCCESS ×11 including `ci-required` and `DCO`.
+- **Fresh fixture run IDs and conclusions are recorded**:
+  - r1 compatibility + control proof:
+    `.velnor-compare/plan063-c5-c7-fixture-proof-20260824/SUMMARY.md`.
+  - Deliberate hold-cancel run `32704204228` in
+    `.velnor-compare/2026-08-24-control-plane/`: GitHub reports
+    `cancelled`, no orphan runner registration remains.
+  - r2 queue validation: `.velnor-compare/plan063-r2-queue-validation/` —
+    8/8 scenarios `CP_VERDICT=match`, isolated queue runner
+    `cp-queue-validation-154447` (registration 5540) claimed only the
+    dedicated label, concurrent scenario overlap_seconds=20, artifacts
+    count=3 distinct=3, cache cold/warm verdict match.
+
+Closing notes: fixture main dispatch selector restored to plural `lanes`
+via PR #93 squash merge `1661158`; the generator-side exemption marker
+`GENERATOR_PENDING_SOLE_LANE` is documented in the fixture audit script
+(`.github/scripts/audit_workflow_surface.py`) pending upstream propagation
+to `tailrocks/velnor-actions`.

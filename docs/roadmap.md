@@ -5,7 +5,7 @@ Velnor unified CI contract (2026-08-09):
 
 - Estate: exactly 28 repositories in the canonical class map in `VELNOR_PROJECTS_SETUP.md`.
 - Classes: exactly four generated templates—20 code, 5 tap, 2 apt, 1 fixture—byte-identical within each class; no concern-based omission or repository-local fork.
-- Selector: only `lane`, with exact values `github | velnor | both`; every repository supports all three values.
+- Selector: exactly the plural `lanes` choice input with values `velnor | github | both` (`lanes: type: choice, default: velnor, options: [velnor, github, both]`); every repository supports all three values. Callable reusable workflows keep their singular `lane` input; callers derive it from `inputs.lanes`.
 - Defaults: every listed `jackin-project/*` repository defaults to `github`; every listed `tailrocks/*` and `ChainArgos/*` repository defaults to `velnor`.
 - Trust route: public unmerged contributor code uses GitHub-hosted until lower-trust Velnor isolation is live-proven. This explicit safety override does not change repository default, applicable checks, or permit silent failover.
 - Trusted admission: Velnor trusted access is limited to exact default-branch or release workflow paths and refs, never an entire public repository.
@@ -38,6 +38,15 @@ boundary is frozen in [Build L3 boundary
 v1](security/build-l3-boundary-v1.md) with its [versioned threat/control/test
 matrix](security/build-l3-threat-control-test-v1.tsv). Both are design-only
 until Plans 012 and 017 implement and prove them live.
+
+## velnorctl migration
+
+The `velnorctl` migration replaces every `velnor-runner` product, binary,
+package, and command surface. Normative command granularity and ordering live
+in [`plans/velnorctl-migration/README.md`](../plans/velnorctl-migration/README.md)
+and [`plans/velnorctl-migration/commands/README.md`](../plans/velnorctl-migration/commands/README.md);
+Plan 063 lands first. This section intentionally does not duplicate their
+detail.
 
 ## Hard Rules
 
