@@ -40,7 +40,7 @@ prevent exclusive-scope collisions.
 | 065 | Session B | 2026-08-24 ~10:40Z | DONE @8734b4b — reconciling-executor convergence complete (gates 943/943 at landing); verification chain closed 2026-08-24 |
 | 066 | orchestrating ox-alpha (validator session) | 2026-08-24 ~13:30Z | CLAIMED — Track B next-ready leaf; implementation via fresh writer subagent on this branch; other sessions read-only on 066 scope |
 | 065-defect-fix | Session C validator (ox-alpha) | 2026-08-24 ~13:45Z | CLOSED @f06d439 — fail-closed opaque rejection landed; verifier PASS 973/973; reviewer APPROVE-CLOSE; evidence addendum in 065 file |
-| C005-man | Session C validator (ox-alpha) | 2026-08-24 ~14:05Z | IMPLEMENTED+REVIEWED locally @b98801e+0630a98 (18/18 command_c005, full check 997/997, verifier PASS, reviewer APPROVE-FLIP with all findings closed) — remaining before DONE flip: mandatory fixture integration gate (pinned `bd4be093…`, cancel-clean-dispatch-monitor hygiene) and push; BOTH blocked by SSH-agent/network outage since ~14:05Z (ssh-add empty, push Permission denied); local commits queued: b98801e, 0630a98 + fleet commits from other sessions; flip deferred until fixture proof per "no DONE without evidence" |
+| C005-man | Session C validator (ox-alpha) | 2026-08-24 ~14:05Z | IMPLEMENTED+REVIEWED, pushed @b98801e+0630a98 (18/18 command_c005, full check 997/997, verifier PASS, reviewer APPROVE-FLIP findings closed). FIXTURE DISPATCH WINDOW OPENED ~15:20Z: pin `bd4be09375154e891052b5159801f613fa0b4f09`, cancel-clean-dispatch-monitor hygiene, single dispatch, sanitized evidence only. Other sessions: do NOT dispatch fixture runs until this row closes. DONE flip after fixture proof lands |
 
 ## Decisions
 
