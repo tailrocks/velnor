@@ -24,6 +24,10 @@ run = "cargo clippy --workspace --all-targets --locked -- -D warnings"
 [tasks.test]
 run = "cargo nextest run --workspace --locked --color=always"
 
+[tasks.test-focused]
+description = "Focused nextest run; pass filters after the task, e.g. rtk mise run test-focused -- -p velnor-tools"
+run = "cargo nextest run --locked --color=always"
+
 [tasks.actionlint]
 run = "actionlint"
 
