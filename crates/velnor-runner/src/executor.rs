@@ -10341,11 +10341,11 @@ esac
         impl CommandRunner for ReclaimRunner {
             fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
                 self.calls.push(args.to_vec());
-                let stdout = if args == &crate::docker_lease::list_owned_containers_args("job") {
+                let stdout = if args == crate::docker_lease::list_owned_containers_args("job") {
                     "guest-postgres\nbuildkit-one\n".into()
-                } else if args == &crate::docker_lease::list_owned_networks_args("job") {
+                } else if args == crate::docker_lease::list_owned_networks_args("job") {
                     "guest-net\n".into()
-                } else if args == &crate::docker_lease::list_owned_volumes_args("job") {
+                } else if args == crate::docker_lease::list_owned_volumes_args("job") {
                     "guest-vol\n".into()
                 } else {
                     String::new()
