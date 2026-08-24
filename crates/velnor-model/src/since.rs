@@ -32,14 +32,21 @@ impl Since {
     }
 
     /// Resolve against `now` into an absolute lower bound.
-    #[must_use]
-    pub fn resolve(self, now: Timestamp) -> Timestamp {
+    ///
+    /// Returns a typed error when the relative duration cannot be
+    /// represented as milliseconds or pushes the bound outside the
+    /// representable timestamp range; never saturates or panics.
+    pub fn resolve(self, now: Timestamp) -> Result<Timestamp, SinceResolveError> {
         match self {
-            Since::At(at) => at,
-            Since::Within(ms) => Timestamp(
+            Since::At(at) => Ok(at),
+            Since::Within(ms) => {
+                let millis = i64::try_from(ms.as_u64())
+                    .map_err(|_| SinceResolveError { ms: ms.as_u64() })?;
                 now.as_offset_datetime()
-                    - time::Duration::milliseconds(i64::try_from(ms.as_u64()).unwrap_or(i64::MAX)),
-            ),
+                    .checked_sub(time::Duration::milliseconds(millis))
+                    .map(Timestamp)
+                    .ok_or(SinceResolveError { ms: ms.as_u64() })
+            }
         }
     }
 }
@@ -78,6 +85,24 @@ impl fmt::Display for InvalidSince {
 }
 
 impl std::error::Error for InvalidSince {}
+
+/// A relative `--since` duration overflows when resolved against `now`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SinceResolveError {
+    ms: u64,
+}
+
+impl fmt::Display for SinceResolveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "--since duration {}ms overflows when resolved against now",
+            self.ms
+        )
+    }
+}
+
+impl std::error::Error for SinceResolveError {}
 
 trait FromStrMillis {
     fn from_str_millis(raw: &str) -> Result<u64, ()>;
@@ -160,7 +185,24 @@ mod tests {
     #[test]
     fn resolve_subtracts_within_bounds() {
         let now = Timestamp::parse("2026-08-24T12:30:45Z").unwrap();
-        let resolved = Since::Within(DurationMs(90_000)).resolve(now);
+        let resolved = Since::Within(DurationMs(90_000)).resolve(now).unwrap();
         assert_eq!(resolved.to_rfc3339().unwrap(), "2026-08-24T12:29:15Z");
+    }
+
+    #[test]
+    fn resolve_rejects_u64_max_milliseconds_with_typed_error() {
+        let now = Timestamp::parse("2026-08-24T12:30:45Z").unwrap();
+        let since = Since::parse("18446744073709551615ms").unwrap();
+        assert_eq!(since, Since::Within(DurationMs(u64::MAX)));
+        let err = since.resolve(now).unwrap_err();
+        assert_eq!(err, SinceResolveError { ms: u64::MAX });
+        assert!(err.to_string().contains("18446744073709551615ms"));
+    }
+
+    #[test]
+    fn resolve_rejects_duration_outside_representable_range() {
+        let now = Timestamp::parse("2026-08-24T12:30:45Z").unwrap();
+        let since = Since::parse("9223372036854775807ms").unwrap();
+        assert!(since.resolve(now).is_err());
     }
 }

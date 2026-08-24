@@ -43,8 +43,31 @@ impl fmt::Display for RepositoryRef {
 ///
 /// Construction strips any userinfo component (`user:password@`) so an
 /// endpoint URL with embedded credentials can never be serialized.
+/// Deserialization applies the same projection and fails closed: wire input
+/// that cannot be parsed into a sanitizable URL is rejected rather than
+/// stored verbatim.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct SanitizedUrl(String);
+
+/// Strip userinfo from a parsed URL.
+///
+/// Fails when parsing fails entirely; callers decide whether that degrades
+/// or propagates.
+fn sanitize(raw: &str) -> Result<String, url::ParseError> {
+    let mut parsed = url::Url::parse(raw)?;
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    Ok(parsed.to_string())
+}
+
+impl TryFrom<String> for SanitizedUrl {
+    type Error = url::ParseError;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        sanitize(&raw).map(Self)
+    }
+}
 
 impl SanitizedUrl {
     /// Project `raw` down to its scheme + host (+ port/path) form.
@@ -53,14 +76,7 @@ impl SanitizedUrl {
     /// degrades to the empty string rather than echoing unvetted input.
     #[must_use]
     pub fn project(raw: &str) -> Self {
-        match url::Url::parse(raw) {
-            Ok(mut parsed) => {
-                let _ = parsed.set_username("");
-                let _ = parsed.set_password(None);
-                Self(parsed.to_string())
-            }
-            Err(_) => Self(String::new()),
-        }
+        Self(sanitize(raw).unwrap_or_default())
     }
 
     /// The sanitized projection; never contains credentials.
@@ -135,6 +151,27 @@ mod tests {
     #[test]
     fn sanitized_url_degrades_unparseable_input_to_empty() {
         assert_eq!(SanitizedUrl::project("not a url at all").as_str(), "");
+    }
+
+    #[test]
+    fn deserialization_applies_credential_stripping_projection() {
+        let raw = r#""https://octocat:ghp_supersecret@github.example.com/octo/hook""#;
+        let clean: SanitizedUrl = serde_json::from_str(raw).unwrap();
+        assert_eq!(clean.as_str(), "https://github.example.com/octo/hook");
+        assert!(!clean.as_str().contains("ghp_"));
+        assert!(!clean.as_str().contains("octocat"));
+    }
+
+    #[test]
+    fn debug_output_of_deserialized_value_never_contains_wire_secret() {
+        let raw = r#""https://user:ghp_supersecret@host.example.com/x""#;
+        let clean: SanitizedUrl = serde_json::from_str(raw).unwrap();
+        assert!(!format!("{clean:?}").contains("ghp_supersecret"));
+    }
+
+    #[test]
+    fn deserialization_fails_closed_on_unparseable_url() {
+        assert!(serde_json::from_str::<SanitizedUrl>(r#""not a url at all""#).is_err());
     }
 
     #[test]
