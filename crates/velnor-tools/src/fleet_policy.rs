@@ -16,6 +16,10 @@ use std::{
 };
 use time::{Date, Month};
 
+use crate::fleet_policy_client::{
+    FleetGateway, ReqwestFleetHttp, RetryPolicy, DEFAULT_GITHUB_API_URL,
+};
+
 /// Version of the fleet-policy contract this module implements.
 pub const POLICY_CONTRACT_VERSION: &str = "1";
 /// Version of the deterministic generator producing canonical bytes.
@@ -693,14 +697,80 @@ pub struct FleetApplyArgs {
 const NOT_IMPLEMENTED_LIVE: &str =
     "live GitHub API client not implemented in this build (Plan 039 Step 2 continues)";
 
-pub fn fleet_policy(command: FleetPolicyCommand) -> Result<()> {
+/// Read the maintainer GitHub token from the environment. The value is never
+/// echoed; errors name only the variable.
+fn fleet_github_token() -> Result<String> {
+    for variable in ["GITHUB_TOKEN", "GH_TOKEN"] {
+        if let Ok(value) = std::env::var(variable) {
+            if !value.trim().is_empty() {
+                return Ok(value);
+            }
+        }
+    }
+    bail!("fleet operation requires a GitHub token in GITHUB_TOKEN (or GH_TOKEN); none found")
+}
+
+fn ensure_organization(policy: &OrgPolicy, organization: &str) -> Result<()> {
+    if organization != policy.organization {
+        bail!(
+            "field 'organization': requested '{organization}' but policy targets '{}'; refusing to operate",
+            policy.organization
+        );
+    }
+    Ok(())
+}
+
+async fn live_gateway<'a>(
+    http: &'a ReqwestFleetHttp,
+) -> Result<FleetGateway<'a, ReqwestFleetHttp>> {
+    let token = fleet_github_token()?;
+    Ok(FleetGateway::new(http, &token, RetryPolicy::default()))
+}
+
+pub async fn fleet_policy(command: FleetPolicyCommand) -> Result<()> {
     match command {
         FleetPolicyCommand::Plan(args) => fleet_plan(args),
-        FleetPolicyCommand::Audit(_) => {
-            bail!("fleet audit: static inputs accepted; {NOT_IMPLEMENTED_LIVE}")
-        }
-        FleetPolicyCommand::Apply(args) => fleet_apply(args),
+        FleetPolicyCommand::Audit(args) => fleet_audit(args).await,
+        FleetPolicyCommand::Apply(args) => fleet_apply(args).await,
     }
+}
+
+async fn fleet_audit(args: FleetAuditArgs) -> Result<()> {
+    let policy = load_policy(&args.policy)?;
+    ensure_organization(&policy, &args.organization)?;
+    let http = ReqwestFleetHttp::new(DEFAULT_GITHUB_API_URL, &fleet_github_token()?)?;
+    let gateway = live_gateway(&http).await?;
+    let mismatches = gateway.audit(&policy, &args.organization).await?;
+    if mismatches.is_empty() {
+        println!(
+            "fleet audit: '{}' matches the reviewed plan digest exactly",
+            args.organization
+        );
+        return Ok(());
+    }
+    println!("fleet audit: {} mismatch class(es):", mismatches.len());
+    for line in &mismatches {
+        println!("  {line}");
+    }
+    bail!("fleet audit: drift detected; no mutation was performed")
+}
+
+async fn fleet_apply(args: FleetApplyArgs) -> Result<()> {
+    let policy = load_policy(&args.policy)?;
+    ensure_organization(&policy, &args.organization)?;
+    // Digest gate before any HTTP call happens inside apply_reviewed_policy;
+    // verify here too so a stale digest never even builds a transport.
+    verify_plan_digest(&args.plan_digest, policy.digest()?.as_str())?;
+    let http = ReqwestFleetHttp::new(DEFAULT_GITHUB_API_URL, &fleet_github_token()?)?;
+    let gateway = live_gateway(&http).await?;
+    let stages = gateway
+        .apply_reviewed_policy(&policy, &args.organization, &args.plan_digest)
+        .await?;
+    println!("fleet apply: '{}':", args.organization);
+    for stage in &stages {
+        println!("  {stage}");
+    }
+    Ok(())
 }
 
 fn load_policy(path: &Path) -> Result<OrgPolicy> {
@@ -731,22 +801,6 @@ fn fleet_plan(args: FleetPlanArgs) -> Result<()> {
     println!("digest: {}", policy.digest()?);
     println!("note: observed-state section unavailable; {NOT_IMPLEMENTED_LIVE}");
     Ok(())
-}
-
-fn fleet_apply(args: FleetApplyArgs) -> Result<()> {
-    let policy = load_policy(&args.policy)?;
-    if args.organization != policy.organization {
-        bail!(
-            "field 'organization': requested '{args_organization}' but policy targets '{}'; refusing to mutate",
-            policy.organization,
-            args_organization = args.organization
-        );
-    }
-    verify_plan_digest(&args.plan_digest, policy.digest()?.as_str())?;
-    bail!(
-        "fleet apply: digest verified for '{}'; {NOT_IMPLEMENTED_LIVE}",
-        policy.organization
-    )
 }
 
 #[cfg(test)]
