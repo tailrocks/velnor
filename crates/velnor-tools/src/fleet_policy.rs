@@ -13,7 +13,7 @@ use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as ShaDigest, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{btree_map::Entry, BTreeMap, BTreeSet},
     fmt, fs,
     path::{Path, PathBuf},
 };
@@ -821,18 +821,35 @@ fn plan_policy_actions(
     policies: &[OrgPolicy],
     existing: &BTreeMap<String, Vec<u8>>,
 ) -> Result<BTreeMap<String, PlannedPolicyChange>> {
-    // Fail closed on ASCII-case-insensitive filename collisions (review G2):
-    // on case-insensitive filesystems (macOS APFS, Windows NTFS) a ledger org
-    // and an existing stem differing only by case map to one physical file,
-    // so two plan keys can make BTree order delete a just-written policy with
-    // exit 0. Bail with both spellings named BEFORE any write/remove is
-    // planned. Unreadable on-disk state aborts upstream for the same reason;
-    // refusing the run over partial mutation is intentional (review G4).
+    // Fail closed on ASCII-case-insensitive filename collisions (review G2,
+    // residual H1/H2): on case-insensitive filesystems (macOS APFS, Windows
+    // NTFS) two names differing only by ASCII case address one physical file.
+    // An intra-ledger pair would classify both spellings as Written and clobber
+    // one policy with exit 0; a stale-file pair would classify both as Removed
+    // so the second unlink fails ENOENT after the writes already applied —
+    // partial mutation either way. Bail naming both original spellings BEFORE
+    // any write/remove is planned. Unreadable on-disk state aborts upstream
+    // for the same reason; refusing the run over partial mutation is
+    // intentional (review G4).
     let mut planned_by_lowercase: BTreeMap<String, &str> = BTreeMap::new();
     for policy in policies {
-        planned_by_lowercase
-            .entry(policy.organization.to_ascii_lowercase())
-            .or_insert(&policy.organization);
+        match planned_by_lowercase.entry(policy.organization.to_ascii_lowercase()) {
+            Entry::Occupied(slot) => {
+                let first = *slot.get();
+                if first != policy.organization.as_str() {
+                    bail!(
+                        "fleet policy generation: case-insensitive organization-name collision \
+                         within the release-ref ledger between '{first}' and '{}'; both map to \
+                         '<org>-desired-policy.json' on a case-insensitive filesystem. \
+                         Deduplicate the ledger organizations before generating.",
+                        policy.organization
+                    );
+                }
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(&policy.organization);
+            }
+        }
     }
     for stem in existing.keys() {
         let lowercase_stem = stem.to_ascii_lowercase();
@@ -844,6 +861,30 @@ fn plan_policy_actions(
                      to '{stem}-desired-policy.json' on a case-insensitive filesystem. Rename \
                      or remove the stale file before generating."
                 );
+            }
+        }
+    }
+    // Stale-file pair check (residual H2): plan_policy_actions performs no
+    // filesystem mutation itself, and fleet_generate only writes/unlinks after
+    // this function returns Ok, so bailing here is strictly pre-mutation even
+    // when both colliding stems can only coexist on a case-sensitive volume.
+    let mut existing_by_lowercase: BTreeMap<String, &str> = BTreeMap::new();
+    for stem in existing.keys() {
+        match existing_by_lowercase.entry(stem.to_ascii_lowercase()) {
+            Entry::Occupied(slot) => {
+                let first = *slot.get();
+                if first != stem.as_str() {
+                    bail!(
+                        "fleet policy generation: case-insensitive filename collision between \
+                         stale policy files '{first}' and '{stem}' (both '-desired-policy.json'); \
+                         they map to one physical file on a case-insensitive filesystem, so their \
+                         removals could partially apply. Rename or remove one of them before \
+                         generating."
+                    );
+                }
+            }
+            Entry::Vacant(slot) => {
+                slot.insert(stem);
             }
         }
     }
@@ -1864,5 +1905,107 @@ mod tests {
         );
         let plan = plan_policy_actions(&policies, &exact).expect("exact case is not a collision");
         assert_eq!(plan[org].0, PolicyFileAction::Skipped);
+    }
+
+    #[test]
+    fn plan_bails_on_intra_ledger_case_duplicate_organizations() {
+        let lower = OrgPolicy::new("tailrocks").normalized();
+        let upper = OrgPolicy::new("Tailrocks").normalized();
+        assert_ne!(lower.organization, upper.organization);
+
+        let err = plan_policy_actions(&[lower, upper], &BTreeMap::new())
+            .expect_err("intra-ledger ASCII-case duplicate orgs must abort planning")
+            .to_string();
+        assert!(err.contains("case-insensitive"), "{err}");
+        assert!(err.contains("ledger"), "{err}");
+        assert!(err.contains("'tailrocks'"), "{err}");
+        assert!(err.contains("'Tailrocks'"), "{err}");
+    }
+
+    #[test]
+    fn generate_bails_on_intra_ledger_case_duplicate_before_any_mutation() {
+        let dir = PolicyDir::new("case-dupe-ledger");
+        let healthy = dir.path.join("ChainArgos-desired-policy.json");
+        fs::write(&healthy, b"drifted\n").expect("seed healthy org");
+        let pinned = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&healthy)
+            .expect("open")
+            .set_modified(pinned)
+            .expect("pin mtime");
+
+        let mut ledger = sample_ledger();
+        let mut upper = ledger.entries[0].clone();
+        upper.owner = "Tailrocks".to_owned();
+        ledger.entries.push(upper);
+        let ledger_path = dir.path.join("ledger.toml");
+        fs::write(
+            &ledger_path,
+            toml::to_string(&ledger).expect("serialize ledger"),
+        )
+        .expect("write ledger");
+
+        let args = FleetGenerateArgs {
+            ledger: ledger_path,
+            out_dir: dir.path.clone(),
+        };
+        let err = fleet_generate(args)
+            .expect_err("ASCII-case duplicate ledger orgs must abort generation")
+            .to_string();
+        assert!(err.contains("case-insensitive"), "{err}");
+        assert!(err.contains("'tailrocks'"), "{err}");
+        assert!(err.contains("'Tailrocks'"), "{err}");
+
+        // Zero mutations landed: the healthy org's file is content- and
+        // mtime-identical, and neither colliding spelling was ever written.
+        assert_eq!(
+            fs::read(&healthy).ok(),
+            Some(b"drifted\n".to_vec()),
+            "healthy org's policy file must be unchanged"
+        );
+        assert_eq!(
+            fs::metadata(&healthy)
+                .expect("metadata")
+                .modified()
+                .expect("mtime"),
+            pinned,
+            "healthy org's policy mtime must be unchanged"
+        );
+        assert!(
+            !dir.path.join("tailrocks-desired-policy.json").exists(),
+            "lowercase spelling must never be written"
+        );
+        assert!(
+            !dir.path.join("Tailrocks-desired-policy.json").exists(),
+            "capitalized spelling must never be written"
+        );
+    }
+
+    #[test]
+    fn plan_bails_on_case_colliding_stale_stems_before_any_write() {
+        let policies = vec![sample_policy()];
+        let mut existing = BTreeMap::new();
+        existing.insert("GHOST-ORG".to_owned(), b"stale uppercase\n".to_vec());
+        existing.insert("ghost-org".to_owned(), b"stale lowercase\n".to_vec());
+
+        let err = plan_policy_actions(&policies, &existing)
+            .expect_err("two stale stems colliding only by ASCII case must abort planning")
+            .to_string();
+        assert!(err.contains("case-insensitive"), "{err}");
+        assert!(err.contains("'GHOST-ORG'"), "{err}");
+        assert!(err.contains("'ghost-org'"), "{err}");
+
+        // Pre-mutation proof: fleet_generate performs no write or unlink
+        // until this function returns Ok, so an Err here leaves the tree
+        // untouched even though the healthy org would have classified
+        // Skipped and both stale stems Removed. Adding the healthy stem
+        // changes nothing about the refusal:
+        let mut with_healthy = existing;
+        with_healthy.insert(
+            "tailrocks".to_owned(),
+            format!("{}\n", policies[0].canonical_json().expect("canonical")).into_bytes(),
+        );
+        assert!(plan_policy_actions(&policies, &with_healthy).is_err());
     }
 }
