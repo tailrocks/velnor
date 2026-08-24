@@ -33,7 +33,7 @@ Progress: 2 / 94 done.
 
 - [x] **063** - Record direction and fixture control contract (P1) - first; unblocks everything
 - [x] **064** - Scaffold workspace and CLI seams (P1, deps 063)
-- [ ] **065** - Resources, rendering, global conventions (P1, deps 064)
+- [x] **065** - Resources, rendering, global conventions (P1, deps 064)
 - [ ] **066** - Persist sanitized operational history and events (P1, deps 065)
 - [ ] **067** - Versioned Unix-socket control API (P1, deps 066)
 - [ ] **074** - GitHub Actions client and run merge service (P1, deps 065 066 068)

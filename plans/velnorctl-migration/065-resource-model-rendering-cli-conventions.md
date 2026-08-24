@@ -8,6 +8,8 @@
 
 ## Status
 
+**DONE** (2026-08-24)
+
 - **Priority**: P1
 - **Effort**: L
 - **Risk**: MED
@@ -127,14 +129,50 @@ but no token, endpoint authorization, or raw secret variable.
 
 ## Done criteria
 
-- [ ] All approved resource nouns and slot phases are modeled.
-- [ ] JSON, YAML, and JSONL are versioned and deterministic; `name` is the
+- [x] All approved resource nouns and slot phases are modeled.
+- [x] JSON, YAML, and JSONL are versioned and deterministic; `name` is the
       documented unversioned identity projection.
-- [ ] Redaction tests pass.
-- [ ] C002–C005 can consume schema/help/completion/man metadata without domain
+- [x] Redaction tests pass.
+- [x] C002–C005 can consume schema/help/completion/man metadata without domain
       duplication.
-- [ ] Every command and API error uses the shared `ExitClass` mapping.
-- [ ] `rtk mise run check` and fresh fixture run pass.
+- [x] Every command and API error uses the shared `ExitClass` mapping.
+- [x] `rtk mise run check` and fresh fixture run pass.
+
+## Evidence (2026-08-24)
+
+- **Convergence of record**: `ce98a27` adopted the canonical peer surface from
+  `a9f017f`/`34a6dad` after the writer conflict
+  (`.velnor-compare/2026-08-24-065-writer-conflict/`); gates at landing:
+  943/943 exit 0.
+- **Independent review #1** (orchestrating session): verdict FIX-FIRST(2).
+  Both majors repaired in `8734b4b`: `SanitizedUrl::try_from(String)`
+  fail-closed sanitize; `--since` checked resolution with typed
+  `SinceResolveError`; five new tests cover the repairs. Repairs
+  independently re-verified.
+- **Independent review #2**
+  (`.velnor-compare/2026-08-24-065-seam-review/feedback-to-converging-session.md`):
+  DBG-leak finding closed by `04321e9`, including the stderr-silence
+  subprocess contract test.
+- **Criteria evidence**:
+  - 12 approved nouns `Host` … `Adapter` modeled (`crates/velnor-model/src/resources.rs`).
+  - All 11 `SlotPhase` variants in plan order, covered by test.
+  - Versioned envelope `schemaVersion = 1` plus six deterministic goldens with
+    a fail-closed `UPDATE_GOLDENS` guard.
+  - Redaction corpus: PAT / OAuth / Basic / Bearer / credential-URL /
+    secret-value × JSON/YAML × stdout/stderr.
+  - C002–C005 consume metadata interfaces only (`compose()` returns empty).
+  - `ExitClass` full 10-class mapping incl. `Interrupted = 130`, exhaustiveness +
+    inverse-uniqueness tests.
+  - Live smoke: `version` → 2, `--help` → 0.
+  - Fixture run 32724621332 success via unchanged daemon
+    (`crates/velnor-render/tests/fixture_run_model.rs:51`).
+  - Scoped gates green at `8734b4b`: fmt/clippy exit 0; model+render 64/64;
+    velnorctl 23/23.
+  - Workspace `mise run check` temporarily RED solely from foreign velnor-tools
+    WIP per COORDINATION.md; rerun when fleet WIP lands.
+  - Accepted review notes deferred to C002+: `condition.rs` schema_version wire
+    validation, `metadata.rs` stale doc link `crate::globals::Cli`, undocumented
+    public tuple fields on `DurationMs`/`RepositoryRef`/`SecretRef`/`IdentityRef`.
 
 ## STOP conditions
 

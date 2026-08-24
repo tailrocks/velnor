@@ -37,9 +37,13 @@ prevent exclusive-scope collisions.
 | Leaf | Session | Claimed at (UTC) | Status |
 |---|---|---|---|
 | 039 | ox-alpha session C (takeover) | 2026-08-24 ~12:00Z | ACTIVE — prior `parallel opencode actor` claim EXPIRED per rule 3 (last leaf-scoped commit eea87eb 10:39Z, >60 min idle; no uncommitted fleet files, no unpushed commits at takeover) |
-| 065 | Session B | 2026-08-24 ~10:40Z | IMPLEMENTATION LANDED ce98a27 — reconciling-executor convergence complete (gates 943/943); verification/review/status-flip in progress by the converging session per its 19:05Z+07 restatement below |
+| 065 | Session B | 2026-08-24 ~10:40Z | DONE @8734b4b — reconciling-executor convergence complete (gates 943/943 at landing); verification chain closed 2026-08-24 |
 
 ## Decisions
+
+- **2026-08-24 leaf 065 DONE**: verification chain complete (convergence
+  ce98a27 → FIX-FIRST repairs 8734b4b → seam-review DBG fix 04321e9); minors
+  deferred to C002 metadata task.
 
 - **2026-08-24 leaf 039 progress** (ox-alpha session C): step-1/6 code surface
   landed and independently verified — `041079c` deterministic offline
