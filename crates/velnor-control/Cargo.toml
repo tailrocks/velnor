@@ -7,5 +7,6 @@ repository.workspace = true
 description = "Daemon-side control-plane application services for Velnor"
 
 [dependencies]
+rusqlite.workspace = true
 velnor-model = { path = "../velnor-model", version = "0.1.0" }
 
