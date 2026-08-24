@@ -2159,6 +2159,12 @@ fn cache_step(
 fn gate_step(b: &mut Builder, gate: &Gate, run_gate: &str) {
     b.line(6, &format!("- name: {} gate", gate.name));
     b.line(8, &format!("uses: {run_gate}"));
+    // Gate commands are identical on both lanes, but a gate may invoke `gh`
+    // (for example remote-closure-check fetching a pinned action.yml). The
+    // Velnor fleet provides ambient runner auth; GitHub-hosted runners do not.
+    // Pin the token explicitly so no gate depends on ambient auth.
+    b.line(8, "env:");
+    b.line(10, "GH_TOKEN: ${{ github.token }}");
     b.line(8, "with:");
     b.line(10, &format!("name: {}", gate.name));
     b.line(10, &format!("command: {}", gate.command));

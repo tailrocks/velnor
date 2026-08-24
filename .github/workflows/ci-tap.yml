@@ -388,21 +388,29 @@ jobs:
         uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
       - name: install gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           name: install
           command: mise install --locked
       - name: build gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           name: build
           command: mise run build
       - name: lint gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           name: lint
           command: mise run lint
       - name: format gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           name: format
           command: mise run fmt
@@ -525,21 +533,29 @@ jobs:
         uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
       - name: install gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           name: install
           command: mise install --locked
       - name: build gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           name: build
           command: mise run build
       - name: lint gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           name: lint
           command: mise run lint
       - name: format gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           name: format
           command: mise run fmt
@@ -569,6 +585,8 @@ jobs:
         uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
       - name: test gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           name: test
           command: mise run test
@@ -1182,21 +1200,29 @@ jobs:
         uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
       - name: install gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           name: install
           command: mise install --locked
       - name: build gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           name: build
           command: mise run build
       - name: lint gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           name: lint
           command: mise run lint
       - name: format gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           name: format
           command: mise run fmt
@@ -1504,21 +1530,29 @@ jobs:
         uses: jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654 # v4.2.4
       - name: install gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           name: install
           command: mise install --locked
       - name: build gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           name: build
           command: mise run build
       - name: lint gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           name: lint
           command: mise run lint
       - name: format gate
         uses: tailrocks/velnor-actions/actions/run-gate@3057391f93f3bfc0fe570ee08cfcea9533ea3f92
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           name: format
           command: mise run fmt
