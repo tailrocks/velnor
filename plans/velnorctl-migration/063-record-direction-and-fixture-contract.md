@@ -132,6 +132,39 @@ literally (expression-parity observation).
 dedicated validation runner labeled `velnor-cp-queue-validation`; all other
 criteria evidenced.
 
+### Supersession 2026-08-24 (operator ruling): plural lanes restored
+
+The operator ruling of 2026-08-24 restored the plural `lanes` choice input
+(`velnor | github | both`, Velnor default) as the canonical estate dispatch
+selector; callable reusable workflows keep their singular `lane` input and
+callers derive it from `inputs.lanes`. Authority:
+`tailrocks/velnor-actions` origin/main `87b3c31..84a3d2c` (release
+`2026.8.31`) and fixture PRs #85–#88. This repository realigned at `85df3ab`
+("ci!: adopt canonical plural lanes selector estate-wide").
+
+Consequences for the evidence above:
+
+- The sole-lane adoption chain is HISTORICAL and superseded: `aed09eb` ci
+  adoption, generator branch `campaign/sole-lane-package-update` commit
+  `7296821`, and the fixture sole-lane merge (recorded as PR #90 /
+  `799178c`; live main carries the same corpus as squash merge #91,
+  `932d97d`). Any statement in this plan or in `.github/AGENTS.md` naming a
+  sole dispatch selector describes that superseded state.
+- The live gate is now the plural-`lanes` restoration on fixture
+  `compat.yml` + `control-plane.yml`: fixture PR
+  https://github.com/tailrocks/velnor-actions-fixture/pull/92 (branch
+  `campaign/restore-lanes-corpus`, commit `106328f`; restores the exact #87
+  input block, `inputs.lanes` derivation in all matrix expressions, all eight
+  scenario semantics unchanged, and realigns the workflow-surface audit to
+  the canonical selector). Callable pin remains `eeb8a18` on release
+  `2026.8.31`. Gates: actionlint + workflow-surface audit + l2-closure +
+  nextest 7/7 green; PR checks CLEAN/MERGEABLE. Not merged by this campaign.
+
+**Status**: BLOCKED — unchanged: queue-isolation proof still requires an
+operator-provided dedicated validation runner labeled
+`velnor-cp-queue-validation`; Plan 063 stays blocked pending both that runner
+and the merge of the lanes-restoration PR above.
+
 ## Scope
 
 **Velnor repository**:

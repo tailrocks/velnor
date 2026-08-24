@@ -31,7 +31,7 @@ Progress: 0 / 94 done.
 
 ### Shared architecture (execute in order)
 
-- [-] **063** - Record direction and fixture control contract (P1) - first; unblocks everything (BLOCKED: queue-isolation infra)
+- [-] **063** - Record direction and fixture control contract (P1) - first; unblocks everything (BLOCKED: queue-isolation infra; lanes-restoration PR open)
 - [ ] **064** - Scaffold workspace and CLI seams (P1, deps 063)
 - [ ] **065** - Resources, rendering, global conventions (P1, deps 064)
 - [ ] **066** - Persist sanitized operational history and events (P1, deps 065)
