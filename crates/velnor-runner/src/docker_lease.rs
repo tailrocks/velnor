@@ -181,6 +181,29 @@ pub fn force_remove_container_args(ids: &[String]) -> Vec<String> {
     args
 }
 
+/// Docker Engine can issue concurrent DELETE requests when `docker rm` gets
+/// multiple docker-container BuildKit IDs. Created/removing BuildKit daemons
+/// then deadlock each other's removal and survive the bounded timeout. Keep
+/// this narrow helper for BuildKit only; ordinary guest containers are safe to
+/// remove in a batch.
+pub fn force_remove_containers_serially(
+    ids: &[String],
+    mut docker: impl FnMut(&[String]) -> Result<()>,
+) -> Result<()> {
+    let mut first_error = None;
+    for id in ids {
+        if let Err(error) = docker(&force_remove_container_args(std::slice::from_ref(id))) {
+            if first_error.is_none() {
+                first_error = Some(error.context(format!("remove BuildKit container {id}")));
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 pub fn force_remove_network_args(ids: &[String]) -> Vec<String> {
     let mut args = vec!["network".into(), "rm".into()];
     args.extend(ids.iter().cloned());
@@ -482,7 +505,7 @@ fn reclaim_orphan_job_buildkit_with_live(
     let formatted = docker(&list_job_buildkit_format_args())?;
     let ids = orphan_job_buildkit_ids(&formatted, live_jobs, daemon_id);
     if !ids.is_empty() {
-        docker(&force_remove_container_args(&ids)).map(|_| ())?;
+        force_remove_containers_serially(&ids, |args| docker(args).map(|_| ()))?;
     }
     let volumes = docker(&list_job_buildkit_volume_args())?;
     let volume_ids: Vec<String> = volumes
@@ -1292,6 +1315,7 @@ id-other\tpostgres\tvelnor-job-dead\t/var/lib/velnor/work/slot-2\trunning
              id-removing\tbuildx_buildkit_velnor-builder-dead0\tvelnor-job-dead\t\tremoving\n"
                 .to_string(),
             String::new(),
+            String::new(),
             "buildx_buildkit_velnor-builder-dead0_state\nbuildx_buildkit_velnor-builder-live0_state\n"
                 .to_string(),
             String::new(),
@@ -1308,8 +1332,12 @@ id-other\tpostgres\tvelnor-job-dead\t/var/lib/velnor/work/slot-2\trunning
         assert!(calls
             .iter()
             .any(|call| call == &list_job_buildkit_format_args()));
-        assert!(calls.iter().any(|call| call
-            == &force_remove_container_args(&["id-created".into(), "id-removing".into()])));
+        assert!(calls
+            .iter()
+            .any(|call| call == &force_remove_container_args(&["id-created".into()])));
+        assert!(calls
+            .iter()
+            .any(|call| call == &force_remove_container_args(&["id-removing".into()])));
         assert!(calls
             .iter()
             .any(|call| call == &list_job_buildkit_volume_args()));

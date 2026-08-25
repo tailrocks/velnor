@@ -3159,9 +3159,9 @@ where
         let ids =
             crate::docker_lease::job_buildkit_ids_for_job(&listed.stdout, &container.name, &scope);
         if !ids.is_empty() {
-            self.run_docker_remove_container(&crate::docker_lease::force_remove_container_args(
-                &ids,
-            ))?;
+            crate::docker_lease::force_remove_containers_serially(&ids, |args| {
+                self.run_docker_remove_container(args).map(|_| ())
+            })?;
         }
 
         // Buildx creates a named `<container>_state` volume. Docker's
@@ -10504,7 +10504,8 @@ esac
             executor.runner().calls,
             vec![
                 crate::docker_lease::list_job_buildkit_format_args(),
-                crate::docker_lease::force_remove_container_args(&["bk1".into(), "bk2".into()]),
+                crate::docker_lease::force_remove_container_args(&["bk1".into()]),
+                crate::docker_lease::force_remove_container_args(&["bk2".into()]),
                 vec![
                     "volume",
                     "ls",
