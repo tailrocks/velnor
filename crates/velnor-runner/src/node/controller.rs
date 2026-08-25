@@ -57,6 +57,10 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut jobs: HashMap<String, Child> = HashMap::new();
     let mut ready_announced = false;
     loop {
+        if crate::runner::draining() {
+            drain_children(&mut slots, &mut jobs).await?;
+            return Ok(());
+        }
         let cycle = reconcile_once(&args, &mut journal, &server, &mut slots, &mut jobs).await?;
         let _ = feed_after_cycle(cycle, !ready_announced);
         ready_announced = true;
@@ -69,6 +73,56 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// Stop idle controller-owned slot processes when the daemon receives SIGTERM.
+/// Job workers are deliberately left alone so systemd's stop timeout remains
+/// the outer bound for an in-flight job rather than turning an upgrade into a
+/// lost job. The daemon's drain flag lives in the supervisor process, so this
+/// explicit handoff is the process boundary that makes graceful drain real.
+async fn drain_children(
+    slots: &mut HashMap<String, Child>,
+    jobs: &mut HashMap<String, Child>,
+) -> anyhow::Result<()> {
+    for child in slots.values() {
+        request_child_shutdown(child)?;
+    }
+
+    loop {
+        reap(slots);
+        reap(jobs);
+        if slots.is_empty() && jobs.is_empty() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn request_child_shutdown(child: &Child) -> anyhow::Result<()> {
+    if child.id() == 0 {
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        // SAFETY: the PID comes from the live Child handle owned by this
+        // controller. SIGTERM lets the child exit through its normal signal
+        // path; SIGKILL remains systemd's final timeout action.
+        let result = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+        if result == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error.into());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = child;
+        anyhow::bail!("graceful controller-child shutdown requires a Unix target")
     }
 }
 

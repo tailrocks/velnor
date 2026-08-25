@@ -124,6 +124,19 @@ to four proven slot registrations concurrently, then commits `Registered` and
 parallax queue** and Jackin microjob queue/boot overhead; live before/after
 proof waits on exact runner-group policy reconciliation.
 
+### Runner fix — controller drain propagation
+
+Sentry `0.1.211` exposed a separate upgrade stall: systemd delivered SIGTERM to
+the daemon supervisor, but the child-process controller never observed the
+parent-only drain flag. It kept its two-second reconcile loop alive while five
+idle slot children remained, leaving the unit in `deactivating` for more than
+six minutes with no Docker job and zero registered runners. The structural fix
+hands the drain to controller-owned slot children with SIGTERM, keeps job
+workers alive for the systemd stop bound, and reaps both sets before exit.
+This removes the upgrade/drain queue without weakening in-flight job safety;
+live proof requires the corrected binary and the same exact runner-group
+policy admission used by the JIT test.
+
 ## 4. Unified workflow standard (cross-org)
 
 Both research passes agree with the marked contract; the deltas are:
