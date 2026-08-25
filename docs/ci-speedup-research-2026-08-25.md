@@ -169,10 +169,13 @@ asm! gaps), `-Zshare-generics=y -Zthreads=N`.
 2. Velnor #365/#370 — queue timing records plus daemon-bound doctor probes;
    Sentry now reports 73 samples instead of a false empty result.
 3. Velnor — Docker lifecycle gate: cross-daemon create/start/teardown control
-   mutations are serialized at `/run/velnor/docker-lifecycle.lock`, while job
-   containers remain concurrent. The pre-gate burst proved the root cause:
-   isolated boot was 0.4–3.7s and teardown 0.6–5.9s, but an eight-slot burst
-   produced 11.6–70.5s boot and 12.1–42.1s teardown tails. This targets the
-   dockerd control-plane contention directly; the next Sentry burst measures
-   whether the tails collapse without reducing job parallelism.
+   mutations are bounded at two host-wide permits by default (`/run/velnor/
+   docker-lifecycle.lock` plus numbered sibling locks), while job containers
+   remain concurrent. The pre-gate burst proved the root cause: isolated boot
+   was 0.4–3.7s and teardown 0.6–5.9s, but an eight-slot burst produced
+   11.6–70.5s boot and 12.1–42.1s teardown tails. v0.1.209 then proved that
+   full serialization fixes contention but makes the gate itself the queue:
+   broker pickup stayed below 1.1s while container boot reached 42.7s. The
+   bounded gate preserves the race fix without turning eight slots into one.
+   `VELNOR_DOCKER_LIFECYCLE_CONCURRENCY` permits controlled tuning from 1–8.
 4. This document + adoption roadmap (P1 next implementation target).
