@@ -419,21 +419,39 @@ fn build_rootfs(
         GuestArch::X86_64 => "amd64",
         GuestArch::Aarch64 => "arm64",
     };
-    let mmdebstrap = runner.run(
-        "env",
-        &[
-            "SOURCE_DATE_EPOCH=0".into(),
-            "mmdebstrap".into(),
-            "--variant=minbase".into(),
-            format!("--include={includes}"),
-            format!("--architectures={deb_arch}"),
-            "--components=main,universe".into(),
-            "noble".into(),
-            tree.display().to_string(),
-        ],
-    );
+    // mmdebstrap's unprivileged modes need user namespaces that CI job
+    // sandboxes routinely block; prefer real root via passwordless sudo when
+    // available and hand the tree back to the invoking user afterwards.
+    let (prefix, elevated) = root_mmdebstrap_prefix(runner);
+    let mut mmdebstrap_args = prefix;
+    mmdebstrap_args.extend([
+        "SOURCE_DATE_EPOCH=0".into(),
+        "mmdebstrap".into(),
+        "--variant=minbase".into(),
+        format!("--include={includes}"),
+        format!("--architectures={deb_arch}"),
+        "--components=main,universe".into(),
+        "noble".into(),
+        tree.display().to_string(),
+    ]);
+    let mmdebstrap = runner.run("env", &mmdebstrap_args);
     match mmdebstrap {
-        Ok(result) if result.code == 0 => {}
+        Ok(result) if result.code == 0 => {
+            if elevated {
+                run(
+                    runner,
+                    "sudo",
+                    &[
+                        "-n".into(),
+                        "chown".into(),
+                        "-R".into(),
+                        format!("{}:{}", unix_uid(), unix_gid()),
+                        tree.display().to_string(),
+                    ],
+                    "guest.rootfs",
+                )?;
+            }
+        }
         Ok(result) => {
             return Err(MicroVmPreflightFailure::new(
                 "guest.rootfs",
@@ -509,6 +527,56 @@ fn build_rootfs(
         "guest.rootfs",
     )?;
     Ok(())
+}
+
+/// Prefix args that run mmdebstrap as real root when the invoking user has
+/// passwordless sudo. Empty when already root (no prefix needed) or when sudo
+/// is unavailable (fall back to mmdebstrap's automatic mode selection).
+fn root_mmdebstrap_prefix(runner: &mut dyn CommandRunner) -> (Vec<String>, bool) {
+    if unix_euid() == 0 {
+        return (Vec::new(), false);
+    }
+    let probe = runner.run("sudo", &["-n".to_string(), "true".to_string()]);
+    if matches!(probe, Ok(result) if result.code == 0) {
+        // `env sudo -n env SOURCE_DATE_EPOCH=0 mmdebstrap ...`: sudo's
+        // env_reset keeps the variable only when set by a root `env`.
+        (vec!["sudo".into(), "-n".into(), "env".into()], true)
+    } else {
+        (Vec::new(), false)
+    }
+}
+
+#[cfg(unix)]
+fn unix_euid() -> u32 {
+    // SAFETY: geteuid takes no arguments and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(not(unix))]
+fn unix_euid() -> u32 {
+    1
+}
+
+#[cfg(unix)]
+fn unix_uid() -> u32 {
+    // SAFETY: getuid takes no arguments and cannot fail.
+    unsafe { libc::getuid() }
+}
+
+#[cfg(not(unix))]
+fn unix_uid() -> u32 {
+    1
+}
+
+#[cfg(unix)]
+fn unix_gid() -> u32 {
+    // SAFETY: getgid takes no arguments and cannot fail.
+    unsafe { libc::getgid() }
+}
+
+#[cfg(not(unix))]
+fn unix_gid() -> u32 {
+    1
 }
 
 fn debian_package(spec: &str) -> &str {
