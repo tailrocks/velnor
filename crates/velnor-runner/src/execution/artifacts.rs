@@ -82,12 +82,23 @@ impl MicroVmArtifactSet {
         let bytes = fs
             .read(&manifest_path)
             .map_err(|detail| MicroVmPreflightFailure::new("artifacts.manifest", detail))?;
-        let mut checksums: ArtifactChecksums = serde_json::from_slice(&bytes).map_err(|error| {
+        let file: ManifestFile = serde_json::from_slice(&bytes).map_err(|error| {
             MicroVmPreflightFailure::new(
                 "artifacts.manifest",
                 format!("invalid manifest.json: {error}"),
             )
         })?;
+        let arch = host_arch()?;
+        let mut checksums = ArtifactChecksums {
+            firecracker_version: file.firecracker_version,
+            jailer_version: file.jailer_version,
+            firecracker: file.firecracker.resolve("firecracker", arch)?,
+            jailer: file.jailer.resolve("jailer", arch)?,
+            kernel: file.kernel.resolve("kernel", arch)?,
+            rootfs: file.rootfs.resolve("rootfs", arch)?,
+            guest_agent: file.guest_agent.resolve("guest_agent", arch)?,
+            snapshot: file.snapshot,
+        };
         parse_pins()?;
         require_pin_version(
             "artifacts.firecracker_version",
@@ -120,6 +131,51 @@ fn require_pin_version(
             field,
             format!("manifest {got} != pinned {expected}"),
         ))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+enum PinnedDigest {
+    One(String),
+    ByArch(std::collections::BTreeMap<String, String>),
+}
+
+impl PinnedDigest {
+    fn resolve(&self, field: &str, arch: &str) -> Result<String, MicroVmPreflightFailure> {
+        match self {
+            Self::One(value) => Ok(value.clone()),
+            Self::ByArch(map) => map.get(arch).cloned().ok_or_else(|| {
+                MicroVmPreflightFailure::new(
+                    "artifacts.checksum",
+                    format!("{field} has no pin for {arch}"),
+                )
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+struct ManifestFile {
+    firecracker_version: String,
+    jailer_version: String,
+    firecracker: PinnedDigest,
+    jailer: PinnedDigest,
+    kernel: PinnedDigest,
+    rootfs: PinnedDigest,
+    guest_agent: PinnedDigest,
+    #[serde(default)]
+    snapshot: Option<String>,
+}
+
+fn host_arch() -> Result<&'static str, MicroVmPreflightFailure> {
+    match std::env::consts::ARCH {
+        "x86_64" => Ok("x86_64"),
+        "aarch64" => Ok("aarch64"),
+        other => Err(MicroVmPreflightFailure::new(
+            "guest.arch",
+            format!("no microVM artifact pin for {other}"),
+        )),
     }
 }
 
@@ -188,6 +244,8 @@ struct FirecrackerTarballPin {
     sha256: String,
     firecracker_member: String,
     jailer_member: String,
+    firecracker_sha256: String,
+    jailer_sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
@@ -295,6 +353,8 @@ fn parse_pins() -> Result<MicroVmPinsFile, MicroVmPreflightFailure> {
             )
         })?;
         require_sha256(&format!("{arch}.tarball"), &tarball.sha256)?;
+        require_sha256(&format!("{arch}.firecracker"), &tarball.firecracker_sha256)?;
+        require_sha256(&format!("{arch}.jailer"), &tarball.jailer_sha256)?;
     }
     Ok(pins)
 }

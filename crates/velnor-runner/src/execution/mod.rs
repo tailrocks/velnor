@@ -11,6 +11,7 @@ mod docker;
 mod firecracker;
 mod guest;
 mod guest_agent;
+mod guest_image;
 mod guest_runtime;
 mod isolation;
 mod net;
@@ -38,6 +39,10 @@ pub use guest::{
 #[cfg(target_os = "linux")]
 pub use guest_agent::{accept_af_vsock, bind_af_vsock};
 pub use guest_agent::{serve_guest_session, GuestSessionEnv};
+pub use guest_image::{
+    build_guest_image, build_guest_image_cli, merged_kernel_fragment, stage_release_dir,
+    verify_kernel_tarball, GuestArch, GuestImageRequest, BOOT_KCONFIG,
+};
 pub use guest_runtime::{
     execute_guest_plan, handle_delivered_plan, host_vsock_connect_path, LoopbackVsock,
     UnixVsockChannel, GUEST_AGENT_PORT,

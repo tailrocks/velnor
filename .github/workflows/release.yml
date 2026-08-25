@@ -280,8 +280,76 @@ jobs:
             image-index.digest
             manifest.json
 
+  guest-image:
+    needs: identity
+    name: Guest kernel/rootfs ${{ matrix.arch }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            deb: amd64
+          - arch: aarch64
+            deb: arm64
+    runs-on: ${{ (((github.event_name == 'workflow_dispatch') && inputs.lanes == 'github') || (github.event_name == 'push') || ((github.event_name != 'workflow_dispatch') && vars.VELNOR_AUTOMATIC_LANES == 'github')) && (matrix.deb == 'arm64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04') || fromJSON('["self-hosted", "velnor-target-mvp"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.identity.outputs.commit }}
+          fetch-depth: 1
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Normalize immutable release checkout
+        env:
+          SOURCE_COMMIT: ${{ needs.identity.outputs.commit }}
+        run: |
+          set -euo pipefail
+          git cat-file -e "${SOURCE_COMMIT}^{commit}"
+          git checkout --detach "$SOURCE_COMMIT"
+          [ "$(git rev-parse HEAD)" = "$SOURCE_COMMIT" ] || { echo "::error::checkout did not reach $SOURCE_COMMIT" >&2; exit 1; }
+
+      - uses: jdx/mise-action@3c2e0cf82a5b2e5249f0d3635a4d83d0ae861518 # v4.2.5
+        with:
+          install_args: "rust"
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install kernel and rootfs build packages
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison bc libssl-dev libelf-dev xz-utils e2fsprogs \
+            mmdebstrap debootstrap qemu-user-static binfmt-support \
+            gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu
+
+      - name: Download pinned kernel tarball
+        run: |
+          set -euo pipefail
+          url="$(jq -er '.kernel_tarball' microvm/pins.json)"
+          sha="$(jq -er '.kernel_tarball_sha256' microvm/pins.json)"
+          curl -fsSL -o linux.tar.xz "$url"
+          echo "$sha  linux.tar.xz" | sha256sum -c -
+
+      - name: Build guest vmlinux and rootfs.ext4
+        run: |
+          set -euo pipefail
+          mkdir -p dist/microvm
+          cargo run -p velnor-runner --bin velnor-guest-image --locked -- \
+            build --arch "${{ matrix.arch }}" --out dist/microvm --tarball linux.tar.xz
+          test -s dist/microvm/vmlinux
+          test -s dist/microvm/rootfs.ext4
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: guest-image-${{ matrix.arch }}
+          path: |
+            dist/microvm/vmlinux
+            dist/microvm/rootfs.ext4
+
   build:
-    needs: [identity, metadata]
+    needs: [identity, metadata, guest-image]
     name: Build ${{ matrix.arch }} binary + deb (release-build)
     timeout-minutes: 60
     strategy:
@@ -396,6 +464,11 @@ jobs:
           cp release-metadata/build-identity.json crates/velnor-runner/release/build-identity.json
           cp release-metadata/manifest.json crates/velnor-runner/release/manifest.json
 
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: guest-image-${{ matrix.arch == 'amd64' && 'x86_64' || 'aarch64' }}
+          path: guest-image
+
       - name: Stage pinned Firecracker, jailer, and guest agent
         env:
           TARGET: ${{ matrix.target }}
@@ -418,30 +491,29 @@ jobs:
           cp "extracted/${fc_member}" crates/velnor-runner/release/microvm/firecracker
           cp "extracted/${jailer_member}" crates/velnor-runner/release/microvm/jailer
           cp "target/${TARGET}/release/velnor-guest-agent" crates/velnor-runner/release/microvm/velnor-guest-agent
+          test -s guest-image/vmlinux || { echo "::error::guest-image missing vmlinux" >&2; exit 1; }
+          test -s guest-image/rootfs.ext4 || { echo "::error::guest-image missing rootfs.ext4" >&2; exit 1; }
+          cp guest-image/vmlinux crates/velnor-runner/release/microvm/vmlinux
+          cp guest-image/rootfs.ext4 crates/velnor-runner/release/microvm/rootfs.ext4
           chmod 0755 \
             crates/velnor-runner/release/microvm/firecracker \
             crates/velnor-runner/release/microvm/jailer \
             crates/velnor-runner/release/microvm/velnor-guest-agent
           fc_sha="$(sha256sum crates/velnor-runner/release/microvm/firecracker | awk '{print $1}')"
           jailer_sha="$(sha256sum crates/velnor-runner/release/microvm/jailer | awk '{print $1}')"
-          agent_sha="$(sha256sum crates/velnor-runner/release/microvm/velnor-guest-agent | awk '{print $1}')"
-          jq -n \
-            --arg fv "$(jq -er '.firecracker_version' microvm/pins.json)" \
-            --arg jv "$(jq -er '.jailer_version' microvm/pins.json)" \
-            --arg fc "$fc_sha" \
-            --arg jailer "$jailer_sha" \
-            --arg kernel "$(jq -er '.kernel' microvm/manifest.json)" \
-            --arg rootfs "$(jq -er '.rootfs' microvm/manifest.json)" \
-            --arg agent "$agent_sha" \
-            '{
-              firecracker_version: $fv,
-              jailer_version: $jv,
-              firecracker: $fc,
-              jailer: $jailer,
-              kernel: $kernel,
-              rootfs: $rootfs,
-              guest_agent: $agent
-            }' > crates/velnor-runner/release/microvm/manifest.json
+          expected_fc="$(jq -er --arg a "$pin_arch" '.tarballs[$a].firecracker_sha256' microvm/pins.json)"
+          expected_jailer="$(jq -er --arg a "$pin_arch" '.tarballs[$a].jailer_sha256' microvm/pins.json)"
+          [ "$fc_sha" = "$expected_fc" ] || { echo "::error::firecracker sha $fc_sha != pin $expected_fc" >&2; exit 1; }
+          [ "$jailer_sha" = "$expected_jailer" ] || { echo "::error::jailer sha $jailer_sha != pin $expected_jailer" >&2; exit 1; }
+          cargo run -p velnor-runner --bin velnor-guest-image --locked -- \
+            stage --root crates/velnor-runner/release/microvm
+          kernel="$(jq -er '.kernel' crates/velnor-runner/release/microvm/manifest.json)"
+          rootfs="$(jq -er '.rootfs' crates/velnor-runner/release/microvm/manifest.json)"
+          case "$kernel$rootfs" in
+            *UNSET*) echo "::error::staged kernel/rootfs checksum is still UNSET" >&2; exit 1 ;;
+          esac
+          [ "${#kernel}" -eq 64 ] || { echo "::error::kernel sha256 length ${#kernel}" >&2; exit 1; }
+          [ "${#rootfs}" -eq 64 ] || { echo "::error::rootfs sha256 length ${#rootfs}" >&2; exit 1; }
 
       - name: Build .deb (version pinned to the tag)
         run: |
@@ -470,6 +542,8 @@ jobs:
           grep -q "usr/share/velnor/microvm/firecracker" "$manifest" || { echo "::error::deb missing firecracker" >&2; exit 1; }
           grep -q "usr/share/velnor/microvm/jailer" "$manifest" || { echo "::error::deb missing jailer" >&2; exit 1; }
           grep -q "usr/share/velnor/microvm/velnor-guest-agent" "$manifest" || { echo "::error::deb missing packaged guest-agent" >&2; exit 1; }
+          grep -q "usr/share/velnor/microvm/vmlinux" "$manifest" || { echo "::error::deb missing guest kernel" >&2; exit 1; }
+          grep -q "usr/share/velnor/microvm/rootfs.ext4" "$manifest" || { echo "::error::deb missing guest rootfs" >&2; exit 1; }
           grep -q "usr/share/velnor/job-ubuntu.Dockerfile" "$manifest" || { echo "::error::deb missing canonical Dockerfile" >&2; exit 1; }
           [ "$(stat -c%s "$src")" -gt 1000000 ] || { echo "::error::deb suspiciously small: $(stat -c%s "$src") bytes" >&2; exit 1; }
           dst="velnor-runner-${VERSION}-${{ matrix.arch }}.deb"

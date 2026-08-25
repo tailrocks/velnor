@@ -18,6 +18,10 @@ path = "src/main.rs"
 name = "velnor-guest-agent"
 path = "src/bin/velnor-guest-agent.rs"
 
+[[bin]]
+name = "velnor-guest-image"
+path = "src/bin/velnor-guest-image.rs"
+
 # Debian packaging (cargo-deb).
 # The unified release.yml (on tag) handles:
 #   cargo zigbuild --release --locked --target $TGT
@@ -74,6 +78,8 @@ assets = [
   ["release/microvm/firecracker", "usr/share/velnor/microvm/firecracker", "755"],
   ["release/microvm/jailer", "usr/share/velnor/microvm/jailer", "755"],
   ["release/microvm/velnor-guest-agent", "usr/share/velnor/microvm/velnor-guest-agent", "755"],
+  ["release/microvm/vmlinux", "usr/share/velnor/microvm/vmlinux", "644"],
+  ["release/microvm/rootfs.ext4", "usr/share/velnor/microvm/rootfs.ext4", "644"],
   # Plan 010: the release workflow writes these two acyclic-safe identity files
   # (they depend only on the source, NOT on the deb digest, so shipping them
   # inside the deb creates no cycle) into release/ before `cargo deb`. postinst
