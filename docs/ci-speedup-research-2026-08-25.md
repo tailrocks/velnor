@@ -78,32 +78,39 @@ live Velnor proof remains required before claiming CI speedup.
 
 ## 3. Ranked bottleneck list
 
-1. **Fleet admission latency**: parallax waited 425 s queued; jackin micro-jobs
+1. **GitHub Actions build-output cache gate**: two same-head GitHub-lane
+   dispatches (`32887769954`, `32887914488`) entered
+   `Restore and publish build-output cache` before toolchain/build work and
+   made no step transition for more than two minutes. Both were cancelled by
+   the bounded-wait rule. Root cause is not yet proven because GitHub withholds
+   live logs for an active job; inspect cache-key contention/upload behavior
+   before merging a workflow fix.
+2. **Fleet admission latency**: parallax waited 425 s queued; jackin micro-jobs
    lose more time to queue+JIT boot than to work. Work items: keep N pre-warmed
    JIT registrations per slot instead of discard-per-cycle, measure pickup SLO
    from forensics `job-timing` records, and expose a fleet saturation signal so
    capacity grows before queues form.
-2. **Conditional native BuildKit CacheService**: Velnor currently forwards
+3. **Conditional native BuildKit CacheService**: Velnor currently forwards
    GitHub's cache endpoint and the Java registry-primary workflow is fast, but
    workflows without a registry cache still depend on GitHub's remote service.
    Implement only after a scoped protocol canary proves a material win.
-3. **kestra-build-publish.yml (java-monorepo)** builds four images with bare
+4. **kestra-build-publish.yml (java-monorepo)** builds four images with bare
    `docker buildx` and no `cache-from/to`; only an exists-check skips them.
    Give it the registry-buildcache pattern below.
-4. **Registry-primary docker caching everywhere** (shipped pattern): jackin
+5. **Registry-primary docker caching everywhere** (shipped pattern): jackin
    `construct.yml` already does `type=registry,ref=<image>:buildcache-<arch>`
    written by main, restored by both lanes. Ported to java-monorepo
    `rust-docker.yml` this cycle (PR chainargos/java-monorepo#1976) as the
    immediate fix while P1 lands; expected 28 → ~5 min warm without any runner
    change.
-5. **Redundant target-layer caches**: parallax keys `target/` archives with
+6. **Redundant target-layer caches**: parallax keys `target/` archives with
    `github.sha` (new archive per commit), tablerock native trio archives whole
    `target/`, jackin release stacks Swatinem/rust-cache on top of sccache.
    Delete them; sccache (already present) owns compiler outputs per doctrine.
-6. **jackin macOS menu-bar job on main CI**: 26 min pushes dominated by one
+7. **jackin macOS menu-bar job on main CI**: 26 min pushes dominated by one
    1592 s packaging job — move to desktop-cadence/release or split with
    DerivedData caching.
-7. **parallax storage-integration cold bring-up**: 316 s warm vs 4841 s cold;
+8. **parallax storage-integration cold bring-up**: 316 s warm vs 4841 s cold;
    seedable service containers collapse the cold case.
 
 ### Runner fix — bounded JIT admission
