@@ -10,6 +10,7 @@ mod cache_transport;
 mod docker;
 mod firecracker;
 mod guest;
+mod guest_runtime;
 mod isolation;
 mod net;
 mod snapshot;
@@ -26,15 +27,50 @@ pub use cache_transport::{publish_on_success, CacheBlob, CacheTransportError};
 pub use docker::DockerBackend;
 pub use firecracker::{
     restore_or_cold_boot, FirecrackerApi, FirecrackerBackend, RecordingFirecracker,
+    FIRECRACKER_GUEST_CID,
 };
 pub use guest::{
     validate_guest_toml, validate_kernel_config, validate_rootfs_packages, KERNEL_TARBALL,
     KERNEL_VERSION, ROOTFS_PACKAGES,
 };
+pub use guest_runtime::{
+    execute_guest_plan, handle_delivered_plan, host_vsock_connect_path, LoopbackVsock,
+    UnixVsockChannel, GUEST_AGENT_PORT,
+};
 pub use isolation::{IsolationIdentity, IsolationResources};
 pub use net::{nftables_commands, teardown_is_exact, teardown_net_commands};
 pub use snapshot::SnapshotIdentity;
 pub use unix_api::UnixFirecrackerClient;
+
+/// Guest-agent entry: decode a vsock plan and run it on the local Docker daemon.
+///
+/// # Errors
+/// Plan decode or guest Docker failure.
+pub fn run_guest_plan_bytes(plan_bytes: &[u8]) -> Result<i32, String> {
+    let mut runner = crate::executor::ProcessCommandRunner;
+    let mut events = Vec::new();
+    handle_delivered_plan(plan_bytes, &mut runner, &mut events)
+}
+
+/// Production GitHub job engine owned by the Docker backend.
+pub trait ProductionDockerEngine {
+    /// # Errors
+    /// Docker job execution failures.
+    fn execute_github_job(
+        &mut self,
+        events: &mut Vec<ExecutionEvent>,
+    ) -> Result<(), ExecutionError>;
+}
+
+/// Host vsock channel (Firecracker UDS or a test loopback).
+pub trait VsockChannel {
+    /// # Errors
+    /// Transport failure.
+    fn send(&mut self, message: velnor_model::VsockMessage) -> Result<(), String>;
+    /// # Errors
+    /// Transport failure.
+    fn recv(&mut self) -> Result<velnor_model::VsockMessage, String>;
+}
 
 use std::path::{Path, PathBuf};
 
@@ -93,17 +129,27 @@ pub fn run_validated_job(
     session.reserve(world)?;
     session.prepare(plan, world)?;
     session.start(world)?;
-    if plan.cancel_requested {
-        session.cancel(world)?;
+    let run_result = if plan.cancel_requested {
+        session.cancel(world)
     } else {
-        session.execute(plan, world)?;
-    }
-    let mut outcome = session.collect()?;
-    let torn = session.teardown(world)?;
-    outcome.cleaned = torn.cleaned;
+        session.execute(plan, world)
+    };
+    let collect_result = if run_result.is_ok() {
+        Some(session.collect())
+    } else {
+        None
+    };
+    let torn = session.teardown(world);
     if file.backend() == ExecutionBackendKind::MicroVm && session.used_host_docker() {
         return Err(ExecutionError::HostDockerForbidden);
     }
+    run_result?;
+    let mut outcome = match collect_result {
+        Some(result) => result?,
+        None => return Err(ExecutionError::CollectBeforeStop),
+    };
+    let torn = torn?;
+    outcome.cleaned = torn.cleaned;
     Ok(outcome)
 }
 
@@ -115,6 +161,11 @@ pub struct ExecutionWorld<'a> {
     pub runner: &'a mut dyn CommandRunner,
     pub firecracker: &'a mut dyn FirecrackerApi,
     pub host_fs: &'a mut dyn HostFs,
+    pub vsock: Option<&'a mut dyn VsockChannel>,
+    pub docker_engine: Option<&'a mut dyn ProductionDockerEngine>,
+    /// Tests may run the guest plan against an injected `CommandRunner`.
+    /// Production microVM execute requires [`Self::vsock`].
+    pub allow_inline_guest_plan: bool,
 }
 
 /// Host filesystem operations used by isolation cleanup and artifact checks.

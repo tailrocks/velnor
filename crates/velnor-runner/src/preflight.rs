@@ -30,6 +30,9 @@ fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) ->
             runner,
             firecracker: &mut api,
             host_fs: &mut fs,
+            vsock: None,
+            docker_engine: None,
+            allow_inline_guest_plan: false,
         };
         crate::execution::FirecrackerBackend::preflight(&mut world)?;
         println!(

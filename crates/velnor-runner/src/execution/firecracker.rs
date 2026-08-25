@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use velnor_model::{MicroVmKind, MicroVmPreflightFailure};
+use velnor_model::{MicroVmKind, MicroVmPreflightFailure, VsockMessage};
 
 use super::artifacts::{verify_microvm_artifacts, MicroVmArtifactSet, FIRECRACKER_VERSION};
 use super::backend::{ExecutionError, ExecutionEvent, ValidatedPlan};
@@ -106,6 +106,9 @@ impl FirecrackerApi for RecordingFirecracker {
         Ok(())
     }
 }
+
+/// Firecracker guest CID used for vsock.
+pub const FIRECRACKER_GUEST_CID: u32 = 3;
 
 /// One jailed Firecracker process per GitHub job.
 #[derive(Debug, Default)]
@@ -216,7 +219,7 @@ impl FirecrackerBackend {
             .firecracker
             .put_network_interface("eth0", &resources.tap)
             .map_err(|detail| MicroVmPreflightFailure::new("firecracker.api", detail))?;
-        self.guest_cid = 3;
+        self.guest_cid = FIRECRACKER_GUEST_CID;
         world
             .firecracker
             .put_vsock(self.guest_cid, &resources.vsock)
@@ -246,39 +249,35 @@ impl FirecrackerBackend {
         world: &mut ExecutionWorld<'_>,
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
-        let _ = world;
-        if plan.cancel_requested {
-            events.push(ExecutionEvent::Log {
-                stream: 1,
-                line: "cancel".into(),
-            });
-            return Ok(());
+        let guest = plan.to_guest(&format!("job-{}", plan.job_id), 1);
+        let bytes = guest
+            .encode()
+            .map_err(|detail| MicroVmPreflightFailure::new("vsock.plan", detail))?;
+        events.push(ExecutionEvent::FirecrackerApi("vsock DeliverPlan".into()));
+        if let Some(vsock) = world.vsock.as_mut() {
+            return drive_vsock(
+                &mut **vsock,
+                VsockMessage::DeliverPlan {
+                    isolation_id: guest.isolation_id,
+                    generation: guest.generation,
+                    plan_bytes: bytes,
+                },
+                events,
+            );
         }
-        if plan.timeout_ms == 0 {
-            events.push(ExecutionEvent::Log {
-                stream: 1,
-                line: "timeout".into(),
-            });
-            return Ok(());
+        if !world.allow_inline_guest_plan {
+            return Err(MicroVmPreflightFailure::new(
+                "vsock",
+                "microvm execute requires a vsock channel",
+            )
+            .into());
         }
-        if plan.fail {
+        let code = super::guest_runtime::handle_delivered_plan(&bytes, world.runner, events)
+            .map_err(|detail| MicroVmPreflightFailure::new("guest.docker", detail))?;
+        if code != 0 && !super::guest_runtime::has_terminal_log(events) {
             events.push(ExecutionEvent::Log {
                 stream: 1,
                 line: "failure".into(),
-            });
-            return Ok(());
-        }
-        events.push(ExecutionEvent::GuestDocker(format!(
-            "job container {}",
-            plan.job_container_image
-        )));
-        for service in &plan.service_images {
-            events.push(ExecutionEvent::GuestDocker(format!("service {service}")));
-        }
-        for step in &plan.steps {
-            events.push(ExecutionEvent::Log {
-                stream: 1,
-                line: format!("*** {step} ***"),
             });
         }
         Ok(())
@@ -296,6 +295,37 @@ impl FirecrackerBackend {
             line: "cancel".into(),
         });
         Ok(())
+    }
+}
+
+fn drive_vsock(
+    vsock: &mut dyn super::VsockChannel,
+    message: VsockMessage,
+    events: &mut Vec<ExecutionEvent>,
+) -> Result<(), ExecutionError> {
+    vsock
+        .send(message)
+        .map_err(|detail| MicroVmPreflightFailure::new("vsock", detail))?;
+    loop {
+        match vsock
+            .recv()
+            .map_err(|detail| MicroVmPreflightFailure::new("vsock", detail))?
+        {
+            VsockMessage::TeardownAck { .. } => return Ok(()),
+            VsockMessage::StepCompleted { exit_code, .. } if exit_code != 0 => {
+                events.push(ExecutionEvent::Log {
+                    stream: 1,
+                    line: "failure".into(),
+                });
+            }
+            VsockMessage::Stdio { stream, bytes } => {
+                events.push(ExecutionEvent::Log {
+                    stream,
+                    line: String::from_utf8_lossy(&bytes).into_owned(),
+                });
+            }
+            other => events.push(ExecutionEvent::GuestDocker(format!("{other:?}"))),
+        }
     }
 }
 

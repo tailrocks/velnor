@@ -26,6 +26,7 @@ pub enum BackendPhase {
 pub struct ValidatedPlan {
     pub job_id: String,
     pub steps: Vec<String>,
+    pub scripts: Vec<String>,
     pub job_container_image: String,
     pub service_images: Vec<String>,
     pub timeout_ms: u64,
@@ -36,13 +37,83 @@ pub struct ValidatedPlan {
 }
 
 impl ValidatedPlan {
+    /// Convert to the vsock-serializable guest plan.
+    #[must_use]
+    pub fn to_guest(&self, isolation_id: &str, generation: u64) -> velnor_model::GuestJobPlan {
+        velnor_model::GuestJobPlan {
+            isolation_id: isolation_id.to_string(),
+            generation,
+            job_id: self.job_id.clone(),
+            image: self.job_container_image.clone(),
+            services: self
+                .service_images
+                .iter()
+                .enumerate()
+                .map(|(index, image)| velnor_model::GuestService {
+                    name: format!("svc-{index}"),
+                    image: image.clone(),
+                })
+                .collect(),
+            steps: self
+                .steps
+                .iter()
+                .enumerate()
+                .map(|(index, id)| velnor_model::GuestStep {
+                    id: id.clone(),
+                    script: self.scripts.get(index).cloned().unwrap_or_default(),
+                })
+                .collect(),
+            timeout_ms: self.timeout_ms,
+            cancel_requested: self.cancel_requested,
+            fail: self.fail,
+            cache_digest: self.cache_digest.clone(),
+            command_files: self.command_files.clone(),
+        }
+    }
+}
+
+impl ValidatedPlan {
     #[must_use]
     pub fn example_success(job_id: impl Into<String>) -> Self {
         Self {
             job_id: job_id.into(),
             steps: vec!["run".into()],
+            scripts: vec!["echo run".into()],
             job_container_image: "velnor/job-ubuntu:26.04".into(),
             service_images: vec!["postgres:16".into()],
+            timeout_ms: 60_000,
+            cancel_requested: false,
+            fail: false,
+            cache_digest: None,
+            command_files: vec!["GITHUB_OUTPUT".into(), "GITHUB_ENV".into()],
+        }
+    }
+
+    /// Lift the admitted GitHub plan into the backend-neutral contract.
+    #[must_use]
+    pub fn from_normalized(plan: &crate::plan::NormalizedJobPlan) -> Self {
+        Self {
+            job_id: plan.identity.job_id.clone(),
+            steps: plan
+                .steps
+                .iter()
+                .map(|step| step.id().to_string())
+                .collect(),
+            scripts: plan
+                .steps
+                .iter()
+                .map(|step| match step {
+                    crate::executor::ExecutableStep::Script(script) => script.script.clone(),
+                    _ => String::new(),
+                })
+                .collect(),
+            job_container_image: plan.execution.job_container.image.clone(),
+            service_images: plan
+                .execution
+                .services
+                .iter()
+                .map(|service| service.image.clone())
+                .collect(),
             timeout_ms: 60_000,
             cancel_requested: false,
             fail: false,
@@ -83,6 +154,7 @@ pub enum ExecutionError {
     },
     HostDockerForbidden,
     DockerPreflight(String),
+    DockerExecute(String),
     CollectBeforeStop,
     TeardownSkipped,
 }
@@ -100,6 +172,7 @@ impl std::fmt::Display for ExecutionError {
                 "host Docker executor is forbidden while execution backend is microvm; the docker backend was not used"
             ),
             Self::DockerPreflight(detail) => write!(f, "docker preflight failed: {detail}"),
+            Self::DockerExecute(detail) => write!(f, "docker job execution failed: {detail}"),
             Self::CollectBeforeStop => {
                 write!(f, "collect is forbidden while the backend is still live")
             }

@@ -748,7 +748,7 @@ struct PostNativeAction {
 }
 
 impl ExecutableStep {
-    fn id(&self) -> &str {
+    pub(crate) fn id(&self) -> &str {
         match self {
             ExecutableStep::CompositeStart { step_id, .. } => step_id,
             ExecutableStep::CompositeEnd { step_id } => step_id,

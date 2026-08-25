@@ -40,8 +40,8 @@ use crate::{
     },
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     executor::{
-        condition_is_statically_false, DockerScriptExecutor, ExecutableStep, ProcessCommandRunner,
-        StepLog, StepStartEvent,
+        condition_is_statically_false, CommandRunner, DockerScriptExecutor, ExecutableStep,
+        JobExecutionSummary, ProcessCommandRunner, StepLog, StepStartEvent,
     },
     github_adapter::{
         github_job_container_spec, github_normalized_job_plan, job_container_name,
@@ -5101,6 +5101,44 @@ fn execute_script_job(
     result
 }
 
+struct RunnerDockerEngine<'a, R: CommandRunner> {
+    executor: &'a mut DockerScriptExecutor<R>,
+    plan: &'a crate::plan::NormalizedJobPlan,
+    job_outputs: Option<&'a Value>,
+    environment_url: Option<&'a Value>,
+    summary: Option<JobExecutionSummary>,
+}
+
+impl<R: CommandRunner> crate::execution::ProductionDockerEngine for RunnerDockerEngine<'_, R> {
+    fn execute_github_job(
+        &mut self,
+        events: &mut Vec<crate::execution::ExecutionEvent>,
+    ) -> Result<(), crate::execution::ExecutionError> {
+        let summary = self
+            .executor
+            .execute_ordered_steps_without_cleanup(
+                &self.plan.execution.job_container,
+                &self.plan.steps,
+                &self.plan.execution.env,
+                &self.plan.execution.context_data,
+                self.job_outputs,
+                self.environment_url,
+                &self.plan.execution.temp_host,
+            )
+            .map_err(|error| crate::execution::ExecutionError::DockerExecute(error.to_string()))?;
+        for log in &summary.step_logs {
+            for line in &log.lines {
+                events.push(crate::execution::ExecutionEvent::Log {
+                    stream: 1,
+                    line: line.clone(),
+                });
+            }
+        }
+        self.summary = Some(summary);
+        Ok(())
+    }
+}
+
 fn execute_microvm_script_job(
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
@@ -5113,11 +5151,17 @@ fn execute_microvm_script_job(
     let isolation = crate::execution::IsolationIdentity::new(job.job_id.clone(), 1);
     let resources = crate::execution::IsolationResources::for_identity(
         isolation.clone(),
-        std::path::Path::new("/usr/share/velnor/microvm"),
+        std::path::Path::new("/run/velnor"),
     );
     let mut fs = crate::execution::RealHostFs;
     let mut runner = crate::executor::ProcessCommandRunner;
-    let mut api = crate::execution::UnixFirecrackerClient::new(resources.vsock);
+    let vsock_path = resources.vsock.clone();
+    let mut api = crate::execution::UnixFirecrackerClient::new(vsock_path.clone());
+    let mut vsock = crate::execution::UnixVsockChannel::lazy(
+        vsock_path,
+        crate::execution::FIRECRACKER_GUEST_CID,
+        crate::execution::GUEST_AGENT_PORT,
+    );
     let artifact_root = std::path::PathBuf::from("/usr/share/velnor/microvm");
     let kvm = std::path::PathBuf::from("/dev/kvm");
     let docker = std::path::PathBuf::from("/var/run/docker.sock");
@@ -5128,10 +5172,17 @@ fn execute_microvm_script_job(
         runner: &mut runner,
         firecracker: &mut api,
         host_fs: &mut fs,
+        vsock: Some(&mut vsock),
+        docker_engine: None,
+        allow_inline_guest_plan: false,
     };
     let plan = crate::execution::ValidatedPlan {
         job_id: job.job_id.clone(),
         steps: script_steps.iter().map(|step| step.id.clone()).collect(),
+        scripts: script_steps
+            .iter()
+            .map(|step| step.script.clone())
+            .collect(),
         job_container_image: String::new(),
         service_images: Vec::new(),
         timeout_ms: 60_000,
@@ -5518,17 +5569,45 @@ fn execute_script_job_inner(
     }
     let steps_started = Instant::now();
     let first_step_ms = duration_ms(execution_started.elapsed());
+    let mut docker_engine = RunnerDockerEngine {
+        executor: &mut executor,
+        plan: &plan,
+        job_outputs: job.job_outputs.as_ref(),
+        environment_url: actions_environment_url(job),
+        summary: None,
+    };
+    let execution_file = velnor_model::ExecutionFile {
+        execution: velnor_model::ExecutionSection {
+            backend: velnor_model::ExecutionBackendKind::Docker,
+        },
+    };
+    let isolation = crate::execution::IsolationIdentity::new(job.job_id.clone(), 1);
+    let mut fs = crate::execution::RealHostFs;
+    let mut preflight_runner = ProcessCommandRunner;
+    let mut firecracker_api = crate::execution::RecordingFirecracker::default();
+    let kvm = std::path::PathBuf::from("/dev/kvm");
+    let artifact_root = plan.execution.temp_host.clone();
+    let docker_sock = std::path::PathBuf::from("/var/run/docker.sock");
+    let validated = crate::execution::ValidatedPlan::from_normalized(&plan);
     let summary_result = {
         let _span = tracing::info_span!("job-steps").entered();
-        executor.execute_ordered_steps_without_cleanup(
-            &plan.execution.job_container,
-            &plan.steps,
-            &plan.execution.env,
-            &plan.execution.context_data,
-            job.job_outputs.as_ref(),
-            actions_environment_url(job),
-            &plan.execution.temp_host,
-        )
+        let mut world = crate::execution::ExecutionWorld {
+            kvm: &kvm,
+            artifact_root: &artifact_root,
+            host_docker_socket: &docker_sock,
+            runner: &mut preflight_runner,
+            firecracker: &mut firecracker_api,
+            host_fs: &mut fs,
+            vsock: None,
+            docker_engine: Some(&mut docker_engine),
+            allow_inline_guest_plan: false,
+        };
+        crate::execution::run_validated_job(&execution_file, isolation, &validated, &mut world)
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        docker_engine
+            .summary
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("docker backend produced no job summary"))
     };
     let steps_ms = duration_ms(steps_started.elapsed());
     println!(

@@ -3,6 +3,8 @@
 //! Frames have a fixed header, explicit maximum lengths, and a checksum.
 //! The guest never receives runner-registration keys or host signing material.
 
+use std::io::{Read, Write};
+
 use sha2::{Digest, Sha256};
 
 /// Protocol version. Mismatch fails closed.
@@ -101,6 +103,50 @@ impl VsockMessage {
         let digest = Sha256::digest(&frame);
         frame.extend_from_slice(&digest);
         Ok(frame)
+    }
+
+    /// Write one framed message. Callers must not concatenate raw payloads.
+    ///
+    /// # Errors
+    /// Encode or write failure.
+    pub fn write_to<W: Write>(&self, writer: &mut W) -> Result<(), VsockCodecError> {
+        let bytes = self.encode()?;
+        writer
+            .write_all(&bytes)
+            .map_err(|error| VsockCodecError::Io {
+                detail: error.to_string(),
+            })
+    }
+
+    /// Read exactly one framed message from a stream.
+    ///
+    /// # Errors
+    /// Truncation, IO, or decode failure.
+    pub fn read_from<R: Read>(reader: &mut R) -> Result<Self, VsockCodecError> {
+        let mut header = [0_u8; HEADER_LEN];
+        reader
+            .read_exact(&mut header)
+            .map_err(|error| VsockCodecError::Io {
+                detail: error.to_string(),
+            })?;
+        let payload_len = u32::from_be_bytes(
+            header[4..8]
+                .try_into()
+                .map_err(|_| VsockCodecError::Truncated { len: HEADER_LEN })?,
+        ) as usize;
+        if payload_len > MAX_PAYLOAD_BYTES as usize {
+            return Err(VsockCodecError::PayloadTooLarge { len: payload_len });
+        }
+        let mut rest = vec![0_u8; payload_len + CHECKSUM_LEN];
+        reader
+            .read_exact(&mut rest)
+            .map_err(|error| VsockCodecError::Io {
+                detail: error.to_string(),
+            })?;
+        let mut frame = Vec::with_capacity(HEADER_LEN + rest.len());
+        frame.extend_from_slice(&header);
+        frame.extend_from_slice(&rest);
+        Self::decode(&frame)
     }
 
     /// Decode one frame. Truncation, version mismatch, bad checksum, and
@@ -382,6 +428,7 @@ pub enum VsockCodecError {
     UnknownKind { kind: u16 },
     InvalidUtf8,
     TrailingBytes { len: usize },
+    Io { detail: String },
 }
 
 impl std::fmt::Display for VsockCodecError {
@@ -398,6 +445,7 @@ impl std::fmt::Display for VsockCodecError {
             Self::UnknownKind { kind } => write!(f, "vsock unknown kind {kind}"),
             Self::InvalidUtf8 => write!(f, "vsock payload is not UTF-8"),
             Self::TrailingBytes { len } => write!(f, "vsock trailing payload {len} bytes"),
+            Self::Io { detail } => write!(f, "vsock io: {detail}"),
         }
     }
 }
@@ -440,6 +488,34 @@ mod tests {
         assert_eq!(
             VsockMessage::decode(&bad),
             Err(VsockCodecError::ChecksumMismatch)
+        );
+    }
+
+    #[test]
+    fn read_from_splits_concatenated_frames() {
+        use std::io::Cursor;
+        let mut buf = VsockMessage::Cancel.encode().unwrap();
+        buf.extend(
+            VsockMessage::GuestReady {
+                isolation_id: "job-1".into(),
+                generation: 1,
+                docker_healthy: true,
+            }
+            .encode()
+            .unwrap(),
+        );
+        let mut cursor = Cursor::new(buf);
+        assert_eq!(
+            VsockMessage::read_from(&mut cursor).unwrap(),
+            VsockMessage::Cancel
+        );
+        assert_eq!(
+            VsockMessage::read_from(&mut cursor).unwrap(),
+            VsockMessage::GuestReady {
+                isolation_id: "job-1".into(),
+                generation: 1,
+                docker_healthy: true,
+            }
         );
     }
 }

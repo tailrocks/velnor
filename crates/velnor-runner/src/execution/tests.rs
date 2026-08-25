@@ -46,6 +46,9 @@ fn world<'a>(
         runner,
         firecracker: api,
         host_fs: fs,
+        vsock: None,
+        docker_engine: None,
+        allow_inline_guest_plan: true,
     }
 }
 
@@ -329,4 +332,133 @@ fn shipped_guest_image_rejects_virtio_fs() {
     crate::execution::validate_kernel_config(include_str!("../../../../microvm/kernel.config"))
         .unwrap();
     crate::execution::validate_guest_toml(include_str!("../../../../microvm/guest.toml")).unwrap();
+}
+
+#[test]
+fn docker_backend_uses_production_engine_when_present() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let docker = PathBuf::from("/var/run/docker.sock");
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        next: CommandResult {
+            code: 0,
+            stdout: "ok".into(),
+            stderr: String::new(),
+        },
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let artifacts = PathBuf::from("/microvm");
+    struct StubEngine;
+    impl ProductionDockerEngine for StubEngine {
+        fn execute_github_job(
+            &mut self,
+            events: &mut Vec<ExecutionEvent>,
+        ) -> Result<(), ExecutionError> {
+            events.push(ExecutionEvent::HostDockerInvoked(
+                "production-engine".into(),
+            ));
+            events.push(ExecutionEvent::Log {
+                stream: 1,
+                line: "*** engine ***".into(),
+            });
+            Ok(())
+        }
+    }
+    let mut engine = StubEngine;
+    let outcome = {
+        let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+        world.docker_engine = Some(&mut engine);
+        crate::execution::run_validated_job(
+            &file,
+            IsolationIdentity::new("job-engine", 1),
+            &ValidatedPlan::example_success("job-engine"),
+            &mut world,
+        )
+        .unwrap()
+    };
+    assert_eq!(outcome.conclusion, "success");
+    assert!(outcome.masked);
+    assert!(runner
+        .calls
+        .iter()
+        .all(|(_, args)| !args.iter().any(|arg| arg == "exec")));
+}
+
+#[test]
+fn microvm_execute_sends_deliver_plan_over_vsock() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let artifacts = PathBuf::from("/microvm");
+    seed_microvm_world(&mut fs, &artifacts);
+    let docker = PathBuf::from("/var/run/docker.sock");
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        next: CommandResult {
+            code: 0,
+            stdout: "ok".into(),
+            stderr: String::new(),
+        },
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let mut vsock = LoopbackVsock::default();
+    {
+        let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+        world.allow_inline_guest_plan = false;
+        let mut session =
+            open_session(&file, IsolationIdentity::new("job-vsock", 1), &mut world).unwrap();
+        session.reserve(&mut world).unwrap();
+        let plan = ValidatedPlan::example_success("job-vsock");
+        session.prepare(&plan, &mut world).unwrap();
+        session.start(&mut world).unwrap();
+        world.vsock = Some(&mut vsock);
+        session.execute(&plan, &mut world).unwrap();
+        assert!(!session.used_host_docker());
+        assert!(session.used_firecracker());
+    }
+    assert!(matches!(
+        vsock.sent[0],
+        velnor_model::VsockMessage::DeliverPlan { .. }
+    ));
+    assert!(!runner
+        .calls
+        .iter()
+        .any(|(program, args)| { program == "docker" && args.iter().any(|arg| arg == "exec") }));
+}
+
+#[test]
+fn microvm_execute_without_vsock_fails_closed() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let artifacts = PathBuf::from("/microvm");
+    seed_microvm_world(&mut fs, &artifacts);
+    let docker = PathBuf::from("/var/run/docker.sock");
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        next: CommandResult {
+            code: 0,
+            stdout: "ok".into(),
+            stderr: String::new(),
+        },
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+    world.allow_inline_guest_plan = false;
+    let mut session =
+        open_session(&file, IsolationIdentity::new("job-novsock", 1), &mut world).unwrap();
+    session.reserve(&mut world).unwrap();
+    let plan = ValidatedPlan::example_success("job-novsock");
+    session.prepare(&plan, &mut world).unwrap();
+    session.start(&mut world).unwrap();
+    let error = session.execute(&plan, &mut world).unwrap_err();
+    let text = error.to_string();
+    assert!(text.contains("vsock"), "{text}");
+    assert!(text.contains("docker backend was not used"), "{text}");
+    assert!(!session.used_host_docker());
 }

@@ -70,41 +70,19 @@ impl DockerBackend {
         world: &mut ExecutionWorld<'_>,
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
-        let _ = world;
-        if plan.cancel_requested {
-            events.push(ExecutionEvent::Log {
-                stream: 1,
-                line: "cancel".into(),
-            });
+        if let Some(engine) = world.docker_engine.as_mut() {
+            engine.execute_github_job(events)?;
             return Ok(());
         }
-        if plan.timeout_ms == 0 {
-            events.push(ExecutionEvent::Log {
-                stream: 1,
-                line: "timeout".into(),
-            });
-            return Ok(());
-        }
-        if plan.fail {
+        let guest = plan.to_guest("job", 1);
+        let code = super::guest_runtime::execute_guest_plan(&guest, world.runner, events, true)
+            .map_err(ExecutionError::DockerPreflight)?;
+        if code != 0 && !super::guest_runtime::has_terminal_log(events) {
             events.push(ExecutionEvent::Log {
                 stream: 1,
                 line: "failure".into(),
             });
-            return Ok(());
         }
-        if let Some(digest) = &plan.cache_digest {
-            events.push(ExecutionEvent::Log {
-                stream: 1,
-                line: format!("cache {digest}"),
-            });
-        }
-        for step in &plan.steps {
-            events.push(ExecutionEvent::Log {
-                stream: 1,
-                line: format!("*** {step} ***"),
-            });
-        }
-        events.push(ExecutionEvent::HostDockerInvoked("docker run".into()));
         Ok(())
     }
 

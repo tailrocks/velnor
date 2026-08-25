@@ -3,11 +3,10 @@
 //! Production has no SSH server. The agent never receives runner-registration
 //! keys, org admin tokens, or host signing material.
 
-use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
-use velnor_model::{VsockMessage, PROTOCOL_VERSION};
+use velnor_model::{VsockCodecError, VsockMessage, PROTOCOL_VERSION};
 
 fn main() {
     if let Err(error) = run() {
@@ -34,35 +33,34 @@ fn run() -> Result<(), String> {
             .unwrap_or(0),
         docker_healthy: PathBuf::from("/var/run/docker.sock").exists(),
     };
-    let bytes = ready.encode().map_err(|error| error.to_string())?;
-    stream
-        .write_all(&bytes)
+    ready
+        .write_to(&mut stream)
         .map_err(|error| format!("write ready: {error}"))?;
-    let mut buf = vec![0_u8; velnor_model::MAX_FRAME_BYTES];
     loop {
-        let n = stream
-            .read(&mut buf)
-            .map_err(|error| format!("read: {error}"))?;
-        if n == 0 {
-            break;
-        }
-        match VsockMessage::decode(&buf[..n]) {
+        match VsockMessage::read_from(&mut stream) {
             Ok(VsockMessage::Cancel | VsockMessage::TeardownAck { .. }) => break,
             Ok(VsockMessage::DeliverPlan {
                 isolation_id,
                 generation,
-                ..
+                plan_bytes,
             }) => {
-                let ack = VsockMessage::TeardownAck {
+                let code = velnor_runner::execution::run_guest_plan_bytes(&plan_bytes)
+                    .map_err(|error| format!("guest plan: {error}"))?;
+                VsockMessage::StepCompleted {
+                    step_id: "job".into(),
+                    exit_code: code,
+                }
+                .write_to(&mut stream)
+                .map_err(|error| format!("write step: {error}"))?;
+                VsockMessage::TeardownAck {
                     isolation_id,
                     generation,
-                };
-                let bytes = ack.encode().map_err(|error| error.to_string())?;
-                stream
-                    .write_all(&bytes)
-                    .map_err(|error| format!("write ack: {error}"))?;
+                }
+                .write_to(&mut stream)
+                .map_err(|error| format!("write ack: {error}"))?;
             }
             Ok(_) => {}
+            Err(VsockCodecError::Io { .. }) => break,
             Err(error) => return Err(format!("protocol v{PROTOCOL_VERSION}: {error}")),
         }
     }
