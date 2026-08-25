@@ -341,6 +341,13 @@ pub enum Event {
         slot_id: SlotId,
         generation: Generation,
     },
+    /// GitHub no longer has the runner identity recorded for this slot.
+    /// Clear the local registration claim so reconciliation can issue a fresh
+    /// JIT request instead of trusting split-brain state forever.
+    RegistrationLost {
+        slot_id: SlotId,
+        generation: Generation,
+    },
     ReadyAttempt {
         slot_id: SlotId,
         generation: Generation,
@@ -545,6 +552,18 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             } else {
                 slot.registered = true;
                 slot.phase = ActorPhase::Registered;
+            }
+        }
+        Event::RegistrationLost {
+            slot_id,
+            generation,
+        } => {
+            let slot = state.slot_mut(&slot_id);
+            if generation != slot.generation || !slot.registered {
+                rejected = true;
+            } else {
+                slot.registered = false;
+                slot.phase = ActorPhase::Provisioning;
             }
         }
         Event::ReadyAttempt {
@@ -1051,6 +1070,7 @@ fn event_generation(event: &Event) -> Generation {
         | Event::SessionLive { generation, .. }
         | Event::RegistrationIntended { generation, .. }
         | Event::Registered { generation, .. }
+        | Event::RegistrationLost { generation, .. }
         | Event::ReadyAttempt { generation, .. }
         | Event::Assigned { generation, .. }
         | Event::JobOwned { generation, .. }
@@ -1080,6 +1100,7 @@ fn event_kind(event: &Event) -> &'static str {
         Event::SessionLive { .. } => "session_live",
         Event::RegistrationIntended { .. } => "registration_intended",
         Event::Registered { .. } => "registered",
+        Event::RegistrationLost { .. } => "registration_lost",
         Event::ReadyAttempt { .. } => "ready_attempt",
         Event::Assigned { .. } => "assigned",
         Event::JobOwned { .. } => "job_owned",
@@ -1242,6 +1263,28 @@ mod tests {
                 .and_then(|slot| slot.pid),
             Some(456)
         );
+    }
+
+    #[test]
+    fn registration_lost_clears_stale_local_identity() {
+        let (_dir, mut journal) = open_tmp("registration-lost");
+        prime_ready(&mut journal, "scope-1");
+        let outcome = journal
+            .apply(Event::RegistrationLost {
+                slot_id: slot("scope-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        assert!(!outcome.rejected);
+        let slot = journal
+            .load_state()
+            .unwrap()
+            .slots
+            .into_iter()
+            .find(|row| row.slot_id == slot("scope-1"))
+            .unwrap();
+        assert!(!slot.registered);
+        assert_eq!(slot.phase, ActorPhase::Provisioning);
     }
 
     #[test]
