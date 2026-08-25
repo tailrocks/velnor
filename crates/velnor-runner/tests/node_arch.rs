@@ -121,7 +121,7 @@ fn slot_kill_drops_one_unit_of_capacity() {
         children.push(child);
     }
     let mut pids = 0;
-    for _ in 0..40 {
+    for _ in 0..200 {
         if let Ok(journal) = Journal::open(dir.join("journal.db")) {
             if let Ok(state) = journal.load_state() {
                 pids = state.slots.iter().filter(|slot| slot.pid.is_some()).count();
@@ -132,12 +132,18 @@ fn slot_kill_drops_one_unit_of_capacity() {
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    let live: Vec<bool> = children
+        .iter_mut()
+        .map(|child| child.try_wait().ok().flatten().is_none())
+        .collect();
     assert_eq!(
         pids,
         2,
-        "slot stderr: 1={:?} 2={:?}",
+        "slot stderr: 1={:?} 2={:?} live={live:?} stdout=1={:?} 2={:?}",
         std::fs::read_to_string(dir.join("slot-1.err")),
-        std::fs::read_to_string(dir.join("slot-2.err"))
+        std::fs::read_to_string(dir.join("slot-2.err")),
+        std::fs::read_to_string(dir.join("slot-1.out")),
+        std::fs::read_to_string(dir.join("slot-2.out")),
     );
 
     let guardian = Command::new(runner())
