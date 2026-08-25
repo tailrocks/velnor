@@ -18,7 +18,10 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::{sync::mpsc::UnboundedReceiver, task::JoinHandle};
+use tokio::{
+    sync::{mpsc::UnboundedReceiver, oneshot},
+    task::{JoinHandle, JoinSet},
+};
 use tracing::Instrument as _;
 
 use crate::{
@@ -89,6 +92,7 @@ const REGISTRY_CHECK_INTERVAL_SECONDS: u64 = 180;
 const REGISTRY_OFFLINE_STRIKES_TO_RECYCLE: u32 = 2;
 const DEFAULT_MAX_IDLE_SLOT_AGE_SECONDS: u64 = 4 * 60 * 60;
 const DAEMON_JIT_CONFIG_CONCURRENCY: usize = 4;
+const DAEMON_JIT_PREWARM_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum V2MessageAction {
@@ -798,6 +802,13 @@ fn registration_was_deleted(error: &anyhow::Error) -> bool {
 }
 
 pub async fn run(args: RunArgs) -> Result<()> {
+    run_with_jit_prewarmer(args, None).await
+}
+
+async fn run_with_jit_prewarmer(
+    args: RunArgs,
+    prewarm_trigger: Option<oneshot::Sender<()>>,
+) -> Result<()> {
     if args.complete_noop && args.execute_scripts {
         bail!("--complete-noop and --execute-scripts are mutually exclusive");
     }
@@ -824,7 +835,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     })?;
     let token = oauth_access_token(&stored).await.map_err(local_failure)?;
     ensure_v2_runner_settings(&stored).map_err(local_failure)?;
-    run_v2(args, dir, stored, agent_id, token).await
+    run_v2(args, dir, stored, agent_id, token, prewarm_trigger).await
 }
 
 /// Append one line to the daemon supervisor's forensic log
@@ -1342,7 +1353,34 @@ pub(crate) async fn run_daemon_slot(
         if !args.once {
             slot_args.once = true;
         }
-        if let Err(error) = run(slot_args).await {
+        let (prewarm_trigger, prewarm_waiter) = if args.once {
+            (None, None)
+        } else {
+            let (trigger, receiver) = oneshot::channel();
+            let prewarm_args = args.clone();
+            let prewarm_base = config_base.clone();
+            let prewarm_waiter = tokio::spawn(async move {
+                prewarm_successor_after_job(
+                    receiver,
+                    &prewarm_args,
+                    &prewarm_base,
+                    slot_index,
+                    slots,
+                    cycle,
+                )
+                .await
+            });
+            (Some(trigger), Some(prewarm_waiter))
+        };
+        let run_result = run_with_jit_prewarmer(slot_args, prewarm_trigger).await;
+        if let Some(prewarm_waiter) = prewarm_waiter {
+            if let Err(join_error) = prewarm_waiter.await {
+                eprintln!(
+                    "daemon slot-{slot_index} successor JIT prewarm task failed: {join_error:#}"
+                );
+            }
+        }
+        if let Err(error) = run_result {
             if args.once {
                 cleanup_failed_daemon_slot(&args, &config_base, slot_index, slots, cycle).await;
                 return Err(error);
@@ -1487,6 +1525,77 @@ async fn reconfigure_daemon_slot_forever(
     }
 }
 
+/// Wait until this slot has acquired a job, then register the next ephemeral
+/// identity while the job runs. Registration latency is thereby removed from
+/// the post-job handoff for normal-length jobs. A cancelled receiver means the
+/// slot ended idle or failed before accepting work; no JIT registration is
+/// created in that case.
+async fn prewarm_successor_after_job(
+    receiver: oneshot::Receiver<()>,
+    args: &DaemonArgs,
+    config_base: &Path,
+    slot_index: usize,
+    slots: usize,
+    cycle: u64,
+) -> Result<()> {
+    if receiver.await.is_err() || draining() {
+        return Ok(());
+    }
+
+    tokio::time::timeout(
+        DAEMON_JIT_PREWARM_TIMEOUT,
+        prewarm_daemon_slot_successor(args, config_base, slot_index, slots, cycle),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "prewarm successor JIT config for daemon slot-{slot_index} timed out after {}s",
+            DAEMON_JIT_PREWARM_TIMEOUT.as_secs()
+        )
+    })??;
+    Ok(())
+}
+
+async fn prewarm_daemon_slot_successor(
+    args: &DaemonArgs,
+    config_base: &Path,
+    slot_index: usize,
+    slots: usize,
+    cycle: u64,
+) -> Result<()> {
+    let next_dir = daemon_slot_successor_config_dir(config_base, slot_index, slots);
+    if config::load(&next_dir).is_ok() {
+        return Ok(());
+    }
+
+    if next_dir.exists() {
+        delete_and_remove_daemon_slot_jit_config(args, &next_dir)
+            .await
+            .with_context(|| {
+                format!("remove stale successor JIT config for daemon slot-{slot_index}")
+            })?;
+    }
+
+    let mut configure_args = daemon_slot_configure_args(args, config_base, slot_index, slots)?;
+    configure_args.name = Some(daemon_slot_successor_agent_name(
+        args.name.as_deref(),
+        slot_index,
+        slots,
+        cycle,
+    ));
+    configure_args.config_dir = Some(next_dir);
+    configure(configure_args)
+        .await
+        .with_context(|| format!("prewarm successor JIT config for daemon slot-{slot_index}"))?;
+    println!(
+        "forensics.lifecycle event=successor-jit-ready slot={} cycle={} timestamp={}",
+        daemon_slot_name(slot_index),
+        cycle,
+        unix_now_iso8601()
+    );
+    Ok(())
+}
+
 async fn recycle_daemon_slot(
     args: &DaemonArgs,
     config_base: &Path,
@@ -1503,6 +1612,22 @@ async fn recycle_daemon_slot(
     // path so they do not linger until GitHub's expiry window.
     remove_completed_daemon_slot_jit_config(&slot_dir)
         .with_context(|| format!("discard consumed daemon slot-{slot_index} JIT identity"))?;
+    if config::promote_prepared(&slot_dir)
+        .with_context(|| format!("promote successor JIT config for daemon slot-{slot_index}"))?
+    {
+        println!(
+            "Promoted prewarmed successor JIT config for {} after cycle {cycle}.",
+            daemon_slot_name(slot_index)
+        );
+        if let Some(sink) = crate::ops::global() {
+            sink.emit(
+                velnor_model::EventReason::SlotStateChanged,
+                &daemon_slot_name(slot_index),
+                Some(format!("promoted prewarmed JIT config after cycle {cycle}")),
+            );
+        }
+        return Ok(());
+    }
     println!(
         "Discarded JIT runner config for {} after cycle {cycle}.",
         daemon_slot_name(slot_index)
@@ -1535,6 +1660,25 @@ fn remove_completed_daemon_slot_jit_config(slot_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+fn daemon_slot_successor_config_dir(
+    config_base: &Path,
+    slot_index: usize,
+    slot_count: usize,
+) -> PathBuf {
+    daemon_slot_config_dir(config_base, slot_index, slot_count).join("next")
+}
+
+fn daemon_slot_successor_agent_name(
+    base_name: Option<&str>,
+    slot_index: usize,
+    slot_count: usize,
+    cycle: u64,
+) -> String {
+    let current = daemon_slot_agent_name(base_name, slot_index, slot_count)
+        .unwrap_or_else(default_agent_name);
+    format!("{current}-next-{}-{cycle}", std::process::id())
+}
+
 async fn cleanup_failed_daemon_slot(
     args: &DaemonArgs,
     config_base: &Path,
@@ -1549,6 +1693,11 @@ async fn cleanup_failed_daemon_slot(
             slot_dir.display()
         );
     }
+    if let Err(error) =
+        cleanup_daemon_slot_successor_jit_config(args, config_base, slot_index, slots).await
+    {
+        eprintln!("daemon slot-{slot_index} cycle {cycle} successor cleanup failed: {error:#}");
+    }
     if let Some(sink) = crate::ops::global() {
         sink.emit(
             velnor_model::EventReason::SlotStateChanged,
@@ -1556,6 +1705,26 @@ async fn cleanup_failed_daemon_slot(
             Some(format!("cleaned failed slot after cycle {cycle}")),
         );
     }
+}
+
+async fn cleanup_daemon_slot_successor_jit_config(
+    args: &DaemonArgs,
+    config_base: &Path,
+    slot_index: usize,
+    slots: usize,
+) -> Result<()> {
+    let next_dir = daemon_slot_successor_config_dir(config_base, slot_index, slots);
+    if next_dir.exists() {
+        delete_and_remove_daemon_slot_jit_config(args, &next_dir)
+            .await
+            .with_context(|| {
+                format!(
+                    "delete successor daemon slot-{slot_index} JIT identity; local identity preserved"
+                )
+            })?;
+        let _ = fs::remove_dir(&next_dir);
+    }
+    Ok(())
 }
 
 async fn retry_daemon_slot_jit_config(
@@ -1571,6 +1740,7 @@ async fn retry_daemon_slot_jit_config(
         .with_context(|| {
             format!("retire daemon slot-{slot_index} registration before JIT reconfigure")
         })?;
+    cleanup_daemon_slot_successor_jit_config(args, config_base, slot_index, slots).await?;
     let configure_args = daemon_slot_configure_args(args, config_base, slot_index, slots)?;
     configure(configure_args).await.with_context(|| {
         format!("retry JIT config for daemon slot-{slot_index} after cycle {cycle}")
@@ -1775,6 +1945,11 @@ async fn cleanup_configured_daemon_slots(
                 "cleanup failed for configured daemon slot-{slot_index} at {}: {error:#}",
                 slot_dir.display()
             );
+        }
+        if let Err(error) =
+            cleanup_daemon_slot_successor_jit_config(args, config_base, *slot_index, slots).await
+        {
+            eprintln!("cleanup failed for successor daemon slot-{slot_index}: {error:#}");
         }
     }
 }
@@ -2212,6 +2387,7 @@ async fn run_v2(
     stored: StoredRunnerConfig,
     agent_id: i64,
     token: OAuthAccessToken,
+    mut prewarm_trigger: Option<oneshot::Sender<()>>,
 ) -> Result<()> {
     // Disk peak is reserved only while a job is executing (see
     // `reserve_job_peak_capacity` in `handle_job_request`). Idle JIT slots
@@ -2392,6 +2568,7 @@ async fn run_v2(
                     stored.settings.disable_update,
                     &stored.settings.agent_name,
                     &forensics,
+                    &mut prewarm_trigger,
                     message,
                 )
                 .instrument(message_span)
@@ -2916,6 +3093,7 @@ async fn handle_v2_message(
     disable_update: bool,
     runner_name: &str,
     forensics: &SlotForensics,
+    prewarm_trigger: &mut Option<oneshot::Sender<()>>,
     message: crate::protocol::TaskAgentMessage,
 ) -> Result<V2MessageAction> {
     println!(
@@ -3079,6 +3257,9 @@ async fn handle_v2_message(
         run_service_url: run_service_url.to_string(),
         billing_owner_id: reference.billing_owner_id,
     };
+    if let Some(trigger) = prewarm_trigger.take() {
+        let _ = trigger.send(());
+    }
     let broker_cancellation = BrokerCancellationContext {
         broker: broker.clone(),
         session_id: session_id.to_string(),
@@ -10800,6 +10981,7 @@ jobs:
             BrokerClient::new("https://broker.actions.githubusercontent.com/", "token").unwrap();
         let run_service = RunServiceClient::new("token").unwrap();
         let stored = stored_config();
+        let mut prewarm_trigger = None;
         let message = TaskAgentMessage {
             message_id: 10,
             message_type: "JobCancellation".into(),
@@ -10817,6 +10999,7 @@ jobs:
             true,
             "velnor",
             &SlotForensics::new(PathBuf::from("/tmp"), "test".to_string()),
+            &mut prewarm_trigger,
             message,
         )
         .await
