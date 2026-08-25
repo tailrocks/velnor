@@ -99,7 +99,10 @@ jobs:
                       (.draft | not) and (.prerelease | not) and
                       (.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
                     ))
-                  | sort_by(.published_at)
+                  # Publication order is not release order: concurrent release
+                  # jobs can publish an older tag after a newer one. Stable
+                  # selection is semantic-version based and immutable.
+                  | sort_by([.tag_name | ltrimstr("v") | split(".") | map(tonumber)])
                 ' > verified/releases.json
             release_count=$(jq -e 'length' verified/releases.json)
             if test "$release_count" -eq 0; then

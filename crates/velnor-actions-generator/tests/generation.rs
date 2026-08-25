@@ -445,6 +445,8 @@ fn updater_executes_explicit_current_then_old_signer_alternatives() {
     assert!(body.contains("--signer-digest \"$signer_digest\""));
     assert!(body.contains("$SOURCE_OWNER/velnor-actions/.github/workflows/package-signer.yml"));
     assert!(body.contains("$SOURCE_REPOSITORY/.github/workflows/preview.yml"));
+    assert!(body.contains("sort_by([.tag_name | ltrimstr(\"v\") | split(\".\") | map(tonumber)])"));
+    assert!(!body.contains("sort_by(.published_at)"));
     assert!(body.contains("keys == [\"accepted_signer_digest\",\"verification\"]"));
     assert!(body.contains("if length > 0 and all(.[];"));
     assert!(body.contains("jdx/mise-action@7e36c90d9ab29c415a2384db3006f3ec8a8cc654"));
