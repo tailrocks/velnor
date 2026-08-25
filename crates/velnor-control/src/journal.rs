@@ -21,6 +21,10 @@ use crate::store::error::{StoreError, StoreResult};
 /// Minimum bundled SQLite that includes the WAL-reset fix (3.51.3).
 pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 
+/// Current journal schema. Older writers seeing a higher `PRAGMA user_version`
+/// must not apply events (N-1 must not clobber an N writer's log).
+pub const JOURNAL_SCHEMA_VERSION: u32 = 1;
+
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 const SCHEMA: &str = "
@@ -78,6 +82,8 @@ pub struct FleetState {
     pub desired_ready: u32,
     pub surge: u32,
     pub canary: CanaryStatus,
+    pub package_generation: u64,
+    pub package_apt_version: String,
     pub slots: Vec<SlotRecord>,
     pub jobs: Vec<JobRecord>,
     pub outbox: Vec<OutboxRecord>,
@@ -94,6 +100,8 @@ impl Default for FleetState {
             desired_ready: 0,
             surge: 0,
             canary: CanaryStatus::Unknown,
+            package_generation: 0,
+            package_apt_version: String::new(),
             slots: Vec::new(),
             jobs: Vec::new(),
             outbox: Vec::new(),
@@ -330,6 +338,15 @@ pub enum Event {
     },
     CanaryObserved {
         status: CanaryStatus,
+    },
+    /// Installed apt generation is live. Additive: N-1 readers skip unknown kinds.
+    PackageActivated {
+        apt_version: String,
+        generation: u64,
+    },
+    /// Retire an old apt generation only when no job or outbox still names it.
+    PackageRetireIntended {
+        generation: u64,
     },
 }
 
@@ -652,6 +669,25 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             }
         }
         Event::CanaryObserved { status } => state.canary = status,
+        Event::PackageActivated {
+            apt_version,
+            generation,
+        } => {
+            state.package_generation = generation;
+            state.package_apt_version = apt_version;
+        }
+        Event::PackageRetireIntended { generation } => {
+            let pending_outbox = state
+                .outbox
+                .iter()
+                .any(|row| row.intended && !row.remote_acked);
+            if generation != state.package_generation || !state.jobs.is_empty() || pending_outbox {
+                rejected = true;
+            } else {
+                state.package_generation = 0;
+                state.package_apt_version.clear();
+            }
+        }
     }
     ReduceOutcome {
         state,
@@ -665,6 +701,8 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
 pub struct Journal {
     conn: Connection,
     path: PathBuf,
+    /// True when on-disk `user_version` is newer than this binary (N-1 vs N).
+    write_blocked: bool,
 }
 
 impl Journal {
@@ -700,10 +738,23 @@ impl Journal {
         conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
         assert_sqlite_version(&conn)?;
         conn.execute_batch(SCHEMA)?;
+        let stored: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        let stored = u32::try_from(stored).unwrap_or(0);
+        let write_blocked = stored > JOURNAL_SCHEMA_VERSION;
+        if stored == 0 {
+            conn.pragma_update(None, "user_version", JOURNAL_SCHEMA_VERSION)?;
+        }
         Ok(Self {
             conn,
             path: path.to_path_buf(),
+            write_blocked,
         })
+    }
+
+    /// Whether apply is refused because a newer writer owns the schema.
+    #[must_use]
+    pub fn write_blocked(&self) -> bool {
+        self.write_blocked
     }
 
     #[must_use]
@@ -717,6 +768,15 @@ impl Journal {
     /// # Errors
     /// SQLite write failures.
     pub fn apply(&mut self, event: Event) -> StoreResult<ReduceOutcome> {
+        if self.write_blocked {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Conflict,
+                "journal.schema.newer",
+            )
+            .with_remediation(
+                "N-1 must not write a journal whose PRAGMA user_version is newer than this binary",
+            ));
+        }
         let state = self.load_state()?;
         let outcome = reduce(state, event.clone());
         if outcome.rejected {
@@ -764,10 +824,14 @@ impl Journal {
                 )
                 .with_remediation("the event log failed integrity verification"));
             }
-            let event: Event = serde_json::from_str(&payload).map_err(|error| {
-                StoreError::new(velnor_model::ExitClass::Operation, "journal.decode.failed")
-                    .with_remediation(error.to_string())
-            })?;
+            let event: Event = match serde_json::from_str(&payload) {
+                Ok(event) => event,
+                Err(_) => {
+                    // Newer writer's unknown envelope: N-1 skips it. Checksum
+                    // already matched, so this is not corruption.
+                    continue;
+                }
+            };
             let outcome = reduce(state, event);
             state = outcome.state;
         }
@@ -861,6 +925,8 @@ fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreRes
         ("desired_ready", state.desired_ready.to_string()),
         ("surge", state.surge.to_string()),
         ("canary", state.canary.as_str().to_owned()),
+        ("package_generation", state.package_generation.to_string()),
+        ("package_apt_version", state.package_apt_version.clone()),
     ];
     for (key, value) in meta {
         tx.execute(
@@ -889,6 +955,8 @@ fn event_generation(event: &Event) -> Generation {
         | Event::CleanupIntended { generation, .. }
         | Event::SlotHeartbeat { generation, .. }
         | Event::SlotStale { generation, .. } => *generation,
+        Event::PackageActivated { generation, .. }
+        | Event::PackageRetireIntended { generation } => Generation(*generation),
         _ => Generation(0),
     }
 }
@@ -917,6 +985,8 @@ fn event_kind(event: &Event) -> &'static str {
         Event::SlotHeartbeat { .. } => "slot_heartbeat",
         Event::SlotStale { .. } => "slot_stale",
         Event::CanaryObserved { .. } => "canary_observed",
+        Event::PackageActivated { .. } => "package_activated",
+        Event::PackageRetireIntended { .. } => "package_retire_intended",
     }
 }
 
@@ -1328,5 +1398,125 @@ mod tests {
         );
         assert!(outcome.rejected);
         assert!(outcome.commands.is_empty());
+    }
+
+    #[test]
+    fn n_minus_one_cannot_write_a_newer_schema() {
+        let (dir, journal) = open_tmp("nn1");
+        let path = dir.join("journal.db");
+        drop(journal);
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "user_version", 99u32).unwrap();
+        drop(conn);
+        let mut older = Journal::open(&path).unwrap();
+        assert!(older.write_blocked());
+        assert!(older.apply(Event::ControlLive).is_err());
+        assert!(older.load_state().unwrap().journal_writable);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn unknown_event_kind_does_not_drop_known_state() {
+        let (dir, mut journal) = open_tmp("unk");
+        journal.apply(Event::ControlLive).unwrap();
+        drop(journal);
+        let path = dir.join("journal.db");
+        let conn = Connection::open(&path).unwrap();
+        let payload = r#"{"type":"future_envelope","x":1}"#;
+        let checksum = payload_checksum(payload.as_bytes());
+        conn.execute(
+            "INSERT INTO events (generation, kind, payload, checksum) VALUES (0, 'future_envelope', ?1, ?2)",
+            params![payload, checksum],
+        )
+        .unwrap();
+        drop(conn);
+        let state = Journal::open(&path).unwrap().load_state().unwrap();
+        assert!(state.control_live);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn duplicate_assignment_is_rejected() {
+        let (_dir, mut journal) = open_tmp("dup-assign");
+        prime_ready(&mut journal, "scope-1");
+        journal
+            .apply(Event::ReadyAttempt {
+                slot_id: slot("scope-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        let first = journal
+            .apply(Event::Assigned {
+                slot_id: slot("scope-1"),
+                job_id: job("job-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        assert!(!first.rejected);
+        let second = journal
+            .apply(Event::Assigned {
+                slot_id: slot("scope-1"),
+                job_id: job("job-2"),
+                generation: gen(),
+            })
+            .unwrap();
+        assert!(second.rejected);
+    }
+
+    #[test]
+    fn package_retire_blocked_while_outbox_pending() {
+        let (_dir, mut journal) = open_tmp("pkg");
+        prime_ready(&mut journal, "scope-1");
+        journal
+            .apply(Event::ReadyAttempt {
+                slot_id: slot("scope-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::Assigned {
+                slot_id: slot("scope-1"),
+                job_id: job("job-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::JobOwned {
+                job_id: job("job-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: gen(),
+                worker: "w".into(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::PackageActivated {
+                apt_version: "0.1.209".into(),
+                generation: 3,
+            })
+            .unwrap();
+        let retire = journal
+            .apply(Event::PackageRetireIntended { generation: 3 })
+            .unwrap();
+        assert!(retire.rejected);
+        assert_eq!(journal.load_state().unwrap().package_generation, 3);
+    }
+
+    #[test]
+    fn package_retire_succeeds_without_jobs_or_outbox() {
+        let (_dir, mut journal) = open_tmp("pkg-ok");
+        journal
+            .apply(Event::PackageActivated {
+                apt_version: "0.1.209".into(),
+                generation: 3,
+            })
+            .unwrap();
+        let retire = journal
+            .apply(Event::PackageRetireIntended { generation: 3 })
+            .unwrap();
+        assert!(!retire.rejected);
+        let state = journal.load_state().unwrap();
+        assert_eq!(state.package_generation, 0);
+        assert!(state.package_apt_version.is_empty());
     }
 }

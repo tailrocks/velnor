@@ -241,6 +241,11 @@ fn packaged_units_have_no_controller_partof_to_workers() {
         !job.contains("--once"),
         "packaged job unit must not pass --once: {job}"
     );
+    let postinst = include_str!("../debian/postinst");
+    assert!(
+        postinst.contains("NEVER") && postinst.contains("restart"),
+        "apt configure must not restart the fleet"
+    );
 }
 
 fn daemon_src_has_args_json() -> bool {
