@@ -39,8 +39,10 @@ than GitHub-hosted runners — proven in production: 2.5–3× faster Rust jobs 
 
 1. **Fastest possible.** Beat GitHub-hosted runners on wall-clock and on
    queue-to-first-log latency.
-   - Exploit the beefy host: parallel slots, warm caches, warm broker
-     sessions; eventually dynamic slot autoscaling and multi-host scale-out.
+   - Exploit the beefy host: independently supervised slot processes, warm
+     caches, warm broker sessions; eventually dynamic slot autoscaling and
+     multi-host scale-out. One daemon `JoinSet` is not the availability
+     boundary.
    - Native Rust adapters skip JS/Docker action startup entirely.
    - Aggressive Rust-aware caching (cargo registry/git, target dirs, sccache,
      buildkit layers) — we own the host and the storage.

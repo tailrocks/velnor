@@ -2,8 +2,9 @@
 //!
 //! The operator-facing Velnor CLI lives exclusively in the `velnorctl`
 //! command center; what remains here is exactly the machine-invoked plumbing
-//! packaged consumers execute: the systemd daemon loop
-//! (`ExecStart=/usr/bin/velnor-runner daemon`), the pre-start coherence hook
+//! packaged consumers execute: the node-local guardian/controller/slot/job
+//! processes (`ExecStart=/usr/bin/velnor-runner daemon` still launches the
+//! controller that spawns one OS process per slot), the pre-start coherence hook
 //! (`release verify-installed`), Debian maintainer-script identity exports
 //! (`release export`, `capabilities export`), and the release workflow's
 //! metadata job. The [`packaged invoker guard`](#) in `crates/velnorctl/tests`
@@ -35,6 +36,14 @@ pub struct ServiceCli {
 pub enum ServiceCommand {
     /// Run one daemon process that manages one or more internal runner slots.
     Daemon(Box<DaemonArgs>),
+    /// Node-local guardian: supervise units and health, never GitHub or Docker.
+    Guardian(crate::node::GuardianArgs),
+    /// Per-scope controller: permits, registrations, slot process desired state.
+    Controller(Box<crate::node::ControllerArgs>),
+    /// One ready slot as its own OS process.
+    Slot(Box<crate::node::SlotArgs>),
+    /// Transient per-job worker process.
+    Job(crate::node::JobArgs),
     /// Release-coherence hooks for ExecStartPre, postinst, and release CI.
     Release(ReleaseArgs),
     /// Compiled-manifest export for postinst identity validation.
@@ -65,6 +74,12 @@ impl From<ServiceCommand> for Command {
             ServiceCommand::Daemon(args) => Self::Daemon(*args),
             ServiceCommand::Release(args) => Self::Release(args),
             ServiceCommand::Capabilities(args) => Self::Capabilities(args.into()),
+            ServiceCommand::Guardian(_)
+            | ServiceCommand::Controller(_)
+            | ServiceCommand::Slot(_)
+            | ServiceCommand::Job(_) => {
+                unreachable!("node roles dispatch before Command conversion")
+            }
         }
     }
 }
@@ -508,15 +523,35 @@ impl From<RunArgs> for crate::args::RunArgs {
 pub async fn execute() -> anyhow::Result<()> {
     crate::scaffold::enforce_admission()?;
     let cli = ServiceCli::parse();
-    let command = Command::from(cli.command);
-    let telemetry_dir = match &command {
-        Command::Daemon(args) => crate::runner::daemon_config_dir(&(*args).clone().into())
-            .ok()
-            .map(|dir| dir.join("logs")),
-        _ => None,
-    };
-    crate::scaffold::init_telemetry(telemetry_dir.as_deref());
-    dispatch_service(command).await
+    match cli.command {
+        ServiceCommand::Guardian(args) => {
+            crate::scaffold::init_telemetry(None);
+            crate::node::run_guardian(args).await
+        }
+        ServiceCommand::Controller(args) => {
+            crate::scaffold::init_telemetry(None);
+            crate::node::run_controller(*args).await
+        }
+        ServiceCommand::Slot(args) => {
+            crate::scaffold::init_telemetry(None);
+            crate::node::run_slot(*args).await
+        }
+        ServiceCommand::Job(args) => {
+            crate::scaffold::init_telemetry(None);
+            crate::node::run_job(args).await
+        }
+        other => {
+            let command = Command::from(other);
+            let telemetry_dir = match &command {
+                Command::Daemon(args) => crate::runner::daemon_config_dir(&(*args).clone().into())
+                    .ok()
+                    .map(|dir| dir.join("logs")),
+                _ => None,
+            };
+            crate::scaffold::init_telemetry(telemetry_dir.as_deref());
+            dispatch_service(command).await
+        }
+    }
 }
 
 async fn dispatch_service(command: Command) -> anyhow::Result<()> {

@@ -177,6 +177,14 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-08-25: **Node Architecture v2 is the production availability
+  boundary** (operator goal): independently supervised OS processes
+  (guardian, per-scope controller, one process per ready slot, transient
+  job unit) replace one daemon `JoinSet`. Health is a vector; systemd
+  READY/watchdog prove a completed local control cycle only. Host Docker
+  remains a named transitional executor. Build L3 stays the final isolation
+  target. Direction: `docs/vision.md`, `docs/roadmap.md`, `docs/mission.md`.
+
 - 2026-08-25: **Modern-first gate added** (operator): every change must be the
   modern approach — fastest path, better product, more features; any
   contradicting change (performance degradation first) requires explicit

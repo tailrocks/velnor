@@ -18,10 +18,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::{
-    sync::mpsc::UnboundedReceiver,
-    task::{JoinHandle, JoinSet},
-};
+use tokio::{sync::mpsc::UnboundedReceiver, task::JoinHandle};
 use tracing::Instrument as _;
 
 use crate::{
@@ -876,19 +873,8 @@ fn notify_daemon_ready(usable_slots: usize, slots: usize) {
         return;
     }
     crate::sd_notify::status(&format!(
-        "ready: {usable_slots}/{slots} runner slot(s) configured"
+        "configured: {usable_slots}/{slots} runner slot(s); control READY follows a local cycle"
     ));
-    crate::sd_notify::ready();
-    if let Some(interval) = crate::sd_notify::watchdog_interval() {
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(interval);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tick.tick().await;
-                crate::sd_notify::watchdog_ping();
-            }
-        });
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1111,131 +1097,48 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
             }
         });
     }
-    let mut slot_tasks = JoinSet::new();
-
     println!(
-        "Starting Velnor daemon with {slots} internal runner slot{}.",
-        if slots == 1 { "" } else { "s" }
+        "Starting Velnor controller with {slots} runner slot process{}.",
+        if slots == 1 { "" } else { "es" }
     );
     if slots > 1 {
         println!(
-            "Each slot uses its own GitHub runner config under {}/slots/slot-N.",
+            "Each slot is one OS process with config under {}/slots/slot-N.",
             config_base.display()
         );
     }
-    crate::sd_notify::status(&format!("supervising {slots} runner slot(s)"));
+    crate::sd_notify::status(&format!("supervising {slots} runner slot process(es)"));
     daemon_forensic_log(
         &config_base,
         &format!(
-            "supervising {slots} slot(s), version={}",
+            "supervising {slots} slot process(es), version={}",
             env!("CARGO_PKG_VERSION")
         ),
     );
-
-    let spawn_slot = |slot_tasks: &mut JoinSet<(usize, Result<()>)>, slot_index: usize| {
-        let daemon_args = resolved_args.clone();
-        let config_base = config_base.clone();
-        slot_tasks.spawn(async move {
-            // catch_unwind keeps the slot index attached to a panic, so the
-            // supervisor can respawn exactly the panicked slot instead of
-            // silently losing capacity until the whole set drains.
-            use futures_util::FutureExt as _;
-            let result = std::panic::AssertUnwindSafe(run_daemon_slot(
-                daemon_args,
-                config_base,
-                slot_index,
-                slots,
-            ))
-            .catch_unwind()
-            .await;
-            let result = match result {
-                Ok(result) => result.with_context(|| format!("daemon slot-{slot_index} failed")),
-                Err(panic) => {
-                    let panic_message = panic
-                        .downcast_ref::<&str>()
-                        .map(|s| (*s).to_string())
-                        .or_else(|| panic.downcast_ref::<String>().cloned())
-                        .unwrap_or_else(|| "non-string panic payload".to_string());
-                    Err(anyhow::anyhow!(
-                        "daemon slot-{slot_index} task panicked: {panic_message}"
-                    ))
-                }
-            };
-            (slot_index, result)
-        });
-    };
-
-    for slot_index in 1..=slots {
-        spawn_slot(&mut slot_tasks, slot_index);
-    }
-
-    let supervised = args.url.is_some() && !args.once && !args.dry_run_registration;
-    let mut failures = Vec::new();
-    while let Some(result) = slot_tasks.join_next().await {
-        match result {
-            Ok((_, Ok(()))) => {}
-            Ok((slot_index, Err(error))) => {
-                let ops_state = match crate::ops::global() {
-                    Some(sink) if sink.degraded() => " ops-store=degraded",
-                    Some(_) => " ops-store=ok",
-                    None => " ops-store=absent",
-                };
-                eprintln!("{error:#}{ops_state}");
-                daemon_forensic_log(
-                    &config_base,
-                    &format!("slot-{slot_index} task exited with error: {error:#}{ops_state}"),
-                );
-                if supervised && !draining() {
-                    // A slot returning an error in supervised mode is a bug
-                    // (slot loops are supposed to retry internally) — but one
-                    // broken slot must never take down the others. Respawn it.
-                    eprintln!("Respawning daemon slot-{slot_index} in 10s.");
-                    tokio::time::sleep(Duration::from_secs(10)).await;
-                    spawn_slot(&mut slot_tasks, slot_index);
-                } else if !supervised {
-                    failures.push(error);
-                }
-            }
-            Err(join_error) => {
-                let slot_note = if join_error.is_panic() {
-                    "daemon slot task panicked"
-                } else {
-                    "daemon slot task aborted"
-                };
-                let error = anyhow::Error::new(join_error).context(slot_note);
-                eprintln!("{error:#}");
-                if supervised {
-                    // Panic isolation: the panicking slot's index is unknown
-                    // from the JoinError alone, so respawn any missing slots
-                    // by simply continuing — remaining slots keep running.
-                    // (Slot identity recovery: respawn is handled by the
-                    // error arm above for non-panic failures; a panic loses
-                    // the index, so restart the whole pass only if the set
-                    // drains completely.)
-                    if slot_tasks.is_empty() {
-                        bail!("all daemon slot tasks stopped (last: panic)");
-                    }
-                } else {
-                    failures.push(error);
-                }
-            }
+    std::fs::write(
+        config_base.join("daemon-args.json"),
+        serde_json::to_vec(&resolved_args)?,
+    )?;
+    let scope = resolved_args
+        .name
+        .clone()
+        .unwrap_or_else(|| "velnor".to_owned());
+    let result = crate::node::controller::supervise_from_daemon(
+        config_base.clone(),
+        scope,
+        slots as u32,
+        resolved_args.once,
+    )
+    .await;
+    if let Some(sink) = crate::ops::global() {
+        if sink.degraded() {
+            daemon_forensic_log(&config_base, "ops-store=degraded after slot supervision");
         }
     }
-    if !failures.is_empty() {
-        bail!("{} daemon slot task(s) failed", failures.len());
+    if draining() {
+        emit_drain_completed_once();
     }
-    if supervised {
-        if draining() {
-            let note = "drain complete: all slots deregistered, exiting";
-            println!("{note}");
-            daemon_forensic_log(&config_base, note);
-            emit_drain_completed_once();
-            return Ok(());
-        }
-        bail!("all daemon slot tasks stopped");
-    }
-
-    Ok(())
+    result
 }
 
 /// Capped exponential backoff with deterministic jitter for the never-exit
@@ -1388,7 +1291,7 @@ pub fn diagnose_github_token(token: Option<&str>) -> Option<String> {
     None
 }
 
-async fn run_daemon_slot(
+pub(crate) async fn run_daemon_slot(
     args: DaemonArgs,
     config_base: PathBuf,
     slot_index: usize,

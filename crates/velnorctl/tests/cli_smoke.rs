@@ -271,6 +271,33 @@ fn json_output_placement_is_equivalent_for_nested_help() {
     assert_eq!(text(&before.stdout), text(&after.stdout));
 }
 
+#[test]
+fn status_json_health_vector_keys_are_stable() {
+    let dir = tempfile_dir("health-json");
+    let output = run(&["status", "--json", "--state-dir", &dir]);
+    assert_eq!(code(&output), 0, "{}", text(&output.stderr));
+    let first: serde_json::Value = serde_json::from_str(text(&output.stdout).trim()).unwrap();
+    let output2 = run(&["status", "--json", "--state-dir", &dir]);
+    let second: serde_json::Value = serde_json::from_str(text(&output2.stdout).trim()).unwrap();
+    let keys: Vec<&str> = first
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    let keys2: Vec<&str> = second
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(keys, keys2);
+    for required in velnor_model::HealthDocument::REQUIRED_KEYS {
+        assert!(keys.contains(&required), "{required} missing from {keys:?}");
+    }
+    assert_ne!(first["state"], "ready");
+}
+
 fn clap_command_paths() -> Vec<Vec<String>> {
     fn walk(cmd: &clap::Command, prefix: Vec<String>, out: &mut Vec<Vec<String>>) {
         let mut subs: Vec<&clap::Command> = cmd

@@ -1,0 +1,1272 @@
+//! Durable node journal: WAL + `synchronous=FULL`, immutable events, reducer.
+//!
+//! Side-effect commands are returned only after the intent event is committed.
+//! Completions are at-least-once: an outbox row survives until a remote
+//! acknowledgement (or observed terminal) is itself committed.
+
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::time::Duration;
+
+use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use velnor_model::{
+    ActorPhase, CanaryStatus, FleetHealthState, Generation, HealthDocument, JobId, ReadyProof,
+    SlotId,
+};
+
+use crate::store::error::{StoreError, StoreResult};
+
+/// Minimum bundled SQLite that includes the WAL-reset fix (3.51.3).
+pub const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
+
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    generation INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    checksum TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS slots (
+    slot_id TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL,
+    phase TEXT NOT NULL,
+    permit_held INTEGER NOT NULL DEFAULT 0,
+    routing_valid INTEGER NOT NULL DEFAULT 0,
+    session_live INTEGER NOT NULL DEFAULT 0,
+    executor_proven INTEGER NOT NULL DEFAULT 0,
+    registered INTEGER NOT NULL DEFAULT 0,
+    pid INTEGER,
+    heartbeat_unix INTEGER NOT NULL DEFAULT 0,
+    surge INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id TEXT PRIMARY KEY,
+    slot_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    attempt INTEGER NOT NULL,
+    worker TEXT NOT NULL,
+    phase TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS outbox (
+    job_id TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    intended INTEGER NOT NULL DEFAULT 0,
+    send_started INTEGER NOT NULL DEFAULT 0,
+    remote_acked INTEGER NOT NULL DEFAULT 0,
+    created_unix INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+";
+
+/// Fleet materialization the reducer reads and writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetState {
+    pub control_live: bool,
+    pub journal_writable: bool,
+    pub github_reachable: bool,
+    pub routing_valid: bool,
+    pub runner_group_valid: bool,
+    pub desired_ready: u32,
+    pub surge: u32,
+    pub canary: CanaryStatus,
+    pub slots: Vec<SlotRecord>,
+    pub jobs: Vec<JobRecord>,
+    pub outbox: Vec<OutboxRecord>,
+}
+
+impl Default for FleetState {
+    fn default() -> Self {
+        Self {
+            control_live: false,
+            journal_writable: false,
+            github_reachable: false,
+            routing_valid: false,
+            runner_group_valid: false,
+            desired_ready: 0,
+            surge: 0,
+            canary: CanaryStatus::Unknown,
+            slots: Vec::new(),
+            jobs: Vec::new(),
+            outbox: Vec::new(),
+        }
+    }
+}
+
+impl FleetState {
+    #[must_use]
+    pub fn health(&self) -> HealthDocument {
+        let actual_ready = self
+            .slots
+            .iter()
+            .filter(|slot| slot.phase.counts_as_ready())
+            .count() as u32;
+        let registered = self.slots.iter().filter(|slot| slot.registered).count() as u32;
+        let permits = self.slots.iter().filter(|slot| slot.permit_held).count() as u32;
+        let executor_ready = self
+            .slots
+            .iter()
+            .filter(|slot| slot.executor_proven)
+            .count() as u32;
+        let surge_ready = self
+            .slots
+            .iter()
+            .filter(|slot| slot.surge && slot.phase.counts_as_ready())
+            .count() as u32;
+        HealthDocument {
+            control_live: self.control_live,
+            journal_writable: self.journal_writable,
+            github_reachable: self.github_reachable,
+            routing_valid: self.routing_valid,
+            runner_group_valid: self.runner_group_valid,
+            desired_ready_slots: self.desired_ready,
+            actual_ready_slots: actual_ready,
+            surge_ready_slots: surge_ready,
+            registered_slots: registered,
+            capacity_permits: permits,
+            executor_ready_slots: executor_ready,
+            oldest_queued_job_seconds: 0,
+            oldest_outbox_entry_seconds: oldest_outbox_age_seconds(&self.outbox),
+            external_canary: self.canary,
+            state: FleetHealthState::NotReady,
+        }
+        .with_derived_state()
+    }
+
+    fn slot_mut(&mut self, id: &SlotId) -> &mut SlotRecord {
+        if let Some(index) = self.slots.iter().position(|slot| slot.slot_id == *id) {
+            return &mut self.slots[index];
+        }
+        self.slots.push(SlotRecord::new(id.clone()));
+        let index = self.slots.len() - 1;
+        &mut self.slots[index]
+    }
+
+    #[must_use]
+    pub fn advertised_capacity(&self) -> u32 {
+        self.slots
+            .iter()
+            .filter(|slot| slot.permit_held && slot.phase.counts_as_ready())
+            .count() as u32
+    }
+}
+
+fn oldest_outbox_age_seconds(outbox: &[OutboxRecord]) -> u64 {
+    let now = unix_now();
+    outbox
+        .iter()
+        .filter(|row| row.intended && !row.remote_acked)
+        .map(|row| now.saturating_sub(row.created_unix))
+        .max()
+        .unwrap_or(0)
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotRecord {
+    pub slot_id: SlotId,
+    pub generation: Generation,
+    pub phase: ActorPhase,
+    pub permit_held: bool,
+    pub routing_valid: bool,
+    pub session_live: bool,
+    pub executor_proven: bool,
+    pub registered: bool,
+    pub pid: Option<u32>,
+    pub heartbeat_unix: u64,
+    pub surge: bool,
+}
+
+impl SlotRecord {
+    fn new(slot_id: SlotId) -> Self {
+        Self {
+            slot_id,
+            generation: Generation::INITIAL,
+            phase: ActorPhase::Absent,
+            permit_held: false,
+            routing_valid: false,
+            session_live: false,
+            executor_proven: false,
+            registered: false,
+            pid: None,
+            heartbeat_unix: 0,
+            surge: false,
+        }
+    }
+
+    pub fn ready_proof(&self) -> Result<ReadyProof, velnor_model::NotReady> {
+        ReadyProof::try_new(
+            self.permit_held,
+            self.routing_valid,
+            self.session_live,
+            self.executor_proven,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobRecord {
+    pub job_id: JobId,
+    pub slot_id: SlotId,
+    pub generation: Generation,
+    pub attempt: u32,
+    pub worker: String,
+    pub phase: ActorPhase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutboxRecord {
+    pub job_id: JobId,
+    pub generation: Generation,
+    pub payload_sha256: String,
+    pub intended: bool,
+    pub send_started: bool,
+    pub remote_acked: bool,
+    pub created_unix: u64,
+}
+
+/// Intent events. The reducer never performs I/O.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Event {
+    ControlLive,
+    JournalWritable,
+    Dependency {
+        github_reachable: bool,
+    },
+    Routing {
+        valid: bool,
+        group_valid: bool,
+    },
+    DesiredCapacity {
+        ready: u32,
+        surge: u32,
+    },
+    PermitReserved {
+        slot_id: SlotId,
+        generation: Generation,
+        surge: bool,
+    },
+    ExecutorProven {
+        slot_id: SlotId,
+        generation: Generation,
+    },
+    SessionLive {
+        slot_id: SlotId,
+        generation: Generation,
+    },
+    RegistrationIntended {
+        slot_id: SlotId,
+        generation: Generation,
+    },
+    Registered {
+        slot_id: SlotId,
+        generation: Generation,
+    },
+    ReadyAttempt {
+        slot_id: SlotId,
+        generation: Generation,
+    },
+    Assigned {
+        slot_id: SlotId,
+        job_id: JobId,
+        generation: Generation,
+    },
+    JobOwned {
+        job_id: JobId,
+        slot_id: SlotId,
+        attempt: u32,
+        generation: Generation,
+        worker: String,
+    },
+    JobStarted {
+        job_id: JobId,
+        generation: Generation,
+    },
+    CompletionIntended {
+        job_id: JobId,
+        generation: Generation,
+        payload_sha256: String,
+    },
+    CompletionSendStarted {
+        job_id: JobId,
+        generation: Generation,
+    },
+    RemoteAcked {
+        job_id: JobId,
+        generation: Generation,
+    },
+    RemoteObservedTerminal {
+        job_id: JobId,
+        generation: Generation,
+    },
+    CleanupIntended {
+        isolation_id: String,
+        generation: Generation,
+    },
+    SlotHeartbeat {
+        slot_id: SlotId,
+        generation: Generation,
+        pid: u32,
+    },
+    SlotStale {
+        slot_id: SlotId,
+        generation: Generation,
+    },
+    CanaryObserved {
+        status: CanaryStatus,
+    },
+}
+
+/// Effects the I/O layer may run only after the matching intent is durable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SideEffect {
+    RegisterRunner {
+        slot_id: SlotId,
+        generation: Generation,
+    },
+    AdvertiseCapacity {
+        permits: u32,
+    },
+    StartJob {
+        job_id: JobId,
+        generation: Generation,
+    },
+    SendCompletion {
+        job_id: JobId,
+        generation: Generation,
+        payload_sha256: String,
+    },
+    Cleanup {
+        isolation_id: String,
+        generation: Generation,
+    },
+    DeleteOutbox {
+        job_id: JobId,
+        generation: Generation,
+    },
+    SpawnSlot {
+        slot_id: SlotId,
+        generation: Generation,
+    },
+    FenceSlot {
+        slot_id: SlotId,
+        generation: Generation,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReduceOutcome {
+    pub state: FleetState,
+    pub commands: Vec<SideEffect>,
+    pub rejected: bool,
+}
+
+/// Pure `State + Event -> New State + Commands`. No I/O.
+#[must_use]
+pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
+    let mut commands = Vec::new();
+    let mut rejected = false;
+    match event {
+        Event::ControlLive => state.control_live = true,
+        Event::JournalWritable => state.journal_writable = true,
+        Event::Dependency { github_reachable } => {
+            state.github_reachable = github_reachable;
+            // GitHub down is degraded, never a restart storm.
+        }
+        Event::Routing { valid, group_valid } => {
+            state.routing_valid = valid;
+            state.runner_group_valid = group_valid;
+            for slot in &mut state.slots {
+                slot.routing_valid = valid && group_valid;
+            }
+        }
+        Event::DesiredCapacity { ready, surge } => {
+            state.desired_ready = ready;
+            state.surge = surge;
+        }
+        Event::PermitReserved {
+            slot_id,
+            generation,
+            surge,
+        } => {
+            let routing = state.routing_valid && state.runner_group_valid;
+            let slot = state.slot_mut(&slot_id);
+            if generation < slot.generation {
+                rejected = true;
+            } else {
+                slot.generation = generation;
+                slot.permit_held = true;
+                slot.surge = surge;
+                slot.routing_valid = routing;
+                if slot.phase == ActorPhase::Absent {
+                    slot.phase = ActorPhase::Provisioning;
+                }
+                commands.push(SideEffect::SpawnSlot {
+                    slot_id,
+                    generation,
+                });
+            }
+        }
+        Event::ExecutorProven {
+            slot_id,
+            generation,
+        } => {
+            let slot = state.slot_mut(&slot_id);
+            if generation != slot.generation {
+                rejected = true;
+            } else {
+                slot.executor_proven = true;
+            }
+        }
+        Event::SessionLive {
+            slot_id,
+            generation,
+        } => {
+            let slot = state.slot_mut(&slot_id);
+            if generation != slot.generation {
+                rejected = true;
+            } else {
+                slot.session_live = true;
+            }
+        }
+        Event::RegistrationIntended {
+            slot_id,
+            generation,
+        } => {
+            let slot = state.slot_mut(&slot_id);
+            if generation != slot.generation || !slot.permit_held {
+                rejected = true;
+            } else {
+                commands.push(SideEffect::RegisterRunner {
+                    slot_id,
+                    generation,
+                });
+            }
+        }
+        Event::Registered {
+            slot_id,
+            generation,
+        } => {
+            let slot = state.slot_mut(&slot_id);
+            if generation != slot.generation {
+                rejected = true;
+            } else {
+                slot.registered = true;
+                slot.phase = ActorPhase::Registered;
+            }
+        }
+        Event::ReadyAttempt {
+            slot_id,
+            generation,
+        } => {
+            {
+                let slot = state.slot_mut(&slot_id);
+                if generation != slot.generation {
+                    rejected = true;
+                } else if slot.ready_proof().is_ok() && slot.registered {
+                    slot.phase = ActorPhase::Ready;
+                } else {
+                    rejected = true;
+                }
+            }
+            if !rejected {
+                commands.push(SideEffect::AdvertiseCapacity {
+                    permits: state.advertised_capacity(),
+                });
+            }
+        }
+        Event::Assigned {
+            slot_id,
+            job_id: _,
+            generation,
+        } => {
+            let slot = state.slot_mut(&slot_id);
+            if generation != slot.generation || slot.phase != ActorPhase::Ready {
+                rejected = true;
+            } else {
+                slot.phase = ActorPhase::Assigned;
+            }
+        }
+        Event::JobOwned {
+            job_id,
+            slot_id,
+            attempt,
+            generation,
+            worker,
+        } => {
+            let slot_generation = state
+                .slots
+                .iter()
+                .find(|slot| slot.slot_id == slot_id)
+                .map(|slot| slot.generation);
+            let newer_job = state
+                .jobs
+                .iter()
+                .any(|job| job.job_id == job_id && job.generation > generation);
+            if newer_job || slot_generation != Some(generation) {
+                rejected = true;
+            } else {
+                state.jobs.retain(|job| job.job_id != job_id);
+                state.jobs.push(JobRecord {
+                    job_id: job_id.clone(),
+                    slot_id,
+                    generation,
+                    attempt,
+                    worker,
+                    phase: ActorPhase::Assigned,
+                });
+                commands.push(SideEffect::StartJob { job_id, generation });
+            }
+        }
+        Event::JobStarted { job_id, generation } => {
+            if let Some(job) = state.jobs.iter_mut().find(|job| job.job_id == job_id) {
+                if job.generation != generation {
+                    rejected = true;
+                } else {
+                    job.phase = ActorPhase::Running;
+                }
+            } else {
+                rejected = true;
+            }
+        }
+        Event::CompletionIntended {
+            job_id,
+            generation,
+            payload_sha256,
+        } => {
+            if let Some(job) = state.jobs.iter().find(|job| job.job_id == job_id) {
+                let slot_generation = state
+                    .slots
+                    .iter()
+                    .find(|slot| slot.slot_id == job.slot_id)
+                    .map(|slot| slot.generation);
+                if job.generation != generation || slot_generation != Some(generation) {
+                    rejected = true;
+                } else {
+                    state.outbox.retain(|row| row.job_id != job_id);
+                    state.outbox.push(OutboxRecord {
+                        job_id: job_id.clone(),
+                        generation,
+                        payload_sha256: payload_sha256.clone(),
+                        intended: true,
+                        send_started: false,
+                        remote_acked: false,
+                        created_unix: unix_now(),
+                    });
+                    commands.push(SideEffect::SendCompletion {
+                        job_id,
+                        generation,
+                        payload_sha256,
+                    });
+                }
+            } else {
+                rejected = true;
+            }
+        }
+        Event::CompletionSendStarted { job_id, generation } => {
+            if let Some(row) = state.outbox.iter_mut().find(|row| row.job_id == job_id) {
+                if row.generation != generation {
+                    rejected = true;
+                } else {
+                    row.send_started = true;
+                }
+            } else {
+                rejected = true;
+            }
+        }
+        Event::RemoteAcked { job_id, generation }
+        | Event::RemoteObservedTerminal { job_id, generation } => {
+            if let Some(row) = state.outbox.iter_mut().find(|row| row.job_id == job_id) {
+                if row.generation != generation {
+                    rejected = true;
+                } else {
+                    row.remote_acked = true;
+                    commands.push(SideEffect::DeleteOutbox { job_id, generation });
+                }
+            } else {
+                rejected = true;
+            }
+        }
+        Event::CleanupIntended {
+            isolation_id,
+            generation,
+        } => {
+            commands.push(SideEffect::Cleanup {
+                isolation_id,
+                generation,
+            });
+        }
+        Event::SlotHeartbeat {
+            slot_id,
+            generation,
+            pid,
+        } => {
+            let slot = state.slot_mut(&slot_id);
+            if generation != slot.generation {
+                rejected = true;
+            } else {
+                slot.pid = Some(pid);
+                slot.heartbeat_unix = unix_now();
+            }
+        }
+        Event::SlotStale {
+            slot_id,
+            generation,
+        } => {
+            let slot = state.slot_mut(&slot_id);
+            if generation != slot.generation {
+                rejected = true;
+            } else {
+                slot.phase = ActorPhase::Fenced;
+                commands.push(SideEffect::FenceSlot {
+                    slot_id,
+                    generation,
+                });
+            }
+        }
+        Event::CanaryObserved { status } => state.canary = status,
+    }
+    ReduceOutcome {
+        state,
+        commands,
+        rejected,
+    }
+}
+
+/// Opened journal on local disk only.
+#[derive(Debug)]
+pub struct Journal {
+    conn: Connection,
+    path: PathBuf,
+}
+
+impl Journal {
+    /// Open (creating) a journal file. Parent directory must already exist.
+    ///
+    /// # Errors
+    /// Missing parent, SQLite older than the WAL-reset fix, or schema setup.
+    pub fn open(path: impl AsRef<Path>) -> StoreResult<Self> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() && !parent.is_dir() {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Unavailable,
+                    "journal.parent.missing",
+                )
+                .with_remediation(format!(
+                    "create directory {} before opening {}",
+                    parent.display(),
+                    path.display()
+                )));
+            }
+        }
+        let conn = Connection::open(path)?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        let wal: String = conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+        if !wal.eq_ignore_ascii_case("wal") {
+            return Err(StoreError::new(
+                velnor_model::ExitClass::Operation,
+                "journal.wal.unavailable",
+            )
+            .with_remediation("the filesystem must support WAL journaling"));
+        }
+        conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
+        assert_sqlite_version(&conn)?;
+        conn.execute_batch(SCHEMA)?;
+        Ok(Self {
+            conn,
+            path: path.to_path_buf(),
+        })
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Persist `event` then return the commands. Crash after this returns
+    /// still has the intent; crash before it has neither intent nor command.
+    ///
+    /// # Errors
+    /// SQLite write failures.
+    pub fn apply(&mut self, event: Event) -> StoreResult<ReduceOutcome> {
+        let state = self.load_state()?;
+        let outcome = reduce(state, event.clone());
+        if outcome.rejected {
+            return Ok(outcome);
+        }
+        let payload = serde_json::to_string(&event).map_err(|error| {
+            StoreError::new(velnor_model::ExitClass::Operation, "journal.encode.failed")
+                .with_remediation(error.to_string())
+        })?;
+        let checksum = sha256_hex(payload.as_bytes());
+        let generation = event_generation(&event);
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO events (generation, kind, payload, checksum) VALUES (?1, ?2, ?3, ?4)",
+            params![generation.0 as i64, event_kind(&event), payload, checksum],
+        )?;
+        persist_state(&tx, &outcome.state)?;
+        tx.commit()?;
+        Ok(outcome)
+    }
+
+    /// Rebuild materialization from the event log (crash recovery).
+    ///
+    /// # Errors
+    /// SQLite or payload decode failures.
+    pub fn load_state(&self) -> StoreResult<FleetState> {
+        // Journal open succeeded, so the file is writable unless a later
+        // apply fails; recovery treats an opened journal as writable.
+        let mut state = FleetState {
+            journal_writable: true,
+            ..FleetState::default()
+        };
+        let mut stmt = self
+            .conn
+            .prepare("SELECT payload, checksum FROM events ORDER BY id ASC")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (payload, checksum) = row?;
+            if sha256_hex(payload.as_bytes()) != checksum {
+                return Err(StoreError::new(
+                    velnor_model::ExitClass::Conflict,
+                    "journal.checksum.mismatch",
+                )
+                .with_remediation("the event log failed integrity verification"));
+            }
+            let event: Event = serde_json::from_str(&payload).map_err(|error| {
+                StoreError::new(velnor_model::ExitClass::Operation, "journal.decode.failed")
+                    .with_remediation(error.to_string())
+            })?;
+            let outcome = reduce(state, event);
+            state = outcome.state;
+        }
+        Ok(state)
+    }
+
+    /// Pending completion outbox rows that still need remote reconciliation.
+    ///
+    /// # Errors
+    /// SQLite read failures.
+    pub fn pending_outbox(&self) -> StoreResult<Vec<OutboxRecord>> {
+        Ok(self
+            .load_state()?
+            .outbox
+            .into_iter()
+            .filter(|row| row.intended && !row.remote_acked)
+            .collect())
+    }
+}
+
+fn persist_state(tx: &rusqlite::Transaction<'_>, state: &FleetState) -> StoreResult<()> {
+    tx.execute("DELETE FROM slots", [])?;
+    tx.execute("DELETE FROM jobs", [])?;
+    tx.execute("DELETE FROM outbox", [])?;
+    tx.execute("DELETE FROM meta", [])?;
+    for slot in &state.slots {
+        tx.execute(
+            "INSERT INTO slots (
+                slot_id, generation, phase, permit_held, routing_valid, session_live,
+                executor_proven, registered, pid, heartbeat_unix, surge
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                slot.slot_id.0,
+                slot.generation.0 as i64,
+                slot.phase.as_str(),
+                slot.permit_held as i64,
+                slot.routing_valid as i64,
+                slot.session_live as i64,
+                slot.executor_proven as i64,
+                slot.registered as i64,
+                slot.pid.map(i64::from),
+                slot.heartbeat_unix as i64,
+                slot.surge as i64,
+            ],
+        )?;
+    }
+    for job in &state.jobs {
+        tx.execute(
+            "INSERT INTO jobs (job_id, slot_id, generation, attempt, worker, phase)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                job.job_id.0,
+                job.slot_id.0,
+                job.generation.0 as i64,
+                job.attempt as i64,
+                job.worker,
+                job.phase.as_str(),
+            ],
+        )?;
+    }
+    for row in &state.outbox {
+        if row.remote_acked {
+            continue;
+        }
+        tx.execute(
+            "INSERT INTO outbox (
+                job_id, generation, payload_sha256, intended, send_started, remote_acked, created_unix
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                row.job_id.0,
+                row.generation.0 as i64,
+                row.payload_sha256,
+                row.intended as i64,
+                row.send_started as i64,
+                row.remote_acked as i64,
+                row.created_unix as i64,
+            ],
+        )?;
+    }
+    let meta = [
+        ("control_live", (state.control_live as u8).to_string()),
+        (
+            "github_reachable",
+            (state.github_reachable as u8).to_string(),
+        ),
+        ("routing_valid", (state.routing_valid as u8).to_string()),
+        (
+            "runner_group_valid",
+            (state.runner_group_valid as u8).to_string(),
+        ),
+        ("desired_ready", state.desired_ready.to_string()),
+        ("surge", state.surge.to_string()),
+        ("canary", state.canary.as_str().to_owned()),
+    ];
+    for (key, value) in meta {
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+            params![key, value],
+        )?;
+    }
+    Ok(())
+}
+
+fn event_generation(event: &Event) -> Generation {
+    match event {
+        Event::PermitReserved { generation, .. }
+        | Event::ExecutorProven { generation, .. }
+        | Event::SessionLive { generation, .. }
+        | Event::RegistrationIntended { generation, .. }
+        | Event::Registered { generation, .. }
+        | Event::ReadyAttempt { generation, .. }
+        | Event::Assigned { generation, .. }
+        | Event::JobOwned { generation, .. }
+        | Event::JobStarted { generation, .. }
+        | Event::CompletionIntended { generation, .. }
+        | Event::CompletionSendStarted { generation, .. }
+        | Event::RemoteAcked { generation, .. }
+        | Event::RemoteObservedTerminal { generation, .. }
+        | Event::CleanupIntended { generation, .. }
+        | Event::SlotHeartbeat { generation, .. }
+        | Event::SlotStale { generation, .. } => *generation,
+        _ => Generation(0),
+    }
+}
+
+fn event_kind(event: &Event) -> &'static str {
+    match event {
+        Event::ControlLive => "control_live",
+        Event::JournalWritable => "journal_writable",
+        Event::Dependency { .. } => "dependency",
+        Event::Routing { .. } => "routing",
+        Event::DesiredCapacity { .. } => "desired_capacity",
+        Event::PermitReserved { .. } => "permit_reserved",
+        Event::ExecutorProven { .. } => "executor_proven",
+        Event::SessionLive { .. } => "session_live",
+        Event::RegistrationIntended { .. } => "registration_intended",
+        Event::Registered { .. } => "registered",
+        Event::ReadyAttempt { .. } => "ready_attempt",
+        Event::Assigned { .. } => "assigned",
+        Event::JobOwned { .. } => "job_owned",
+        Event::JobStarted { .. } => "job_started",
+        Event::CompletionIntended { .. } => "completion_intended",
+        Event::CompletionSendStarted { .. } => "completion_send_started",
+        Event::RemoteAcked { .. } => "remote_acked",
+        Event::RemoteObservedTerminal { .. } => "remote_observed_terminal",
+        Event::CleanupIntended { .. } => "cleanup_intended",
+        Event::SlotHeartbeat { .. } => "slot_heartbeat",
+        Event::SlotStale { .. } => "slot_stale",
+        Event::CanaryObserved { .. } => "canary_observed",
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn assert_sqlite_version(conn: &Connection) -> StoreResult<()> {
+    let raw: String = conn.query_row("SELECT sqlite_version()", [], |row| row.get(0))?;
+    let parsed = parse_sqlite_version(&raw).ok_or_else(|| {
+        StoreError::new(
+            velnor_model::ExitClass::Operation,
+            "journal.sqlite.version.unparsed",
+        )
+        .with_remediation(format!("sqlite_version() returned {raw}"))
+    })?;
+    if parsed < MIN_SQLITE_VERSION {
+        return Err(
+            StoreError::new(velnor_model::ExitClass::Operation, "journal.sqlite.too_old")
+                .with_remediation(format!(
+                    "bundled SQLite {raw} is older than {}.{}.{} (WAL-reset fix)",
+                    MIN_SQLITE_VERSION.0, MIN_SQLITE_VERSION.1, MIN_SQLITE_VERSION.2
+                )),
+        );
+    }
+    Ok(())
+}
+
+fn parse_sqlite_version(raw: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = raw.split('.');
+    let major = u32::from_str(parts.next()?).ok()?;
+    let minor = u32::from_str(parts.next()?).ok()?;
+    let patch = u32::from_str(parts.next()?).ok()?;
+    Some((major, minor, patch))
+}
+
+/// Checksum of an outbox payload, recorded before send.
+#[must_use]
+pub fn payload_checksum(bytes: &[u8]) -> String {
+    sha256_hex(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open_tmp(label: &str) -> (PathBuf, Journal) {
+        let nanos = unix_now();
+        let dir = std::env::temp_dir().join(format!(
+            "velnor-journal-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("journal.db");
+        let journal = Journal::open(&path).unwrap();
+        (dir, journal)
+    }
+
+    fn slot(id: &str) -> SlotId {
+        SlotId(id.to_owned())
+    }
+
+    fn job(id: &str) -> JobId {
+        JobId(id.to_owned())
+    }
+
+    fn gen() -> Generation {
+        Generation::INITIAL
+    }
+
+    fn prime_ready(journal: &mut Journal, id: &str) {
+        let s = slot(id);
+        let g = gen();
+        for event in [
+            Event::ControlLive,
+            Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1, surge: 1 },
+            Event::PermitReserved {
+                slot_id: s.clone(),
+                generation: g,
+                surge: false,
+            },
+            Event::ExecutorProven {
+                slot_id: s.clone(),
+                generation: g,
+            },
+            Event::SessionLive {
+                slot_id: s.clone(),
+                generation: g,
+            },
+            Event::RegistrationIntended {
+                slot_id: s.clone(),
+                generation: g,
+            },
+            Event::Registered {
+                slot_id: s.clone(),
+                generation: g,
+            },
+        ] {
+            let outcome = journal.apply(event).unwrap();
+            assert!(!outcome.rejected);
+        }
+    }
+
+    #[test]
+    fn ready_requires_permit_routing_session_and_executor() {
+        let (_dir, mut journal) = open_tmp("not-ready");
+        let s = slot("scope-1");
+        let g = gen();
+        journal.apply(Event::ControlLive).unwrap();
+        journal.apply(Event::JournalWritable).unwrap();
+        journal
+            .apply(Event::PermitReserved {
+                slot_id: s.clone(),
+                generation: g,
+                surge: false,
+            })
+            .unwrap();
+        let outcome = journal
+            .apply(Event::ReadyAttempt {
+                slot_id: s,
+                generation: g,
+            })
+            .unwrap();
+        assert!(outcome.rejected);
+        assert_eq!(outcome.state.slots[0].phase, ActorPhase::Provisioning);
+    }
+
+    #[test]
+    fn github_unreachable_stays_control_live_and_not_ready_state() {
+        let (_dir, mut journal) = open_tmp("gh-down");
+        journal.apply(Event::ControlLive).unwrap();
+        journal.apply(Event::JournalWritable).unwrap();
+        journal
+            .apply(Event::Dependency {
+                github_reachable: false,
+            })
+            .unwrap();
+        let health = journal.load_state().unwrap().health();
+        assert!(health.control_live);
+        assert!(!health.github_reachable);
+        assert_eq!(health.state, FleetHealthState::Degraded);
+        assert_ne!(health.state.as_str(), "ready");
+    }
+
+    #[test]
+    fn registration_intent_is_durable_before_register_command() {
+        let (dir, mut journal) = open_tmp("reg-intent");
+        let s = slot("scope-1");
+        let g = gen();
+        journal.apply(Event::ControlLive).unwrap();
+        journal.apply(Event::JournalWritable).unwrap();
+        journal
+            .apply(Event::PermitReserved {
+                slot_id: s.clone(),
+                generation: g,
+                surge: false,
+            })
+            .unwrap();
+        let outcome = journal
+            .apply(Event::RegistrationIntended {
+                slot_id: s.clone(),
+                generation: g,
+            })
+            .unwrap();
+        assert_eq!(
+            outcome.commands,
+            vec![SideEffect::RegisterRunner {
+                slot_id: s.clone(),
+                generation: g,
+            }]
+        );
+        drop(journal);
+        let recovered = Journal::open(dir.join("journal.db")).unwrap();
+        let state = recovered.load_state().unwrap();
+        assert!(state.slots.iter().any(|slot| slot.slot_id == s));
+        assert!(!state.slots[0].registered);
+    }
+
+    #[test]
+    fn job_ownership_survives_reopen_before_start_command() {
+        let (dir, mut journal) = open_tmp("job-own");
+        prime_ready(&mut journal, "scope-1");
+        journal
+            .apply(Event::ReadyAttempt {
+                slot_id: slot("scope-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::Assigned {
+                slot_id: slot("scope-1"),
+                job_id: job("job-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        let outcome = journal
+            .apply(Event::JobOwned {
+                job_id: job("job-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: gen(),
+                worker: "velnor-job@job-1".to_owned(),
+            })
+            .unwrap();
+        assert!(matches!(
+            outcome.commands.as_slice(),
+            [SideEffect::StartJob { .. }]
+        ));
+        drop(journal);
+        let recovered = Journal::open(dir.join("journal.db"))
+            .unwrap()
+            .load_state()
+            .unwrap();
+        assert_eq!(recovered.jobs[0].job_id, job("job-1"));
+        assert_eq!(recovered.jobs[0].worker, "velnor-job@job-1");
+    }
+
+    #[test]
+    fn completion_kill_points_leave_outbox_recoverable() {
+        let (dir, mut journal) = open_tmp("complete");
+        prime_ready(&mut journal, "scope-1");
+        journal
+            .apply(Event::ReadyAttempt {
+                slot_id: slot("scope-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::Assigned {
+                slot_id: slot("scope-1"),
+                job_id: job("job-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::JobOwned {
+                job_id: job("job-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: gen(),
+                worker: "w".to_owned(),
+            })
+            .unwrap();
+        let checksum = payload_checksum(b"conclusion=success");
+        // Kill before send: intent is durable, outbox pending.
+        journal
+            .apply(Event::CompletionIntended {
+                job_id: job("job-1"),
+                generation: gen(),
+                payload_sha256: checksum.clone(),
+            })
+            .unwrap();
+        assert_eq!(journal.pending_outbox().unwrap().len(), 1);
+        // Kill during send.
+        journal
+            .apply(Event::CompletionSendStarted {
+                job_id: job("job-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        drop(journal);
+        let mut recovered = Journal::open(dir.join("journal.db")).unwrap();
+        let pending = recovered.pending_outbox().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].send_started);
+        assert!(!pending[0].remote_acked);
+        // Kill after remote accept before local ack: observe terminal, then
+        // delete command is issued only after that event commits.
+        let outcome = recovered
+            .apply(Event::RemoteObservedTerminal {
+                job_id: job("job-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        assert!(matches!(
+            outcome.commands.as_slice(),
+            [SideEffect::DeleteOutbox { .. }]
+        ));
+        drop(recovered);
+        let again = Journal::open(dir.join("journal.db")).unwrap();
+        assert!(again.pending_outbox().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_generation_cannot_complete_or_cleanup() {
+        let (_dir, mut journal) = open_tmp("stale");
+        prime_ready(&mut journal, "scope-1");
+        journal
+            .apply(Event::ReadyAttempt {
+                slot_id: slot("scope-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::Assigned {
+                slot_id: slot("scope-1"),
+                job_id: job("job-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::JobOwned {
+                job_id: job("job-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: gen(),
+                worker: "w".to_owned(),
+            })
+            .unwrap();
+        let newer = Generation(2);
+        journal
+            .apply(Event::PermitReserved {
+                slot_id: slot("scope-1"),
+                generation: newer,
+                surge: false,
+            })
+            .unwrap();
+        let complete = journal
+            .apply(Event::CompletionIntended {
+                job_id: job("job-1"),
+                generation: gen(),
+                payload_sha256: payload_checksum(b"nope"),
+            })
+            .unwrap();
+        assert!(complete.rejected);
+        let cleanup = reduce(
+            complete.state,
+            Event::SlotHeartbeat {
+                slot_id: slot("scope-1"),
+                generation: gen(),
+                pid: 1,
+            },
+        );
+        assert!(cleanup.rejected);
+    }
+
+    #[test]
+    fn registration_command_is_not_emitted_without_permit() {
+        let state = FleetState::default();
+        let outcome = reduce(
+            state,
+            Event::RegistrationIntended {
+                slot_id: slot("x"),
+                generation: gen(),
+            },
+        );
+        assert!(outcome.rejected);
+        assert!(outcome.commands.is_empty());
+    }
+}

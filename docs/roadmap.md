@@ -28,6 +28,9 @@ template instances, and doctor timers (master-plan P0/P1 complete). Active
 engineering: master-plan P2 (estate pipeline tuning), P3 (performance core:
 native HTTP transport, zero-copy logs, dynamic slots, org-level JIT), P3b
 (native-adapter completeness — no JS product path), P4 (UX parity matrix).
+**2026-08-25:** the production availability boundary is Node Architecture v2
+(guardian / controller / per-slot OS process / transient job unit + durable
+journal). A shared-process slot `JoinSet` is not an availability boundary.
 Sections below describe standing architecture; the marked contract governs
 unified-CI conflicts.
 

@@ -215,6 +215,8 @@ pub enum Command {
     Status(Box<runtime::StatusArgs>),
     /// Inspect the canonical Velnor storage layout and catalog.
     Storage(Box<runtime::StorageArgs>),
+    /// External black-box canary (queue → assignment → first step → completion).
+    Canary(velnor_runner::node::CanaryArgs),
 }
 
 /// Error a command execution returns, carrying its exit class.
@@ -347,12 +349,48 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
             run_runtime(velnor_runner::args::Command::Remove((*args).into())).await
         }
         Command::Status(args) => {
+            if args.json {
+                return status_health_json(&args);
+            }
             run_runtime(velnor_runner::args::Command::Status((*args).into())).await
         }
         Command::Storage(args) => {
             run_runtime(velnor_runner::args::Command::Storage((*args).into())).await
         }
+        Command::Canary(args) => {
+            let report = velnor_runner::node::run_canary(&args)?;
+            println!(
+                "{}",
+                serde_json::to_string(&report)
+                    .map_err(|error| CommandError::operation(error.to_string()))?
+            );
+            Ok(())
+        }
     }
+}
+
+fn status_health_json(args: &runtime::StatusArgs) -> Result<(), CommandError> {
+    use velnor_control::journal::Journal;
+    use velnor_model::HealthDocument;
+    let dir = args
+        .state_dir
+        .clone()
+        .or_else(|| args.config_dir.clone())
+        .unwrap_or_else(|| std::path::PathBuf::from("/run/velnor"));
+    let document = match Journal::open(dir.join("journal.db")) {
+        Ok(journal) => journal
+            .load_state()
+            .map(|state| state.health())
+            .unwrap_or_else(|_| HealthDocument::empty().with_derived_state()),
+        Err(_) => velnor_runner::node::health::fetch(&dir)
+            .unwrap_or_else(|_| HealthDocument::empty().with_derived_state()),
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&document)
+            .map_err(|error| CommandError::operation(error.to_string()))?
+    );
+    Ok(())
 }
 
 async fn run_runtime(command: velnor_runner::args::Command) -> Result<(), CommandError> {

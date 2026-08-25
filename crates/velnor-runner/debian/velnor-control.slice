@@ -1,0 +1,9 @@
+[Unit]
+Description=Velnor control-plane slice (guardian, controller, journal)
+Documentation=https://github.com/tailrocks/velnor
+
+[Slice]
+MemoryMin=64M
+CPUWeight=200
+IOWeight=200
+TasksMax=256

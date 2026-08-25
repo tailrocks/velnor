@@ -28,6 +28,7 @@ mod job_message;
 mod leftover_disk;
 mod manifest;
 mod mise;
+pub mod node;
 mod ops;
 mod plan;
 mod platform;

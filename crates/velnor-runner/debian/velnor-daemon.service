@@ -1,17 +1,17 @@
 [Unit]
 Description=Velnor self-hosted GitHub Actions runner daemon
 Documentation=https://github.com/tailrocks/velnor
-After=network-online.target docker.service
-Wants=network-online.target
+After=network-online.target docker.service velnor-guardian.service
+Wants=network-online.target velnor-guardian.service
 Requires=docker.service
 
 [Service]
-# Type=notify + WatchdogSec: the daemon reports READY/STATUS over sd_notify and
-# pings the watchdog; a hung process is restarted by systemd. The daemon itself
-# never exits on registration/network/credential failures (it retries forever
-# with backoff), so Restart=always is a backstop, not the recovery mechanism.
+# Type=notify + WatchdogSec: READY means the local control cycle can run, not
+# fleet schedulability. Watchdog pings only after a completed local cycle.
+# Each ready slot is a separate OS process (not a JoinSet in this unit).
 Type=notify
 WatchdogSec=180
+Slice=velnor-control.slice
 # Registration intentionally retries through transient GitHub/network failures
 # and large fleets provision slots before READY=1. The systemd default 90s
 # startup timeout can therefore kill a healthy daemon mid-registration.
