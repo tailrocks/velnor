@@ -44,7 +44,6 @@ pub async fn run(args: JobArgs) -> anyhow::Result<()> {
             args.generation
         );
     }
-    super::complete::bind_state_dir(args.state_dir.clone());
     if let Ok(mut daemon) = super::exec::load_exec_config(&args.state_dir) {
         if args.once {
             daemon.once = true;

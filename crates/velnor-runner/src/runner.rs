@@ -108,6 +108,7 @@ struct RunServiceJobContext {
     client: RunServiceClient,
     run_service_url: String,
     billing_owner_id: Option<String>,
+    journal_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -271,6 +272,7 @@ async fn complete_recorded_in_flight_job(
         client,
         run_service_url: record.run_service_url,
         billing_owner_id: record.billing_owner_id,
+        journal_dir: crate::node::complete::journal_dir_near(slot_dir),
     };
     let identity = AcquiredJobIdentity {
         plan_id: record.plan_id,
@@ -1316,7 +1318,6 @@ pub(crate) async fn run_daemon_slot(
     slot_index: usize,
     slots: usize,
 ) -> Result<()> {
-    crate::node::complete::bind_state_dir(config_base.clone());
     if args.url.is_none() {
         let slot_args = daemon_slot_run_args(&args, &config_base, slot_index, slots)?;
         return run(slot_args).await;
@@ -3211,10 +3212,12 @@ async fn handle_v2_message(
     };
     let acquired_identity = acquired_job_identity(&job_value)
         .ok_or_else(|| anyhow::anyhow!("acquired run-service job missing plan/job identity"))?;
+    let journal_dir = crate::node::complete::journal_dir_near(config_dir);
     let fallback_run_service_job = RunServiceJobContext {
         client: run_service.clone(),
         run_service_url: run_service_url.to_string(),
         billing_owner_id: reference.billing_owner_id.clone(),
+        journal_dir: journal_dir.clone(),
     };
     let job: AgentJobRequestMessage = match serde_json::from_value(job_value) {
         Ok(job) => job,
@@ -3253,6 +3256,7 @@ async fn handle_v2_message(
         client: job_run_service,
         run_service_url: run_service_url.to_string(),
         billing_owner_id: reference.billing_owner_id,
+        journal_dir,
     };
     if let Some(trigger) = prewarm_trigger.take() {
         let _ = trigger.send(());
@@ -3291,7 +3295,7 @@ async fn handle_job_request(
     let capacity_run_root = crate::storage::StorageLayout::resolve()
         .map(|layout| layout.run_root)
         .unwrap_or_else(|| daemon_capacity_run_root(config_dir));
-    crate::node::complete::bind_state_dir(crate::node::complete::journal_dir_near(config_dir));
+    let journal_dir = crate::node::complete::journal_dir_near(config_dir);
     let Some(job_claim) =
         JobClaim::try_acquire(&capacity_run_root, &job.plan.plan_id, &job.job_id)?
     else {
@@ -3880,6 +3884,7 @@ async fn handle_job_request(
             run_service_job.billing_owner_id,
             None,
             false,
+            &journal_dir,
         )
         .instrument(finalize_span)
         .await;
@@ -3936,6 +3941,7 @@ async fn handle_job_request(
             run_service_job.billing_owner_id,
             None,
             true,
+            &journal_dir,
         )
         .await?;
         println!("No-op job completed and message acknowledged.");
@@ -7314,6 +7320,7 @@ async fn complete_run_service_job(
     billing_owner_id: Option<String>,
     infrastructure_failure_category: Option<String>,
     publish_completion_timeline_logs: bool,
+    journal_dir: &Path,
 ) -> Result<()> {
     if publish_completion_timeline_logs {
         if let Err(error) = publish_timeline_logs(job, &step_logs).await {
@@ -7431,24 +7438,23 @@ async fn complete_run_service_job(
         billing_owner_id,
         infrastructure_failure_category,
     };
-    send_guarded_run_service_complete(client, run_service_url, completion).await
+    send_guarded_run_service_complete(client, run_service_url, completion, journal_dir).await
 }
 
 async fn send_guarded_run_service_complete(
     client: &RunServiceClient,
     run_service_url: &str,
     completion: crate::protocol::RunServiceCompleteJob,
+    journal_dir: &Path,
 ) -> Result<()> {
-    let state_dir = crate::node::complete::bound_state_dir()
-        .ok_or_else(|| anyhow::anyhow!("refusing GitHub complete_job without a bound journal"))?;
-    let mut journal = velnor_control::journal::Journal::open(state_dir.join("journal.db"))
+    let mut journal = velnor_control::journal::Journal::open(journal_dir.join("journal.db"))
         .map_err(|error| anyhow::anyhow!("journal: {error}"))?;
     let job_id = velnor_model::JobId(completion.job_id.clone());
     let generation = crate::node::complete::ensure_owned(&mut journal, &job_id)?;
     let payload = serde_json::to_vec(&completion)?;
     crate::node::complete::guarded_complete_async(
         &mut journal,
-        &state_dir,
+        journal_dir,
         &job_id,
         generation,
         &payload,
@@ -7475,6 +7481,7 @@ async fn complete_run_service_job_refreshing(
     billing_owner_id: Option<String>,
     infrastructure_failure_category: Option<String>,
     publish_completion_timeline_logs: bool,
+    journal_dir: &Path,
 ) -> Result<()> {
     let first = complete_run_service_job(
         client,
@@ -7487,6 +7494,7 @@ async fn complete_run_service_job_refreshing(
         billing_owner_id.clone(),
         infrastructure_failure_category.clone(),
         publish_completion_timeline_logs,
+        journal_dir,
     )
     .await;
     if !first
@@ -7509,6 +7517,7 @@ async fn complete_run_service_job_refreshing(
         billing_owner_id,
         infrastructure_failure_category,
         publish_completion_timeline_logs,
+        journal_dir,
     )
     .await
 }
@@ -7767,6 +7776,7 @@ async fn complete_acquired_job_outcome(
         &run_service_job.client,
         &run_service_job.run_service_url,
         completion,
+        &run_service_job.journal_dir,
     )
     .await
     .context("complete acquired run-service job after infrastructure failure")

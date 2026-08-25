@@ -1,26 +1,15 @@
 //! Persist completion intent before any GitHub `complete_job` send.
+//!
+//! The journal directory is a function argument, never thread-local: the
+//! service binary uses a multi-thread Tokio runtime, so TLS set before an
+//! `.await` is not visible on the worker that resumes `complete_job`.
 
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use velnor_control::journal::{payload_checksum, Event, Journal};
 use velnor_model::{Generation, JobId, SlotId};
 
 use super::cleanup;
-
-thread_local! {
-    static STATE_DIR: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-}
-
-/// Bind the fleet journal directory for this process (one job/slot process).
-pub fn bind_state_dir(dir: impl Into<PathBuf>) {
-    STATE_DIR.with(|cell| *cell.borrow_mut() = Some(dir.into()));
-}
-
-#[must_use]
-pub fn bound_state_dir() -> Option<PathBuf> {
-    STATE_DIR.with(|cell| cell.borrow().clone())
-}
 
 /// Walk from a slot config dir to the fleet journal directory.
 #[must_use]
@@ -237,6 +226,47 @@ mod tests {
         .unwrap_err();
         assert!(!sent, "send must not run without durable intent: {error}");
         assert!(journal.pending_outbox().unwrap().is_empty());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn complete_on_another_thread_uses_the_passed_directory() {
+        let dir = tmp("hop");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let job_id = JobId("job-hop".into());
+        let generation = prime_owned(&mut journal, &job_id);
+        drop(journal);
+        let dir_for_thread = dir.clone();
+        let sent = std::thread::spawn(move || {
+            let mut journal = Journal::open(dir_for_thread.join("journal.db")).unwrap();
+            let mut sent = false;
+            guarded_complete(
+                &mut journal,
+                &dir_for_thread,
+                &JobId("job-hop".into()),
+                generation,
+                b"ok",
+                || {
+                    sent = true;
+                    Ok::<(), anyhow::Error>(())
+                },
+            )
+            .unwrap();
+            sent
+        })
+        .join()
+        .expect("worker thread");
+        assert!(sent);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn journal_dir_near_walks_up_to_fleet_journal() {
+        let dir = tmp("near");
+        Journal::open(dir.join("journal.db")).unwrap();
+        let slot = dir.join("slots").join("slot-1");
+        std::fs::create_dir_all(&slot).unwrap();
+        assert_eq!(journal_dir_near(&slot), dir);
         std::fs::remove_dir_all(dir).ok();
     }
 }
