@@ -254,8 +254,10 @@ blocking UnixListener and synthetic wakeup connections; under host load the
 wakeup race left the accept thread behind while teardown held the lifecycle
 permit.
 
-The structural fix makes the listener nonblocking, parks on `WouldBlock`, and
-unparks the exact accept thread during guard drop. Connection abortion and
-Docker ownership cleanup remain unchanged. The new regression test requires
-idle lease shutdown below 500 ms. Post-deploy proof must show zero new accept
-thread warnings and reduced teardown tail on the same workload mix.
+The structural fix makes the listener nonblocking and waits with `poll()` on
+both listener readiness and a dedicated shutdown socket. Guard drop writes the
+shutdown byte; no timer polling or synthetic client connection is needed.
+Connection abortion and Docker ownership cleanup remain unchanged. The new
+regression test requires idle lease shutdown below 500 ms. Post-deploy proof
+must show zero new accept-thread warnings and reduced teardown tail on the same
+workload mix.
