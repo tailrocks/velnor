@@ -137,6 +137,10 @@ Units (all shipped by the package):
   `systemctl list-units --type=service --all` is the normal completed state
   after a timer run. Inspect `systemctl list-timers 'velnor-doctor*'` and
   failed units instead of treating inactive one-shot services as stale daemons.
+  Doctor timing summaries include queue-to-acquire and queue-to-first-step
+  percentiles when records contain those fields. Tune their warning thresholds
+  with `VELNOR_SLO_QUEUE_MS` and `VELNOR_SLO_QUEUE_TO_FIRST_STEP_MS`; older
+  timing records remain readable but are excluded from those two percentiles.
 - `velnor-fleet-policy-audit.timer` / `velnor-fleet-policy-audit.service`
   (velnor-tools surface) — weekly read-only fleet-policy audit
   (`Sat *-*-* 03:17`, `Persistent=true`). The service runs
