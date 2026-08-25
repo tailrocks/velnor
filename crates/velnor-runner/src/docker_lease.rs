@@ -540,10 +540,27 @@ impl Drop for DockerLeaseGuard {
         self.shutdown.store(true, Ordering::SeqCst);
         #[cfg(unix)]
         {
-            let _ = std::os::unix::net::UnixStream::connect(&self.listen_path);
+            // Wake `accept()` twice: the first connect can be handed to
+            // `handle_client` if it races the shutdown load; the second
+            // unblocks the loop so Drop can finish. EOF the wakeup so a
+            // raced `read_http_request` does not wait for headers.
+            for _ in 0..2 {
+                if let Ok(stream) = std::os::unix::net::UnixStream::connect(&self.listen_path) {
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                }
+            }
         }
         if let Some(thread) = self.accept_thread.take() {
-            let _ = thread.join();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = thread.join();
+                let _ = tx.send(());
+            });
+            if rx.recv_timeout(std::time::Duration::from_secs(2)).is_err() {
+                eprintln!(
+                    "Warning: job Docker lease accept thread did not stop within 2s; continuing teardown"
+                );
+            }
         }
         let _ = std::fs::remove_file(&self.listen_path);
         // dockerd auto-creates an empty DIRECTORY at a missing bind-mount
