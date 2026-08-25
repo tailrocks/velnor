@@ -523,7 +523,7 @@ async fn dispatch_service(command: Command) -> anyhow::Result<()> {
     match command {
         Command::Daemon(args) => crate::runner::daemon(args.into()).await,
         Command::Release(args) => crate::release::run(args.into()),
-        Command::Capabilities(args) => crate::manifest::run(args.into()),
+        Command::Capabilities(args) => crate::manifest::run(args),
         Command::Run(args) => crate::runner::run(args.into()).await,
         other => crate::scaffold::dispatch(other_command(other)).await,
     }
