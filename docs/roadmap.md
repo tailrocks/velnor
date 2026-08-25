@@ -34,13 +34,30 @@ journal). A shared-process slot `JoinSet` is not an availability boundary.
 Sections below describe standing architecture; the marked contract governs
 unified-CI conflicts.
 
-The current host-socket Docker model is not a lower-trust or Build L3
-isolation boundary. Public unmerged code stays GitHub-hosted. The proposed
-microVM, guest-local Docker, signing, cleanup, cache/network, and disk-safety
-boundary is frozen in [Build L3 boundary
+Two named job backends exist. The live **Docker backend** is Velnor → host
+Docker → job container + service containers: a named transitional
+compatibility path, not lower-trust or Build L3 isolation. Public unmerged
+code stays GitHub-hosted. The **MicroVM backend** is Velnor →
+Firecracker/KVM → guest Linux → guest-local Docker, with job container,
+service containers, BuildKit/Buildx, and Testcontainers inside the guest.
+Production microVM is Firecracker: an open-source Rust VMM on Linux KVM,
+started directly through its HTTP API and jailer (namespaces, cgroups,
+seccomp, privilege dropping). Kata Containers and firecracker-containerd are
+not the product orchestration path. Cloud Hypervisor is recorded only as a
+fallback if a real estate workflow proves Firecracker's five-device model
+(virtio-net, virtio-block, virtio-vsock, serial console, i8042) cannot
+support that workflow — not as a live or silent alternative. Guest isolation
+uses immutable block devices, job-local writable disks, and bounded vsock —
+not virtio-fs, host directory passthrough, PCI passthrough, GPUs, Windows
+guests, USB, or a legacy device model. The signing, cleanup, cache/network,
+and disk-safety boundary is frozen in [Build L3 boundary
 v1](security/build-l3-boundary-v1.md) with its [versioned threat/control/test
-matrix](security/build-l3-threat-control-test-v1.tsv). Both are design-only
-until Plans 012 and 017 implement and prove them live.
+matrix](security/build-l3-threat-control-test-v1.tsv). Both remain
+design-only until Plans 012 and 017 implement and prove them live. The
+shipped selection type is `velnor_model::{JobExecutorKind, MicroVmKind,
+MicroVmControl}`: host Docker is the live executor; Firecracker plus
+direct API and jailer activate as production; Cloud Hypervisor fails as
+not-proven; Kata and firecracker-containerd cannot activate.
 
 ## velnorctl migration
 

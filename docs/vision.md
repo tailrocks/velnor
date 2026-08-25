@@ -34,10 +34,22 @@ conclusions in the GitHub UI — is **achieved and in production**:
 - GitHub still parses workflows, expands matrices and reusable workflows,
   schedules jobs, manages secrets, and renders the Actions UI. Velnor
   replaces only the runner side, over GitHub's current V2 JIT/broker/
-  run-service/Results Service protocol, executing every assigned trusted Linux
-  job in a Docker container. The current host-socket model is a compatibility
-  boundary, not lower-trust or Build L3 isolation. The design-only target is
-  [Build L3 boundary v1](security/build-l3-boundary-v1.md).
+  run-service/Results Service protocol. Assigned trusted Linux jobs have two
+  named backends. The live **Docker backend** is Velnor → host Docker → job
+  container + service containers: a named transitional compatibility path, not
+  lower-trust isolation. The **MicroVM backend** is Velnor → Firecracker/KVM →
+  guest Linux → guest-local Docker (job container, service containers,
+  BuildKit/Buildx, Testcontainers). Production microVM is Firecracker: an
+  open-source Rust VMM on Linux KVM, started directly through its HTTP API and
+  jailer (namespaces, cgroups, seccomp, privilege dropping). Kata Containers
+  and firecracker-containerd are not the product orchestration path. Cloud
+  Hypervisor is a fallback only if a real estate workflow proves Firecracker's
+  five-device model (virtio-net, virtio-block, virtio-vsock, serial console,
+  i8042) cannot support it — not a live or silent alternative. Guest isolation
+  uses immutable block devices, job-local writable disks, and bounded vsock —
+  not virtio-fs, host directory passthrough, PCI, GPUs, Windows guests, USB, or
+  a legacy device model. The design-only target remains [Build L3 boundary
+  v1](security/build-l3-boundary-v1.md) until Plans 012 and 017 prove it live.
 - The estate program standardizes the exact 28 repositories in
   `VELNOR_PROJECTS_SETUP.md` on one generated class surface with plural `lanes`
   selector and organization-scoped defaults. Repositories whose delivery is blocked retain their pushed
@@ -71,8 +83,10 @@ conclusions in the GitHub UI — is **achieved and in production**:
   supervised OS processes — guardian, per-scope controller, one process per
   ready slot, one transient job worker — not one daemon `JoinSet`. Health is
   a vector (`velnorctl status --json`); systemd `READY=1` is control-loop
-  liveness only. Host Docker remains a named transitional executor; Build L3
-  (Firecracker / guest-local Docker) is still the final isolation boundary.
+  liveness only. Host Docker remains the named transitional live executor.
+  Build L3 isolation is Firecracker/KVM with guest-local Docker (direct HTTP
+  API and jailer); Cloud Hypervisor is fallback-only; Kata Containers and
+  firecracker-containerd are not product orchestration.
 - **velnorctl migration**: the product surface converges on one `velnorctl`
   operator CLI with a service-only `daemon` entrypoint. Final crate layout:
   `velnorctl` (operator CLI), service-only `daemon` entrypoint, and libraries

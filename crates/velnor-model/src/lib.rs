@@ -14,6 +14,7 @@ pub mod condition;
 pub mod error_envelope;
 pub mod job_summary;
 pub mod lifecycle;
+pub mod microvm;
 pub mod node;
 pub mod phase;
 pub mod resources;
@@ -31,6 +32,11 @@ pub use job_summary::{
     NormalizedJob, Slug, TriggerEvent, MAX_SLUG_LEN,
 };
 pub use lifecycle::{transition_target, EventReason, InvalidLifecycleToken, JobState};
+pub use microvm::{
+    GuestIsolation, IsolationRejected, JobExecutorKind, MicroVmControl, MicroVmControlRejected,
+    MicroVmKind, MicroVmNotLive, MicroVmNotProven, FIRECRACKER_DEVICES, FIRECRACKER_REPO_URL,
+    FIRECRACKER_SPEC_URL, JAILER_CONTROLS,
+};
 pub use node::{
     ActorPhase, CanaryStatus, CapacityPermit, FleetHealthState, Generation, HealthDocument, JobId,
     NotReady, ReadyProof, SliDimension, SlotId,

@@ -177,6 +177,21 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
+- 2026-08-26: **Firecracker is the production microVM** (operator goal):
+  open-source Rust VMM on Linux KVM, started directly through its HTTP API
+  and jailer (namespaces, cgroups, seccomp, privilege dropping). Host Docker
+  remains the named transitional live executor (Velnor → host Docker → job
+  container + service containers). The MicroVM backend is Velnor →
+  Firecracker/KVM → guest Linux → guest-local Docker. Guest isolation is
+  immutable block, job-local writable disk, and bounded vsock — not
+  virtio-fs, host directory passthrough, PCI, GPUs, Windows guests, USB, or
+  a legacy device model. Cloud Hypervisor is fallback-only if an estate
+  workflow proves Firecracker's five-device model insufficient; Kata
+  Containers and firecracker-containerd are not product orchestration.
+  Direction: `docs/vision.md`, `docs/roadmap.md`, `docs/mission.md`,
+  `docs/security/build-l3-boundary-v1.md`. Shipped type:
+  `velnor_model::{JobExecutorKind, MicroVmKind, MicroVmControl}`.
+
 - 2026-08-25: **Node Architecture v2 is the production availability
   boundary** (operator goal): independently supervised OS processes
   (guardian, per-scope controller, one process per ready slot, transient

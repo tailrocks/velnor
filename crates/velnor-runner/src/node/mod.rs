@@ -2,8 +2,9 @@
 //!
 //! The daemon `JoinSet` is not the availability boundary. Each ready slot is
 //! one child process. systemd watchdog pings happen only after a completed
-//! local cycle. The transitional job executor remains host Docker and is not
-//! the Build L3 isolation boundary.
+//! local cycle. The live job executor remains host Docker (named
+//! transitional). Production microVM selection is Firecracker via its HTTP
+//! API and jailer; that path is not live until Plans 012/017.
 
 pub mod assign;
 pub mod canary;
@@ -14,6 +15,7 @@ pub mod exec;
 pub mod guardian;
 pub mod health;
 pub mod job;
+pub mod microvm;
 pub mod prove;
 pub mod scheduler;
 pub mod slot;

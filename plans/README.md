@@ -18,6 +18,15 @@ Velnor unified CI contract (2026-08-09):
 
 Current execution follows the marked contract and the tracked active goal graph.
 
+Build L3 (Plans 012 and 017, design-only until live proof) uses Firecracker
+as the production microVM: Linux KVM, started through its HTTP API and
+jailer, guest-local Docker, isolation by immutable block + job-local writable
+disk + bounded vsock (not virtio-fs). Host Docker is the named transitional
+live executor. Cloud Hypervisor is fallback-only if Firecracker's device
+model is proven insufficient. Kata Containers and firecracker-containerd are
+not a product path. The shipped selection type is
+`velnor_model::{JobExecutorKind, MicroVmKind, MicroVmControl}`.
+
 Legacy plans 001–038 and 040–062 are historical and non-executable. Remaining
 stale working files were removed; Git history preserves delivery evidence. Plan
 039 was refreshed because exact trusted-workflow admission remains unfinished.
