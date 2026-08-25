@@ -181,6 +181,11 @@ pub fn force_remove_container_args(ids: &[String]) -> Vec<String> {
     args
 }
 
+/// One container id. BuildKit reclaim must never batch ids into one `docker rm`.
+pub fn force_remove_one_container_args(id: &str) -> Vec<String> {
+    vec!["rm".into(), "--force".into(), id.to_string()]
+}
+
 /// Docker Engine can issue concurrent DELETE requests when `docker rm` gets
 /// multiple docker-container BuildKit IDs. Created/removing BuildKit daemons
 /// then deadlock each other's removal and survive the bounded timeout. Keep
@@ -192,7 +197,7 @@ pub fn force_remove_containers_serially(
 ) -> Result<()> {
     let mut first_error = None;
     for id in ids {
-        if let Err(error) = docker(&force_remove_container_args(std::slice::from_ref(id))) {
+        if let Err(error) = docker(&force_remove_one_container_args(id)) {
             if first_error.is_none() {
                 first_error = Some(error.context(format!("remove BuildKit container {id}")));
             }
@@ -1080,6 +1085,48 @@ mod tests {
     use super::*;
     use anyhow::anyhow;
 
+    fn docker_rm_ids(args: &[String]) -> Vec<&str> {
+        if args.first().map(String::as_str) != Some("rm") {
+            return Vec::new();
+        }
+        args.iter()
+            .skip(1)
+            .filter(|arg| !arg.starts_with('-'))
+            .map(String::as_str)
+            .collect()
+    }
+
+    fn assert_container_rms_are_singleton(calls: &[Vec<String>]) {
+        for call in calls {
+            let ids = docker_rm_ids(call);
+            assert!(
+                ids.len() <= 1,
+                "docker rm batched {} ids (Engine 29 concurrent DELETE deadlocks BuildKit): {call:?}",
+                ids.len()
+            );
+        }
+    }
+
+    #[test]
+    fn force_remove_containers_serially_issues_one_id_per_rm() {
+        let mut calls = Vec::new();
+        force_remove_containers_serially(&["id-a".into(), "id-b".into(), "id-c".into()], |args| {
+            calls.push(args.to_vec());
+            assert_eq!(docker_rm_ids(args).len(), 1, "batched docker rm {args:?}");
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            calls,
+            vec![
+                force_remove_one_container_args("id-a"),
+                force_remove_one_container_args("id-b"),
+                force_remove_one_container_args("id-c"),
+            ]
+        );
+        assert_container_rms_are_singleton(&calls);
+    }
+
     #[test]
     fn guest_socket_path_fits_unix_sun_len() {
         let path = guest_docker_socket_host(
@@ -1332,12 +1379,13 @@ id-other\tpostgres\tvelnor-job-dead\t/var/lib/velnor/work/slot-2\trunning
         assert!(calls
             .iter()
             .any(|call| call == &list_job_buildkit_format_args()));
+        assert_container_rms_are_singleton(&calls);
         assert!(calls
             .iter()
-            .any(|call| call == &force_remove_container_args(&["id-created".into()])));
+            .any(|call| call == &force_remove_one_container_args("id-created")));
         assert!(calls
             .iter()
-            .any(|call| call == &force_remove_container_args(&["id-removing".into()])));
+            .any(|call| call == &force_remove_one_container_args("id-removing")));
         assert!(calls
             .iter()
             .any(|call| call == &list_job_buildkit_volume_args()));

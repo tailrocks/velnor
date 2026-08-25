@@ -10498,14 +10498,30 @@ esac
         let mut executor = DockerScriptExecutor::new(BuildkitCleanupRunner::default());
 
         executor.cleanup_job_buildkit(&spec).unwrap();
-        // Created + removing of this job's builder must both be force-removed.
+        // Created + removing of this job's builder must both be force-removed,
+        // one docker rm per id. Batching those ids deadlocks Engine 29 DELETE.
+
+        for call in &executor.runner().calls {
+            if call.first().map(String::as_str) != Some("rm") {
+                continue;
+            }
+            let ids: Vec<_> = call
+                .iter()
+                .skip(1)
+                .filter(|arg| !arg.starts_with('-'))
+                .collect();
+            assert!(
+                ids.len() <= 1,
+                "cleanup_job_buildkit batched docker rm {call:?}"
+            );
+        }
 
         assert_eq!(
             executor.runner().calls,
             vec![
                 crate::docker_lease::list_job_buildkit_format_args(),
-                crate::docker_lease::force_remove_container_args(&["bk1".into()]),
-                crate::docker_lease::force_remove_container_args(&["bk2".into()]),
+                crate::docker_lease::force_remove_one_container_args("bk1"),
+                crate::docker_lease::force_remove_one_container_args("bk2"),
                 vec![
                     "volume",
                     "ls",
