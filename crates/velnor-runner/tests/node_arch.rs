@@ -716,6 +716,7 @@ fn job_once_without_exec_persists_only_after_ownership() {
             attempt: 1,
             generation: Generation::INITIAL,
             worker: "velnor-job@slot-1-worker".into(),
+            accepted_unix: 0,
         })
         .unwrap();
     drop(journal);
@@ -771,6 +772,7 @@ fn controller_sends_pending_completion_outbox() {
             attempt: 1,
             generation: Generation::INITIAL,
             worker: "velnor-job@slot-1-worker".into(),
+            accepted_unix: 0,
         })
         .unwrap();
     let payload = b"conclusion=success";

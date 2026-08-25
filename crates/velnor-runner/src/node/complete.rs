@@ -146,6 +146,7 @@ pub fn accept_job(
         attempt: 1,
         generation,
         worker: format!("velnor-job@{}", job_id.0),
+        accepted_unix: 0,
     })?;
     if owned.rejected {
         anyhow::bail!("JobOwned rejected for {} on {}", job_id.0, slot_id.0);
@@ -285,6 +286,7 @@ mod tests {
                     attempt: 1,
                     generation: g,
                     worker: "w".into(),
+                    accepted_unix: 0,
                 })
                 .unwrap()
                 .rejected
