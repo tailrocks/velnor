@@ -618,10 +618,10 @@ pub static ACTIONS: &[ActionCapability] = &[
     capability!(
         "hadolint/hadolint-action",
         Hadolint,
-        &[allowed(
-            "2a66e89f53d0771bb131a7fa31f3136336094aa6",
-            "v3.4.0"
-        )],
+        &[
+            allowed("06be81baf89a55ffd0e24b8f04a4185738dd3387", "v3.5.0"),
+            allowed("2a66e89f53d0771bb131a7fa31f3136336094aa6", "v3.4.0"),
+        ],
         &[
             InputRule::Any("dockerfile"),
             InputRule::Any("config"),
@@ -2375,7 +2375,7 @@ mod tests {
     fn hadolint_accepts_latest_ref_and_rejects_retired_ref() {
         let latest = violations(&job(
             "hadolint/hadolint-action",
-            Some("2a66e89f53d0771bb131a7fa31f3136336094aa6"),
+            Some("06be81baf89a55ffd0e24b8f04a4185738dd3387"),
             serde_json::json!({"failure-threshold": "error"}),
         ));
         assert!(latest.is_empty());
