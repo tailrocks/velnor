@@ -104,6 +104,46 @@ fn github_api_error(
 struct GitHubRetryHint {
     retry_after_seconds: Option<u64>,
     rate_limit_reset_epoch: Option<u64>,
+    remaining: Option<u64>,
+}
+
+/// Rate-limit telemetry captured from GitHub response headers. Read-only
+/// probes report it so callers can pace themselves instead of hammering a
+/// token that is already exhausted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GitHubRateLimitStatus {
+    pub retry_after_seconds: Option<u64>,
+    pub rate_limit_reset_epoch: Option<u64>,
+    pub remaining: Option<u64>,
+}
+
+impl From<GitHubRetryHint> for GitHubRateLimitStatus {
+    fn from(hint: GitHubRetryHint) -> Self {
+        Self {
+            retry_after_seconds: hint.retry_after_seconds,
+            rate_limit_reset_epoch: hint.rate_limit_reset_epoch,
+            remaining: hint.remaining,
+        }
+    }
+}
+
+impl GitHubRateLimitStatus {
+    /// True when the response says the shared token budget is exhausted.
+    ///
+    /// GitHub sends `x-ratelimit-remaining`/`-reset` on every response,
+    /// including permission 403s, so a bare header pair is NOT proof of a
+    /// rate limit. Exhaustion is: 429, `remaining: 0`, or an explicit
+    /// `Retry-After` on a 403 (secondary/abuse limit).
+    #[must_use]
+    pub fn is_limited(self, status: u16) -> bool {
+        if status == 429 {
+            return true;
+        }
+        if status != 403 {
+            return false;
+        }
+        self.remaining == Some(0) || self.retry_after_seconds.is_some()
+    }
 }
 
 impl GitHubRetryHint {
@@ -129,6 +169,8 @@ fn parse_github_retry_headers(headers: &[u8]) -> GitHubRetryHint {
             hint.retry_after_seconds = value.parse().ok();
         } else if name.eq_ignore_ascii_case("x-ratelimit-reset") {
             hint.rate_limit_reset_epoch = value.parse().ok();
+        } else if name.eq_ignore_ascii_case("x-ratelimit-remaining") {
+            hint.remaining = value.parse().ok();
         }
     }
     hint
@@ -144,6 +186,7 @@ fn github_retry_hint_from_header_map(headers: &HeaderMap) -> GitHubRetryHint {
     GitHubRetryHint {
         retry_after_seconds: parse("retry-after"),
         rate_limit_reset_epoch: parse("x-ratelimit-reset"),
+        remaining: parse("x-ratelimit-remaining"),
     }
 }
 
@@ -175,6 +218,7 @@ pub fn github_api_retry_delay(error: &anyhow::Error) -> Option<std::time::Durati
             GitHubRetryHint {
                 retry_after_seconds: error.retry_after_seconds,
                 rate_limit_reset_epoch: error.rate_limit_reset_epoch,
+                remaining: None,
             }
             .delay(now_epoch)
         })
@@ -1326,6 +1370,25 @@ pub async fn github_json_request(
     }
 }
 
+/// Like [`github_json_request`] but also returns the rate-limit telemetry
+/// from the response headers. Periodic callers (the controller probe) use it
+/// to pace themselves against the shared PAT budget instead of discovering
+/// exhaustion one 403 at a time.
+pub async fn github_json_request_with_rate_limit(
+    method: &str,
+    url: &str,
+    bearer_token: &str,
+    json_body: Option<String>,
+    max_time_secs: u64,
+) -> Result<(u16, String, GitHubRateLimitStatus)> {
+    if github_http_transport() == "native" {
+        native_json_request_with_rate_limit(method, url, bearer_token, json_body, max_time_secs)
+            .await
+    } else {
+        curl_json_request_with_rate_limit(method, url, bearer_token, json_body, max_time_secs).await
+    }
+}
+
 fn native_http_client() -> Result<Client> {
     static CLIENT: OnceLock<std::result::Result<Client, String>> = OnceLock::new();
     match CLIENT.get_or_init(|| {
@@ -1376,6 +1439,42 @@ async fn native_json_request(
     Ok((status, body))
 }
 
+/// Native transport variant that also reports rate-limit telemetry.
+async fn native_json_request_with_rate_limit(
+    method: &str,
+    url: &str,
+    bearer_token: &str,
+    json_body: Option<String>,
+    max_time_secs: u64,
+) -> Result<(u16, String, GitHubRateLimitStatus)> {
+    let method_name = method.to_string();
+    let method = Method::from_bytes(method.as_bytes())
+        .with_context(|| format!("parse GitHub HTTP method '{method}'"))?;
+    let client = native_http_client()?;
+    let mut request = client
+        .request(method, url)
+        .bearer_auth(bearer_token)
+        .header(USER_AGENT, RUNNER_USER_AGENT)
+        .header(ACCEPT, "application/json")
+        .timeout(std::time::Duration::from_secs(max_time_secs));
+    if let Some(body) = json_body {
+        request = request
+            .header("Content-Type", "application/json")
+            .body(body);
+    }
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("send native GitHub request {method_name} {url}"))?;
+    let status = response.status().as_u16();
+    let rate_limit = github_retry_hint_from_header_map(response.headers()).into();
+    let body = response
+        .text()
+        .await
+        .context("read native GitHub response body")?;
+    Ok((status, body, rate_limit))
+}
+
 /// Make an HTTP request via the curl subprocess. GitHub's infrastructure
 /// applies TLS-fingerprint-based throttling to reqwest/hyper connections;
 /// curl (LibreSSL) is the proven production fallback.
@@ -1391,6 +1490,33 @@ async fn curl_json_request(
     json_body: Option<String>,
     max_time_secs: u64,
 ) -> Result<(u16, String)> {
+    let (status, body, _) =
+        curl_json_request_impl(method, url, bearer_token, json_body, max_time_secs, false).await?;
+    Ok((status, body))
+}
+
+/// Curl transport variant that also reports rate-limit telemetry via a
+/// `--dump-header` temp file (parsed and removed before returning).
+async fn curl_json_request_with_rate_limit(
+    method: &str,
+    url: &str,
+    bearer_token: &str,
+    json_body: Option<String>,
+    max_time_secs: u64,
+) -> Result<(u16, String, GitHubRateLimitStatus)> {
+    let (status, body, hint) =
+        curl_json_request_impl(method, url, bearer_token, json_body, max_time_secs, true).await?;
+    Ok((status, body, hint.unwrap_or_default().into()))
+}
+
+async fn curl_json_request_impl(
+    method: &str,
+    url: &str,
+    bearer_token: &str,
+    json_body: Option<String>,
+    max_time_secs: u64,
+    capture_headers: bool,
+) -> Result<(u16, String, Option<GitHubRetryHint>)> {
     let url = url.to_string();
     let token = bearer_token.to_string();
     let ua = RUNNER_USER_AGENT.to_string();
@@ -1401,6 +1527,7 @@ async fn curl_json_request(
         let tmp_dir = std::env::temp_dir();
         let cfg_path = tmp_dir.join(format!("velnor-curl-{}.cfg", uuid::Uuid::new_v4()));
         let body_path = tmp_dir.join(format!("velnor-curl-{}.body", uuid::Uuid::new_v4()));
+        let headers_path = tmp_dir.join(format!("velnor-curl-{}.hdrs", uuid::Uuid::new_v4()));
 
         let mut cfg = format!(
             "header = \"User-Agent: {ua}\"\n\
@@ -1412,6 +1539,11 @@ async fn curl_json_request(
              silent\n\
              write-out = \"\\n%{{http_code}}\"\n"
         );
+        if capture_headers {
+            // Raw response headers land in a private temp file; only the
+            // rate-limit fields are ever parsed out of it.
+            cfg.push_str(&format!("dump-header = \"{}\"\n", headers_path.display()));
+        }
         let has_body = json_body.is_some();
         if has_body {
             cfg.push_str("header = \"Content-Type: application/json\"\n");
@@ -1453,16 +1585,24 @@ async fn curl_json_request(
         if has_body {
             let _ = std::fs::remove_file(&body_path);
         }
-        result
+        let headers = if capture_headers {
+            let bytes = std::fs::read(&headers_path).unwrap_or_default();
+            let hint = parse_github_retry_headers(&bytes);
+            let _ = std::fs::remove_file(&headers_path);
+            Some(hint)
+        } else {
+            None
+        };
+        result.map(|output| (output, headers))
     })
     .await
     .context("spawn_blocking curl")?
     .context("run curl")?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&output.0.stdout);
     let (body, status_str) = stdout.rsplit_once('\n').unwrap_or(("", stdout.as_ref()));
     let status: u16 = status_str.trim().parse().unwrap_or(0);
-    Ok((status, body.to_string()))
+    Ok((status, body.to_string(), output.1))
 }
 
 pub fn decode_jit_config(encoded_jit_config: &str) -> Result<DecodedJitConfig> {
@@ -5558,14 +5698,46 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("retry-after", HeaderValue::from_static("29"));
         headers.insert("x-ratelimit-reset", HeaderValue::from_static("123456"));
+        headers.insert("x-ratelimit-remaining", HeaderValue::from_static("4999"));
 
         assert_eq!(
             github_retry_hint_from_header_map(&headers),
             GitHubRetryHint {
                 retry_after_seconds: Some(29),
                 rate_limit_reset_epoch: Some(123456),
+                remaining: Some(4999),
             }
         );
+    }
+
+    #[test]
+    fn rate_limit_status_requires_real_exhaustion_evidence() {
+        // Permission 403s also carry x-ratelimit headers with a non-zero
+        // remaining count; those must NOT be classified as rate limits.
+        let permission = GitHubRateLimitStatus {
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: Some(1_800_000_000),
+            remaining: Some(4200),
+        };
+        assert!(!permission.is_limited(403));
+
+        let exhausted = GitHubRateLimitStatus {
+            retry_after_seconds: None,
+            rate_limit_reset_epoch: Some(1_800_000_000),
+            remaining: Some(0),
+        };
+        assert!(exhausted.is_limited(403));
+        assert!(!exhausted.is_limited(200));
+
+        let abuse = GitHubRateLimitStatus {
+            retry_after_seconds: Some(30),
+            rate_limit_reset_epoch: None,
+            remaining: Some(4200),
+        };
+        assert!(abuse.is_limited(403));
+
+        let throttled = GitHubRateLimitStatus::default();
+        assert!(throttled.is_limited(429));
     }
 
     #[test]

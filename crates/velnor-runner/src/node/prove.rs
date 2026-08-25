@@ -10,7 +10,10 @@ use std::process::Child;
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{github_json_request, GitHubScope, ListedWorkflowJob, RunnerGroup};
+use crate::protocol::{
+    github_json_request, github_json_request_with_rate_limit, GitHubScope, ListedWorkflowJob,
+    RunnerGroup,
+};
 
 /// On-disk routing observation. Missing or invalid file is not valid routing.
 pub const ROUTING_FILE: &str = "routing.json";
@@ -188,6 +191,11 @@ pub struct GitHubProbeRequest<'a> {
 pub struct GitHubProbe {
     pub reachable: bool,
     pub evidence: Option<RoutingFields>,
+    /// The shared PAT budget is exhausted; callers must pace to
+    /// `rate_limit_reset_epoch` instead of retrying on the reconcile tick.
+    pub rate_limited: bool,
+    pub rate_limit_reset_epoch: Option<u64>,
+    pub rate_limit_remaining: Option<u64>,
 }
 
 /// Trust scope the process is actually running with.
@@ -248,6 +256,8 @@ pub fn write_evidence(state_dir: &Path, evidence: &RoutingFields) -> anyhow::Res
 
 /// Probe GitHub reachability and compare live group/repos to desired policy.
 /// Labels and trust are the process-configured values (what JIT will send).
+/// Rate-limit telemetry from the response headers is surfaced so the
+/// controller can pace the whole fleet to the token reset window.
 pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
     let Ok(scope) = GitHubScope::parse(request.url) else {
         return GitHubProbe::default();
@@ -255,7 +265,7 @@ pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
     let Ok(runners_url) = scope.runners_url() else {
         return GitHubProbe::default();
     };
-    let Ok((status, body)) = github_json_request(
+    let Ok((status, body, rate_limit)) = github_json_request_with_rate_limit(
         "GET",
         runners_url.as_str(),
         request.token,
@@ -267,6 +277,15 @@ pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
         return GitHubProbe::default();
     };
     if !(200..300).contains(&status) {
+        if rate_limit.is_limited(status) {
+            return GitHubProbe {
+                reachable: false,
+                evidence: None,
+                rate_limited: true,
+                rate_limit_reset_epoch: rate_limit.rate_limit_reset_epoch,
+                rate_limit_remaining: rate_limit.remaining,
+            };
+        }
         return GitHubProbe::default();
     }
     let _ = body;
@@ -319,6 +338,9 @@ pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
     GitHubProbe {
         reachable: true,
         evidence: Some(evidence),
+        rate_limited: false,
+        rate_limit_reset_epoch: rate_limit.rate_limit_reset_epoch,
+        rate_limit_remaining: rate_limit.remaining,
     }
 }
 
