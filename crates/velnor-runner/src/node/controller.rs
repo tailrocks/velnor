@@ -20,6 +20,10 @@ use super::prove;
 use super::slot::slot_id;
 use super::watchdog::{feed_after_cycle, LocalCycle};
 
+/// Bound live JIT requests during startup/recovery without making the GitHub
+/// API a burst target. This matches the bounded configure path.
+const JIT_REGISTRATION_CONCURRENCY: usize = 4;
+
 #[derive(Debug, Clone, Args)]
 pub struct ControllerArgs {
     #[arg(long)]
@@ -53,6 +57,10 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     let mut jobs: HashMap<String, Child> = HashMap::new();
     let mut ready_announced = false;
     loop {
+        if crate::runner::draining() {
+            drain_children(&mut slots, &mut jobs).await?;
+            return Ok(());
+        }
         let cycle = reconcile_once(&args, &mut journal, &server, &mut slots, &mut jobs).await?;
         let _ = feed_after_cycle(cycle, !ready_announced);
         ready_announced = true;
@@ -65,6 +73,56 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// Stop idle controller-owned slot processes when the daemon receives SIGTERM.
+/// Job workers are deliberately left alone so systemd's stop timeout remains
+/// the outer bound for an in-flight job rather than turning an upgrade into a
+/// lost job. The daemon's drain flag lives in the supervisor process, so this
+/// explicit handoff is the process boundary that makes graceful drain real.
+async fn drain_children(
+    slots: &mut HashMap<String, Child>,
+    jobs: &mut HashMap<String, Child>,
+) -> anyhow::Result<()> {
+    for child in slots.values() {
+        request_child_shutdown(child)?;
+    }
+
+    loop {
+        reap(slots);
+        reap(jobs);
+        if slots.is_empty() && jobs.is_empty() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn request_child_shutdown(child: &Child) -> anyhow::Result<()> {
+    if child.id() == 0 {
+        return Ok(());
+    }
+
+    #[cfg(unix)]
+    {
+        // SAFETY: the PID comes from the live Child handle owned by this
+        // controller. SIGTERM lets the child exit through its normal signal
+        // path; SIGKILL remains systemd's final timeout action.
+        let result = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+        if result == -1 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error.into());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = child;
+        anyhow::bail!("graceful controller-child shutdown requires a Unix target")
     }
 }
 
@@ -141,9 +199,17 @@ async fn reconcile_once(
             }
         }
     }
+    let mut registrations = Vec::new();
     for command in proof_effects {
-        execute_effect(args, journal, slots, jobs, command).await?;
+        match command {
+            SideEffect::RegisterRunner {
+                slot_id,
+                generation,
+            } => registrations.push((slot_id, generation)),
+            command => execute_effect(args, journal, slots, jobs, command).await?,
+        }
     }
+    register_runners(args, journal, registrations).await?;
 
     spawn_ready_waiters(args, journal, jobs)?;
 
@@ -206,42 +272,76 @@ async fn register_runner(
     slot_id: SlotId,
     generation: Generation,
 ) -> anyhow::Result<()> {
+    register_runners(args, journal, vec![(slot_id, generation)]).await
+}
+
+/// Configure independent, already-proven slots concurrently, then commit the
+/// resulting journal events in slot order. Network work never mutates the
+/// journal; routing, executor, session, and permit proofs remain prerequisites
+/// for every request.
+async fn register_runners(
+    args: &ControllerArgs,
+    journal: &mut Journal,
+    registrations: Vec<(SlotId, Generation)>,
+) -> anyhow::Result<()> {
+    if registrations.is_empty() {
+        return Ok(());
+    }
     super::scheduler::production_scheduler().activate_production()?;
     let Ok(exec) = load_exec_config(&args.state_dir) else {
         return Ok(());
     };
-    let index = slot_index_from_id(&slot_id);
-    if let Err(error) = crate::runner::jit_configure_one_slot(
-        &exec,
-        exec.config_dir.as_deref().unwrap_or(&args.state_dir),
-        index,
-        exec.slots.max(1),
-    )
-    .await
-    {
-        eprintln!(
-            "Warning: JIT register {} failed (slot stays unregistered): {error:#}",
-            slot_id.0
-        );
-        return Ok(());
-    }
-    let registered = journal.apply(Event::Registered {
-        slot_id: slot_id.clone(),
-        generation,
-    })?;
-    if registered.rejected {
-        return Ok(());
-    }
-    let ready = journal.apply(Event::ReadyAttempt {
-        slot_id,
-        generation,
-    })?;
-    for nested in ready.commands {
-        if let SideEffect::AdvertiseCapacity { permits } = nested {
-            std::fs::write(
-                args.state_dir.join("advertised-capacity"),
-                permits.to_string(),
-            )?;
+
+    let config_base = exec
+        .config_dir
+        .clone()
+        .unwrap_or_else(|| args.state_dir.clone());
+    let slot_count = exec.slots.max(1);
+    use futures_util::stream::{self, StreamExt as _};
+    let concurrency = registrations.len().clamp(1, JIT_REGISTRATION_CONCURRENCY);
+    let mut outcomes = stream::iter(registrations)
+        .map(|(slot_id, generation)| {
+            let exec = exec.clone();
+            let config_base = config_base.clone();
+            async move {
+                let index = slot_index_from_id(&slot_id);
+                let result =
+                    crate::runner::jit_configure_one_slot(&exec, &config_base, index, slot_count)
+                        .await;
+                (slot_id, generation, result)
+            }
+        })
+        .buffer_unordered(concurrency)
+        .collect::<Vec<_>>()
+        .await;
+    outcomes.sort_by_key(|(slot_id, _, _)| slot_id.0.clone());
+
+    for (slot_id, generation, result) in outcomes {
+        if let Err(error) = result {
+            eprintln!(
+                "Warning: JIT register {} failed (slot stays unregistered): {error:#}",
+                slot_id.0
+            );
+            continue;
+        }
+        let registered = journal.apply(Event::Registered {
+            slot_id: slot_id.clone(),
+            generation,
+        })?;
+        if registered.rejected {
+            continue;
+        }
+        let ready = journal.apply(Event::ReadyAttempt {
+            slot_id,
+            generation,
+        })?;
+        for nested in ready.commands {
+            if let SideEffect::AdvertiseCapacity { permits } = nested {
+                std::fs::write(
+                    args.state_dir.join("advertised-capacity"),
+                    permits.to_string(),
+                )?;
+            }
         }
     }
     Ok(())
