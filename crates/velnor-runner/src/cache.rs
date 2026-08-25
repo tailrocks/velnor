@@ -75,6 +75,21 @@ fn work_root(config_dir: Option<PathBuf>, work_dir: Option<PathBuf>) -> Result<P
     if let Some(work_dir) = work_dir {
         return Ok(crate::container::daemon_shared_root(work_dir));
     }
+    // Package units set VELNOR_STORAGE_ROOT=/var. Scanning
+    // `$HOME/.velnor/runner/_work` reports 0 candidates while leftover job
+    // UUID trees sit in `/var/lib/velnor*/work`.
+    if let Some(layout) = crate::storage::StorageLayout::resolve() {
+        let work = layout.lib_root.join("work");
+        if work.is_dir() {
+            return Ok(crate::container::daemon_shared_root(work));
+        }
+    }
+    if let Some(first) = crate::leftover_disk::discover_daemon_work_roots()
+        .into_iter()
+        .next()
+    {
+        return Ok(crate::container::daemon_shared_root(first));
+    }
     Ok(config::config_dir(config_dir)?.join("_work"))
 }
 
@@ -179,6 +194,7 @@ fn run_gc(
                 candidate.path.display()
             );
         }
+        print_leftover_workspace_candidates();
         return Ok(());
     }
 
@@ -204,7 +220,30 @@ fn run_gc(
             );
         }
     }
+    match crate::leftover_disk::reclaim_production_leftovers(true) {
+        Ok(report) => {
+            println!(
+                "leftover_workspace_deleted\t{}",
+                report.deleted_workspaces.len()
+            );
+        }
+        Err(error) => eprintln!("leftover-after-Velnor reclaim failed: {error:#}"),
+    }
     Ok(())
+}
+
+fn print_leftover_workspace_candidates() {
+    let roots = crate::leftover_disk::discover_daemon_work_roots();
+    println!("leftover_work_roots\t{}", roots.len());
+    for root in &roots {
+        println!("leftover_work_root\t{}", root.display());
+    }
+    let live = crate::leftover_disk::live_job_ids_from_host_docker().unwrap_or_default();
+    let orphans = crate::leftover_disk::orphan_job_workspace_paths(&roots, &live);
+    println!("leftover_workspace_candidates\t{}", orphans.len());
+    for path in orphans {
+        println!("leftover-workspace\torphan-job-uuid\t{}", path.display());
+    }
 }
 
 struct GcLeaderLock {

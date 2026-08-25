@@ -1291,15 +1291,29 @@ fn disk_space_problem(config_base: &Path, work_dir: Option<&Path>) -> Option<Str
     if let Some(work_dir) = work_dir {
         roots.push(work_dir);
     }
+    let probe = work_dir.unwrap_or(config_base);
+    if let Some(percent) = crate::leftover_disk::disk_usage_percent(probe) {
+        if percent >= crate::leftover_disk::HARD_PRESSURE_PERCENT {
+            // H0.4: never park for disk without first reclaiming leftover
+            // job UUID trees and dangling untagged images.
+            if let Err(error) = crate::leftover_disk::reclaim_production_if_hard_pressure(percent) {
+                eprintln!("leftover-after-Velnor reclaim failed: {error:#}");
+            }
+        }
+    }
     for root in roots {
         if let Some(free) = free_space_bytes(root) {
             if free < DISK_MIN_FREE_BYTES {
-                return Some(format!(
-                    "low disk space at {} ({} MiB free, need {} MiB)",
-                    root.display(),
-                    free / (1024 * 1024),
-                    DISK_MIN_FREE_BYTES / (1024 * 1024)
-                ));
+                let _ = crate::leftover_disk::reclaim_production_leftovers(true);
+                let free = free_space_bytes(root).unwrap_or(free);
+                if free < DISK_MIN_FREE_BYTES {
+                    return Some(format!(
+                        "low disk space at {} ({} MiB free, need {} MiB)",
+                        root.display(),
+                        free / (1024 * 1024),
+                        DISK_MIN_FREE_BYTES / (1024 * 1024)
+                    ));
+                }
             }
         }
     }
