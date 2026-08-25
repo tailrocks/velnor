@@ -3106,13 +3106,11 @@ where
         let owned_result = self.reclaim_job_owned_docker(&container.name);
         let buildkit_result = self.cleanup_job_buildkit(container);
         let service_result = self.cleanup_services(container);
-        let network_result = self.run_docker(&container.remove_network_args());
 
         container_result?;
         owned_result?;
         buildkit_result?;
         service_result?;
-        network_result?;
         Ok(())
     }
 
@@ -3131,12 +3129,10 @@ where
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
         let service_result = self.cleanup_services(container);
-        let network_result = self.run_docker(&container.remove_network_args());
 
         container_result?;
         owned_result?;
         service_result?;
-        network_result?;
         Ok(())
     }
 
@@ -3158,11 +3154,9 @@ where
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
         let buildkit_result = self.cleanup_job_buildkit(container);
-        let network_result = self.run_docker(&container.remove_network_args());
         container_result?;
         owned_result?;
         buildkit_result?;
-        network_result?;
         Ok(())
     }
 
@@ -3173,10 +3167,8 @@ where
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
-        let network_result = self.run_docker(&container.remove_network_args());
         container_result?;
         owned_result?;
-        network_result?;
         Ok(())
     }
 
@@ -3456,7 +3448,6 @@ where
         for service in container.services.iter().rev() {
             self.run_docker(&service.remove_args()).ok();
         }
-        self.run_docker(&container.remove_network_args()).ok();
     }
 
     fn abort_docker_lease(&mut self) {
@@ -10412,7 +10403,6 @@ esac
             "name={}{scope}",
             crate::docker_lease::BUILDKIT_CONTAINER_NAME_PREFIX
         )));
-        assert_eq!(calls[rm_index + 6].1[0], "network");
     }
 
     fn expected_network_create_args() -> Vec<String> {
@@ -10474,11 +10464,9 @@ esac
         assert!(calls
             .iter()
             .any(|(_, args)| args == &crate::docker_lease::list_job_buildkit_format_args()));
-        assert!(calls.iter().any(|(_, args)| args.starts_with(&[
-            "network".into(),
-            "rm".into(),
-            "net".into()
-        ])));
+        assert!(!calls
+            .iter()
+            .any(|(_, args)| args == &spec.remove_network_args()));
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -10527,6 +10515,7 @@ esac
             .iter()
             .any(|args| args
                 == &crate::docker_lease::force_remove_network_args(&["guest-net".into()])));
+        assert!(!calls.iter().any(|args| args == &spec.remove_network_args()));
         assert!(calls
             .iter()
             .any(|args| args
@@ -13477,7 +13466,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         let calls = &executor.runner().calls;
         assert_eq!(calls[0].1, expected_network_create_args());
         assert_cleanup_reclaims_job_docker(calls, 1, &temp);
-        assert_eq!(calls[8].1, expected_network_create_args());
+        assert_eq!(calls[7].1, expected_network_create_args());
         fs::remove_dir_all(temp).unwrap();
     }
 
@@ -13489,7 +13478,7 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
             calls: Vec::new(),
             stdin: Vec::new(),
             env: Vec::new(),
-            codes: vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
+            codes: vec![1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
         });
 
         let error = executor
@@ -13500,9 +13489,9 @@ type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ !inputs.pub
         let calls = &executor.runner().calls;
         assert_eq!(calls[0].1, expected_network_create_args());
         assert_cleanup_reclaims_job_docker(calls, 1, &temp);
-        assert_eq!(calls[8].1, expected_network_create_args());
-        assert_eq!(calls[9].1[0], "run");
-        assert_cleanup_reclaims_job_docker(calls, 10, &temp);
+        assert_eq!(calls[7].1, expected_network_create_args());
+        assert_eq!(calls[8].1[0], "run");
+        assert_cleanup_reclaims_job_docker(calls, 9, &temp);
         fs::remove_dir_all(temp).unwrap();
     }
 
