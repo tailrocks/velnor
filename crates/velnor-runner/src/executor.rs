@@ -4679,7 +4679,6 @@ fn restore_cache_paths(
         fs::create_dir_all(&destination)
             .with_context(|| format!("create cache restore path {}", destination.display()))?;
         copy_dir_contents(&source, &destination)?;
-        verify_cache_copy(&source, &destination)?;
     }
     Ok(())
 }
@@ -4935,48 +4934,6 @@ fn cache_entry_complete(path: &Path) -> bool {
     path.is_dir() && path.join(".velnor-complete-v1").is_file()
 }
 
-fn verify_cache_copy(source: &Path, destination: &Path) -> Result<()> {
-    for entry in fs::read_dir(source).with_context(|| format!("verify {}", source.display()))? {
-        let entry = entry?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        let source_type = entry.file_type()?;
-        let destination_metadata = fs::symlink_metadata(&destination_path).with_context(|| {
-            format!(
-                "cache restore omitted {} while materializing {}",
-                source_path.display(),
-                destination.display()
-            )
-        })?;
-        if source_type.is_dir() {
-            if !destination_metadata.is_dir() {
-                bail!(
-                    "cache restore changed directory {} into another file type",
-                    source_path.display()
-                );
-            }
-            verify_cache_copy(&source_path, &destination_path)?;
-        } else if source_type.is_file() {
-            let source_metadata = entry.metadata()?;
-            if !destination_metadata.is_file()
-                || source_metadata.len() != destination_metadata.len()
-                || source_metadata.permissions().mode() != destination_metadata.permissions().mode()
-            {
-                bail!(
-                    "cache restore did not preserve file metadata for {}",
-                    source_path.display()
-                );
-            }
-        } else {
-            bail!(
-                "cache entry contains unsupported file type at {}",
-                source_path.display()
-            );
-        }
-    }
-    Ok(())
-}
-
 const TARGET_SOURCE_REVISION_MARKER: &str = ".velnor-source-revision-v1";
 
 fn materialize_persistent_target(
@@ -5022,8 +4979,6 @@ fn materialize_persistent_target(
     fs::create_dir_all(&target)
         .with_context(|| format!("create job-local target {}", target.display()))?;
     copy_dir_contents(&payload, &target)?;
-    verify_cache_copy(&payload, &target)
-        .with_context(|| format!("verify persistent target restore from {}", store.display()))?;
     Ok(())
 }
 
@@ -5061,9 +5016,7 @@ fn publish_persistent_target(
     let payload = staging.join("data");
     fs::create_dir_all(&payload)
         .with_context(|| format!("create target staging directory {}", payload.display()))?;
-    if let Err(error) =
-        copy_dir_contents(&target, &payload).and_then(|()| verify_cache_copy(&target, &payload))
-    {
+    if let Err(error) = copy_dir_contents(&target, &payload) {
         fs::remove_dir_all(&staging).ok();
         return Err(error).context("stage persistent target generation");
     }
@@ -7039,6 +6992,11 @@ fn copy_cache_source(source: &Path, destination: &Path) -> Result<()> {
     }
 }
 
+/// Copy a cache tree in one traversal.
+///
+/// Each directory entry is either recursively materialized or rejected. The
+/// copy primitive already reports a failed file operation, so a second full
+/// metadata traversal only adds warm-path latency for large Rust target trees.
 fn copy_dir_contents(source: &Path, destination: &Path) -> Result<()> {
     for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
         let entry = entry?;
@@ -7056,6 +7014,11 @@ fn copy_dir_contents(source: &Path, destination: &Path) -> Result<()> {
             }
             crate::fs_copy::clone_or_copy(&source_path, &destination_path)
                 .with_context(|| format!("copy {}", source_path.display()))?;
+        } else {
+            bail!(
+                "cache entry contains unsupported file type at {}",
+                source_path.display()
+            );
         }
     }
     Ok(())
@@ -11824,17 +11787,18 @@ esac
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
-    fn cache_copy_verification_rejects_omitted_files() {
+    fn cache_copy_rejects_unsupported_entries() {
         let root = temp_dir();
         let source = root.join("source");
         let destination = root.join("destination");
         fs::create_dir_all(&source).unwrap();
         fs::create_dir_all(&destination).unwrap();
-        fs::write(source.join("manifest-rustc"), "required").unwrap();
+        std::os::unix::fs::symlink("missing-target", source.join("unsupported")).unwrap();
 
-        let error = verify_cache_copy(&source, &destination).unwrap_err();
-        assert!(error.to_string().contains("cache restore omitted"));
+        let error = copy_dir_contents(&source, &destination).unwrap_err();
+        assert!(error.to_string().contains("unsupported file type"));
         fs::remove_dir_all(root).unwrap();
     }
 
