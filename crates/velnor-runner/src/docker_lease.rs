@@ -6,11 +6,17 @@
 //! host. The lease is the missing ownership boundary: the job talks to a
 //! per-job proxy that injects `velnor.job-id` / `velnor.daemon-id` on every
 //! create, and every terminal path deletes by that label.
+//!
+//! In-flight Engine requests (BuildKit `ContainerStart`) hold dockerd's
+//! container lock until the HTTP client disconnects. A one-way host→guest
+//! copy cannot see job cancel, so `docker rm` of Created BuildKit hung until
+//! dockerd itself was killed. The proxy now splices both directions and Drop
+//! shuts down every live Engine stream before reclaim.
 
 use anyhow::{bail, Context, Result};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -845,6 +851,84 @@ pub struct DockerLeaseGuard {
     listen_path: PathBuf,
     shutdown: Arc<AtomicBool>,
     accept_thread: Option<JoinHandle<()>>,
+    #[cfg(unix)]
+    conns: Arc<LeaseConnSet>,
+}
+
+/// Live guest/host unix streams for one job lease. Drop aborts them so an
+/// in-flight Engine `POST /containers/{id}/start` cannot pin Created BuildKit
+/// behind a lock that `docker rm --force` never wins.
+#[cfg(unix)]
+struct LeaseConnSet {
+    shutdown: Arc<AtomicBool>,
+    next_id: Mutex<u64>,
+    streams: Mutex<BTreeMap<u64, std::os::unix::net::UnixStream>>,
+}
+
+#[cfg(unix)]
+struct WatchedStream {
+    set: Arc<LeaseConnSet>,
+    id: Option<u64>,
+}
+
+#[cfg(unix)]
+impl LeaseConnSet {
+    fn new(shutdown: Arc<AtomicBool>) -> Arc<Self> {
+        Arc::new(Self {
+            shutdown,
+            next_id: Mutex::new(0),
+            streams: Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::SeqCst)
+    }
+
+    fn abort(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        let mut streams = self.streams.lock().unwrap_or_else(|err| err.into_inner());
+        let drained = std::mem::take(&mut *streams);
+        for (_, stream) in drained {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+    }
+
+    fn watch(self: &Arc<Self>, stream: &std::os::unix::net::UnixStream) -> WatchedStream {
+        let id = stream.try_clone().ok().map(|clone| {
+            let mut next = self.next_id.lock().unwrap_or_else(|err| err.into_inner());
+            let id = *next;
+            *next = next.saturating_add(1);
+            self.streams
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .insert(id, clone);
+            id
+        });
+        if self.is_shutdown() {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+        WatchedStream {
+            set: Arc::clone(self),
+            id,
+        }
+    }
+
+    fn unregister(&self, id: u64) {
+        self.streams
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&id);
+    }
+}
+
+#[cfg(unix)]
+impl Drop for WatchedStream {
+    fn drop(&mut self) {
+        if let Some(id) = self.id.take() {
+            self.set.unregister(id);
+        }
+    }
 }
 
 impl DockerLeaseGuard {
@@ -880,6 +964,11 @@ impl Drop for DockerLeaseGuard {
         self.shutdown.store(true, Ordering::SeqCst);
         #[cfg(unix)]
         {
+            // Abort in-flight Engine HTTP first. Job cancel kills the guest
+            // CLI, but a one-way host→client copy stays blocked on dockerd
+            // `ContainerStart`; that lock is what made Created BuildKit
+            // `docker rm --force` hang until dockerd was SIGKILL'd.
+            self.conns.abort();
             // Wake `accept()` twice: the first connect can be handed to
             // `handle_client` if it races the shutdown load; the second
             // unblocks the loop so Drop can finish. EOF the wakeup so a
@@ -930,7 +1019,8 @@ fn bind_unix_lease(
         .set_nonblocking(false)
         .context("configure job Docker lease socket")?;
     let shutdown = Arc::new(AtomicBool::new(false));
-    let shutdown_thread = Arc::clone(&shutdown);
+    let conns = LeaseConnSet::new(Arc::clone(&shutdown));
+    let conns_thread = Arc::clone(&conns);
     let listen_path_thread = listen_path.clone();
     let accept_thread = std::thread::Builder::new()
         .name(format!("velnor-docker-lease-{}", job_id))
@@ -940,7 +1030,7 @@ fn bind_unix_lease(
                 host_socket,
                 job_id,
                 daemon_id,
-                shutdown_thread,
+                conns_thread,
                 listen_path_thread,
             );
         })
@@ -949,6 +1039,7 @@ fn bind_unix_lease(
         listen_path,
         shutdown,
         accept_thread: Some(accept_thread),
+        conns,
     })
 }
 
@@ -958,24 +1049,27 @@ fn accept_loop(
     host_socket: PathBuf,
     job_id: String,
     daemon_id: String,
-    shutdown: Arc<AtomicBool>,
+    conns: Arc<LeaseConnSet>,
     listen_path: PathBuf,
 ) {
-    while !shutdown.load(Ordering::SeqCst) {
+    while !conns.is_shutdown() {
         let stream = match listener.accept() {
             Ok((stream, _)) => stream,
             Err(_) => continue,
         };
-        if shutdown.load(Ordering::SeqCst) {
+        if conns.is_shutdown() {
             break;
         }
         let host_socket = host_socket.clone();
         let job_id = job_id.clone();
         let daemon_id = daemon_id.clone();
+        let conns = Arc::clone(&conns);
         let _ = std::thread::Builder::new()
             .name("velnor-docker-lease-conn".into())
             .spawn(move || {
-                if let Err(error) = handle_client(stream, &host_socket, &job_id, &daemon_id) {
+                if let Err(error) =
+                    handle_client_with(stream, &host_socket, &job_id, &daemon_id, conns)
+                {
                     eprintln!("Warning: job Docker lease proxy: {error:#}");
                 }
             });
@@ -983,16 +1077,41 @@ fn accept_loop(
     let _ = std::fs::remove_file(listen_path);
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn handle_client(
-    mut client: std::os::unix::net::UnixStream,
+    client: std::os::unix::net::UnixStream,
     host_socket: &Path,
     job_id: &str,
     daemon_id: &str,
 ) -> Result<()> {
+    handle_client_with(
+        client,
+        host_socket,
+        job_id,
+        daemon_id,
+        LeaseConnSet::new(Arc::new(AtomicBool::new(false))),
+    )
+}
+
+#[cfg(unix)]
+fn handle_client_with(
+    mut client: std::os::unix::net::UnixStream,
+    host_socket: &Path,
+    job_id: &str,
+    daemon_id: &str,
+    conns: Arc<LeaseConnSet>,
+) -> Result<()> {
     use std::os::unix::net::UnixStream;
 
-    let request = read_http_request(&mut client)?;
+    let _client_watch = conns.watch(&client);
+    if conns.is_shutdown() {
+        return Ok(());
+    }
+    let request = match read_http_request(&mut client) {
+        Ok(request) => request,
+        Err(_) if conns.is_shutdown() => return Ok(()),
+        Err(error) => return Err(error),
+    };
     let forwarded = rewrite_docker_api_request(&request, job_id, daemon_id)?;
     let upgrade = std::str::from_utf8(&request).is_ok_and(|header| {
         header.lines().any(|line| {
@@ -1007,26 +1126,66 @@ fn handle_client(
     } else {
         with_connection_close(&forwarded)?
     };
+    if conns.is_shutdown() {
+        return Ok(());
+    }
     let mut host = UnixStream::connect(host_socket).with_context(|| {
         format!(
             "connect job Docker lease to host engine {}",
             host_socket.display()
         )
     })?;
-    host.write_all(&forwarded)
-        .context("forward Docker API request through job lease")?;
-    if upgrade {
-        let mut host_reader = host.try_clone().context("clone host Docker lease stream")?;
-        let mut client_writer = client
-            .try_clone()
-            .context("clone job Docker lease stream")?;
-        let pump = std::thread::spawn(move || io::copy(&mut host_reader, &mut client_writer));
-        let _ = io::copy(&mut client, &mut host);
-        let _ = pump.join();
-    } else {
-        io::copy(&mut host, &mut client)
-            .context("forward Docker API response through job lease")?;
+    let _host_watch = conns.watch(&host);
+    if conns.is_shutdown() {
+        return Ok(());
     }
+    if let Err(error) = host
+        .write_all(&forwarded)
+        .context("forward Docker API request through job lease")
+    {
+        if conns.is_shutdown() {
+            return Ok(());
+        }
+        return Err(error);
+    }
+    proxy_until_closed(host, client)
+}
+
+/// Copy both directions and shut the peer down when either side EOFs.
+///
+/// Non-upgrade used to `io::copy` host→guest only. Job cancel closed the
+/// guest CLI, but the proxy kept the Engine `ContainerStart` HTTP request
+/// open, so Created `buildx_buildkit_velnor-builder-*` could not be deleted.
+#[cfg(unix)]
+fn proxy_until_closed(
+    host: std::os::unix::net::UnixStream,
+    client: std::os::unix::net::UnixStream,
+) -> Result<()> {
+    let mut host_read = host.try_clone().context("clone host Docker lease stream")?;
+    let mut client_write = client
+        .try_clone()
+        .context("clone job Docker lease stream")?;
+    let mut client_read = client
+        .try_clone()
+        .context("clone job Docker lease stream")?;
+    let mut host_write = host.try_clone().context("clone host Docker lease stream")?;
+    let host_close = host.try_clone().context("clone host Docker lease stream")?;
+    let client_close = client
+        .try_clone()
+        .context("clone job Docker lease stream")?;
+    let up = std::thread::Builder::new()
+        .name("velnor-docker-lease-io".into())
+        .spawn(move || {
+            let result = io::copy(&mut host_read, &mut client_write);
+            let _ = host_close.shutdown(std::net::Shutdown::Both);
+            let _ = client_close.shutdown(std::net::Shutdown::Both);
+            result
+        })
+        .context("start job Docker lease copy thread")?;
+    let _ = io::copy(&mut client_read, &mut host_write);
+    let _ = host.shutdown(std::net::Shutdown::Both);
+    let _ = client.shutdown(std::net::Shutdown::Both);
+    let _ = up.join();
     Ok(())
 }
 
@@ -1576,6 +1735,122 @@ other-dead\tother-dead\t/var/lib/velnor-other/work\texited
         rx.recv_timeout(Duration::from_secs(2))
             .expect("handle_client must return after injecting Connection: close; keepalive io::copy deadlocks docker CLI")
             .unwrap();
+        engine_thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    fn unique_unix_dir(prefix: &str) -> PathBuf {
+        let dir = PathBuf::from("/tmp").join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_client_closes_host_when_guest_disconnects_during_hanging_engine() {
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = unique_unix_dir("velnor-lease-guest-eof");
+        let engine_path = dir.join("engine.sock");
+        let engine = UnixListener::bind(&engine_path).unwrap();
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let engine_thread = std::thread::spawn(move || {
+            let (mut sock, _) = engine.accept().unwrap();
+            let mut buf = vec![0_u8; 4096];
+            let _ = sock.read(&mut buf);
+            let _ = accepted_tx.send(());
+            sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let n = sock.read(&mut buf);
+            let _ = closed_tx.send(n.map(|bytes| bytes == 0).unwrap_or(true));
+        });
+
+        let (mut client, proxy_client) = UnixStream::pair().unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let engine_for_proxy = engine_path.clone();
+        std::thread::spawn(move || {
+            let result = handle_client(proxy_client, &engine_for_proxy, "job", "daemon");
+            let _ = done_tx.send(result);
+        });
+
+        client
+            .write_all(b"POST /v1.43/containers/abc/start HTTP/1.1\r\nHost: docker\r\nContent-Length: 0\r\n\r\n")
+            .unwrap();
+        accepted_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("engine should accept the forwarded start");
+        drop(client);
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("handle_client must return when the guest disconnects; one-way host copy leaves Engine Start held")
+            .unwrap();
+        let engine_saw_close = closed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("engine should see the host stream close");
+        assert!(
+            engine_saw_close,
+            "guest EOF must shut down the Engine request, not leave ContainerStart in flight"
+        );
+        engine_thread.join().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drop_aborts_in_flight_host_engine_request() {
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let dir = unique_unix_dir("velnor-lease-drop-abort");
+        let listen_path = dir.join("lease.sock");
+        let engine_path = dir.join("engine.sock");
+        let engine = UnixListener::bind(&engine_path).unwrap();
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let engine_thread = std::thread::spawn(move || {
+            let (mut sock, _) = engine.accept().unwrap();
+            let mut buf = vec![0_u8; 4096];
+            let _ = sock.read(&mut buf);
+            let _ = accepted_tx.send(());
+            sock.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            let n = sock.read(&mut buf);
+            let _ = closed_tx.send(n.map(|bytes| bytes == 0).unwrap_or(true));
+        });
+
+        let guard = DockerLeaseGuard::bind_to(
+            listen_path.clone(),
+            engine_path,
+            "job".into(),
+            "daemon".into(),
+        )
+        .unwrap();
+        let mut client = UnixStream::connect(&listen_path).unwrap();
+        client
+            .write_all(b"POST /v1.43/containers/abc/start HTTP/1.1\r\nHost: docker\r\nContent-Length: 0\r\n\r\n")
+            .unwrap();
+        accepted_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("engine should accept the forwarded start");
+        drop(guard);
+        let _keep_guest = client;
+        let engine_saw_close = closed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("Drop must abort the in-flight Engine stream");
+        assert!(
+            engine_saw_close,
+            "lease Drop must shut down host Engine HTTP, not leave ContainerStart held after the job ends"
+        );
         engine_thread.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
