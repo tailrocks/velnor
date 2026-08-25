@@ -378,6 +378,7 @@ async fn reconcile_once(
     register_runners(args, journal, pacing, registrations).await?;
 
     spawn_ready_waiters(args, journal, jobs)?;
+    reclaim_orphaned_jobs(args, journal)?;
 
     for row in journal.pending_outbox()? {
         preserve_outbox(
@@ -661,6 +662,40 @@ fn spawn_ready_waiters(
             slot.generation.0,
             Some(&slot.slot_id.0),
         )?;
+    }
+    Ok(())
+}
+
+/// Return slots occupied by job workers that died without a terminal
+/// completion (daemon drain mid-run, OOM-kill, reboot). Without this the
+/// slot stays `Assigned` forever and advertised capacity never recovers.
+fn reclaim_orphaned_jobs(args: &ControllerArgs, journal: &mut Journal) -> anyhow::Result<()> {
+    let state = journal.load_state()?;
+    for job in &state.jobs {
+        if !matches!(
+            job.phase,
+            ActorPhase::Assigned | ActorPhase::Starting | ActorPhase::Running
+        ) {
+            continue;
+        }
+        // Waiters spawned by this controller are not journal jobs; a journal
+        // job always has an owned pid file written at spawn time. A missing
+        // or dead pid means no worker can ever complete this job.
+        let worker_live = cleanup::read_owned_pid(&args.state_dir, &job.job_id.0, job.generation.0)
+            .is_some_and(prove::pid_is_alive);
+        if worker_live {
+            continue;
+        }
+        let lost = journal.apply(Event::JobWorkerLost {
+            job_id: job.job_id.clone(),
+            generation: job.generation,
+        })?;
+        if !lost.rejected {
+            eprintln!(
+                "Warning: job {} worker lost on {}; slot restored to Ready",
+                job.job_id.0, job.slot_id.0
+            );
+        }
     }
     Ok(())
 }
