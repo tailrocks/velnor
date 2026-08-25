@@ -52,7 +52,10 @@ jobs:
     # Callable-only contract: the app identity inputs and secret exist only
     # for workflow_call, so a standalone dispatch is a documented no-op
     # instead of a run that can never bind the release credential.
-    if: ${{ github.event_name == 'workflow_call' }}
+    # A called workflow inherits the caller's event name. Gate on the
+    # required callable input so a caller dispatch executes, while a direct
+    # standalone dispatch (which cannot provide the input) remains a no-op.
+    if: ${{ inputs.consumer-repository != '' }}
     runs-on: ${{ inputs.lane == 'github' && 'ubuntu-26.04' || fromJSON('["self-hosted","velnor-target-mvp"]') }}
     timeout-minutes: 15
     permissions:
