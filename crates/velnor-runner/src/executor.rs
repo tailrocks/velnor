@@ -223,6 +223,29 @@ impl CommandRunner for ProcessCommandRunner {
         timeout: Duration,
     ) -> Result<CommandResult> {
         // Called from spawn_blocking context — synchronous blocking is fine here.
+        let timeout = if program == "docker" {
+            crate::docker_lease::docker_cli_timeout(args, timeout)
+        } else {
+            timeout
+        };
+        let rm_claim = if program == "docker" {
+            crate::docker_lease::claim_docker_container_rm(args)
+        } else {
+            None
+        };
+        if let Some(claim) = rm_claim.as_ref() {
+            if claim.ids.is_empty() {
+                return Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                });
+            }
+        }
+        let claimed_args = rm_claim
+            .as_ref()
+            .map(|claim| crate::docker_lease::force_remove_container_args(&claim.ids));
+        let args = claimed_args.as_deref().unwrap_or(args);
         let mut command = Command::new(program);
         command
             .args(args)
@@ -9183,7 +9206,7 @@ fn spawn_docker_timeout_watchdog(
                     .arg(container_name)
                     .status();
             }
-            let _ = Command::new("kill")
+            let _ = Command::new("/bin/kill")
                 .args(["-KILL", &child_pid.to_string()])
                 .status();
         }
@@ -9391,6 +9414,21 @@ mod tests {
     };
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(unix)]
+    #[test]
+    fn process_command_runner_timeout_kills_sleep_child() {
+        let start = std::time::Instant::now();
+        let result = ProcessCommandRunner
+            .run_timeout("sleep", &["30".into()], std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "watchdog must kill sleep, elapsed={:?}",
+            start.elapsed()
+        );
+        assert_eq!(result.code, 124);
+    }
 
     #[test]
     fn effective_timeout_prefers_step_over_job_over_default() {
@@ -10408,7 +10446,7 @@ esac
             fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
                 self.calls.push(args.to_vec());
                 let stdout = if args == crate::docker_lease::list_owned_containers_args("job") {
-                    "guest-postgres\nbuildkit-one\n".into()
+                    "guest-id\tguest-postgres\nbk-id\tbuildx_buildkit_velnor-builder-job0\n".into()
                 } else if args == crate::docker_lease::list_owned_networks_args("job") {
                     "guest-net\n".into()
                 } else if args == crate::docker_lease::list_owned_volumes_args("job") {
@@ -10433,11 +10471,13 @@ esac
         assert!(calls
             .iter()
             .any(|args| args == &crate::docker_lease::list_owned_containers_args("job")));
-        assert!(calls.iter().any(|args| args
-            == &crate::docker_lease::force_remove_container_args(&[
-                "buildkit-one".into(),
-                "guest-postgres".into()
-            ])));
+        assert!(calls
+            .iter()
+            .any(|args| args
+                == &crate::docker_lease::force_remove_container_args(&["guest-id".into()])));
+        assert!(calls.iter().all(|args| {
+            !(args.first().is_some_and(|arg| arg == "rm") && args.iter().any(|arg| arg == "bk-id"))
+        }));
         assert!(calls
             .iter()
             .any(|args| args

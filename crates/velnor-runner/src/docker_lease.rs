@@ -10,11 +10,13 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 pub const JOB_ID_LABEL: &str = "velnor.job-id";
 pub const DAEMON_ID_LABEL: &str = "velnor.daemon-id";
@@ -62,9 +64,10 @@ pub fn list_owned_containers_args(job_id: &str) -> Vec<String> {
     vec![
         "ps".into(),
         "--all".into(),
-        "--quiet".into(),
         "--filter".into(),
         format!("label={JOB_ID_LABEL}={job_id}"),
+        "--format".into(),
+        "{{.ID}}\t{{.Names}}".into(),
     ]
 }
 
@@ -200,6 +203,99 @@ pub fn parse_docker_id_list(stdout: &str) -> Vec<String> {
     ids.sort();
     ids.dedup();
     ids
+}
+
+/// Labeled job containers minus docker-container BuildKit daemons.
+///
+/// BuildKit carries `velnor.job-id`, so the generic owned-container reclaim
+/// used to `docker rm --force` it with the 6h step timeout while job-end
+/// and doctor also rm'd the same id. Concurrent Engine deletes of a Created
+/// `buildx_buildkit_velnor-builder-*` deadlock; the leftover stays. BuildKit
+/// has its own prefix reclaim with a 20s bound.
+pub fn owned_container_ids_excluding_buildkit(formatted: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for line in formatted.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (id, names) = line.split_once('\t').unwrap_or((line, line));
+        let id = id.trim();
+        let names = names.trim();
+        if id.is_empty() || names.contains(BUILDKIT_CONTAINER_NAME_PREFIX) {
+            continue;
+        }
+        ids.push(id.to_string());
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+const DOCKER_RM_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Cap `docker rm` / `volume rm` / `network rm` so a stuck Engine delete cannot
+/// pin job teardown for the 6h step timeout.
+pub fn docker_cli_timeout(args: &[String], requested: Duration) -> Duration {
+    let is_rm = match args.first().map(String::as_str) {
+        Some("rm") => true,
+        Some("volume" | "network") if args.get(1).map(String::as_str) == Some("rm") => true,
+        _ => false,
+    };
+    if is_rm {
+        requested.min(DOCKER_RM_TIMEOUT)
+    } else {
+        requested
+    }
+}
+
+fn container_ids_from_rm_args(args: &[String]) -> Vec<String> {
+    if args.first().map(String::as_str) != Some("rm") {
+        return Vec::new();
+    }
+    args.iter()
+        .skip(1)
+        .filter(|arg| !arg.starts_with('-'))
+        .cloned()
+        .collect()
+}
+
+static IN_FLIGHT_CONTAINER_RM: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+/// Claim container ids for a `docker rm` so job-end and doctor never start a
+/// second Engine delete of the same Created BuildKit (that deadlock is the
+/// leftover class). Empty `ids` means every id is already in flight: skip.
+pub struct DockerContainerRmClaim {
+    pub ids: Vec<String>,
+}
+
+impl Drop for DockerContainerRmClaim {
+    fn drop(&mut self) {
+        if self.ids.is_empty() {
+            return;
+        }
+        let mut held = IN_FLIGHT_CONTAINER_RM
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        for id in &self.ids {
+            held.remove(id);
+        }
+    }
+}
+
+pub fn claim_docker_container_rm(args: &[String]) -> Option<DockerContainerRmClaim> {
+    let ids = container_ids_from_rm_args(args);
+    if ids.is_empty() {
+        return None;
+    }
+    let mut held = IN_FLIGHT_CONTAINER_RM
+        .lock()
+        .unwrap_or_else(|err| err.into_inner());
+    let claimed = ids
+        .into_iter()
+        .filter(|id| held.insert(id.clone()))
+        .collect::<Vec<_>>();
+    Some(DockerContainerRmClaim { ids: claimed })
 }
 
 /// Job ids whose job container is not running. Guest objects for those jobs are orphans.
@@ -569,11 +665,11 @@ pub fn reclaim_job_owned(
     job_id: &str,
     mut docker: impl FnMut(&[String]) -> Result<String>,
 ) -> Result<()> {
-    reclaim_listed(
-        &list_owned_containers_args(job_id),
-        &mut docker,
-        force_remove_container_args,
-    )?;
+    let listed = docker(&list_owned_containers_args(job_id))?;
+    let ids = owned_container_ids_excluding_buildkit(&listed);
+    if !ids.is_empty() {
+        docker(&force_remove_container_args(&ids)).map(|_| ())?;
+    }
     reclaim_listed(
         &list_owned_networks_args(job_id),
         &mut docker,
@@ -639,11 +735,12 @@ pub fn reclaim_unlabeled_job_image_siblings(
     docker(&force_remove_container_args(&ids)).map(|_| ())
 }
 
-const TEARDOWN_RM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
-
 pub fn run_host_docker(args: &[String]) -> Result<String> {
-    if args.first().is_some_and(|arg| arg == "rm") {
-        return run_host_docker_bounded(args, TEARDOWN_RM_TIMEOUT);
+    if args.first().is_some_and(|arg| arg == "rm")
+        || (matches!(args.first().map(String::as_str), Some("volume" | "network"))
+            && args.get(1).map(String::as_str) == Some("rm"))
+    {
+        return run_host_docker_bounded(args, docker_cli_timeout(args, DOCKER_RM_TIMEOUT));
     }
     let output = std::process::Command::new("docker")
         .args(args)
@@ -660,6 +757,16 @@ pub fn run_host_docker(args: &[String]) -> Result<String> {
 }
 
 fn run_host_docker_bounded(args: &[String], timeout: std::time::Duration) -> Result<String> {
+    let rm_claim = claim_docker_container_rm(args);
+    if let Some(claim) = rm_claim.as_ref() {
+        if claim.ids.is_empty() {
+            return Ok(String::new());
+        }
+    }
+    let claimed_args = rm_claim
+        .as_ref()
+        .map(|claim| force_remove_container_args(&claim.ids));
+    let args = claimed_args.as_deref().unwrap_or(args);
     let child = std::process::Command::new("docker")
         .args(args)
         .stdout(std::process::Stdio::piped())
@@ -670,7 +777,7 @@ fn run_host_docker_bounded(args: &[String], timeout: std::time::Duration) -> Res
     let (cancel, cancelled) = std::sync::mpsc::channel();
     let killer = std::thread::spawn(move || {
         if cancelled.recv_timeout(timeout).is_err() {
-            let _ = std::process::Command::new("kill")
+            let _ = std::process::Command::new("/bin/kill")
                 .args(["-KILL", &pid.to_string()])
                 .status();
         }
@@ -1032,7 +1139,7 @@ mod tests {
     fn reclaim_job_owned_removes_guest_container_network_and_volume() {
         let mut calls = Vec::new();
         let mut outputs = vec![
-            "guest-postgres\nbuildkit-one\n".to_string(),
+            "aaa\tguest-postgres\nbbb\tbuildx_buildkit_velnor-builder-dead0\n".to_string(),
             String::new(),
             "guest-net\n".to_string(),
             String::new(),
@@ -1049,10 +1156,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(calls[0], list_owned_containers_args("velnor-job-1"));
-        assert_eq!(
-            calls[1],
-            force_remove_container_args(&["buildkit-one".into(), "guest-postgres".into()])
-        );
+        assert_eq!(calls[1], force_remove_container_args(&["aaa".into()]));
         assert_eq!(calls[2], list_owned_networks_args("velnor-job-1"));
         assert_eq!(calls[3], force_remove_network_args(&["guest-net".into()]));
         assert_eq!(calls[4], list_owned_volumes_args("velnor-job-1"));
@@ -1104,6 +1208,51 @@ velnor-job-dead\tvelnor-job-dead\texited
         assert!(calls
             .iter()
             .any(|call| call == &list_job_buildkit_volume_args()));
+    }
+
+    #[test]
+    fn owned_container_ids_excluding_buildkit_keep_guests_only() {
+        let formatted = "\
+aaa\tguest-postgres
+bbb\tbuildx_buildkit_velnor-builder-dead0
+ccc\tvelnor-docker-action-velnor-job-dead
+";
+        assert_eq!(
+            owned_container_ids_excluding_buildkit(formatted),
+            vec!["aaa".to_string(), "ccc".to_string()]
+        );
+    }
+
+    #[test]
+    fn docker_cli_timeout_caps_rm_and_leaves_other_commands() {
+        let six_hours = Duration::from_secs(6 * 3600);
+        assert_eq!(
+            docker_cli_timeout(&force_remove_container_args(&["id".into()]), six_hours),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            docker_cli_timeout(
+                &["volume".into(), "rm".into(), "--force".into(), "v".into()],
+                six_hours
+            ),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            docker_cli_timeout(&["ps".into(), "--all".into()], six_hours),
+            six_hours
+        );
+    }
+
+    #[test]
+    fn claim_docker_container_rm_single_flights_same_id() {
+        let args = force_remove_container_args(&["same-id".into()]);
+        let first = claim_docker_container_rm(&args).unwrap();
+        assert_eq!(first.ids, vec!["same-id".to_string()]);
+        let second = claim_docker_container_rm(&args).unwrap();
+        assert!(second.ids.is_empty());
+        drop(first);
+        let third = claim_docker_container_rm(&args).unwrap();
+        assert_eq!(third.ids, vec!["same-id".to_string()]);
     }
 
     #[test]
