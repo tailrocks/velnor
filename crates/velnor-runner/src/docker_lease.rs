@@ -856,6 +856,8 @@ pub struct DockerLeaseGuard {
     accept_thread: Option<JoinHandle<()>>,
     #[cfg(unix)]
     conns: Arc<LeaseConnSet>,
+    #[cfg(unix)]
+    shutdown_wake: Option<std::os::unix::net::UnixStream>,
 }
 
 /// Live guest/host unix streams for one job lease. Drop aborts them so an
@@ -974,10 +976,13 @@ impl Drop for DockerLeaseGuard {
             self.conns.abort();
         }
         if let Some(thread) = self.accept_thread.take() {
-            // The listener is nonblocking. Wake its park timeout directly;
-            // synthetic socket connects raced shutdown and could still leave
-            // the accept thread inside a blocking accept on busy hosts.
-            thread.thread().unpark();
+            #[cfg(unix)]
+            if let Some(mut wake) = self.shutdown_wake.take() {
+                // Wake the poll set directly. Synthetic listener connects
+                // raced shutdown and could still leave the accept thread
+                // inside a blocking accept on busy hosts.
+                let _ = wake.write_all(&[1]);
+            }
             let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
                 let _ = thread.join();
@@ -1016,6 +1021,8 @@ fn bind_unix_lease(
     listener
         .set_nonblocking(true)
         .context("configure job Docker lease socket")?;
+    let (wake_reader, wake_writer) =
+        std::os::unix::net::UnixStream::pair().context("create job Docker lease shutdown wake")?;
     let shutdown = Arc::new(AtomicBool::new(false));
     let conns = LeaseConnSet::new(Arc::clone(&shutdown));
     let conns_thread = Arc::clone(&conns);
@@ -1030,6 +1037,7 @@ fn bind_unix_lease(
                 daemon_id,
                 conns_thread,
                 listen_path_thread,
+                wake_reader,
             );
         })
         .context("start job Docker lease proxy thread")?;
@@ -1038,6 +1046,7 @@ fn bind_unix_lease(
         shutdown,
         accept_thread: Some(accept_thread),
         conns,
+        shutdown_wake: Some(wake_writer),
     })
 }
 
@@ -1049,23 +1058,42 @@ fn accept_loop(
     daemon_id: String,
     conns: Arc<LeaseConnSet>,
     listen_path: PathBuf,
+    wake_reader: std::os::unix::net::UnixStream,
 ) {
+    use std::os::fd::AsRawFd;
+
+    let mut poll_fds = [
+        libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: wake_reader.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
     while !conns.is_shutdown() {
+        poll_fds[0].revents = 0;
+        poll_fds[1].revents = 0;
+        let polled = unsafe { libc::poll(poll_fds.as_mut_ptr(), poll_fds.len() as _, -1) };
+        if polled < 0 {
+            if io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            break;
+        }
+        if poll_fds[1].revents != 0 {
+            break;
+        }
+        if poll_fds[0].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) == 0 {
+            continue;
+        }
         let stream = match listener.accept() {
             Ok((stream, _)) => stream,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                // Polling avoids a blocking accept that cannot be reliably
-                // interrupted by a raced wakeup connection. Drop unparks us
-                // immediately; the timeout bounds an external shutdown that
-                // happens before the thread reaches park.
-                std::thread::park_timeout(Duration::from_millis(10));
-                continue;
-            }
-            Err(_) if conns.is_shutdown() => break,
-            Err(_) => {
-                std::thread::yield_now();
-                continue;
-            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(_) => break,
         };
         if conns.is_shutdown() {
             break;
