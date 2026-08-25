@@ -106,6 +106,10 @@ opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
 
+http-body-util = { version = "0.1", default-features = false, features = ["channel"] }
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio", "service", "http1"] }
+
 [dev-dependencies]
 wiremock = "=0.6.5"
 

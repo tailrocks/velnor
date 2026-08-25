@@ -22,6 +22,7 @@ mod container;
 mod docker_lease;
 mod executor;
 mod fs_copy;
+pub mod gha_cache;
 mod git_mirror;
 mod github_adapter;
 mod job_message;
