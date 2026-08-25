@@ -153,18 +153,13 @@ async fn reconcile_once(
     }
 
     for row in journal.pending_outbox()? {
-        cleanup::write_outbox(
-            &args.state_dir,
-            &row.job_id.0,
-            row.generation.0,
-            row.payload_sha256.as_bytes(),
+        preserve_outbox(
+            args,
+            journal,
+            &row.job_id,
+            row.generation,
+            &row.payload_sha256,
         )?;
-        if !row.send_started {
-            journal.apply(Event::CompletionSendStarted {
-                job_id: row.job_id,
-                generation: row.generation,
-            })?;
-        }
     }
 
     reap(slots);
@@ -201,16 +196,7 @@ async fn execute_effect(
             job_id,
             generation,
             payload_sha256,
-        } => {
-            cleanup::write_outbox(
-                &args.state_dir,
-                &job_id.0,
-                generation.0,
-                payload_sha256.as_bytes(),
-            )?;
-            journal.apply(Event::CompletionSendStarted { job_id, generation })?;
-            Ok(())
-        }
+        } => preserve_outbox(args, journal, &job_id, generation, &payload_sha256),
         SideEffect::Cleanup {
             isolation_id,
             generation,
@@ -380,6 +366,31 @@ fn ingest_assignments(
         effects.extend(owned.commands);
     }
     Ok(effects)
+}
+
+/// Keep a durable completion payload. Never replace it with the checksum
+/// and never stamp `CompletionSendStarted` without an actual send.
+fn preserve_outbox(
+    args: &ControllerArgs,
+    _journal: &mut Journal,
+    job_id: &JobId,
+    generation: Generation,
+    payload_sha256: &str,
+) -> anyhow::Result<()> {
+    let path = cleanup::outbox_path(&args.state_dir, &job_id.0, generation.0);
+    if !path.is_file() {
+        return Ok(());
+    }
+    let bytes = std::fs::read(&path)?;
+    let actual = velnor_control::journal::payload_checksum(&bytes);
+    if actual != payload_sha256 {
+        anyhow::bail!(
+            "outbox checksum mismatch for {} generation {}",
+            job_id.0,
+            generation.0
+        );
+    }
+    Ok(())
 }
 
 fn slot_index_from_id(slot_id: &SlotId) -> usize {

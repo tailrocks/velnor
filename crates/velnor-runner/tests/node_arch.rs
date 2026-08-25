@@ -364,6 +364,11 @@ fn controller_does_not_stamp_ready_without_proofs() {
         "{:?}",
         state.slots
     );
+    assert!(
+        state.slots.iter().all(|slot| !slot.executor_proven),
+        "docker.sock is not executor proof: {:?}",
+        state.slots
+    );
     assert!(state.slots.iter().all(|slot| !slot.registered));
     assert!(state.jobs.is_empty());
     std::fs::remove_dir_all(dir).ok();
@@ -776,11 +781,12 @@ fn controller_sends_pending_completion_outbox() {
     let payload = b"conclusion=success";
     journal
         .apply(Event::CompletionIntended {
-            job_id,
+            job_id: job_id.clone(),
             generation: Generation::INITIAL,
             payload_sha256: payload_checksum(payload),
         })
         .unwrap();
+    velnor_runner::node::cleanup::write_outbox(&dir, &job_id.0, 1, payload).unwrap();
     drop(journal);
 
     let status = run_runner(
@@ -801,16 +807,21 @@ fn controller_sends_pending_completion_outbox() {
         ],
     );
     assert!(status.success(), "{}", cmd_err(&dir));
-    assert!(
-        dir.join("outbox").join("slot-1-worker.1").exists(),
-        "SendCompletion must write the outbox payload"
+    let outbox = dir.join("outbox").join("slot-1-worker.1");
+    assert_eq!(
+        std::fs::read(&outbox).unwrap(),
+        payload,
+        "controller must not replace the durable payload with a checksum"
     );
     let pending = Journal::open(dir.join("journal.db"))
         .unwrap()
         .pending_outbox()
         .unwrap();
     assert_eq!(pending.len(), 1);
-    assert!(pending[0].send_started);
+    assert!(
+        !pending[0].send_started,
+        "send-started is only after an actual GitHub send, not outbox observation"
+    );
     if let Some(pid) = velnor_runner::node::cleanup::read_owned_pid(&dir, "slot-1-worker", 1) {
         kill_pid(pid);
     }

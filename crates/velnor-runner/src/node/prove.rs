@@ -20,7 +20,8 @@ pub const ROUTING_POLICY_FILE: &str = "routing-policy.json";
 pub const ROUTING_EVIDENCE_FILE: &str = "routing-evidence.json";
 /// Host-local executor proof written by a real preflight, never by daemon startup.
 pub const EXECUTOR_OK: &str = "executor.ok";
-/// Transitional host Docker socket. Presence is executor proof.
+/// Transitional host Docker socket. Presence is not executor proof.
+#[allow(dead_code)]
 pub const HOST_DOCKER_SOCKET: &str = "/var/run/docker.sock";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -81,10 +82,11 @@ pub fn observe_document(document: &RoutingDocument) -> RoutingObservation {
     RoutingObservation { valid, group_valid }
 }
 
-/// Executor is proven by a preflight `executor.ok` file or a live host Docker socket.
+/// Executor is proven only by a preflight `executor.ok` file.
+/// A live Docker socket is the transitional backend, not the proof.
 #[must_use]
 pub fn observe_executor(state_dir: &Path) -> bool {
-    state_dir.join(EXECUTOR_OK).is_file() || Path::new(HOST_DOCKER_SOCKET).exists()
+    state_dir.join(EXECUTOR_OK).is_file()
 }
 
 /// Session is live when the slot child is running or its journal pid still exists.
@@ -600,7 +602,7 @@ mod tests {
     #[test]
     fn executor_ok_file_is_proof() {
         let dir = tmp("exec");
-        assert!(!dir.join(EXECUTOR_OK).exists());
+        assert!(!observe_executor(&dir));
         write_executor_ok(&dir).unwrap();
         assert!(observe_executor(&dir));
         std::fs::remove_dir_all(dir).ok();

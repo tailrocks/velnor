@@ -2118,9 +2118,15 @@ fn preflight_before_daemon_jit_config(
         return Ok(());
     }
 
+    let mut ran = false;
     for preflight_args in daemon_preflight_args(args, config_base, slots)? {
         crate::preflight::preflight(preflight_args)
             .context("Docker preflight failed before daemon JIT runner configuration")?;
+        ran = true;
+    }
+    if ran {
+        crate::node::prove::write_executor_ok(config_base)
+            .context("persist executor proof after preflight")?;
     }
     Ok(())
 }
