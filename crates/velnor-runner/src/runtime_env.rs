@@ -174,6 +174,25 @@ pub fn job_runtime_env(job: &AgentJobRequestMessage) -> Vec<(String, String)> {
             "ACTIONS_RESULTS_URL",
         );
     }
+    // P1: self-hosted job messages never carry a CacheServerUrl, which makes
+    // BuildKit's type=gha backend and actions/cache@v4 silently no-op. When
+    // the operator enables the daemon-hosted cache service (gha_cache module)
+    // by exporting both variables into the runner environment, inject the
+    // equivalent contract so identical YAML is warm on every lane. Strict
+    // capability rule: absent those variables nothing changes.
+    if !env.iter().any(|(name, _)| name == "ACTIONS_CACHE_URL") {
+        if let (Ok(url), Ok(token)) = (
+            std::env::var("VELNOR_ACTIONS_CACHE_URL"),
+            std::env::var("VELNOR_ACTIONS_RUNTIME_TOKEN"),
+        ) {
+            if !url.is_empty() && !token.is_empty() {
+                set_env(&mut env, "ACTIONS_CACHE_URL", &url);
+                set_env(&mut env, "ACTIONS_RESULTS_URL", &url);
+                set_env(&mut env, "ACTIONS_RUNTIME_TOKEN", &token);
+                env.push(("ACTIONS_CACHE_SERVICE_V2".to_string(), "True".to_string()));
+            }
+        }
+    }
     if job.variable_bool("actions_uses_cache_service_v2") == Some(true) {
         env.push(("ACTIONS_CACHE_SERVICE_V2".to_string(), "True".to_string()));
     }
