@@ -67,9 +67,9 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
-# Per-instance state, work, and forensic logs all live below this root.
-# JIT slot credentials remain under the root user's configured runner state.
-ReadWritePaths=/var/lib/velnor-%i /var/cache/velnor /run/velnor /var/log/velnor /root/.velnor/runner
+# Per-instance state, work, JIT credentials, and forensic logs live below
+# StateDirectory=/var/lib/velnor-%i. Never $HOME/.velnor.
+ReadWritePaths=/var/lib/velnor-%i /var/cache/velnor /run/velnor /var/log/velnor
 
 [Install]
 WantedBy=multi-user.target

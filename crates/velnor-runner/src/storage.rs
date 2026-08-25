@@ -11,13 +11,17 @@ pub fn run(args: StorageArgs) -> Result<()> {
     let layout = match StorageLayout::resolve() {
         Some(layout) => layout,
         None => {
-            let config = crate::config::config_dir(args.config_dir)?;
-            StorageLayout {
-                cache_root: config.join("_work"),
-                lib_root: config.clone(),
-                run_root: config.join("run"),
-                log_root: config.join("logs"),
-                mode: "legacy-dev",
+            if args.config_dir.is_some() {
+                let config = crate::config::config_dir(args.config_dir)?;
+                StorageLayout {
+                    cache_root: config.join("cache"),
+                    lib_root: config.clone(),
+                    run_root: config.join("run"),
+                    log_root: config.join("log"),
+                    mode: "explicit-config",
+                }
+            } else {
+                StorageLayout::user_cli()?
             }
         }
     };
@@ -69,6 +73,23 @@ impl StorageLayout {
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .map(|prefix| Self::from_prefix(&prefix))
+    }
+
+    /// Interactive CLI without `VELNOR_STORAGE_ROOT`: XDG cache/state/runtime,
+    /// never `$HOME/.velnor`.
+    pub fn user_cli() -> Result<Self> {
+        let home = std::env::var_os("HOME");
+        let state =
+            crate::config::user_state_dir(std::env::var_os("XDG_STATE_HOME"), home.clone())?;
+        let cache = crate::config::user_cache_dir(std::env::var_os("XDG_CACHE_HOME"), home)?;
+        let runtime = crate::config::user_runtime_dir(std::env::var_os("XDG_RUNTIME_DIR"));
+        Ok(Self {
+            cache_root: cache.join("velnor"),
+            lib_root: state.join("velnor"),
+            run_root: runtime.join("velnor"),
+            log_root: state.join("velnor").join("log"),
+            mode: "xdg-user",
+        })
     }
 
     pub fn cache_class(&self, trust_scope: &str, class: &str) -> PathBuf {
@@ -187,6 +208,7 @@ mod tests {
         assert_eq!(layout.lib_root, Path::new("/var/lib/velnor"));
         assert_eq!(layout.run_root, Path::new("/run/velnor"));
         assert_eq!(layout.log_root, Path::new("/var/log/velnor"));
+        assert_ne!(layout.lib_root, Path::new("/root/.velnor/runner"));
     }
 
     #[test]
