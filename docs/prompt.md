@@ -24,9 +24,9 @@ exactly: the marked unified-CI contract, the tracked goal graph, and the
 No earlier prompt or plan is active.
 
 Direction sources (`docs/mission.md`, `docs/vision.md`, `docs/roadmap.md`)
-name Firecracker (direct HTTP API + jailer on Linux KVM, guest-local Docker)
-as the production microVM; host Docker as the named transitional live
-executor; Cloud Hypervisor as fallback-only on proven device-model
-insufficiency; and Kata Containers / firecracker-containerd as not the
-product orchestration path. This prompt does not restate a second execution
-sequence.
+name exactly two operator backends in `execution.toml`: `docker` and
+`microvm`, with no automatic fallback. Firecracker (direct HTTP API + jailer
+on Linux KVM, guest-local Docker) is the production microVM; Cloud
+Hypervisor is fallback-only on proven device-model insufficiency; Kata
+Containers / firecracker-containerd are not the product orchestration path.
+This prompt does not restate a second execution sequence.

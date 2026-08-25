@@ -34,7 +34,9 @@ journal). A shared-process slot `JoinSet` is not an availability boundary.
 Sections below describe standing architecture; the marked contract governs
 unified-CI conflicts.
 
-Two named job backends exist. The live **Docker backend** is Velnor → host
+Operator selection is `[execution] backend = "docker"` or `"microvm"` in
+`execution.toml` (per daemon/pool, never workflow input). There is no
+automatic fallback. Two named job backends exist. The **Docker backend** is Velnor → host
 Docker → job container + service containers: a named transitional
 compatibility path, not lower-trust or Build L3 isolation. Public unmerged
 code stays GitHub-hosted. The **MicroVM backend** is Velnor →

@@ -2,9 +2,9 @@
 //!
 //! The daemon `JoinSet` is not the availability boundary. Each ready slot is
 //! one child process. systemd watchdog pings happen only after a completed
-//! local cycle. The live job executor remains host Docker (named
-//! transitional). Production microVM selection is Firecracker via its HTTP
-//! API and jailer; that path is not live until Plans 012/017.
+//! local cycle. Operator execution selection is `[execution] backend =
+//! "docker" | "microvm"` with no fallback. The microVM VMM is Firecracker
+//! via its HTTP API and jailer.
 
 pub mod assign;
 pub mod canary;

@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::ExecutionBackendKind;
+
 /// Overall fleet schedulability. Distinct from systemd `READY=1`, which only
 /// means a control process completed a local cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -66,12 +68,13 @@ pub struct HealthDocument {
     pub oldest_queued_job_seconds: u64,
     pub oldest_outbox_entry_seconds: u64,
     pub external_canary: CanaryStatus,
+    pub execution_backend: ExecutionBackendKind,
     pub state: FleetHealthState,
 }
 
 impl HealthDocument {
     /// Every JSON object key the health contract requires, in document order.
-    pub const REQUIRED_KEYS: [&'static str; 15] = [
+    pub const REQUIRED_KEYS: [&'static str; 16] = [
         "control_live",
         "journal_writable",
         "github_reachable",
@@ -86,6 +89,7 @@ impl HealthDocument {
         "oldest_queued_job_seconds",
         "oldest_outbox_entry_seconds",
         "external_canary",
+        "execution_backend",
         "state",
     ];
 
@@ -106,6 +110,7 @@ impl HealthDocument {
             oldest_queued_job_seconds: 0,
             oldest_outbox_entry_seconds: 0,
             external_canary: CanaryStatus::Unknown,
+            execution_backend: ExecutionBackendKind::Docker,
             state: FleetHealthState::NotReady,
         }
     }
@@ -320,6 +325,7 @@ mod tests {
             oldest_queued_job_seconds: 0,
             oldest_outbox_entry_seconds: 0,
             external_canary: CanaryStatus::Unknown,
+            execution_backend: ExecutionBackendKind::Docker,
             state: FleetHealthState::Ready,
         }
         .with_derived_state();

@@ -23,6 +23,7 @@ pub struct GitHubJobContainerPaths {
     pub actions_host: PathBuf,
     pub tools_host: PathBuf,
     pub docker_host_work_dir: Option<PathBuf>,
+    pub execution_backend: velnor_model::ExecutionBackendKind,
 }
 
 pub fn github_job_container_spec(
@@ -55,7 +56,8 @@ pub fn github_job_container_spec(
         home_host: paths.home_host,
         actions_host: paths.actions_host,
         tools_host: paths.tools_host,
-        mount_docker_socket: github_trust_scope_allows_host_docker(trust_scope),
+        mount_docker_socket: github_trust_scope_allows_host_docker(trust_scope)
+            && paths.execution_backend.uses_host_docker_socket(),
         env: job_container_env(job),
         resource_options,
         options: job_container_options(job),
@@ -1036,6 +1038,7 @@ mod tests {
                 actions_host: "/tmp/actions".into(),
                 tools_host: "/tmp/tools".into(),
                 docker_host_work_dir: None,
+                execution_backend: velnor_model::ExecutionBackendKind::Docker,
             },
             "ubuntu:24.04",
             Vec::new(),
@@ -1044,6 +1047,37 @@ mod tests {
             "public-forks",
         );
 
+        assert!(!spec.mount_docker_socket);
+    }
+
+    #[test]
+    fn microvm_backend_never_mounts_host_docker_socket() {
+        let job: AgentJobRequestMessage = serde_json::from_value(serde_json::json!({
+            "messageType": "PipelineAgentJobRequest",
+            "plan": { "planId": "plan" },
+            "timeline": { "id": "timeline" },
+            "jobId": "job",
+            "jobDisplayName": "Trusted",
+            "requestId": 1
+        }))
+        .unwrap();
+        let spec = github_job_container_spec(
+            &job,
+            GitHubJobContainerPaths {
+                workspace_host: "/tmp/workspace".into(),
+                temp_host: "/tmp/temp".into(),
+                home_host: "/tmp/home".into(),
+                actions_host: "/tmp/actions".into(),
+                tools_host: "/tmp/tools".into(),
+                docker_host_work_dir: None,
+                execution_backend: velnor_model::ExecutionBackendKind::MicroVm,
+            },
+            "ubuntu:24.04",
+            Vec::new(),
+            "",
+            "daemon".into(),
+            "trusted",
+        );
         assert!(!spec.mount_docker_socket);
     }
 

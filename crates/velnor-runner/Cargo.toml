@@ -14,6 +14,10 @@ description = "Velnor self-hosted GitHub Actions runner daemon"
 name = "velnor-runner"
 path = "src/main.rs"
 
+[[bin]]
+name = "velnor-guest-agent"
+path = "src/bin/velnor-guest-agent.rs"
+
 # Debian packaging (cargo-deb).
 # The unified release.yml (on tag) handles:
 #   cargo zigbuild --release --locked --target $TGT
@@ -33,7 +37,7 @@ Velnor is a self-hosted GitHub Actions runner daemon. This package installs the
 velnor-runner daemon binary, the velnorctl operator CLI, systemd units
 (velnor-daemon), and a config file at /etc/velnor/velnor.env. Set
 GITHUB_TOKEN + VELNOR_URL there, then start the service to register JIT runners
-and execute jobs in Docker."""
+and execute jobs through an explicit execution backend (docker or microvm)."""
 section = "devel"
 priority = "optional"
 # Explicit depends instead of $auto: dpkg-shlibdeps cannot resolve shared-lib
@@ -41,13 +45,14 @@ priority = "optional"
 # so the runtime surface is just glibc + libgcc (>= 2.34 covers every "latest
 # Debian/Ubuntu" this package targets).
 depends = "libc6 (>= 2.34), libgcc-s1, git, curl, ca-certificates, docker.io | docker-ce"
-conf-files = ["/etc/velnor/velnor.env"]
+conf-files = ["/etc/velnor/velnor.env", "/etc/velnor/execution.toml"]
 maintainer-scripts = "debian/"
 assets = [
   # The daemon/service binary executed by systemd.
   ["target/release/velnor-runner", "usr/bin/velnor-runner", "755"],
   # The kubectl-style operator control panel.
   ["target/release/velnorctl", "usr/bin/velnorctl", "755"],
+  ["target/release/velnor-guest-agent", "usr/bin/velnor-guest-agent", "755"],
   ["debian/velnor-daemon.service", "lib/systemd/system/velnor-daemon.service", "644"],
   ["debian/velnor-daemon@.service", "lib/systemd/system/velnor-daemon@.service", "644"],
   ["debian/velnor-guardian.service", "lib/systemd/system/velnor-guardian.service", "644"],
@@ -61,6 +66,8 @@ assets = [
   ["debian/velnor-doctor@.service", "lib/systemd/system/velnor-doctor@.service", "644"],
   ["debian/velnor-doctor@.timer", "lib/systemd/system/velnor-doctor@.timer", "644"],
   ["debian/velnor.env", "etc/velnor/velnor.env", "640"],
+  ["debian/execution.toml", "etc/velnor/execution.toml", "644"],
+  ["../../microvm/manifest.json", "usr/share/velnor/microvm/manifest.json", "644"],
   # Plan 010: the release workflow writes these two acyclic-safe identity files
   # (they depend only on the source, NOT on the deb digest, so shipping them
   # inside the deb creates no cycle) into release/ before `cargo deb`. postinst

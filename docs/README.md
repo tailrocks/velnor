@@ -51,6 +51,10 @@ Start here:
 - [Storage and disk pressure](storage-and-disk-pressure-2026-07-18.md): live
   Sentry evidence, canonical paths, leases, reclaim-before-register, and the
   compiler-cache comparison method.
+- [ADR 0001 Firecracker production microVM](adr/0001-firecracker-production-microvm.md):
+  two backends (`docker` | `microvm`), no fallback, Firecracker+jailer.
+- [Estate capability matrix](estate-capability-matrix.md): fleet-map workflow
+  inventory for backend compatibility.
 - [Build L3 boundary v1](security/build-l3-boundary-v1.md): the reviewed target
   TCB, per-job microVM, guest-local Docker, signer separation, cleanup,
   cache/network, and disk-safety design. Its status is design-only, not live

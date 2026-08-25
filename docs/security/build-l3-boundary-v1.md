@@ -61,11 +61,11 @@ real estate workflow proves Firecracker's device model cannot support it.
 Guest isolation uses **immutable block devices**, **job-local writable
 disks**, and **bounded vsock**. virtio-fs, host directory passthrough, PCI
 passthrough, GPUs, Windows guests, USB, and a legacy device model are
-rejected. Live Build L3 remains Plans 012 and 017; host Docker remains the
-named transitional live executor until those plans prove the MicroVM backend.
+rejected. Operator selection is `[execution] backend = "docker" | "microvm"`
+with no automatic fallback. Live Build L3 remains Plans 012 and 017.
 
-The shipped selection type is `velnor_model::{JobExecutorKind, MicroVmKind,
-MicroVmControl}`.
+The shipped selection types are `velnor_model::{ExecutionBackendKind,
+JobExecutorKind, MicroVmKind, MicroVmControl}`.
 
 ## Isolation unit and control flow
 

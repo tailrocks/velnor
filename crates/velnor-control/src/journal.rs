@@ -12,8 +12,8 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use velnor_model::{
-    ActorPhase, CanaryStatus, FleetHealthState, Generation, HealthDocument, JobId, ReadyProof,
-    SlotId,
+    ActorPhase, CanaryStatus, ExecutionBackendKind, FleetHealthState, Generation, HealthDocument,
+    JobId, ReadyProof, SlotId,
 };
 
 use crate::store::error::{StoreError, StoreResult};
@@ -84,6 +84,7 @@ pub struct FleetState {
     pub canary: CanaryStatus,
     pub package_generation: u64,
     pub package_apt_version: String,
+    pub execution_backend: ExecutionBackendKind,
     pub slots: Vec<SlotRecord>,
     pub jobs: Vec<JobRecord>,
     pub outbox: Vec<OutboxRecord>,
@@ -102,6 +103,7 @@ impl Default for FleetState {
             canary: CanaryStatus::Unknown,
             package_generation: 0,
             package_apt_version: String::new(),
+            execution_backend: ExecutionBackendKind::Docker,
             slots: Vec::new(),
             jobs: Vec::new(),
             outbox: Vec::new(),
@@ -144,6 +146,7 @@ impl FleetState {
             oldest_queued_job_seconds: oldest_queued_job_seconds(&self.jobs),
             oldest_outbox_entry_seconds: oldest_outbox_age_seconds(&self.outbox),
             external_canary: self.canary,
+            execution_backend: self.execution_backend,
             state: FleetHealthState::NotReady,
         }
         .with_derived_state()

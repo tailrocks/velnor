@@ -12,6 +12,7 @@
 pub mod cli_meta;
 pub mod condition;
 pub mod error_envelope;
+pub mod execution;
 pub mod job_summary;
 pub mod lifecycle;
 pub mod microvm;
@@ -23,10 +24,15 @@ pub mod scheduler;
 pub mod since;
 pub mod source;
 pub mod time;
+pub mod vsock_protocol;
 
 pub use cli_meta::{CommandMetadata, FlagMetadata, SchemaDocument};
 pub use condition::{Condition, ConditionStatus, Labels, ResourceMeta};
 pub use error_envelope::{exit_code_for_class, ExitClass, MachineErrorEnvelope};
+pub use execution::{
+    ExecutionBackendKind, ExecutionBackendRejected, ExecutionConfigError, ExecutionFile,
+    ExecutionSection, MicroVmPreflightFailure,
+};
 pub use job_summary::{
     InfrastructureCategory, InvalidJobSummaryField, JobConclusion, JobPhase, JobSummary,
     NormalizedJob, Slug, TriggerEvent, MAX_SLUG_LEN,
@@ -55,6 +61,9 @@ pub use scheduler::{
 pub use since::{InvalidSince, Since};
 pub use source::Source;
 pub use time::{DurationMs, DurationOverflowError, InvalidTimestamp, Timestamp};
+pub use vsock_protocol::{
+    VsockCodecError, VsockMessage, MAX_FRAME_BYTES, MAX_PAYLOAD_BYTES, PROTOCOL_VERSION,
+};
 
 /// Crate version reported by `velnorctl --version`.
 pub const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");

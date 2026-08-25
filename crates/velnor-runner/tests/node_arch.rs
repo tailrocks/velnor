@@ -17,6 +17,11 @@ fn scratch(label: &str) -> PathBuf {
         std::process::id()
     ));
     std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(
+        path.join("execution.toml"),
+        "[execution]\nbackend = \"docker\"\n",
+    )
+    .unwrap();
     path
 }
 

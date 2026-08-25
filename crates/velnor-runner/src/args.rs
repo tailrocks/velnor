@@ -161,6 +161,7 @@ pub struct PreflightArgs {
     pub docker_image: String,
     pub require_docker_socket: bool,
     pub require_buildx: bool,
+    pub execution_backend: Option<velnor_model::ExecutionBackendKind>,
 }
 
 #[derive(Debug, Clone)]

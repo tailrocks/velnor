@@ -2412,6 +2412,9 @@ fn preflight_args_for_run(args: &RunArgs, config_dir: &Path) -> PreflightArgs {
         docker_image: args.docker_image.clone(),
         require_docker_socket: args.require_docker_socket,
         require_buildx: true,
+        execution_backend: crate::execution::load_execution_file(config_dir, None)
+            .ok()
+            .map(|file| file.backend()),
     }
 }
 
@@ -5065,6 +5068,9 @@ fn execute_script_job(
     daemon_id: String,
     reserved_bytes: u64,
 ) -> Result<ScriptJobResult> {
+    let execution_backend = crate::execution::load_execution_file(config_dir, None)
+        .map_err(|error| anyhow::anyhow!("{error}"))?
+        .backend();
     let job_dir = job_work_dir(config_dir, work_dir, job);
     let result = execute_script_job_inner(
         &job_dir,
@@ -5082,6 +5088,7 @@ fn execute_script_job(
         step_log_sender,
         daemon_id,
         reserved_bytes,
+        execution_backend,
     );
     if result.is_err() {
         if let Err(e) = fs::remove_dir_all(&job_dir) {
@@ -5111,7 +5118,17 @@ fn execute_script_job_inner(
     step_log_sender: Option<tokio::sync::mpsc::UnboundedSender<StepLog>>,
     daemon_id: String,
     reserved_bytes: u64,
+    execution_backend: velnor_model::ExecutionBackendKind,
 ) -> Result<ScriptJobResult> {
+    if execution_backend == velnor_model::ExecutionBackendKind::MicroVm {
+        anyhow::bail!(
+            "{}",
+            velnor_model::MicroVmPreflightFailure::new(
+                "job.execute",
+                "this job must run in a jailed Firecracker session; host DockerScriptExecutor was not used"
+            )
+        );
+    }
     let execution_started = Instant::now();
     // Side-effect ledger: admission has already completed, so every counter here
     // starts at zero and only increments after the closure was admitted.
@@ -5155,6 +5172,7 @@ fn execute_script_job_inner(
             actions_host: actions.clone(),
             tools_host: tools.clone(),
             docker_host_work_dir,
+            execution_backend,
         },
         docker_image,
         resource_options,

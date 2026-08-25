@@ -17,6 +17,27 @@ pub fn preflight(args: PreflightArgs) -> Result<()> {
 }
 
 fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) -> Result<()> {
+    if args.execution_backend == Some(velnor_model::ExecutionBackendKind::MicroVm) {
+        let mut fs = crate::execution::RealHostFs;
+        let mut api = crate::execution::RecordingFirecracker::default();
+        let artifact_root = std::path::PathBuf::from("/usr/share/velnor/microvm");
+        let kvm = std::path::PathBuf::from("/dev/kvm");
+        let docker = std::path::PathBuf::from("/var/run/docker.sock");
+        let mut world = crate::execution::ExecutionWorld {
+            kvm: &kvm,
+            artifact_root: &artifact_root,
+            host_docker_socket: &docker,
+            runner,
+            firecracker: &mut api,
+            host_fs: &mut fs,
+        };
+        crate::execution::FirecrackerBackend::preflight(&mut world)?;
+        println!(
+            "microVM preflight passed (Firecracker {}).",
+            crate::execution::FIRECRACKER_VERSION
+        );
+        return Ok(());
+    }
     let work_dir = preflight_work_dir(args.work_dir)?;
     let docker_host_work_dir = args.docker_host_work_dir;
     let temp_dir = work_dir.join("preflight").join("temp");
@@ -385,6 +406,7 @@ mod tests {
             docker_image: "ubuntu:24.04".to_string(),
             require_docker_socket: false,
             require_buildx: true,
+            execution_backend: None,
         };
         let mut runner = RecordingRunner::default();
 
@@ -483,6 +505,7 @@ mod tests {
             docker_image: "ubuntu:24.04".to_string(),
             require_docker_socket: false,
             require_buildx: false,
+            execution_backend: None,
         };
         let mut runner = RecordingRunner {
             calls: Vec::new(),
@@ -509,6 +532,7 @@ mod tests {
             docker_image: "ubuntu:24.04".to_string(),
             require_docker_socket: false,
             require_buildx: false,
+            execution_backend: None,
         };
         let mut runner = RecordingRunner {
             calls: Vec::new(),
@@ -537,6 +561,7 @@ mod tests {
             docker_image: "minimal:latest".to_string(),
             require_docker_socket: false,
             require_buildx: false,
+            execution_backend: None,
         };
         let mut runner = RecordingRunner {
             calls: Vec::new(),

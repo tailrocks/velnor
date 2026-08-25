@@ -15,10 +15,13 @@ pub fn production_microvm_control() -> MicroVmControl {
     MicroVmControl::PRODUCTION
 }
 
-/// Live job executor. Host Docker remains transitional until Plans 012/017.
+/// Map operator selection onto the infrastructure kind.
 #[must_use]
-pub fn live_job_executor() -> JobExecutorKind {
-    JobExecutorKind::LIVE
+pub fn live_job_executor(backend: velnor_model::ExecutionBackendKind) -> JobExecutorKind {
+    match backend {
+        velnor_model::ExecutionBackendKind::Docker => JobExecutorKind::HostDocker,
+        velnor_model::ExecutionBackendKind::MicroVm => JobExecutorKind::MicroVm,
+    }
 }
 
 #[cfg(test)]
@@ -49,10 +52,17 @@ mod tests {
     }
 
     #[test]
-    fn live_job_executor_is_host_docker() {
-        assert_eq!(live_job_executor(), JobExecutorKind::HostDocker);
-        assert!(live_job_executor().activate_live().is_ok());
-        assert!(JobExecutorKind::MicroVm.activate_live().is_err());
+    fn both_operator_backends_are_selectable() {
+        assert_eq!(
+            live_job_executor(velnor_model::ExecutionBackendKind::Docker),
+            JobExecutorKind::HostDocker
+        );
+        assert_eq!(
+            live_job_executor(velnor_model::ExecutionBackendKind::MicroVm),
+            JobExecutorKind::MicroVm
+        );
+        assert!(JobExecutorKind::HostDocker.activate_live().is_ok());
+        assert!(JobExecutorKind::MicroVm.activate_live().is_ok());
         assert!(IsolationRejected::VirtioFs.activate_production().is_err());
     }
 }

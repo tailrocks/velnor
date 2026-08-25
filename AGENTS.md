@@ -177,11 +177,13 @@ Never let a prompt, README, or doc describe a direction that the current vision/
 
 ### Direction change log
 
-- 2026-08-26: **Firecracker is the production microVM** (operator goal):
+- 2026-08-26: **Two explicit execution backends** (operator goal):
+  `[execution] backend = "docker" | "microvm"` in `execution.toml` per
+  daemon/pool, no automatic fallback. Firecracker is the production microVM:
   open-source Rust VMM on Linux KVM, started directly through its HTTP API
   and jailer (namespaces, cgroups, seccomp, privilege dropping). Host Docker
-  remains the named transitional live executor (Velnor → host Docker → job
-  container + service containers). The MicroVM backend is Velnor →
+  is the `docker` backend (Velnor → host Docker → job container + service
+  containers). The `microvm` backend is Velnor →
   Firecracker/KVM → guest Linux → guest-local Docker. Guest isolation is
   immutable block, job-local writable disk, and bounded vsock — not
   virtio-fs, host directory passthrough, PCI, GPUs, Windows guests, USB, or

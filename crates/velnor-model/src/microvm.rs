@@ -36,10 +36,9 @@ pub enum JobExecutorKind {
 }
 
 impl JobExecutorKind {
-    /// Current live executor. Switching production jobs off host Docker is a
-    /// separate Build L3 delivery, not this selection.
-    pub const LIVE: Self = Self::HostDocker;
-    /// Chosen isolation backend once Plans 012/017 are live.
+    /// Packaged default until `execution.toml` selects otherwise.
+    pub const PACKAGED_DEFAULT: Self = Self::HostDocker;
+    /// Isolation backend when `[execution] backend = "microvm"`.
     pub const ISOLATION: Self = Self::MicroVm;
 
     #[must_use]
@@ -50,16 +49,14 @@ impl JobExecutorKind {
         }
     }
 
-    /// Host Docker is the only live executor.
+    /// Both operator backends are selectable. Preflight, not this enum, is the
+    /// fail-closed gate.
     ///
     /// # Errors
-    /// [`MicroVmNotLive`] when `self` is not [`Self::LIVE`].
+    /// Never: both variants are live-selectable.
     pub fn activate_live(self) -> Result<(), MicroVmNotLive> {
-        if self == Self::LIVE {
-            Ok(())
-        } else {
-            Err(MicroVmNotLive { requested: self })
-        }
+        let _ = self;
+        Ok(())
     }
 }
 
@@ -324,10 +321,13 @@ mod tests {
     }
 
     #[test]
-    fn live_job_executor_is_host_docker() {
-        assert_eq!(JobExecutorKind::LIVE, JobExecutorKind::HostDocker);
+    fn both_backends_are_live_selectable() {
+        assert_eq!(
+            JobExecutorKind::PACKAGED_DEFAULT,
+            JobExecutorKind::HostDocker
+        );
         assert!(JobExecutorKind::HostDocker.activate_live().is_ok());
-        assert!(JobExecutorKind::MicroVm.activate_live().is_err());
+        assert!(JobExecutorKind::MicroVm.activate_live().is_ok());
         assert_eq!(JobExecutorKind::ISOLATION, JobExecutorKind::MicroVm);
     }
 

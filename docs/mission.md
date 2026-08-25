@@ -28,10 +28,10 @@ projects** — not a generic CI runner. It appears to GitHub as a self-hosted
 runner (V2 JIT / broker / run-service / Results Service only), runs assigned
 Linux jobs through a dual backend, and executes the known action surface through
 **native Rust adapters** instead of marketplace JavaScript or Docker action
-bundles. The live path is the named transitional **Docker backend**
-(Velnor → host Docker → job container + service containers). Production
-isolation is the **MicroVM backend** (Velnor → Firecracker/KVM → guest Linux →
-guest-local Docker). Firecracker is the production microVM: an open-source
+bundles. Operator selection is `[execution] backend = "docker"` or `"microvm"` with
+no fallback. The **Docker backend** is Velnor → host Docker → job container +
+service containers. The **MicroVM backend** is Velnor → Firecracker/KVM →
+guest Linux → guest-local Docker. Firecracker is the production microVM: an open-source
 Rust VMM on Linux KVM, started through its HTTP API and jailer (namespaces,
 cgroups, seccomp, privilege dropping). Guest isolation uses immutable block
 devices, job-local writable disks, and bounded vsock — not virtio-fs, host

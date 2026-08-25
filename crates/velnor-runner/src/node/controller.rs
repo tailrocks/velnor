@@ -156,7 +156,8 @@ async fn reconcile_once(
     observe_github_and_routing(args, journal).await?;
 
     let mut proof_effects = Vec::new();
-    let executor = prove::observe_executor(&args.state_dir);
+    let execution = crate::execution::load_execution_file(&args.state_dir, None)?;
+    let executor = prove::observe_executor(&args.state_dir, execution.backend());
     let snapshot = journal.load_state()?;
     for index in 1..=total {
         let id = slot_id(&args.scope, index as usize);
@@ -225,7 +226,8 @@ async fn reconcile_once(
 
     reap(slots);
     reap(jobs);
-    let health = journal.load_state()?.health();
+    let mut health = journal.load_state()?.health();
+    health.execution_backend = execution.backend();
     server.publish(&health)?;
     Ok(LocalCycle::finished())
 }

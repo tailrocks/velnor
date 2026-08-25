@@ -83,9 +83,11 @@ conclusions in the GitHub UI — is **achieved and in production**:
   supervised OS processes — guardian, per-scope controller, one process per
   ready slot, one transient job worker — not one daemon `JoinSet`. Health is
   a vector (`velnorctl status --json`); systemd `READY=1` is control-loop
-  liveness only. Host Docker remains the named transitional live executor.
-  Build L3 isolation is Firecracker/KVM with guest-local Docker (direct HTTP
-  API and jailer); Cloud Hypervisor is fallback-only; Kata Containers and
+  liveness only. Operator selection is explicit `[execution] backend =
+  "docker"` or `"microvm"` per daemon/pool, with no automatic fallback. Host
+  Docker is the packaged `docker` backend. The `microvm` backend is
+  Firecracker/KVM with guest-local Docker (direct HTTP API and jailer);
+  Cloud Hypervisor is fallback-only; Kata Containers and
   firecracker-containerd are not product orchestration.
 - **velnorctl migration**: the product surface converges on one `velnorctl`
   operator CLI with a service-only `daemon` entrypoint. Final crate layout:

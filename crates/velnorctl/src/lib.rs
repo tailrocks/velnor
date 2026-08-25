@@ -207,7 +207,7 @@ pub enum Command {
     /// Probe GitHub for this daemon's registered runners and fail loudly when
     /// the fleet is gone (run from a systemd timer for alerting).
     Doctor(Box<runtime::DoctorArgs>),
-    /// Validate local Docker prerequisites before polling GitHub for jobs.
+    /// Validate the selected execution backend before polling GitHub for jobs.
     Preflight(Box<runtime::PreflightArgs>),
     /// Remove local runner configuration.
     Remove(Box<runtime::RemoveArgs>),
@@ -401,7 +401,11 @@ fn status_health_json(args: &runtime::StatusArgs) -> Result<(), CommandError> {
         .clone()
         .or_else(|| args.config_dir.clone())
         .unwrap_or_else(|| std::path::PathBuf::from("/run/velnor"));
-    let document = match Journal::open(dir.join("journal.db")) {
+    let config_dir = args.config_dir.clone().unwrap_or_else(|| dir.clone());
+    let execution = velnor_runner::execution::load_execution_file(&config_dir, None)
+        .or_else(|_| velnor_runner::execution::load_execution_file(&dir, None))
+        .map_err(|error| CommandError::operation(error.to_string()))?;
+    let mut document = match Journal::open(dir.join("journal.db")) {
         Ok(journal) => journal
             .load_state()
             .map(|state| state.health())
@@ -409,6 +413,7 @@ fn status_health_json(args: &runtime::StatusArgs) -> Result<(), CommandError> {
         Err(_) => velnor_runner::node::health::fetch(&dir)
             .unwrap_or_else(|_| HealthDocument::empty().with_derived_state()),
     };
+    document.execution_backend = execution.backend();
     println!(
         "{}",
         serde_json::to_string(&document)
