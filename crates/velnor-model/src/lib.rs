@@ -34,7 +34,7 @@ pub use execution::{
     ExecutionBackendKind, ExecutionBackendRejected, ExecutionConfigError, ExecutionFile,
     ExecutionSection, MicroVmPreflightFailure,
 };
-pub use guest_plan::{GuestJobPlan, GuestService, GuestStep};
+pub use guest_plan::{GuestJobPlan, GuestOutput, GuestService, GuestStep};
 pub use job_summary::{
     InfrastructureCategory, InvalidJobSummaryField, JobConclusion, JobPhase, JobSummary,
     NormalizedJob, Slug, TriggerEvent, MAX_SLUG_LEN,

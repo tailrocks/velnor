@@ -652,6 +652,10 @@ fn docker_backend_uses_production_engine_when_present() {
                 stream: 1,
                 line: "*** engine ***".into(),
             });
+            events.push(ExecutionEvent::JobCompleted {
+                conclusion: velnor_model::JobConclusion::Success,
+                exit_code: 0,
+            });
             Ok(())
         }
     }
@@ -775,7 +779,8 @@ fn both_backends_execute_the_same_admitted_plan() {
         vec!["postgres:16".into()],
     );
     assert_eq!(plan.job_container_image, "velnor/job-ubuntu:26.04");
-    assert_eq!(plan.scripts, vec!["echo run".to_string()]);
+    assert_eq!(plan.steps[0].script, "echo run");
+    assert!(plan.steps[0].action.is_none());
     assert_eq!(plan.service_images, vec!["postgres:16".to_string()]);
     let guest = plan.to_guest("job-shared", 1);
     assert_eq!(guest.image, plan.job_container_image);
@@ -785,6 +790,7 @@ fn both_backends_execute_the_same_admitted_plan() {
     assert_eq!(docker.conclusion, micro.conclusion);
     assert_eq!(docker.exit_code, micro.exit_code);
     assert_eq!(docker.command_file, micro.command_file);
+    assert_eq!(docker.outputs, micro.outputs);
     assert!(docker.cleaned && micro.cleaned);
 }
 
@@ -857,6 +863,47 @@ fn microvm_spawns_jailer_with_api_socket_and_unique_net() {
         runner.calls
     );
     assert_ne!(resources.api_socket(), resources.vsock);
+}
+
+#[test]
+fn log_substring_does_not_override_explicit_exit() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"docker\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let docker = PathBuf::from("/var/run/docker.sock");
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        next: CommandResult {
+            code: 0,
+            stdout: "this is not a failure cancel timeout".into(),
+            stderr: String::new(),
+        },
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let artifacts = PathBuf::from("/microvm");
+    let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+    let mut plan = ValidatedPlan::example_success("job-echo");
+    plan.steps[0].script = "echo this is not a failure".into();
+    let outcome = crate::execution::run_validated_job(
+        &file,
+        IsolationIdentity::new("job-echo", 1),
+        &plan,
+        &mut world,
+    )
+    .unwrap();
+    assert_eq!(outcome.conclusion, "success", "{:?}", outcome.log_lines);
+    assert_eq!(outcome.exit_code, 0);
+    assert!(
+        outcome
+            .log_lines
+            .iter()
+            .any(|line| line.contains("failure")),
+        "{:?}",
+        outcome.log_lines
+    );
+    assert_eq!(outcome.outputs, vec![("result".into(), "ok".into())]);
+    assert_eq!(outcome.command_file.as_deref(), Some("GITHUB_OUTPUT"));
 }
 
 #[test]

@@ -5135,6 +5135,24 @@ impl<R: CommandRunner> crate::execution::ProductionDockerEngine for RunnerDocker
                 });
             }
         }
+        for (name, value) in &summary.job_outputs {
+            events.push(crate::execution::ExecutionEvent::Output {
+                name: name.clone(),
+                value: value.clone(),
+            });
+        }
+        let failed = summary
+            .step_results
+            .iter()
+            .any(|result| result.exit_code != 0 && !result.failure_ignored);
+        events.push(crate::execution::ExecutionEvent::JobCompleted {
+            conclusion: if failed {
+                velnor_model::JobConclusion::Failure
+            } else {
+                velnor_model::JobConclusion::Success
+            },
+            exit_code: if failed { 1 } else { 0 },
+        });
         self.summary = Some(summary);
         Ok(())
     }

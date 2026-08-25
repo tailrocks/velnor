@@ -1,7 +1,9 @@
 //! Host-Docker backend. Preserves current semantics through the contract.
 
 use super::backend::{ExecutionError, ExecutionEvent, ValidatedPlan};
+use super::isolation::IsolationIdentity;
 use super::ExecutionWorld;
+use velnor_model::JobConclusion;
 
 /// Host Docker execution. Uses `/var/run/docker.sock` (via the job lease).
 #[derive(Debug, Default)]
@@ -67,6 +69,7 @@ impl DockerBackend {
     pub(crate) fn execute(
         &mut self,
         plan: &ValidatedPlan,
+        isolation: &IsolationIdentity,
         world: &mut ExecutionWorld<'_>,
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
@@ -74,15 +77,9 @@ impl DockerBackend {
             engine.execute_github_job(events)?;
             return Ok(());
         }
-        let guest = plan.to_guest("job", 1);
-        let code = super::guest_runtime::execute_guest_plan(&guest, world.runner, events, true)
+        let guest = plan.to_guest(&isolation.id, isolation.generation);
+        super::guest_runtime::execute_guest_plan(&guest, world.runner, events, true)
             .map_err(ExecutionError::DockerPreflight)?;
-        if code != 0 && !super::guest_runtime::has_terminal_log(events) {
-            events.push(ExecutionEvent::Log {
-                stream: 1,
-                line: "failure".into(),
-            });
-        }
         Ok(())
     }
 
@@ -95,9 +92,9 @@ impl DockerBackend {
         events.push(ExecutionEvent::HostDockerInvoked(
             "docker rm --force".into(),
         ));
-        events.push(ExecutionEvent::Log {
-            stream: 1,
-            line: "cancel".into(),
+        events.push(ExecutionEvent::JobCompleted {
+            conclusion: JobConclusion::Cancelled,
+            exit_code: 1,
         });
         Ok(())
     }

@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use velnor_model::{MicroVmKind, MicroVmPreflightFailure, VsockMessage};
+use velnor_model::{JobConclusion, MicroVmKind, MicroVmPreflightFailure, VsockMessage};
 
 use super::artifacts::{
     verify_microvm_artifacts, MicroVmArtifactSet, MicroVmGeneration, FIRECRACKER_VERSION,
@@ -296,14 +296,8 @@ impl FirecrackerBackend {
             )
             .into());
         }
-        let code = super::guest_runtime::handle_delivered_plan(&bytes, world.runner, events)
+        super::guest_runtime::handle_delivered_plan(&bytes, world.runner, events)
             .map_err(|detail| MicroVmPreflightFailure::new("guest.docker", detail))?;
-        if code != 0 && !super::guest_runtime::has_terminal_log(events) {
-            events.push(ExecutionEvent::Log {
-                stream: 1,
-                line: "failure".into(),
-            });
-        }
         Ok(())
     }
 
@@ -313,9 +307,9 @@ impl FirecrackerBackend {
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
         events.push(ExecutionEvent::FirecrackerApi("cancel".into()));
-        events.push(ExecutionEvent::Log {
-            stream: 1,
-            line: "cancel".into(),
+        events.push(ExecutionEvent::JobCompleted {
+            conclusion: JobConclusion::Cancelled,
+            exit_code: 1,
         });
         self.stop_jailer(world, events);
         Ok(())
@@ -511,11 +505,17 @@ fn drive_vsock(
             .map_err(|detail| MicroVmPreflightFailure::new("vsock", detail))?
         {
             VsockMessage::TeardownAck { .. } => return Ok(()),
-            VsockMessage::StepCompleted { exit_code, .. } if exit_code != 0 => {
-                events.push(ExecutionEvent::Log {
-                    stream: 1,
-                    line: "failure".into(),
+            VsockMessage::JobCompleted {
+                conclusion,
+                exit_code,
+            } => {
+                events.push(ExecutionEvent::JobCompleted {
+                    conclusion,
+                    exit_code,
                 });
+            }
+            VsockMessage::CommandFile { path, .. } => {
+                events.push(ExecutionEvent::CommandFile { path });
             }
             VsockMessage::Stdio { stream, bytes } => {
                 events.push(ExecutionEvent::Log {

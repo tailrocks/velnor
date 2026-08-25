@@ -6,7 +6,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use velnor_model::{GuestJobPlan, VsockMessage};
+use velnor_model::{GuestJobPlan, JobConclusion, VsockMessage};
 
 use super::backend::ExecutionEvent;
 use super::VsockChannel;
@@ -83,9 +83,28 @@ impl VsockChannel for LoopbackVsock {
         if let VsockMessage::DeliverPlan {
             isolation_id,
             generation,
-            ..
+            plan_bytes,
         } = &message
         {
+            let (conclusion, exit_code, command_files) = match GuestJobPlan::decode(plan_bytes) {
+                Ok(plan) => {
+                    let (conclusion, exit_code) = plan
+                        .planned_conclusion()
+                        .unwrap_or((JobConclusion::Success, 0));
+                    (conclusion, exit_code, plan.command_files)
+                }
+                Err(_) => (JobConclusion::Failure, 1, Vec::new()),
+            };
+            for path in command_files {
+                self.pending.push(VsockMessage::CommandFile {
+                    path,
+                    bytes: Vec::new(),
+                });
+            }
+            self.pending.push(VsockMessage::JobCompleted {
+                conclusion,
+                exit_code,
+            });
             self.pending.push(VsockMessage::TeardownAck {
                 isolation_id: isolation_id.clone(),
                 generation: *generation,
@@ -103,18 +122,6 @@ impl VsockChannel for LoopbackVsock {
     }
 }
 
-/// True when events already record cancel, timeout, or failure.
-#[must_use]
-pub fn has_terminal_log(events: &[ExecutionEvent]) -> bool {
-    events.iter().any(|event| {
-        matches!(
-            event,
-            ExecutionEvent::Log { line, .. }
-                if line == "cancel" || line == "timeout" || line == "failure"
-        )
-    })
-}
-
 /// Run the plan: network, services, job container, steps, cleanup.
 ///
 /// # Errors
@@ -125,17 +132,13 @@ pub fn execute_guest_plan(
     events: &mut Vec<ExecutionEvent>,
     host_docker: bool,
 ) -> Result<i32, String> {
-    if plan.cancel_requested {
-        events.push(log_line("cancel"));
-        return Ok(1);
-    }
-    if plan.timeout_ms == 0 {
-        events.push(log_line("timeout"));
-        return Ok(1);
-    }
-    if plan.fail {
-        events.push(log_line("failure"));
-        return Ok(1);
+    if let Some((conclusion, exit_code)) = plan.planned_conclusion() {
+        record_plan_files(plan, events);
+        events.push(ExecutionEvent::JobCompleted {
+            conclusion,
+            exit_code,
+        });
+        return Ok(exit_code);
     }
     let label = plan.isolation_label();
     let network = format!("velnor-net-{}", plan.isolation_id);
@@ -198,6 +201,11 @@ pub fn execute_guest_plan(
             host_docker,
             &["exec", &job_name, "sh", "-c", &script],
         )?;
+        if !result.stdout.is_empty() {
+            for line in result.stdout.lines() {
+                events.push(log_line(line));
+            }
+        }
         if result.code != 0 {
             code = result.code;
             break;
@@ -208,7 +216,28 @@ pub fn execute_guest_plan(
         let _ = docker(runner, events, host_docker, &["rm", "-f", &service.name]);
     }
     let _ = docker(runner, events, host_docker, &["network", "rm", &network]);
+    record_plan_files(plan, events);
+    events.push(ExecutionEvent::JobCompleted {
+        conclusion: if code == 0 {
+            JobConclusion::Success
+        } else {
+            JobConclusion::Failure
+        },
+        exit_code: code,
+    });
     Ok(code)
+}
+
+fn record_plan_files(plan: &GuestJobPlan, events: &mut Vec<ExecutionEvent>) {
+    for path in &plan.command_files {
+        events.push(ExecutionEvent::CommandFile { path: path.clone() });
+    }
+    for output in &plan.outputs {
+        events.push(ExecutionEvent::Output {
+            name: output.name.clone(),
+            value: output.value.clone(),
+        });
+    }
 }
 
 fn docker(
@@ -265,7 +294,7 @@ mod tests {
     use super::*;
     use crate::execution::RecordingCommands;
     use crate::executor::CommandResult;
-    use velnor_model::{GuestService, GuestStep};
+    use velnor_model::{GuestService, GuestStep, JobConclusion};
 
     fn sample_plan() -> GuestJobPlan {
         GuestJobPlan {
@@ -280,12 +309,17 @@ mod tests {
             steps: vec![GuestStep {
                 id: "run".into(),
                 script: "echo hi".into(),
+                action: None,
             }],
             timeout_ms: 1000,
             cancel_requested: false,
             fail: false,
             cache_digest: None,
             command_files: vec!["GITHUB_OUTPUT".into()],
+            outputs: vec![velnor_model::GuestOutput {
+                name: "result".into(),
+                value: "ok".into(),
+            }],
         }
     }
 
@@ -302,6 +336,13 @@ mod tests {
         let mut events = Vec::new();
         let code = execute_guest_plan(&sample_plan(), &mut runner, &mut events, false).unwrap();
         assert_eq!(code, 0);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::JobCompleted {
+                conclusion: JobConclusion::Success,
+                exit_code: 0
+            }
+        )));
         assert!(events
             .iter()
             .any(|event| matches!(event, ExecutionEvent::GuestDocker(_))));
@@ -337,6 +378,17 @@ mod tests {
                 plan_bytes: plan.encode().unwrap(),
             })
             .unwrap();
+        assert!(matches!(
+            vsock.recv().unwrap(),
+            VsockMessage::CommandFile { path, .. } if path == "GITHUB_OUTPUT"
+        ));
+        assert!(matches!(
+            vsock.recv().unwrap(),
+            VsockMessage::JobCompleted {
+                conclusion: JobConclusion::Success,
+                exit_code: 0
+            }
+        ));
         assert!(matches!(
             vsock.recv().unwrap(),
             VsockMessage::TeardownAck {

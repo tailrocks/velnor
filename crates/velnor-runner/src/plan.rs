@@ -182,8 +182,10 @@ mod tests {
         );
         let validated = crate::execution::ValidatedPlan::from_normalized(&plan);
         assert_eq!(validated.job_id, "job");
-        assert_eq!(validated.steps, vec!["check".to_string()]);
-        assert_eq!(validated.scripts, vec!["cargo check".to_string()]);
+        assert_eq!(validated.steps[0].id, "check");
+        assert_eq!(validated.steps[0].script, "cargo check");
+        assert!(validated.steps[0].action.is_none());
+        assert!(validated.outputs.is_empty());
         assert_eq!(validated.job_container_image, "ubuntu:24.04");
         let guest = validated.to_guest("job", 1);
         assert_eq!(guest.steps[0].script, "cargo check");

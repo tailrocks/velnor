@@ -3,7 +3,7 @@
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
-use velnor_model::{VsockCodecError, VsockMessage, PROTOCOL_VERSION};
+use velnor_model::{GuestJobPlan, JobConclusion, VsockCodecError, VsockMessage, PROTOCOL_VERSION};
 
 /// Guest identity announced on `GuestReady`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,13 +56,38 @@ where
                 generation,
                 plan_bytes,
             }) => {
-                let code = run_plan(&plan_bytes)?;
-                VsockMessage::StepCompleted {
-                    step_id: "job".into(),
+                let decoded = GuestJobPlan::decode(&plan_bytes).ok();
+                let (conclusion, code) = if let Some(planned) =
+                    decoded.as_ref().and_then(GuestJobPlan::planned_conclusion)
+                {
+                    planned
+                } else {
+                    let code = run_plan(&plan_bytes)?;
+                    (
+                        if code == 0 {
+                            JobConclusion::Success
+                        } else {
+                            JobConclusion::Failure
+                        },
+                        code,
+                    )
+                };
+                if let Some(plan) = &decoded {
+                    for path in &plan.command_files {
+                        VsockMessage::CommandFile {
+                            path: path.clone(),
+                            bytes: Vec::new(),
+                        }
+                        .write_to(stream)
+                        .map_err(|error| format!("write command file: {error}"))?;
+                    }
+                }
+                VsockMessage::JobCompleted {
+                    conclusion,
                     exit_code: code,
                 }
                 .write_to(stream)
-                .map_err(|error| format!("write step: {error}"))?;
+                .map_err(|error| format!("write conclusion: {error}"))?;
                 VsockMessage::TeardownAck {
                     isolation_id,
                     generation,
@@ -174,6 +199,7 @@ mod tests {
             fail: false,
             cache_digest: None,
             command_files: Vec::new(),
+            outputs: Vec::new(),
         };
         let bytes = plan.encode().unwrap();
         let guest_env = env.clone();
@@ -202,7 +228,10 @@ mod tests {
         .unwrap();
         assert!(matches!(
             VsockMessage::read_from(&mut host).unwrap(),
-            VsockMessage::StepCompleted { exit_code: 0, .. }
+            VsockMessage::JobCompleted {
+                conclusion: velnor_model::JobConclusion::Success,
+                exit_code: 0
+            }
         ));
         assert!(matches!(
             VsockMessage::read_from(&mut host).unwrap(),

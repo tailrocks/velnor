@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::job_summary::JobConclusion;
+
 /// Serializable plan both backends execute.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GuestJobPlan {
@@ -18,7 +20,10 @@ pub struct GuestJobPlan {
     pub cancel_requested: bool,
     pub fail: bool,
     pub cache_digest: Option<String>,
+    #[serde(default)]
     pub command_files: Vec<String>,
+    #[serde(default)]
+    pub outputs: Vec<GuestOutput>,
 }
 
 /// Service container inside the job (guest Docker or host Docker backend).
@@ -33,6 +38,16 @@ pub struct GuestService {
 pub struct GuestStep {
     pub id: String,
     pub script: String,
+    /// Native/JS/Docker `uses:` identity when this step is an action.
+    #[serde(default)]
+    pub action: Option<String>,
+}
+
+/// Declared job output name and admitted value/expression.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuestOutput {
+    pub name: String,
+    pub value: String,
 }
 
 impl GuestJobPlan {
@@ -57,6 +72,20 @@ impl GuestJobPlan {
     pub fn isolation_label(&self) -> String {
         format!("velnor.isolation={}/{}", self.isolation_id, self.generation)
     }
+
+    /// Explicit terminal conclusion from plan flags, before steps run.
+    #[must_use]
+    pub fn planned_conclusion(&self) -> Option<(JobConclusion, i32)> {
+        if self.cancel_requested {
+            Some((JobConclusion::Cancelled, 1))
+        } else if self.timeout_ms == 0 {
+            Some((JobConclusion::TimedOut, 1))
+        } else if self.fail {
+            Some((JobConclusion::Failure, 1))
+        } else {
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -77,12 +106,17 @@ mod tests {
             steps: vec![GuestStep {
                 id: "run".into(),
                 script: "echo hi".into(),
+                action: None,
             }],
             timeout_ms: 1000,
             cancel_requested: false,
             fail: false,
             cache_digest: None,
             command_files: vec!["GITHUB_OUTPUT".into()],
+            outputs: vec![GuestOutput {
+                name: "result".into(),
+                value: "ok".into(),
+            }],
         };
         let bytes = plan.encode().unwrap();
         assert_eq!(GuestJobPlan::decode(&bytes).unwrap(), plan);

@@ -1,6 +1,8 @@
 //! Typed backend session. Wrong-phase calls fail; teardown cannot be skipped.
 
-use velnor_model::{ExecutionBackendKind, ExecutionConfigError, MicroVmPreflightFailure};
+use velnor_model::{
+    ExecutionBackendKind, ExecutionConfigError, JobConclusion, MicroVmPreflightFailure,
+};
 
 use super::docker::DockerBackend;
 use super::firecracker::FirecrackerBackend;
@@ -21,12 +23,19 @@ pub enum BackendPhase {
     TornDown,
 }
 
+/// One admitted step: a script, an action `uses:`, or both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedStep {
+    pub id: String,
+    pub script: String,
+    pub action: Option<String>,
+}
+
 /// Backend-neutral plan delivered after admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedPlan {
     pub job_id: String,
-    pub steps: Vec<String>,
-    pub scripts: Vec<String>,
+    pub steps: Vec<ValidatedStep>,
     pub job_container_image: String,
     pub service_images: Vec<String>,
     pub timeout_ms: u64,
@@ -34,6 +43,7 @@ pub struct ValidatedPlan {
     pub fail: bool,
     pub cache_digest: Option<String>,
     pub command_files: Vec<String>,
+    pub outputs: Vec<(String, String)>,
 }
 
 impl ValidatedPlan {
@@ -57,10 +67,10 @@ impl ValidatedPlan {
             steps: self
                 .steps
                 .iter()
-                .enumerate()
-                .map(|(index, id)| velnor_model::GuestStep {
-                    id: id.clone(),
-                    script: self.scripts.get(index).cloned().unwrap_or_default(),
+                .map(|step| velnor_model::GuestStep {
+                    id: step.id.clone(),
+                    script: step.script.clone(),
+                    action: step.action.clone(),
                 })
                 .collect(),
             timeout_ms: self.timeout_ms,
@@ -68,6 +78,14 @@ impl ValidatedPlan {
             fail: self.fail,
             cache_digest: self.cache_digest.clone(),
             command_files: self.command_files.clone(),
+            outputs: self
+                .outputs
+                .iter()
+                .map(|(name, value)| velnor_model::GuestOutput {
+                    name: name.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
         }
     }
 }
@@ -77,8 +95,11 @@ impl ValidatedPlan {
     pub fn example_success(job_id: impl Into<String>) -> Self {
         Self {
             job_id: job_id.into(),
-            steps: vec!["run".into()],
-            scripts: vec!["echo run".into()],
+            steps: vec![ValidatedStep {
+                id: "run".into(),
+                script: "echo run".into(),
+                action: None,
+            }],
             job_container_image: "velnor/job-ubuntu:26.04".into(),
             service_images: vec!["postgres:16".into()],
             timeout_ms: 60_000,
@@ -86,6 +107,7 @@ impl ValidatedPlan {
             fail: false,
             cache_digest: None,
             command_files: vec!["GITHUB_OUTPUT".into(), "GITHUB_ENV".into()],
+            outputs: vec![("result".into(), "ok".into())],
         }
     }
 
@@ -94,19 +116,7 @@ impl ValidatedPlan {
     pub fn from_normalized(plan: &crate::plan::NormalizedJobPlan) -> Self {
         Self {
             job_id: plan.identity.job_id.clone(),
-            steps: plan
-                .steps
-                .iter()
-                .map(|step| step.id().to_string())
-                .collect(),
-            scripts: plan
-                .steps
-                .iter()
-                .map(|step| match step {
-                    crate::executor::ExecutableStep::Script(script) => script.script.clone(),
-                    _ => String::new(),
-                })
-                .collect(),
+            steps: plan.steps.iter().map(validated_step).collect(),
             job_container_image: plan.execution.job_container.image.clone(),
             service_images: plan
                 .execution
@@ -123,6 +133,11 @@ impl ValidatedPlan {
             fail: false,
             cache_digest: None,
             command_files: vec!["GITHUB_OUTPUT".into(), "GITHUB_ENV".into()],
+            outputs: plan
+                .outputs
+                .iter()
+                .map(|(name, output)| (name.clone(), output.value.clone()))
+                .collect(),
         }
     }
 
@@ -136,10 +151,13 @@ impl ValidatedPlan {
     ) -> Self {
         Self {
             job_id: job_id.into(),
-            steps: script_steps.iter().map(|step| step.id.clone()).collect(),
-            scripts: script_steps
+            steps: script_steps
                 .iter()
-                .map(|step| step.script.clone())
+                .map(|step| ValidatedStep {
+                    id: step.id.clone(),
+                    script: step.script.clone(),
+                    action: None,
+                })
                 .collect(),
             job_container_image: docker_image.into(),
             service_images,
@@ -150,6 +168,7 @@ impl ValidatedPlan {
             fail: false,
             cache_digest: None,
             command_files: vec!["GITHUB_OUTPUT".into(), "GITHUB_ENV".into()],
+            outputs: Vec::new(),
         }
     }
 }
@@ -161,6 +180,36 @@ fn plan_timeout_ms(minutes: impl Iterator<Item = u64>) -> u64 {
         .unwrap_or(60_000)
 }
 
+fn validated_step(step: &crate::executor::ExecutableStep) -> ValidatedStep {
+    ValidatedStep {
+        id: step.id().to_string(),
+        script: match step {
+            crate::executor::ExecutableStep::Script(script) => script.script.clone(),
+            _ => String::new(),
+        },
+        action: executable_action(step),
+    }
+}
+
+fn executable_action(step: &crate::executor::ExecutableStep) -> Option<String> {
+    match step {
+        crate::executor::ExecutableStep::Script(_) => None,
+        crate::executor::ExecutableStep::Checkout(_) => Some("actions/checkout".into()),
+        crate::executor::ExecutableStep::Native { invocation, .. } => {
+            Some(invocation.git_ref.clone())
+        }
+        crate::executor::ExecutableStep::JavaScript { invocation, .. } => {
+            Some(invocation.action_container_path.clone())
+        }
+        crate::executor::ExecutableStep::Docker { invocation, .. } => {
+            Some(invocation.image.clone())
+        }
+        crate::executor::ExecutableStep::CompositeStart { .. } => Some("composite".into()),
+        crate::executor::ExecutableStep::CompositeEnd { .. }
+        | crate::executor::ExecutableStep::CompositeOutputs { .. } => None,
+    }
+}
+
 /// Observable GitHub-visible outcome for contract tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionOutcome {
@@ -169,6 +218,7 @@ pub struct ExecutionOutcome {
     pub log_lines: Vec<String>,
     pub masked: bool,
     pub command_file: Option<String>,
+    pub outputs: Vec<(String, String)>,
     pub cleaned: bool,
 }
 
@@ -178,7 +228,21 @@ pub enum ExecutionEvent {
     HostDockerInvoked(String),
     FirecrackerApi(String),
     GuestDocker(String),
-    Log { stream: u8, line: String },
+    Log {
+        stream: u8,
+        line: String,
+    },
+    CommandFile {
+        path: String,
+    },
+    Output {
+        name: String,
+        value: String,
+    },
+    JobCompleted {
+        conclusion: JobConclusion,
+        exit_code: i32,
+    },
 }
 
 /// Failures at the execution boundary.
@@ -231,6 +295,8 @@ pub struct BackendSession {
     firecracker: Option<FirecrackerBackend>,
     events: Vec<ExecutionEvent>,
     teardown_ran: bool,
+    plan_command_files: Vec<String>,
+    plan_outputs: Vec<(String, String)>,
 }
 
 impl BackendSession {
@@ -250,6 +316,8 @@ impl BackendSession {
             firecracker: None,
             events: Vec::new(),
             teardown_ran: false,
+            plan_command_files: Vec::new(),
+            plan_outputs: Vec::new(),
         })
     }
 
@@ -269,6 +337,8 @@ impl BackendSession {
             firecracker: Some(FirecrackerBackend::default()),
             events: Vec::new(),
             teardown_ran: false,
+            plan_command_files: Vec::new(),
+            plan_outputs: Vec::new(),
         })
     }
 
@@ -320,6 +390,8 @@ impl BackendSession {
         world: &mut ExecutionWorld<'_>,
     ) -> Result<(), ExecutionError> {
         self.require(BackendPhase::Reserved)?;
+        self.plan_command_files = plan.command_files.clone();
+        self.plan_outputs = plan.outputs.clone();
         match self.kind {
             ExecutionBackendKind::Docker => {
                 if let Some(docker) = &mut self.docker {
@@ -368,7 +440,7 @@ impl BackendSession {
         match self.kind {
             ExecutionBackendKind::Docker => {
                 if let Some(docker) = &mut self.docker {
-                    docker.execute(plan, world, &mut self.events)?;
+                    docker.execute(plan, &self.isolation, world, &mut self.events)?;
                 }
             }
             ExecutionBackendKind::MicroVm => {
@@ -416,16 +488,18 @@ impl BackendSession {
             return Err(ExecutionError::CollectBeforeStop);
         }
         self.phase = BackendPhase::Collecting;
-        let conclusion = self
+        let (conclusion, exit_code) = self
             .events
             .iter()
+            .rev()
             .find_map(|event| match event {
-                ExecutionEvent::Log { line, .. } if line.contains("cancel") => Some("cancelled"),
-                ExecutionEvent::Log { line, .. } if line.contains("timeout") => Some("timed_out"),
-                ExecutionEvent::Log { line, .. } if line.contains("failure") => Some("failure"),
+                ExecutionEvent::JobCompleted {
+                    conclusion,
+                    exit_code,
+                } => Some((*conclusion, *exit_code)),
                 _ => None,
             })
-            .unwrap_or("success");
+            .unwrap_or((JobConclusion::Failure, 1));
         let logs: Vec<String> = self
             .events
             .iter()
@@ -434,14 +508,34 @@ impl BackendSession {
                 _ => None,
             })
             .collect();
+        let mut outputs: Vec<(String, String)> = self
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                ExecutionEvent::Output { name, value } => Some((name.clone(), value.clone())),
+                _ => None,
+            })
+            .collect();
+        if outputs.is_empty() {
+            outputs.clone_from(&self.plan_outputs);
+        }
+        let command_file = self
+            .events
+            .iter()
+            .find_map(|event| match event {
+                ExecutionEvent::CommandFile { path } => Some(path.clone()),
+                _ => None,
+            })
+            .or_else(|| self.plan_command_files.first().cloned());
         Ok(ExecutionOutcome {
-            conclusion,
-            exit_code: if conclusion == "success" { 0 } else { 1 },
+            conclusion: conclusion.as_str(),
+            exit_code,
             log_lines: logs,
             masked: self.events.iter().any(
                 |event| matches!(event, ExecutionEvent::Log { line, .. } if line.contains("***")),
             ),
-            command_file: Some("GITHUB_OUTPUT".into()),
+            command_file,
+            outputs,
             cleaned: false,
         })
     }
@@ -480,7 +574,8 @@ impl BackendSession {
             exit_code: 0,
             log_lines: Vec::new(),
             masked: false,
-            command_file: Some("GITHUB_OUTPUT".into()),
+            command_file: self.plan_command_files.first().cloned(),
+            outputs: self.plan_outputs.clone(),
             cleaned: true,
         }
     }

@@ -7,6 +7,8 @@ use std::io::{Read, Write};
 
 use sha2::{Digest, Sha256};
 
+use crate::job_summary::JobConclusion;
+
 /// Protocol version. Mismatch fails closed.
 pub const PROTOCOL_VERSION: u16 = 1;
 /// Maximum payload bytes per frame (1 MiB).
@@ -65,6 +67,10 @@ pub enum VsockMessage {
         isolation_id: String,
         generation: u64,
     },
+    JobCompleted {
+        conclusion: JobConclusion,
+        exit_code: i32,
+    },
 }
 
 impl VsockMessage {
@@ -83,6 +89,7 @@ impl VsockMessage {
             Self::Telemetry { .. } => 10,
             Self::ResultExport { .. } => 11,
             Self::TeardownAck { .. } => 12,
+            Self::JobCompleted { .. } => 13,
         }
     }
 
@@ -258,6 +265,13 @@ fn encode_payload(message: &VsockMessage) -> Result<Vec<u8>, VsockCodecError> {
             write_string(&mut payload, isolation_id)?;
             payload.extend_from_slice(&generation.to_be_bytes());
         }
+        VsockMessage::JobCompleted {
+            conclusion,
+            exit_code,
+        } => {
+            write_string(&mut payload, conclusion.as_str())?;
+            payload.extend_from_slice(&exit_code.to_be_bytes());
+        }
     }
     Ok(payload)
 }
@@ -333,6 +347,16 @@ fn decode_payload(kind: u16, payload: &[u8]) -> Result<VsockMessage, VsockCodecE
             VsockMessage::TeardownAck {
                 isolation_id,
                 generation,
+            }
+        }
+        13 => {
+            let raw = read_string(&mut cur)?;
+            let conclusion = JobConclusion::try_from(raw.as_str())
+                .map_err(|_| VsockCodecError::InvalidConclusion { value: raw })?;
+            let exit_code = read_i32(&mut cur)?;
+            VsockMessage::JobCompleted {
+                conclusion,
+                exit_code,
             }
         }
         other => return Err(VsockCodecError::UnknownKind { kind: other }),
@@ -429,6 +453,7 @@ pub enum VsockCodecError {
     InvalidUtf8,
     TrailingBytes { len: usize },
     Io { detail: String },
+    InvalidConclusion { value: String },
 }
 
 impl std::fmt::Display for VsockCodecError {
@@ -446,6 +471,9 @@ impl std::fmt::Display for VsockCodecError {
             Self::InvalidUtf8 => write!(f, "vsock payload is not UTF-8"),
             Self::TrailingBytes { len } => write!(f, "vsock trailing payload {len} bytes"),
             Self::Io { detail } => write!(f, "vsock io: {detail}"),
+            Self::InvalidConclusion { value } => {
+                write!(f, "vsock unknown job conclusion {value}")
+            }
         }
     }
 }
@@ -455,6 +483,7 @@ impl std::error::Error for VsockCodecError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::job_summary::JobConclusion;
 
     #[test]
     fn round_trip_guest_ready_and_cancel() {
@@ -467,6 +496,12 @@ mod tests {
         assert_eq!(VsockMessage::decode(&bytes).unwrap(), ready);
         let cancel = VsockMessage::Cancel.encode().unwrap();
         assert_eq!(VsockMessage::decode(&cancel).unwrap(), VsockMessage::Cancel);
+        let completed = VsockMessage::JobCompleted {
+            conclusion: JobConclusion::TimedOut,
+            exit_code: 1,
+        };
+        let bytes = completed.encode().unwrap();
+        assert_eq!(VsockMessage::decode(&bytes).unwrap(), completed);
     }
 
     #[test]
