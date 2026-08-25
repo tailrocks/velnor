@@ -9,6 +9,10 @@ Environment=HOME=/root
 Environment=VELNOR_STORAGE_ROOT=/var
 EnvironmentFile=/etc/velnor/%i.env
 EnvironmentFile=-/etc/velnor/%i.secrets.env
+# Same StateDirectory as velnor-daemon@%i so STATE_DIRECTORY wins over
+# VELNOR_STORAGE_ROOT. Doctor SLO samples and in-flight heal read
+# /var/lib/velnor-%i/runner/daemons/<name>, not /var/lib/velnor/runner.
+StateDirectory=velnor-%i
 ExecStart=/usr/bin/velnorctl doctor \
   --url ${VELNOR_URL} \
   --name ${VELNOR_NAME} \

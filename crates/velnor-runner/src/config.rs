@@ -333,4 +333,73 @@ mod tests {
         assert_eq!(dir, PathBuf::from("/home/alice/.local/state/velnor/runner"));
         assert!(!dir.as_os_str().to_string_lossy().contains("/.velnor/"));
     }
+
+    fn shipped_state_directory(unit: &str) -> &str {
+        unit.lines()
+            .find_map(|line| line.strip_prefix("StateDirectory="))
+            .unwrap()
+    }
+
+    /// systemd.exec maps relative `StateDirectory=name` to `/var/lib/name`.
+    fn systemd_state_directory_env(state_directory: &str, instance: Option<&str>) -> String {
+        let name = match instance {
+            Some(instance) => state_directory.replace("%i", instance),
+            None => state_directory.to_string(),
+        };
+        format!("/var/lib/{name}")
+    }
+
+    fn doctor_unit_env(state_directory: &str, instance: Option<&str>) -> ResolveConfigDir {
+        ResolveConfigDir {
+            state_directory: Some(systemd_state_directory_env(state_directory, instance).into()),
+            velnor_storage_root: Some("/var".into()),
+            home: Some("/root".into()),
+            ..ResolveConfigDir::default()
+        }
+    }
+
+    #[test]
+    fn doctor_instance_unit_shares_daemon_state_directory() {
+        let doctor = include_str!("../debian/velnor-doctor@.service");
+        let daemon = include_str!("../debian/velnor-daemon@.service");
+        assert_eq!(shipped_state_directory(doctor), "velnor-%i");
+        assert_eq!(
+            shipped_state_directory(doctor),
+            shipped_state_directory(daemon)
+        );
+
+        let doctor_dir = resolve_config_dir(doctor_unit_env(
+            shipped_state_directory(doctor),
+            Some("tailrocks"),
+        ))
+        .unwrap();
+        let daemon_dir = resolve_config_dir(doctor_unit_env(
+            shipped_state_directory(daemon),
+            Some("tailrocks"),
+        ))
+        .unwrap();
+        assert_eq!(doctor_dir, daemon_dir);
+        assert_eq!(
+            doctor_dir,
+            PathBuf::from("/var/lib/velnor-tailrocks/runner")
+        );
+        assert_ne!(doctor_dir, PathBuf::from("/var/lib/velnor/runner"));
+        assert!(!doctor_dir.starts_with("/root/.velnor"));
+    }
+
+    #[test]
+    fn doctor_base_unit_shares_daemon_state_directory() {
+        let doctor = include_str!("../debian/velnor-doctor.service");
+        let daemon = include_str!("../debian/velnor-daemon.service");
+        assert_eq!(shipped_state_directory(doctor), "velnor");
+        assert_eq!(
+            shipped_state_directory(doctor),
+            shipped_state_directory(daemon)
+        );
+
+        let doctor_dir =
+            resolve_config_dir(doctor_unit_env(shipped_state_directory(doctor), None)).unwrap();
+        assert_eq!(doctor_dir, PathBuf::from("/var/lib/velnor/runner"));
+        assert!(!doctor_dir.starts_with("/root/.velnor"));
+    }
 }

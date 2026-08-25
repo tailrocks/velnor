@@ -9,6 +9,9 @@ Environment=HOME=/root
 Environment=VELNOR_STORAGE_ROOT=/var
 EnvironmentFile=/etc/velnor/velnor.env
 EnvironmentFile=-/etc/velnor/secrets.env
+# Same StateDirectory as velnor-daemon.service so STATE_DIRECTORY wins over
+# VELNOR_STORAGE_ROOT. Never $HOME/.velnor.
+StateDirectory=velnor
 ExecStart=/usr/bin/velnorctl doctor \
   --url ${VELNOR_URL} \
   --name ${VELNOR_NAME} \
