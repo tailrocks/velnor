@@ -45,18 +45,50 @@ pub const ROOTFS_PACKAGES: &[&str] = &[
 
 pub const FORBIDDEN_PACKAGES: &[&str] = &["openssh-server", "openssh-sftp-server"];
 
+/// Required options after `tinyconfig`+`olddefconfig` for `arch`.
+///
+/// `CONFIG_KVM_GUEST` exists only on x86. aarch64 uses `CONFIG_PARAVIRT`.
+#[must_use]
+pub fn required_kconfig_for_arch(arch: &str) -> Vec<&'static str> {
+    match arch {
+        "aarch64" | "arm64" => REQUIRED_KCONFIG
+            .iter()
+            .copied()
+            .filter(|option| *option != "CONFIG_KVM_GUEST=y")
+            .chain(std::iter::once("CONFIG_PARAVIRT=y"))
+            .collect(),
+        _ => REQUIRED_KCONFIG.to_vec(),
+    }
+}
+
 /// Validate a kernel.config fragment against the production allow/deny lists.
 ///
 /// # Errors
 /// Missing required options or enabled forbidden options.
 pub fn validate_kernel_config(text: &str) -> Result<(), MicroVmPreflightFailure> {
-    for required in REQUIRED_KCONFIG {
-        if !text.lines().any(|line| line.trim() == *required) {
-            return Err(MicroVmPreflightFailure::new(
-                "guest.kernel",
-                format!("kernel.config missing {required}"),
-            ));
-        }
+    validate_kernel_options(text, REQUIRED_KCONFIG)
+}
+
+/// Validate a built `.config` for `arch`. Unknown-on-arch symbols are not required.
+///
+/// # Errors
+/// Missing required options or enabled forbidden options.
+pub fn validate_built_kernel_config(text: &str, arch: &str) -> Result<(), MicroVmPreflightFailure> {
+    let required = required_kconfig_for_arch(arch);
+    validate_kernel_options(text, &required)
+}
+
+fn validate_kernel_options(text: &str, required: &[&str]) -> Result<(), MicroVmPreflightFailure> {
+    let missing: Vec<&str> = required
+        .iter()
+        .copied()
+        .filter(|option| !text.lines().any(|line| line.trim() == *option))
+        .collect();
+    if !missing.is_empty() {
+        return Err(MicroVmPreflightFailure::new(
+            "guest.kernel",
+            format!("kernel.config missing {}", missing.join(", ")),
+        ));
     }
     for forbidden in FORBIDDEN_KCONFIG {
         if text.lines().any(|line| line.trim() == *forbidden) {
@@ -152,8 +184,11 @@ mod tests {
 
     #[test]
     fn virtio_fs_and_sshd_fail_closed() {
-        let err = validate_kernel_config("CONFIG_VIRTIO_FS=y\n").unwrap_err();
+        let mut text = REQUIRED_KCONFIG.join("\n");
+        text.push_str("\nCONFIG_VIRTIO_FS=y\n");
+        let err = validate_kernel_config(&text).unwrap_err();
         assert_eq!(err.requirement, "guest.kernel");
+        assert!(err.to_string().contains("CONFIG_VIRTIO_FS=y"));
         let err = validate_rootfs_packages(&[
             "containerd",
             "runc",
@@ -164,5 +199,41 @@ mod tests {
         .unwrap_err();
         assert_eq!(err.requirement, "guest.rootfs");
         assert!(err.to_string().contains("docker backend was not used"));
+    }
+
+    #[test]
+    fn aarch64_built_config_requires_paravirt_not_kvm_guest() {
+        let mut lines: Vec<&str> = REQUIRED_KCONFIG
+            .iter()
+            .copied()
+            .filter(|option| *option != "CONFIG_KVM_GUEST=y")
+            .collect();
+        lines.push("CONFIG_PARAVIRT=y");
+        let text = lines.join("\n");
+        validate_built_kernel_config(&text, "aarch64").unwrap();
+        let err = validate_kernel_config(&text).unwrap_err();
+        assert!(err.to_string().contains("CONFIG_KVM_GUEST=y"));
+        let err = validate_built_kernel_config(&text.replace("CONFIG_PARAVIRT=y", ""), "aarch64")
+            .unwrap_err();
+        assert!(err.to_string().contains("CONFIG_PARAVIRT=y"));
+    }
+
+    #[test]
+    fn x86_built_config_requires_kvm_guest() {
+        let text = REQUIRED_KCONFIG
+            .iter()
+            .copied()
+            .filter(|option| *option != "CONFIG_KVM_GUEST=y")
+            .collect::<Vec<_>>()
+            .join("\n");
+        let err = validate_built_kernel_config(&text, "x86_64").unwrap_err();
+        assert!(err.to_string().contains("CONFIG_KVM_GUEST=y"));
+    }
+
+    #[test]
+    fn missing_required_options_are_all_reported() {
+        let err = validate_kernel_config("CONFIG_VIRTIO=y\n").unwrap_err();
+        assert!(err.to_string().contains("CONFIG_VIRTIO_NET=y"));
+        assert!(err.to_string().contains("CONFIG_VIRTIO_BLK=y"));
     }
 }

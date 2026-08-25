@@ -6,13 +6,17 @@ use velnor_model::MicroVmPreflightFailure;
 
 use super::artifacts::{hex_sha256, ArtifactChecksums, FIRECRACKER_VERSION, JAILER_VERSION};
 use super::guest::{
-    validate_guest_toml, validate_kernel_config, validate_rootfs_packages, KERNEL_TARBALL_SHA256,
-    KERNEL_VERSION, ROOTFS_PACKAGES,
+    validate_built_kernel_config, validate_guest_toml, validate_kernel_config,
+    validate_rootfs_packages, KERNEL_TARBALL_SHA256, KERNEL_VERSION, ROOTFS_PACKAGES,
 };
 use super::HostFs;
 use crate::executor::{CommandResult, CommandRunner};
 
-/// Boot options merged onto the isolation fragment before `tinyconfig`.
+/// Boot options and kconfig parents merged onto the isolation fragment.
+///
+/// `tinyconfig` is allnoconfig. Menu parents without `default y` (notably
+/// `CONFIG_NETDEVICES`) stay n, and `olddefconfig` then drops children such as
+/// `CONFIG_VIRTIO_NET`. `CONFIG_HYPERVISOR_GUEST` is x86-only; aarch64 drops it.
 pub const BOOT_KCONFIG: &[&str] = &[
     "CONFIG_EXT4_FS=y",
     "CONFIG_DEVTMPFS=y",
@@ -24,13 +28,30 @@ pub const BOOT_KCONFIG: &[&str] = &[
     "CONFIG_NET=y",
     "CONFIG_INET=y",
     "CONFIG_BLOCK=y",
+    "CONFIG_BLK_DEV=y",
+    "CONFIG_NETDEVICES=y",
+    "CONFIG_NET_CORE=y",
+    "CONFIG_VIRTIO_MENU=y",
+    "CONFIG_VSOCKETS=y",
+    "CONFIG_HYPERVISOR_GUEST=y",
+    "CONFIG_PARAVIRT=y",
     "CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y",
     "CONFIG_VIRTIO_CONSOLE=y",
     "CONFIG_PRINTK=y",
     "CONFIG_TTY=y",
+    "CONFIG_SERIAL_8250=y",
+    "CONFIG_SERIAL_8250_CONSOLE=y",
     "CONFIG_BINFMT_ELF=y",
     "CONFIG_SHMEM=y",
     "CONFIG_CGROUPS=y",
+    "CONFIG_MEMCG=y",
+    "CONFIG_BLK_CGROUP=y",
+    "CONFIG_CGROUP_SCHED=y",
+    "CONFIG_CGROUP_PIDS=y",
+    "CONFIG_CGROUP_FREEZER=y",
+    "CONFIG_CGROUP_DEVICE=y",
+    "CONFIG_CGROUP_CPUACCT=y",
+    "CONFIG_CPUSETS=y",
     "CONFIG_NAMESPACES=y",
     "CONFIG_NET_NS=y",
     "CONFIG_PID_NS=y",
@@ -39,8 +60,17 @@ pub const BOOT_KCONFIG: &[&str] = &[
     "CONFIG_IPC_NS=y",
     "CONFIG_BRIDGE=y",
     "CONFIG_VETH=y",
+    "CONFIG_PACKET=y",
+    "CONFIG_NETFILTER_XTABLES=y",
+    "CONFIG_NF_CONNTRACK=y",
     "CONFIG_IP_NF_IPTABLES=y",
+    "CONFIG_IP_NF_FILTER=y",
+    "CONFIG_IP_NF_NAT=y",
     "CONFIG_NF_NAT=y",
+    "CONFIG_KEYS=y",
+    "CONFIG_POSIX_MQUEUE=y",
+    "CONFIG_SECCOMP=y",
+    "CONFIG_SECCOMP_FILTER=y",
 ];
 
 /// Guest image architecture. Matches Firecracker release tarball names.
@@ -327,7 +357,11 @@ pub fn build_guest_image(
     let config_text = std::fs::read_to_string(src.join(".config")).map_err(|error| {
         MicroVmPreflightFailure::new("guest.kernel", format!("read .config: {error}"))
     })?;
-    validate_kernel_config(&config_text)?;
+    if let Err(error) = validate_built_kernel_config(&config_text, arch.as_str()) {
+        let dump = work_dir.join("kernel.config.rejected");
+        let _ = std::fs::write(&dump, config_text.as_bytes());
+        return Err(error);
+    }
     let mut make_vmlinux = vec![
         "-C".into(),
         src.display().to_string(),
@@ -465,6 +499,8 @@ fn build_rootfs(
 fn debian_package(spec: &str) -> &str {
     match spec {
         "docker-engine" => "docker.io",
+        // Ubuntu has no `buildkit` binary package; BuildKit ships as docker-buildx.
+        "buildkit" => "docker-buildx",
         other => other,
     }
 }
@@ -494,6 +530,14 @@ mod tests {
     use crate::executor::CommandResult;
 
     #[test]
+    fn debian_package_maps_engine_and_buildkit() {
+        assert_eq!(debian_package("docker-engine"), "docker.io");
+        assert_eq!(debian_package("buildkit"), "docker-buildx");
+        assert_eq!(debian_package("containerd"), "containerd");
+        assert_eq!(debian_package("runc"), "runc");
+    }
+
+    #[test]
     fn kernel_tarball_mismatch_fails_closed() {
         let error = verify_kernel_tarball(b"not-the-kernel").unwrap_err();
         assert_eq!(error.requirement, "guest.kernel");
@@ -505,6 +549,11 @@ mod tests {
         let merged = merged_kernel_fragment(include_str!("../../../../microvm/kernel.config"));
         validate_kernel_config(&merged).unwrap();
         assert!(merged.contains("CONFIG_EXT4_FS=y"));
+        assert!(merged.contains("CONFIG_NETDEVICES=y"));
+        assert!(merged.contains("CONFIG_NET_CORE=y"));
+        assert!(merged.contains("CONFIG_VIRTIO_MENU=y"));
+        assert!(merged.contains("CONFIG_VSOCKETS=y"));
+        assert!(merged.contains("CONFIG_PARAVIRT=y"));
         assert!(merged.contains("# CONFIG_VIRTIO_FS is not set"));
         assert!(merged.contains("# CONFIG_PCI is not set"));
         assert!(!merged.contains("CONFIG_PCI=y"));

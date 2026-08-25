@@ -56,7 +56,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential flex bison bc libssl-dev libelf-dev xz-utils e2fsprogs \
-            mmdebstrap debootstrap qemu-user-static binfmt-support \
+            mmdebstrap debootstrap qemu-user-static binfmt-support gnupg \
             gcc-aarch64-linux-gnu gcc-x86-64-linux-gnu
 
       - name: Download pinned kernel tarball

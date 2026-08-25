@@ -1149,7 +1149,10 @@ mod tests {
         let env = backend_advertising_env(
             vec![
                 ("NODE_OPTIONS".to_string(), "x".to_string()),
-                ("VELNOR_EXECUTION_BACKEND".to_string(), "microvm".to_string()),
+                (
+                    "VELNOR_EXECUTION_BACKEND".to_string(),
+                    "microvm".to_string(),
+                ),
             ],
             velnor_model::ExecutionBackendKind::Docker,
         );

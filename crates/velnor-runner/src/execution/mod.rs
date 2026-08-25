@@ -33,8 +33,9 @@ pub use firecracker::{
     FIRECRACKER_GUEST_CID,
 };
 pub use guest::{
-    validate_guest_toml, validate_kernel_config, validate_rootfs_packages, KERNEL_TARBALL,
-    KERNEL_TARBALL_SHA256, KERNEL_VERSION, ROOTFS_PACKAGES,
+    required_kconfig_for_arch, validate_built_kernel_config, validate_guest_toml,
+    validate_kernel_config, validate_rootfs_packages, KERNEL_TARBALL, KERNEL_TARBALL_SHA256,
+    KERNEL_VERSION, ROOTFS_PACKAGES,
 };
 #[cfg(target_os = "linux")]
 pub use guest_agent::{accept_af_vsock, bind_af_vsock};
@@ -284,9 +285,7 @@ pub fn executor_is_proven(
     _host_docker_socket: &Path,
 ) -> bool {
     match backend {
-        ExecutionBackendKind::Docker => {
-            state_dir.join(crate::node::prove::EXECUTOR_OK).is_file()
-        }
+        ExecutionBackendKind::Docker => state_dir.join(crate::node::prove::EXECUTOR_OK).is_file(),
         ExecutionBackendKind::MicroVm => executor_is_proven_at(
             state_dir,
             backend,
