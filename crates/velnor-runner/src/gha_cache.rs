@@ -31,9 +31,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 const DEFAULT_BUDGET_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const MAX_BODY: u64 = 16 * 1024 * 1024 * 1024;
@@ -327,7 +327,7 @@ fn keys_from_query(req: &Request<Incoming>) -> Vec<String> {
         .collect()
 }
 
-async fn reserve(mut req: Request<Incoming>, ctx: &Ctx) -> Result<Value> {
+async fn reserve(req: Request<Incoming>, ctx: &Ctx) -> Result<Value> {
     let body = body_json(req).await?;
     let key = required_str(&body, "key")?;
     let version = required_str(&body, "version")?;
@@ -335,18 +335,18 @@ async fn reserve(mut req: Request<Incoming>, ctx: &Ctx) -> Result<Value> {
     if size > MAX_BODY {
         return Ok(json!({"__typename": "BadRequestError"}));
     }
-    let hash = entry_hash(&key, &version);
+    let hash = entry_hash(key, version);
     if ctx.service.entry_path(&hash).exists() {
         return Ok(json!({"__typename": "ConflictError", "message": "already exists"}));
     }
     Ok(json!({"cacheId": hash}))
 }
 
-async fn reserve_v2(mut req: Request<Incoming>, ctx: &Ctx) -> Result<Value> {
+async fn reserve_v2(req: Request<Incoming>, ctx: &Ctx) -> Result<Value> {
     let body = body_json(req).await?;
     let key = required_str(&body, "key")?;
     let version = required_str(&body, "version")?;
-    let hash = entry_hash(&key, &version);
+    let hash = entry_hash(key, version);
     if ctx.service.entry_path(&hash).exists() {
         return Ok(json!({"ok": false}));
     }
@@ -356,7 +356,7 @@ async fn reserve_v2(mut req: Request<Incoming>, ctx: &Ctx) -> Result<Value> {
     }))
 }
 
-async fn upload(mut req: Request<Incoming>, _ctx: &Ctx, id: &str) -> Result<()> {
+async fn upload(req: Request<Incoming>, _ctx: &Ctx, id: &str) -> Result<()> {
     if id.len() != 64 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
         anyhow::bail!("invalid cache id");
     }
@@ -382,12 +382,12 @@ async fn upload(mut req: Request<Incoming>, _ctx: &Ctx, id: &str) -> Result<()> 
     Ok(())
 }
 
-async fn finalize_v2(mut req: Request<Incoming>, ctx: &Ctx) -> Result<Value> {
+async fn finalize_v2(req: Request<Incoming>, ctx: &Ctx) -> Result<Value> {
     let body = body_json(req).await?;
     let key = required_str(&body, "key")?;
     let version = required_str(&body, "version")?;
     let size = body["size"].as_u64().unwrap_or(0);
-    commit_entry(&ctx.service, &key, &version, size)?;
+    commit_entry(&ctx.service, key, version, size)?;
     Ok(json!({"ok": true, "state": "succeeded"}))
 }
 
@@ -426,7 +426,7 @@ fn lookup_v1(req: &Request<Incoming>, ctx: &Ctx) -> Result<Value> {
     }
 }
 
-async fn lookup_v2(mut req: Request<Incoming>, ctx: &mut Ctx) -> Result<Value> {
+async fn lookup_v2(req: Request<Incoming>, ctx: &mut Ctx) -> Result<Value> {
     let body = body_json(req).await?;
     let key = required_str(&body, "key")?;
     let version = required_str(&body, "version")?;
@@ -438,10 +438,10 @@ async fn lookup_v2(mut req: Request<Incoming>, ctx: &mut Ctx) -> Result<Value> {
                 .filter_map(|v| v.as_str().map(str::to_owned)),
         );
     }
-    let key = keys[0].as_str();
+    let _key = keys[0].as_str();
     match ctx.service.lookup(
         &keys.iter().map(String::as_str).collect::<Vec<_>>(),
-        &version,
+        version,
     ) {
         Some((hash, _)) => Ok(json!({
             "ok": true,
@@ -451,7 +451,7 @@ async fn lookup_v2(mut req: Request<Incoming>, ctx: &mut Ctx) -> Result<Value> {
     }
 }
 
-fn query_param<'a>(req: &'a Request<Incoming>, name: &str) -> Option<String> {
+fn query_param(req: &Request<Incoming>, name: &str) -> Option<String> {
     req.uri()
         .query()?
         .split('&')
@@ -491,6 +491,7 @@ pub async fn bind(service: CacheService) -> Result<SocketAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn test_service(dir: &Path) -> CacheService {
         let mut service = CacheService::open(dir.to_path_buf()).expect("open");
