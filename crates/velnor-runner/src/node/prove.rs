@@ -522,6 +522,20 @@ pub fn write_executor_ok(state_dir: &Path) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+/// Record a microVM executor proof bound to the packaged generation.
+///
+/// # Errors
+/// Directory or write failures.
+pub fn write_microvm_executor_ok(
+    state_dir: &Path,
+    generation: &crate::execution::MicroVmGeneration,
+) -> anyhow::Result<PathBuf> {
+    std::fs::create_dir_all(state_dir)?;
+    let path = state_dir.join(EXECUTOR_OK);
+    std::fs::write(&path, serde_json::to_vec(generation)?)?;
+    Ok(path)
+}
+
 fn fields_complete(fields: &RoutingFields) -> bool {
     !fields.group.is_empty()
         && !fields.selected_repositories.is_empty()
@@ -644,10 +658,10 @@ mod tests {
             &dir,
             velnor_model::ExecutionBackendKind::Docker
         ));
-        assert!(observe_executor(
-            &dir,
-            velnor_model::ExecutionBackendKind::MicroVm
-        ));
+        assert!(
+            !observe_executor(&dir, velnor_model::ExecutionBackendKind::MicroVm),
+            "stale ok\\n must not prove microvm"
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 

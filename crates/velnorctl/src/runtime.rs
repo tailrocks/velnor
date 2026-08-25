@@ -312,6 +312,7 @@ impl From<PreflightArgs> for rt::PreflightArgs {
                 .unwrap_or(true),
             require_buildx: args.require_buildx,
             execution_backend: backend,
+            config_dir: args.config_dir,
         }
     }
 }

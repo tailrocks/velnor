@@ -35,6 +35,10 @@ fn preflight_with_runner(args: PreflightArgs, runner: &mut dyn CommandRunner) ->
             allow_inline_guest_plan: false,
         };
         crate::execution::FirecrackerBackend::preflight(&mut world)?;
+        let generation = crate::execution::packaged_generation(&artifact_root, &fs)?;
+        if let Some(config_dir) = &args.config_dir {
+            crate::node::prove::write_microvm_executor_ok(config_dir, &generation)?;
+        }
         println!(
             "microVM preflight passed (Firecracker {}).",
             crate::execution::FIRECRACKER_VERSION
@@ -410,6 +414,7 @@ mod tests {
             require_docker_socket: false,
             require_buildx: true,
             execution_backend: None,
+            config_dir: None,
         };
         let mut runner = RecordingRunner::default();
 
@@ -509,6 +514,7 @@ mod tests {
             require_docker_socket: false,
             require_buildx: false,
             execution_backend: None,
+            config_dir: None,
         };
         let mut runner = RecordingRunner {
             calls: Vec::new(),
@@ -536,6 +542,7 @@ mod tests {
             require_docker_socket: false,
             require_buildx: false,
             execution_backend: None,
+            config_dir: None,
         };
         let mut runner = RecordingRunner {
             calls: Vec::new(),
@@ -565,6 +572,7 @@ mod tests {
             require_docker_socket: false,
             require_buildx: false,
             execution_backend: None,
+            config_dir: None,
         };
         let mut runner = RecordingRunner {
             calls: Vec::new(),

@@ -2,6 +2,7 @@
 # manifest.json. macOS cannot produce the kernel/rootfs bytes.
 
 kernel_version = "6.1.102"
+kernel_tarball_sha256 = "1ba5f93b411ead7587fe48b2eec6c656f6796d31f5e406d236913c77512497ec"
 # Firecracker-tested LTS class. Exact source:
 # https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.102.tar.xz
 

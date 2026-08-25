@@ -59,6 +59,13 @@ case "$1" in
     # acyclic identity shipped in the deb, and its compiled manifest MUST match
     # the shipped manifest export. This proves binary <-> package <-> manifest
     # coherence for exactly this deb before anything is activated.
+    MICROVM="$SHARE/microvm"
+    if [ -e "$MICROVM/firecracker" ] || [ -e "$MICROVM/jailer" ] || [ -e "$MICROVM/velnor-guest-agent" ]; then
+      [ -x "$MICROVM/firecracker" ] || fail "microvm firecracker missing from package identity"
+      [ -x "$MICROVM/jailer" ] || fail "microvm jailer missing from package identity"
+      [ -x "$MICROVM/velnor-guest-agent" ] || fail "microvm guest-agent missing from package identity"
+    fi
+
     if [ -x "$BIN" ] && [ -f "$SHARE/build-identity.json" ]; then
       installed_sha="$("$BIN" release export | sed -n 's/.*"source_sha": *"\([0-9a-f]*\)".*/\1/p' | head -n1)"
       shipped_sha="$(sed -n 's/.*"source_sha": *"\([0-9a-f]*\)".*/\1/p' "$SHARE/build-identity.json" | head -n1)"

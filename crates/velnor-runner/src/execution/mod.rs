@@ -10,6 +10,7 @@ mod cache_transport;
 mod docker;
 mod firecracker;
 mod guest;
+mod guest_agent;
 mod guest_runtime;
 mod isolation;
 mod net;
@@ -17,8 +18,9 @@ mod snapshot;
 mod unix_api;
 
 pub use artifacts::{
-    hex_sha256, verify_microvm_artifacts, ArtifactChecksums, MicroVmArtifactSet,
-    FIRECRACKER_VERSION, JAILER_VERSION,
+    hex_sha256, packaged_generation, require_coherent_generation, verify_microvm_artifacts,
+    ArtifactChecksums, MicroVmArtifactSet, MicroVmGeneration, FIRECRACKER_VERSION, JAILER_VERSION,
+    PACKAGED_MICROVM_ROOT,
 };
 pub use backend::{
     BackendPhase, BackendSession, ExecutionError, ExecutionEvent, ExecutionOutcome, ValidatedPlan,
@@ -31,8 +33,11 @@ pub use firecracker::{
 };
 pub use guest::{
     validate_guest_toml, validate_kernel_config, validate_rootfs_packages, KERNEL_TARBALL,
-    KERNEL_VERSION, ROOTFS_PACKAGES,
+    KERNEL_TARBALL_SHA256, KERNEL_VERSION, ROOTFS_PACKAGES,
 };
+#[cfg(target_os = "linux")]
+pub use guest_agent::{accept_af_vsock, bind_af_vsock};
+pub use guest_agent::{serve_guest_session, GuestSessionEnv};
 pub use guest_runtime::{
     execute_guest_plan, handle_delivered_plan, host_vsock_connect_path, LoopbackVsock,
     UnixVsockChannel, GUEST_AGENT_PORT,
@@ -273,7 +278,41 @@ pub fn executor_is_proven(
     let ok_file = state_dir.join(crate::node::prove::EXECUTOR_OK);
     match backend {
         ExecutionBackendKind::Docker => ok_file.is_file() || host_docker_socket.exists(),
-        ExecutionBackendKind::MicroVm => ok_file.is_file() && !host_docker_socket_counts(backend),
+        ExecutionBackendKind::MicroVm => executor_is_proven_at(
+            state_dir,
+            backend,
+            host_docker_socket,
+            Path::new(PACKAGED_MICROVM_ROOT),
+        ),
+    }
+}
+
+/// MicroVM proof: `executor.ok` generation must match live packaged artifacts.
+#[must_use]
+pub fn executor_is_proven_at(
+    state_dir: &Path,
+    backend: ExecutionBackendKind,
+    host_docker_socket: &Path,
+    artifact_root: &Path,
+) -> bool {
+    match backend {
+        ExecutionBackendKind::Docker => executor_is_proven(state_dir, backend, host_docker_socket),
+        ExecutionBackendKind::MicroVm => {
+            if host_docker_socket_counts(backend) {
+                return false;
+            }
+            let Ok(bytes) = std::fs::read(state_dir.join(crate::node::prove::EXECUTOR_OK)) else {
+                return false;
+            };
+            let Ok(proven) = serde_json::from_slice::<MicroVmGeneration>(&bytes) else {
+                return false;
+            };
+            let fs = RealHostFs;
+            let Ok(packaged) = packaged_generation(artifact_root, &fs) else {
+                return false;
+            };
+            require_coherent_generation(&proven, &packaged).is_ok()
+        }
     }
 }
 

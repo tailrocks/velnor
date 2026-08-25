@@ -17,6 +17,7 @@ fn seed_microvm_world(fs: &mut MemoryFs, root: &Path) {
     fs.write(Path::new("/dev/kvm"), b"kvm").unwrap();
     let checksums = ArtifactChecksums {
         firecracker_version: FIRECRACKER_VERSION.to_string(),
+        jailer_version: JAILER_VERSION.to_string(),
         firecracker: hex_sha256(b"fc"),
         jailer: hex_sha256(b"jailer"),
         kernel: hex_sha256(b"kernel"),
@@ -332,6 +333,66 @@ fn shipped_guest_image_rejects_virtio_fs() {
     crate::execution::validate_kernel_config(include_str!("../../../../microvm/kernel.config"))
         .unwrap();
     crate::execution::validate_guest_toml(include_str!("../../../../microvm/guest.toml")).unwrap();
+}
+
+#[test]
+fn microvm_advertise_requires_coherent_packaged_generation() {
+    let dir = std::env::temp_dir().join(format!(
+        "velnor-microvm-gen-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, bytes) in [
+        ("firecracker", b"fc".as_slice()),
+        ("jailer", b"jailer".as_slice()),
+        ("vmlinux", b"kernel".as_slice()),
+        ("rootfs.ext4", b"rootfs".as_slice()),
+        ("velnor-guest-agent", b"agent".as_slice()),
+    ] {
+        std::fs::write(dir.join(name), bytes).unwrap();
+    }
+    let checksums = ArtifactChecksums {
+        firecracker_version: FIRECRACKER_VERSION.to_string(),
+        jailer_version: JAILER_VERSION.to_string(),
+        firecracker: hex_sha256(b"fc"),
+        jailer: hex_sha256(b"jailer"),
+        kernel: hex_sha256(b"kernel"),
+        rootfs: hex_sha256(b"rootfs"),
+        guest_agent: hex_sha256(b"agent"),
+        snapshot: None,
+    };
+    std::fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_vec(&checksums).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(dir.join(crate::node::prove::EXECUTOR_OK), b"ok\n").unwrap();
+    assert!(!executor_is_proven_at(
+        &dir,
+        ExecutionBackendKind::MicroVm,
+        Path::new("/no-docker.sock"),
+        &dir
+    ));
+    let generation = packaged_generation(&dir, &RealHostFs).unwrap();
+    crate::node::prove::write_microvm_executor_ok(&dir, &generation).unwrap();
+    assert!(executor_is_proven_at(
+        &dir,
+        ExecutionBackendKind::MicroVm,
+        Path::new("/no-docker.sock"),
+        &dir
+    ));
+    std::fs::write(dir.join("firecracker"), b"other-generation").unwrap();
+    assert!(!executor_is_proven_at(
+        &dir,
+        ExecutionBackendKind::MicroVm,
+        Path::new("/no-docker.sock"),
+        &dir
+    ));
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

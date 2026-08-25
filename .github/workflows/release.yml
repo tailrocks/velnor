@@ -396,6 +396,53 @@ jobs:
           cp release-metadata/build-identity.json crates/velnor-runner/release/build-identity.json
           cp release-metadata/manifest.json crates/velnor-runner/release/manifest.json
 
+      - name: Stage pinned Firecracker, jailer, and guest agent
+        env:
+          TARGET: ${{ matrix.target }}
+          DEB_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          case "$DEB_ARCH" in
+            amd64) pin_arch=x86_64 ;;
+            arm64) pin_arch=aarch64 ;;
+            *) echo "::error::unsupported arch $DEB_ARCH" >&2; exit 1 ;;
+          esac
+          url="$(jq -er --arg a "$pin_arch" '.tarballs[$a].url' microvm/pins.json)"
+          sha="$(jq -er --arg a "$pin_arch" '.tarballs[$a].sha256' microvm/pins.json)"
+          fc_member="$(jq -er --arg a "$pin_arch" '.tarballs[$a].firecracker_member' microvm/pins.json)"
+          jailer_member="$(jq -er --arg a "$pin_arch" '.tarballs[$a].jailer_member' microvm/pins.json)"
+          curl -fsSL -o firecracker.tgz "$url"
+          echo "$sha  firecracker.tgz" | sha256sum -c -
+          mkdir -p extracted crates/velnor-runner/release/microvm
+          tar -xzf firecracker.tgz -C extracted
+          cp "extracted/${fc_member}" crates/velnor-runner/release/microvm/firecracker
+          cp "extracted/${jailer_member}" crates/velnor-runner/release/microvm/jailer
+          cp "target/${TARGET}/release/velnor-guest-agent" crates/velnor-runner/release/microvm/velnor-guest-agent
+          chmod 0755 \
+            crates/velnor-runner/release/microvm/firecracker \
+            crates/velnor-runner/release/microvm/jailer \
+            crates/velnor-runner/release/microvm/velnor-guest-agent
+          fc_sha="$(sha256sum crates/velnor-runner/release/microvm/firecracker | awk '{print $1}')"
+          jailer_sha="$(sha256sum crates/velnor-runner/release/microvm/jailer | awk '{print $1}')"
+          agent_sha="$(sha256sum crates/velnor-runner/release/microvm/velnor-guest-agent | awk '{print $1}')"
+          jq -n \
+            --arg fv "$(jq -er '.firecracker_version' microvm/pins.json)" \
+            --arg jv "$(jq -er '.jailer_version' microvm/pins.json)" \
+            --arg fc "$fc_sha" \
+            --arg jailer "$jailer_sha" \
+            --arg kernel "$(jq -er '.kernel' microvm/manifest.json)" \
+            --arg rootfs "$(jq -er '.rootfs' microvm/manifest.json)" \
+            --arg agent "$agent_sha" \
+            '{
+              firecracker_version: $fv,
+              jailer_version: $jv,
+              firecracker: $fc,
+              jailer: $jailer,
+              kernel: $kernel,
+              rootfs: $rootfs,
+              guest_agent: $agent
+            }' > crates/velnor-runner/release/microvm/manifest.json
+
       - name: Build .deb (version pinned to the tag)
         run: |
           set -euo pipefail
@@ -419,6 +466,10 @@ jobs:
           dpkg-deb -c "$src" > "$manifest"
           grep -q "usr/bin/velnor-runner" "$manifest" || { echo "::error::deb missing usr/bin/velnor-runner" >&2; exit 1; }
           grep -q "usr/bin/velnorctl" "$manifest" || { echo "::error::deb missing usr/bin/velnorctl" >&2; exit 1; }
+          grep -q "usr/bin/velnor-guest-agent" "$manifest" || { echo "::error::deb missing usr/bin/velnor-guest-agent" >&2; exit 1; }
+          grep -q "usr/share/velnor/microvm/firecracker" "$manifest" || { echo "::error::deb missing firecracker" >&2; exit 1; }
+          grep -q "usr/share/velnor/microvm/jailer" "$manifest" || { echo "::error::deb missing jailer" >&2; exit 1; }
+          grep -q "usr/share/velnor/microvm/velnor-guest-agent" "$manifest" || { echo "::error::deb missing packaged guest-agent" >&2; exit 1; }
           grep -q "usr/share/velnor/job-ubuntu.Dockerfile" "$manifest" || { echo "::error::deb missing canonical Dockerfile" >&2; exit 1; }
           [ "$(stat -c%s "$src")" -gt 1000000 ] || { echo "::error::deb suspiciously small: $(stat -c%s "$src") bytes" >&2; exit 1; }
           dst="velnor-runner-${VERSION}-${{ matrix.arch }}.deb"

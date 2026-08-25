@@ -6,6 +6,9 @@ use velnor_model::MicroVmPreflightFailure;
 pub const KERNEL_VERSION: &str = "6.1.102";
 pub const KERNEL_TARBALL: &str =
     "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.102.tar.xz";
+/// kernel.org sha256 of [`KERNEL_TARBALL`].
+pub const KERNEL_TARBALL_SHA256: &str =
+    "1ba5f93b411ead7587fe48b2eec6c656f6796d31f5e406d236913c77512497ec";
 
 /// Required kconfig tokens. Undocumented extras in the fragment are rejected
 /// only when they enable forbidden features.
@@ -105,6 +108,14 @@ pub fn validate_guest_toml(text: &str) -> Result<(), MicroVmPreflightFailure> {
         return Err(MicroVmPreflightFailure::new(
             "guest.spec",
             format!("guest.toml must pin kernel_version {KERNEL_VERSION}"),
+        ));
+    }
+    if !text.contains(&format!(
+        "kernel_tarball_sha256 = \"{KERNEL_TARBALL_SHA256}\""
+    )) {
+        return Err(MicroVmPreflightFailure::new(
+            "guest.spec",
+            "guest.toml must pin kernel_tarball_sha256",
         ));
     }
     if !text.contains("no_sshd = true") {

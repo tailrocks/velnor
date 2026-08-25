@@ -67,9 +67,13 @@ assets = [
   ["debian/velnor-doctor@.timer", "lib/systemd/system/velnor-doctor@.timer", "644"],
   ["debian/velnor.env", "etc/velnor/velnor.env", "640"],
   ["debian/execution.toml", "etc/velnor/execution.toml", "644"],
-  ["../../microvm/manifest.json", "usr/share/velnor/microvm/manifest.json", "644"],
   ["../../microvm/guest.toml", "usr/share/velnor/microvm/guest.toml", "644"],
   ["../../microvm/kernel.config", "usr/share/velnor/microvm/kernel.config", "644"],
+  ["../../microvm/pins.json", "usr/share/velnor/microvm/pins.json", "644"],
+  ["release/microvm/manifest.json", "usr/share/velnor/microvm/manifest.json", "644"],
+  ["release/microvm/firecracker", "usr/share/velnor/microvm/firecracker", "755"],
+  ["release/microvm/jailer", "usr/share/velnor/microvm/jailer", "755"],
+  ["release/microvm/velnor-guest-agent", "usr/share/velnor/microvm/velnor-guest-agent", "755"],
   # Plan 010: the release workflow writes these two acyclic-safe identity files
   # (they depend only on the source, NOT on the deb digest, so shipping them
   # inside the deb creates no cycle) into release/ before `cargo deb`. postinst

@@ -1,5 +1,6 @@
 {
   "firecracker_version": "1.16.1",
+  "jailer_version": "1.16.1",
   "firecracker": "UNSET_FILL_FROM_RELEASE_SHA256_OF_FIRECRACKER_BINARY",
   "jailer": "UNSET_FILL_FROM_RELEASE_SHA256_OF_JAILER_BINARY",
   "kernel": "UNSET_FILL_FROM_REPRODUCIBLE_GUEST_KERNEL",

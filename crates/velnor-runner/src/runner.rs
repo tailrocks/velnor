@@ -2415,6 +2415,7 @@ fn preflight_args_for_run(args: &RunArgs, config_dir: &Path) -> PreflightArgs {
         execution_backend: crate::execution::load_execution_file(config_dir, None)
             .ok()
             .map(|file| file.backend()),
+        config_dir: Some(config_dir.to_path_buf()),
     }
 }
 
