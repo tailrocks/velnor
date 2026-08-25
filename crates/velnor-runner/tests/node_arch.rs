@@ -591,7 +591,7 @@ fn controller_keeps_ready_when_exec_exists_without_assignment() {
 }
 
 #[test]
-fn controller_claims_job_owned_on_real_assignment_before_spawn() {
+fn controller_does_not_assign_rest_queued_ids() {
     let dir = scratch("owned");
     let mut journal = Journal::open(dir.join("journal.db")).unwrap();
     prime_named_ready(&mut journal, "own");
@@ -599,7 +599,7 @@ fn controller_claims_job_owned_on_real_assignment_before_spawn() {
     velnor_runner::node::assign::write(
         &dir,
         &velnor_runner::node::assign::Assignment {
-            job_id: "gh-job-42".into(),
+            job_id: "424242".into(),
             slot_id: "own-1".into(),
         },
     )
@@ -627,22 +627,17 @@ fn controller_claims_job_owned_on_real_assignment_before_spawn() {
         .unwrap()
         .load_state()
         .unwrap();
-    assert_eq!(state.jobs.len(), 1, "{:?}", state.jobs);
-    assert_eq!(state.jobs[0].job_id.0, "gh-job-42");
-    assert_eq!(state.jobs[0].slot_id.0, "own-1");
     assert!(
-        dir.join("owned").join("gh-job-42.1").exists(),
-        "JobOwned must create the ownership marker before StartJob"
+        state.jobs.is_empty(),
+        "REST queued ids must not become journal owners: {:?}",
+        state.jobs
     );
-    if let Some(pid) = velnor_runner::node::cleanup::read_owned_pid(&dir, "gh-job-42", 1) {
-        assert!(
-            velnor_runner::node::prove::pid_is_alive(pid),
-            "worker must still be running (not exited on beat --once)"
-        );
-        kill_pid(pid);
-    } else {
-        panic!("StartJob must record the worker pid in the ownership marker");
-    }
+    let slot = state
+        .slots
+        .iter()
+        .find(|item| item.slot_id.0 == "own-1")
+        .expect("slot");
+    assert_eq!(slot.phase, velnor_model::ActorPhase::Ready, "{slot:?}");
     std::fs::remove_dir_all(dir).ok();
 }
 

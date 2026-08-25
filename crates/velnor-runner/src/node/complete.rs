@@ -128,11 +128,18 @@ pub fn accept_job(
         .find(|slot| slot.slot_id == *slot_id)
         .ok_or_else(|| anyhow::anyhow!("slot {} is missing from the journal", slot_id.0))?;
     let generation = slot.generation;
-    let _ = journal.apply(Event::Assigned {
+    let assigned = journal.apply(Event::Assigned {
         slot_id: slot_id.clone(),
         job_id: job_id.clone(),
         generation,
     })?;
+    if assigned.rejected {
+        anyhow::bail!(
+            "Assigned rejected for {} on {} (slot must still be Ready)",
+            job_id.0,
+            slot_id.0
+        );
+    }
     let owned = journal.apply(Event::JobOwned {
         job_id: job_id.clone(),
         slot_id: slot_id.clone(),
@@ -229,10 +236,43 @@ mod tests {
         for event in [
             Event::ControlLive,
             Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1, surge: 0 },
             Event::PermitReserved {
                 slot_id: slot.clone(),
                 generation: g,
                 surge: false,
+            },
+            Event::ExecutorProven {
+                slot_id: slot.clone(),
+                generation: g,
+            },
+            Event::SessionLive {
+                slot_id: slot.clone(),
+                generation: g,
+            },
+            Event::RegistrationIntended {
+                slot_id: slot.clone(),
+                generation: g,
+            },
+            Event::Registered {
+                slot_id: slot.clone(),
+                generation: g,
+            },
+            Event::ReadyAttempt {
+                slot_id: slot.clone(),
+                generation: g,
+            },
+            Event::Assigned {
+                slot_id: slot.clone(),
+                job_id: job_id.clone(),
+                generation: g,
             },
         ] {
             assert!(!journal.apply(event).unwrap().rejected);
@@ -363,25 +403,75 @@ mod tests {
     }
 
     #[test]
-    fn accept_job_owns_the_named_slot() {
+    fn accept_job_owns_a_ready_slot() {
         let dir = tmp("accept");
         let mut journal = Journal::open(dir.join("journal.db")).unwrap();
         let slot = SlotId("scope-1".into());
+        let g = Generation::INITIAL;
         for event in [
             Event::ControlLive,
             Event::JournalWritable,
+            Event::Dependency {
+                github_reachable: true,
+            },
+            Event::Routing {
+                valid: true,
+                group_valid: true,
+            },
+            Event::DesiredCapacity { ready: 1, surge: 0 },
             Event::PermitReserved {
                 slot_id: slot.clone(),
-                generation: Generation::INITIAL,
+                generation: g,
                 surge: false,
+            },
+            Event::ExecutorProven {
+                slot_id: slot.clone(),
+                generation: g,
+            },
+            Event::SessionLive {
+                slot_id: slot.clone(),
+                generation: g,
+            },
+            Event::RegistrationIntended {
+                slot_id: slot.clone(),
+                generation: g,
+            },
+            Event::Registered {
+                slot_id: slot.clone(),
+                generation: g,
+            },
+            Event::ReadyAttempt {
+                slot_id: slot.clone(),
+                generation: g,
             },
         ] {
             assert!(!journal.apply(event).unwrap().rejected);
         }
-        let generation = accept_job(&mut journal, &JobId("gh-1".into()), &slot).unwrap();
-        assert_eq!(generation, Generation::INITIAL);
-        let found = ensure_owned(&mut journal, &JobId("gh-1".into())).unwrap();
-        assert_eq!(found, generation);
+        let generation = accept_job(&mut journal, &JobId("guid-1".into()), &slot).unwrap();
+        assert_eq!(generation, g);
+        let state = journal.load_state().unwrap();
+        assert_eq!(state.slots[0].phase, ActorPhase::Assigned);
+        assert_eq!(state.jobs[0].job_id.0, "guid-1");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn accept_job_rejects_a_second_live_owner() {
+        let dir = tmp("accept-second");
+        let mut journal = Journal::open(dir.join("journal.db")).unwrap();
+        let job_id = JobId("already".into());
+        let _ = prime_owned(&mut journal, &job_id);
+        let error = accept_job(
+            &mut journal,
+            &JobId("other".into()),
+            &SlotId("scope-1".into()),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Assigned rejected"), "{error}");
+        assert_eq!(
+            ensure_owned(&mut journal, &job_id).unwrap(),
+            Generation::INITIAL
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 }

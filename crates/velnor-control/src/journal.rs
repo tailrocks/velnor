@@ -167,6 +167,44 @@ impl FleetState {
     }
 }
 
+fn job_occupies_slot(phase: ActorPhase) -> bool {
+    matches!(
+        phase,
+        ActorPhase::Assigned | ActorPhase::Starting | ActorPhase::Running | ActorPhase::Completing
+    )
+}
+
+fn restore_slot_after_terminal_job(
+    state: &mut FleetState,
+    commands: &mut Vec<SideEffect>,
+    job_id: &JobId,
+) {
+    let Some(job) = state.jobs.iter().find(|job| job.job_id == *job_id).cloned() else {
+        return;
+    };
+    state.jobs.retain(|item| item.job_id != *job_id);
+    let Some(index) = state
+        .slots
+        .iter()
+        .position(|slot| slot.slot_id == job.slot_id)
+    else {
+        return;
+    };
+    if state.slots[index].generation != job.generation {
+        return;
+    }
+    if state.slots[index].ready_proof().is_ok() && state.slots[index].registered {
+        state.slots[index].phase = ActorPhase::Ready;
+        commands.push(SideEffect::AdvertiseCapacity {
+            permits: state.advertised_capacity(),
+        });
+    } else if state.slots[index].registered {
+        state.slots[index].phase = ActorPhase::Registered;
+    } else {
+        state.slots[index].phase = ActorPhase::Provisioning;
+    }
+}
+
 fn oldest_outbox_age_seconds(outbox: &[OutboxRecord]) -> u64 {
     let now = unix_now();
     outbox
@@ -528,16 +566,21 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
             generation,
             worker,
         } => {
-            let slot_generation = state
-                .slots
-                .iter()
-                .find(|slot| slot.slot_id == slot_id)
-                .map(|slot| slot.generation);
+            let slot = state.slots.iter().find(|slot| slot.slot_id == slot_id);
+            let slot_generation = slot.map(|slot| slot.generation);
+            let slot_phase = slot.map(|slot| slot.phase);
             let newer_job = state
                 .jobs
                 .iter()
                 .any(|job| job.job_id == job_id && job.generation > generation);
-            if newer_job || slot_generation != Some(generation) {
+            let other_live = state.jobs.iter().any(|job| {
+                job.slot_id == slot_id && job.job_id != job_id && job_occupies_slot(job.phase)
+            });
+            if newer_job
+                || slot_generation != Some(generation)
+                || slot_phase != Some(ActorPhase::Assigned)
+                || other_live
+            {
                 rejected = true;
             } else {
                 state.jobs.retain(|job| job.job_id != job_id);
@@ -615,7 +658,11 @@ pub fn reduce(mut state: FleetState, event: Event) -> ReduceOutcome {
                     rejected = true;
                 } else {
                     row.remote_acked = true;
-                    commands.push(SideEffect::DeleteOutbox { job_id, generation });
+                    commands.push(SideEffect::DeleteOutbox {
+                        job_id: job_id.clone(),
+                        generation,
+                    });
+                    restore_slot_after_terminal_job(&mut state, &mut commands, &job_id);
                 }
             } else {
                 rejected = true;
@@ -1324,10 +1371,22 @@ mod tests {
                 generation: gen(),
             })
             .unwrap();
-        assert!(matches!(
-            outcome.commands.as_slice(),
-            [SideEffect::DeleteOutbox { .. }]
-        ));
+        assert!(
+            outcome
+                .commands
+                .iter()
+                .any(|command| matches!(command, SideEffect::DeleteOutbox { .. })),
+            "{:?}",
+            outcome.commands
+        );
+        assert!(
+            outcome
+                .commands
+                .iter()
+                .any(|command| matches!(command, SideEffect::AdvertiseCapacity { .. })),
+            "terminal job must restore advertised Ready capacity: {:?}",
+            outcome.commands
+        );
         drop(recovered);
         let again = Journal::open(dir.join("journal.db")).unwrap();
         assert!(again.pending_outbox().unwrap().is_empty());
@@ -1433,6 +1492,100 @@ mod tests {
         let state = Journal::open(&path).unwrap().load_state().unwrap();
         assert!(state.control_live);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn second_live_job_on_assigned_slot_is_rejected() {
+        let (_dir, mut journal) = open_tmp("two-jobs");
+        prime_ready(&mut journal, "scope-1");
+        journal
+            .apply(Event::ReadyAttempt {
+                slot_id: slot("scope-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        assert!(
+            !journal
+                .apply(Event::Assigned {
+                    slot_id: slot("scope-1"),
+                    job_id: job("guid-1"),
+                    generation: gen(),
+                })
+                .unwrap()
+                .rejected
+        );
+        assert!(
+            !journal
+                .apply(Event::JobOwned {
+                    job_id: job("guid-1"),
+                    slot_id: slot("scope-1"),
+                    attempt: 1,
+                    generation: gen(),
+                    worker: "w".into(),
+                })
+                .unwrap()
+                .rejected
+        );
+        let second = journal
+            .apply(Event::JobOwned {
+                job_id: job("424242"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: gen(),
+                worker: "w2".into(),
+            })
+            .unwrap();
+        assert!(second.rejected);
+        let state = journal.load_state().unwrap();
+        assert_eq!(state.jobs.len(), 1);
+        assert_eq!(state.jobs[0].job_id, job("guid-1"));
+        assert_eq!(state.slots[0].phase, ActorPhase::Assigned);
+    }
+
+    #[test]
+    fn remote_ack_restores_ready() {
+        let (_dir, mut journal) = open_tmp("ack-ready");
+        prime_ready(&mut journal, "scope-1");
+        journal
+            .apply(Event::ReadyAttempt {
+                slot_id: slot("scope-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::Assigned {
+                slot_id: slot("scope-1"),
+                job_id: job("guid-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::JobOwned {
+                job_id: job("guid-1"),
+                slot_id: slot("scope-1"),
+                attempt: 1,
+                generation: gen(),
+                worker: "w".into(),
+            })
+            .unwrap();
+        journal
+            .apply(Event::CompletionIntended {
+                job_id: job("guid-1"),
+                generation: gen(),
+                payload_sha256: payload_checksum(b"ok"),
+            })
+            .unwrap();
+        let acked = journal
+            .apply(Event::RemoteAcked {
+                job_id: job("guid-1"),
+                generation: gen(),
+            })
+            .unwrap();
+        assert!(!acked.rejected);
+        let state = journal.load_state().unwrap();
+        assert!(state.jobs.is_empty(), "{:?}", state.jobs);
+        assert_eq!(state.slots[0].phase, ActorPhase::Ready);
+        assert!(state.slots[0].phase.counts_as_ready());
     }
 
     #[test]

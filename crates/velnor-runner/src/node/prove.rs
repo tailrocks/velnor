@@ -177,7 +177,7 @@ const GITHUB_PROBE_TIMEOUT_SECS: u64 = 10;
 pub struct GitHubProbeRequest<'a> {
     pub url: &'a str,
     pub token: &'a str,
-    pub policy: &'a RoutingFields,
+    pub policy: Option<&'a RoutingFields>,
     pub pool_id: Option<i64>,
     pub configured_labels: &'a [String],
     pub configured_trust: &'a str,
@@ -270,22 +270,46 @@ pub async fn probe_github(request: GitHubProbeRequest<'_>) -> GitHubProbe {
         return GitHubProbe::default();
     }
     let _ = body;
-    let labels = if request.configured_labels.is_empty() {
-        request.policy.labels.clone()
-    } else {
+    let labels = if !request.configured_labels.is_empty() {
         request.configured_labels.to_vec()
+    } else {
+        request
+            .policy
+            .map(|policy| policy.labels.clone())
+            .unwrap_or_default()
     };
     let trust_scope = runtime_trust_scope(request.configured_trust);
     let mut evidence = RoutingFields {
-        group: request.policy.group.clone(),
-        selected_repositories: request.policy.selected_repositories.clone(),
+        group: request
+            .policy
+            .map(|policy| policy.group.clone())
+            .unwrap_or_default(),
+        selected_repositories: request
+            .policy
+            .map(|policy| policy.selected_repositories.clone())
+            .unwrap_or_default(),
         labels,
         trust_scope,
     };
     if let Some((owner, repo)) = scope.repo_full_name() {
         evidence.selected_repositories = vec![format!("{owner}/{repo}")];
-    } else if let Some((group_name, repos)) =
-        live_group_and_repos(&scope, request.token, request.policy, request.pool_id).await
+        if evidence.group.is_empty() {
+            evidence.group = request
+                .policy
+                .map(|policy| policy.group.clone())
+                .filter(|group| !group.is_empty())
+                .unwrap_or_else(|| "Default".to_owned());
+        }
+    } else if let Some((group_name, repos)) = live_group_and_repos(
+        &scope,
+        request.token,
+        request
+            .policy
+            .map(|policy| policy.group.as_str())
+            .unwrap_or(""),
+        request.pool_id,
+    )
+    .await
     {
         evidence.group = group_name;
         if !repos.is_empty() {
@@ -326,7 +350,7 @@ fn write_fields(path: &Path, fields: &RoutingFields) -> anyhow::Result<()> {
 async fn live_group_and_repos(
     scope: &GitHubScope,
     token: &str,
-    policy: &RoutingFields,
+    want_group: &str,
     pool_id: Option<i64>,
 ) -> Option<(String, Vec<String>)> {
     let url = scope.runner_groups_url().ok()?;
@@ -344,8 +368,17 @@ async fn live_group_and_repos(
     let groups: Groups = serde_json::from_str(&body).ok()?;
     let group = groups
         .runner_groups
-        .into_iter()
-        .find(|group| pool_id == Some(group.id) || group.name == policy.group)?;
+        .iter()
+        .find(|group| pool_id == Some(group.id))
+        .or_else(|| {
+            groups
+                .runner_groups
+                .iter()
+                .find(|group| !want_group.is_empty() && group.name == want_group)
+        })
+        .or_else(|| groups.runner_groups.iter().find(|group| !group.default))
+        .or_else(|| groups.runner_groups.first())?
+        .clone();
     let repos = live_group_repos(scope, token, group.id)
         .await
         .unwrap_or_default();
@@ -672,5 +705,69 @@ mod tests {
             "trusted".into(),
         )
         .is_none());
+    }
+
+    #[tokio::test]
+    async fn org_probe_without_policy_writes_live_group_and_repos() {
+        use serde_json::json;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runners"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 0,
+                "runners": []
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v3/orgs/tailrocks/actions/runner-groups"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "runner_groups": [{
+                    "id": 7,
+                    "name": "velnor",
+                    "default": false
+                }]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/v3/orgs/tailrocks/actions/runner-groups/7/repositories",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 1,
+                "repositories": [{"full_name": "tailrocks/velnor"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let url = format!("{}/tailrocks", server.uri());
+        std::env::set_var(crate::protocol::GITHUB_HTTP_TRANSPORT_ENV, "native");
+        let probe = probe_github(GitHubProbeRequest {
+            url: &url,
+            token: "ghs_test",
+            policy: None,
+            pool_id: None,
+            configured_labels: &["velnor".into()],
+            configured_trust: "trusted",
+        })
+        .await;
+        assert!(probe.reachable, "url={url} probe={probe:?}");
+        let evidence = probe.evidence.expect("live evidence");
+        assert_eq!(evidence.group, "velnor");
+        assert_eq!(evidence.selected_repositories, vec!["tailrocks/velnor"]);
+        assert_eq!(evidence.labels, vec!["velnor"]);
+        assert_eq!(evidence.trust_scope, "trusted");
+
+        let dir = tmp("org-probe");
+        write_evidence(&dir, &evidence).unwrap();
+        let on_disk: RoutingFields =
+            serde_json::from_slice(&std::fs::read(dir.join(ROUTING_EVIDENCE_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(on_disk, evidence);
+        std::fs::remove_dir_all(dir).ok();
     }
 }

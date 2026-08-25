@@ -348,11 +348,15 @@ fn is_hosted_github(host: &str) -> bool {
 
 fn api_base_url(github_url: &Url, hosted: bool) -> Result<Url> {
     let host = github_url.host_str().context("GitHub URL needs host")?;
+    let hostport = match github_url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    };
     if hosted {
-        Url::parse(&format!("{}://api.{host}/", github_url.scheme()))
+        Url::parse(&format!("{}://api.{hostport}/", github_url.scheme()))
             .context("build GitHub API URL")
     } else {
-        Url::parse(&format!("{}://{host}/api/v3/", github_url.scheme()))
+        Url::parse(&format!("{}://{hostport}/api/v3/", github_url.scheme()))
             .context("build GitHub Enterprise API URL")
     }
 }
@@ -408,6 +412,8 @@ pub struct GitHubJitRunnerLabel {
 pub struct RunnerGroup {
     pub id: i64,
     pub name: String,
+    #[serde(default)]
+    pub default: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4832,6 +4838,19 @@ mod tests {
         assert_eq!(
             scope.jit_config_url.as_str(),
             "https://github.example.com/api/v3/repos/org/repo/actions/runners/generate-jitconfig"
+        );
+    }
+
+    #[test]
+    fn ghe_scope_preserves_explicit_port() {
+        let scope = GitHubScope::parse("http://127.0.0.1:8443/tailrocks").unwrap();
+        assert_eq!(
+            scope.runners_url().unwrap().as_str(),
+            "http://127.0.0.1:8443/api/v3/orgs/tailrocks/actions/runners"
+        );
+        assert_eq!(
+            scope.runner_groups_url().unwrap().as_str(),
+            "http://127.0.0.1:8443/api/v3/orgs/tailrocks/actions/runner-groups"
         );
     }
 

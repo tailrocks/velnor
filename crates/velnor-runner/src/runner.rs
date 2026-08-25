@@ -8842,6 +8842,7 @@ mod tests {
         let groups = vec![crate::protocol::RunnerGroup {
             id: 42,
             name: "Velnor Trusted".into(),
+            default: false,
         }];
         assert_eq!(
             resolve_runner_group_id(&groups, "velnor trusted", None).unwrap(),
