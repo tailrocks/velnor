@@ -224,6 +224,29 @@ pub fn read_policy(state_dir: &Path) -> Option<RoutingFields> {
     read_fields(&state_dir.join(ROUTING_POLICY_FILE))
 }
 
+/// Read an operator-declared desired policy from an explicit path. Live
+/// GitHub evidence is never promoted to policy by this function.
+pub fn read_policy_file(path: &Path) -> anyhow::Result<RoutingFields> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| anyhow::anyhow!("read routing policy {}: {error}", path.display()))?;
+    let fields: RoutingFields = serde_json::from_slice(&bytes)
+        .map_err(|error| anyhow::anyhow!("parse routing policy {}: {error}", path.display()))?;
+    if !fields_complete(&fields) {
+        anyhow::bail!(
+            "routing policy {} is incomplete: group, selected_repositories, labels, and trust_scope are required",
+            path.display()
+        );
+    }
+    Ok(fields)
+}
+
+/// Persist an explicit desired policy into the controller state directory.
+/// The source remains operator-owned; this copy lets the existing routing
+/// observation path compare evidence and policy without a second authority.
+pub fn write_policy(state_dir: &Path, policy: &RoutingFields) -> anyhow::Result<()> {
+    write_fields(&state_dir.join(ROUTING_POLICY_FILE), policy)
+}
+
 /// Write desired policy only when the operator has not already done so.
 ///
 /// # Errors
@@ -705,6 +728,18 @@ mod tests {
             "trusted".into(),
         )
         .is_none());
+    }
+
+    #[test]
+    fn explicit_policy_file_is_required_to_be_complete() {
+        let dir = tmp("policy-file");
+        let path = dir.join("desired.json");
+        let fields = matching_fields();
+        std::fs::write(&path, serde_json::to_vec(&fields).unwrap()).unwrap();
+        assert_eq!(read_policy_file(&path).unwrap(), fields);
+        std::fs::write(&path, br#"{"group":"velnor"}"#).unwrap();
+        assert!(read_policy_file(&path).is_err());
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[tokio::test]

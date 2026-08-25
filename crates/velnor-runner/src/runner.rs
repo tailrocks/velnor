@@ -9723,6 +9723,7 @@ jobs:
             replace: false,
             pool_id: None,
             pool_name: None,
+            routing_policy_file: None,
             dry_run_registration: false,
             slots,
             once: false,

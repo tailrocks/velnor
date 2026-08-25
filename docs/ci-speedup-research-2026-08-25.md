@@ -260,6 +260,13 @@ scoped heartbeat file, and the controller validates the PID/generation then
 commits the durable heartbeat event. Guardian and job ownership semantics stay
 unchanged.
 
+The same Sentry inspection found `routing-evidence.json` but no desired
+`routing-policy.json`. Org URLs cannot safely infer an allowlist from live
+evidence, so routing correctly stayed fail-closed. The recovery surface is now
+explicit `VELNOR_ROUTING_POLICY_FILE`, which accepts only a complete
+operator-declared policy and never treats observed GitHub membership as
+desired state.
+
 The journal recorded **65** instances on 2026-08-25 where the Docker lease
 accept thread failed to stop within its 2 s bound. The old lease used a
 blocking UnixListener and synthetic wakeup connections; under host load the

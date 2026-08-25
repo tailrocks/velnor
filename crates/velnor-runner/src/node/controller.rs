@@ -381,7 +381,13 @@ async fn observe_github_and_routing(
                 prove::write_policy_if_absent(&args.state_dir, &policy)?;
             }
         }
-        let policy = prove::read_policy(&args.state_dir);
+        let policy = if let Some(path) = exec.routing_policy_file.as_deref() {
+            let policy = prove::read_policy_file(path)?;
+            prove::write_policy(&args.state_dir, &policy)?;
+            Some(policy)
+        } else {
+            prove::read_policy(&args.state_dir)
+        };
         if let (Some(url), Some(token)) = (exec.url.as_deref(), exec.pat.as_deref()) {
             let probe = prove::probe_github(prove::GitHubProbeRequest {
                 url,
