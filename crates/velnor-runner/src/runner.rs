@@ -20,7 +20,7 @@ use std::{
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{
     sync::{mpsc::UnboundedReceiver, oneshot},
-    task::{JoinHandle, JoinSet},
+    task::JoinHandle,
 };
 use tracing::Instrument as _;
 
