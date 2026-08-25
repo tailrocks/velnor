@@ -5101,6 +5101,62 @@ fn execute_script_job(
     result
 }
 
+fn execute_microvm_script_job(
+    job: &AgentJobRequestMessage,
+    script_steps: &[crate::script_step::ScriptStep],
+) -> Result<ScriptJobResult> {
+    let file = velnor_model::ExecutionFile {
+        execution: velnor_model::ExecutionSection {
+            backend: velnor_model::ExecutionBackendKind::MicroVm,
+        },
+    };
+    let isolation = crate::execution::IsolationIdentity::new(job.job_id.clone(), 1);
+    let resources = crate::execution::IsolationResources::for_identity(
+        isolation.clone(),
+        std::path::Path::new("/usr/share/velnor/microvm"),
+    );
+    let mut fs = crate::execution::RealHostFs;
+    let mut runner = crate::executor::ProcessCommandRunner;
+    let mut api = crate::execution::UnixFirecrackerClient::new(resources.vsock);
+    let artifact_root = std::path::PathBuf::from("/usr/share/velnor/microvm");
+    let kvm = std::path::PathBuf::from("/dev/kvm");
+    let docker = std::path::PathBuf::from("/var/run/docker.sock");
+    let mut world = crate::execution::ExecutionWorld {
+        kvm: &kvm,
+        artifact_root: &artifact_root,
+        host_docker_socket: &docker,
+        runner: &mut runner,
+        firecracker: &mut api,
+        host_fs: &mut fs,
+    };
+    let plan = crate::execution::ValidatedPlan {
+        job_id: job.job_id.clone(),
+        steps: script_steps.iter().map(|step| step.id.clone()).collect(),
+        job_container_image: String::new(),
+        service_images: Vec::new(),
+        timeout_ms: 60_000,
+        cancel_requested: false,
+        fail: false,
+        cache_digest: None,
+        command_files: vec!["GITHUB_OUTPUT".into()],
+    };
+    let outcome = crate::execution::run_validated_job(&file, isolation, &plan, &mut world)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    let result = match outcome.conclusion {
+        "success" => TaskResult::Succeeded,
+        "cancelled" => TaskResult::Canceled,
+        _ => TaskResult::Failed,
+    };
+    Ok(ScriptJobResult {
+        result,
+        outputs: BTreeMap::new(),
+        environment_url: None,
+        step_logs: Vec::new(),
+        teardown: None,
+        timings: ExecutionTimings::default(),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_script_job_inner(
     job_dir: &std::path::Path,
@@ -5121,13 +5177,7 @@ fn execute_script_job_inner(
     execution_backend: velnor_model::ExecutionBackendKind,
 ) -> Result<ScriptJobResult> {
     if execution_backend == velnor_model::ExecutionBackendKind::MicroVm {
-        anyhow::bail!(
-            "{}",
-            velnor_model::MicroVmPreflightFailure::new(
-                "job.execute",
-                "this job must run in a jailed Firecracker session; host DockerScriptExecutor was not used"
-            )
-        );
+        return execute_microvm_script_job(job, script_steps);
     }
     let execution_started = Instant::now();
     // Side-effect ledger: admission has already completed, so every counter here
@@ -5447,7 +5497,8 @@ fn execute_script_job_inner(
         }
         log
     });
-    let mut executor = DockerScriptExecutor::new(command_runner)
+    let mut executor = crate::execution::host_docker_executor(command_runner, execution_backend)
+        .map_err(|error| anyhow::anyhow!("{error}"))?
         .with_job_environment_started(environment_started)
         .with_initial_order(checkout_order)
         .with_trailing_post_action_count(cleanup_checkout_plans.len())

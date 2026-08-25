@@ -6,9 +6,14 @@
 
 mod artifacts;
 mod backend;
+mod cache_transport;
 mod docker;
 mod firecracker;
+mod guest;
 mod isolation;
+mod net;
+mod snapshot;
+mod unix_api;
 
 pub use artifacts::{
     hex_sha256, verify_microvm_artifacts, ArtifactChecksums, MicroVmArtifactSet,
@@ -17,11 +22,19 @@ pub use artifacts::{
 pub use backend::{
     BackendPhase, BackendSession, ExecutionError, ExecutionEvent, ExecutionOutcome, ValidatedPlan,
 };
+pub use cache_transport::{publish_on_success, CacheBlob, CacheTransportError};
 pub use docker::DockerBackend;
 pub use firecracker::{
     restore_or_cold_boot, FirecrackerApi, FirecrackerBackend, RecordingFirecracker,
 };
+pub use guest::{
+    validate_guest_toml, validate_kernel_config, validate_rootfs_packages, KERNEL_TARBALL,
+    KERNEL_VERSION, ROOTFS_PACKAGES,
+};
 pub use isolation::{IsolationIdentity, IsolationResources};
+pub use net::{nftables_commands, teardown_is_exact, teardown_net_commands};
+pub use snapshot::SnapshotIdentity;
+pub use unix_api::UnixFirecrackerClient;
 
 use std::path::{Path, PathBuf};
 
@@ -64,6 +77,34 @@ pub fn open_session(
         ExecutionBackendKind::Docker => BackendSession::docker(isolation, world),
         ExecutionBackendKind::MicroVm => BackendSession::microvm(isolation, world),
     }
+}
+
+/// Drive the full lifecycle for one admitted plan. Both backends use this.
+///
+/// # Errors
+/// Preflight, phase, or teardown failures. MicroVM never hops to docker.
+pub fn run_validated_job(
+    file: &ExecutionFile,
+    isolation: IsolationIdentity,
+    plan: &ValidatedPlan,
+    world: &mut ExecutionWorld<'_>,
+) -> Result<ExecutionOutcome, ExecutionError> {
+    let mut session = open_session(file, isolation, world)?;
+    session.reserve(world)?;
+    session.prepare(plan, world)?;
+    session.start(world)?;
+    if plan.cancel_requested {
+        session.cancel(world)?;
+    } else {
+        session.execute(plan, world)?;
+    }
+    let mut outcome = session.collect()?;
+    let torn = session.teardown(world)?;
+    outcome.cleaned = torn.cleaned;
+    if file.backend() == ExecutionBackendKind::MicroVm && session.used_host_docker() {
+        return Err(ExecutionError::HostDockerForbidden);
+    }
+    Ok(outcome)
 }
 
 /// Host/guest world used by backends. Tests inject doubles at this boundary.
@@ -220,6 +261,7 @@ impl From<MicroVmPreflightFailure> for ExecutionError {
 pub struct RecordingCommands {
     pub calls: Vec<(String, Vec<String>)>,
     pub next: CommandResult,
+    pub codes: Vec<i32>,
 }
 
 impl Default for RecordingCommands {
@@ -231,6 +273,7 @@ impl Default for RecordingCommands {
                 stdout: String::new(),
                 stderr: String::new(),
             },
+            codes: Vec::new(),
         }
     }
 }
@@ -238,7 +281,11 @@ impl Default for RecordingCommands {
 impl CommandRunner for RecordingCommands {
     fn run(&mut self, program: &str, args: &[String]) -> anyhow::Result<CommandResult> {
         self.calls.push((program.to_string(), args.to_vec()));
-        Ok(self.next.clone())
+        let mut result = self.next.clone();
+        if !self.codes.is_empty() {
+            result.code = self.codes.remove(0);
+        }
+        Ok(result)
     }
 }
 

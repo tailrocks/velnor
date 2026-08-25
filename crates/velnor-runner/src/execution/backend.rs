@@ -30,6 +30,9 @@ pub struct ValidatedPlan {
     pub service_images: Vec<String>,
     pub timeout_ms: u64,
     pub cancel_requested: bool,
+    pub fail: bool,
+    pub cache_digest: Option<String>,
+    pub command_files: Vec<String>,
 }
 
 impl ValidatedPlan {
@@ -42,6 +45,9 @@ impl ValidatedPlan {
             service_images: vec!["postgres:16".into()],
             timeout_ms: 60_000,
             cancel_requested: false,
+            fail: false,
+            cache_digest: None,
+            command_files: vec!["GITHUB_OUTPUT".into(), "GITHUB_ENV".into()],
         }
     }
 }

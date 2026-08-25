@@ -78,6 +78,26 @@ impl DockerBackend {
             });
             return Ok(());
         }
+        if plan.timeout_ms == 0 {
+            events.push(ExecutionEvent::Log {
+                stream: 1,
+                line: "timeout".into(),
+            });
+            return Ok(());
+        }
+        if plan.fail {
+            events.push(ExecutionEvent::Log {
+                stream: 1,
+                line: "failure".into(),
+            });
+            return Ok(());
+        }
+        if let Some(digest) = &plan.cache_digest {
+            events.push(ExecutionEvent::Log {
+                stream: 1,
+                line: format!("cache {digest}"),
+            });
+        }
         for step in &plan.steps {
             events.push(ExecutionEvent::Log {
                 stream: 1,

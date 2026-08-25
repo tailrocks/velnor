@@ -183,8 +183,22 @@ impl FirecrackerBackend {
         world: &mut ExecutionWorld<'_>,
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
-        let _ = plan;
         let set = MicroVmArtifactSet::load(world.artifact_root, world.host_fs)?;
+        let jailer_bin = set.jailer.path.to_str().unwrap_or("jailer");
+        let jailer_args = Self::jailer_args(resources, &set.firecracker.path);
+        let jailer = world
+            .runner
+            .run(jailer_bin, &jailer_args)
+            .map_err(|error| MicroVmPreflightFailure::new("jailer", error.to_string()))?;
+        if jailer.code != 0 {
+            return Err(MicroVmPreflightFailure::new(
+                "jailer",
+                format!("jailer start exited {}", jailer.code),
+            )
+            .into());
+        }
+        events.push(ExecutionEvent::FirecrackerApi("jailer".into()));
+        let _ = plan;
         world
             .firecracker
             .put_boot_source(&set.kernel.path)
@@ -237,6 +251,20 @@ impl FirecrackerBackend {
             events.push(ExecutionEvent::Log {
                 stream: 1,
                 line: "cancel".into(),
+            });
+            return Ok(());
+        }
+        if plan.timeout_ms == 0 {
+            events.push(ExecutionEvent::Log {
+                stream: 1,
+                line: "timeout".into(),
+            });
+            return Ok(());
+        }
+        if plan.fail {
+            events.push(ExecutionEvent::Log {
+                stream: 1,
+                line: "failure".into(),
             });
             return Ok(());
         }

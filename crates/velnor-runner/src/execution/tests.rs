@@ -231,3 +231,102 @@ fn collect_while_live_is_forbidden_and_snapshot_mismatch_fails_closed() {
     assert_eq!(err.requirement, "guest.snapshot");
     assert!(err.to_string().contains("docker backend was not used"));
 }
+
+#[test]
+fn contract_timeout_and_failure_match_across_backends() {
+    for fail in [false, true] {
+        let mut docker_plan = ValidatedPlan::example_success("job-x");
+        docker_plan.fail = fail;
+        docker_plan.timeout_ms = if fail { 60_000 } else { 0 };
+        let docker = run_custom(ExecutionBackendKind::Docker, docker_plan.clone());
+        let micro = run_custom(ExecutionBackendKind::MicroVm, docker_plan);
+        assert_eq!(docker.conclusion, micro.conclusion);
+        assert!(docker.cleaned && micro.cleaned);
+    }
+}
+
+fn run_custom(kind: ExecutionBackendKind, plan: ValidatedPlan) -> super::backend::ExecutionOutcome {
+    let toml = match kind {
+        ExecutionBackendKind::Docker => "[execution]\nbackend = \"docker\"\n",
+        ExecutionBackendKind::MicroVm => "[execution]\nbackend = \"microvm\"\n",
+    };
+    let file = ExecutionFile::parse_toml(toml).unwrap();
+    let mut fs = MemoryFs::default();
+    let docker = PathBuf::from("/var/run/docker.sock");
+    fs.write(&docker, b"socket").unwrap();
+    let artifacts = PathBuf::from("/microvm");
+    if kind == ExecutionBackendKind::MicroVm {
+        seed_microvm_world(&mut fs, &artifacts);
+    }
+    let mut runner = RecordingCommands {
+        next: CommandResult {
+            code: 0,
+            stdout: "ok".into(),
+            stderr: String::new(),
+        },
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+    crate::execution::run_validated_job(
+        &file,
+        IsolationIdentity::new("job-x", 1),
+        &plan,
+        &mut world,
+    )
+    .unwrap()
+}
+
+#[test]
+fn faults_fail_closed_without_host_docker_or_sibling_teardown() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let artifacts = PathBuf::from("/microvm");
+    seed_microvm_world(&mut fs, &artifacts);
+    let docker = PathBuf::from("/var/run/docker.sock");
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        next: CommandResult {
+            code: 0,
+            stdout: String::new(),
+            stderr: "jailer killed".into(),
+        },
+        codes: vec![0, 1],
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+    let mut session =
+        open_session(&file, IsolationIdentity::new("job-fault", 1), &mut world).unwrap();
+    session.reserve(&mut world).unwrap();
+    let err = session
+        .prepare(&ValidatedPlan::example_success("job-fault"), &mut world)
+        .unwrap_err();
+    assert!(err.to_string().contains("jailer"), "{err}");
+    assert!(!session.used_host_docker());
+
+    let victim = IsolationResources::for_identity(
+        IsolationIdentity::new("job-victim", 1),
+        Path::new("/run"),
+    );
+    let sibling = IsolationIdentity::new("job-sibling", 2);
+    assert!(crate::execution::teardown_is_exact(&victim, &sibling));
+
+    let snap = SnapshotIdentity::production_template("x86_64", "linux-6.1");
+    let mut other = snap.clone();
+    other.firecracker_version = "0.0.0".into();
+    assert!(snap.restore_or_cold_boot(&other).is_err());
+
+    let stale = IsolationIdentity::new("job-stale", 1);
+    let live = IsolationIdentity::new("job-stale", 2);
+    assert_ne!(stale.as_jailer_id(), live.as_jailer_id());
+}
+
+#[test]
+fn shipped_guest_image_rejects_virtio_fs() {
+    crate::execution::validate_kernel_config(include_str!("../../../../microvm/kernel.config"))
+        .unwrap();
+    crate::execution::validate_guest_toml(include_str!("../../../../microvm/guest.toml")).unwrap();
+}
