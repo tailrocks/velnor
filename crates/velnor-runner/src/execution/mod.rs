@@ -257,20 +257,6 @@ impl HostFs for MemoryFs {
     }
 }
 
-/// Construct a host Docker executor only for the docker backend.
-///
-/// # Errors
-/// [`ExecutionError::HostDockerForbidden`] when `microvm` is selected.
-pub fn host_docker_executor<R: CommandRunner>(
-    runner: R,
-    backend: ExecutionBackendKind,
-) -> Result<crate::executor::DockerScriptExecutor<R>, ExecutionError> {
-    match backend {
-        ExecutionBackendKind::Docker => Ok(crate::executor::DockerScriptExecutor::new(runner)),
-        ExecutionBackendKind::MicroVm => Err(ExecutionError::HostDockerForbidden),
-    }
-}
-
 /// Executor proof. A preflight `executor.ok` file for the docker backend;
 /// for MicroVM, one whose recorded generation matches the packaged artifacts.
 /// A live host Docker socket is never proof: it is the transitional backend

@@ -40,7 +40,7 @@ use crate::{
     },
     config::{self, CredentialScheme, RunnerSettings, StoredCredentials, StoredRunnerConfig},
     executor::{
-        condition_is_statically_false, CommandRunner, DockerScriptExecutor, ExecutableStep,
+        condition_is_statically_false, CommandRunner, DockerJobEngine, ExecutableStep,
         JobExecutionSummary, ProcessCommandRunner, StepLog, StepStartEvent,
     },
     github_adapter::{
@@ -5103,7 +5103,7 @@ fn execute_script_job(
 }
 
 struct RunnerDockerEngine<'a, R: CommandRunner> {
-    executor: &'a mut DockerScriptExecutor<R>,
+    executor: &'a mut DockerJobEngine<R>,
     plan: &'a crate::plan::NormalizedJobPlan,
     job_outputs: Option<&'a Value>,
     environment_url: Option<&'a Value>,
@@ -5651,8 +5651,7 @@ fn execute_script_job_inner(
         }
         log
     });
-    let mut executor = crate::execution::host_docker_executor(command_runner, execution_backend)
-        .map_err(|error| anyhow::anyhow!("{error}"))?
+    let mut executor = DockerJobEngine::new(command_runner)
         .with_job_environment_started(environment_started)
         .with_initial_order(checkout_order)
         .with_trailing_post_action_count(cleanup_checkout_plans.len())
@@ -5835,7 +5834,7 @@ fn execute_script_job_inner(
                 order: post_order,
             });
         }
-        let mut service_executor = DockerScriptExecutor::new(command_runner);
+        let mut service_executor = DockerJobEngine::new(command_runner);
         service_executor.cleanup_services(&plan.execution.job_container)?;
         let stop_log = StepLog {
             step_id: stop_step_id,
@@ -6023,7 +6022,7 @@ impl TeardownHandle {
             job_dir,
             services_removed,
         } = self;
-        let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+        let mut executor = DockerJobEngine::new(ProcessCommandRunner);
         let cleanup = if services_removed {
             executor.cleanup_job_and_network_without_buildkit(&container)
         } else {
@@ -6055,7 +6054,7 @@ impl TeardownHandle {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take();
                 worker_forensics.lifecycle("buildkit-teardown-deferred-start");
-                let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+                let mut executor = DockerJobEngine::new(ProcessCommandRunner);
                 match executor.cleanup_job_buildkit(&worker_container) {
                     Ok(()) => worker_forensics.lifecycle("buildkit-teardown-deferred-done"),
                     Err(error) => worker_forensics.lifecycle(&format!(
@@ -6071,7 +6070,7 @@ impl TeardownHandle {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take();
-            let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+            let mut executor = DockerJobEngine::new(ProcessCommandRunner);
             if let Err(error) = executor.cleanup_job_buildkit(&container) {
                 eprintln!("Warning: deferred BuildKit teardown fallback failed: {error:#}");
             }
@@ -6160,7 +6159,7 @@ struct PrecreatedJobEnvironment {
 impl PrecreatedJobEnvironment {
     fn spawn(container: crate::container::JobContainerSpec) -> Self {
         Self::spawn_with(container, |container| {
-            let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+            let mut executor = DockerJobEngine::new(ProcessCommandRunner);
             let result = executor.start_job_environment(container);
             // Hand the guard out of the thread-local executor BEFORE it is
             // dropped; the running container keeps using the proxied socket.
@@ -6233,7 +6232,7 @@ impl Drop for PrecreatedJobEnvironment {
         if self.claimed || !self.join() {
             return;
         }
-        let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+        let mut executor = DockerJobEngine::new(ProcessCommandRunner);
         // Hand the pre-create thread's guard to the cleanup executor: its
         // cleanup drops the guard only AFTER the abandoned environment's
         // container is removed, so the proxy never dies under a live mount.

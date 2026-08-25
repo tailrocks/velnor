@@ -102,9 +102,23 @@ fn microvm_missing_kvm_does_not_invoke_host_docker() {
     assert!(text.contains("docker backend was not used"), "{text}");
     assert!(runner.calls.is_empty());
     assert!(api.calls.is_empty());
-    assert!(
-        host_docker_executor(RecordingCommands::default(), ExecutionBackendKind::MicroVm).is_err()
-    );
+}
+
+#[test]
+fn superseded_docker_script_executor_paths_are_gone() {
+    let execution = include_str!("mod.rs");
+    let runner = include_str!("../runner.rs");
+    let executor = include_str!("../executor.rs");
+    for source in [execution, runner, executor] {
+        assert!(
+            !source.contains("DockerScriptExecutor"),
+            "DockerScriptExecutor must not remain as a parallel executor"
+        );
+        assert!(
+            !source.contains("host_docker_executor"),
+            "host_docker_executor must not construct a host Docker engine outside ValidatedPlan"
+        );
+    }
 }
 
 #[test]
