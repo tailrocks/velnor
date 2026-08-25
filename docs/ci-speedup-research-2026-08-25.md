@@ -11,7 +11,7 @@ capability contract still govern execution.
 
 | Repo / run | Dominant job | Job wall | Queue | Notes |
 |---|---|---:|---:|---|
-| java-monorepo `rust-docker.yml` | Build and publish Docker images (Velnor) | **23–28 min** | ≤2 min | single bake step = 27.8 min; one stage (`processor-compare-app builder 4/4`) = **1194 s** |
+| java-monorepo `rust-docker.yml` | Build and publish Docker images (Velnor) | **188 s** | ≤2 min | run `32832916776`; registry-primary cache reduced the preceding no-registry run by **316 s / 62.7%** |
 | parallax dispatch run | velnor lane | 5.5 min | **425 s** | queue ≫ run; fleet starvation at peak |
 | tablerock dispatch run | velnor lane vs github lane | **5.2 vs 3.55 min** | 96 s | Velnor lane slower than GitHub lane |
 | jackin PR check sweep | 6 micro-jobs | 0.3–0.5 min each | 20–53 s each | overhead-dominated: queue+boot ≈ work |
@@ -48,9 +48,10 @@ byte-identical YAML:
   `<repo>/<scope>`, honoring the estate cache policy: bounded cardinality,
   LRU + age eviction, trust-scope separation, quota accounting.
 
-Effect estimate: java-monorepo Velnor bake 28 → ~5 min warm (dep-tree layers
-hit); fixes tablerock lane parity and parallax/jackin gha-scoped caches with
-zero YAML changes (portability law satisfied).
+Effect estimate from the pre-registry baseline was java-monorepo Velnor bake
+28 → ~5 min warm (dep-tree layers hit). That estimate is superseded for the
+current workflow by the measured 188-second run above; native CacheService is
+still a separate research track, not a claimed present bottleneck.
 
 ### Measurement correction — 2026-08-25
 
@@ -65,6 +66,15 @@ Velnor still does not implement a CacheService/Twirp backend; it forwards the
 workflow endpoint and token. Native cache service remains a separate research
 track, not the current Java bottleneck. Do not claim the old 23–28 minute cold
 result for the post-PR #1976 workflow.
+
+### Measurement — 2026-08-26 runner warm-path copy
+
+The persistent target/cache path now rejects unsupported entries while copying
+and does not rescan the completed tree for metadata. A Rust microbenchmark over
+50,000 files measured **5.45 s copy-only vs 8.25 s copy-plus-verification**
+(−2.80 s / **33.9%**) on the first run; a warm filesystem rerun measured
+5.59 s vs 5.99 s. This isolates traversal overhead, not a production lane;
+live Velnor proof remains required before claiming CI speedup.
 
 ## 3. Ranked bottleneck list
 
@@ -95,6 +105,16 @@ result for the post-PR #1976 workflow.
    DerivedData caching.
 7. **parallax storage-integration cold bring-up**: 316 s warm vs 4841 s cold;
    seedable service containers collapse the cold case.
+
+### Runner fix — bounded JIT admission
+
+Node v2 previously executed every durable `RegisterRunner` side effect
+serially, even though the old configure path already bounded independent JIT
+requests at four. The new controller path preserves all proof gates, runs up
+to four proven slot registrations concurrently, then commits `Registered` and
+`ReadyAttempt` events in slot order. This targets the measured **425 s
+parallax queue** and Jackin microjob queue/boot overhead; live before/after
+proof waits on exact runner-group policy reconciliation.
 
 ## 4. Unified workflow standard (cross-org)
 
