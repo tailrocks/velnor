@@ -400,6 +400,51 @@ fn controller_rejects_boolean_routing_stamp() {
 }
 
 #[test]
+fn controller_reconciles_routing_independently_of_scheduler() {
+    let dir = scratch("route-recon");
+    let policy = matching_routing();
+    let mut evidence = matching_routing();
+    evidence.selected_repositories = vec!["other/repo".into()];
+    std::fs::write(
+        dir.join("routing-policy.json"),
+        serde_json::to_vec(&policy).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("routing-evidence.json"),
+        serde_json::to_vec(&evidence).unwrap(),
+    )
+    .unwrap();
+    let status = run_runner(
+        &dir,
+        &[
+            "controller",
+            "--state-dir",
+            dir.to_str().unwrap(),
+            "--scope",
+            "routerecon",
+            "--desired-ready",
+            "1",
+            "--surge",
+            "0",
+            "--once",
+            "--spawn-slots",
+            "false",
+        ],
+    );
+    assert!(status.success(), "{}", cmd_err(&dir));
+    let observed = velnor_runner::node::prove::observe_routing(&dir);
+    assert!(!observed.valid, "{observed:?}");
+    assert!(observed.group_valid);
+    let state = Journal::open(dir.join("journal.db"))
+        .unwrap()
+        .load_state()
+        .unwrap();
+    assert!(!state.routing_valid, "{state:?}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn controller_observes_live_session_and_executor_before_ready_proof() {
     let dir = scratch("proofs");
     let first = run_runner(

@@ -18,6 +18,7 @@ pub mod node;
 pub mod phase;
 pub mod resources;
 pub mod sanitized;
+pub mod scheduler;
 pub mod since;
 pub mod source;
 pub mod time;
@@ -40,6 +41,11 @@ pub use resources::{
     Run, RunnerRegistration, Slot,
 };
 pub use sanitized::{IdentityRef, RepositoryRef, SanitizedUrl, SecretRef};
+pub use scheduler::{
+    RunnerScaleSetMessageResponse, RunnerScaleSetStatistic, ScaleSetJobMessageType,
+    ScaleSetNotProven, SchedulerKind, SCALESET_API_VERSION, SCALESET_ENDPOINT,
+    SCALESET_MAX_CAPACITY_HEADER, SCALESET_UPSTREAM_COMMIT,
+};
 pub use since::{InvalidSince, Since};
 pub use source::Source;
 pub use time::{DurationMs, DurationOverflowError, InvalidTimestamp, Timestamp};

@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 
 /// On-disk routing observation. Missing or invalid file is not valid routing.
 pub const ROUTING_FILE: &str = "routing.json";
+/// Desired routing policy. Reconciled independently of the scheduler backend.
+pub const ROUTING_POLICY_FILE: &str = "routing-policy.json";
+/// Observed GitHub group/repo/label/trust evidence.
+pub const ROUTING_EVIDENCE_FILE: &str = "routing-evidence.json";
 /// Host-local executor proof written by a real preflight, never by daemon startup.
 pub const EXECUTOR_OK: &str = "executor.ok";
 /// Transitional host Docker socket. Presence is executor proof.
@@ -114,6 +118,72 @@ pub fn write_routing_document(
     let body = serde_json::to_vec_pretty(&RoutingDocument { evidence, policy })?;
     std::fs::write(&path, body)?;
     Ok(path)
+}
+
+/// Drift between desired policy and observed GitHub routing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RoutingDrift {
+    pub missing_repositories: Vec<String>,
+    pub extra_repositories: Vec<String>,
+    pub group_mismatch: bool,
+    pub labels_mismatch: bool,
+    pub trust_mismatch: bool,
+}
+
+impl RoutingDrift {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.missing_repositories.is_empty()
+            && self.extra_repositories.is_empty()
+            && !self.group_mismatch
+            && !self.labels_mismatch
+            && !self.trust_mismatch
+    }
+}
+
+/// Compare desired policy to observed GitHub routing. Independent of JIT vs scale-set.
+#[must_use]
+pub fn routing_drift(policy: &RoutingFields, evidence: &RoutingFields) -> RoutingDrift {
+    let want = normalized(policy);
+    let got = normalized(evidence);
+    let missing_repositories = want
+        .selected_repositories
+        .iter()
+        .filter(|repo| !got.selected_repositories.contains(repo))
+        .cloned()
+        .collect();
+    let extra_repositories = got
+        .selected_repositories
+        .iter()
+        .filter(|repo| !want.selected_repositories.contains(repo))
+        .cloned()
+        .collect();
+    RoutingDrift {
+        missing_repositories,
+        extra_repositories,
+        group_mismatch: want.group != got.group,
+        labels_mismatch: want.labels != got.labels,
+        trust_mismatch: want.trust_scope != got.trust_scope,
+    }
+}
+
+/// Write `routing.json` from policy + evidence files when both exist.
+///
+/// # Errors
+/// Filesystem or JSON failures.
+pub fn reconcile_from_dir(state_dir: &Path) -> anyhow::Result<Option<RoutingObservation>> {
+    let policy_path = state_dir.join(ROUTING_POLICY_FILE);
+    let evidence_path = state_dir.join(ROUTING_EVIDENCE_FILE);
+    if !policy_path.is_file() || !evidence_path.is_file() {
+        return Ok(None);
+    }
+    let policy: RoutingFields = serde_json::from_slice(&std::fs::read(policy_path)?)?;
+    let evidence: RoutingFields = serde_json::from_slice(&std::fs::read(evidence_path)?)?;
+    write_routing_document(state_dir, evidence.clone(), policy.clone())?;
+    Ok(Some(observe_document(&RoutingDocument {
+        evidence,
+        policy,
+    })))
 }
 
 /// Record a preflight executor proof file. Daemon startup must not call this.
@@ -243,6 +313,38 @@ mod tests {
         assert!(!dir.join(EXECUTOR_OK).exists());
         write_executor_ok(&dir).unwrap();
         assert!(observe_executor(&dir));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn routing_drift_is_independent_of_scheduler() {
+        let policy = matching_fields();
+        let mut evidence = matching_fields();
+        evidence.selected_repositories = vec!["other/repo".into()];
+        let drift = routing_drift(&policy, &evidence);
+        assert!(!drift.is_empty());
+        assert_eq!(drift.missing_repositories, vec!["tailrocks/velnor"]);
+        assert_eq!(drift.extra_repositories, vec!["other/repo"]);
+        assert!(!drift.group_mismatch);
+    }
+
+    #[test]
+    fn reconcile_from_dir_writes_observation() {
+        let dir = tmp("reconcile");
+        let policy = matching_fields();
+        std::fs::write(
+            dir.join(ROUTING_POLICY_FILE),
+            serde_json::to_vec(&policy).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(ROUTING_EVIDENCE_FILE),
+            serde_json::to_vec(&policy).unwrap(),
+        )
+        .unwrap();
+        let observed = reconcile_from_dir(&dir).unwrap().unwrap();
+        assert!(observed.valid);
+        assert!(observed.group_valid);
         std::fs::remove_dir_all(dir).ok();
     }
 

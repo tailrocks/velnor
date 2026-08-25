@@ -14,6 +14,7 @@ pub mod guardian;
 pub mod health;
 pub mod job;
 pub mod prove;
+pub mod scheduler;
 pub mod slot;
 pub mod watchdog;
 

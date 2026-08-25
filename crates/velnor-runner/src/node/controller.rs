@@ -95,6 +95,7 @@ async fn reconcile_once(
         execute_effect(args, journal, slots, jobs, command).await?;
     }
 
+    let _ = prove::reconcile_from_dir(&args.state_dir)?;
     let routing = prove::observe_routing(&args.state_dir);
     journal.apply(Event::Routing {
         valid: routing.valid,
@@ -260,6 +261,7 @@ async fn register_runner(
     slot_id: SlotId,
     generation: Generation,
 ) -> anyhow::Result<()> {
+    super::scheduler::production_scheduler().activate_production()?;
     let Ok(exec) = load_exec_config(&args.state_dir) else {
         return Ok(());
     };
