@@ -10,7 +10,7 @@ KillMode=control-group
 Slice=velnor-jobs.slice
 Environment=VELNOR_CAPABILITY_VALIDATION=strict
 EnvironmentFile=/etc/velnor/velnor.env
-ExecStart=/usr/bin/velnor-runner job --state-dir /var/lib/velnor --job-id %i --once
+ExecStart=/usr/bin/velnor-runner job --state-dir /var/lib/velnor --job-id %i
 Restart=no
 TimeoutStartSec=0
 TimeoutStopSec=600

@@ -1023,10 +1023,10 @@ pub async fn daemon(args: DaemonArgs) -> Result<()> {
     }
 }
 
-/// One full daemon pass: preflight → prune → JIT-configure slots → supervise
-/// slot tasks. In supervised mode the slot tasks themselves loop forever, so
-/// reaching the end of this function only happens in one-shot modes or when
-/// every slot task has stopped (e.g. all panicked repeatedly).
+/// One full daemon pass: preflight → prune → reserve permits → supervise
+/// slot processes. JIT registration is the controller `RegisterRunner` side
+/// effect after permit+routing+session+executor proof, not a bulk configure
+/// before those checks. Dry-run still calls `configure_daemon_slots`.
 async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     if draining() {
         return Ok(());
@@ -1075,24 +1075,29 @@ async fn daemon_pass(args: &DaemonArgs, slots: usize) -> Result<()> {
     };
     let total_slots = slots.saturating_add(surge as usize);
     reserve_capacity_permits(&config_base, &resolved_args, slots as u32, surge)?;
-    let usable_slots = configure_daemon_slots(&resolved_args, &config_base, total_slots).await?;
-    // Startup preflight covered every executable slot before JIT configuration.
+    if !daemon_should_poll_after_jit_config(&resolved_args) {
+        let _usable_slots =
+            configure_daemon_slots(&resolved_args, &config_base, total_slots).await?;
+        println!("Daemon JIT config dry run complete; skipped polling GitHub for jobs.");
+        return Ok(());
+    }
+    // Startup preflight covered every executable slot before supervision.
     // Child cycles must not repeat the same expensive check.
     resolved_args.skip_preflight = true;
     if draining() {
         return Ok(());
     }
-    if !daemon_should_poll_after_jit_config(&resolved_args) {
-        println!("Daemon JIT config dry run complete; skipped polling GitHub for jobs.");
-        return Ok(());
+    if resolved_args.url.is_some() {
+        crate::node::prove::write_routing(&config_base, true, true)?;
     }
-    notify_daemon_ready(usable_slots, total_slots);
+    crate::node::prove::write_executor_ok(&config_base)?;
+    notify_daemon_ready(total_slots, total_slots);
     if let Some(sink) = crate::ops::global() {
         // Current instance state row: identity, version, and slot counts.
         let _ = sink.upsert_instance(
             &instance_slug_for_store(),
             env!("CARGO_PKG_VERSION"),
-            usable_slots as u32,
+            total_slots as u32,
         );
         // Time-gated retention passes continue while slots are supervised.
         let retention_sink = std::sync::Arc::clone(sink);

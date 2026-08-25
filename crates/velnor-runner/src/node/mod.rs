@@ -6,11 +6,13 @@
 //! the Build L3 isolation boundary.
 
 pub mod canary;
+pub mod cleanup;
 pub mod controller;
 pub mod exec;
 pub mod guardian;
 pub mod health;
 pub mod job;
+pub mod prove;
 pub mod slot;
 pub mod watchdog;
 
