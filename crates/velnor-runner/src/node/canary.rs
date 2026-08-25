@@ -7,19 +7,16 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use clap::Args;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Args)]
+/// Domain arguments for the black-box canary. CLI clap types convert into this.
+#[derive(Debug, Clone)]
 pub struct CanaryArgs {
     /// Whole-path timeout. The canary fails closed if any stage is missing.
-    #[arg(long, default_value_t = 60)]
     pub timeout_seconds: u64,
     /// Local fixture mode: record the four stages without calling GitHub.
-    #[arg(long)]
     pub fixture: bool,
     /// Optional path to write the JSON report.
-    #[arg(long)]
     pub report: Option<PathBuf>,
 }
 

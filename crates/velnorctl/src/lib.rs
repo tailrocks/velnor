@@ -216,7 +216,31 @@ pub enum Command {
     /// Inspect the canonical Velnor storage layout and catalog.
     Storage(Box<runtime::StorageArgs>),
     /// External black-box canary (queue → assignment → first step → completion).
-    Canary(velnor_runner::node::CanaryArgs),
+    Canary(CanaryArgs),
+}
+
+/// CLI-facing canary arguments. Converted into the clap-free domain type.
+#[derive(Debug, Clone, Args)]
+pub struct CanaryArgs {
+    /// Whole-path timeout in seconds. The canary fails closed if any stage is missing.
+    #[arg(long, default_value_t = 60, value_name = "SECONDS")]
+    pub timeout_seconds: u64,
+    /// Record the four stages locally without calling GitHub.
+    #[arg(long)]
+    pub fixture: bool,
+    /// Write the JSON report to this path.
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<std::path::PathBuf>,
+}
+
+impl From<CanaryArgs> for velnor_runner::node::CanaryArgs {
+    fn from(args: CanaryArgs) -> Self {
+        Self {
+            timeout_seconds: args.timeout_seconds,
+            fixture: args.fixture,
+            report: args.report,
+        }
+    }
 }
 
 /// Error a command execution returns, carrying its exit class.
@@ -358,7 +382,7 @@ async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
             run_runtime(velnor_runner::args::Command::Storage((*args).into())).await
         }
         Command::Canary(args) => {
-            let report = velnor_runner::node::run_canary(&args)?;
+            let report = velnor_runner::node::run_canary(&args.into())?;
             println!(
                 "{}",
                 serde_json::to_string(&report)

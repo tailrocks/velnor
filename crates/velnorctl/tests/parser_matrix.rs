@@ -355,3 +355,38 @@ fn daemon_release_and_run_are_unknown_clap_subcommands() {
         assert!(parse(&[name]).is_err(), "{name} must stay unknown");
     }
 }
+
+#[test]
+fn canary_parses_as_typed_cli_args_not_runner_clap() {
+    match parse(&["canary", "--fixture", "--timeout-seconds", "15"]).expect("canary") {
+        Cli {
+            command: Command::Canary(args),
+            ..
+        } => {
+            assert!(args.fixture);
+            assert_eq!(args.timeout_seconds, 15);
+            assert!(args.report.is_none());
+        }
+        other => panic!("expected Canary, got {other:?}"),
+    }
+    let with_report = parse(&["canary", "--report", "/tmp/canary.json"]).expect("report");
+    match with_report.command {
+        Command::Canary(args) => {
+            assert_eq!(
+                args.report.as_deref(),
+                Some(std::path::Path::new("/tmp/canary.json"))
+            );
+            assert!(!args.fixture);
+        }
+        other => panic!("expected Canary, got {other:?}"),
+    }
+}
+
+#[test]
+fn runner_canary_domain_type_does_not_use_clap() {
+    let src = include_str!("../../velnor-runner/src/node/canary.rs");
+    assert!(
+        !src.contains("clap::") && !src.contains("use clap"),
+        "canary domain args must stay clap-free: CLI convert at the velnorctl boundary"
+    );
+}
