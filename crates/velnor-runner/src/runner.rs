@@ -91,6 +91,7 @@ const IDLE_TOKEN_REFRESH_SECONDS: u64 = 40 * 60;
 const REGISTRY_CHECK_INTERVAL_SECONDS: u64 = 180;
 const REGISTRY_OFFLINE_STRIKES_TO_RECYCLE: u32 = 2;
 const DEFAULT_MAX_IDLE_SLOT_AGE_SECONDS: u64 = 4 * 60 * 60;
+const DAEMON_JIT_CONFIG_CONCURRENCY: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum V2MessageAction {
@@ -1699,9 +1700,9 @@ async fn configure_daemon_slots(
     let mut configured_slots = Vec::new();
     let mut usable_slots = 0usize;
     let mut skipped_slots = Vec::new();
+    let mut pending = Vec::new();
     for slot_index in 1..=slots {
         if draining() {
-            cleanup_configured_daemon_slots(args, config_base, slots, &configured_slots).await;
             return Ok(usable_slots);
         }
         let slot_config_dir = daemon_slot_config_dir(config_base, slot_index, slots);
@@ -1720,12 +1721,34 @@ async fn configure_daemon_slots(
         }
 
         let configure_args = daemon_slot_configure_args(args, config_base, slot_index, slots)?;
+        pending.push((slot_index, configure_args));
+    }
+
+    if draining() {
+        return Ok(usable_slots);
+    }
+
+    // Slot identities are independent. Bound concurrency to reduce startup
+    // latency without turning a large daemon into a registration-request burst.
+    use futures_util::stream::{self, StreamExt as _};
+    let concurrency = pending.len().clamp(1, DAEMON_JIT_CONFIG_CONCURRENCY);
+    let mut outcomes =
+        stream::iter(pending)
+            .map(|(slot_index, configure_args)| async move {
+                (slot_index, configure(configure_args).await)
+            })
+            .buffer_unordered(concurrency)
+            .collect::<Vec<_>>()
+            .await;
+    outcomes.sort_by_key(|(slot_index, _)| *slot_index);
+
+    for (slot_index, result) in outcomes {
         // Per-slot best-effort: a slot whose previous runner is still registered
         // and busy (stale from a prior crash) can't reclaim its name yet and will
         // fail here (409 → orphan delete → 422). That must NOT take down the whole
         // daemon — skip this slot and run on the rest; it recovers on a later
         // restart once the stale runner ages out.
-        if let Err(error) = configure(configure_args).await {
+        if let Err(error) = result {
             eprintln!(
                 "Warning: could not configure daemon slot-{slot_index} (skipping; running on the remaining slots): {error:#}"
             );
@@ -1736,8 +1759,12 @@ async fn configure_daemon_slots(
         usable_slots += 1;
     }
 
-    if usable_slots == 0 {
+    if draining() {
         cleanup_configured_daemon_slots(args, config_base, slots, &configured_slots).await;
+        return Ok(usable_slots);
+    }
+
+    if usable_slots == 0 {
         bail!(
             "could not configure any of the {slots} daemon runner slot(s); all failed (e.g. stale busy runners holding every slot name)"
         );
