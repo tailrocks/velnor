@@ -32,9 +32,10 @@ velnor-runner = { path = "../velnor-runner" }
 
 [features]
 default = []
-# Forward release identity embedding to the runtime library so `velnorctl
-# release export` / `capabilities export` carry the same coherent build
-# identity that deb packaging and postinst verify.
+# Forward release identity embedding to the runtime library so
+# `velnorctl capabilities export` (and service-binary release hooks)
+# carry the same coherent build identity that deb packaging and postinst
+# verify.
 release-build = ["velnor-runner/release-build"]
 
 [dev-dependencies]

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use velnor_model::{DurationMs, Since, Timestamp};
 use velnorctl::man::ManArgs;
 use velnorctl::{schema_document, Cli, Command, OutputArg, Verbosity};
@@ -223,4 +223,135 @@ fn cli_c005_schema_document_is_derived_from_the_live_clap_tree() {
     let man_flags: Vec<&str> = man.flags.iter().map(|flag| flag.long.as_str()).collect();
     assert!(man_flags.contains(&"directory"));
     assert!(man_flags.contains(&"force"));
+
+    for nested in [
+        "cache du",
+        "cache gc",
+        "capabilities check",
+        "capabilities export",
+        "storage paths",
+        "storage status",
+    ] {
+        assert!(names.contains(&nested), "{nested} missing: {names:?}");
+    }
+}
+
+fn clap_command_paths() -> Vec<Vec<String>> {
+    fn walk(cmd: &clap::Command, prefix: Vec<String>, out: &mut Vec<Vec<String>>) {
+        let mut subs: Vec<&clap::Command> = cmd
+            .get_subcommands()
+            .filter(|sub| !sub.is_hide_set() && sub.get_name() != "help")
+            .collect();
+        subs.sort_by_key(|sub| sub.get_name());
+        for sub in subs {
+            let mut path = prefix.clone();
+            path.push(sub.get_name().to_owned());
+            out.push(path.clone());
+            walk(sub, path, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(&Cli::command(), Vec::new(), &mut out);
+    out
+}
+
+#[test]
+fn every_clap_subcommand_is_in_the_schema() {
+    let document = schema_document();
+    let names: Vec<&str> = document
+        .commands
+        .iter()
+        .map(|command| command.name.as_str())
+        .collect();
+    let paths = clap_command_paths();
+    assert!(!paths.is_empty(), "clap tree must expose subcommands");
+    for path in &paths {
+        let name = path.join(" ");
+        assert!(names.contains(&name.as_str()), "{name} missing: {names:?}");
+    }
+    assert_eq!(names.len(), paths.len(), "schema drifted from clap tree");
+}
+
+#[test]
+fn nested_operator_commands_parse_as_typed_values() {
+    match parse(&["cache", "du"]).expect("cache du") {
+        Cli {
+            command: Command::Cache(args),
+            ..
+        } => assert!(matches!(args.command, velnorctl::runtime::CacheCommand::Du)),
+        other => panic!("expected cache du, got {other:?}"),
+    }
+    match parse(&["cache", "gc", "--dry-run"]).expect("cache gc") {
+        Cli {
+            command: Command::Cache(args),
+            ..
+        } => match args.command {
+            velnorctl::runtime::CacheCommand::Gc(gc) => assert!(gc.dry_run),
+            other => panic!("expected gc, got {other:?}"),
+        },
+        other => panic!("expected cache gc, got {other:?}"),
+    }
+    match parse(&["capabilities", "export"]).expect("capabilities export") {
+        Cli {
+            command: Command::Capabilities(args),
+            ..
+        } => assert!(matches!(
+            args.command,
+            velnorctl::runtime::CapabilitiesCommand::Export
+        )),
+        other => panic!("expected capabilities export, got {other:?}"),
+    }
+    match parse(&["storage", "paths"]).expect("storage paths") {
+        Cli {
+            command: Command::Storage(args),
+            ..
+        } => assert!(matches!(
+            args.command,
+            velnorctl::runtime::StorageCommand::Paths
+        )),
+        other => panic!("expected storage paths, got {other:?}"),
+    }
+}
+
+#[test]
+fn globals_apply_before_and_after_nested_subcommands() {
+    let before = parse(&["--output=json", "cache", "du"]).expect("before");
+    let after = parse(&["cache", "du", "-o", "json"]).expect("after");
+    assert_eq!(before.globals.output, OutputArg::Json);
+    assert_eq!(after.globals.output, OutputArg::Json);
+    assert!(matches!(before.command, Command::Cache(_)));
+    assert!(matches!(after.command, Command::Cache(_)));
+}
+
+#[test]
+fn missing_required_subcommand_and_flag_values_are_rejected() {
+    for argv in [
+        vec!["configure"],
+        vec!["doctor"],
+        vec!["cache"],
+        vec!["capabilities"],
+        vec!["storage"],
+        vec!["capabilities", "check"],
+        vec!["completion"],
+        vec!["configure", "--url"],
+        vec!["doctor", "--url"],
+    ] {
+        assert!(parse(&argv).is_err(), "{argv:?} must fail");
+    }
+}
+
+#[test]
+fn every_completion_shell_choice_parses() {
+    for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+        let cli = parse(&["completion", shell]).expect(shell);
+        assert!(matches!(cli.command, Command::Completion(_)), "{shell}");
+    }
+    assert!(parse(&["completion", "noshell"]).is_err());
+}
+
+#[test]
+fn daemon_release_and_run_are_unknown_clap_subcommands() {
+    for name in ["daemon", "release", "run"] {
+        assert!(parse(&[name]).is_err(), "{name} must stay unknown");
+    }
 }

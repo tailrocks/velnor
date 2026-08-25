@@ -57,13 +57,31 @@ fn cli_c005_combined_stdout_page_is_deterministic_and_structurally_complete() {
     assert!(first.contains(".SH OUTPUT"));
     assert!(first.contains(".SH EXIT STATUS"));
     assert!(first.contains(".SH SAFETY"));
-    // Every registered leaf appears exactly once by its own page header.
-    for command in ["man", "completion"] {
+    // Every clap command, including nested subcommands, appears exactly
+    // once by its own page header (git-style names for nested leaves).
+    for command in [
+        "man",
+        "completion",
+        "cache",
+        "cache-du",
+        "cache-gc",
+        "capabilities",
+        "capabilities-check",
+        "capabilities-export",
+        "configure",
+        "doctor",
+        "preflight",
+        "remove",
+        "status",
+        "storage",
+        "storage-paths",
+        "storage-status",
+    ] {
         let marker = format!(".TH {command} 1");
         assert_eq!(
             first.matches(&marker).count(),
             1,
-            "{command} must appear exactly once in {first}"
+            "{command} must appear exactly once"
         );
     }
 }
@@ -90,7 +108,11 @@ fn cli_c005_directory_mode_writes_a_complete_deterministic_0644_page_set() {
     assert_eq!(
         names,
         vec![
+            "cache-du.1",
+            "cache-gc.1",
             "cache.1",
+            "capabilities-check.1",
+            "capabilities-export.1",
             "capabilities.1",
             "completion.1",
             "configure.1",
@@ -99,6 +121,8 @@ fn cli_c005_directory_mode_writes_a_complete_deterministic_0644_page_set() {
             "preflight.1",
             "remove.1",
             "status.1",
+            "storage-paths.1",
+            "storage-status.1",
             "storage.1",
             "velnorctl.1",
         ]
@@ -124,6 +148,18 @@ fn cli_c005_directory_mode_writes_a_complete_deterministic_0644_page_set() {
             .expect("completion page")
             .contains("SHELL"),
         "leaf page carries its own options"
+    );
+    assert!(
+        std::fs::read_to_string(scratch.path().join("cache-gc.1"))
+            .expect("cache-gc page")
+            .contains("\\-\\-dry\\-run"),
+        "nested gc page carries its own options"
+    );
+    assert!(
+        std::fs::read_to_string(scratch.path().join("storage-status.1"))
+            .expect("storage-status page")
+            .contains(".TH storage-status 1"),
+        "nested storage status must not collide with top-level status"
     );
 
     let before: Vec<(PathBuf, [u8; 32])> = members

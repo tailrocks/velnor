@@ -37,9 +37,10 @@ velnorctl man [--directory <PATH>] [--force]
 
 Without `--directory`, one combined `velnorctl.1` roff page is written to
 stdout: the clap-rendered root manual, Velnor OUTPUT / EXIT STATUS / SAFETY
-convention sections, then one section block per registered leaf command in
-stable name order. With `--directory`, the complete deterministic page set is
-written (`velnorctl.1` plus one `<command>.1` per leaf), each member atomically
+convention sections, then one section block per clap command (including nested
+subcommands) in stable name order. With `--directory`, the complete deterministic page set is
+written (`velnorctl.1` plus one page per clap command, nested names like
+`cache-du.1` so `status` and `storage status` never collide), each member atomically
 (temp file inside the destination, then rename) with mode `0644`.
 
 Exit statuses for `man`:
