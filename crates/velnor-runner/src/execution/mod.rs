@@ -273,20 +273,24 @@ pub fn host_docker_executor<R: CommandRunner>(
     }
 }
 
-/// Docker-socket executor proof. MicroVM never treats the host socket as ready.
+/// Executor proof. A preflight `executor.ok` file for the docker backend;
+/// for MicroVM, one whose recorded generation matches the packaged artifacts.
+/// A live host Docker socket is never proof: it is the transitional backend
+/// substrate, not evidence that a preflight ran (August 24 class).
 #[must_use]
 pub fn executor_is_proven(
     state_dir: &Path,
     backend: ExecutionBackendKind,
-    host_docker_socket: &Path,
+    _host_docker_socket: &Path,
 ) -> bool {
-    let ok_file = state_dir.join(crate::node::prove::EXECUTOR_OK);
     match backend {
-        ExecutionBackendKind::Docker => ok_file.is_file() || host_docker_socket.exists(),
+        ExecutionBackendKind::Docker => {
+            state_dir.join(crate::node::prove::EXECUTOR_OK).is_file()
+        }
         ExecutionBackendKind::MicroVm => executor_is_proven_at(
             state_dir,
             backend,
-            host_docker_socket,
+            _host_docker_socket,
             Path::new(PACKAGED_MICROVM_ROOT),
         ),
     }
@@ -303,9 +307,6 @@ pub fn executor_is_proven_at(
     match backend {
         ExecutionBackendKind::Docker => executor_is_proven(state_dir, backend, host_docker_socket),
         ExecutionBackendKind::MicroVm => {
-            if host_docker_socket_counts(backend) {
-                return false;
-            }
             let Ok(bytes) = std::fs::read(state_dir.join(crate::node::prove::EXECUTOR_OK)) else {
                 return false;
             };
@@ -319,10 +320,6 @@ pub fn executor_is_proven_at(
             require_coherent_generation(&proven, &packaged).is_ok()
         }
     }
-}
-
-fn host_docker_socket_counts(backend: ExecutionBackendKind) -> bool {
-    backend.uses_host_docker_socket()
 }
 
 /// Run backend-specific preflight. MicroVM does not invoke host Docker.
