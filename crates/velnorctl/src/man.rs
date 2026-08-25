@@ -58,44 +58,79 @@ pub fn run(args: &ManArgs) -> Result<(), CommandError> {
 }
 
 fn root_command() -> clap::Command {
-    Cli::command()
+    let mut cmd = Cli::command().disable_help_subcommand(true);
+    cmd.build();
+    cmd
 }
 
-fn render_man(command: &clap::Command) -> String {
+fn render_man(command: clap::Command) -> String {
     let mut buffer = Vec::new();
-    clap_mangen::Man::new(command.clone())
+    clap_mangen::Man::new(command)
         .manual("Velnor Manual")
         .render(&mut buffer)
         .unwrap_or_default();
     String::from_utf8_lossy(&buffer).into_owned()
 }
 
+fn visible_subcommands(cmd: &clap::Command) -> Vec<clap::Command> {
+    let mut subs: Vec<clap::Command> = cmd
+        .get_subcommands()
+        .filter(|sub| !sub.is_hide_set())
+        .cloned()
+        .collect();
+    subs.sort_by(|left, right| left.get_name().cmp(right.get_name()));
+    subs
+}
+
+/// One clap-derived page per command in the live tree, including nested
+/// subcommands. Filenames are git-style (`cache-du.1`) so `status` and
+/// `storage status` never collide.
+fn collect_subcommand_pages(cmd: &clap::Command) -> Vec<(String, String)> {
+    let mut pages = Vec::new();
+    collect_subcommand_pages_into(cmd, None, &mut pages);
+    pages
+}
+
+fn collect_subcommand_pages_into(
+    cmd: &clap::Command,
+    prefix: Option<&str>,
+    pages: &mut Vec<(String, String)>,
+) {
+    for sub in visible_subcommands(cmd) {
+        let stem = match prefix {
+            None => sub.get_name().to_owned(),
+            Some(prefix) => format!("{prefix}-{}", sub.get_name()),
+        };
+        pages.push((
+            format!("{stem}.1"),
+            render_man(sub.clone().display_name(stem.clone())),
+        ));
+        collect_subcommand_pages_into(&sub, Some(&stem), pages);
+    }
+}
+
 /// Render the combined binary page from the live command tree: the root
 /// manual (NAME, SYNOPSIS, global OPTIONS, subcommand list) followed by the
-/// Velnor-specific semantic sections and one full section block per leaf
-/// command. Deterministic by construction.
+/// Velnor-specific semantic sections and one full section block per command,
+/// including nested subcommands. Deterministic by construction.
 #[must_use]
 pub fn combined_page() -> String {
-    let mut page = render_man(&root_command());
+    let root = root_command();
+    let mut page = render_man(root.clone());
     page.push_str(semantic_sections().as_str());
-    let mut subs: Vec<clap::Command> = root_command().get_subcommands().cloned().collect();
-    subs.sort_by(|left, right| left.get_name().cmp(right.get_name()));
-    for sub in &subs {
-        page.push_str(&render_man(sub));
+    for (_, contents) in collect_subcommand_pages(&root) {
+        page.push_str(&contents);
         page.push('\n');
     }
     page
 }
 
 /// The complete deterministic page set: the combined page first, then one
-/// `<command>.1` page per leaf command in stable name order.
+/// page per clap command (nested names like `cache-du.1`) in tree order.
 fn page_set() -> Vec<(String, String)> {
+    let root = root_command();
     let mut members = vec![(MAN_PAGE_NAME.to_owned(), combined_page())];
-    let mut subs: Vec<clap::Command> = root_command().get_subcommands().cloned().collect();
-    subs.sort_by(|left, right| left.get_name().cmp(right.get_name()));
-    for sub in &subs {
-        members.push((format!("{}.1", sub.get_name()), render_man(sub)));
-    }
+    members.extend(collect_subcommand_pages(&root));
     members
 }
 
@@ -225,8 +260,6 @@ fn write_page_set(directory: &Path, force: bool) -> Result<(), CommandError> {
     Ok(())
 }
 
-/// Write one member through an in-directory temp file plus rename, so a
-/// reader never observes a partial page; mode is fixed at 0644.
 fn write_member_atomic(directory: &Path, name: &str, bytes: &[u8]) -> Result<(), CommandError> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

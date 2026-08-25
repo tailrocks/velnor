@@ -2,6 +2,9 @@
 
 use std::process::{Command, Output};
 
+use clap::CommandFactory;
+use velnorctl::Cli;
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_velnorctl")
 }
@@ -213,6 +216,78 @@ fn cli_c005_runtime_failure_reports_human_error_by_default() {
         !stderr.trim_start_matches("error:").starts_with('{'),
         "{stderr}"
     );
+}
+
+#[test]
+fn every_subcommand_and_nested_help_exits_success() {
+    for path in clap_command_paths() {
+        let mut args: Vec<&str> = path.iter().map(String::as_str).collect();
+        args.push("--help");
+        let output = run(&args);
+        assert_eq!(code(&output), 0, "{path:?}");
+        assert!(
+            text(&output.stderr).is_empty(),
+            "{path:?}: {}",
+            text(&output.stderr)
+        );
+        assert!(text(&output.stdout).contains("Usage:"), "{path:?}");
+    }
+}
+
+#[test]
+fn missing_required_arguments_exit_two() {
+    for args in [
+        ["configure"].as_slice(),
+        ["doctor"].as_slice(),
+        ["cache"].as_slice(),
+        ["capabilities"].as_slice(),
+        ["storage"].as_slice(),
+        ["capabilities", "check"].as_slice(),
+        ["completion"].as_slice(),
+    ] {
+        let output = run(args);
+        assert_eq!(code(&output), 2, "{args:?}");
+        assert!(!text(&output.stderr).is_empty(), "{args:?}");
+        assert!(text(&output.stdout).is_empty(), "{args:?}");
+    }
+}
+
+#[test]
+fn every_completion_shell_writes_stdout() {
+    for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+        let output = run(&["completion", shell]);
+        assert_eq!(code(&output), 0, "{shell}");
+        assert!(text(&output.stderr).is_empty(), "{shell}");
+        assert!(!text(&output.stdout).is_empty(), "{shell}");
+    }
+}
+
+#[test]
+fn json_output_placement_is_equivalent_for_nested_help() {
+    let before = run(&["--output", "json", "cache", "du", "--help"]);
+    let after = run(&["cache", "du", "--output", "json", "--help"]);
+    assert_eq!(code(&before), 0);
+    assert_eq!(code(&after), 0);
+    assert_eq!(text(&before.stdout), text(&after.stdout));
+}
+
+fn clap_command_paths() -> Vec<Vec<String>> {
+    fn walk(cmd: &clap::Command, prefix: Vec<String>, out: &mut Vec<Vec<String>>) {
+        let mut subs: Vec<&clap::Command> = cmd
+            .get_subcommands()
+            .filter(|sub| !sub.is_hide_set() && sub.get_name() != "help")
+            .collect();
+        subs.sort_by_key(|sub| sub.get_name());
+        for sub in subs {
+            let mut path = prefix.clone();
+            path.push(sub.get_name().to_owned());
+            out.push(path.clone());
+            walk(sub, path, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(&Cli::command(), Vec::new(), &mut out);
+    out
 }
 
 fn writes_succeed_anyway(path: &str) -> bool {

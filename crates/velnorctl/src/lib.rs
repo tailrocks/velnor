@@ -21,8 +21,8 @@ use velnor_model::{
 use velnor_render::{ColorPolicy, OutputFormat};
 
 pub mod completion;
-pub mod legacy;
 pub mod man;
+pub mod runtime;
 
 /// Binary name used across generated surfaces.
 pub const BIN_NAME: &str = "velnorctl";
@@ -187,16 +187,11 @@ impl GlobalArgs {
     }
 }
 
-/// Every leaf command; the exhaustive match in `main` is the dispatch
-/// registry, so the compiler proves each command is wired.
+/// Every public leaf command. Exhaustive match in [`execute`] is the
+/// dispatch registry, so the compiler proves each command is wired.
 ///
-/// The migrated groups are the complete former `velnor-runner` command trees
-/// (formerly `crates/velnor-runner/src/cli.rs`): the operator CLI owns the
-/// only Velnor command surface, while the interim facade executes the
-/// handlers with identical behavior. `run` is intentionally absent — that
-/// namespace belongs to the future GitHub workflow-run resource (research
-/// deviation 3), and the old single-worker mode is service-only internal
-/// plumbing (`daemon --once`), never a public CLI arm (C075).
+/// `daemon`, `release`, and `run` are not public commands: they remain
+/// unrecognized clap subcommands (service plumbing / reserved names).
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Generate man pages for the current command tree.
@@ -204,38 +199,22 @@ pub enum Command {
     /// Generate shell completion scripts.
     Completion(completion::CompletionArgs),
     /// Inspect Velnor's daemon-shared host cache stores.
-    Cache(Box<legacy::CacheArgs>),
+    Cache(Box<runtime::CacheArgs>),
     /// Inspect or validate against the compiled strict capability manifest.
-    Capabilities(Box<legacy::CapabilitiesArgs>),
+    Capabilities(Box<runtime::CapabilitiesArgs>),
     /// Create and store a GitHub JIT runner configuration.
-    Configure(Box<legacy::ConfigureArgs>),
+    Configure(Box<runtime::ConfigureArgs>),
     /// Probe GitHub for this daemon's registered runners and fail loudly when
     /// the fleet is gone (run from a systemd timer for alerting).
-    Doctor(Box<legacy::DoctorArgs>),
+    Doctor(Box<runtime::DoctorArgs>),
     /// Validate local Docker prerequisites before polling GitHub for jobs.
-    Preflight(Box<legacy::PreflightArgs>),
+    Preflight(Box<runtime::PreflightArgs>),
     /// Remove local runner configuration.
-    Remove(Box<legacy::RemoveArgs>),
+    Remove(Box<runtime::RemoveArgs>),
     /// Print local runner configuration status.
-    Status(Box<legacy::StatusArgs>),
+    Status(Box<runtime::StatusArgs>),
     /// Inspect the canonical Velnor storage layout and catalog.
-    Storage(Box<legacy::StorageArgs>),
-}
-
-impl From<Command> for velnor_runner::args::Command {
-    fn from(command: Command) -> Self {
-        match command {
-            Command::Cache(args) => Self::Cache((*args).into()),
-            Command::Capabilities(args) => Self::Capabilities((*args).into()),
-            Command::Configure(args) => Self::Configure((*args).into()),
-            Command::Doctor(args) => Self::Doctor((*args).into()),
-            Command::Preflight(args) => Self::Preflight((*args).into()),
-            Command::Remove(args) => Self::Remove((*args).into()),
-            Command::Status(args) => Self::Status((*args).into()),
-            Command::Storage(args) => Self::Storage((*args).into()),
-            Command::Man(_) | Command::Completion(_) => unreachable!("CLI-only commands"),
-        }
-    }
+    Storage(Box<runtime::StorageArgs>),
 }
 
 /// Error a command execution returns, carrying its exit class.
@@ -328,19 +307,59 @@ pub fn exit_code_for(class: &ExitClass) -> u8 {
     u8::try_from(velnor_model::exit_code_for_class(*class)).unwrap_or(u8::MAX)
 }
 
-/// Execute a migrated command through the interim facade with the exact
-/// legacy bootstrap semantics: unconditional strict-capability admission,
-/// manifest integrity, and long-running telemetry selection.
-///
-/// Failures map to the documented [`ExitClass::Operation`] status class;
-/// per-command refinement (condition/timeout/transport) arrives with plans
-/// 069–072 and never changes this dispatch registry.
-pub async fn execute_legacy(command: Command) -> Result<(), CommandError> {
-    let runtime_command = velnor_runner::args::Command::from(command);
-    legacy::enforce_admission()?;
-    let log_dir = legacy::telemetry_dir(&runtime_command);
-    legacy::init_telemetry(log_dir.as_deref());
-    legacy::dispatch(runtime_command).await?;
+/// Execute a fully parsed CLI: clap already owns argv. Runtime failures map
+/// to [`ExitClass`]; `--timeout` is a real deadline around the handler.
+pub async fn execute(cli: Cli) -> Result<(), CommandError> {
+    let timeout = cli.globals.timeout;
+    let work = execute_parsed(cli);
+    match timeout {
+        Some(limit) => tokio::time::timeout(limit, work).await.unwrap_or_else(|_| {
+            Err(CommandError::new(
+                ExitClass::Timeout,
+                "deadline.elapsed",
+                "the deadline elapsed before a terminal result",
+            ))
+        }),
+        None => work.await,
+    }
+}
+
+async fn execute_parsed(cli: Cli) -> Result<(), CommandError> {
+    match cli.command {
+        Command::Man(args) => man::run(&args),
+        Command::Completion(args) => completion::run(&args),
+        Command::Cache(args) => {
+            run_runtime(velnor_runner::args::Command::Cache((*args).into())).await
+        }
+        Command::Capabilities(args) => {
+            run_runtime(velnor_runner::args::Command::Capabilities((*args).into())).await
+        }
+        Command::Configure(args) => {
+            run_runtime(velnor_runner::args::Command::Configure((*args).into())).await
+        }
+        Command::Doctor(args) => {
+            run_runtime(velnor_runner::args::Command::Doctor((*args).into())).await
+        }
+        Command::Preflight(args) => {
+            run_runtime(velnor_runner::args::Command::Preflight((*args).into())).await
+        }
+        Command::Remove(args) => {
+            run_runtime(velnor_runner::args::Command::Remove((*args).into())).await
+        }
+        Command::Status(args) => {
+            run_runtime(velnor_runner::args::Command::Status((*args).into())).await
+        }
+        Command::Storage(args) => {
+            run_runtime(velnor_runner::args::Command::Storage((*args).into())).await
+        }
+    }
+}
+
+async fn run_runtime(command: velnor_runner::args::Command) -> Result<(), CommandError> {
+    runtime::enforce_admission()?;
+    let log_dir = runtime::telemetry_dir(&command);
+    runtime::init_telemetry(log_dir.as_deref());
+    runtime::dispatch(command).await?;
     Ok(())
 }
 
@@ -353,18 +372,32 @@ pub fn schema_document() -> SchemaDocument {
         binary: BIN_NAME.to_owned(),
         version: velnor_model::CRATE_VERSION.to_owned(),
         global_flags: flag_metadata(cmd.get_arguments(), true),
-        commands: cmd
-            .get_subcommands()
-            .map(|sub| CommandMetadata {
-                name: sub.get_name().to_owned(),
-                about: sub
-                    .get_about()
-                    .map(|styled| styled.to_string())
-                    .unwrap_or_default(),
-                flags: flag_metadata(sub.get_arguments(), false),
-            })
-            .collect(),
+        commands: collect_command_metadata(&cmd, ""),
     }
+}
+
+fn collect_command_metadata(cmd: &clap::Command, prefix: &str) -> Vec<CommandMetadata> {
+    let mut commands = Vec::new();
+    for sub in cmd
+        .get_subcommands()
+        .filter(|sub| !sub.is_hide_set() && sub.get_name() != "help")
+    {
+        let name = if prefix.is_empty() {
+            sub.get_name().to_owned()
+        } else {
+            format!("{prefix} {}", sub.get_name())
+        };
+        commands.push(CommandMetadata {
+            name: name.clone(),
+            about: sub
+                .get_about()
+                .map(|styled| styled.to_string())
+                .unwrap_or_default(),
+            flags: flag_metadata(sub.get_arguments(), false),
+        });
+        commands.extend(collect_command_metadata(sub, &name));
+    }
+    commands
 }
 
 fn flag_metadata<'a>(args: impl Iterator<Item = &'a clap::Arg>, global: bool) -> Vec<FlagMetadata> {

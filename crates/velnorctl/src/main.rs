@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use velnor_render::OutputFormat;
-use velnorctl::{Cli, Command, CommandError};
+use velnorctl::{Cli, CommandError};
 
 /// Tokio waits forever for a started `spawn_blocking` task when the runtime is
 /// dropped. A stuck Docker/curl cleanup must not hold a fully drained systemd
@@ -32,19 +32,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let result = runtime.block_on(dispatch(cli.command));
+    let result = runtime.block_on(velnorctl::execute(cli));
     // Bound blocking-task teardown exactly like the service bootstrap did.
     runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
 
     report(result.err().as_ref(), machine_output)
-}
-
-async fn dispatch(command: Command) -> Result<(), CommandError> {
-    match command {
-        Command::Man(args) => velnorctl::man::run(&args),
-        Command::Completion(args) => velnorctl::completion::run(&args),
-        migrated => velnorctl::execute_legacy(migrated).await,
-    }
 }
 
 fn build_runtime() -> std::io::Result<tokio::runtime::Runtime> {
