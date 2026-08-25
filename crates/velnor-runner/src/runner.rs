@@ -5143,6 +5143,7 @@ impl<R: CommandRunner> crate::execution::ProductionDockerEngine for RunnerDocker
 fn execute_microvm_script_job(
     job: &AgentJobRequestMessage,
     script_steps: &[crate::script_step::ScriptStep],
+    docker_image: &str,
 ) -> Result<ScriptJobResult> {
     let file = velnor_model::ExecutionFile {
         execution: velnor_model::ExecutionSection {
@@ -5156,14 +5157,13 @@ fn execute_microvm_script_job(
     );
     let mut fs = crate::execution::RealHostFs;
     let mut runner = crate::executor::ProcessCommandRunner;
-    let vsock_path = resources.vsock.clone();
-    let mut api = crate::execution::UnixFirecrackerClient::new(vsock_path.clone());
+    let mut api = crate::execution::UnixFirecrackerClient::new(resources.api_socket());
     let mut vsock = crate::execution::UnixVsockChannel::lazy(
-        vsock_path,
+        resources.vsock.clone(),
         crate::execution::FIRECRACKER_GUEST_CID,
         crate::execution::GUEST_AGENT_PORT,
     );
-    let artifact_root = std::path::PathBuf::from("/usr/share/velnor/microvm");
+    let artifact_root = std::path::PathBuf::from(crate::execution::PACKAGED_MICROVM_ROOT);
     let kvm = std::path::PathBuf::from("/dev/kvm");
     let docker = std::path::PathBuf::from("/var/run/docker.sock");
     let mut world = crate::execution::ExecutionWorld {
@@ -5177,21 +5177,12 @@ fn execute_microvm_script_job(
         docker_engine: None,
         allow_inline_guest_plan: false,
     };
-    let plan = crate::execution::ValidatedPlan {
-        job_id: job.job_id.clone(),
-        steps: script_steps.iter().map(|step| step.id.clone()).collect(),
-        scripts: script_steps
-            .iter()
-            .map(|step| step.script.clone())
-            .collect(),
-        job_container_image: String::new(),
-        service_images: Vec::new(),
-        timeout_ms: 60_000,
-        cancel_requested: false,
-        fail: false,
-        cache_digest: None,
-        command_files: vec!["GITHUB_OUTPUT".into()],
-    };
+    let plan = crate::execution::ValidatedPlan::from_script_steps(
+        job.job_id.clone(),
+        docker_image,
+        script_steps,
+        admitted_service_images(job),
+    );
     let outcome = crate::execution::run_validated_job(&file, isolation, &plan, &mut world)
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let result = match outcome.conclusion {
@@ -5203,10 +5194,82 @@ fn execute_microvm_script_job(
         result,
         outputs: BTreeMap::new(),
         environment_url: None,
-        step_logs: Vec::new(),
+        step_logs: microvm_step_logs(script_steps, &outcome),
         teardown: None,
         timings: ExecutionTimings::default(),
     })
+}
+
+fn admitted_service_images(job: &AgentJobRequestMessage) -> Vec<String> {
+    match &job.job_service_containers {
+        Some(Value::Object(map)) => map.values().filter_map(admitted_container_image).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn admitted_container_image(value: &Value) -> Option<String> {
+    if let Some(image) = value.as_str().filter(|image| !image.is_empty()) {
+        return Some(image.to_owned());
+    }
+    value
+        .as_object()
+        .and_then(|object| object.get("image").or_else(|| object.get("Image")))
+        .and_then(Value::as_str)
+        .filter(|image| !image.is_empty())
+        .map(str::to_owned)
+}
+
+fn microvm_step_logs(
+    script_steps: &[crate::script_step::ScriptStep],
+    outcome: &crate::execution::ExecutionOutcome,
+) -> Vec<StepLog> {
+    let mut buckets = vec![Vec::new(); script_steps.len()];
+    let mut current = 0_usize;
+    for line in &outcome.log_lines {
+        if let Some(index) = script_steps
+            .iter()
+            .position(|step| line.contains(&format!("*** {} ***", step.id)))
+        {
+            current = index;
+        }
+        if let Some(bucket) = buckets.get_mut(current) {
+            bucket.push(line.clone());
+        }
+    }
+    if buckets.iter().all(Vec::is_empty) {
+        if let Some(first) = buckets.first_mut() {
+            first.extend(outcome.log_lines.iter().cloned());
+        }
+    }
+    script_steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            let now = unix_now_iso8601();
+            StepLog {
+                step_id: step.id.clone(),
+                display_name: if step.display_name.is_empty() {
+                    step.id.clone()
+                } else {
+                    step.display_name.clone()
+                },
+                order: i32::try_from(index + 1).unwrap_or(i32::MAX),
+                started_at: now.clone(),
+                completed_at: now,
+                lines: buckets.get(index).cloned().unwrap_or_default(),
+                masks: Vec::new(),
+                annotations: Vec::new(),
+                telemetry: Vec::new(),
+                exit_code: outcome.exit_code,
+                skipped: false,
+                failure_ignored: false,
+                error_count: if outcome.exit_code == 0 { 0 } else { 1 },
+                warning_count: 0,
+                notice_count: 0,
+                summary: String::new(),
+            }
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5229,7 +5292,7 @@ fn execute_script_job_inner(
     execution_backend: velnor_model::ExecutionBackendKind,
 ) -> Result<ScriptJobResult> {
     if execution_backend == velnor_model::ExecutionBackendKind::MicroVm {
-        return execute_microvm_script_job(job, script_steps);
+        return execute_microvm_script_job(job, script_steps, docker_image);
     }
     let execution_started = Instant::now();
     // Side-effect ledger: admission has already completed, so every counter here

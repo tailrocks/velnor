@@ -114,13 +114,51 @@ impl ValidatedPlan {
                 .iter()
                 .map(|service| service.image.clone())
                 .collect(),
-            timeout_ms: 60_000,
+            timeout_ms: plan_timeout_ms(
+                plan.steps
+                    .iter()
+                    .filter_map(crate::executor::ExecutableStep::timeout_minutes),
+            ),
             cancel_requested: false,
             fail: false,
             cache_digest: None,
             command_files: vec!["GITHUB_OUTPUT".into(), "GITHUB_ENV".into()],
         }
     }
+
+    /// Lift admitted script steps into the same backend-neutral contract.
+    #[must_use]
+    pub fn from_script_steps(
+        job_id: impl Into<String>,
+        docker_image: impl Into<String>,
+        script_steps: &[crate::script_step::ScriptStep],
+        service_images: Vec<String>,
+    ) -> Self {
+        Self {
+            job_id: job_id.into(),
+            steps: script_steps.iter().map(|step| step.id.clone()).collect(),
+            scripts: script_steps
+                .iter()
+                .map(|step| step.script.clone())
+                .collect(),
+            job_container_image: docker_image.into(),
+            service_images,
+            timeout_ms: plan_timeout_ms(
+                script_steps.iter().filter_map(|step| step.timeout_minutes),
+            ),
+            cancel_requested: false,
+            fail: false,
+            cache_digest: None,
+            command_files: vec!["GITHUB_OUTPUT".into(), "GITHUB_ENV".into()],
+        }
+    }
+}
+
+fn plan_timeout_ms(minutes: impl Iterator<Item = u64>) -> u64 {
+    minutes
+        .map(|minutes| minutes.saturating_mul(60_000))
+        .min()
+        .unwrap_or(60_000)
 }
 
 /// Observable GitHub-visible outcome for contract tests.
@@ -335,7 +373,7 @@ impl BackendSession {
             }
             ExecutionBackendKind::MicroVm => {
                 if let Some(firecracker) = &mut self.firecracker {
-                    firecracker.execute(plan, world, &mut self.events)?;
+                    firecracker.execute(plan, &self.isolation, world, &mut self.events)?;
                 }
             }
         }
@@ -419,6 +457,9 @@ impl BackendSession {
                 required: BackendPhase::Stopped,
                 actual: self.phase,
             });
+        }
+        if let Some(firecracker) = &mut self.firecracker {
+            firecracker.teardown(&self.resources, world, &mut self.events)?;
         }
         for path in self.resources.teardown_paths() {
             world

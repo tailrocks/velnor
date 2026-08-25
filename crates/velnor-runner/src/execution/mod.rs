@@ -49,7 +49,10 @@ pub use guest_runtime::{
     UnixVsockChannel, GUEST_AGENT_PORT,
 };
 pub use isolation::{IsolationIdentity, IsolationResources};
-pub use net::{nftables_commands, teardown_is_exact, teardown_net_commands};
+pub use net::{
+    nftables_commands, setup_net_invocations, teardown_is_exact, teardown_net_commands,
+    teardown_net_invocations,
+};
 pub use snapshot::{GuestReady, SnapshotIdentity};
 pub use unix_api::UnixFirecrackerClient;
 
@@ -89,7 +92,7 @@ use velnor_model::{
     ExecutionBackendKind, ExecutionConfigError, ExecutionFile, MicroVmPreflightFailure,
 };
 
-use crate::executor::{CommandResult, CommandRunner};
+use crate::executor::{CommandResult, CommandRunner, SpawnedProcess};
 
 /// Load `[execution] backend` from `execution.toml`. No env default.
 ///
@@ -137,30 +140,23 @@ pub fn run_validated_job(
     world: &mut ExecutionWorld<'_>,
 ) -> Result<ExecutionOutcome, ExecutionError> {
     let mut session = open_session(file, isolation, world)?;
-    session.reserve(world)?;
-    session.prepare(plan, world)?;
-    session.start(world)?;
-    let run_result = if plan.cancel_requested {
-        session.cancel(world)
-    } else {
-        session.execute(plan, world)
-    };
-    let collect_result = if run_result.is_ok() {
-        Some(session.collect())
-    } else {
-        None
-    };
+    let result = (|| {
+        session.reserve(world)?;
+        session.prepare(plan, world)?;
+        session.start(world)?;
+        if plan.cancel_requested {
+            session.cancel(world)?;
+        } else {
+            session.execute(plan, world)?;
+        }
+        session.collect()
+    })();
     let torn = session.teardown(world);
     if file.backend() == ExecutionBackendKind::MicroVm && session.used_host_docker() {
         return Err(ExecutionError::HostDockerForbidden);
     }
-    run_result?;
-    let mut outcome = match collect_result {
-        Some(result) => result?,
-        None => return Err(ExecutionError::CollectBeforeStop),
-    };
-    let torn = torn?;
-    outcome.cleaned = torn.cleaned;
+    let mut outcome = result?;
+    outcome.cleaned = torn?.cleaned;
     Ok(outcome)
 }
 
@@ -353,6 +349,10 @@ pub struct RecordingCommands {
     pub calls: Vec<(String, Vec<String>)>,
     pub next: CommandResult,
     pub codes: Vec<i32>,
+    pub next_pid: u32,
+    pub fail_spawn: Option<String>,
+    pub spawned: Vec<SpawnedProcess>,
+    pub killed: Vec<u32>,
 }
 
 impl Default for RecordingCommands {
@@ -365,6 +365,10 @@ impl Default for RecordingCommands {
                 stderr: String::new(),
             },
             codes: Vec::new(),
+            next_pid: 1,
+            fail_spawn: None,
+            spawned: Vec::new(),
+            killed: Vec::new(),
         }
     }
 }
@@ -377,6 +381,24 @@ impl CommandRunner for RecordingCommands {
             result.code = self.codes.remove(0);
         }
         Ok(result)
+    }
+
+    fn spawn(&mut self, program: &str, args: &[String]) -> anyhow::Result<SpawnedProcess> {
+        self.calls.push((program.to_string(), args.to_vec()));
+        if let Some(detail) = &self.fail_spawn {
+            anyhow::bail!("{program}: {detail}");
+        }
+        let spawned = SpawnedProcess { pid: self.next_pid };
+        self.next_pid = self.next_pid.saturating_add(1);
+        self.spawned.push(spawned.clone());
+        Ok(spawned)
+    }
+
+    fn kill(&mut self, process: &SpawnedProcess) -> anyhow::Result<()> {
+        self.calls
+            .push(("kill".into(), vec![process.pid.to_string()]));
+        self.killed.push(process.pid);
+        Ok(())
     }
 }
 

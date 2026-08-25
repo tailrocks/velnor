@@ -8,9 +8,11 @@ use super::artifacts::{
     verify_microvm_artifacts, MicroVmArtifactSet, MicroVmGeneration, FIRECRACKER_VERSION,
 };
 use super::backend::{ExecutionError, ExecutionEvent, ValidatedPlan};
-use super::isolation::IsolationResources;
+use super::isolation::{IsolationIdentity, IsolationResources};
+use super::net::{setup_net_invocations, teardown_net_invocations};
 use super::snapshot::{read_identity, vmstate_path, write_identity, GuestReady, SnapshotIdentity};
 use super::ExecutionWorld;
+use crate::executor::SpawnedProcess;
 
 /// Injectable Firecracker HTTP API (Unix socket). Tests use [`RecordingFirecracker`].
 pub trait FirecrackerApi {
@@ -139,6 +141,7 @@ pub struct FirecrackerBackend {
     pub guest_cid: u32,
     pub started: bool,
     pub restored: bool,
+    pub jailer: Option<SpawnedProcess>,
 }
 
 impl FirecrackerBackend {
@@ -195,11 +198,16 @@ impl FirecrackerBackend {
             "100".into(),
             "--cgroup-version".into(),
             "2".into(),
+            "--chroot-base-dir".into(),
+            resources.chroot_base.display().to_string(),
             "--netns".into(),
             resources.netns.display().to_string(),
             "--new-pid-ns".into(),
             "--resource-limit".into(),
             "no-file=1024".into(),
+            "--".into(),
+            "--api-sock".into(),
+            "/run/firecracker.socket".into(),
         ]
     }
 
@@ -213,7 +221,8 @@ impl FirecrackerBackend {
         let set = MicroVmArtifactSet::load(world.artifact_root, world.host_fs)?;
         let _ = plan;
         let identity_ok = snapshot_identity_matches(&set, world);
-        start_jailer(&set, resources, world, events)?;
+        setup_guest_net(resources, world, events)?;
+        self.jailer = Some(spawn_jailer(&set, resources, world, events)?);
         if identity_ok && try_restore_snapshot(&set, world, events)? {
             self.restored = true;
             self.guest_cid = FIRECRACKER_GUEST_CID;
@@ -221,7 +230,10 @@ impl FirecrackerBackend {
         }
         if identity_ok {
             // Load taints a Firecracker process; a failed load needs a fresh VMM.
-            start_jailer(&set, resources, world, events)?;
+            if let Some(previous) = self.jailer.take() {
+                let _ = world.runner.kill(&previous);
+            }
+            self.jailer = Some(spawn_jailer(&set, resources, world, events)?);
         }
         cold_configure(self, &set, resources, world, events)
     }
@@ -257,10 +269,11 @@ impl FirecrackerBackend {
     pub(crate) fn execute(
         &mut self,
         plan: &ValidatedPlan,
+        isolation: &IsolationIdentity,
         world: &mut ExecutionWorld<'_>,
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
-        let guest = plan.to_guest(&format!("job-{}", plan.job_id), 1);
+        let guest = plan.to_guest(&isolation.id, isolation.generation);
         let bytes = guest
             .encode()
             .map_err(|detail| MicroVmPreflightFailure::new("vsock.plan", detail))?;
@@ -299,37 +312,79 @@ impl FirecrackerBackend {
         world: &mut ExecutionWorld<'_>,
         events: &mut Vec<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
-        let _ = world;
         events.push(ExecutionEvent::FirecrackerApi("cancel".into()));
         events.push(ExecutionEvent::Log {
             stream: 1,
             line: "cancel".into(),
         });
+        self.stop_jailer(world, events);
         Ok(())
+    }
+
+    pub(crate) fn teardown(
+        &mut self,
+        resources: &IsolationResources,
+        world: &mut ExecutionWorld<'_>,
+        events: &mut Vec<ExecutionEvent>,
+    ) -> Result<(), ExecutionError> {
+        self.stop_jailer(world, events);
+        for (program, args) in teardown_net_invocations(resources) {
+            let _ = world.runner.run(&program, &args);
+        }
+        events.push(ExecutionEvent::FirecrackerApi("teardown_net".into()));
+        Ok(())
+    }
+
+    fn stop_jailer(&mut self, world: &mut ExecutionWorld<'_>, events: &mut Vec<ExecutionEvent>) {
+        if let Some(jailer) = self.jailer.take() {
+            let _ = world.runner.kill(&jailer);
+            events.push(ExecutionEvent::FirecrackerApi(format!(
+                "kill jailer pid {}",
+                jailer.pid
+            )));
+        }
     }
 }
 
-fn start_jailer(
-    set: &MicroVmArtifactSet,
+fn setup_guest_net(
     resources: &IsolationResources,
     world: &mut ExecutionWorld<'_>,
     events: &mut Vec<ExecutionEvent>,
 ) -> Result<(), ExecutionError> {
+    for (program, args) in setup_net_invocations(resources) {
+        let result = world
+            .runner
+            .run(&program, &args)
+            .map_err(|error| MicroVmPreflightFailure::new("guest.net", error.to_string()))?;
+        if result.code != 0 {
+            return Err(MicroVmPreflightFailure::new(
+                "guest.net",
+                format!("{program} exited {}: {}", result.code, result.stderr),
+            )
+            .into());
+        }
+    }
+    events.push(ExecutionEvent::FirecrackerApi("setup_net".into()));
+    Ok(())
+}
+
+fn spawn_jailer(
+    set: &MicroVmArtifactSet,
+    resources: &IsolationResources,
+    world: &mut ExecutionWorld<'_>,
+    events: &mut Vec<ExecutionEvent>,
+) -> Result<SpawnedProcess, ExecutionError> {
     let jailer_bin = set.jailer.path.to_str().unwrap_or("jailer");
     let jailer_args = FirecrackerBackend::jailer_args(resources, &set.firecracker.path);
-    let jailer = world
+    let spawned = world
         .runner
-        .run(jailer_bin, &jailer_args)
+        .spawn(jailer_bin, &jailer_args)
         .map_err(|error| MicroVmPreflightFailure::new("jailer", error.to_string()))?;
-    if jailer.code != 0 {
-        return Err(MicroVmPreflightFailure::new(
-            "jailer",
-            format!("jailer start exited {}", jailer.code),
-        )
-        .into());
-    }
-    events.push(ExecutionEvent::FirecrackerApi("jailer".into()));
-    Ok(())
+    events.push(ExecutionEvent::FirecrackerApi(format!(
+        "jailer pid {}",
+        spawned.pid
+    )));
+    Ok(spawned)
 }
 
 fn cold_configure(

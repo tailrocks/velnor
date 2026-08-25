@@ -296,7 +296,7 @@ fn faults_fail_closed_without_host_docker_or_sibling_teardown() {
             stdout: String::new(),
             stderr: "jailer killed".into(),
         },
-        codes: vec![0, 1],
+        fail_spawn: Some("jailer killed".into()),
         ..RecordingCommands::default()
     };
     let mut api = RecordingFirecracker::default();
@@ -749,4 +749,123 @@ fn microvm_execute_without_vsock_fails_closed() {
     assert!(text.contains("vsock"), "{text}");
     assert!(text.contains("docker backend was not used"), "{text}");
     assert!(!session.used_host_docker());
+}
+
+fn script_step(id: &str, script: &str) -> crate::script_step::ScriptStep {
+    crate::script_step::ScriptStep {
+        id: id.into(),
+        display_name: id.into(),
+        script: script.into(),
+        shell: crate::container::Shell::Bash,
+        working_directory_container: "/__w".into(),
+        env: Vec::new(),
+        condition: None,
+        continue_on_error: false,
+        timeout_minutes: None,
+    }
+}
+
+#[test]
+fn both_backends_execute_the_same_admitted_plan() {
+    let steps = [script_step("run", "echo run")];
+    let plan = ValidatedPlan::from_script_steps(
+        "job-shared",
+        "velnor/job-ubuntu:26.04",
+        &steps,
+        vec!["postgres:16".into()],
+    );
+    assert_eq!(plan.job_container_image, "velnor/job-ubuntu:26.04");
+    assert_eq!(plan.scripts, vec!["echo run".to_string()]);
+    assert_eq!(plan.service_images, vec!["postgres:16".to_string()]);
+    let guest = plan.to_guest("job-shared", 1);
+    assert_eq!(guest.image, plan.job_container_image);
+    assert_eq!(guest.steps[0].script, "echo run");
+    let docker = run_custom(ExecutionBackendKind::Docker, plan.clone());
+    let micro = run_custom(ExecutionBackendKind::MicroVm, plan);
+    assert_eq!(docker.conclusion, micro.conclusion);
+    assert_eq!(docker.exit_code, micro.exit_code);
+    assert_eq!(docker.command_file, micro.command_file);
+    assert!(docker.cleaned && micro.cleaned);
+}
+
+#[test]
+fn microvm_spawns_jailer_with_api_socket_and_unique_net() {
+    let file = ExecutionFile::parse_toml("[execution]\nbackend = \"microvm\"\n").unwrap();
+    let mut fs = MemoryFs::default();
+    let artifacts = PathBuf::from("/microvm");
+    seed_microvm_world(&mut fs, &artifacts);
+    let docker = PathBuf::from("/var/run/docker.sock");
+    fs.write(&docker, b"socket").unwrap();
+    let mut runner = RecordingCommands {
+        next: CommandResult {
+            code: 0,
+            stdout: "ok".into(),
+            stderr: String::new(),
+        },
+        ..RecordingCommands::default()
+    };
+    let mut api = RecordingFirecracker::default();
+    let kvm = PathBuf::from("/dev/kvm");
+    let isolation = IsolationIdentity::new("job-net", 1);
+    let resources = IsolationResources::for_identity(isolation.clone(), &artifacts);
+    {
+        let mut world = world(&mut fs, &mut runner, &mut api, &kvm, &artifacts, &docker);
+        let mut session = open_session(&file, isolation, &mut world).unwrap();
+        session.reserve(&mut world).unwrap();
+        let plan = ValidatedPlan::example_success("job-net");
+        session.prepare(&plan, &mut world).unwrap();
+        session.start(&mut world).unwrap();
+        session.execute(&plan, &mut world).unwrap();
+        let _ = session.collect().unwrap();
+        session.teardown(&mut world).unwrap();
+    }
+    assert_eq!(runner.spawned.len(), 1, "{:?}", runner.calls);
+    assert_eq!(runner.killed, vec![runner.spawned[0].pid]);
+    assert!(
+        runner.calls.iter().any(
+            |(program, args)| program == "ip" && args.windows(2).any(|w| w == ["netns", "add"])
+        ),
+        "{:?}",
+        runner.calls
+    );
+    assert!(
+        runner.calls.iter().any(|(program, args)| {
+            program == "ip"
+                && args.windows(2).any(|w| w == ["tuntap", "add"])
+                && args.iter().any(|arg| arg == &resources.tap)
+        }),
+        "{:?}",
+        runner.calls
+    );
+    assert!(
+        runner.calls.iter().any(|(program, args)| {
+            program.ends_with("jailer")
+                && args.iter().any(|arg| arg == "--chroot-base-dir")
+                && args
+                    .windows(2)
+                    .any(|w| w == ["--api-sock", "/run/firecracker.socket"])
+                && !args.iter().any(|arg| arg == "--daemonize")
+        }),
+        "{:?}",
+        runner.calls
+    );
+    assert!(
+        runner.calls.iter().any(|(program, args)| {
+            program == "ip" && args.windows(2).any(|w| w == ["netns", "delete"])
+        }),
+        "{:?}",
+        runner.calls
+    );
+    assert_ne!(resources.api_socket(), resources.vsock);
+}
+
+#[test]
+fn fixture_parity_yaml_keeps_lanes_choice() {
+    let yaml = include_str!("../../../../docs/fixture-backend-parity.yml");
+    assert!(yaml.contains("lanes:"), "{yaml}");
+    assert!(yaml.contains("options: [velnor, github, both]"), "{yaml}");
+    assert!(
+        !yaml.contains("\n      backend:"),
+        "fixture must not add a repository-controlled backend input: {yaml}"
+    );
 }

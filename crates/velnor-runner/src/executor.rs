@@ -20,14 +20,14 @@ use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, ExitStatus, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc,
+        mpsc, Mutex, OnceLock,
     },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -67,8 +67,33 @@ pub struct CommandResult {
     pub stderr: String,
 }
 
+/// Token for a long-lived child (jailer). Kill uses the retained pid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnedProcess {
+    pub pid: u32,
+}
+
 pub trait CommandRunner {
     fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult>;
+
+    /// Spawn without waiting. Default refuses so accidental long waits stay fail-closed.
+    ///
+    /// # Errors
+    /// Spawn unsupported or OS failure.
+    fn spawn(&mut self, program: &str, _args: &[String]) -> Result<SpawnedProcess> {
+        bail!("command runner does not support spawn for {program}")
+    }
+
+    /// Kill a process returned by [`CommandRunner::spawn`].
+    ///
+    /// # Errors
+    /// Kill unsupported or OS failure.
+    fn kill(&mut self, process: &SpawnedProcess) -> Result<()> {
+        bail!(
+            "command runner does not support kill of pid {}",
+            process.pid
+        )
+    }
 
     fn run_timeout(
         &mut self,
@@ -205,10 +230,51 @@ fn node_action_image(runtime: &str, fallback: &str) -> String {
     }
 }
 
+fn spawned_children() -> &'static Mutex<HashMap<u32, Child>> {
+    static CHILDREN: OnceLock<Mutex<HashMap<u32, Child>>> = OnceLock::new();
+    CHILDREN.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 #[derive(Default)]
 pub struct ProcessCommandRunner;
 
 impl CommandRunner for ProcessCommandRunner {
+    fn spawn(&mut self, program: &str, args: &[String]) -> Result<SpawnedProcess> {
+        let child = Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("spawn {program} {}", args.join(" ")))?;
+        let pid = child.id();
+        spawned_children()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(pid, child);
+        Ok(SpawnedProcess { pid })
+    }
+
+    fn kill(&mut self, process: &SpawnedProcess) -> Result<()> {
+        if let Some(mut child) = spawned_children()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&process.pid)
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(());
+        }
+        let status = Command::new("kill")
+            .args(["-TERM", &process.pid.to_string()])
+            .status()
+            .with_context(|| format!("kill {}", process.pid))?;
+        if !status.success() {
+            bail!("kill {} exited {:?}", process.pid, status.code());
+        }
+        Ok(())
+    }
+
     fn run(&mut self, program: &str, args: &[String]) -> Result<CommandResult> {
         self.run_timeout(program, args, DEFAULT_STEP_TIMEOUT)
     }
@@ -793,7 +859,7 @@ impl ExecutableStep {
         }
     }
 
-    fn timeout_minutes(&self) -> Option<u64> {
+    pub(crate) fn timeout_minutes(&self) -> Option<u64> {
         match self {
             ExecutableStep::Checkout(plan) => plan.timeout_minutes,
             ExecutableStep::Script(step) => step.timeout_minutes,
