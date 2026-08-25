@@ -210,7 +210,6 @@ fn queued_for_from_rfc3339(raw: Option<&str>, now: SystemTime) -> Duration {
     now.duration_since(start).unwrap_or(Duration::ZERO)
 }
 
-#[cfg(test)]
 fn job_queued_for(job: &AgentJobRequestMessage, now: SystemTime) -> Duration {
     let raw = job.queue_time.as_deref().or_else(|| {
         job.variables
@@ -292,6 +291,10 @@ async fn complete_recorded_in_flight_job(
 struct JobTimingRecord {
     v: u8,
     job_id: String,
+    #[serde(default)]
+    queue_ms: Option<u64>,
+    #[serde(default)]
+    queue_to_first_step_ms: Option<u64>,
     pickup_ms: u64,
     first_step_ms: u64,
     checkout_ms: u64,
@@ -3169,6 +3172,7 @@ async fn handle_job_request(
     let early_context = job_context_data(&job);
     let mut job = job;
     hydrate_github_variables_from_context(&mut job, &early_context);
+    let queue_ms = duration_ms(job_queued_for(&job, SystemTime::now()));
     persist_in_flight_job(config_dir, &run_service_job, &job)?;
 
     // Plan 066 required write: the sanitized admission row must persist
@@ -3742,6 +3746,12 @@ async fn handle_job_request(
         let timing_record = JobTimingRecord {
             v: 1,
             job_id: job.job_id.clone(),
+            queue_ms: Some(queue_ms),
+            queue_to_first_step_ms: Some(
+                queue_ms
+                    .saturating_add(pickup_ms)
+                    .saturating_add(execution_timings.first_step_ms),
+            ),
             pickup_ms,
             first_step_ms: pickup_ms.saturating_add(execution_timings.first_step_ms),
             checkout_ms: execution_timings.checkout_ms,
@@ -8020,6 +8030,8 @@ async fn remove_one(args: &RemoveArgs, dir: &Path) -> Result<()> {
 }
 
 const DEFAULT_SLO_PICKUP_MS: u64 = 3_000;
+const DEFAULT_SLO_QUEUE_MS: u64 = 30_000;
+const DEFAULT_SLO_QUEUE_TO_FIRST_STEP_MS: u64 = 35_000;
 const DEFAULT_SLO_FIRST_STEP_MS: u64 = 5_000;
 const DEFAULT_SLO_FINALIZE_MS: u64 = 2_000;
 const DEFAULT_SLO_TEARDOWN_MS: u64 = 2_000;
@@ -8027,6 +8039,10 @@ const DEFAULT_SLO_SAMPLE_SIZE: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TimingPercentiles {
+    queue_p50: Option<u64>,
+    queue_p95: Option<u64>,
+    queue_to_first_step_p50: Option<u64>,
+    queue_to_first_step_p95: Option<u64>,
     pickup_p50: u64,
     pickup_p95: u64,
     first_step_p50: u64,
@@ -8061,11 +8077,23 @@ fn timing_percentiles(records: &[JobTimingRecord]) -> Option<TimingPercentiles> 
     if records.is_empty() {
         return None;
     }
+    let mut queue: Vec<_> = records
+        .iter()
+        .filter_map(|record| record.queue_ms)
+        .collect();
+    let mut queue_to_first_step: Vec<_> = records
+        .iter()
+        .filter_map(|record| record.queue_to_first_step_ms)
+        .collect();
     let mut pickup: Vec<_> = records.iter().map(|record| record.pickup_ms).collect();
     let mut first_step: Vec<_> = records.iter().map(|record| record.first_step_ms).collect();
     let mut finalize: Vec<_> = records.iter().map(|record| record.finalize_ms).collect();
     let mut teardown: Vec<_> = records.iter().map(|record| record.teardown_ms).collect();
     Some(TimingPercentiles {
+        queue_p50: optional_percentile(&mut queue, 50),
+        queue_p95: optional_percentile(&mut queue, 95),
+        queue_to_first_step_p50: optional_percentile(&mut queue_to_first_step, 50),
+        queue_to_first_step_p95: optional_percentile(&mut queue_to_first_step, 95),
         pickup_p50: percentile(&mut pickup.clone(), 50),
         pickup_p95: percentile(&mut pickup, 95),
         first_step_p50: percentile(&mut first_step.clone(), 50),
@@ -8075,6 +8103,10 @@ fn timing_percentiles(records: &[JobTimingRecord]) -> Option<TimingPercentiles> 
         teardown_p50: percentile(&mut teardown.clone(), 50),
         teardown_p95: percentile(&mut teardown, 95),
     })
+}
+
+fn optional_percentile(values: &mut [u64], rank: usize) -> Option<u64> {
+    (!values.is_empty()).then(|| percentile(values, rank))
 }
 
 fn env_u64(name: &str, default: u64) -> u64 {
@@ -8123,11 +8155,37 @@ fn print_doctor_slos(records: &[JobTimingRecord]) {
         println!("timing SLOs: no completed job-timing records yet");
         return;
     };
+    let queue_budget = env_u64("VELNOR_SLO_QUEUE_MS", DEFAULT_SLO_QUEUE_MS);
+    let queue_to_first_step_budget = env_u64(
+        "VELNOR_SLO_QUEUE_TO_FIRST_STEP_MS",
+        DEFAULT_SLO_QUEUE_TO_FIRST_STEP_MS,
+    );
     let pickup_budget = env_u64("VELNOR_SLO_PICKUP_MS", DEFAULT_SLO_PICKUP_MS);
     let first_step_budget = env_u64("VELNOR_SLO_FIRST_STEP_MS", DEFAULT_SLO_FIRST_STEP_MS);
     let finalize_budget = env_u64("VELNOR_SLO_FINALIZE_MS", DEFAULT_SLO_FINALIZE_MS);
     let teardown_budget = env_u64("VELNOR_SLO_TEARDOWN_MS", DEFAULT_SLO_TEARDOWN_MS);
     println!("timing SLOs: samples={}", records.len());
+    if let (Some(p50), Some(p95)) = (summary.queue_p50, summary.queue_p95) {
+        let state = timing_slo_state(p95, queue_budget);
+        println!("  queue: p50={p50}ms p95={p95}ms budget={queue_budget}ms {state}");
+        if p95 > queue_budget {
+            eprintln!("WARNING: timing SLO breach: queue p95={p95}ms exceeds {queue_budget}ms");
+        }
+    }
+    if let (Some(p50), Some(p95)) = (
+        summary.queue_to_first_step_p50,
+        summary.queue_to_first_step_p95,
+    ) {
+        let state = timing_slo_state(p95, queue_to_first_step_budget);
+        println!(
+            "  queue-to-first-step: p50={p50}ms p95={p95}ms budget={queue_to_first_step_budget}ms {state}"
+        );
+        if p95 > queue_to_first_step_budget {
+            eprintln!(
+                "WARNING: timing SLO breach: queue-to-first-step p95={p95}ms exceeds {queue_to_first_step_budget}ms"
+            );
+        }
+    }
     for (name, p50, p95, budget) in [
         (
             "pickup",
@@ -12683,6 +12741,8 @@ runs:
         JobTimingRecord {
             v: 1,
             job_id: job_id.to_string(),
+            queue_ms: Some(20),
+            queue_to_first_step_ms: Some(50),
             pickup_ms,
             first_step_ms: 30,
             checkout_ms: 20,
@@ -12702,6 +12762,24 @@ runs:
             record
         );
         assert!(json.contains("\"v\":1"));
+    }
+
+    #[test]
+    fn timing_record_reads_legacy_json_without_queue_fields() {
+        let legacy = r#"{
+            "v": 1,
+            "job_id": "legacy",
+            "pickup_ms": 10,
+            "first_step_ms": 20,
+            "checkout_ms": 3,
+            "container_boot_ms": 4,
+            "steps_ms": 5,
+            "finalize_ms": 6,
+            "teardown_ms": 7
+        }"#;
+        let record: JobTimingRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(record.queue_ms, None);
+        assert_eq!(record.queue_to_first_step_ms, None);
     }
 
     #[cfg(unix)]
@@ -12849,9 +12927,14 @@ runs:
 
     #[test]
     fn timing_percentiles_report_pickup_to_first_step() {
+        let fast = timing_record("fast", 100);
         let mut slow = timing_record("slow", 9_000);
+        slow.queue_ms = Some(8_000);
+        slow.queue_to_first_step_ms = Some(21_000);
         slow.first_step_ms = 4_000;
-        let summary = timing_percentiles(&[timing_record("fast", 100), slow]).unwrap();
+        let summary = timing_percentiles(&[fast, slow]).unwrap();
+        assert_eq!(summary.queue_p95, Some(8_000));
+        assert_eq!(summary.queue_to_first_step_p95, Some(21_000));
         assert_eq!(summary.pickup_p50, 100);
         assert_eq!(summary.pickup_p95, 9_000);
         assert_eq!(summary.first_step_p95, 4_000);

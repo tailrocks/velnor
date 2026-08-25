@@ -52,15 +52,31 @@ Effect estimate: java-monorepo Velnor bake 28 → ~5 min warm (dep-tree layers
 hit); fixes tablerock lane parity and parallax/jackin gha-scoped caches with
 zero YAML changes (portability law satisfied).
 
+### Measurement correction — 2026-08-25
+
+The current Java workflow uses registry cache as the primary backend and keeps
+`type=gha` as an `ignore-error` secondary. The Velnor lane proved that the
+GitHub endpoint passthrough is usable: run `32832916776` imported both `gha`
+and registry manifests and completed its Docker job in **188 s**; the
+preceding no-registry-primary run `32830746424` took **504 s**. That is a
+316-second (**62.7%**) reduction, before any native Velnor CacheService work.
+
+Velnor still does not implement a CacheService/Twirp backend; it forwards the
+workflow endpoint and token. Native cache service remains a separate research
+track, not the current Java bottleneck. Do not claim the old 23–28 minute cold
+result for the post-PR #1976 workflow.
+
 ## 3. Ranked bottleneck list
 
-1. **P1 above** — largest measured cost in the estate (~23 min × every
-   java-monorepo push/PR).
-2. **Fleet admission latency**: parallax waited 425 s queued; jackin micro-jobs
+1. **Fleet admission latency**: parallax waited 425 s queued; jackin micro-jobs
    lose more time to queue+JIT boot than to work. Work items: keep N pre-warmed
    JIT registrations per slot instead of discard-per-cycle, measure pickup SLO
    from forensics `job-timing` records, and expose a fleet saturation signal so
    capacity grows before queues form.
+2. **Conditional native BuildKit CacheService**: Velnor currently forwards
+   GitHub's cache endpoint and the Java registry-primary workflow is fast, but
+   workflows without a registry cache still depend on GitHub's remote service.
+   Implement only after a scoped protocol canary proves a material win.
 3. **kestra-build-publish.yml (java-monorepo)** builds four images with bare
    `docker buildx` and no `cache-from/to`; only an exists-check skips them.
    Give it the registry-buildcache pattern below.
@@ -141,7 +157,8 @@ asm! gaps), `-Zshare-generics=y -Zthreads=N`.
   (job wall + created→started queue split) on ≥3 runs of each affected repo.
 - Runner-side: enable JSON span export on all pool daemons
   (`logs/trace.jsonl`) so pickup/boot/teardown percentiles become first-class;
-  add pickup-SLO reporting to doctor output.
+  queue-to-acquire and queue-to-first-step fields now flow through versioned
+  `job-timing` records and doctor SLO output, enabling elastic-capacity proof.
 - Weekly scheduled `both`-lane parity runs remain the regression tripwire;
   extend lane-compare tooling to flag any Velnor lane >1.15× its GitHub twin.
 
