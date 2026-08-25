@@ -137,6 +137,20 @@ This removes the upgrade/drain queue without weakening in-flight job safety;
 live proof requires the corrected binary and the same exact runner-group
 policy admission used by the JIT test.
 
+### Live policy gate — 2026-08-26
+
+Read-only `velnor-tools fleet-policy audit` confirmed the admission blocker:
+
+- Tailrocks: **80** mismatch classes; two unexpected repositories.
+- ChainArgos: **23** mismatch classes; two unexpected repositories.
+- jackin-project: **62** mismatch classes; one unexpected repository.
+
+All three groups report `restricted_to_workflows=false` and no selected
+workflow identities. No mutation was performed. Exact reviewed digests remain
+Tailrocks `sha256:b9f497117c5a4d6bc13b48ac5dbc857de92f9465df06631fcd3d8cb516e8cd57`,
+ChainArgos `sha256:db3edaa1e0f2e058708fb3310bfc5ca9eca8cbe1c71cdeb76e33fe7ab47f68c0`,
+and jackin-project `sha256:97b13ff43e2132fc92fb34cbea4e34bca9c1754457b2899ece08a858ed39571f`.
+
 ## 4. Unified workflow standard (cross-org)
 
 Both research passes agree with the marked contract; the deltas are:
