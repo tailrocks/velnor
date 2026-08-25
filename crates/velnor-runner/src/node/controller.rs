@@ -17,7 +17,7 @@ use super::cleanup;
 use super::exec::load_exec_config;
 use super::health::HealthServer;
 use super::prove;
-use super::slot::slot_id;
+use super::slot::{heartbeat_path, slot_id, SlotHeartbeat};
 use super::watchdog::{feed_after_cycle, LocalCycle};
 
 /// Bound live JIT requests during startup/recovery without making the GitHub
@@ -55,13 +55,22 @@ pub async fn run(args: ControllerArgs) -> anyhow::Result<()> {
     })?;
     let mut slots: HashMap<String, Child> = HashMap::new();
     let mut jobs: HashMap<String, Child> = HashMap::new();
+    let mut heartbeats: HashMap<String, (u32, u64)> = HashMap::new();
     let mut ready_announced = false;
     loop {
         if crate::runner::draining() {
             drain_children(&mut slots, &mut jobs).await?;
             return Ok(());
         }
-        let cycle = reconcile_once(&args, &mut journal, &server, &mut slots, &mut jobs).await?;
+        let cycle = reconcile_once(
+            &args,
+            &mut journal,
+            &server,
+            &mut slots,
+            &mut jobs,
+            &mut heartbeats,
+        )
+        .await?;
         let _ = feed_after_cycle(cycle, !ready_announced);
         ready_announced = true;
         if args.once {
@@ -132,6 +141,7 @@ async fn reconcile_once(
     server: &HealthServer,
     slots: &mut HashMap<String, Child>,
     jobs: &mut HashMap<String, Child>,
+    heartbeats: &mut HashMap<String, (u32, u64)>,
 ) -> anyhow::Result<LocalCycle> {
     let total = args.desired_ready.saturating_add(args.surge).max(1);
     let generation = Generation::INITIAL;
@@ -152,6 +162,8 @@ async fn reconcile_once(
     for command in effects {
         execute_effect(args, journal, slots, jobs, command).await?;
     }
+
+    ingest_slot_heartbeats(args, journal, total as usize, heartbeats)?;
 
     observe_github_and_routing(args, journal).await?;
 
@@ -238,7 +250,10 @@ async fn execute_effect(
     command: SideEffect,
 ) -> anyhow::Result<()> {
     match command {
-        SideEffect::SpawnSlot { slot_id, .. } => maybe_spawn_slot(args, journal, slots, &slot_id),
+        SideEffect::SpawnSlot {
+            slot_id,
+            generation,
+        } => maybe_spawn_slot(args, journal, slots, &slot_id, generation),
         SideEffect::RegisterRunner {
             slot_id,
             generation,
@@ -472,11 +487,54 @@ fn slot_index_from_id(slot_id: &SlotId) -> usize {
         .unwrap_or(1)
 }
 
+/// Read per-slot liveness files and serialize their durable journal effects in
+/// this controller process. Slot processes must not contend on the shared
+/// SQLite writer just to report liveness.
+fn ingest_slot_heartbeats(
+    args: &ControllerArgs,
+    journal: &mut Journal,
+    total: usize,
+    seen: &mut HashMap<String, (u32, u64)>,
+) -> anyhow::Result<()> {
+    let state = journal.load_state()?;
+    for index in 1..=total {
+        let path = heartbeat_path(&args.state_dir, index);
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let Ok(heartbeat) = serde_json::from_slice::<SlotHeartbeat>(&bytes) else {
+            continue;
+        };
+        let id = slot_id(&args.scope, index);
+        let Some(slot) = state.slots.iter().find(|slot| slot.slot_id == id) else {
+            continue;
+        };
+        if slot.generation.0 != heartbeat.generation
+            || !prove::pid_is_alive(heartbeat.pid)
+            || seen.get(&id.0).is_some_and(|(pid, sequence)| {
+                *pid == heartbeat.pid && *sequence >= heartbeat.sequence
+            })
+        {
+            continue;
+        }
+        let outcome = journal.apply(Event::SlotHeartbeat {
+            slot_id: id.clone(),
+            generation: Generation(heartbeat.generation),
+            pid: heartbeat.pid,
+        })?;
+        if !outcome.rejected {
+            seen.insert(id.0, (heartbeat.pid, heartbeat.sequence));
+        }
+    }
+    Ok(())
+}
+
 fn maybe_spawn_slot(
     args: &ControllerArgs,
     journal: &Journal,
     children: &mut HashMap<String, Child>,
     slot_id: &SlotId,
+    generation: Generation,
 ) -> anyhow::Result<()> {
     if !args.spawn_slots {
         return Ok(());
@@ -501,6 +559,8 @@ fn maybe_spawn_slot(
         .arg(&args.scope)
         .arg("--slot-index")
         .arg(index.to_string())
+        .arg("--generation")
+        .arg(generation.0.to_string())
         .spawn()?;
     children.insert(slot_id.0.clone(), child);
     Ok(())
