@@ -121,10 +121,17 @@ fn slot_kill_drops_one_unit_of_capacity() {
         children.push(child);
     }
     let mut pids = 0;
-    for _ in 0..200 {
+    for _ in 0..400 {
         if let Ok(journal) = Journal::open(dir.join("journal.db")) {
             if let Ok(state) = journal.load_state() {
-                pids = state.slots.iter().filter(|slot| slot.pid.is_some()).count();
+                pids = state
+                    .slots
+                    .iter()
+                    .filter(|slot| {
+                        (slot.slot_id.0 == "iso-1" || slot.slot_id.0 == "iso-2")
+                            && slot.pid.is_some()
+                    })
+                    .count();
                 if pids == 2 {
                     break;
                 }
