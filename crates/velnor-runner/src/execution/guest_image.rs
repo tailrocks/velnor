@@ -321,17 +321,12 @@ pub fn build_guest_image(
     std::fs::write(&fragment_path, fragment.as_bytes()).map_err(|error| {
         MicroVmPreflightFailure::new("guest.kernel", format!("write fragment: {error}"))
     })?;
-    let make_arch = arch.make_arch();
-    let mut make_tiny = vec![
-        "-C".into(),
-        src.display().to_string(),
-        format!("ARCH={make_arch}"),
-    ];
-    if let Some(cross) = cross_compile(arch) {
-        make_tiny.push(format!("CROSS_COMPILE={cross}"));
-    }
-    make_tiny.push("tinyconfig".into());
-    run(runner, "make", &make_tiny, "guest.kernel")?;
+    run(
+        runner,
+        "make",
+        &make_kernel_args(src.as_path(), arch, &["tinyconfig"]),
+        "guest.kernel",
+    )?;
     run(
         runner,
         "bash",
@@ -344,16 +339,12 @@ pub fn build_guest_image(
         ],
         "guest.kernel",
     )?;
-    let mut make_olddef = vec![
-        "-C".into(),
-        src.display().to_string(),
-        format!("ARCH={make_arch}"),
-    ];
-    if let Some(cross) = cross_compile(arch) {
-        make_olddef.push(format!("CROSS_COMPILE={cross}"));
-    }
-    make_olddef.push("olddefconfig".into());
-    run(runner, "make", &make_olddef, "guest.kernel")?;
+    run(
+        runner,
+        "make",
+        &make_kernel_args(src.as_path(), arch, &["olddefconfig"]),
+        "guest.kernel",
+    )?;
     let config_text = std::fs::read_to_string(src.join(".config")).map_err(|error| {
         MicroVmPreflightFailure::new("guest.kernel", format!("read .config: {error}"))
     })?;
@@ -362,21 +353,16 @@ pub fn build_guest_image(
         let _ = std::fs::write(&dump, config_text.as_bytes());
         return Err(error);
     }
-    let mut make_vmlinux = vec![
-        "-C".into(),
-        src.display().to_string(),
-        format!("ARCH={make_arch}"),
-        "-j".into(),
-        std::thread::available_parallelism()
-            .map(std::num::NonZeroUsize::get)
-            .unwrap_or(2)
-            .to_string(),
-    ];
-    if let Some(cross) = cross_compile(arch) {
-        make_vmlinux.push(format!("CROSS_COMPILE={cross}"));
-    }
-    make_vmlinux.push("vmlinux".into());
-    run(runner, "make", &make_vmlinux, "guest.kernel")?;
+    let jobs = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(2)
+        .to_string();
+    run(
+        runner,
+        "make",
+        &make_kernel_args(src.as_path(), arch, &["-j", jobs.as_str(), "vmlinux"]),
+        "guest.kernel",
+    )?;
 
     std::fs::create_dir_all(output_dir).map_err(|error| {
         MicroVmPreflightFailure::new("guest.kernel", format!("create output: {error}"))
@@ -399,6 +385,23 @@ fn cross_compile(arch: GuestArch) -> Option<&'static str> {
     }
 }
 
+/// Fixed identity so `vmlinux` bytes do not include wall-clock or builder host.
+fn make_kernel_args(src: &Path, arch: GuestArch, extra: &[&str]) -> Vec<String> {
+    let mut args = vec![
+        "-C".into(),
+        src.display().to_string(),
+        format!("ARCH={}", arch.make_arch()),
+        "KBUILD_BUILD_USER=velnor".into(),
+        "KBUILD_BUILD_HOST=velnor-guest".into(),
+        "KBUILD_BUILD_TIMESTAMP=1970-01-01".into(),
+    ];
+    if let Some(cross) = cross_compile(arch) {
+        args.push(format!("CROSS_COMPILE={cross}"));
+    }
+    args.extend(extra.iter().map(|value| (*value).to_string()));
+    args
+}
+
 fn build_rootfs(
     runner: &mut dyn CommandRunner,
     work_dir: &Path,
@@ -417,8 +420,10 @@ fn build_rootfs(
         GuestArch::Aarch64 => "arm64",
     };
     let mmdebstrap = runner.run(
-        "mmdebstrap",
+        "env",
         &[
+            "SOURCE_DATE_EPOCH=0".into(),
+            "mmdebstrap".into(),
             "--variant=minbase".into(),
             format!("--include={includes}"),
             format!("--architectures={deb_arch}"),
@@ -438,8 +443,10 @@ fn build_rootfs(
         Err(_) => {
             run(
                 runner,
-                "debootstrap",
+                "env",
                 &[
+                    "SOURCE_DATE_EPOCH=0".into(),
+                    "debootstrap".into(),
                     "--variant=minbase".into(),
                     format!("--include={includes}"),
                     format!("--arch={deb_arch}"),
@@ -482,10 +489,18 @@ fn build_rootfs(
     }
     run(
         runner,
-        "mke2fs",
+        "env",
         &[
+            "SOURCE_DATE_EPOCH=0".into(),
+            "mke2fs".into(),
             "-t".into(),
             "ext4".into(),
+            "-U".into(),
+            "00000000-0000-0000-0000-000000000001".into(),
+            "-L".into(),
+            "velnor-guest".into(),
+            "-E".into(),
+            "hash_seed=00000000-0000-0000-0000-000000000002".into(),
             "-d".into(),
             tree.display().to_string(),
             output.display().to_string(),
@@ -528,6 +543,18 @@ mod tests {
     use super::*;
     use crate::execution::{MemoryFs, RecordingCommands};
     use crate::executor::CommandResult;
+
+    #[test]
+    fn kbuild_identity_is_fixed() {
+        let args = make_kernel_args(Path::new("/k"), GuestArch::Aarch64, &["vmlinux"]);
+        assert!(args.iter().any(|arg| arg == "KBUILD_BUILD_USER=velnor"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "KBUILD_BUILD_HOST=velnor-guest"));
+        assert!(args
+            .iter()
+            .any(|arg| arg == "KBUILD_BUILD_TIMESTAMP=1970-01-01"));
+    }
 
     #[test]
     fn debian_package_maps_engine_and_buildkit() {
