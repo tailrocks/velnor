@@ -226,6 +226,28 @@ pub fn policy_from_github_url(
     fields_complete(&fields).then_some(fields)
 }
 
+/// Desired policy for org-scoped fleets: the runner group's live membership.
+///
+/// An org URL names no repository, so the operator's declared intent is the
+/// runner group itself (plus configured labels/trust). The desired repository
+/// set is therefore snapshotted from the observed group membership; later
+/// drift between the live group and that snapshot invalidates routing and
+/// stops new registrations exactly like an operator-written policy.
+#[must_use]
+pub fn org_policy_from_evidence(
+    evidence: &RoutingFields,
+    labels: Vec<String>,
+    trust_scope: String,
+) -> Option<RoutingFields> {
+    let fields = RoutingFields {
+        group: evidence.group.clone(),
+        selected_repositories: evidence.selected_repositories.clone(),
+        labels,
+        trust_scope,
+    };
+    fields_complete(&fields).then_some(fields)
+}
+
 /// Read `routing-policy.json` when present.
 #[must_use]
 pub fn read_policy(state_dir: &Path) -> Option<RoutingFields> {

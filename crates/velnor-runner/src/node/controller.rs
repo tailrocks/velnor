@@ -545,12 +545,17 @@ async fn observe_github_and_routing(
             .or_else(|| exec.name.clone())
             .unwrap_or_else(|| "default".to_owned());
         let trust = prove::runtime_trust_scope(&exec.trust_scope);
-        if let Some(url) = exec.url.as_deref() {
-            if let Some(policy) =
-                prove::policy_from_github_url(url, group, exec.labels.clone(), trust.clone())
-            {
-                prove::write_policy_if_absent(&args.state_dir, &policy)?;
-            }
+        // Repo-scoped fleets derive policy from the URL. Org-scoped fleets
+        // have no repository in the URL, so their desired repository set is
+        // the runner group's live membership, snapshotted once from a
+        // successful probe. Without that bootstrap no policy file ever
+        // exists, routing can never validate, and `RegistrationIntended`
+        // never fires (0.1.211/0.1.212 fleet-wide 0/8 registration).
+        let repo_policy = exec.url.as_deref().and_then(|url| {
+            prove::policy_from_github_url(url, group, exec.labels.clone(), trust.clone())
+        });
+        if let Some(policy) = &repo_policy {
+            prove::write_policy_if_absent(&args.state_dir, policy)?;
         }
         let policy = prove::read_policy(&args.state_dir);
         if let (Some(url), Some(token)) = (exec.url.as_deref(), exec.pat.as_deref()) {
@@ -593,6 +598,16 @@ async fn observe_github_and_routing(
                 reachable = probe.reachable;
                 dependency_observed = true;
                 if let Some(evidence) = probe.evidence {
+                    if repo_policy.is_none() && prove::read_policy(&args.state_dir).is_none() {
+                        let org_policy = prove::org_policy_from_evidence(
+                            &evidence,
+                            exec.labels.clone(),
+                            trust.clone(),
+                        );
+                        if let Some(policy) = org_policy {
+                            prove::write_policy_if_absent(&args.state_dir, &policy)?;
+                        }
+                    }
                     prove::write_evidence(&args.state_dir, &evidence)?;
                 }
             }
@@ -884,7 +899,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn org_url_probe_sets_github_reachable_without_inferred_policy() {
+    async fn org_url_probe_bootstraps_policy_from_group_membership() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v3/orgs/tailrocks/actions/runners"))
@@ -943,6 +958,15 @@ mod tests {
                 .unwrap();
         assert_eq!(evidence.group, "velnor");
         assert_eq!(evidence.selected_repositories, vec!["tailrocks/velnor"]);
+        // Org fleets must bootstrap routing policy from the observed group
+        // membership, otherwise routing stays invalid and registration never
+        // fires (0.1.211/0.1.212 fleet-wide 0/8).
+        assert!(state.routing_valid, "{state:?}");
+        assert!(state.runner_group_valid, "{state:?}");
+        let policy: crate::node::prove::RoutingFields =
+            serde_json::from_slice(&std::fs::read(dir.join(prove::ROUTING_POLICY_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(policy, evidence);
         std::env::remove_var("GITHUB_TOKEN");
         std::fs::remove_dir_all(dir).ok();
     }
