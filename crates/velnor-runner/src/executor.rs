@@ -3099,11 +3099,14 @@ where
 
     pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
+        // Job container is gone; abort in-flight Engine HTTP (BuildKit start)
+        // before reclaim. `docker rm` of Created BuildKit waits forever on
+        // that lock if the lease still holds `POST /containers/{id}/start`.
+        self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
         let buildkit_result = self.cleanup_job_buildkit(container);
         let service_result = self.cleanup_services(container);
         let network_result = self.run_docker(&container.remove_network_args());
-        self.docker_lease.take();
 
         container_result?;
         owned_result?;
@@ -3122,10 +3125,13 @@ where
     /// volume retry timeout into slot turnover latency.
     pub(crate) fn cleanup_without_buildkit(&mut self, container: &JobContainerSpec) -> Result<()> {
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
+        // Abort in-flight Engine HTTP before the deferred BuildKit worker
+        // runs. Dropping the lease at the end used to leave ContainerStart
+        // held, so the worker's `docker rm` of Created BuildKit hung.
+        self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
         let service_result = self.cleanup_services(container);
         let network_result = self.run_docker(&container.remove_network_args());
-        self.docker_lease.take();
 
         container_result?;
         owned_result?;
@@ -3149,11 +3155,10 @@ where
 
     pub(crate) fn cleanup_job_and_network(&mut self, container: &JobContainerSpec) -> Result<()> {
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
+        self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
         let buildkit_result = self.cleanup_job_buildkit(container);
         let network_result = self.run_docker(&container.remove_network_args());
-        self.docker_lease.take();
-
         container_result?;
         owned_result?;
         buildkit_result?;
@@ -3166,9 +3171,9 @@ where
         container: &JobContainerSpec,
     ) -> Result<()> {
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
+        self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
         let network_result = self.run_docker(&container.remove_network_args());
-        self.docker_lease.take();
         container_result?;
         owned_result?;
         network_result?;
@@ -3445,12 +3450,16 @@ where
 
     fn cleanup_stale(&mut self, container: &JobContainerSpec) {
         self.run_docker(&container.remove_container_args()).ok();
+        self.abort_docker_lease();
         self.reclaim_job_owned_docker(&container.name).ok();
         self.cleanup_job_buildkit(container).ok();
         for service in container.services.iter().rev() {
             self.run_docker(&service.remove_args()).ok();
         }
         self.run_docker(&container.remove_network_args()).ok();
+    }
+
+    fn abort_docker_lease(&mut self) {
         self.docker_lease.take();
     }
 
@@ -10580,6 +10589,162 @@ esac
             ]
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_aborts_docker_lease_before_buildkit_rm() {
+        use std::path::PathBuf;
+
+        struct LeaseOrderRunner {
+            lease_path: PathBuf,
+            job_rm_saw_lease: bool,
+            buildkit_saw_dead_lease: bool,
+        }
+
+        impl CommandRunner for LeaseOrderRunner {
+            fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+                let lease_live = self.lease_path.exists();
+                if args == ["rm".to_string(), "--force".to_string(), "job".to_string()].as_slice() {
+                    assert!(
+                        lease_live,
+                        "lease must stay mounted until the job container is removed"
+                    );
+                    self.job_rm_saw_lease = true;
+                }
+                if args == crate::docker_lease::list_job_buildkit_format_args() {
+                    assert!(
+                        !lease_live,
+                        "in-flight Engine Start must be aborted before BuildKit reclaim"
+                    );
+                    self.buildkit_saw_dead_lease = true;
+                }
+                Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let lease_dir = PathBuf::from("/tmp").join(format!(
+            "vlc-abort-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&lease_dir).unwrap();
+        let lease_path = lease_dir.join("s.sock");
+        let lease = crate::docker_lease::DockerLeaseGuard::bind_to(
+            lease_path.clone(),
+            PathBuf::from("/nonexistent-host-docker.sock"),
+            "job".into(),
+            "daemon".into(),
+        )
+        .unwrap();
+        assert!(
+            lease_path.exists(),
+            "lease socket must exist before cleanup"
+        );
+        let spec = container(&temp);
+        let mut executor = DockerScriptExecutor::new(LeaseOrderRunner {
+            lease_path: lease_path.clone(),
+            job_rm_saw_lease: false,
+            buildkit_saw_dead_lease: false,
+        })
+        .with_docker_lease(lease);
+        executor.cleanup(&spec).unwrap();
+        let runner = executor.into_runner();
+        assert!(
+            runner.job_rm_saw_lease,
+            "cleanup must remove the job container"
+        );
+        assert!(
+            runner.buildkit_saw_dead_lease,
+            "cleanup must reclaim BuildKit after aborting the lease"
+        );
+        assert!(!lease_path.exists(), "cleanup must drop the lease socket");
+        fs::remove_dir_all(temp).ok();
+        fs::remove_dir_all(lease_dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_without_buildkit_aborts_lease_before_deferred_reclaim() {
+        use std::path::PathBuf;
+
+        struct SkipBuildkitRunner {
+            lease_path: PathBuf,
+            job_rm_saw_lease: bool,
+            calls: Vec<Vec<String>>,
+        }
+
+        impl CommandRunner for SkipBuildkitRunner {
+            fn run(&mut self, _program: &str, args: &[String]) -> Result<CommandResult> {
+                let lease_live = self.lease_path.exists();
+                if args == ["rm".to_string(), "--force".to_string(), "job".to_string()].as_slice() {
+                    assert!(
+                        lease_live,
+                        "lease must stay mounted until the job container is removed"
+                    );
+                    self.job_rm_saw_lease = true;
+                }
+                self.calls.push(args.to_vec());
+                Ok(CommandResult {
+                    code: 0,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        let temp = temp_dir();
+        fs::create_dir_all(&temp).unwrap();
+        let lease_dir = PathBuf::from("/tmp").join(format!(
+            "vlc-defer-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&lease_dir).unwrap();
+        let lease_path = lease_dir.join("s.sock");
+        let lease = crate::docker_lease::DockerLeaseGuard::bind_to(
+            lease_path.clone(),
+            PathBuf::from("/nonexistent-host-docker.sock"),
+            "job".into(),
+            "daemon".into(),
+        )
+        .unwrap();
+        let spec = container(&temp);
+        let mut executor = DockerScriptExecutor::new(SkipBuildkitRunner {
+            lease_path: lease_path.clone(),
+            job_rm_saw_lease: false,
+            calls: Vec::new(),
+        })
+        .with_docker_lease(lease);
+        executor.cleanup_without_buildkit(&spec).unwrap();
+        let runner = executor.into_runner();
+        assert!(runner.job_rm_saw_lease);
+        assert!(
+            runner
+                .calls
+                .iter()
+                .all(|args| args != &crate::docker_lease::list_job_buildkit_format_args()),
+            "slot path must not wait on BuildKit rm: {:?}",
+            runner.calls
+        );
+        assert!(
+            !lease_path.exists(),
+            "deferred BuildKit worker must not inherit a live Engine Start"
+        );
+        fs::remove_dir_all(temp).ok();
+        fs::remove_dir_all(lease_dir).ok();
     }
 
     #[test]
