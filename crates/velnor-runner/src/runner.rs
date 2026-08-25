@@ -5530,21 +5530,64 @@ struct TeardownHandle {
 }
 
 impl TeardownHandle {
-    fn run(self) {
+    fn run(self, job_claim: JobClaim, forensics: SlotForensics) {
+        let TeardownHandle {
+            container,
+            job_dir,
+            services_removed,
+        } = self;
         let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
-        let cleanup = if self.services_removed {
-            executor.cleanup_job_and_network(&self.container)
+        let cleanup = if services_removed {
+            executor.cleanup_job_and_network_without_buildkit(&container)
         } else {
-            executor.cleanup(&self.container)
+            executor.cleanup_without_buildkit(&container)
         };
         if let Err(error) = cleanup {
             eprintln!("Warning: post-completion Docker teardown failed: {error:#}");
         }
-        if let Err(error) = fs::remove_dir_all(&self.job_dir) {
+        if let Err(error) = fs::remove_dir_all(&job_dir) {
             eprintln!(
                 "Warning: post-completion workspace teardown failed for {}: {error}",
-                self.job_dir.display()
+                job_dir.display()
             );
+        }
+
+        // Docker Engine can acknowledge a forced BuildKit container removal
+        // while its state volume is still attached. Keep this slow, retryable
+        // cleanup out of slot turnover, but hold the duplicate-job claim until
+        // the worker finishes so a replay cannot recreate the same scope.
+        let claim = Arc::new(std::sync::Mutex::new(Some(job_claim)));
+        let worker_claim = Arc::clone(&claim);
+        let worker_forensics = forensics.clone();
+        let worker_container = container.clone();
+        let deferred = std::thread::Builder::new()
+            .name("velnor-buildkit-cleanup".into())
+            .spawn(move || {
+                let _job_claim = worker_claim
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                worker_forensics.lifecycle("buildkit-teardown-deferred-start");
+                let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+                match executor.cleanup_job_buildkit(&worker_container) {
+                    Ok(()) => worker_forensics.lifecycle("buildkit-teardown-deferred-done"),
+                    Err(error) => worker_forensics.lifecycle(&format!(
+                        "buildkit-teardown-deferred-failed error={error:#}"
+                    )),
+                }
+            });
+        if let Err(error) = deferred {
+            eprintln!(
+                "Warning: could not defer BuildKit teardown; running it synchronously: {error}"
+            );
+            let _job_claim = claim
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            let mut executor = DockerScriptExecutor::new(ProcessCommandRunner);
+            if let Err(error) = executor.cleanup_job_buildkit(&container) {
+                eprintln!("Warning: deferred BuildKit teardown fallback failed: {error:#}");
+            }
         }
     }
 }
@@ -5566,12 +5609,9 @@ fn spawn_post_completion_teardown(
     job_claim: JobClaim,
 ) {
     let task = std::thread::spawn(move || {
-        // Claim ownership follows deterministic resources. Duplicate delivery
-        // cannot recreate them until Docker and workspace teardown completes.
-        let _job_claim = job_claim;
         let _span = tracing::info_span!("job-teardown").entered();
         let teardown_started = Instant::now();
-        teardown.run();
+        teardown.run(job_claim, forensics.clone());
         timing_record.teardown_ms = duration_ms(teardown_started.elapsed());
         if let Ok(json) = serde_json::to_string(&timing_record) {
             forensics.lifecycle(&format!("job-timing {json}"));

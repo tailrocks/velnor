@@ -3113,6 +3113,27 @@ where
         Ok(())
     }
 
+    /// Remove the job-owned containers, services, network, and lease without
+    /// waiting for BuildKit's asynchronous container/volume deletion.
+    ///
+    /// BuildKit cleanup is intentionally separate: Docker can acknowledge a
+    /// forced container removal while the container still holds its state
+    /// volume. Keeping that delete on the slot's critical path turns the
+    /// volume retry timeout into slot turnover latency.
+    pub(crate) fn cleanup_without_buildkit(&mut self, container: &JobContainerSpec) -> Result<()> {
+        let container_result = self.run_docker_remove_container(&container.remove_container_args());
+        let owned_result = self.reclaim_job_owned_docker(&container.name);
+        let service_result = self.cleanup_services(container);
+        let network_result = self.run_docker(&container.remove_network_args());
+        self.docker_lease.take();
+
+        container_result?;
+        owned_result?;
+        service_result?;
+        network_result?;
+        Ok(())
+    }
+
     pub(crate) fn cleanup_services(&mut self, container: &JobContainerSpec) -> Result<()> {
         let service_results = container
             .services
@@ -3132,9 +3153,24 @@ where
         let buildkit_result = self.cleanup_job_buildkit(container);
         let network_result = self.run_docker(&container.remove_network_args());
         self.docker_lease.take();
+
         container_result?;
         owned_result?;
         buildkit_result?;
+        network_result?;
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_job_and_network_without_buildkit(
+        &mut self,
+        container: &JobContainerSpec,
+    ) -> Result<()> {
+        let container_result = self.run_docker_remove_container(&container.remove_container_args());
+        let owned_result = self.reclaim_job_owned_docker(&container.name);
+        let network_result = self.run_docker(&container.remove_network_args());
+        self.docker_lease.take();
+        container_result?;
+        owned_result?;
         network_result?;
         Ok(())
     }
@@ -3153,7 +3189,7 @@ where
     /// state volume from the builder name; every native builder is suffixed
     /// with the job's unique scope. Match that exact suffix, then remove the
     /// daemon together with its anonymous/named state volume.
-    fn cleanup_job_buildkit(&mut self, container: &JobContainerSpec) -> Result<()> {
+    pub(crate) fn cleanup_job_buildkit(&mut self, container: &JobContainerSpec) -> Result<()> {
         let scope = job_scope_from_temp(Some(&container.temp_host));
         let listed = self.run_docker(&crate::docker_lease::list_job_buildkit_format_args())?;
         let ids =
