@@ -45,6 +45,13 @@ const SETUP_QEMU_BINFMT_IMAGE: &str =
     "docker.io/tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0";
 static CACHE_STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 
+fn docker_lifecycle_guard() -> Result<crate::capacity::DockerLifecycleGuard> {
+    let run_root = crate::storage::StorageLayout::resolve()
+        .map(|layout| layout.run_root)
+        .unwrap_or_else(|| std::env::temp_dir().join("velnor"));
+    crate::capacity::DockerLifecycleGuard::lock(&run_root)
+}
+
 // ANSI color helpers for Velnor-authored adapter output.
 // GitHub's UI renders these as colored spans (ansifg-* classes).
 const ANSI_GREEN: &str = "\x1b[32m";
@@ -3098,14 +3105,15 @@ where
     }
 
     pub(crate) fn cleanup(&mut self, container: &JobContainerSpec) -> Result<()> {
+        let _lifecycle = docker_lifecycle_guard()?;
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         // Job container is gone; abort in-flight Engine HTTP (BuildKit start)
         // before reclaim. `docker rm` of Created BuildKit waits forever on
         // that lock if the lease still holds `POST /containers/{id}/start`.
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
-        let buildkit_result = self.cleanup_job_buildkit(container);
-        let service_result = self.cleanup_services(container);
+        let buildkit_result = self.cleanup_job_buildkit_unlocked(container);
+        let service_result = self.cleanup_services_unlocked(container);
 
         container_result?;
         owned_result?;
@@ -3122,13 +3130,18 @@ where
     /// volume. Keeping that delete on the slot's critical path turns the
     /// volume retry timeout into slot turnover latency.
     pub(crate) fn cleanup_without_buildkit(&mut self, container: &JobContainerSpec) -> Result<()> {
+        let _lifecycle = docker_lifecycle_guard()?;
+        self.cleanup_without_buildkit_unlocked(container)
+    }
+
+    fn cleanup_without_buildkit_unlocked(&mut self, container: &JobContainerSpec) -> Result<()> {
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         // Abort in-flight Engine HTTP before the deferred BuildKit worker
         // runs. Dropping the lease at the end used to leave ContainerStart
         // held, so the worker's `docker rm` of Created BuildKit hung.
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
-        let service_result = self.cleanup_services(container);
+        let service_result = self.cleanup_services_unlocked(container);
 
         container_result?;
         owned_result?;
@@ -3137,6 +3150,11 @@ where
     }
 
     pub(crate) fn cleanup_services(&mut self, container: &JobContainerSpec) -> Result<()> {
+        let _lifecycle = docker_lifecycle_guard()?;
+        self.cleanup_services_unlocked(container)
+    }
+
+    fn cleanup_services_unlocked(&mut self, container: &JobContainerSpec) -> Result<()> {
         let service_results = container
             .services
             .iter()
@@ -3164,6 +3182,14 @@ where
         &mut self,
         container: &JobContainerSpec,
     ) -> Result<()> {
+        let _lifecycle = docker_lifecycle_guard()?;
+        self.cleanup_job_and_network_without_buildkit_unlocked(container)
+    }
+
+    fn cleanup_job_and_network_without_buildkit_unlocked(
+        &mut self,
+        container: &JobContainerSpec,
+    ) -> Result<()> {
         let container_result = self.run_docker_remove_container(&container.remove_container_args());
         self.abort_docker_lease();
         let owned_result = self.reclaim_job_owned_docker(&container.name);
@@ -3187,6 +3213,11 @@ where
     /// with the job's unique scope. Match that exact suffix, then remove the
     /// daemon together with its anonymous/named state volume.
     pub(crate) fn cleanup_job_buildkit(&mut self, container: &JobContainerSpec) -> Result<()> {
+        let _lifecycle = docker_lifecycle_guard()?;
+        self.cleanup_job_buildkit_unlocked(container)
+    }
+
+    fn cleanup_job_buildkit_unlocked(&mut self, container: &JobContainerSpec) -> Result<()> {
         let scope = job_scope_from_temp(Some(&container.temp_host));
         let listed = self.run_docker(&crate::docker_lease::list_job_buildkit_format_args())?;
         let ids =
@@ -3227,6 +3258,7 @@ where
     }
 
     pub(crate) fn start_job_environment(&mut self, container: &JobContainerSpec) -> Result<()> {
+        let _lifecycle = docker_lifecycle_guard()?;
         let _span = tracing::info_span!("job-container-boot").entered();
         let mut attempt = 1_u32;
         loop {
@@ -3445,7 +3477,7 @@ where
             .ok();
         self.abort_docker_lease();
         self.reclaim_job_owned_docker(&container.name).ok();
-        self.cleanup_job_buildkit(container).ok();
+        self.cleanup_job_buildkit_unlocked(container).ok();
         for service in container.services.iter().rev() {
             self.run_docker_remove_container(&service.remove_args())
                 .ok();
